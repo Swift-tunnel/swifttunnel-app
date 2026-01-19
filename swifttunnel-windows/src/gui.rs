@@ -932,7 +932,9 @@ impl eframe::App for BoosterApp {
         // Render process notification toast (overlay at top of screen)
         self.render_process_notification(ctx);
     }
+}
 
+impl BoosterApp {
     /// Render process detection notification toast at top of screen
     fn render_process_notification(&mut self, ctx: &egui::Context) {
         let should_show = if let Some((_, time)) = &self.process_notification {
@@ -982,9 +984,6 @@ impl eframe::App for BoosterApp {
             self.process_notification = None;
         }
     }
-}
-
-impl BoosterApp {
     fn render_header(&self, ui: &mut egui::Ui) {
         // Header with subtle gradient background
         let header_rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::hover()).0;
