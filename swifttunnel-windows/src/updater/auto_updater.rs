@@ -22,6 +22,7 @@ pub enum AutoUpdateState {
 }
 
 /// Result of the auto-update check
+#[derive(Clone)]
 pub enum AutoUpdateResult {
     NoUpdate,
     UpdateInstalled,
@@ -162,15 +163,23 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
 
         match download_checksum(checksum_url).await {
             Ok(expected_hash) => {
-                if !verify_checksum(&msi_path, &expected_hash) {
-                    // Clean up bad file
-                    let _ = std::fs::remove_file(&msi_path);
-                    if let Ok(mut s) = state.lock() {
-                        *s = AutoUpdateState::Failed("Checksum verification failed".to_string());
+                match verify_checksum(&msi_path, &expected_hash).await {
+                    Ok(true) => {
+                        info!("Checksum verified");
                     }
-                    return Err("Checksum verification failed".to_string());
+                    Ok(false) => {
+                        // Clean up bad file
+                        let _ = std::fs::remove_file(&msi_path);
+                        if let Ok(mut s) = state.lock() {
+                            *s = AutoUpdateState::Failed("Checksum verification failed".to_string());
+                        }
+                        return Err("Checksum verification failed".to_string());
+                    }
+                    Err(e) => {
+                        // Continue anyway if checksum verification had I/O error
+                        info!("Checksum verification error: {}", e);
+                    }
                 }
-                info!("Checksum verified");
             }
             Err(e) => {
                 // Continue anyway if checksum download fails
