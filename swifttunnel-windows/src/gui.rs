@@ -657,6 +657,9 @@ impl eframe::App for BoosterApp {
 
         // Only actually quit when tray "Quit" is clicked
         if quit {
+            // Disconnect VPN before quitting to ensure proper adapter cleanup
+            self.disconnect_vpn_sync();
+
             // Force save settings before quitting
             self.settings_dirty = true;
             self.last_save_time = std::time::Instant::now() - std::time::Duration::from_secs(10);
@@ -2820,6 +2823,33 @@ impl BoosterApp {
         });
     }
 
+    /// Disconnect VPN synchronously (blocks until complete)
+    /// Used when quitting the app to ensure proper cleanup
+    fn disconnect_vpn_sync(&mut self) {
+        if !self.vpn_state.is_connected() && !self.vpn_state.is_connecting() {
+            return;
+        }
+
+        log::info!("Disconnecting VPN before quit...");
+
+        let vpn = Arc::clone(&self.vpn_connection);
+        let rt = Arc::clone(&self.runtime);
+
+        // Block on the disconnect to ensure cleanup completes
+        rt.block_on(async {
+            if let Ok(mut connection) = vpn.lock() {
+                if let Err(e) = connection.disconnect().await {
+                    log::error!("VPN disconnect on quit failed: {}", e);
+                } else {
+                    log::info!("VPN disconnected successfully before quit");
+                }
+            }
+        });
+
+        // Give a moment for adapter cleanup
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
     fn retry_load_servers(&mut self) {
         if let Ok(mut list) = self.dynamic_server_list.lock() {
             *list = DynamicServerList::new_empty();
@@ -3326,6 +3356,9 @@ impl BoosterApp {
         if let Ok(mut state) = self.update_state.lock() {
             *state = UpdateState::Installing;
         }
+
+        // Disconnect VPN before exiting for update
+        self.disconnect_vpn_sync();
 
         // Run installation
         match install_update(&msi_path) {
