@@ -100,24 +100,6 @@ Built-in performance optimizations:
 
 SwiftTunnel uses Windows Filtering Platform (WFP) to intercept game traffic at the network layer. Only packets from your game are encrypted and routed through our servers — everything else goes directly to the internet.
 
----
-
-## Server Regions
-
-| Region | Locations | Latency Target |
-|--------|-----------|----------------|
-| 🇸🇬 Singapore | 6 servers | <10ms SEA |
-| 🇮🇳 Mumbai | 6 servers | <20ms India |
-| 🇯🇵 Tokyo | 4 servers | <15ms Japan |
-| 🇦🇺 Sydney | 3 servers | <20ms OCE |
-| 🇩🇪 Germany | 5 servers | <15ms EU |
-| 🇫🇷 Paris | 1 server | <20ms EU |
-| 🇺🇸 US East/West | 2 servers | <30ms NA |
-| 🇧🇷 Brazil | 1 server | <30ms SA |
-
-All servers support both standard (UDP 51820) and stealth mode (TCP 443) connections.
-
----
 
 ## Building
 
