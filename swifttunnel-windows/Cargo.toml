@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-fps-booster"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel - Gaming VPN with PC Boosts"
