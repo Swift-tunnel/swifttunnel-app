@@ -42,5 +42,5 @@ jobs:
 
           # Use Claude Opus 4.5 for highest quality responses
           # Read CLAUDE.md for project context and guidelines
-          claude_args: '--model claude-opus-4-5-20251101 --append-system-prompt "Always read and follow the guidelines in CLAUDE.md at the repository root. This file contains the project documentation, architecture, coding standards, and TODO list. Use it as your primary reference for understanding the codebase."'
+          claude_args: '--model claude-opus-4-5-20251101 --append-system-prompt "Follow Kiss Dry Code principals"'
 
