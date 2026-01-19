@@ -1,0 +1,143 @@
+[package]
+name = "swifttunnel-fps-booster"
+version = "0.3.0"
+edition = "2021"
+authors = ["SwiftTunnel <support@swifttunnel.net>"]
+description = "SwiftTunnel - Gaming VPN with PC Boosts"
+default-run = "swifttunnel-fps-booster"
+
+[dependencies]
+# GUI Framework (glow/OpenGL backend - lighter and faster than wgpu)
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.29"
+
+# Windows API
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Performance",
+    "Win32_Security",
+    "Win32_System_Memory",
+    # VPN/Network features
+    "Win32_System_IO",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    # Windows Filtering Platform (WFP) for split tunneling
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    # Split tunnel driver communication
+    "Win32_Storage_FileSystem",
+    "Win32_System_Ioctl",
+    # COM/RPC for WFP
+    "Win32_System_Rpc",
+    # Timer APIs for 1ms resolution (PC Boosts)
+    "Win32_Media",
+] }
+
+# System utilities
+sysinfo = "0.32"
+winreg = "0.52"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Home directory detection
+dirs = "5.0"
+
+# HTTP client for API calls
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+
+# VPN Core - WireGuard userspace implementation
+boringtun = "0.6"
+
+# Wintun virtual network adapter for Windows
+wintun = "0.5"
+
+# Curve25519 key exchange - MUST match boringtun's version exactly
+x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
+
+# Additional async utilities for VPN packet handling
+futures = "0.3"
+futures-util = "0.3"
+
+# SHA256 hex encoding for update verification
+hex = "0.4"
+
+# Semantic versioning comparison for updates
+semver = "1.0"
+
+# Secure credential storage (DPAPI on Windows)
+keyring = "3"
+
+# Cryptography for PKCE
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+# URL handling
+url = "2"
+urlencoding = "2"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Open URLs in browser
+open = "5"
+
+# System tray support
+tray-icon = "0.19"
+
+# Image loading for tray icon
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Test configuration
+[[test]]
+name = "vpn_tests"
+path = "Tests/vpn_tests.rs"
+
+# VPN test binary
+[[bin]]
+name = "vpn_test"
+path = "src/bin/vpn_test.rs"
+
+# Split tunnel test binary
+[[bin]]
+name = "split_tunnel_test"
+path = "src/bin/split_tunnel_test.rs"
+
+# IP checker test app (for split tunnel verification)
+[[bin]]
+name = "ip_checker"
+path = "src/bin/ip_checker.rs"
+
+# Split tunnel integration test (full end-to-end test)
+[[bin]]
+name = "split_tunnel_integration_test"
+path = "src/bin/split_tunnel_integration_test.rs"
+
+[dev-dependencies]
+# Already have serde_json in dependencies
+
+[build-dependencies]
+embed-manifest = "1.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

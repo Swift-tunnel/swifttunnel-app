@@ -1,0 +1,221 @@
+//! Settings persistence module
+//!
+//! Saves and loads app settings to/from disk
+
+use crate::structs::Config;
+use crate::updater::UpdateSettings;
+use log::{debug, error, info};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+
+const SETTINGS_FILE: &str = "settings.json";
+const APP_NAME: &str = "SwiftTunnel";
+
+/// Window state for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowState {
+    /// Window X position (None = center)
+    pub x: Option<f32>,
+    /// Window Y position (None = center)
+    pub y: Option<f32>,
+    /// Window width
+    pub width: f32,
+    /// Window height
+    pub height: f32,
+    /// Whether window is maximized
+    pub maximized: bool,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self {
+            x: None,  // Let OS center the window
+            y: None,
+            width: 560.0,   // Good default width for the UI
+            height: 750.0,  // Good default height
+            maximized: false,
+        }
+    }
+}
+
+/// App settings including theme preference
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    /// Theme preference: "dark" or "light"
+    pub theme: String,
+    /// App configuration
+    pub config: Config,
+    /// Whether optimizations were active on last exit
+    pub optimizations_active: bool,
+    /// Window state (position, size, maximized)
+    #[serde(default)]
+    pub window_state: WindowState,
+    /// Selected gaming region (e.g., "singapore", "mumbai")
+    #[serde(default = "default_region")]
+    pub selected_region: String,
+    /// Selected VPN server within region (auto-selected by best ping)
+    #[serde(default = "default_server")]
+    pub selected_server: String,
+    /// Current tab
+    #[serde(default)]
+    pub current_tab: String,
+    /// Update settings
+    #[serde(default)]
+    pub update_settings: UpdateSettings,
+    /// Whether to minimize to tray instead of closing
+    #[serde(default = "default_minimize_to_tray")]
+    pub minimize_to_tray: bool,
+}
+
+fn default_minimize_to_tray() -> bool {
+    true
+}
+
+fn default_region() -> String {
+    "singapore".to_string()
+}
+
+fn default_server() -> String {
+    "singapore".to_string()
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme: "dark".to_string(),
+            config: Config::default(),
+            optimizations_active: false,
+            window_state: WindowState::default(),
+            selected_region: "singapore".to_string(),
+            selected_server: "singapore".to_string(),
+            current_tab: "connect".to_string(),
+            update_settings: UpdateSettings::default(),
+            minimize_to_tray: true,
+        }
+    }
+}
+
+/// Get the settings directory path
+/// Windows: %APPDATA%\SwiftTunnel\
+fn get_settings_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|p| p.join(APP_NAME))
+}
+
+/// Get the full path to the settings file
+fn get_settings_path() -> Option<PathBuf> {
+    get_settings_dir().map(|p| p.join(SETTINGS_FILE))
+}
+
+/// Load settings from disk
+pub fn load_settings() -> AppSettings {
+    let path = match get_settings_path() {
+        Some(p) => p,
+        None => {
+            debug!("Could not determine settings path, using defaults");
+            return AppSettings::default();
+        }
+    };
+
+    if !path.exists() {
+        debug!("Settings file does not exist, using defaults");
+        return AppSettings::default();
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            match serde_json::from_str(&content) {
+                Ok(settings) => {
+                    info!("Loaded settings from {:?}", path);
+                    settings
+                }
+                Err(e) => {
+                    error!("Failed to parse settings file: {}", e);
+                    AppSettings::default()
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to read settings file: {}", e);
+            AppSettings::default()
+        }
+    }
+}
+
+/// Save settings to disk
+pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
+    let dir = match get_settings_dir() {
+        Some(d) => d,
+        None => return Err("Could not determine settings directory".to_string()),
+    };
+
+    // Create directory if it doesn't exist
+    if !dir.exists() {
+        if let Err(e) = fs::create_dir_all(&dir) {
+            return Err(format!("Failed to create settings directory: {}", e));
+        }
+    }
+
+    let path = dir.join(SETTINGS_FILE);
+
+    let json = match serde_json::to_string_pretty(settings) {
+        Ok(j) => j,
+        Err(e) => return Err(format!("Failed to serialize settings: {}", e)),
+    };
+
+    match fs::write(&path, json) {
+        Ok(_) => {
+            info!("Saved settings to {:?}", path);
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to write settings file: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_settings() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.theme, "dark");
+        assert!(!settings.optimizations_active);
+        assert_eq!(settings.selected_region, "singapore");
+        assert_eq!(settings.selected_server, "singapore");
+    }
+
+    #[test]
+    fn test_settings_roundtrip() {
+        let mut settings = AppSettings::default();
+        settings.theme = "light".to_string();
+        settings.optimizations_active = true;
+        settings.selected_region = "tokyo".to_string();
+        settings.selected_server = "tokyo-02".to_string();
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.theme, "light");
+        assert!(loaded.optimizations_active);
+        assert_eq!(loaded.selected_region, "tokyo");
+        assert_eq!(loaded.selected_server, "tokyo-02");
+    }
+
+    #[test]
+    fn test_settings_backward_compat() {
+        // Test that settings without selected_region still deserialize
+        let old_json = r#"{
+            "theme": "dark",
+            "config": {},
+            "optimizations_active": false,
+            "window_state": {"width": 350.0, "height": 520.0, "maximized": false},
+            "selected_server": "mumbai-02",
+            "current_tab": "connect"
+        }"#;
+
+        let loaded: AppSettings = serde_json::from_str(old_json).unwrap();
+        assert_eq!(loaded.selected_region, "singapore"); // Default value
+        assert_eq!(loaded.selected_server, "mumbai-02");
+    }
+}

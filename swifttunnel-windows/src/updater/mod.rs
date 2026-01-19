@@ -1,0 +1,16 @@
+//! Auto-updater module for SwiftTunnel
+//!
+//! Checks for updates from GitHub Releases, downloads MSI installers,
+//! verifies SHA256 checksums, and performs silent installation.
+
+mod types;
+mod checker;
+mod downloader;
+mod verifier;
+mod installer;
+
+pub use types::{UpdateState, UpdateInfo, UpdateSettings};
+pub use checker::UpdateChecker;
+pub use downloader::{download_update, download_checksum};
+pub use verifier::verify_checksum;
+pub use installer::install_update;
