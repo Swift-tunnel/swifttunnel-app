@@ -28,7 +28,7 @@
   <a href="#features">Features</a> •
   <a href="#download">Download</a> •
   <a href="#how-it-works">How It Works</a> •
-  <a href="#server-regions">Servers</a> •
+  <a href="https://status.swifttunnel.net">Servers</a> •
   <a href="#building">Building</a>
 </p>
 
