@@ -694,6 +694,7 @@ impl eframe::App for BoosterApp {
             self.last_vpn_check = std::time::Instant::now();
 
             // Non-blocking VPN state check using try_lock
+            let mut should_mark_dirty = false;
             if let Ok(vpn) = self.vpn_connection.try_lock() {
                 // Get state directly - the state() method is fast
                 let new_state = self.runtime.block_on(vpn.state());
@@ -704,12 +705,16 @@ impl eframe::App for BoosterApp {
                         // Only update if it's a new region
                         if self.last_connected_region.as_ref() != Some(server_region) {
                             self.last_connected_region = Some(server_region.clone());
-                            self.mark_dirty();
+                            should_mark_dirty = true;
                         }
                     }
                 }
 
                 self.vpn_state = new_state;
+            }
+            // Mark dirty outside the lock scope to avoid borrow conflict
+            if should_mark_dirty {
+                self.mark_dirty();
             }
 
             // Update auth state only when timer fires (cheap but reduces lock contention)
@@ -1534,7 +1539,8 @@ impl BoosterApp {
 
                 // Show tooltip on hover
                 if is_hovered {
-                    egui::show_tooltip_at_pointer(ui.ctx(), ui.id().with(&card_id), |ui| {
+                    let tooltip_id = ui.id().with(&card_id);
+                    egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
                         ui.set_max_width(250.0);
                         ui.label(egui::RichText::new(profile_info.name).size(13.0).color(TEXT_PRIMARY).strong());
                         ui.add_space(4.0);
@@ -1651,7 +1657,8 @@ impl BoosterApp {
                             ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
                         });
                     if tier_badge.response.hovered() {
-                        egui::show_tooltip_at_pointer(ui.ctx(), ui.id().with("tier1_tip"), |ui| {
+                        let tooltip_id = ui.id().with("tier1_tip");
+                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
                             ui.set_max_width(280.0);
                             ui.label(egui::RichText::new(tier_info::TIER_1_TITLE).size(12.0).color(TEXT_PRIMARY).strong());
                             ui.add_space(4.0);
@@ -1710,7 +1717,8 @@ impl BoosterApp {
                             ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
                         });
                     if tier_badge.response.hovered() {
-                        egui::show_tooltip_at_pointer(ui.ctx(), ui.id().with("tier1_net_tip"), |ui| {
+                        let tooltip_id = ui.id().with("tier1_net_tip");
+                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
                             ui.set_max_width(280.0);
                             ui.label(egui::RichText::new(tier_info::TIER_1_TITLE).size(12.0).color(TEXT_PRIMARY).strong());
                             ui.add_space(4.0);
@@ -2117,7 +2125,8 @@ impl BoosterApp {
                                 toggle_info_panel = true;
                             }
                             if info_btn.hovered() {
-                                egui::show_tooltip_at_pointer(ui.ctx(), ui.id().with("tip"), |ui| {
+                                let tooltip_id = ui.id().with("tip");
+                                egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
                                     ui.label(egui::RichText::new("Click for more details").size(11.0).color(TEXT_SECONDARY));
                                 });
                             }
