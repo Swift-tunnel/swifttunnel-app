@@ -5,7 +5,7 @@ use log::{debug, error, info};
 use semver::Version;
 
 /// GitHub repository for SwiftTunnel releases
-const GITHUB_REPO: &str = "evelynwantscookies-ship-it/swifttunnel-app";
+const GITHUB_REPO: &str = "Swift-tunnel/swifttunnel-app";
 
 /// Expected MSI asset name pattern
 const MSI_PATTERN: &str = "SwiftTunnel";
