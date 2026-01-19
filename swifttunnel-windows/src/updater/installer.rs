@@ -32,29 +32,59 @@ pub fn install_update(msi_path: &Path) -> Result<(), String> {
     let msi_path_str = msi_path.to_string_lossy();
     let exe_path_str = exe_path.to_string_lossy();
 
+    // Get just the exe filename for taskkill
+    let exe_name = exe_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("swifttunnel-fps-booster.exe");
+
     // Batch script that performs the update
-    // Uses ping for reliable delay (more compatible than timeout on all Windows versions)
+    // Uses taskkill to ensure the app is closed, then installs
     let batch_content = format!(
         r#"@echo off
 :: SwiftTunnel Update Script
-:: Wait for the app to close
+:: First, try to gracefully wait for the app to close
+ping -n 2 127.0.0.1 > nul
+
+:: Kill any remaining instances of the app (force close)
+taskkill /f /im "{exe_name}" >nul 2>&1
+
+:: Wait a bit more to ensure file handles are released
 ping -n 3 127.0.0.1 > nul
+
+:: Try to delete the old exe to verify it's not locked
+:: If this fails, wait and try again
+:waitloop
+del "{exe_path}" >nul 2>&1
+if exist "{exe_path}" (
+    ping -n 2 127.0.0.1 > nul
+    goto waitloop
+)
 
 :: Run the MSI installer silently
 :: /qn = completely silent
 :: /norestart = don't restart computer
-:: REINSTALLMODE=amus = reinstall all files
-msiexec /i "{msi_path}" /qn /norestart REINSTALLMODE=amus
+msiexec /i "{msi_path}" /qn /norestart
 
 :: Wait for installation to complete
-ping -n 2 127.0.0.1 > nul
+ping -n 3 127.0.0.1 > nul
 
-:: Start the new version
-start "" "{exe_path}"
+:: Verify the new exe exists before starting
+if exist "{exe_path}" (
+    start "" "{exe_path}"
+) else (
+    :: Installation may have failed, show error
+    echo Update installation failed. Please reinstall SwiftTunnel manually.
+    pause
+)
+
+:: Clean up the downloaded MSI
+del "{msi_path}" >nul 2>&1
 
 :: Delete this script
 del "%~f0"
 "#,
+        exe_name = exe_name,
         msi_path = msi_path_str,
         exe_path = exe_path_str
     );
