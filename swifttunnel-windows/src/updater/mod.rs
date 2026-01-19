@@ -8,9 +8,11 @@ mod checker;
 mod downloader;
 mod verifier;
 mod installer;
+mod auto_updater;
 
 pub use types::{UpdateState, UpdateInfo, UpdateSettings};
 pub use checker::UpdateChecker;
 pub use downloader::{download_update, download_checksum};
 pub use verifier::verify_checksum;
 pub use installer::install_update;
+pub use auto_updater::{run_auto_updater, AutoUpdateResult};

@@ -24,6 +24,7 @@ use crate::performance_monitor::PerformanceMonitor;
 use crate::network_booster::NetworkBooster;
 use crate::gui::BoosterApp;
 use crate::settings::load_settings;
+use crate::updater::{run_auto_updater, AutoUpdateResult};
 
 use eframe::NativeOptions;
 use log::{error, info, warn};
@@ -169,6 +170,34 @@ fn main() -> eframe::Result<()> {
     info!("Starting SwiftTunnel v{}", env!("CARGO_PKG_VERSION"));
     info!("Log file: {}", log_file_path.display());
     info!("Log level: {:?}", log_level);
+
+    // Run Discord-like auto-updater before main app (splash screen)
+    // Skip auto-updater if this is an OAuth callback (deep link)
+    let args: Vec<String> = std::env::args().collect();
+    let is_oauth_callback = args.iter().any(|a| a.starts_with("swifttunnel://"));
+
+    if !is_oauth_callback {
+        info!("Running auto-updater check...");
+        match run_auto_updater() {
+            AutoUpdateResult::NoUpdate => {
+                info!("No update available, continuing to main app");
+            }
+            AutoUpdateResult::UpdateInstalled => {
+                info!("Update installed, exiting for restart");
+                // The installer will restart the app
+                return Ok(());
+            }
+            AutoUpdateResult::Failed(e) => {
+                // Don't block app launch on update failure
+                warn!("Auto-update failed: {}, continuing to main app", e);
+            }
+            AutoUpdateResult::Skipped => {
+                info!("Auto-update skipped");
+            }
+        }
+    } else {
+        info!("OAuth callback detected, skipping auto-updater");
+    }
 
     // Check for OAuth callback deep link in command line args
     let oauth_callback = parse_deep_link_args();
