@@ -66,6 +66,12 @@ pub struct AppSettings {
     /// Whether to minimize to tray instead of closing
     #[serde(default = "default_minimize_to_tray")]
     pub minimize_to_tray: bool,
+    /// Last successfully connected region (for "LAST USED" badge)
+    #[serde(default)]
+    pub last_connected_region: Option<String>,
+    /// Expanded boost info panel IDs (user preference to show detailed info)
+    #[serde(default)]
+    pub expanded_boost_info: Vec<String>,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -92,6 +98,8 @@ impl Default for AppSettings {
             current_tab: "connect".to_string(),
             update_settings: UpdateSettings::default(),
             minimize_to_tray: true,
+            last_connected_region: None,
+            expanded_boost_info: Vec::new(),
         }
     }
 }
