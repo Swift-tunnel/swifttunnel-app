@@ -2150,6 +2150,62 @@ impl BoosterApp {
 
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("FPS settings are protected from Roblox overwriting them").size(10.0).color(STATUS_CONNECTED));
+
+                // ─────────────────────────────────────────────────────────────
+                // GRAPHICS QUALITY SLIDER
+                // ─────────────────────────────────────────────────────────────
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                let current_quality = self.state.config.roblox_settings.graphics_quality.to_level();
+                let quality_display = if current_quality == 0 { "Auto".to_string() } else { format!("Level {}", current_quality) };
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Graphics Quality").size(13.0).color(TEXT_SECONDARY));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(&quality_display).size(14.0).color(ACCENT_CYAN).strong());
+                    });
+                });
+
+                ui.add_space(8.0);
+
+                // Slider for graphics quality (1-10)
+                let mut quality_level = current_quality.max(1) as i32; // Ensure min of 1 for slider
+                if ui.add(egui::Slider::new(&mut quality_level, 1..=10).show_value(false)).changed() {
+                    self.state.config.roblox_settings.graphics_quality = GraphicsQuality::from_level(quality_level);
+                    // Switch to Custom profile when manually changing graphics
+                    if self.selected_profile != OptimizationProfile::Custom {
+                        self.selected_profile = OptimizationProfile::Custom;
+                    }
+                    self.mark_dirty();
+                }
+
+                ui.add_space(12.0);
+
+                // Quick preset buttons for common quality levels
+                ui.horizontal(|ui| {
+                    for (label, level) in [("1", 1), ("3", 3), ("5", 5), ("7", 7), ("10", 10)] {
+                        let is_sel = current_quality == level;
+                        let (bg, text) = if is_sel { (ACCENT_CYAN, TEXT_PRIMARY) } else { (BG_ELEVATED, TEXT_SECONDARY) };
+                        if ui.add(
+                            egui::Button::new(egui::RichText::new(label).size(11.0).color(text))
+                                .fill(bg).rounding(4.0).min_size(egui::vec2(36.0, 28.0))
+                        ).clicked() {
+                            self.state.config.roblox_settings.graphics_quality = GraphicsQuality::from_level(level);
+                            if self.selected_profile != OptimizationProfile::Custom {
+                                self.selected_profile = OptimizationProfile::Custom;
+                            }
+                            self.mark_dirty();
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("💡").size(10.0));
+                    ui.label(egui::RichText::new("Lower = better FPS, Higher = better visuals").size(10.0).color(TEXT_MUTED));
+                });
             });
 
         // ─────────────────────────────────────────────────────────────
