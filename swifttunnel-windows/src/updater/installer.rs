@@ -4,6 +4,12 @@ use log::{error, info};
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// Install an update by creating a batch script and launching it
 /// The batch script will:
 /// 1. Wait for the current app to exit
@@ -60,11 +66,15 @@ del "%~f0"
     info!("Created update script at: {}", batch_path.display());
     info!("Launching update installer...");
 
-    // Launch the batch script hidden (no console window)
-    // Using cmd /c start /min to run it minimized/hidden
-    let result = Command::new("cmd")
-        .args(["/c", "start", "/min", "", &batch_path.to_string_lossy()])
-        .spawn();
+    // Launch the batch script completely hidden (no console window at all)
+    // Using CREATE_NO_WINDOW flag to prevent any visible window
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/c", &batch_path.to_string_lossy().to_string()]);
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let result = cmd.spawn();
 
     match result {
         Ok(_) => {
@@ -82,10 +92,14 @@ del "%~f0"
 
 /// Check if an MSI installation is possible (basic validation)
 pub fn can_install() -> Result<(), String> {
-    // Check if msiexec is available
-    let output = Command::new("msiexec")
-        .arg("/?")
-        .output();
+    // Check if msiexec is available (hidden, no window)
+    let mut cmd = Command::new("msiexec");
+    cmd.arg("/?");
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd.output();
 
     match output {
         Ok(_) => Ok(()),
