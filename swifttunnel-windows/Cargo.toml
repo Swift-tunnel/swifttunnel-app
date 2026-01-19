@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-fps-booster"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2021"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel - Game Booster with PC Optimizations"
