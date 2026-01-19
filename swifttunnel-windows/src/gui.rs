@@ -1861,7 +1861,7 @@ impl BoosterApp {
                 ui.label(egui::RichText::new("About").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new(format!("SwiftTunnel v{}", env!("CARGO_PKG_VERSION"))).size(13.0).color(TEXT_PRIMARY));
-                ui.label(egui::RichText::new("Gaming VPN & Optimization Suite").size(12.0).color(TEXT_SECONDARY));
+                ui.label(egui::RichText::new("Game Booster & PC Optimization Suite").size(12.0).color(TEXT_SECONDARY));
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("Optimized for Roblox and other games").size(11.0).color(TEXT_MUTED));
             });

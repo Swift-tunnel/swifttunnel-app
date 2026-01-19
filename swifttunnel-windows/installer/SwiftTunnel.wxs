@@ -11,7 +11,7 @@
                  Compressed="yes"
                  InstallScope="perMachine"
                  Platform="x64"
-                 Description="SwiftTunnel Gaming VPN"
+                 Description="SwiftTunnel Game Booster"
                  Manufacturer="SwiftTunnel" />
 
         <MajorUpgrade DowngradeErrorMessage="A newer version of SwiftTunnel is already installed." />
@@ -85,7 +85,7 @@
             <Component Id="ApplicationShortcut" Guid="C3D4E5F6-A7B8-9012-CDEF-345678901234">
                 <Shortcut Id="ApplicationStartMenuShortcut"
                           Name="SwiftTunnel"
-                          Description="SwiftTunnel Gaming VPN"
+                          Description="SwiftTunnel Game Booster"
                           Target="[INSTALLFOLDER]swifttunnel-fps-booster.exe"
                           WorkingDirectory="INSTALLFOLDER"
                           Icon="SwiftTunnelIcon" />
@@ -98,7 +98,7 @@
             <Component Id="DesktopShortcut" Guid="E5F6A7B8-C9D0-1234-EF01-567890123456">
                 <Shortcut Id="DesktopShortcutId"
                           Name="SwiftTunnel"
-                          Description="SwiftTunnel Gaming VPN"
+                          Description="SwiftTunnel Game Booster"
                           Target="[INSTALLFOLDER]swifttunnel-fps-booster.exe"
                           WorkingDirectory="INSTALLFOLDER"
                           Icon="SwiftTunnelIcon" />
