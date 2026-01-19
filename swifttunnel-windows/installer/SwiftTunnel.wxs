@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*"
+             Name="SwiftTunnel"
+             Language="1033"
+             Version="1.0.0.0"
+             Manufacturer="SwiftTunnel"
+             UpgradeCode="8B5E7A12-4F3D-4A2B-9C5E-1D2F3A4B5C6D">
+
+        <Package InstallerVersion="500"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 Platform="x64"
+                 Description="SwiftTunnel Gaming VPN"
+                 Manufacturer="SwiftTunnel" />
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of SwiftTunnel is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- Require Admin for installation -->
+        <Property Id="MSIUSEREALADMINDETECTION" Value="1" />
+
+        <!-- Icon for Add/Remove Programs -->
+        <Icon Id="SwiftTunnelIcon" SourceFile="$(var.SourceDir)\swifttunnel.ico" />
+        <Property Id="ARPPRODUCTICON" Value="SwiftTunnelIcon" />
+
+        <!-- Features -->
+        <Feature Id="ProductFeature" Title="SwiftTunnel" Level="1">
+            <ComponentGroupRef Id="ProductComponents" />
+            <ComponentGroupRef Id="StartMenuShortcuts" />
+            <ComponentGroupRef Id="DesktopShortcuts" />
+        </Feature>
+
+        <!-- Custom Actions for Firewall -->
+        <CustomAction Id="AddFirewallRule"
+                      Directory="INSTALLFOLDER"
+                      ExeCommand="netsh advfirewall firewall add rule name=&quot;SwiftTunnel&quot; dir=in action=allow program=&quot;[INSTALLFOLDER]swifttunnel-fps-booster.exe&quot; enable=yes"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore" />
+
+        <InstallExecuteSequence>
+            <Custom Action="AddFirewallRule" After="InstallFiles">NOT Installed</Custom>
+        </InstallExecuteSequence>
+
+        <!-- Directory Structure -->
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="SwiftTunnel" />
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="SwiftTunnel" />
+            </Directory>
+            <Directory Id="DesktopFolder" Name="Desktop" />
+        </Directory>
+
+        <!-- UI -->
+        <UIRef Id="WixUI_InstallDir" />
+        <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+        <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+
+    </Product>
+
+    <!-- Component Groups -->
+    <Fragment>
+        <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+            <Component Id="MainExecutable" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890" Win64="yes">
+                <File Id="SwiftTunnelExe"
+                      Source="$(var.SourceDir)\swifttunnel-fps-booster.exe"
+                      KeyPath="yes" />
+            </Component>
+            <Component Id="WintunDll" Guid="B2C3D4E5-F6A7-8901-BCDE-F23456789012" Win64="yes">
+                <File Id="WintunDll"
+                      Source="$(var.SourceDir)\wintun.dll"
+                      KeyPath="yes" />
+            </Component>
+            <Component Id="AppIcon" Guid="D4E5F6A7-B8C9-0123-DEF0-456789012345" Win64="yes">
+                <File Id="SwiftTunnelIco"
+                      Source="$(var.SourceDir)\swifttunnel.ico"
+                      KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
+        <ComponentGroup Id="StartMenuShortcuts" Directory="ApplicationProgramsFolder">
+            <Component Id="ApplicationShortcut" Guid="C3D4E5F6-A7B8-9012-CDEF-345678901234">
+                <Shortcut Id="ApplicationStartMenuShortcut"
+                          Name="SwiftTunnel"
+                          Description="SwiftTunnel Gaming VPN"
+                          Target="[INSTALLFOLDER]swifttunnel-fps-booster.exe"
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="SwiftTunnelIcon" />
+                <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\SwiftTunnel" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
+        <ComponentGroup Id="DesktopShortcuts" Directory="DesktopFolder">
+            <Component Id="DesktopShortcut" Guid="E5F6A7B8-C9D0-1234-EF01-567890123456">
+                <Shortcut Id="DesktopShortcutId"
+                          Name="SwiftTunnel"
+                          Description="SwiftTunnel Gaming VPN"
+                          Target="[INSTALLFOLDER]swifttunnel-fps-booster.exe"
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="SwiftTunnelIcon" />
+                <RemoveFolder Id="CleanUpDesktopShortcut" Directory="DesktopFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\SwiftTunnel" Name="desktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+    </Fragment>
+</Wix>

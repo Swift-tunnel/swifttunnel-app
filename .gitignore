@@ -1,0 +1,26 @@
+# Rust build artifacts
+target/
+**/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.backup
+roblox_settings_backup.xml
+*.exe
+.claude/
+
+# Documentation (private)
+CLAUDE.md
+PC-BOOSTS.md
+*.md
+!README.md
