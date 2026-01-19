@@ -97,6 +97,10 @@ pub struct BoosterApp {
 
     // Minimize to tray setting
     minimize_to_tray: bool,
+
+    // Channel for immediate auth state updates from async operations
+    auth_update_tx: std::sync::mpsc::Sender<AuthState>,
+    auth_update_rx: std::sync::mpsc::Receiver<AuthState>,
 }
 
 impl BoosterApp {
@@ -112,6 +116,9 @@ impl BoosterApp {
                 .build()
                 .expect("Failed to create tokio runtime")
         );
+
+        // Create channel for immediate auth state notifications from async operations
+        let (auth_update_tx, auth_update_rx) = std::sync::mpsc::channel::<AuthState>();
 
         // Initialize auth manager - this can only fail if Windows DPAPI is unavailable,
         // which indicates a fundamental system issue. In that case, panic is acceptable.
@@ -234,6 +241,10 @@ impl BoosterApp {
 
             // Minimize to tray
             minimize_to_tray: saved_settings.minimize_to_tray,
+
+            // Auth state update channel
+            auth_update_tx,
+            auth_update_rx,
         }
     }
 
@@ -439,6 +450,30 @@ impl eframe::App for BoosterApp {
             self.last_save_time = std::time::Instant::now() - std::time::Duration::from_secs(10);
             self.save_if_needed(ctx);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        // Check for immediate auth state updates from async operations (non-blocking)
+        while let Ok(new_state) = self.auth_update_rx.try_recv() {
+            log::info!("Received immediate auth state update");
+
+            // Sync auth error from AuthState::Error for display
+            if let AuthState::Error(ref msg) = new_state {
+                let user_friendly = match msg.as_str() {
+                    m if m.contains("Invalid login credentials") => "Invalid email or password. Please try again.".to_string(),
+                    m if m.contains("Email not confirmed") => "Please verify your email address before signing in.".to_string(),
+                    m if m.contains("Network error") => "Unable to connect. Please check your internet connection.".to_string(),
+                    m if m.contains("timeout") || m.contains("Timeout") => "Connection timed out. Please try again.".to_string(),
+                    _ => msg.clone(),
+                };
+                self.auth_error = Some(user_friendly);
+            } else if matches!(new_state, AuthState::LoggedIn(_)) {
+                self.auth_error = None;
+            }
+
+            self.auth_state = new_state;
+            if let Ok(auth) = self.auth_manager.try_lock() {
+                self.user_info = auth.get_user();
+            }
         }
 
         // PERFORMANCE FIX: Only check VPN state every 500ms, not every frame
@@ -2268,13 +2303,23 @@ impl BoosterApp {
         let password = self.login_password.clone();
         let auth_manager = Arc::clone(&self.auth_manager);
         let rt = Arc::clone(&self.runtime);
+        let tx = self.auth_update_tx.clone();
         self.login_password.clear();
 
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(auth) = auth_manager.lock() {
-                    if let Err(e) = auth.sign_in(&email, &password).await {
-                        log::error!("Sign in failed: {}", e);
+                    match auth.sign_in(&email, &password).await {
+                        Ok(()) => {
+                            // Send updated state immediately to GUI
+                            let new_state = auth.get_state();
+                            let _ = tx.send(new_state);
+                            log::info!("Login completed, notified GUI");
+                        }
+                        Err(e) => {
+                            log::error!("Sign in failed: {}", e);
+                            let _ = tx.send(AuthState::Error(e.to_string()));
+                        }
                     }
                 }
             });
@@ -2307,12 +2352,22 @@ impl BoosterApp {
         let rt = Arc::clone(&self.runtime);
         let token = token.to_string();
         let state = state.to_string();
+        let tx = self.auth_update_tx.clone();
 
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(auth) = auth_manager.lock() {
-                    if let Err(e) = auth.complete_oauth_callback(&token, &state).await {
-                        log::error!("OAuth callback failed: {}", e);
+                    match auth.complete_oauth_callback(&token, &state).await {
+                        Ok(()) => {
+                            // Send updated state immediately to GUI
+                            let new_state = auth.get_state();
+                            let _ = tx.send(new_state);
+                            log::info!("OAuth callback completed, notified GUI");
+                        }
+                        Err(e) => {
+                            log::error!("OAuth callback failed: {}", e);
+                            let _ = tx.send(AuthState::Error(e.to_string()));
+                        }
                     }
                 }
             });
