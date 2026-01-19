@@ -38,6 +38,163 @@ const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(250, 250, 255);
 const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(148, 163, 184);  // slate-400
 const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);      // slate-500
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ANIMATION SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const TOGGLE_ANIMATION_DURATION: f32 = 0.15;  // 150ms for toggle switches
+const PULSE_ANIMATION_DURATION: f32 = 2.0;     // 2s breathing cycle for connected pulse
+const HOVER_ANIMATION_DURATION: f32 = 0.1;     // 100ms for hover effects
+
+/// Ease-out-cubic interpolation for smooth animations
+fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Animation state for a single value
+#[derive(Clone)]
+struct Animation {
+    start_time: std::time::Instant,
+    duration: f32,
+    from: f32,
+    to: f32,
+}
+
+impl Animation {
+    fn new(from: f32, to: f32, duration: f32) -> Self {
+        Self {
+            start_time: std::time::Instant::now(),
+            duration,
+            from,
+            to,
+        }
+    }
+
+    fn current_value(&self) -> f32 {
+        let elapsed = self.start_time.elapsed().as_secs_f32();
+        let t = (elapsed / self.duration).min(1.0);
+        let eased = ease_out_cubic(t);
+        self.from + (self.to - self.from) * eased
+    }
+
+    fn is_complete(&self) -> bool {
+        self.start_time.elapsed().as_secs_f32() >= self.duration
+    }
+}
+
+/// Animation manager for all UI animations
+#[derive(Default)]
+struct AnimationManager {
+    /// Toggle switch animations (key = toggle ID)
+    toggle_animations: HashMap<String, Animation>,
+    /// Hover state animations for cards (key = card ID)
+    hover_animations: HashMap<String, Animation>,
+}
+
+impl AnimationManager {
+    fn animate_toggle(&mut self, id: &str, target: bool, current: f32) {
+        let target_val = if target { 1.0 } else { 0.0 };
+        // Only start a new animation if target changed
+        if let Some(existing) = self.toggle_animations.get(id) {
+            if (existing.to - target_val).abs() < 0.01 {
+                return; // Already animating to this target
+            }
+        }
+        self.toggle_animations.insert(
+            id.to_string(),
+            Animation::new(current, target_val, TOGGLE_ANIMATION_DURATION)
+        );
+    }
+
+    fn get_toggle_value(&self, id: &str, fallback: bool) -> f32 {
+        if let Some(anim) = self.toggle_animations.get(id) {
+            anim.current_value()
+        } else {
+            if fallback { 1.0 } else { 0.0 }
+        }
+    }
+
+    fn animate_hover(&mut self, id: &str, is_hovered: bool, current: f32) {
+        let target_val = if is_hovered { 1.0 } else { 0.0 };
+        if let Some(existing) = self.hover_animations.get(id) {
+            if (existing.to - target_val).abs() < 0.01 {
+                return;
+            }
+        }
+        self.hover_animations.insert(
+            id.to_string(),
+            Animation::new(current, target_val, HOVER_ANIMATION_DURATION)
+        );
+    }
+
+    fn get_hover_value(&self, id: &str) -> f32 {
+        if let Some(anim) = self.hover_animations.get(id) {
+            anim.current_value()
+        } else {
+            0.0
+        }
+    }
+
+    fn has_active_animations(&self) -> bool {
+        self.toggle_animations.values().any(|a| !a.is_complete()) ||
+        self.hover_animations.values().any(|a| !a.is_complete())
+    }
+
+    fn cleanup_completed(&mut self) {
+        self.toggle_animations.retain(|_, a| !a.is_complete());
+        self.hover_animations.retain(|_, a| !a.is_complete());
+    }
+}
+
+/// VPN connection progress step
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionStep {
+    Idle,
+    Fetching,
+    Adapter,
+    Tunnel,
+    Routing,
+    Connected,
+}
+
+impl ConnectionStep {
+    fn from_state(state: &ConnectionState) -> Self {
+        match state {
+            ConnectionState::Disconnected => ConnectionStep::Idle,
+            ConnectionState::FetchingConfig => ConnectionStep::Fetching,
+            ConnectionState::CreatingAdapter => ConnectionStep::Adapter,
+            ConnectionState::Connecting => ConnectionStep::Tunnel,
+            ConnectionState::ConfiguringSplitTunnel => ConnectionStep::Routing,
+            ConnectionState::Connected { .. } => ConnectionStep::Connected,
+            ConnectionState::Disconnecting => ConnectionStep::Idle,
+            ConnectionState::Error(_) => ConnectionStep::Idle,
+        }
+    }
+
+    fn step_index(&self) -> usize {
+        match self {
+            ConnectionStep::Idle => 0,
+            ConnectionStep::Fetching => 1,
+            ConnectionStep::Adapter => 2,
+            ConnectionStep::Tunnel => 3,
+            ConnectionStep::Routing => 4,
+            ConnectionStep::Connected => 5,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            ConnectionStep::Idle => "Ready",
+            ConnectionStep::Fetching => "Fetching",
+            ConnectionStep::Adapter => "Adapter",
+            ConnectionStep::Tunnel => "Tunnel",
+            ConnectionStep::Routing => "Routing",
+            ConnectionStep::Connected => "Done",
+        }
+    }
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Tab { Connect, Boost, Settings }
 
@@ -101,6 +258,15 @@ pub struct BoosterApp {
     // Channel for immediate auth state updates from async operations
     auth_update_tx: std::sync::mpsc::Sender<AuthState>,
     auth_update_rx: std::sync::mpsc::Receiver<AuthState>,
+
+    // Animation system for smooth UI transitions
+    animations: AnimationManager,
+    // App start time for pulse animation
+    app_start_time: std::time::Instant,
+    // Expanded boost info panels (toggle IDs that have expanded details)
+    expanded_boost_info: std::collections::HashSet<String>,
+    // Last successfully connected region (for "LAST USED" badge)
+    last_connected_region: Option<String>,
 }
 
 impl BoosterApp {
@@ -245,6 +411,16 @@ impl BoosterApp {
             // Auth state update channel
             auth_update_tx,
             auth_update_rx,
+
+            // Animation system
+            animations: AnimationManager::default(),
+            app_start_time: std::time::Instant::now(),
+
+            // Expanded boost info panels (restore from settings)
+            expanded_boost_info: saved_settings.expanded_boost_info.into_iter().collect(),
+
+            // Last connected region for "LAST USED" badge
+            last_connected_region: saved_settings.last_connected_region,
         }
     }
 
@@ -326,6 +502,8 @@ impl BoosterApp {
             }.to_string(),
             update_settings: self.update_settings.clone(),
             minimize_to_tray: self.minimize_to_tray,
+            last_connected_region: self.last_connected_region.clone(),
+            expanded_boost_info: self.expanded_boost_info.iter().cloned().collect(),
         };
 
         let _ = save_settings(&settings);
@@ -402,15 +580,49 @@ fn parse_ping_output(stdout: &str) -> Option<u32> {
 
 impl eframe::App for BoosterApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle keyboard shortcuts first
+        let switch_to_tab = ctx.input(|i| {
+            if i.modifiers.ctrl {
+                if i.key_pressed(egui::Key::Num1) { Some(Tab::Connect) }
+                else if i.key_pressed(egui::Key::Num2) { Some(Tab::Boost) }
+                else if i.key_pressed(egui::Key::Num3) { Some(Tab::Settings) }
+                else { None }
+            } else { None }
+        });
+        if let Some(tab) = switch_to_tab {
+            if matches!(self.auth_state, AuthState::LoggedIn(_)) {
+                self.current_tab = tab;
+                self.mark_dirty();
+            }
+        }
+
+        // Ctrl+Shift+C for quick connect/disconnect
+        let quick_toggle = ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::C));
+        if quick_toggle && matches!(self.auth_state, AuthState::LoggedIn(_)) {
+            if self.vpn_state.is_connected() || self.vpn_state.is_connecting() {
+                self.disconnect_vpn();
+            } else if matches!(self.vpn_state, ConnectionState::Disconnected) {
+                self.connect_vpn();
+            }
+        }
+
+        // Clean up completed animations
+        self.animations.cleanup_completed();
+
         // PERFORMANCE FIX: Only request continuous repaint when actually needed
         let is_loading = self.servers_loading || self.finding_best_server.load(Ordering::Relaxed);
         let is_vpn_transitioning = self.vpn_state.is_connecting() || matches!(self.vpn_state, ConnectionState::Disconnecting);
         let is_logging_in = matches!(self.auth_state, AuthState::LoggingIn);
         let is_awaiting_oauth_here = matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_));
         let is_updating = self.update_state.lock().map(|s| s.is_downloading()).unwrap_or(false);
+        let has_animations = self.animations.has_active_animations();
+        let is_connected = self.vpn_state.is_connected();  // For pulse animation
 
-        if is_loading || is_vpn_transitioning || is_logging_in || is_awaiting_oauth_here || is_updating {
-            // Only repaint every 100ms during active states (10 FPS for spinners)
+        if is_loading || is_vpn_transitioning || is_logging_in || is_awaiting_oauth_here || is_updating || has_animations {
+            // Fast repaint for animations (60 FPS target)
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        } else if is_connected {
+            // Slow repaint for pulse animation (10 FPS is enough for breathing effect)
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Otherwise, egui will only repaint on user interaction (clicks, typing, etc.)
@@ -482,9 +694,27 @@ impl eframe::App for BoosterApp {
             self.last_vpn_check = std::time::Instant::now();
 
             // Non-blocking VPN state check using try_lock
+            let mut should_mark_dirty = false;
             if let Ok(vpn) = self.vpn_connection.try_lock() {
                 // Get state directly - the state() method is fast
-                self.vpn_state = self.runtime.block_on(vpn.state());
+                let new_state = self.runtime.block_on(vpn.state());
+
+                // Track when we first connect to save the last connected region
+                if !self.vpn_state.is_connected() && new_state.is_connected() {
+                    if let ConnectionState::Connected { server_region, .. } = &new_state {
+                        // Only update if it's a new region
+                        if self.last_connected_region.as_ref() != Some(server_region) {
+                            self.last_connected_region = Some(server_region.clone());
+                            should_mark_dirty = true;
+                        }
+                    }
+                }
+
+                self.vpn_state = new_state;
+            }
+            // Mark dirty outside the lock scope to avoid borrow conflict
+            if should_mark_dirty {
+                self.mark_dirty();
             }
 
             // Update auth state only when timer fires (cheap but reduces lock contention)
@@ -632,6 +862,23 @@ impl BoosterApp {
                 .color(TEXT_PRIMARY)
                 .strong());
 
+            // Show boost count badge when on Connect or Settings tabs (not on Boost tab)
+            if self.current_tab != Tab::Boost && self.state.optimizations_active {
+                let active_count = self.count_active_boosts();
+                if active_count > 0 {
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(ACCENT_PRIMARY.gamma_multiply(0.2))
+                        .rounding(10.0)
+                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(format!("{} boosts", active_count))
+                                .size(10.0)
+                                .color(ACCENT_PRIMARY));
+                        });
+                }
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (status_text, status_color) = if self.vpn_state.is_connected() {
                     ("PROTECTED", STATUS_CONNECTED)
@@ -639,11 +886,98 @@ impl BoosterApp {
                     ("NOT CONNECTED", STATUS_INACTIVE)
                 };
 
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter().circle_filled(rect.center(), 4.0, status_color);
+                // Pulsing indicator for connected state
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                if self.vpn_state.is_connected() {
+                    // Breathing pulse animation (2s cycle)
+                    let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                    let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
+                    let glow_radius = 4.0 + pulse * 3.0;
+                    let glow_alpha = 0.3 + pulse * 0.2;
+
+                    // Outer glow
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        glow_radius,
+                        status_color.gamma_multiply(glow_alpha)
+                    );
+                    // Inner solid circle
+                    ui.painter().circle_filled(rect.center(), 4.0, status_color);
+                } else {
+                    ui.painter().circle_filled(rect.center(), 4.0, status_color);
+                }
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(status_text).size(11.0).color(status_color));
             });
+        });
+    }
+
+    /// Count how many boosts are currently enabled
+    fn count_active_boosts(&self) -> usize {
+        let sys = &self.state.config.system_optimization;
+        let net = &self.state.config.network_settings;
+        let mut count = 0;
+        if sys.set_high_priority { count += 1; }
+        if sys.timer_resolution_1ms { count += 1; }
+        if sys.mmcss_gaming_profile { count += 1; }
+        if sys.game_mode_enabled { count += 1; }
+        if net.disable_nagle { count += 1; }
+        if net.disable_network_throttling { count += 1; }
+        if net.optimize_mtu { count += 1; }
+        count
+    }
+
+    /// Render VPN connection progress steps
+    fn render_connection_progress_steps(&self, ui: &mut egui::Ui) {
+        let current_step = ConnectionStep::from_state(&self.vpn_state);
+        let current_idx = current_step.step_index();
+
+        // Steps: Fetching (1), Adapter (2), Tunnel (3), Routing (4)
+        let steps = [
+            (1, "Config"),
+            (2, "Adapter"),
+            (3, "Tunnel"),
+            (4, "Route"),
+        ];
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let available = ui.available_width();
+            let step_width = available / (steps.len() as f32);
+
+            for (idx, label) in steps {
+                let is_complete = current_idx > idx;
+                let is_current = current_idx == idx;
+
+                ui.allocate_ui(egui::vec2(step_width, 32.0), |ui| {
+                    ui.vertical_centered(|ui| {
+                        // Draw step dot
+                        let dot_size = 10.0;
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(dot_size, dot_size), egui::Sense::hover());
+
+                        let dot_color = if is_complete {
+                            STATUS_CONNECTED
+                        } else if is_current {
+                            STATUS_WARNING
+                        } else {
+                            BG_ELEVATED
+                        };
+
+                        // Current step has a pulsing effect
+                        if is_current {
+                            let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                            let pulse = ((elapsed * std::f32::consts::PI * 2.0).sin() + 1.0) / 2.0;
+                            let glow_radius = 5.0 + pulse * 2.0;
+                            ui.painter().circle_filled(rect.center(), glow_radius, dot_color.gamma_multiply(0.3));
+                        }
+                        ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+
+                        // Step label
+                        let label_color = if is_complete || is_current { TEXT_PRIMARY } else { TEXT_MUTED };
+                        ui.label(egui::RichText::new(label).size(10.0).color(label_color));
+                    });
+                });
+            }
         });
     }
 
@@ -817,6 +1151,12 @@ impl BoosterApp {
                     });
                 });
 
+                // VPN Connection Progress Steps (shown during connecting states)
+                if is_connecting {
+                    ui.add_space(16.0);
+                    self.render_connection_progress_steps(ui);
+                }
+
                 if show_connected_info {
                     ui.add_space(16.0);
                     ui.separator();
@@ -973,6 +1313,21 @@ impl BoosterApp {
                                                     .color(if is_selected { egui::Color32::WHITE } else { TEXT_SECONDARY })
                                                     .strong());
                                             });
+
+                                        // "LAST USED" badge if this was the last connected region
+                                        let is_last_used = self.last_connected_region.as_ref().map(|r| r == &region.id).unwrap_or(false);
+                                        if is_last_used && !is_selected {
+                                            ui.add_space(4.0);
+                                            egui::Frame::none()
+                                                .fill(ACCENT_CYAN.gamma_multiply(0.15))
+                                                .rounding(4.0)
+                                                .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                                                .show(ui, |ui| {
+                                                    ui.label(egui::RichText::new("LAST")
+                                                        .size(9.0)
+                                                        .color(ACCENT_CYAN));
+                                                });
+                                        }
 
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if let Some(ms) = latency {
@@ -1137,16 +1492,29 @@ impl BoosterApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
 
-            for (title, desc, icon, profile) in [
-                ("Performance", "Maximum FPS", "⚡", OptimizationProfile::LowEnd),
-                ("Balanced", "FPS + Quality", "⚖", OptimizationProfile::Balanced),
-                ("Quality", "Best Visuals", "✨", OptimizationProfile::HighEnd),
+            for (title, desc, icon, profile, profile_info) in [
+                ("Performance", "Maximum FPS", "⚡", OptimizationProfile::LowEnd, &profile_info::PERFORMANCE),
+                ("Balanced", "FPS + Quality", "⚖", OptimizationProfile::Balanced, &profile_info::BALANCED),
+                ("Quality", "Best Visuals", "✨", OptimizationProfile::HighEnd, &profile_info::QUALITY),
             ] {
                 let is_selected = self.selected_profile == profile;
+                let card_id = format!("profile_{}", title);
+
+                // Get hover animation value
+                let hover_val = self.animations.get_hover_value(&card_id);
+
+                // Calculate colors with hover effect
                 let (bg, border, text_color) = if is_selected {
                     (ACCENT_PRIMARY.gamma_multiply(0.15), ACCENT_PRIMARY, ACCENT_PRIMARY)
                 } else {
-                    (BG_CARD, BG_ELEVATED, TEXT_PRIMARY)
+                    // Blend towards hover state
+                    let hover_brightness = 1.0 + hover_val * 0.15;
+                    let bg = egui::Color32::from_rgb(
+                        (BG_CARD.r() as f32 * hover_brightness).min(255.0) as u8,
+                        (BG_CARD.g() as f32 * hover_brightness).min(255.0) as u8,
+                        (BG_CARD.b() as f32 * hover_brightness).min(255.0) as u8,
+                    );
+                    (bg, BG_ELEVATED, TEXT_PRIMARY)
                 };
 
                 let response = egui::Frame::none()
@@ -1164,6 +1532,35 @@ impl BoosterApp {
                             ui.label(egui::RichText::new(desc).size(11.0).color(TEXT_SECONDARY));
                         });
                     });
+
+                // Handle hover for animation
+                let is_hovered = response.response.hovered();
+                self.animations.animate_hover(&card_id, is_hovered, hover_val);
+
+                // Show tooltip on hover
+                if is_hovered {
+                    let tooltip_id = ui.id().with(&card_id);
+                    egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
+                        ui.set_max_width(250.0);
+                        ui.label(egui::RichText::new(profile_info.name).size(13.0).color(TEXT_PRIMARY).strong());
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(profile_info.description).size(11.0).color(TEXT_SECONDARY));
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new(profile_info.settings_summary).size(10.0).color(TEXT_MUTED));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            egui::Frame::none()
+                                .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
+                                .rounding(4.0)
+                                .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new(profile_info.fps_target).size(10.0).color(ACCENT_PRIMARY));
+                                });
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(format!("Best for: {}", profile_info.best_for)).size(10.0).color(TEXT_MUTED));
+                        });
+                    });
+                }
 
                 if response.response.interact(egui::Sense::click()).clicked() {
                     new_profile = Some(profile);
@@ -1250,31 +1647,48 @@ impl BoosterApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("System Boosts").size(14.0).color(TEXT_PRIMARY).strong());
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("TIER 1").size(10.0).color(STATUS_CONNECTED));
+
+                    // Tier 1 badge with tooltip
+                    let tier_badge = egui::Frame::none()
+                        .fill(STATUS_CONNECTED.gamma_multiply(0.15))
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
+                        });
+                    if tier_badge.response.hovered() {
+                        let tooltip_id = ui.id().with("tier1_tip");
+                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
+                            ui.set_max_width(280.0);
+                            ui.label(egui::RichText::new(tier_info::TIER_1_TITLE).size(12.0).color(TEXT_PRIMARY).strong());
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(tier_info::TIER_1_DESC).size(11.0).color(TEXT_SECONDARY));
+                        });
+                    }
                 });
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Safe optimizations with no side effects").size(11.0).color(TEXT_MUTED));
                 ui.add_space(12.0);
 
-                self.render_toggle_row(ui, "High Priority Mode", "Boosts game process priority",
+                self.render_toggle_row_with_info(ui, &boost_info::HIGH_PRIORITY,
                     self.state.config.system_optimization.set_high_priority, |app| {
                     app.state.config.system_optimization.set_high_priority = !app.state.config.system_optimization.set_high_priority;
                 });
                 ui.add_space(10.0);
 
-                self.render_toggle_row(ui, "1ms Timer Resolution", "Smoother frame pacing",
+                self.render_toggle_row_with_info(ui, &boost_info::TIMER_RESOLUTION,
                     self.state.config.system_optimization.timer_resolution_1ms, |app| {
                     app.state.config.system_optimization.timer_resolution_1ms = !app.state.config.system_optimization.timer_resolution_1ms;
                 });
                 ui.add_space(10.0);
 
-                self.render_toggle_row(ui, "MMCSS Gaming Profile", "Better thread scheduling",
+                self.render_toggle_row_with_info(ui, &boost_info::MMCSS,
                     self.state.config.system_optimization.mmcss_gaming_profile, |app| {
                     app.state.config.system_optimization.mmcss_gaming_profile = !app.state.config.system_optimization.mmcss_gaming_profile;
                 });
                 ui.add_space(10.0);
 
-                self.render_toggle_row(ui, "Windows Game Mode", "System resource prioritization",
+                self.render_toggle_row_with_info(ui, &boost_info::GAME_MODE,
                     self.state.config.system_optimization.game_mode_enabled, |app| {
                     app.state.config.system_optimization.game_mode_enabled = !app.state.config.system_optimization.game_mode_enabled;
                 });
@@ -1293,25 +1707,42 @@ impl BoosterApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Network Boosts").size(14.0).color(TEXT_PRIMARY).strong());
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("TIER 1").size(10.0).color(STATUS_CONNECTED));
+
+                    // Tier 1 badge with tooltip
+                    let tier_badge = egui::Frame::none()
+                        .fill(STATUS_CONNECTED.gamma_multiply(0.15))
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
+                        });
+                    if tier_badge.response.hovered() {
+                        let tooltip_id = ui.id().with("tier1_net_tip");
+                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
+                            ui.set_max_width(280.0);
+                            ui.label(egui::RichText::new(tier_info::TIER_1_TITLE).size(12.0).color(TEXT_PRIMARY).strong());
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(tier_info::TIER_1_DESC).size(11.0).color(TEXT_SECONDARY));
+                        });
+                    }
                 });
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Lower latency for online games").size(11.0).color(TEXT_MUTED));
                 ui.add_space(12.0);
 
-                self.render_toggle_row(ui, "Disable Nagle's Algorithm", "Faster packet delivery (-5-15ms)",
+                self.render_toggle_row_with_info(ui, &boost_info::DISABLE_NAGLE,
                     self.state.config.network_settings.disable_nagle, |app| {
                     app.state.config.network_settings.disable_nagle = !app.state.config.network_settings.disable_nagle;
                 });
                 ui.add_space(10.0);
 
-                self.render_toggle_row(ui, "Disable Network Throttling", "Full bandwidth for games",
+                self.render_toggle_row_with_info(ui, &boost_info::NETWORK_THROTTLING,
                     self.state.config.network_settings.disable_network_throttling, |app| {
                     app.state.config.network_settings.disable_network_throttling = !app.state.config.network_settings.disable_network_throttling;
                 });
                 ui.add_space(10.0);
 
-                self.render_toggle_row(ui, "Optimize MTU", "Find & apply best packet size",
+                self.render_toggle_row_with_info(ui, &boost_info::OPTIMIZE_MTU,
                     self.state.config.network_settings.optimize_mtu, |app| {
                     app.state.config.network_settings.optimize_mtu = !app.state.config.network_settings.optimize_mtu;
                 });
@@ -1641,25 +2072,168 @@ impl BoosterApp {
     }
 
     /// Helper function to render a toggle row with label and description
+    /// Render toggle row with smooth animation
     fn render_toggle_row(&mut self, ui: &mut egui::Ui, label: &str, description: &str, value: bool, on_toggle: fn(&mut Self)) {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new(label).size(13.0).color(TEXT_PRIMARY));
-                ui.label(egui::RichText::new(description).size(11.0).color(TEXT_MUTED));
+        let toggle_id = label.to_string();
+        self.render_animated_toggle_row(ui, &toggle_id, label, description, value, on_toggle, None);
+    }
+
+    /// Render toggle row with expandable info panel
+    fn render_toggle_row_with_info(&mut self, ui: &mut egui::Ui, info: &BoostInfo, value: bool, on_toggle: fn(&mut Self)) {
+        let toggle_id = info.id.to_string();
+        self.render_animated_toggle_row(
+            ui,
+            &toggle_id,
+            info.title,
+            info.short_desc,
+            value,
+            on_toggle,
+            Some(info)
+        );
+    }
+
+    /// Core animated toggle row renderer
+    fn render_animated_toggle_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        toggle_id: &str,
+        label: &str,
+        description: &str,
+        value: bool,
+        on_toggle: fn(&mut Self),
+        info: Option<&BoostInfo>
+    ) {
+        let mut should_toggle = false;
+        let mut toggle_info_panel = false;
+        let is_expanded = self.expanded_boost_info.contains(toggle_id);
+
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(label).size(13.0).color(TEXT_PRIMARY));
+
+                        // Info button (?) if we have boost info
+                        if info.is_some() {
+                            let info_btn = ui.add(
+                                egui::Button::new(egui::RichText::new("?").size(10.0).color(TEXT_MUTED))
+                                    .fill(if is_expanded { BG_HOVER } else { BG_ELEVATED })
+                                    .rounding(8.0)
+                                    .min_size(egui::vec2(18.0, 18.0))
+                            );
+                            if info_btn.clicked() {
+                                toggle_info_panel = true;
+                            }
+                            if info_btn.hovered() {
+                                let tooltip_id = ui.id().with("tip");
+                                egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
+                                    ui.label(egui::RichText::new("Click for more details").size(11.0).color(TEXT_SECONDARY));
+                                });
+                            }
+                        }
+                    });
+                    ui.label(egui::RichText::new(description).size(11.0).color(TEXT_MUTED));
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Animated toggle switch
+                    let size = egui::vec2(44.0, 24.0);
+                    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+                    if response.clicked() {
+                        should_toggle = true;
+                        // Start animation
+                        let current = self.animations.get_toggle_value(toggle_id, value);
+                        self.animations.animate_toggle(toggle_id, !value, current);
+                    }
+
+                    // Get animated value
+                    let anim_value = self.animations.get_toggle_value(toggle_id, value);
+
+                    // Interpolate background color (BG_ELEVATED -> ACCENT_PRIMARY)
+                    let bg = egui::Color32::from_rgb(
+                        (BG_ELEVATED.r() as f32 + (ACCENT_PRIMARY.r() as f32 - BG_ELEVATED.r() as f32) * anim_value) as u8,
+                        (BG_ELEVATED.g() as f32 + (ACCENT_PRIMARY.g() as f32 - BG_ELEVATED.g() as f32) * anim_value) as u8,
+                        (BG_ELEVATED.b() as f32 + (ACCENT_PRIMARY.b() as f32 - BG_ELEVATED.b() as f32) * anim_value) as u8,
+                    );
+
+                    // Interpolate knob position
+                    let knob_x = rect.left() + 12.0 + (rect.width() - 24.0) * anim_value;
+
+                    ui.painter().rect_filled(rect, 12.0, bg);
+                    ui.painter().circle_filled(egui::pos2(knob_x, rect.center().y), 8.0, TEXT_PRIMARY);
+                });
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let size = egui::vec2(44.0, 24.0);
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-                if response.clicked() {
-                    on_toggle(self);
-                    self.mark_dirty();
+
+            // Expanded info panel
+            if is_expanded {
+                if let Some(boost_info) = info {
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(BG_ELEVATED.gamma_multiply(0.7))
+                        .rounding(8.0)
+                        .inner_margin(12.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+
+                            // Full description
+                            ui.label(egui::RichText::new(boost_info.long_desc).size(11.0).color(TEXT_SECONDARY));
+                            ui.add_space(8.0);
+
+                            // Impact & risk in a row
+                            ui.horizontal(|ui| {
+                                // Impact badge
+                                egui::Frame::none()
+                                    .fill(STATUS_CONNECTED.gamma_multiply(0.15))
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new(boost_info.impact).size(10.0).color(STATUS_CONNECTED));
+                                    });
+
+                                // Risk level badge
+                                let risk_color = match boost_info.risk_level {
+                                    RiskLevel::Safe => STATUS_CONNECTED,
+                                    RiskLevel::LowRisk => STATUS_WARNING,
+                                    RiskLevel::MediumRisk => STATUS_ERROR,
+                                };
+                                egui::Frame::none()
+                                    .fill(risk_color.gamma_multiply(0.15))
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new(boost_info.risk_level.label()).size(10.0).color(risk_color));
+                                    });
+
+                                // Admin required warning
+                                if boost_info.requires_admin {
+                                    egui::Frame::none()
+                                        .fill(STATUS_WARNING.gamma_multiply(0.15))
+                                        .rounding(4.0)
+                                        .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                                        .show(ui, |ui| {
+                                            ui.label(egui::RichText::new("⚡ Admin").size(10.0).color(STATUS_WARNING));
+                                        });
+                                }
+                            });
+                        });
                 }
-                let bg = if value { ACCENT_PRIMARY } else { BG_ELEVATED };
-                let knob_x = if value { rect.right() - 12.0 } else { rect.left() + 12.0 };
-                ui.painter().rect_filled(rect, 12.0, bg);
-                ui.painter().circle_filled(egui::pos2(knob_x, rect.center().y), 8.0, TEXT_PRIMARY);
-            });
+            }
         });
+
+        // Handle toggle outside the closure
+        if should_toggle {
+            on_toggle(self);
+            self.mark_dirty();
+        }
+        if toggle_info_panel {
+            if is_expanded {
+                self.expanded_boost_info.remove(toggle_id);
+            } else {
+                self.expanded_boost_info.insert(toggle_id.to_string());
+            }
+            self.mark_dirty();
+        }
     }
 
     fn render_account_settings(&mut self, ui: &mut egui::Ui) {
@@ -2388,9 +2962,22 @@ impl BoosterApp {
 
     fn toggle_optimizations(&mut self) {
         if self.state.optimizations_active {
-            self.state.optimizations_active = false;
-            self.set_status("Optimizations disabled", STATUS_WARNING);
+            // Disabling optimizations - restore original Roblox settings
+            match self.roblox_optimizer.restore_settings() {
+                Ok(_) => {
+                    self.state.optimizations_active = false;
+                    self.set_status("Optimizations disabled - Roblox settings restored", STATUS_WARNING);
+                    log::info!("Optimizations disabled, Roblox settings restored from backup");
+                }
+                Err(e) => {
+                    // Still disable even if restore fails (file might be missing)
+                    self.state.optimizations_active = false;
+                    log::warn!("Could not restore Roblox settings: {}", e);
+                    self.set_status("Optimizations disabled (backup not found)", STATUS_WARNING);
+                }
+            }
         } else {
+            // Enabling optimizations - apply Roblox settings
             match self.roblox_optimizer.apply_optimizations(&self.state.config.roblox_settings) {
                 Ok(_) => {
                     self.state.optimizations_active = true;
