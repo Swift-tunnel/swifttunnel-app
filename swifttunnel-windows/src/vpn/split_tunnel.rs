@@ -66,6 +66,101 @@ pub const DEFAULT_TUNNEL_APPS: &[&str] = &[
     "Windows10Universal.exe",
 ];
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  GAME PRESETS
+//  Pre-configured process lists for popular games
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Game preset for quick selection of which game to tunnel
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GamePreset {
+    Roblox,
+    Valorant,
+    Fortnite,
+}
+
+impl GamePreset {
+    /// Get all available presets
+    pub fn all() -> &'static [GamePreset] {
+        &[GamePreset::Roblox, GamePreset::Valorant, GamePreset::Fortnite]
+    }
+
+    /// Get the process names associated with this game preset
+    pub fn process_names(&self) -> &'static [&'static str] {
+        match self {
+            GamePreset::Roblox => &[
+                "RobloxPlayerBeta.exe",
+                "RobloxPlayerLauncher.exe",
+                "RobloxStudioBeta.exe",
+                "RobloxStudioLauncherBeta.exe",
+                "RobloxStudioLauncher.exe",
+                "Windows10Universal.exe",
+            ],
+            GamePreset::Valorant => &[
+                "VALORANT-Win64-Shipping.exe",
+                "VALORANT.exe",
+                "RiotClientServices.exe",
+                "RiotClientUx.exe",
+                "RiotClientUxRender.exe",
+            ],
+            GamePreset::Fortnite => &[
+                "FortniteClient-Win64-Shipping.exe",
+                "FortniteLauncher.exe",
+                "EpicGamesLauncher.exe",
+                "EpicWebHelper.exe",
+            ],
+        }
+    }
+
+    /// Get the display name for the preset
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            GamePreset::Roblox => "Roblox",
+            GamePreset::Valorant => "Valorant",
+            GamePreset::Fortnite => "Fortnite",
+        }
+    }
+
+    /// Get an icon/emoji for the preset
+    pub fn icon(&self) -> &'static str {
+        match self {
+            GamePreset::Roblox => "🎮",
+            GamePreset::Valorant => "🎯",
+            GamePreset::Fortnite => "🏝️",
+        }
+    }
+
+    /// Get a short description of the preset
+    pub fn description(&self) -> &'static str {
+        match self {
+            GamePreset::Roblox => "Roblox Player & Studio",
+            GamePreset::Valorant => "Valorant + Riot Client",
+            GamePreset::Fortnite => "Fortnite + Epic Launcher",
+        }
+    }
+}
+
+/// Get apps to tunnel for a set of selected game presets
+pub fn get_apps_for_presets(presets: &[GamePreset]) -> Vec<String> {
+    let mut apps: Vec<String> = presets
+        .iter()
+        .flat_map(|p| p.process_names())
+        .map(|s| s.to_string())
+        .collect();
+
+    // Remove duplicates while preserving order
+    let mut seen = std::collections::HashSet::new();
+    apps.retain(|app| seen.insert(app.clone()));
+
+    apps
+}
+
+/// Get apps to tunnel from a HashSet of presets (convenience function for GUI)
+pub fn get_apps_for_preset_set(presets: &std::collections::HashSet<GamePreset>) -> Vec<String> {
+    let preset_vec: Vec<GamePreset> = presets.iter().cloned().collect();
+    get_apps_for_presets(&preset_vec)
+}
+
 /// A running process that should be tunneled
 #[derive(Debug, Clone)]
 pub struct TunneledProcess {
