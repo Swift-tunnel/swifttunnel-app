@@ -34,7 +34,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='SwiftTunnel - Gaming VPN with PC Boosts'
+            Description='SwiftTunnel - Game Booster'
             Manufacturer='SwiftTunnel'
             InstallerVersion='450'
             Languages='1033'
@@ -60,7 +60,7 @@
                     <Component Id='StartMenuShortcut' Guid='*'>
                         <Shortcut Id='ApplicationStartMenuShortcut'
                             Name='SwiftTunnel'
-                            Description='SwiftTunnel - Gaming VPN with PC Boosts'
+                            Description='SwiftTunnel - Game Booster'
                             Target='[Bin]swifttunnel-fps-booster.exe'
                             WorkingDirectory='Bin'
                             Icon='SwiftTunnelIcon.ico'/>
@@ -73,7 +73,7 @@
                 <Component Id='DesktopShortcut' Guid='*'>
                     <Shortcut Id='ApplicationDesktopShortcut'
                         Name='SwiftTunnel'
-                        Description='SwiftTunnel - Gaming VPN with PC Boosts'
+                        Description='SwiftTunnel - Game Booster'
                         Target='[Bin]swifttunnel-fps-booster.exe'
                         WorkingDirectory='Bin'
                         Icon='SwiftTunnelIcon.ico'/>
