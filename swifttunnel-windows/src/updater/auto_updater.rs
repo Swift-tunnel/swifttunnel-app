@@ -87,12 +87,15 @@ pub fn run_auto_updater() -> AutoUpdateResult {
         Box::new(move |_cc| Ok(Box::new(app))),
     );
 
-    // Get the result
-    if let Ok(r) = result.lock() {
-        r.clone().unwrap_or(AutoUpdateResult::NoUpdate)
-    } else {
-        AutoUpdateResult::NoUpdate
-    }
+    // Get the result - must save to variable to avoid borrow issues
+    let final_result = {
+        if let Ok(r) = result.lock() {
+            r.clone().unwrap_or(AutoUpdateResult::NoUpdate)
+        } else {
+            AutoUpdateResult::NoUpdate
+        }
+    };
+    final_result
 }
 
 /// Check for updates and download/install if available
@@ -138,7 +141,6 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
 
     // Download with progress
     let state_for_progress = Arc::clone(&state);
-    let total_size = update_info.size;
 
     let progress_callback = Box::new(move |downloaded: u64, total: u64| {
         let progress = if total > 0 {
