@@ -121,6 +121,43 @@ pub enum GraphicsQuality {
     Level10,
 }
 
+impl GraphicsQuality {
+    /// Convert graphics quality to integer level (1-10, 0 for auto/manual)
+    pub fn to_level(&self) -> i32 {
+        match self {
+            GraphicsQuality::Automatic => 0,
+            GraphicsQuality::Manual => 0,
+            GraphicsQuality::Level1 => 1,
+            GraphicsQuality::Level2 => 2,
+            GraphicsQuality::Level3 => 3,
+            GraphicsQuality::Level4 => 4,
+            GraphicsQuality::Level5 => 5,
+            GraphicsQuality::Level6 => 6,
+            GraphicsQuality::Level7 => 7,
+            GraphicsQuality::Level8 => 8,
+            GraphicsQuality::Level9 => 9,
+            GraphicsQuality::Level10 => 10,
+        }
+    }
+
+    /// Create graphics quality from integer level (1-10)
+    pub fn from_level(level: i32) -> Self {
+        match level {
+            1 => GraphicsQuality::Level1,
+            2 => GraphicsQuality::Level2,
+            3 => GraphicsQuality::Level3,
+            4 => GraphicsQuality::Level4,
+            5 => GraphicsQuality::Level5,
+            6 => GraphicsQuality::Level6,
+            7 => GraphicsQuality::Level7,
+            8 => GraphicsQuality::Level8,
+            9 => GraphicsQuality::Level9,
+            10 => GraphicsQuality::Level10,
+            _ => GraphicsQuality::Level5, // Default to 5 for invalid values
+        }
+    }
+}
+
 /// Network optimization settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
