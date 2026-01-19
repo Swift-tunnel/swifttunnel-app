@@ -27,7 +27,6 @@ const BG_CARD: egui::Color32 = egui::Color32::from_rgb(12, 17, 28);         // S
 const BG_ELEVATED: egui::Color32 = egui::Color32::from_rgb(20, 26, 40);     // Elevated surfaces
 const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(28, 36, 52);        // Hover state
 const BG_INPUT: egui::Color32 = egui::Color32::from_rgb(14, 20, 32);        // Input field background
-const BG_GLASS: egui::Color32 = egui::Color32::from_rgba_unmultiplied(30, 40, 60, 180); // Glass effect
 
 // Gradient accent colors - for modern visual depth
 const GRADIENT_START: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);   // Blue
@@ -254,7 +253,7 @@ impl ConnectionStep {
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum Tab { Connect, Boost, Settings }
 
 #[derive(PartialEq, Clone, Copy)]
