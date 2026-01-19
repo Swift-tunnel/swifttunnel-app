@@ -72,6 +72,9 @@ pub struct AppSettings {
     /// Expanded boost info panel IDs (user preference to show detailed info)
     #[serde(default)]
     pub expanded_boost_info: Vec<String>,
+    /// Selected game presets for split tunneling (stored as strings: "roblox", "valorant", "fortnite")
+    #[serde(default = "default_game_presets")]
+    pub selected_game_presets: Vec<String>,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -84,6 +87,10 @@ fn default_region() -> String {
 
 fn default_server() -> String {
     "singapore".to_string()
+}
+
+fn default_game_presets() -> Vec<String> {
+    vec!["roblox".to_string()] // Default to Roblox selected
 }
 
 impl Default for AppSettings {
@@ -100,6 +107,7 @@ impl Default for AppSettings {
             minimize_to_tray: true,
             last_connected_region: None,
             expanded_boost_info: Vec::new(),
+            selected_game_presets: default_game_presets(),
         }
     }
 }

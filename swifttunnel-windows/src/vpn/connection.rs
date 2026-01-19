@@ -16,6 +16,7 @@ use crate::auth::types::VpnConfig;
 use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
+use super::wfp::{WfpEngine, setup_wfp_for_split_tunnel};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::{VpnError, VpnResult};
 
@@ -105,6 +106,8 @@ pub struct VpnConnection {
     adapter: Option<Arc<WintunAdapter>>,
     tunnel: Option<Arc<WireguardTunnel>>,
     split_tunnel: Option<Arc<Mutex<SplitTunnelDriver>>>,
+    /// WFP engine for split tunnel filtering (must be kept alive while split tunnel is active)
+    wfp_engine: Option<WfpEngine>,
     config: Option<VpnConfig>,
     /// Flag to stop the process monitor task
     process_monitor_stop: Arc<AtomicBool>,
@@ -118,6 +121,7 @@ impl VpnConnection {
             adapter: None,
             tunnel: None,
             split_tunnel: None,
+            wfp_engine: None,
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
         }
@@ -271,11 +275,30 @@ impl VpnConnection {
             return (false, Vec::new());
         }
 
+        // Step 1: Setup WFP (Windows Filtering Platform) BEFORE opening the driver
+        // The Mullvad split tunnel driver requires WFP provider/sublayer to exist
+        let interface_luid = adapter.get_luid();
+        log::info!("Setting up WFP for split tunneling (interface LUID: {})...", interface_luid);
+
+        match setup_wfp_for_split_tunnel(interface_luid) {
+            Ok(engine) => {
+                log::info!("WFP setup complete");
+                self.wfp_engine = Some(engine);
+            }
+            Err(e) => {
+                log::warn!("Failed to setup WFP for split tunnel: {}", e);
+                log::warn!("Split tunneling may not work correctly. Continuing anyway...");
+                // Don't fail completely - the driver might still work for process detection
+            }
+        }
+
         let mut driver = SplitTunnelDriver::new();
 
         // Open driver
         if let Err(e) = driver.open() {
             log::warn!("Failed to open split tunnel driver: {}", e);
+            // Clean up WFP if driver fails
+            self.wfp_engine = None;
             return (false, Vec::new());
         }
 
@@ -283,11 +306,13 @@ impl VpnConnection {
         let split_config = SplitTunnelConfig {
             include_apps: apps,
             tunnel_ip: config.assigned_ip.clone(),
-            tunnel_interface_luid: adapter.get_luid(),
+            tunnel_interface_luid: interface_luid,
         };
 
         if let Err(e) = driver.configure(split_config) {
             log::warn!("Failed to configure split tunnel: {}", e);
+            // Clean up WFP if configuration fails
+            self.wfp_engine = None;
             return (false, Vec::new());
         }
 
@@ -391,6 +416,12 @@ impl VpnConnection {
         }
         self.split_tunnel = None;
 
+        // Clean up WFP engine (drop will close it)
+        if self.wfp_engine.is_some() {
+            log::info!("Cleaning up WFP engine...");
+            self.wfp_engine = None;
+        }
+
         // Shutdown adapter
         if let Some(ref adapter) = self.adapter {
             adapter.shutdown();
@@ -460,6 +491,10 @@ impl Drop for VpnConnection {
             } else {
                 log::warn!("Could not acquire split tunnel lock during drop");
             }
+        }
+        // WFP engine will be cleaned up automatically when dropped (its Drop impl closes it)
+        if self.wfp_engine.is_some() {
+            log::info!("Dropping WFP engine...");
         }
         if let Some(ref adapter) = self.adapter {
             adapter.shutdown();

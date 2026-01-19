@@ -7,8 +7,7 @@ use crate::structs::*;
 use crate::system_optimizer::SystemOptimizer;
 use crate::tray::SystemTray;
 use crate::updater::{UpdateChecker, UpdateInfo, UpdateSettings, UpdateState, download_update, download_checksum, verify_checksum, install_update};
-use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource};
-use crate::vpn::split_tunnel::get_default_tunnel_apps;
+use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set};
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -289,7 +288,8 @@ pub struct BoosterApp {
     selected_server: String,
     region_latencies: Arc<Mutex<HashMap<String, Option<u32>>>>,
     finding_best_server: Arc<AtomicBool>,
-    split_tunnel_apps: Vec<String>,
+    /// Selected game presets for split tunneling (multi-select)
+    selected_game_presets: std::collections::HashSet<GamePreset>,
 
     // Performance: reuse tokio runtime
     runtime: Arc<tokio::runtime::Runtime>,
@@ -325,6 +325,10 @@ pub struct BoosterApp {
     expanded_boost_info: std::collections::HashSet<String>,
     // Last successfully connected region (for "LAST USED" badge)
     last_connected_region: Option<String>,
+    // Process detection notification (message, timestamp)
+    process_notification: Option<(String, std::time::Instant)>,
+    // Previously detected tunneled processes (for notification on new process)
+    previously_tunneled: std::collections::HashSet<String>,
 }
 
 impl BoosterApp {
@@ -446,7 +450,15 @@ impl BoosterApp {
             selected_server: saved_settings.selected_server.clone(),
             region_latencies,
             finding_best_server,
-            split_tunnel_apps: get_default_tunnel_apps(),
+            // Convert saved game preset strings to HashSet<GamePreset>
+            selected_game_presets: saved_settings.selected_game_presets.iter()
+                .filter_map(|s| match s.as_str() {
+                    "roblox" => Some(GamePreset::Roblox),
+                    "valorant" => Some(GamePreset::Valorant),
+                    "fortnite" => Some(GamePreset::Fortnite),
+                    _ => None,
+                })
+                .collect(),
             runtime,
             needs_repaint: true,
             last_vpn_check: std::time::Instant::now(),
@@ -479,6 +491,10 @@ impl BoosterApp {
 
             // Last connected region for "LAST USED" badge
             last_connected_region: saved_settings.last_connected_region,
+
+            // Process detection notification
+            process_notification: None,
+            previously_tunneled: std::collections::HashSet::new(),
         }
     }
 
@@ -562,6 +578,14 @@ impl BoosterApp {
             minimize_to_tray: self.minimize_to_tray,
             last_connected_region: self.last_connected_region.clone(),
             expanded_boost_info: self.expanded_boost_info.iter().cloned().collect(),
+            // Convert HashSet<GamePreset> to Vec<String> for storage
+            selected_game_presets: self.selected_game_presets.iter()
+                .map(|p| match p {
+                    GamePreset::Roblox => "roblox",
+                    GamePreset::Valorant => "valorant",
+                    GamePreset::Fortnite => "fortnite",
+                }.to_string())
+                .collect(),
         };
 
         let _ = save_settings(&settings);
@@ -771,6 +795,26 @@ impl eframe::App for BoosterApp {
                     }
                 }
 
+                // Process detection notifications - check for new tunneled processes
+                if let ConnectionState::Connected { tunneled_processes, .. } = &new_state {
+                    for process in tunneled_processes {
+                        if !self.previously_tunneled.contains(process) {
+                            // New process detected - show notification
+                            log::info!("New process detected and tunneled: {}", process);
+                            self.process_notification = Some((
+                                format!("🎮 Tunneling: {}", process),
+                                std::time::Instant::now(),
+                            ));
+                            self.previously_tunneled.insert(process.clone());
+                        }
+                    }
+                }
+
+                // Clear previously tunneled when disconnecting
+                if new_state == ConnectionState::Disconnected {
+                    self.previously_tunneled.clear();
+                }
+
                 self.vpn_state = new_state;
             }
             // Mark dirty outside the lock scope to avoid borrow conflict
@@ -884,6 +928,59 @@ impl eframe::App for BoosterApp {
                         });
                     });
             });
+
+        // Render process notification toast (overlay at top of screen)
+        self.render_process_notification(ctx);
+    }
+
+    /// Render process detection notification toast at top of screen
+    fn render_process_notification(&mut self, ctx: &egui::Context) {
+        let should_show = if let Some((_, time)) = &self.process_notification {
+            time.elapsed() < std::time::Duration::from_secs(3)
+        } else {
+            false
+        };
+
+        if should_show {
+            if let Some((msg, time)) = &self.process_notification {
+                // Calculate fade out animation
+                let elapsed = time.elapsed().as_secs_f32();
+                let alpha = if elapsed > 2.5 {
+                    // Fade out in last 0.5 seconds
+                    1.0 - ((elapsed - 2.5) / 0.5)
+                } else {
+                    1.0
+                };
+
+                egui::Area::new(egui::Id::new("process_notification"))
+                    .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::none()
+                            .fill(STATUS_CONNECTED.gamma_multiply(0.9 * alpha))
+                            .rounding(8.0)
+                            .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                            .shadow(egui::epaint::Shadow {
+                                offset: egui::vec2(0.0, 2.0),
+                                blur: 8.0,
+                                spread: 0.0,
+                                color: egui::Color32::from_black_alpha((40.0 * alpha) as u8),
+                            })
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(msg)
+                                    .color(egui::Color32::WHITE.gamma_multiply(alpha))
+                                    .size(14.0)
+                                    .strong());
+                            });
+                    });
+
+                // Request repaint for animation
+                ctx.request_repaint();
+            }
+        } else if self.process_notification.is_some() {
+            // Clear expired notification
+            self.process_notification = None;
+        }
     }
 }
 
@@ -1219,9 +1316,115 @@ impl BoosterApp {
 
         self.render_connection_status(ui);
         ui.add_space(16.0);
+        self.render_game_preset_selector(ui);
+        ui.add_space(16.0);
         self.render_region_selector(ui);
         ui.add_space(16.0);
         self.render_quick_info(ui);
+    }
+
+    /// Render game preset selector cards (ExitLag-style)
+    fn render_game_preset_selector(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::none()
+            .fill(BG_CARD)
+            .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0)
+            .inner_margin(16.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+
+                // Section header
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("🎮").size(16.0));
+                    ui.label(egui::RichText::new("Game Selection").size(14.0).color(TEXT_PRIMARY).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let count = self.selected_game_presets.len();
+                        if count > 0 {
+                            ui.label(egui::RichText::new(format!("{} selected", count))
+                                .size(11.0).color(ACCENT_PRIMARY));
+                        }
+                    });
+                });
+
+                ui.add_space(12.0);
+
+                // Game preset cards in a horizontal row
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
+
+                    // Calculate card width based on available space (3 cards per row)
+                    let card_width = (ui.available_width() - 20.0) / 3.0;
+
+                    for preset in GamePreset::all() {
+                        let is_selected = self.selected_game_presets.contains(preset);
+                        let is_connected = self.vpn_state.is_connected();
+
+                        let card_bg = if is_selected {
+                            ACCENT_PRIMARY.gamma_multiply(0.15)
+                        } else {
+                            BG_ELEVATED
+                        };
+                        let card_border = if is_selected {
+                            egui::Stroke::new(2.0, ACCENT_PRIMARY)
+                        } else {
+                            egui::Stroke::new(1.0, BG_HOVER)
+                        };
+
+                        let response = egui::Frame::none()
+                            .fill(card_bg)
+                            .stroke(card_border)
+                            .rounding(8.0)
+                            .inner_margin(egui::Margin::symmetric(8.0, 12.0))
+                            .show(ui, |ui| {
+                                ui.set_min_width(card_width);
+                                ui.set_max_width(card_width);
+
+                                ui.vertical_centered(|ui| {
+                                    // Game icon
+                                    ui.label(egui::RichText::new(preset.icon()).size(24.0));
+                                    ui.add_space(4.0);
+
+                                    // Game name
+                                    let name_color = if is_selected { TEXT_PRIMARY } else { TEXT_SECONDARY };
+                                    ui.label(egui::RichText::new(preset.display_name())
+                                        .size(13.0).color(name_color).strong());
+
+                                    // Selection indicator
+                                    if is_selected {
+                                        ui.add_space(2.0);
+                                        ui.label(egui::RichText::new("✓").size(10.0).color(ACCENT_PRIMARY));
+                                    }
+                                });
+                            })
+                            .response;
+
+                        // Handle click (only when not connected)
+                        if response.interact(egui::Sense::click()).clicked() && !is_connected {
+                            if is_selected {
+                                self.selected_game_presets.remove(preset);
+                            } else {
+                                self.selected_game_presets.insert(*preset);
+                            }
+                            self.mark_dirty();
+                        }
+
+                        // Change cursor on hover (only when not connected)
+                        if !is_connected {
+                            response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        }
+                    }
+                });
+
+                // Warning if no game selected
+                if self.selected_game_presets.is_empty() {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("⚠").size(12.0).color(STATUS_WARNING));
+                        ui.label(egui::RichText::new("Select at least one game to enable split tunneling")
+                            .size(11.0).color(STATUS_WARNING));
+                    });
+                }
+            });
     }
 
     fn render_login_prompt(&mut self, ui: &mut egui::Ui) {
@@ -3363,10 +3566,22 @@ impl BoosterApp {
             return;
         };
 
+        // Check if at least one game preset is selected
+        if self.selected_game_presets.is_empty() {
+            self.set_status("Please select at least one game", STATUS_WARNING);
+            return;
+        }
+
         let region = self.selected_server.clone();
-        let apps = self.split_tunnel_apps.clone();
+        // Get apps from selected game presets
+        let apps = get_apps_for_preset_set(&self.selected_game_presets);
+        log::info!("Connecting with split tunnel apps: {:?}", apps);
+
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
+
+        // Clear previously tunneled set when starting a new connection
+        self.previously_tunneled.clear();
 
         std::thread::spawn(move || {
             rt.block_on(async {

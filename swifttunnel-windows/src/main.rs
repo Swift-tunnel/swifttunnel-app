@@ -33,6 +33,55 @@ use std::time::Duration;
 use std::panic;
 use tokio::runtime::Runtime;
 use url::Url;
+use windows::core::PCSTR;
+use windows::Win32::Foundation::{HANDLE, CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+use windows::Win32::System::Threading::CreateMutexA;
+
+/// Single-instance mutex name
+const SINGLE_INSTANCE_MUTEX: &str = "SwiftTunnel_SingleInstance_Mutex_v1";
+
+/// RAII wrapper for Windows mutex handle
+struct SingleInstanceGuard {
+    _handle: HANDLE,
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        // Handle will be released when dropped, mutex is released on process exit
+    }
+}
+
+/// Try to acquire single-instance mutex
+/// Returns Some(guard) if we're the first instance, None if another instance is running
+fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
+    unsafe {
+        let mutex_name = std::ffi::CString::new(SINGLE_INSTANCE_MUTEX).unwrap();
+        let handle = CreateMutexA(
+            None,           // Default security attributes
+            true,           // Initially owned
+            PCSTR(mutex_name.as_ptr() as *const u8),
+        );
+
+        match handle {
+            Ok(h) => {
+                let error = GetLastError();
+                if error == ERROR_ALREADY_EXISTS {
+                    // Another instance is already running
+                    let _ = CloseHandle(h);
+                    None
+                } else {
+                    // We're the first instance
+                    Some(SingleInstanceGuard { _handle: h })
+                }
+            }
+            Err(_) => {
+                // Failed to create mutex - assume we can run
+                warn!("Failed to create single-instance mutex, continuing anyway");
+                None
+            }
+        }
+    }
+}
 
 /// Parsed OAuth callback data from deep link
 #[derive(Debug, Clone)]
@@ -170,6 +219,29 @@ fn main() -> eframe::Result<()> {
     info!("Starting SwiftTunnel v{}", env!("CARGO_PKG_VERSION"));
     info!("Log file: {}", log_file_path.display());
     info!("Log level: {:?}", log_level);
+
+    // Single-instance check - prevent multiple app instances (and multiple tray icons)
+    let _instance_guard = match try_acquire_single_instance() {
+        Some(guard) => {
+            info!("Single-instance lock acquired");
+            guard
+        }
+        None => {
+            // Another instance is running
+            // For OAuth callbacks, we should pass the data to the existing instance
+            // For now, just exit silently
+            let args: Vec<String> = std::env::args().collect();
+            let is_oauth_callback = args.iter().any(|a| a.starts_with("swifttunnel://"));
+
+            if is_oauth_callback {
+                warn!("Another instance is running. OAuth callback should be handled by existing instance.");
+                // TODO: Use IPC to send the OAuth callback to the running instance
+            } else {
+                info!("Another instance of SwiftTunnel is already running. Exiting.");
+            }
+            return Ok(());
+        }
+    };
 
     // Run Discord-like auto-updater before main app (splash screen)
     // Skip auto-updater if this is an OAuth callback (deep link)

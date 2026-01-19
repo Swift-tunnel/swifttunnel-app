@@ -23,7 +23,7 @@ pub use config::{fetch_vpn_config, VpnConfigRequest};
 pub use adapter::WintunAdapter;
 pub use tunnel::WireguardTunnel;
 pub use wfp::{WfpEngine, setup_wfp_for_split_tunnel};
-pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
+pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set};
 pub use connection::{VpnConnection, ConnectionState};
 pub use servers::{
     DynamicServerList, DynamicServerInfo, DynamicGamingRegion,

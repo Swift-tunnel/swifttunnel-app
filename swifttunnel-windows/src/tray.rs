@@ -5,6 +5,7 @@
 use log::info;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -16,6 +17,8 @@ pub struct SystemTray {
     pub toggle_optimizations: Arc<AtomicBool>,
     /// Whether minimize to tray is enabled
     pub minimize_to_tray: Arc<AtomicBool>,
+    /// Stop flag for background threads
+    stop_threads: Arc<AtomicBool>,
 }
 
 impl SystemTray {
@@ -54,22 +57,31 @@ impl SystemTray {
         let quit_requested = Arc::new(AtomicBool::new(false));
         let toggle_optimizations = Arc::new(AtomicBool::new(false));
         let minimize_to_tray = Arc::new(AtomicBool::new(true)); // Enabled by default
+        let stop_threads = Arc::new(AtomicBool::new(false));
 
         // Clone for menu event handler
         let show_clone = Arc::clone(&show_window);
         let quit_clone = Arc::clone(&quit_requested);
         let toggle_clone = Arc::clone(&toggle_optimizations);
+        let stop_clone1 = Arc::clone(&stop_threads);
 
         // Store menu item IDs for event handling
         let show_id = show_item.id().clone();
         let toggle_id = toggle_item.id().clone();
         let quit_id = quit_item.id().clone();
 
-        // Spawn menu event handler thread
+        // Spawn menu event handler thread with timeout-based polling
         std::thread::spawn(move || {
             let receiver = MenuEvent::receiver();
             loop {
-                if let Ok(event) = receiver.recv() {
+                // Check stop flag
+                if stop_clone1.load(Ordering::SeqCst) {
+                    info!("Tray menu event thread stopping");
+                    break;
+                }
+
+                // Use recv_timeout to allow periodic stop flag checks
+                if let Ok(event) = receiver.recv_timeout(Duration::from_millis(500)) {
                     if event.id == show_id {
                         info!("Tray: Show window requested");
                         show_clone.store(true, Ordering::SeqCst);
@@ -86,12 +98,20 @@ impl SystemTray {
 
         // Clone for tray icon click handler
         let show_click_clone = Arc::clone(&show_window);
+        let stop_clone2 = Arc::clone(&stop_threads);
 
-        // Spawn tray icon click handler thread (double-click to show window)
+        // Spawn tray icon click handler thread with timeout-based polling
         std::thread::spawn(move || {
             let receiver = TrayIconEvent::receiver();
             loop {
-                if let Ok(event) = receiver.recv() {
+                // Check stop flag
+                if stop_clone2.load(Ordering::SeqCst) {
+                    info!("Tray click event thread stopping");
+                    break;
+                }
+
+                // Use recv_timeout to allow periodic stop flag checks
+                if let Ok(event) = receiver.recv_timeout(Duration::from_millis(500)) {
                     // Show window on double-click (or single click on Windows)
                     match event {
                         TrayIconEvent::Click { button: tray_icon::MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } => {
@@ -116,7 +136,14 @@ impl SystemTray {
             quit_requested,
             toggle_optimizations,
             minimize_to_tray,
+            stop_threads,
         })
+    }
+
+    /// Signal background threads to stop
+    pub fn shutdown(&self) {
+        info!("Shutting down system tray threads...");
+        self.stop_threads.store(true, Ordering::SeqCst);
     }
 
     /// Set whether minimize to tray is enabled
@@ -142,6 +169,15 @@ impl SystemTray {
     /// Check if toggle optimizations was requested and reset the flag
     pub fn check_toggle_optimizations(&self) -> bool {
         self.toggle_optimizations.swap(false, Ordering::SeqCst)
+    }
+}
+
+impl Drop for SystemTray {
+    fn drop(&mut self) {
+        info!("SystemTray dropping, signaling threads to stop...");
+        self.stop_threads.store(true, Ordering::SeqCst);
+        // Give threads a moment to notice the stop flag
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
