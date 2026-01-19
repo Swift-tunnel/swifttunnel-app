@@ -16,40 +16,98 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  SWIFTTUNNEL DESIGN SYSTEM v4
-//  Deep Blue - Dark theme with blue/cyan accents
-//  Matching the web dashboard design
+//  SWIFTTUNNEL DESIGN SYSTEM v5
+//  Deep Blue - Dark theme with blue/cyan accents + modern glass effects
+//  Enhanced visual hierarchy with gradients and micro-animations
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const BG_DARKEST: egui::Color32 = egui::Color32::from_rgb(8, 12, 21);      // Deep dark blue-black
-const BG_CARD: egui::Color32 = egui::Color32::from_rgb(15, 20, 32);        // Slightly lighter card bg
-const BG_ELEVATED: egui::Color32 = egui::Color32::from_rgb(22, 28, 42);    // Elevated surfaces
-const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(30, 38, 55);       // Hover state
-const BG_INPUT: egui::Color32 = egui::Color32::from_rgb(18, 24, 38);       // Input field background
+// Base backgrounds - refined for better depth
+const BG_DARKEST: egui::Color32 = egui::Color32::from_rgb(6, 9, 18);        // Deeper blue-black
+const BG_CARD: egui::Color32 = egui::Color32::from_rgb(12, 17, 28);         // Subtle card bg
+const BG_ELEVATED: egui::Color32 = egui::Color32::from_rgb(20, 26, 40);     // Elevated surfaces
+const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(28, 36, 52);        // Hover state
+const BG_INPUT: egui::Color32 = egui::Color32::from_rgb(14, 20, 32);        // Input field background
 
-const ACCENT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);  // Blue accent (#3b82f6)
-const ACCENT_CYAN: egui::Color32 = egui::Color32::from_rgb(34, 211, 238);     // Cyan for highlights (#22d3ee)
-const STATUS_CONNECTED: egui::Color32 = egui::Color32::from_rgb(52, 211, 153);
+// Gradient accent colors - for modern visual depth
+const GRADIENT_START: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);   // Blue
+const GRADIENT_END: egui::Color32 = egui::Color32::from_rgb(139, 92, 246);     // Purple/violet
+const GRADIENT_CYAN_START: egui::Color32 = egui::Color32::from_rgb(34, 211, 238); // Cyan
+const GRADIENT_CYAN_END: egui::Color32 = egui::Color32::from_rgb(52, 211, 153);   // Emerald
+
+// Primary accents
+const ACCENT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);   // Blue accent (#3b82f6)
+const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(139, 92, 246); // Violet (#8b5cf6)
+const ACCENT_CYAN: egui::Color32 = egui::Color32::from_rgb(34, 211, 238);      // Cyan for highlights (#22d3ee)
+
+// Status colors - more vibrant
+const STATUS_CONNECTED: egui::Color32 = egui::Color32::from_rgb(52, 211, 153);   // Emerald
+const STATUS_CONNECTED_GLOW: egui::Color32 = egui::Color32::from_rgb(110, 231, 183); // Brighter for glow
 const STATUS_WARNING: egui::Color32 = egui::Color32::from_rgb(251, 191, 36);
 const STATUS_ERROR: egui::Color32 = egui::Color32::from_rgb(248, 113, 113);
-const STATUS_INACTIVE: egui::Color32 = egui::Color32::from_rgb(100, 100, 120);
+const STATUS_INACTIVE: egui::Color32 = egui::Color32::from_rgb(75, 85, 99);     // Slate-600
 
-const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(250, 250, 255);
-const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(148, 163, 184);  // slate-400
-const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);      // slate-500
+// Text hierarchy - improved contrast
+const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(248, 250, 252);     // Near white
+const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(148, 163, 184);   // slate-400
+const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);       // slate-500
+const TEXT_DIMMED: egui::Color32 = egui::Color32::from_rgb(71, 85, 105);        // slate-600
+
+// Latency color thresholds
+const LATENCY_EXCELLENT: egui::Color32 = egui::Color32::from_rgb(52, 211, 153);  // < 30ms
+const LATENCY_GOOD: egui::Color32 = egui::Color32::from_rgb(163, 230, 53);       // < 60ms (lime)
+const LATENCY_FAIR: egui::Color32 = egui::Color32::from_rgb(251, 191, 36);       // < 100ms (yellow)
+const LATENCY_POOR: egui::Color32 = egui::Color32::from_rgb(251, 146, 60);       // < 150ms (orange)
+const LATENCY_BAD: egui::Color32 = egui::Color32::from_rgb(248, 113, 113);       // >= 150ms (red)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ANIMATION SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const TOGGLE_ANIMATION_DURATION: f32 = 0.15;  // 150ms for toggle switches
-const PULSE_ANIMATION_DURATION: f32 = 2.0;     // 2s breathing cycle for connected pulse
-const HOVER_ANIMATION_DURATION: f32 = 0.1;     // 100ms for hover effects
+const TOGGLE_ANIMATION_DURATION: f32 = 0.15;   // 150ms for toggle switches
+const PULSE_ANIMATION_DURATION: f32 = 2.0;      // 2s breathing cycle for connected pulse
+const HOVER_ANIMATION_DURATION: f32 = 0.1;      // 100ms for hover effects
+const SHIMMER_ANIMATION_DURATION: f32 = 1.5;    // 1.5s for skeleton shimmer
+const CARD_TRANSITION_DURATION: f32 = 0.2;      // 200ms for card state changes
+const BUTTON_PRESS_DURATION: f32 = 0.08;        // 80ms for button press feedback
 
 /// Ease-out-cubic interpolation for smooth animations
 fn ease_out_cubic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
+}
+
+/// Ease-in-out for shimmer effects
+fn ease_in_out_sine(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    -(((t * std::f32::consts::PI).cos() - 1.0) / 2.0)
+}
+
+/// Interpolate between two colors
+fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    egui::Color32::from_rgba_unmultiplied(
+        (from.r() as f32 + (to.r() as f32 - from.r() as f32) * t) as u8,
+        (from.g() as f32 + (to.g() as f32 - from.g() as f32) * t) as u8,
+        (from.b() as f32 + (to.b() as f32 - from.b() as f32) * t) as u8,
+        (from.a() as f32 + (to.a() as f32 - from.a() as f32) * t) as u8,
+    )
+}
+
+/// Get latency color based on ms value
+fn latency_color(ms: u32) -> egui::Color32 {
+    if ms < 30 { LATENCY_EXCELLENT }
+    else if ms < 60 { LATENCY_GOOD }
+    else if ms < 100 { LATENCY_FAIR }
+    else if ms < 150 { LATENCY_POOR }
+    else { LATENCY_BAD }
+}
+
+/// Calculate latency bar fill percentage (0.0 - 1.0)
+fn latency_fill_percent(ms: u32) -> f32 {
+    // Inverted: lower latency = more fill
+    // 0ms = 100%, 200ms+ = 10%
+    let normalized = (ms as f32 / 200.0).min(1.0);
+    1.0 - (normalized * 0.9) // Range: 1.0 to 0.1
 }
 
 /// Animation state for a single value
@@ -195,7 +253,7 @@ impl ConnectionStep {
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum Tab { Connect, Boost, Settings }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -831,87 +889,193 @@ impl eframe::App for BoosterApp {
 
 impl BoosterApp {
     fn render_header(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            // Draw wave/tunnel logo icon
-            let logo_size = 28.0;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
-            let center = rect.center();
+        // Header with subtle gradient background
+        let header_rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::hover()).0;
 
-            // Draw stylized wave/tunnel shape
-            let wave_color = ACCENT_CYAN;
-            ui.painter().circle_filled(center, logo_size * 0.45, wave_color.gamma_multiply(0.2));
+        // Draw gradient background effect
+        let gradient_start = ACCENT_PRIMARY.gamma_multiply(0.06);
+        let gradient_end = ACCENT_SECONDARY.gamma_multiply(0.03);
 
-            // Draw curved lines for wave effect
-            for i in 0..3 {
-                let offset = (i as f32 - 1.0) * 4.0;
-                let start = egui::pos2(center.x - 7.0, center.y + offset);
-                let end = egui::pos2(center.x + 7.0, center.y + offset);
-                let control1 = egui::pos2(center.x - 3.0, center.y + offset - 3.0);
-                let control2 = egui::pos2(center.x + 3.0, center.y + offset + 3.0);
+        // Subtle gradient line at bottom
+        let line_rect = egui::Rect::from_min_size(
+            egui::pos2(header_rect.min.x, header_rect.max.y - 1.0),
+            egui::vec2(header_rect.width(), 1.0)
+        );
+        ui.painter().rect_filled(line_rect, 0.0, BG_ELEVATED);
 
-                let points = [start, control1, control2, end];
-                let stroke = egui::Stroke::new(1.5, wave_color);
-                ui.painter().add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
-                    points,
-                    false,
-                    egui::Color32::TRANSPARENT,
-                    stroke,
-                )));
-            }
+        // Put cursor back at start
+        ui.allocate_rect(header_rect, egui::Sense::hover());
+        ui.put(header_rect, |ui: &mut egui::Ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
 
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("SwiftTunnel")
-                .size(22.0)
-                .color(TEXT_PRIMARY)
-                .strong());
+                // Modern logo with gradient effect
+                let logo_size = 36.0;
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
+                let center = rect.center();
 
-            // Show boost count badge when on Connect or Settings tabs (not on Boost tab)
-            if self.current_tab != Tab::Boost && self.state.optimizations_active {
-                let active_count = self.count_active_boosts();
-                if active_count > 0 {
-                    ui.add_space(8.0);
+                // Animated gradient ring
+                let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                let rotation = elapsed * 0.5;
+
+                // Outer ring with gradient-like effect
+                let ring_color_1 = lerp_color(ACCENT_PRIMARY, ACCENT_CYAN, ((rotation).sin() + 1.0) / 2.0);
+                let ring_color_2 = lerp_color(ACCENT_CYAN, ACCENT_SECONDARY, ((rotation + 1.0).sin() + 1.0) / 2.0);
+
+                // Background circle
+                ui.painter().circle_filled(center, logo_size * 0.42, BG_ELEVATED);
+
+                // Gradient-like arc segments
+                for i in 0..8 {
+                    let angle_start = (i as f32 / 8.0) * std::f32::consts::TAU + rotation;
+                    let color = lerp_color(ring_color_1, ring_color_2, i as f32 / 8.0);
+                    let alpha = 0.6 + (((angle_start * 2.0).sin() + 1.0) / 2.0) * 0.4;
+
+                    for j in 0..3 {
+                        let angle = angle_start + j as f32 * 0.05;
+                        let x = center.x + angle.cos() * (logo_size * 0.35);
+                        let y = center.y + angle.sin() * (logo_size * 0.35);
+                        ui.painter().circle_filled(egui::pos2(x, y), 2.0, color.gamma_multiply(alpha));
+                    }
+                }
+
+                // Inner stylized "S" with wave effect
+                let wave_color = ACCENT_CYAN;
+                for i in 0..3 {
+                    let offset = (i as f32 - 1.0) * 4.0;
+                    let start = egui::pos2(center.x - 8.0, center.y + offset);
+                    let end = egui::pos2(center.x + 8.0, center.y + offset);
+                    let control1 = egui::pos2(center.x - 3.0, center.y + offset - 4.0);
+                    let control2 = egui::pos2(center.x + 3.0, center.y + offset + 4.0);
+
+                    let points = [start, control1, control2, end];
+                    let alpha = 0.6 + (i as f32 * 0.2);
+                    let stroke = egui::Stroke::new(2.0, wave_color.gamma_multiply(alpha));
+                    ui.painter().add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
+                        points,
+                        false,
+                        egui::Color32::TRANSPARENT,
+                        stroke,
+                    )));
+                }
+
+                ui.add_space(12.0);
+
+                // App name with subtle gradient text effect (approximated)
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(egui::RichText::new("SwiftTunnel")
+                        .size(20.0)
+                        .color(TEXT_PRIMARY)
+                        .strong());
+
+                    // Subtitle
+                    ui.label(egui::RichText::new("Game Booster")
+                        .size(10.0)
+                        .color(TEXT_DIMMED));
+                });
+
+                // Show boost count badge when on Connect or Settings tabs (not on Boost tab)
+                if self.current_tab != Tab::Boost && self.state.optimizations_active {
+                    let active_count = self.count_active_boosts();
+                    if active_count > 0 {
+                        ui.add_space(10.0);
+                        egui::Frame::none()
+                            .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
+                            .stroke(egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.3)))
+                            .rounding(12.0)
+                            .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label(egui::RichText::new("⚡").size(10.0));
+                                    ui.label(egui::RichText::new(format!("{} boosts", active_count))
+                                        .size(11.0)
+                                        .color(ACCENT_PRIMARY)
+                                        .strong());
+                                });
+                            });
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Status badge with modern styling
+                    let is_connected = self.vpn_state.is_connected();
+                    let is_connecting = self.vpn_state.is_connecting();
+
+                    let (status_text, status_color, show_pulse) = if is_connected {
+                        ("PROTECTED", STATUS_CONNECTED, true)
+                    } else if is_connecting {
+                        ("CONNECTING", STATUS_WARNING, false)
+                    } else {
+                        ("OFFLINE", STATUS_INACTIVE, false)
+                    };
+
+                    // Status badge container
+                    let badge_bg = if is_connected {
+                        STATUS_CONNECTED.gamma_multiply(0.12)
+                    } else if is_connecting {
+                        STATUS_WARNING.gamma_multiply(0.12)
+                    } else {
+                        BG_ELEVATED
+                    };
+
+                    let badge_border = if is_connected {
+                        STATUS_CONNECTED.gamma_multiply(0.3)
+                    } else if is_connecting {
+                        STATUS_WARNING.gamma_multiply(0.3)
+                    } else {
+                        BG_HOVER
+                    };
+
                     egui::Frame::none()
-                        .fill(ACCENT_PRIMARY.gamma_multiply(0.2))
-                        .rounding(10.0)
-                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                        .fill(badge_bg)
+                        .stroke(egui::Stroke::new(1.0, badge_border))
+                        .rounding(14.0)
+                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new(format!("{} boosts", active_count))
-                                .size(10.0)
-                                .color(ACCENT_PRIMARY));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+
+                                // Animated indicator
+                                let indicator_size = 8.0;
+                                let (indicator_rect, _) = ui.allocate_exact_size(egui::vec2(indicator_size, indicator_size), egui::Sense::hover());
+
+                                if show_pulse {
+                                    // Breathing pulse animation
+                                    let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                                    let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
+                                    let glow_radius = 3.0 + pulse * 2.0;
+                                    let glow_alpha = 0.4 + pulse * 0.3;
+
+                                    ui.painter().circle_filled(indicator_rect.center(), glow_radius, status_color.gamma_multiply(glow_alpha));
+                                    ui.painter().circle_filled(indicator_rect.center(), 3.0, status_color);
+                                } else if is_connecting {
+                                    // Spinning indicator for connecting
+                                    let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                                    let angle = elapsed * 4.0;
+                                    for i in 0..3 {
+                                        let a = angle + i as f32 * std::f32::consts::TAU / 3.0;
+                                        let r = 3.0;
+                                        let pos = egui::pos2(
+                                            indicator_rect.center().x + a.cos() * r,
+                                            indicator_rect.center().y + a.sin() * r
+                                        );
+                                        let alpha = 0.3 + (1.0 - i as f32 / 3.0) * 0.7;
+                                        ui.painter().circle_filled(pos, 1.5, status_color.gamma_multiply(alpha));
+                                    }
+                                } else {
+                                    ui.painter().circle_filled(indicator_rect.center(), 3.0, status_color);
+                                }
+
+                                ui.label(egui::RichText::new(status_text)
+                                    .size(11.0)
+                                    .color(status_color)
+                                    .strong());
+                            });
                         });
-                }
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (status_text, status_color) = if self.vpn_state.is_connected() {
-                    ("PROTECTED", STATUS_CONNECTED)
-                } else {
-                    ("NOT CONNECTED", STATUS_INACTIVE)
-                };
-
-                // Pulsing indicator for connected state
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                if self.vpn_state.is_connected() {
-                    // Breathing pulse animation (2s cycle)
-                    let elapsed = self.app_start_time.elapsed().as_secs_f32();
-                    let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
-                    let glow_radius = 4.0 + pulse * 3.0;
-                    let glow_alpha = 0.3 + pulse * 0.2;
-
-                    // Outer glow
-                    ui.painter().circle_filled(
-                        rect.center(),
-                        glow_radius,
-                        status_color.gamma_multiply(glow_alpha)
-                    );
-                    // Inner solid circle
-                    ui.painter().circle_filled(rect.center(), 4.0, status_color);
-                } else {
-                    ui.painter().circle_filled(rect.center(), 4.0, status_color);
-                }
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(status_text).size(11.0).color(status_color));
-            });
+                });
+            }).response
         });
     }
 
@@ -985,22 +1149,61 @@ impl BoosterApp {
     }
 
     fn render_nav_tabs(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+        // Tab container with subtle background
+        egui::Frame::none()
+            .fill(BG_CARD)
+            .rounding(12.0)
+            .inner_margin(egui::Margin::symmetric(4.0, 4.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
 
-            for (label, tab) in [("Connect", Tab::Connect), ("Boost", Tab::Boost), ("Settings", Tab::Settings)] {
-                let is_active = self.current_tab == tab;
-                let (bg, text_color) = if is_active { (ACCENT_PRIMARY, TEXT_PRIMARY) } else { (BG_CARD, TEXT_SECONDARY) };
+                    let tabs = [
+                        ("🌐", "Connect", Tab::Connect),
+                        ("⚡", "Boost", Tab::Boost),
+                        ("⚙", "Settings", Tab::Settings),
+                    ];
 
-                if ui.add(
-                    egui::Button::new(egui::RichText::new(label).size(14.0).color(text_color))
-                        .fill(bg).rounding(8.0).min_size(egui::vec2(100.0, 40.0))
-                ).clicked() {
-                    self.current_tab = tab;
-                    self.mark_dirty();
-                }
-            }
-        });
+                    for (icon, label, tab) in tabs {
+                        let is_active = self.current_tab == tab;
+                        let tab_id = format!("tab_{:?}", tab);
+                        let hover_val = self.animations.get_hover_value(&tab_id);
+
+                        // Calculate colors with hover effect
+                        let (bg, text_color, icon_color) = if is_active {
+                            (ACCENT_PRIMARY, TEXT_PRIMARY, TEXT_PRIMARY)
+                        } else {
+                            let hover_bg = lerp_color(egui::Color32::TRANSPARENT, BG_ELEVATED, hover_val);
+                            let hover_text = lerp_color(TEXT_SECONDARY, TEXT_PRIMARY, hover_val);
+                            (hover_bg, hover_text, TEXT_MUTED)
+                        };
+
+                        let response = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} {}", icon, label))
+                                    .size(13.0)
+                                    .color(text_color)
+                            )
+                            .fill(bg)
+                            .stroke(if is_active {
+                                egui::Stroke::NONE
+                            } else {
+                                egui::Stroke::new(0.0, egui::Color32::TRANSPARENT)
+                            })
+                            .rounding(10.0)
+                            .min_size(egui::vec2(95.0, 38.0))
+                        );
+
+                        // Handle hover for animation
+                        self.animations.animate_hover(&tab_id, response.hovered(), hover_val);
+
+                        if response.clicked() {
+                            self.current_tab = tab;
+                            self.mark_dirty();
+                        }
+                    }
+                });
+            });
     }
 
     fn render_connect_tab(&mut self, ui: &mut egui::Ui) {
@@ -1058,12 +1261,12 @@ impl BoosterApp {
     }
 
     fn render_connection_status(&mut self, ui: &mut egui::Ui) {
-        let (status_text, status_color, detail_text, show_connected_info) = match &self.vpn_state {
-            ConnectionState::Disconnected => ("Disconnected", STATUS_INACTIVE, "Ready to connect".to_string(), false),
-            ConnectionState::FetchingConfig => ("Connecting...", STATUS_WARNING, "Fetching config".to_string(), false),
-            ConnectionState::CreatingAdapter => ("Connecting...", STATUS_WARNING, "Creating adapter".to_string(), false),
-            ConnectionState::Connecting => ("Connecting...", STATUS_WARNING, "Establishing tunnel".to_string(), false),
-            ConnectionState::ConfiguringSplitTunnel => ("Connecting...", STATUS_WARNING, "Configuring routing".to_string(), false),
+        let (status_text, status_icon, status_color, detail_text, show_connected_info) = match &self.vpn_state {
+            ConnectionState::Disconnected => ("Disconnected", "○", STATUS_INACTIVE, "Ready to connect".to_string(), false),
+            ConnectionState::FetchingConfig => ("Connecting", "◐", STATUS_WARNING, "Fetching config...".to_string(), false),
+            ConnectionState::CreatingAdapter => ("Connecting", "◑", STATUS_WARNING, "Creating adapter...".to_string(), false),
+            ConnectionState::Connecting => ("Connecting", "◒", STATUS_WARNING, "Establishing tunnel...".to_string(), false),
+            ConnectionState::ConfiguringSplitTunnel => ("Connecting", "◓", STATUS_WARNING, "Configuring routing...".to_string(), false),
             ConnectionState::Connected { server_region, .. } => {
                 let name = if let Ok(list) = self.dynamic_server_list.lock() {
                     list.get_server(server_region)
@@ -1072,34 +1275,35 @@ impl BoosterApp {
                 } else {
                     server_region.clone()
                 };
-                ("Connected", STATUS_CONNECTED, name, true)
+                ("Protected", "●", STATUS_CONNECTED, name, true)
             }
-            ConnectionState::Disconnecting => ("Disconnecting...", STATUS_WARNING, "Please wait".to_string(), false),
+            ConnectionState::Disconnecting => ("Disconnecting", "◌", STATUS_WARNING, "Please wait...".to_string(), false),
             ConnectionState::Error(msg) => {
                 // Format user-friendly VPN error messages
                 let user_friendly = if msg.contains("Administrator privileges required") {
-                    "Administrator access required. Please restart the app as Administrator.".to_string()
+                    "Admin access required. Restart as Administrator.".to_string()
                 } else if msg.contains("wintun.dll not found") {
-                    "Required driver not found. Please reinstall SwiftTunnel.".to_string()
+                    "Driver not found. Please reinstall SwiftTunnel.".to_string()
                 } else if msg.contains("401") || msg.contains("Unauthorized") {
-                    "Session expired. Please sign out and sign in again.".to_string()
+                    "Session expired. Sign out and sign in again.".to_string()
                 } else if msg.contains("404") {
-                    "Server not available. Please try a different region.".to_string()
+                    "Server unavailable. Try a different region.".to_string()
                 } else if msg.contains("timeout") || msg.contains("Timeout") {
-                    "Connection timed out. Please check your internet and try again.".to_string()
+                    "Connection timed out. Check your internet.".to_string()
                 } else if msg.contains("Network error") || msg.contains("network") {
-                    "Network error. Please check your internet connection.".to_string()
+                    "Network error. Check your connection.".to_string()
                 } else if msg.contains("handshake") || msg.contains("Handshake") {
-                    "Failed to establish secure connection. Please try again.".to_string()
+                    "Secure connection failed. Try again.".to_string()
                 } else {
                     msg.clone()
                 };
-                ("Error", STATUS_ERROR, user_friendly, false)
+                ("Error", "✕", STATUS_ERROR, user_friendly, false)
             }
         };
 
         let is_connected = self.vpn_state.is_connected();
         let is_connecting = self.vpn_state.is_connecting();
+        let is_error = matches!(&self.vpn_state, ConnectionState::Error(_));
 
         let (assigned_ip, uptime_str, split_tunnel_active, tunneled_processes) = if let ConnectionState::Connected {
             assigned_ip, since, split_tunnel_active, tunneled_processes, ..
@@ -1116,35 +1320,122 @@ impl BoosterApp {
         let mut do_connect = false;
         let mut do_disconnect = false;
 
+        // Dynamic card styling based on state
+        let (card_bg, card_border, border_width) = if is_connected {
+            // Connected: subtle green tint with glow
+            (lerp_color(BG_CARD, STATUS_CONNECTED, 0.05),
+             STATUS_CONNECTED.gamma_multiply(0.4),
+             1.5)
+        } else if is_error {
+            // Error: subtle red tint
+            (lerp_color(BG_CARD, STATUS_ERROR, 0.03),
+             STATUS_ERROR.gamma_multiply(0.3),
+             1.0)
+        } else {
+            (BG_CARD, BG_ELEVATED, 1.0)
+        };
+
         egui::Frame::none()
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .fill(card_bg)
+            .stroke(egui::Stroke::new(border_width, card_border))
+            .rounding(16.0)
+            .inner_margin(egui::Margin::symmetric(20.0, 18.0))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 6.0, status_color);
-                    ui.add_space(8.0);
+                    // Status indicator with animation
+                    let indicator_size = 48.0;
+                    let (indicator_rect, _) = ui.allocate_exact_size(egui::vec2(indicator_size, indicator_size), egui::Sense::hover());
+                    let center = indicator_rect.center();
+
+                    if is_connected {
+                        // Animated breathing glow for connected state
+                        let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                        let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
+
+                        // Outer glow rings
+                        for i in 0..3 {
+                            let ring_pulse = ((pulse + i as f32 * 0.2) % 1.0);
+                            let radius = 18.0 + ring_pulse * 8.0;
+                            let alpha = 0.15 * (1.0 - ring_pulse);
+                            ui.painter().circle_filled(center, radius, STATUS_CONNECTED_GLOW.gamma_multiply(alpha));
+                        }
+
+                        // Main circle
+                        ui.painter().circle_filled(center, 16.0, STATUS_CONNECTED);
+                        // Inner highlight
+                        ui.painter().circle_filled(center, 8.0, STATUS_CONNECTED_GLOW.gamma_multiply(0.5));
+                        // Shield icon
+                        ui.painter().text(center, egui::Align2::CENTER_CENTER,
+                            "✓", egui::FontId::proportional(14.0), egui::Color32::WHITE);
+                    } else if is_connecting {
+                        // Spinning animation for connecting
+                        let elapsed = self.app_start_time.elapsed().as_secs_f32();
+
+                        // Rotating dots
+                        for i in 0..3 {
+                            let angle = elapsed * 3.0 + (i as f32 * std::f32::consts::TAU / 3.0);
+                            let radius = 14.0;
+                            let dot_pos = egui::pos2(
+                                center.x + angle.cos() * radius,
+                                center.y + angle.sin() * radius
+                            );
+                            let dot_alpha = 0.3 + (1.0 - (i as f32 / 3.0)) * 0.7;
+                            ui.painter().circle_filled(dot_pos, 4.0 - i as f32 * 0.5, STATUS_WARNING.gamma_multiply(dot_alpha));
+                        }
+
+                        // Center dot
+                        ui.painter().circle_filled(center, 6.0, STATUS_WARNING.gamma_multiply(0.3));
+                    } else if is_error {
+                        // Error state
+                        ui.painter().circle_filled(center, 16.0, STATUS_ERROR.gamma_multiply(0.2));
+                        ui.painter().circle_stroke(center, 16.0, egui::Stroke::new(2.0, STATUS_ERROR));
+                        ui.painter().text(center, egui::Align2::CENTER_CENTER,
+                            "!", egui::FontId::proportional(18.0), STATUS_ERROR);
+                    } else {
+                        // Disconnected state
+                        ui.painter().circle_filled(center, 16.0, BG_ELEVATED);
+                        ui.painter().circle_stroke(center, 16.0, egui::Stroke::new(1.5, STATUS_INACTIVE));
+                    }
+
+                    ui.add_space(14.0);
 
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(status_text).size(18.0).color(status_color).strong());
-                        ui.label(egui::RichText::new(&detail_text).size(13.0).color(TEXT_SECONDARY));
+                        // Status text with icon
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(status_text)
+                                .size(20.0)
+                                .color(status_color)
+                                .strong());
+                        });
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new(&detail_text)
+                            .size(13.0)
+                            .color(TEXT_SECONDARY));
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (btn_text, btn_color) = if is_connected {
-                            ("Disconnect", STATUS_ERROR)
+                        let (btn_text, btn_icon, btn_color) = if is_connected {
+                            ("Disconnect", "⏻", STATUS_ERROR)
                         } else if is_connecting {
-                            ("Cancel", STATUS_WARNING)
+                            ("Cancel", "✕", STATUS_WARNING)
                         } else {
-                            ("Connect", ACCENT_PRIMARY)
+                            ("Connect", "→", ACCENT_PRIMARY)
                         };
 
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new(btn_text).size(14.0).color(TEXT_PRIMARY).strong())
-                                .fill(btn_color).rounding(8.0).min_size(egui::vec2(120.0, 44.0))
-                        ).clicked() {
+                        // Button with icon
+                        let btn_response = ui.add(
+                            egui::Button::new(egui::RichText::new(format!("{}  {}", btn_text, btn_icon))
+                                .size(14.0)
+                                .color(TEXT_PRIMARY)
+                                .strong())
+                                .fill(btn_color)
+                                .rounding(10.0)
+                                .min_size(egui::vec2(130.0, 46.0))
+                        );
+
+                        if btn_response.clicked() {
                             if is_connected || is_connecting {
                                 do_disconnect = true;
                             } else {
@@ -1156,39 +1447,83 @@ impl BoosterApp {
 
                 // VPN Connection Progress Steps (shown during connecting states)
                 if is_connecting {
-                    ui.add_space(16.0);
+                    ui.add_space(18.0);
                     self.render_connection_progress_steps(ui);
                 }
 
                 if show_connected_info {
                     ui.add_space(16.0);
-                    ui.separator();
-                    ui.add_space(12.0);
 
+                    // Subtle divider
+                    let divider_rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover()).0;
+                    ui.painter().rect_filled(divider_rect, 0.0, BG_ELEVATED);
+
+                    ui.add_space(14.0);
+
+                    // Info badges in a row
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("IP Address").size(12.0).color(TEXT_MUTED));
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new(&assigned_ip).size(12.0).color(TEXT_PRIMARY));
-                        ui.add_space(24.0);
-                        ui.label(egui::RichText::new("Uptime").size(12.0).color(TEXT_MUTED));
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new(&uptime_str).size(12.0).color(TEXT_PRIMARY));
-                    });
+                        ui.spacing_mut().item_spacing.x = 12.0;
 
-                    // Show split tunnel status
-                    if split_tunnel_active {
-                        ui.add_space(12.0);
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Split Tunnel").size(12.0).color(TEXT_MUTED));
-                            ui.add_space(8.0);
-                            if tunneled_processes.is_empty() {
-                                ui.label(egui::RichText::new("⏳ Waiting for Roblox...").size(12.0).color(STATUS_WARNING));
+                        // IP Address badge
+                        egui::Frame::none()
+                            .fill(BG_ELEVATED)
+                            .rounding(8.0)
+                            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.label(egui::RichText::new("🌐").size(12.0));
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 1.0;
+                                        ui.label(egui::RichText::new("IP Address").size(10.0).color(TEXT_MUTED));
+                                        ui.label(egui::RichText::new(&assigned_ip).size(12.0).color(TEXT_PRIMARY).strong());
+                                    });
+                                });
+                            });
+
+                        // Uptime badge
+                        egui::Frame::none()
+                            .fill(BG_ELEVATED)
+                            .rounding(8.0)
+                            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.label(egui::RichText::new("⏱").size(12.0));
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 1.0;
+                                        ui.label(egui::RichText::new("Uptime").size(10.0).color(TEXT_MUTED));
+                                        ui.label(egui::RichText::new(&uptime_str).size(12.0).color(TEXT_PRIMARY).strong());
+                                    });
+                                });
+                            });
+
+                        // Split tunnel badge (if active)
+                        if split_tunnel_active {
+                            let (tunnel_icon, tunnel_text, tunnel_color) = if tunneled_processes.is_empty() {
+                                ("⏳", "Waiting...", STATUS_WARNING)
                             } else {
-                                let process_names = tunneled_processes.join(", ");
-                                ui.label(egui::RichText::new(format!("✓ Tunneling: {}", process_names)).size(12.0).color(STATUS_CONNECTED));
-                            }
-                        });
-                    }
+                                ("✓", &tunneled_processes.join(", ") as &str, STATUS_CONNECTED)
+                            };
+
+                            egui::Frame::none()
+                                .fill(tunnel_color.gamma_multiply(0.1))
+                                .stroke(egui::Stroke::new(1.0, tunnel_color.gamma_multiply(0.3)))
+                                .rounding(8.0)
+                                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        ui.label(egui::RichText::new(tunnel_icon).size(12.0).color(tunnel_color));
+                                        ui.vertical(|ui| {
+                                            ui.spacing_mut().item_spacing.y = 1.0;
+                                            ui.label(egui::RichText::new("Split Tunnel").size(10.0).color(TEXT_MUTED));
+                                            ui.label(egui::RichText::new(tunnel_text).size(11.0).color(tunnel_color));
+                                        });
+                                    });
+                                });
+                        }
+                    });
                 }
             });
 
@@ -1210,75 +1545,105 @@ impl BoosterApp {
         };
         let latencies = &self.cached_latencies;
 
-        // Section header with loading indicator
+        // Section header with enhanced styling
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("SELECT REGION").size(12.0).color(TEXT_MUTED).strong());
+            // Globe icon for regions
+            ui.label(egui::RichText::new("🌐").size(14.0));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("SELECT REGION").size(11.0).color(TEXT_SECONDARY).strong());
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if is_loading {
-                    ui.spinner();
+                    // Animated loading indicator
+                    let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                    let pulse = ((elapsed * 3.0).sin() + 1.0) / 2.0;
+                    let color = lerp_color(ACCENT_PRIMARY, ACCENT_CYAN, pulse);
+                    ui.label(egui::RichText::new("●").size(8.0).color(color));
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Loading servers...").size(11.0).color(ACCENT_PRIMARY));
+                    ui.label(egui::RichText::new("Loading...").size(11.0).color(ACCENT_PRIMARY));
                 } else if is_finding {
-                    ui.spinner();
+                    let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                    let pulse = ((elapsed * 3.0).sin() + 1.0) / 2.0;
+                    let color = lerp_color(ACCENT_CYAN, STATUS_CONNECTED, pulse);
+                    ui.label(egui::RichText::new("●").size(8.0).color(color));
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Measuring latency...").size(11.0).color(ACCENT_PRIMARY));
+                    ui.label(egui::RichText::new("Measuring...").size(11.0).color(ACCENT_CYAN));
                 } else {
-                    ui.label(egui::RichText::new(format!("{} regions", regions.len())).size(11.0).color(TEXT_MUTED));
+                    // Server count badge
+                    egui::Frame::none()
+                        .fill(BG_ELEVATED)
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(format!("{} regions", regions.len()))
+                                .size(10.0)
+                                .color(TEXT_MUTED));
+                        });
                 }
             });
         });
-        ui.add_space(12.0);
+        ui.add_space(14.0);
 
-        // Show loading or error state if no regions
+        // Show skeleton loading or error state if no regions
         if regions.is_empty() {
-            egui::Frame::none()
-                .fill(BG_CARD)
-                .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-                .rounding(10.0)
-                .inner_margin(egui::Margin::symmetric(20.0, 30.0))
-                .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        if is_loading {
-                            ui.spinner();
+            if is_loading {
+                // Skeleton loading cards with shimmer effect
+                self.render_skeleton_region_cards(ui);
+            } else if let Some(err) = &error_msg {
+                // Error state with retry
+                egui::Frame::none()
+                    .fill(STATUS_ERROR.gamma_multiply(0.08))
+                    .stroke(egui::Stroke::new(1.0, STATUS_ERROR.gamma_multiply(0.3)))
+                    .rounding(12.0)
+                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new("⚠").size(32.0).color(STATUS_ERROR));
                             ui.add_space(12.0);
-                            ui.label(egui::RichText::new("Loading server list...")
-                                .size(14.0)
-                                .color(TEXT_SECONDARY));
-                            ui.add_space(8.0);
-                            ui.label(egui::RichText::new("Fetching from swifttunnel.net")
-                                .size(12.0)
-                                .color(TEXT_MUTED));
-                        } else if let Some(err) = &error_msg {
                             ui.label(egui::RichText::new("Failed to load servers")
-                                .size(14.0)
-                                .color(STATUS_ERROR)
+                                .size(15.0)
+                                .color(TEXT_PRIMARY)
                                 .strong());
-                            ui.add_space(8.0);
+                            ui.add_space(6.0);
                             ui.label(egui::RichText::new(err)
                                 .size(12.0)
-                                .color(TEXT_MUTED));
+                                .color(TEXT_SECONDARY));
                             ui.add_space(16.0);
-                            if ui.button(egui::RichText::new("Retry")
-                                .size(13.0)
-                                .color(ACCENT_PRIMARY)).clicked() {
+                            if ui.add(
+                                egui::Button::new(egui::RichText::new("↻  Retry").size(13.0).color(TEXT_PRIMARY))
+                                    .fill(ACCENT_PRIMARY)
+                                    .rounding(8.0)
+                                    .min_size(egui::vec2(100.0, 36.0))
+                            ).clicked() {
                                 self.retry_load_servers();
                             }
-                        } else {
+                        });
+                    });
+            } else {
+                // Empty state
+                egui::Frame::none()
+                    .fill(BG_CARD)
+                    .rounding(12.0)
+                    .inner_margin(egui::Margin::symmetric(24.0, 30.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.vertical_centered(|ui| {
                             ui.label(egui::RichText::new("No servers available")
                                 .size(14.0)
                                 .color(TEXT_MUTED));
-                        }
+                        });
                     });
-                });
+            }
             return;
         }
 
-        // Calculate grid dimensions - 2 columns
+        // Calculate grid dimensions - 2 columns with better spacing
         let available_width = ui.available_width();
-        let card_spacing = 10.0;
+        let card_spacing = 12.0;
         let card_width = (available_width - card_spacing) / 2.0;
 
-        // Create 2-column grid
+        // Create 2-column grid with enhanced cards
         let mut region_iter = regions.iter().peekable();
         while region_iter.peek().is_some() {
             ui.horizontal(|ui| {
@@ -1288,84 +1653,151 @@ impl BoosterApp {
                     if let Some(region) = region_iter.next() {
                         let is_selected = self.selected_region == region.id;
                         let latency = latencies.get(&region.id).and_then(|l| *l);
+                        let card_id = format!("region_{}", region.id);
 
-                        let (bg, border_color) = if is_selected {
-                            (ACCENT_PRIMARY.gamma_multiply(0.18), ACCENT_PRIMARY)
+                        // Get hover animation value
+                        let hover_val = self.animations.get_hover_value(&card_id);
+
+                        // Calculate colors based on state
+                        let (bg, border_color, border_width) = if is_selected {
+                            // Selected: gradient-like effect with glow
+                            (lerp_color(ACCENT_PRIMARY.gamma_multiply(0.12), ACCENT_PRIMARY.gamma_multiply(0.18), hover_val),
+                             ACCENT_PRIMARY,
+                             2.0)
                         } else {
-                            (BG_CARD, BG_ELEVATED)
+                            // Hover effect: subtle lift
+                            let hover_bg = lerp_color(BG_CARD, BG_ELEVATED, hover_val * 0.5);
+                            let hover_border = lerp_color(BG_ELEVATED, ACCENT_PRIMARY.gamma_multiply(0.4), hover_val);
+                            (hover_bg, hover_border, 1.0 + hover_val * 0.5)
                         };
 
                         let response = egui::Frame::none()
                             .fill(bg)
-                            .stroke(egui::Stroke::new(if is_selected { 2.0 } else { 1.0 }, border_color))
-                            .rounding(10.0)
-                            .inner_margin(egui::Margin::symmetric(12.0, 12.0))
+                            .stroke(egui::Stroke::new(border_width, border_color))
+                            .rounding(14.0)
+                            .inner_margin(egui::Margin::symmetric(14.0, 14.0))
                             .show(ui, |ui| {
-                                ui.set_width(card_width - 24.0);
-                                ui.set_min_height(70.0);
+                                ui.set_width(card_width - 28.0);
+                                ui.set_min_height(85.0);
 
                                 ui.vertical(|ui| {
+                                    // Top row: Country code + badges + latency
                                     ui.horizontal(|ui| {
+                                        // Country code badge with icon
                                         egui::Frame::none()
                                             .fill(if is_selected { ACCENT_PRIMARY } else { BG_ELEVATED })
-                                            .rounding(4.0)
-                                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                            .rounding(6.0)
+                                            .inner_margin(egui::Margin::symmetric(10.0, 5.0))
                                             .show(ui, |ui| {
-                                                ui.label(egui::RichText::new(&region.country_code)
-                                                    .size(12.0)
-                                                    .color(if is_selected { egui::Color32::WHITE } else { TEXT_SECONDARY })
-                                                    .strong());
+                                                ui.horizontal(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                                    // Flag emoji based on country code
+                                                    let flag = match region.country_code.as_str() {
+                                                        "SG" => "🇸🇬",
+                                                        "JP" => "🇯🇵",
+                                                        "IN" => "🇮🇳",
+                                                        "AU" => "🇦🇺",
+                                                        "DE" => "🇩🇪",
+                                                        "FR" => "🇫🇷",
+                                                        "US" => "🇺🇸",
+                                                        "BR" => "🇧🇷",
+                                                        _ => "🌍",
+                                                    };
+                                                    ui.label(egui::RichText::new(flag).size(12.0));
+                                                    ui.label(egui::RichText::new(&region.country_code)
+                                                        .size(11.0)
+                                                        .color(if is_selected { egui::Color32::WHITE } else { TEXT_SECONDARY })
+                                                        .strong());
+                                                });
                                             });
 
-                                        // "LAST USED" badge if this was the last connected region
+                                        // "LAST" badge
                                         let is_last_used = self.last_connected_region.as_ref().map(|r| r == &region.id).unwrap_or(false);
                                         if is_last_used && !is_selected {
                                             ui.add_space(4.0);
                                             egui::Frame::none()
-                                                .fill(ACCENT_CYAN.gamma_multiply(0.15))
-                                                .rounding(4.0)
+                                                .fill(ACCENT_CYAN.gamma_multiply(0.12))
+                                                .stroke(egui::Stroke::new(1.0, ACCENT_CYAN.gamma_multiply(0.3)))
+                                                .rounding(6.0)
                                                 .inner_margin(egui::Margin::symmetric(6.0, 3.0))
                                                 .show(ui, |ui| {
-                                                    ui.label(egui::RichText::new("LAST")
+                                                    ui.label(egui::RichText::new("★ LAST")
                                                         .size(9.0)
                                                         .color(ACCENT_CYAN));
                                                 });
                                         }
 
+                                        // Latency display on right
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if let Some(ms) = latency {
-                                                let latency_color = if ms < 50 {
-                                                    STATUS_CONNECTED
-                                                } else if ms < 100 {
-                                                    egui::Color32::from_rgb(163, 230, 53)
-                                                } else if ms < 150 {
-                                                    STATUS_WARNING
-                                                } else {
-                                                    STATUS_ERROR
-                                                };
-                                                ui.label(egui::RichText::new(format!("{}ms", ms))
-                                                    .size(12.0)
-                                                    .color(latency_color)
-                                                    .strong());
+                                                let lat_color = latency_color(ms);
+                                                // Latency with colored indicator
+                                                ui.horizontal(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                                    ui.label(egui::RichText::new(format!("{}ms", ms))
+                                                        .size(12.0)
+                                                        .color(lat_color)
+                                                        .strong());
+                                                    // Small quality indicator dot
+                                                    let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                                    ui.painter().circle_filled(dot_rect.center(), 3.0, lat_color);
+                                                });
                                             } else if is_finding {
-                                                // Show placeholder during initial measurement
-                                                ui.label(egui::RichText::new("...")
-                                                    .size(12.0)
-                                                    .color(TEXT_MUTED));
+                                                // Animated measuring indicator
+                                                let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                                                let dots = match ((elapsed * 2.0) as i32) % 4 {
+                                                    0 => ".",
+                                                    1 => "..",
+                                                    2 => "...",
+                                                    _ => "",
+                                                };
+                                                ui.label(egui::RichText::new(format!("ping{}", dots))
+                                                    .size(11.0)
+                                                    .color(TEXT_DIMMED));
                                             }
                                         });
                                     });
 
-                                    ui.add_space(6.0);
+                                    ui.add_space(10.0);
+
+                                    // Region name
                                     ui.label(egui::RichText::new(&region.name)
-                                        .size(14.0)
-                                        .color(if is_selected { ACCENT_PRIMARY } else { TEXT_PRIMARY })
+                                        .size(15.0)
+                                        .color(if is_selected { TEXT_PRIMARY } else { TEXT_PRIMARY })
                                         .strong());
+
+                                    ui.add_space(2.0);
+
+                                    // Description
                                     ui.label(egui::RichText::new(&region.description)
                                         .size(11.0)
                                         .color(TEXT_MUTED));
+
+                                    // Latency bar (visual indicator)
+                                    if let Some(ms) = latency {
+                                        ui.add_space(8.0);
+                                        let bar_height = 3.0;
+                                        let bar_width = card_width - 56.0;
+                                        let (bar_rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
+
+                                        // Background bar
+                                        ui.painter().rect_filled(bar_rect, 2.0, BG_ELEVATED);
+
+                                        // Filled portion based on latency (inverted: lower = more fill)
+                                        let fill_percent = latency_fill_percent(ms);
+                                        let fill_width = bar_width * fill_percent;
+                                        let fill_rect = egui::Rect::from_min_size(
+                                            bar_rect.min,
+                                            egui::vec2(fill_width, bar_height)
+                                        );
+                                        ui.painter().rect_filled(fill_rect, 2.0, latency_color(ms));
+                                    }
                                 });
                             });
+
+                        // Handle hover for animation
+                        let is_hovered = response.response.hovered();
+                        self.animations.animate_hover(&card_id, is_hovered, hover_val);
 
                         if response.response.interact(egui::Sense::click()).clicked() {
                             clicked_region = Some(region.id.clone());
@@ -1373,12 +1805,95 @@ impl BoosterApp {
                     }
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(10.0);
         }
 
         // Handle click - just select the region, don't re-ping
         if let Some(region_id) = clicked_region {
             self.select_region(&region_id);
+        }
+    }
+
+    /// Render skeleton loading cards with shimmer effect
+    fn render_skeleton_region_cards(&self, ui: &mut egui::Ui) {
+        let available_width = ui.available_width();
+        let card_spacing = 12.0;
+        let card_width = (available_width - card_spacing) / 2.0;
+
+        // Shimmer animation progress
+        let elapsed = self.app_start_time.elapsed().as_secs_f32();
+        let shimmer_progress = (elapsed / SHIMMER_ANIMATION_DURATION).fract();
+
+        // Render 4 skeleton cards (2 rows)
+        for row in 0..2 {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = card_spacing;
+
+                for col in 0..2 {
+                    let card_offset = (row * 2 + col) as f32 * 0.1;
+                    let local_shimmer = ((shimmer_progress + card_offset) % 1.0);
+
+                    egui::Frame::none()
+                        .fill(BG_CARD)
+                        .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+                        .rounding(14.0)
+                        .inner_margin(egui::Margin::symmetric(14.0, 14.0))
+                        .show(ui, |ui| {
+                            ui.set_width(card_width - 28.0);
+                            ui.set_min_height(85.0);
+
+                            ui.vertical(|ui| {
+                                // Skeleton badge
+                                let badge_rect = ui.allocate_exact_size(egui::vec2(60.0, 22.0), egui::Sense::hover()).0;
+                                self.render_skeleton_rect(ui.painter(), badge_rect, 6.0, local_shimmer);
+
+                                ui.add_space(10.0);
+
+                                // Skeleton title
+                                let title_rect = ui.allocate_exact_size(egui::vec2(card_width * 0.6, 16.0), egui::Sense::hover()).0;
+                                self.render_skeleton_rect(ui.painter(), title_rect, 4.0, local_shimmer + 0.05);
+
+                                ui.add_space(6.0);
+
+                                // Skeleton description
+                                let desc_rect = ui.allocate_exact_size(egui::vec2(card_width * 0.8, 12.0), egui::Sense::hover()).0;
+                                self.render_skeleton_rect(ui.painter(), desc_rect, 4.0, local_shimmer + 0.1);
+
+                                ui.add_space(8.0);
+
+                                // Skeleton latency bar
+                                let bar_rect = ui.allocate_exact_size(egui::vec2(card_width - 56.0, 3.0), egui::Sense::hover()).0;
+                                self.render_skeleton_rect(ui.painter(), bar_rect, 2.0, local_shimmer + 0.15);
+                            });
+                        });
+                }
+            });
+            ui.add_space(10.0);
+        }
+    }
+
+    /// Render a single skeleton rectangle with shimmer effect
+    fn render_skeleton_rect(&self, painter: &egui::Painter, rect: egui::Rect, rounding: f32, shimmer_offset: f32) {
+        // Base skeleton color
+        let base_color = BG_ELEVATED;
+
+        // Shimmer highlight that moves across
+        let shimmer_width = rect.width() * 0.4;
+        let shimmer_x = rect.left() - shimmer_width + (rect.width() + shimmer_width * 2.0) * ease_in_out_sine(shimmer_offset % 1.0);
+
+        // Draw base
+        painter.rect_filled(rect, rounding, base_color);
+
+        // Draw shimmer highlight (clipped to rect)
+        let shimmer_rect = egui::Rect::from_min_max(
+            egui::pos2(shimmer_x.max(rect.left()), rect.top()),
+            egui::pos2((shimmer_x + shimmer_width).min(rect.right()), rect.bottom())
+        );
+
+        if shimmer_rect.width() > 0.0 {
+            // Gradient-like effect using multiple rectangles
+            let highlight_color = BG_HOVER;
+            painter.rect_filled(shimmer_rect, rounding, highlight_color);
         }
     }
 
@@ -1635,6 +2150,62 @@ impl BoosterApp {
 
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("FPS settings are protected from Roblox overwriting them").size(10.0).color(STATUS_CONNECTED));
+
+                // ─────────────────────────────────────────────────────────────
+                // GRAPHICS QUALITY SLIDER
+                // ─────────────────────────────────────────────────────────────
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                let current_quality = self.state.config.roblox_settings.graphics_quality.to_level();
+                let quality_display = if current_quality == 0 { "Auto".to_string() } else { format!("Level {}", current_quality) };
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Graphics Quality").size(13.0).color(TEXT_SECONDARY));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(&quality_display).size(14.0).color(ACCENT_CYAN).strong());
+                    });
+                });
+
+                ui.add_space(8.0);
+
+                // Slider for graphics quality (1-10)
+                let mut quality_level = current_quality.max(1) as i32; // Ensure min of 1 for slider
+                if ui.add(egui::Slider::new(&mut quality_level, 1..=10).show_value(false)).changed() {
+                    self.state.config.roblox_settings.graphics_quality = GraphicsQuality::from_level(quality_level);
+                    // Switch to Custom profile when manually changing graphics
+                    if self.selected_profile != OptimizationProfile::Custom {
+                        self.selected_profile = OptimizationProfile::Custom;
+                    }
+                    self.mark_dirty();
+                }
+
+                ui.add_space(12.0);
+
+                // Quick preset buttons for common quality levels
+                ui.horizontal(|ui| {
+                    for (label, level) in [("1", 1), ("3", 3), ("5", 5), ("7", 7), ("10", 10)] {
+                        let is_sel = current_quality == level;
+                        let (bg, text) = if is_sel { (ACCENT_CYAN, TEXT_PRIMARY) } else { (BG_ELEVATED, TEXT_SECONDARY) };
+                        if ui.add(
+                            egui::Button::new(egui::RichText::new(label).size(11.0).color(text))
+                                .fill(bg).rounding(4.0).min_size(egui::vec2(36.0, 28.0))
+                        ).clicked() {
+                            self.state.config.roblox_settings.graphics_quality = GraphicsQuality::from_level(level);
+                            if self.selected_profile != OptimizationProfile::Custom {
+                                self.selected_profile = OptimizationProfile::Custom;
+                            }
+                            self.mark_dirty();
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("💡").size(10.0));
+                    ui.label(egui::RichText::new("Lower = better FPS, Higher = better visuals").size(10.0).color(TEXT_MUTED));
+                });
             });
 
         // ─────────────────────────────────────────────────────────────
