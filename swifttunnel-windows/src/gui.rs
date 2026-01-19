@@ -329,6 +329,8 @@ pub struct BoosterApp {
     process_notification: Option<(String, std::time::Instant)>,
     // Previously detected tunneled processes (for notification on new process)
     previously_tunneled: std::collections::HashSet<String>,
+    // Flag to force quit (bypass minimize-to-tray)
+    force_quit: bool,
 }
 
 impl BoosterApp {
@@ -495,6 +497,8 @@ impl BoosterApp {
             // Process detection notification
             process_notification: None,
             previously_tunneled: std::collections::HashSet::new(),
+            // Force quit flag (bypass minimize-to-tray)
+            force_quit: false,
         }
     }
 
@@ -728,17 +732,11 @@ impl eframe::App for BoosterApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
-        // Handle close button - minimize to tray instead of closing if enabled
-        let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if close_requested && self.minimize_to_tray && self.system_tray.is_some() {
-            // Cancel the close and minimize to tray instead
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            log::info!("Close button pressed - minimizing to tray");
-        }
-
         // Only actually quit when tray "Quit" is clicked
         if quit {
+            log::info!("Tray Quit clicked - forcing quit");
+            self.force_quit = true;
+
             // Disconnect VPN before quitting to ensure proper adapter cleanup
             self.disconnect_vpn_sync();
 
@@ -747,6 +745,16 @@ impl eframe::App for BoosterApp {
             self.last_save_time = std::time::Instant::now() - std::time::Duration::from_secs(10);
             self.save_if_needed(ctx);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        // Handle close button - minimize to tray instead of closing if enabled
+        // BUT only if we're not force quitting from the tray menu
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested && !self.force_quit && self.minimize_to_tray && self.system_tray.is_some() {
+            // Cancel the close and minimize to tray instead
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            log::info!("Close button pressed - minimizing to tray");
         }
 
         // Check for immediate auth state updates from async operations (non-blocking)
