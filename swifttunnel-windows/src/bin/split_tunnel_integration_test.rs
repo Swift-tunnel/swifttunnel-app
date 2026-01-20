@@ -412,6 +412,8 @@ async fn run_test(config: TestConfig) -> TestResult {
 
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 5: Setup WFP (STRICT - fail if WFP fails!)
+    // NOTE: The driver's INITIALIZE creates its own WFP callouts. We only need
+    // to ensure the provider/sublayer exist for the callouts to attach to.
     // ═══════════════════════════════════════════════════════════════════════
     println!("\n[5/8] Setting up WFP for split tunneling (STRICT MODE)...");
     println!("    ⚠ WFP failure is FATAL - the driver cannot route without WFP");
