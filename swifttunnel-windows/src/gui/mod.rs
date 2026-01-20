@@ -495,8 +495,8 @@ impl BoosterApp {
                         let _ = tx.send(auth.get_state());
                     }
                     Err(e) => {
-                        log::error!("OAuth start failed: {}", e);
-                        let _ = tx.send(AuthState::Error(e.to_string()));
+                        log::error!("OAuth start failed: {:?}", e);
+                        let _ = tx.send(AuthState::Error(format!("{:?}", e)));
                     }
                 }
             }
@@ -504,8 +504,8 @@ impl BoosterApp {
     }
 
     fn logout(&mut self) {
-        if let Ok(mut auth) = self.auth_manager.lock() {
-            let _ = auth.sign_out();
+        if let Ok(auth) = self.auth_manager.lock() {
+            let _ = auth.logout();
             self.auth_state = AuthState::LoggedOut;
             self.user_info = None;
         }
@@ -561,7 +561,7 @@ impl BoosterApp {
 
         std::thread::spawn(move || {
             rt.block_on(async {
-                run_stability_test(tx).await;
+                let _ = run_stability_test(30, tx).await;
             });
         });
     }

@@ -197,7 +197,7 @@ fn render_nav_item(
 
     // Tooltip
     if response.hovered() {
-        egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new(&item_id).with("tooltip"), |ui: &mut egui::Ui| {
+        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new(&item_id).with("tooltip"), |ui: &mut egui::Ui| {
             ui.label(egui::RichText::new(item.label)
                 .size(12.0)
                 .color(TEXT_PRIMARY));
@@ -238,7 +238,7 @@ fn render_bottom_section(ui: &mut Ui, _user_avatar: Option<&str>, version: &str)
         ui.painter().galley(icon_pos, galley, TEXT_MUTED);
 
         if response.hovered() {
-            egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new("user_tooltip"), |ui| {
+            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("user_tooltip"), |ui| {
                 ui.label(egui::RichText::new("Account")
                     .size(12.0)
                     .color(TEXT_PRIMARY));
