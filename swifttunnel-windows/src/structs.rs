@@ -11,6 +11,7 @@ pub enum OptimizationProfile {
 
 /// Configuration for the FPS booster
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub profile: OptimizationProfile,
     pub system_optimization: SystemOptimizationConfig,
