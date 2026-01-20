@@ -1,7 +1,6 @@
 use crate::structs::*;
 use crate::hidden_command;
 use log::{info, warn};
-use std::process::Command;
 
 pub struct NetworkBooster {
     original_dns: Option<(String, String)>,

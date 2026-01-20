@@ -91,7 +91,7 @@ pub async fn run_stability_test(
 }
 
 /// Perform a single ping and return latency in milliseconds
-async fn ping_once(target: &str) -> Option<u32> {
+async fn ping_once(_target: &str) -> Option<u32> {
     // Use Windows ping command with:
     // -n 1: send only 1 packet
     // -w <timeout>: timeout in ms

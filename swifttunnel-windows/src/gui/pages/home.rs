@@ -36,10 +36,8 @@ pub fn render_home_page(
     state: &HomePageState,
     animations: &mut AnimationManager,
 ) -> HomePageAction {
-    let mut action = HomePageAction::None;
-
     // Connection status section
-    action = render_connection_status(ui, state, animations);
+    let mut action = render_connection_status(ui, state, animations);
 
     ui.add_space(16.0);
 

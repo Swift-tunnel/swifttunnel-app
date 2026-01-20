@@ -23,7 +23,7 @@ pub fn render_header(
     connected_region: Option<&str>,
     connected_latency: Option<u32>,
     animations: &mut AnimationManager,
-    app_start_time: std::time::Instant,
+    _app_start_time: std::time::Instant,
 ) -> HeaderAction {
     let mut action = HeaderAction::None;
 
@@ -130,7 +130,7 @@ pub fn render_header(
 }
 
 /// Render a window control button
-fn render_window_button(ui: &mut Ui, icon: &str, hover_color: Color32, id: &str) -> bool {
+fn render_window_button(ui: &mut Ui, icon: &str, hover_color: Color32, _id: &str) -> bool {
     let size = Vec2::new(32.0, 28.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
 
@@ -156,7 +156,7 @@ fn render_window_button(ui: &mut Ui, icon: &str, hover_color: Color32, id: &str)
 
 /// Render compact header for logged-out state
 pub fn render_auth_header(ui: &mut Ui, app_start_time: std::time::Instant) {
-    let header_height = 80.0;
+    let _header_height = 80.0;
 
     egui::Frame::none()
         .fill(BG_CARD)

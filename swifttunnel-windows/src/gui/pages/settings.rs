@@ -159,7 +159,7 @@ fn render_general_settings(
 fn render_account_settings(
     ui: &mut Ui,
     state: &SettingsPageState,
-    animations: &mut AnimationManager,
+    _animations: &mut AnimationManager,
 ) -> SettingsPageAction {
     let mut action = SettingsPageAction::None;
 

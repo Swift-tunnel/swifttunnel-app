@@ -46,10 +46,8 @@ pub fn render_boost_page(
     state: &BoostPageState,
     animations: &mut AnimationManager,
 ) -> BoostPageAction {
-    let mut action = BoostPageAction::None;
-
     // Master toggle
-    action = render_master_toggle(ui, state, animations);
+    let mut action = render_master_toggle(ui, state, animations);
 
     ui.add_space(16.0);
 
@@ -223,7 +221,7 @@ fn render_system_optimizations(
 fn render_roblox_settings(
     ui: &mut Ui,
     state: &BoostPageState,
-    animations: &mut AnimationManager,
+    _animations: &mut AnimationManager,
 ) -> BoostPageAction {
     let mut action = BoostPageAction::None;
 

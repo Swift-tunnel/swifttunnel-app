@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
 use boringtun::noise::{Tunn, TunnResult};
 use super::adapter::WintunAdapter;
 use super::config::parse_key;

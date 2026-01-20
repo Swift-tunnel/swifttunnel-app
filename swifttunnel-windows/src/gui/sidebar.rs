@@ -85,7 +85,7 @@ pub fn render_sidebar(
 /// Render the SwiftTunnel logo
 fn render_logo(ui: &mut Ui, app_start_time: std::time::Instant) {
     let logo_size = 36.0;
-    let center_x = SIDEBAR_WIDTH / 2.0;
+    let _center_x = SIDEBAR_WIDTH / 2.0;
 
     ui.horizontal(|ui| {
         ui.add_space((SIDEBAR_WIDTH - logo_size) / 2.0);

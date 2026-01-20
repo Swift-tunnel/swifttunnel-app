@@ -926,9 +926,7 @@ impl SplitTunnelDriver {
     /// Convert a Windows path to a device path
     /// e.g., "C:\Users\..." -> "\Device\HarddiskVolume1\Users\..."
     fn to_device_path(path: &str) -> VpnResult<String> {
-        use windows::Win32::Storage::FileSystem::{
-            QueryDosDeviceW, GetVolumePathNameW,
-        };
+        use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
         use windows::core::PCWSTR;
 
         // Extract drive letter (e.g., "C:")

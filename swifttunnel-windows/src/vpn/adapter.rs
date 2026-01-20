@@ -30,8 +30,6 @@ const RING_CAPACITY: u32 = 0x400000; // 4MB
 ///
 /// Returns true if running with elevated privileges, false otherwise.
 fn is_administrator() -> bool {
-    use std::ptr::null_mut;
-
     unsafe {
         use windows::Win32::Security::{
             GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
@@ -387,7 +385,7 @@ impl WintunAdapter {
     /// Shutdown the adapter session
     pub fn shutdown(&self) {
         log::info!("Shutting down Wintun session");
-        self.session.shutdown();
+        let _ = self.session.shutdown();
     }
 }
 

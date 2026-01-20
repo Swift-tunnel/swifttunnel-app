@@ -582,7 +582,7 @@ impl BoosterApp {
 
         std::thread::spawn(move || {
             rt.block_on(async {
-                run_speed_test(tx).await;
+                let _ = run_speed_test(tx).await;
             });
         });
     }
@@ -629,7 +629,7 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<u32> {
 
     let mut best_latency: Option<u32> = None;
 
-    for (server_id, server_ip) in servers {
+    for (_server_id, server_ip) in servers {
         let mut total = 0u32;
         let mut count = 0u32;
 

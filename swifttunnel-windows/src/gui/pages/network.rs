@@ -420,7 +420,7 @@ fn render_running_speed_test(ui: &mut Ui, state: &NetworkPageState) {
 }
 
 /// Render speed test results
-fn render_speed_results(ui: &mut Ui, results: &SpeedTestResults, state: &NetworkPageState) {
+fn render_speed_results(ui: &mut Ui, results: &SpeedTestResults, _state: &NetworkPageState) {
     // Timestamp
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Last test")

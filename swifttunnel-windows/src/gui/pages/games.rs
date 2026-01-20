@@ -28,10 +28,8 @@ pub fn render_games_page(
     state: &GamesPageState,
     animations: &mut AnimationManager,
 ) -> GamesPageAction {
-    let mut action = GamesPageAction::None;
-
     // Game selection section
-    action = render_game_selection(ui, state, animations);
+    let action = render_game_selection(ui, state, animations);
 
     ui.add_space(16.0);
 

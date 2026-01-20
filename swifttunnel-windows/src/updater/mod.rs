@@ -10,7 +10,7 @@ mod verifier;
 mod installer;
 mod auto_updater;
 
-pub use types::{UpdateState, UpdateInfo, UpdateSettings};
+pub use types::{UpdateState, UpdateSettings};
 pub use checker::UpdateChecker;
 pub use downloader::{download_update, download_checksum};
 pub use verifier::verify_checksum;
