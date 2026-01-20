@@ -137,8 +137,8 @@ fn main() {
     println!("\nTest complete.");
 }
 
-fn get_driver_state(handle: HANDLE) -> Option<u32> {
-    let mut state: u32 = 0;
+fn get_driver_state(handle: HANDLE) -> Option<u64> {
+    let mut output = [0u8; 4096];
     let mut bytes_returned: u32 = 0;
 
     let result = unsafe {
@@ -147,8 +147,8 @@ fn get_driver_state(handle: HANDLE) -> Option<u32> {
             IOCTL_ST_GET_STATE,
             None,
             0,
-            Some(&mut state as *mut u32 as *mut _),
-            std::mem::size_of::<u32>() as u32,
+            Some(output.as_mut_ptr() as *mut _),
+            output.len() as u32,
             Some(&mut bytes_returned),
             None,
         )
@@ -156,8 +156,17 @@ fn get_driver_state(handle: HANDLE) -> Option<u32> {
 
     match result {
         Ok(_) => {
-            if bytes_returned == 4 {
+            if bytes_returned >= 8 {
+                let state = u64::from_le_bytes([
+                    output[0], output[1], output[2], output[3],
+                    output[4], output[5], output[6], output[7],
+                ]);
                 Some(state)
+            } else if bytes_returned >= 4 {
+                let state = u32::from_le_bytes([
+                    output[0], output[1], output[2], output[3],
+                ]);
+                Some(state as u64)
             } else {
                 println!("   (unexpected bytes_returned: {})", bytes_returned);
                 None
@@ -195,7 +204,7 @@ fn send_ioctl(handle: HANDLE, ioctl: u32) -> bool {
     }
 }
 
-fn state_name(state: u32) -> &'static str {
+fn state_name(state: u64) -> &'static str {
     match state {
         0 => "NONE",
         1 => "STARTED",
