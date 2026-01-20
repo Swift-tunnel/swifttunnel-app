@@ -626,6 +626,10 @@ async fn run_test(config: TestConfig) -> TestResult {
 
     println!("    ✓ Driver is ENGAGED - ready to route traffic");
 
+    // Debug: Enumerate WFP filters to see what the driver created
+    println!("    Enumerating WFP filters...");
+    wfp_engine.enumerate_filters();
+
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 8: Test traffic routing through WireGuard tunnel
     // ═══════════════════════════════════════════════════════════════════════
@@ -1412,6 +1416,79 @@ impl WfpEngineHandle {
     /// Create sublayers if they don't exist (called after driver INITIALIZE)
     fn ensure_sublayers(&self) -> Result<(), String> {
         create_sublayers_if_needed(self.handle)
+    }
+
+    /// Enumerate WFP filters to debug what the driver created
+    fn enumerate_filters(&self) {
+        // Count filters in the baseline sublayer
+        let mut enum_handle = HANDLE::default();
+        let template = FWPM_FILTER_ENUM_TEMPLATE0 {
+            providerKey: std::ptr::null_mut(),
+            layerKey: GUID::zeroed(),
+            enumType: FWP_FILTER_ENUM_FULLY_CONTAINED,
+            flags: FWP_FILTER_ENUM_FLAG_NONE,
+            providerContextTemplate: std::ptr::null_mut(),
+            numFilterConditions: 0,
+            filterCondition: std::ptr::null_mut(),
+            actionMask: 0,
+            calloutKey: std::ptr::null_mut(),
+        };
+
+        let result = unsafe {
+            FwpmFilterCreateEnumHandle0(self.handle, Some(&template), &mut enum_handle)
+        };
+        if result != 0 {
+            println!("    Failed to create filter enum: 0x{:08X}", result);
+            return;
+        }
+
+        let mut entries: *mut *mut FWPM_FILTER0 = std::ptr::null_mut();
+        let mut num_returned: u32 = 0;
+        let result = unsafe {
+            FwpmFilterEnum0(self.handle, enum_handle, 100, &mut entries, &mut num_returned)
+        };
+
+        if result == 0 {
+            println!("    Total WFP filters: {}", num_returned);
+
+            // Count filters by sublayer
+            let mut baseline_count = 0u32;
+            let mut dns_count = 0u32;
+            let mut other_count = 0u32;
+
+            for i in 0..num_returned {
+                let filter = unsafe { *entries.add(i as usize) };
+                let sublayer = unsafe { (*filter).subLayerKey };
+
+                if sublayer == ST_FW_WINFW_BASELINE_SUBLAYER_KEY {
+                    baseline_count += 1;
+                    // Print first few baseline filters
+                    if baseline_count <= 3 {
+                        let action = unsafe { (*filter).action };
+                        let layer = unsafe { (*filter).layerKey };
+                        println!("    [Baseline] Filter {}: layer {:?}, action type {}",
+                            baseline_count, layer, action.r#type.0);
+                    }
+                } else if sublayer == ST_FW_WINFW_DNS_SUBLAYER_KEY {
+                    dns_count += 1;
+                } else {
+                    other_count += 1;
+                }
+            }
+
+            println!("    Filters by sublayer: baseline={}, dns={}, other={}",
+                baseline_count, dns_count, other_count);
+
+            unsafe {
+                FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut std::ffi::c_void);
+            }
+        } else {
+            println!("    Filter enum failed: 0x{:08X}", result);
+        }
+
+        unsafe {
+            let _ = FwpmFilterDestroyEnumHandle0(self.handle, enum_handle);
+        }
     }
 }
 
