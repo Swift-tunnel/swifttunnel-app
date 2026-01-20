@@ -369,7 +369,7 @@ impl SplitTunnelDriver {
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing(), // We only need basic info
+            ProcessRefreshKind::new(), // We only need basic info
         );
 
         let mut to_exclude = Vec::with_capacity(200);
@@ -415,7 +415,7 @@ impl SplitTunnelDriver {
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing(),
+            ProcessRefreshKind::new(),
         );
 
         let mut running = Vec::new();
