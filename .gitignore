@@ -24,3 +24,9 @@ CLAUDE.md
 PC-BOOSTS.md
 *.md
 !README.md
+
+# Allow Windows-testbench folder contents
+!Windows-testbench/
+!Windows-testbench/*.exe
+!Windows-testbench/*.dll
+!Windows-testbench/*.md
