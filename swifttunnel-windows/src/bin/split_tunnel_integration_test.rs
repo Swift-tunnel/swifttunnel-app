@@ -633,13 +633,19 @@ async fn run_test(config: TestConfig) -> TestResult {
     println!("    (WireGuard tunnel is ACTIVE - packets will be encrypted and forwarded)");
     println!("    Watching for packets on Wintun adapter...");
 
-    // Small delay to let filters settle
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    // Longer delay to let filters settle and observe packet flow
+    println!("    Waiting 2s for filters to settle...");
+    std::thread::sleep(std::time::Duration::from_millis(2000));
 
-    println!("    Running test command: {}", config.test_exe);
+    println!("    ===== RUNNING TEST COMMAND =====");
+    println!("    Exe: {}", config.test_exe);
     let vpn_ip = match run_test_exe(&config.test_exe) {
         Ok(ip) => {
-            println!("    IP through split tunnel: {}", ip);
+            println!("    ===== TEST COMMAND FINISHED =====");
+            println!("    IP returned: {}", ip);
+            // Wait a bit more to catch any late packets
+            println!("    Waiting 2s for late packets...");
+            std::thread::sleep(std::time::Duration::from_millis(2000));
             ip
         }
         Err(e) => {
@@ -1006,14 +1012,25 @@ fn start_packet_forwarding(
                     Ok(packet) => {
                         let count = outbound_count.fetch_add(1, Ordering::SeqCst) + 1;
                         let bytes = packet.bytes();
-                        if count <= 5 {
-                            println!("    [OUTBOUND] Packet #{}: {} bytes", count, bytes.len());
-                            if bytes.len() >= 20 {
-                                // Parse IP header
+                        if count <= 10 {
+                            let ip_version = (bytes[0] >> 4) & 0x0F;
+                            println!("    [OUTBOUND] Packet #{}: {} bytes, IPv{}", count, bytes.len(), ip_version);
+                            if ip_version == 4 && bytes.len() >= 20 {
+                                // Parse IPv4 header
                                 let src_ip = format!("{}.{}.{}.{}", bytes[12], bytes[13], bytes[14], bytes[15]);
                                 let dst_ip = format!("{}.{}.{}.{}", bytes[16], bytes[17], bytes[18], bytes[19]);
                                 let protocol = bytes[9];
-                                println!("              {} -> {} (proto {})", src_ip, dst_ip, protocol);
+                                let proto_name = match protocol {
+                                    1 => "ICMP",
+                                    6 => "TCP",
+                                    17 => "UDP",
+                                    _ => "other",
+                                };
+                                println!("              {} -> {} ({}/{})", src_ip, dst_ip, proto_name, protocol);
+                            } else if ip_version == 6 && bytes.len() >= 40 {
+                                println!("              IPv6 packet (next header: {})", bytes[6]);
+                            } else {
+                                println!("              Raw: {:02X?}", &bytes[..bytes.len().min(20)]);
                             }
                         } else if count % 10 == 0 {
                             println!("    [OUTBOUND] {} packets total", count);
