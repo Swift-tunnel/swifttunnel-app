@@ -98,8 +98,8 @@ pub fn region_card(
     is_loading: bool,
     animations: &mut AnimationManager,
 ) -> bool {
-    let mut clicked = false;
     let card_id = format!("region_card_{}", id);
+    let hover_val = animations.get_hover_value(&card_id);
 
     let card_bg = if is_selected {
         ACCENT_PRIMARY.gamma_multiply(0.15)
@@ -113,35 +113,34 @@ pub fn region_card(
         BG_HOVER
     };
 
-    let hover_val = animations.get_hover_value(&card_id);
-
-    let response = egui::Frame::none()
+    let frame_response = egui::Frame::none()
         .fill(lerp_color(card_bg, BG_HOVER, hover_val * 0.3))
         .stroke(egui::Stroke::new(if is_selected { 2.0 } else { 1.0 }, card_border))
         .rounding(CARD_ROUNDING)
-        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+
             ui.horizontal(|ui| {
-                // Flag
-                ui.label(egui::RichText::new(flag).size(20.0));
+                // Flag emoji
+                ui.label(egui::RichText::new(flag).size(24.0));
+                ui.add_space(10.0);
 
-                ui.add_space(8.0);
-
+                // Name and latency
                 ui.vertical(|ui| {
+                    // Region name with optional LAST badge
                     ui.horizontal(|ui| {
-                        // Name
                         ui.label(egui::RichText::new(name)
-                            .size(13.0)
+                            .size(14.0)
                             .color(TEXT_PRIMARY)
                             .strong());
 
-                        // Last used badge
                         if is_last_used && !is_selected {
-                            ui.add_space(4.0);
+                            ui.add_space(6.0);
                             egui::Frame::none()
                                 .fill(ACCENT_SECONDARY.gamma_multiply(0.2))
                                 .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(4.0, 1.0))
+                                .inner_margin(egui::Margin::symmetric(5.0, 2.0))
                                 .show(ui, |ui| {
                                     ui.label(egui::RichText::new("LAST")
                                         .size(9.0)
@@ -150,11 +149,13 @@ pub fn region_card(
                         }
                     });
 
-                    // Latency bar and value
-                    if is_loading {
-                        // Skeleton loading
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(60.0, 4.0), Sense::hover());
-                        render_shimmer(ui, rect, animations);
+                    ui.add_space(4.0);
+
+                    // Latency display
+                    if is_loading && latency.is_none() {
+                        ui.label(egui::RichText::new("Measuring...")
+                            .size(11.0)
+                            .color(TEXT_MUTED));
                     } else if let Some(ms) = latency {
                         let color = latency_color(ms);
                         let fill = latency_fill_percent(ms);
@@ -165,19 +166,14 @@ pub fn region_card(
                             let bar_height = 4.0;
                             let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_width, bar_height), Sense::hover());
 
-                            // Background
                             ui.painter().rect_filled(rect, 2.0, BG_CARD);
-
-                            // Fill
                             let fill_rect = egui::Rect::from_min_size(
                                 rect.min,
                                 Vec2::new(bar_width * fill, bar_height),
                             );
                             ui.painter().rect_filled(fill_rect, 2.0, color);
 
-                            ui.add_space(6.0);
-
-                            // Latency text
+                            ui.add_space(8.0);
                             ui.label(egui::RichText::new(format!("{}ms", ms))
                                 .size(11.0)
                                 .color(color));
@@ -189,26 +185,27 @@ pub fn region_card(
                     }
                 });
 
-                // Checkmark if selected
+                // Checkmark for selected
                 if is_selected {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new("✓")
-                            .size(16.0)
+                            .size(18.0)
                             .color(ACCENT_PRIMARY));
                     });
                 }
             });
-        })
-        .response;
+        });
 
-    let sense_response = ui.interact(response.rect, egui::Id::new(&card_id), Sense::click());
-    if sense_response.clicked() {
-        clicked = true;
-    }
+    // Handle click interaction
+    let response = ui.interact(
+        frame_response.response.rect,
+        egui::Id::new(&card_id),
+        Sense::click()
+    );
 
-    animations.animate_hover(&card_id, sense_response.hovered(), hover_val);
+    animations.animate_hover(&card_id, response.hovered(), hover_val);
 
-    clicked
+    response.clicked()
 }
 
 /// Boost preset card (Performance, Balanced, Quality)

@@ -257,17 +257,33 @@ fn render_region_selector(
     let mut action = HomePageAction::None;
 
     let region_count = state.regions.len();
-    let badge = if state.finding_best {
-        "Measuring latency..."
+    let badge_text = if state.finding_best {
+        "Measuring latency...".to_string()
     } else {
-        &format!("{} regions", region_count)
+        format!("{} regions", region_count)
     };
 
-    section_card(ui, "SELECT REGION", Some("🌍"), Some(badge), |ui| {
+    section_card(ui, "SELECT REGION", Some("🌍"), Some(&badge_text), |ui| {
+        if state.regions.is_empty() {
+            if state.is_loading {
+                // Show loading skeleton
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("Loading servers...")
+                        .color(TEXT_MUTED));
+                });
+            } else {
+                ui.label(egui::RichText::new("No servers available")
+                    .color(TEXT_MUTED));
+            }
+            return;
+        }
+
         // 2-column grid
         let columns = 2;
         let spacing = 10.0;
-        let card_width = (ui.available_width() - spacing * (columns as f32 - 1.0)) / columns as f32;
+        let available = ui.available_width();
+        let card_width = (available - spacing) / columns as f32;
 
         let regions: Vec<_> = state.regions.iter().collect();
         for chunk in regions.chunks(columns) {
@@ -275,11 +291,11 @@ fn render_region_selector(
                 ui.spacing_mut().item_spacing.x = spacing;
 
                 for region in chunk {
-                    ui.allocate_ui(Vec2::new(card_width, 60.0), |ui| {
-                        let latency = state.latencies.get(&region.id).and_then(|l| *l);
-                        let is_selected = state.selected_region == region.id;
-                        let is_last = state.last_connected_region == Some(region.id.as_str());
+                    let latency = state.latencies.get(&region.id).and_then(|l| *l);
+                    let is_selected = state.selected_region == region.id;
+                    let is_last = state.last_connected_region == Some(region.id.as_str());
 
+                    ui.allocate_ui(Vec2::new(card_width, 70.0), |ui| {
                         if region_card(
                             ui,
                             &region.id,
@@ -298,7 +314,7 @@ fn render_region_selector(
 
                 // Pad incomplete row
                 for _ in chunk.len()..columns {
-                    ui.allocate_space(Vec2::new(card_width, 60.0));
+                    ui.allocate_space(Vec2::new(card_width, 70.0));
                 }
             });
             ui.add_space(spacing);
