@@ -11,7 +11,6 @@ pub mod pages;
 
 pub use theme::*;
 pub use animations::*;
-pub use components::*;
 
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
@@ -19,18 +18,16 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::auth::{AuthManager, AuthState, UserInfo};
-use crate::hidden_command;
 use crate::network_analyzer::{
     NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
-    run_stability_test, run_speed_test, speed_test::format_speed,
+    run_stability_test, run_speed_test,
 };
 use crate::performance_monitor::SystemInfo;
 use crate::roblox_optimizer::RobloxOptimizer;
 use crate::settings::{load_settings, save_settings, AppSettings, WindowState};
 use crate::structs::*;
-use crate::system_optimizer::SystemOptimizer;
 use crate::tray::SystemTray;
-use crate::updater::{UpdateChecker, UpdateInfo, UpdateSettings, UpdateState, download_update, download_checksum, verify_checksum, install_update};
+use crate::updater::{UpdateChecker, UpdateSettings, UpdateState};
 use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set};
 
 use sidebar::render_sidebar;
@@ -518,6 +515,38 @@ impl BoosterApp {
         }
     }
 
+    /// Process OAuth callback from deep link
+    /// Called when the app is launched with swifttunnel://callback?token=xxx&state=xxx
+    pub fn process_oauth_callback(&mut self, token: &str, state: &str) {
+        log::info!("Processing OAuth callback");
+        self.auth_error = None;
+
+        let auth_manager = Arc::clone(&self.auth_manager);
+        let rt = Arc::clone(&self.runtime);
+        let token = token.to_string();
+        let state = state.to_string();
+        let tx = self.auth_update_tx.clone();
+
+        std::thread::spawn(move || {
+            rt.block_on(async {
+                if let Ok(auth) = auth_manager.lock() {
+                    match auth.complete_oauth_callback(&token, &state).await {
+                        Ok(()) => {
+                            // Send updated state immediately to GUI
+                            let new_state = auth.get_state();
+                            let _ = tx.send(new_state);
+                            log::info!("OAuth callback completed, notified GUI");
+                        }
+                        Err(e) => {
+                            log::error!("OAuth callback failed: {}", e);
+                            let _ = tx.send(AuthState::Error(e.to_string()));
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════
     //  NETWORK TEST ACTIONS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -787,14 +816,22 @@ impl eframe::App for BoosterApp {
         if self.last_vpn_check.elapsed() >= std::time::Duration::from_millis(500) {
             self.last_vpn_check = std::time::Instant::now();
 
-            if let Ok(vpn) = self.vpn_connection.try_lock() {
-                let new_state = self.runtime.block_on(vpn.state());
+            // Get new VPN state (acquire lock, get state, release lock)
+            let new_state = if let Ok(vpn) = self.vpn_connection.try_lock() {
+                Some(self.runtime.block_on(vpn.state()))
+            } else {
+                None
+            };
+
+            // Process state changes after lock is released
+            if let Some(new_state) = new_state {
+                let mut should_mark_dirty = false;
 
                 if !self.vpn_state.is_connected() && new_state.is_connected() {
                     if let ConnectionState::Connected { server_region, .. } = &new_state {
                         if self.last_connected_region.as_ref() != Some(server_region) {
                             self.last_connected_region = Some(server_region.clone());
-                            self.mark_dirty();
+                            should_mark_dirty = true;
                         }
                     }
                 }
@@ -816,6 +853,10 @@ impl eframe::App for BoosterApp {
                 }
 
                 self.vpn_state = new_state;
+
+                if should_mark_dirty {
+                    self.mark_dirty();
+                }
             }
 
             // Update caches
@@ -1020,7 +1061,8 @@ impl BoosterApp {
                         self.state.config.profile = profile;
                         // Apply profile defaults
                         match profile {
-                            OptimizationProfile::Performance => {
+                            OptimizationProfile::LowEnd => {
+                                // Performance/Low-end PC mode - all optimizations enabled
                                 self.state.config.system_optimization.set_high_priority = true;
                                 self.state.config.system_optimization.timer_resolution_1ms = true;
                                 self.state.config.system_optimization.mmcss_gaming_profile = true;
@@ -1030,10 +1072,14 @@ impl BoosterApp {
                                 self.state.config.system_optimization.timer_resolution_1ms = true;
                                 self.state.config.system_optimization.mmcss_gaming_profile = false;
                             }
-                            OptimizationProfile::Quality => {
+                            OptimizationProfile::HighEnd => {
+                                // Quality/High-end PC mode - minimal optimizations
                                 self.state.config.system_optimization.set_high_priority = false;
                                 self.state.config.system_optimization.timer_resolution_1ms = false;
                                 self.state.config.system_optimization.mmcss_gaming_profile = false;
+                            }
+                            OptimizationProfile::Custom => {
+                                // Don't change settings for custom profile
                             }
                         }
                         self.mark_dirty();
@@ -1083,8 +1129,8 @@ impl BoosterApp {
                         self.state.config.roblox_settings.target_fps = fps;
                         self.mark_dirty();
                     }
-                    BoostPageAction::SetGraphicsQuality(quality) => {
-                        self.state.config.roblox_settings.graphics_quality = quality;
+                    BoostPageAction::SetGraphicsQuality(graphics_quality) => {
+                        self.state.config.roblox_settings.graphics_quality = graphics_quality;
                         self.mark_dirty();
                     }
                     BoostPageAction::None => {}

@@ -2,7 +2,7 @@
 //!
 //! Animated toggle switches with multiple styles.
 
-use eframe::egui::{self, Color32, Ui, Sense, Response, Vec2, Pos2, Rect};
+use eframe::egui::{self, Color32, Ui, Sense, Vec2, Pos2};
 use crate::gui::theme::*;
 use crate::gui::animations::AnimationManager;
 

@@ -2,7 +2,7 @@
 //!
 //! Various card styles for game selection, regions, and info panels.
 
-use eframe::egui::{self, Color32, Ui, Sense, Vec2, Response};
+use eframe::egui::{self, Ui, Sense, Vec2};
 use crate::gui::theme::*;
 use crate::gui::animations::AnimationManager;
 

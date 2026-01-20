@@ -6,7 +6,7 @@ use eframe::egui::{self, Color32, Ui, Sense, Vec2, Pos2};
 use std::collections::HashMap;
 use crate::gui::theme::*;
 use crate::gui::animations::{AnimationManager, ConnectionStep};
-use crate::gui::components::{section_card, region_card, stat_card, dot_badge, BadgeVariant};
+use crate::gui::components::{section_card, region_card, stat_card};
 use crate::vpn::{ConnectionState, DynamicGamingRegion};
 
 /// Home page state needed from main app

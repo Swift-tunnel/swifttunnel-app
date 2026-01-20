@@ -2,11 +2,11 @@
 //!
 //! ExitLag-style game cards with split tunnel toggles.
 
-use eframe::egui::{self, Color32, Ui, Vec2};
+use eframe::egui::{self, Ui, Vec2};
 use std::collections::HashSet;
 use crate::gui::theme::*;
 use crate::gui::animations::AnimationManager;
-use crate::gui::components::{section_card, game_card, ConnectionStatRow, connection_stats_table, tunneled_processes_list};
+use crate::gui::components::{section_card, game_card};
 use crate::vpn::{GamePreset, ConnectionState};
 
 /// Games page state needed from main app

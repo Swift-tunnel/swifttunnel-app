@@ -2,10 +2,10 @@
 //!
 //! This module contains all reusable UI components like toggles, cards, badges, and tables.
 
-mod toggle;
-mod card;
-mod badge;
-mod table;
+pub mod toggle;
+pub mod card;
+pub mod badge;
+pub mod table;
 
 pub use toggle::*;
 pub use card::*;

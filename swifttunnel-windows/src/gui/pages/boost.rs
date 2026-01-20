@@ -2,12 +2,12 @@
 //!
 //! 3-column card layout for boost toggles.
 
-use eframe::egui::{self, Color32, Ui, Vec2};
+use eframe::egui::{self, Ui, Vec2};
 use std::collections::HashSet;
 use crate::gui::theme::*;
 use crate::gui::animations::AnimationManager;
 use crate::gui::components::{section_card, preset_card, boost_toggle, tier_badge, toggle_switch, ToggleStyle};
-use crate::structs::{Config, OptimizationProfile};
+use crate::structs::{Config, OptimizationProfile, GraphicsQuality};
 
 /// Boost page state needed from main app
 pub struct BoostPageState<'a> {
@@ -25,7 +25,7 @@ pub enum BoostPageAction {
     ToggleSetting(BoostSetting),
     ToggleExpand(String),
     SetTargetFps(u32),
-    SetGraphicsQuality(u8),
+    SetGraphicsQuality(GraphicsQuality),
 }
 
 /// Individual boost settings
@@ -124,9 +124,9 @@ fn render_profile_presets(
         let card_width = (ui.available_width() - 20.0) / 3.0;
 
         let presets = [
-            (OptimizationProfile::Performance, "🚀", "Performance", "Max FPS"),
+            (OptimizationProfile::LowEnd, "🚀", "Performance", "Max FPS"),
             (OptimizationProfile::Balanced, "⚖", "Balanced", "Recommended"),
-            (OptimizationProfile::Quality, "✨", "Quality", "Stability"),
+            (OptimizationProfile::HighEnd, "✨", "Quality", "Stability"),
         ];
 
         for (profile, icon, name, desc) in presets {
@@ -295,7 +295,7 @@ fn render_roblox_settings(
 
         ui.horizontal(|ui| {
             let presets = [1, 3, 5, 7, 10];
-            let current_quality = state.config.roblox_settings.graphics_quality;
+            let current_quality = state.config.roblox_settings.graphics_quality.to_level();
 
             for quality in presets {
                 let is_selected = current_quality == quality;
@@ -309,7 +309,7 @@ fn render_roblox_settings(
                 .min_size(Vec2::new(36.0, 28.0));
 
                 if ui.add(button).clicked() {
-                    action = BoostPageAction::SetGraphicsQuality(quality);
+                    action = BoostPageAction::SetGraphicsQuality(GraphicsQuality::from_level(quality));
                 }
             }
         });
@@ -317,13 +317,13 @@ fn render_roblox_settings(
         ui.add_space(8.0);
 
         // Quality slider
-        let mut quality = state.config.roblox_settings.graphics_quality as f32;
+        let mut quality = state.config.roblox_settings.graphics_quality.to_level() as f32;
         let slider = egui::Slider::new(&mut quality, 1.0..=10.0)
             .show_value(true)
             .text("Level");
 
         if ui.add(slider).changed() {
-            action = BoostPageAction::SetGraphicsQuality(quality as u8);
+            action = BoostPageAction::SetGraphicsQuality(GraphicsQuality::from_level(quality as i32));
         }
 
         ui.add_space(8.0);

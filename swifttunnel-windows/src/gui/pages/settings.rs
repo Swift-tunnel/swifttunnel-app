@@ -2,12 +2,11 @@
 //!
 //! General settings, account, and about information.
 
-use eframe::egui::{self, Color32, Ui, Vec2};
+use eframe::egui::{self, Ui, Vec2};
 use crate::gui::theme::*;
 use crate::gui::animations::AnimationManager;
 use crate::gui::components::{section_card, toggle_switch, ToggleStyle, key_value_row};
 use crate::auth::UserInfo;
-use crate::updater::UpdateSettings;
 
 /// Settings section tabs
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -185,30 +184,13 @@ fn render_account_settings(
                 ui.add_space(12.0);
 
                 ui.vertical(|ui| {
-                    if let Some(ref name) = user.full_name {
-                        ui.label(egui::RichText::new(name)
-                            .size(14.0)
-                            .color(TEXT_PRIMARY)
-                            .strong());
-                    }
                     ui.label(egui::RichText::new(&user.email)
-                        .size(12.0)
-                        .color(TEXT_SECONDARY));
-
-                    // Admin badge
-                    if user.is_admin {
-                        ui.add_space(4.0);
-                        egui::Frame::none()
-                            .fill(ACCENT_SECONDARY.gamma_multiply(0.2))
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new("ADMIN")
-                                    .size(9.0)
-                                    .color(ACCENT_SECONDARY)
-                                    .strong());
-                            });
-                    }
+                        .size(14.0)
+                        .color(TEXT_PRIMARY)
+                        .strong());
+                    ui.label(egui::RichText::new(&user.id)
+                        .size(10.0)
+                        .color(TEXT_MUTED));
                 });
             });
 

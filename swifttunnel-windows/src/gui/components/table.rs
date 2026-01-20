@@ -2,7 +2,7 @@
 //!
 //! Data tables for connection stats, process lists, etc.
 
-use eframe::egui::{self, Color32, Ui, Vec2};
+use eframe::egui::{self, Ui, Vec2};
 use crate::gui::theme::*;
 use crate::gui::components::badge::protocol_badge;
 
