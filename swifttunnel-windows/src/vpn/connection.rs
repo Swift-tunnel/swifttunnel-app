@@ -4,9 +4,9 @@
 //! - Configuration fetching
 //! - Wintun adapter creation
 //! - WireGuard tunnel establishment
-//! - Split tunneling setup
+//! - Split tunneling setup (exclude-all-except mode)
+//! - Route management
 //! - Connection state tracking
-//! - Process monitoring for split tunneling
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,45 +17,42 @@ use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
 use super::wfp::{WfpEngine, setup_wfp_for_split_tunnel};
+use super::routes::{RouteManager, get_interface_index};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::{VpnError, VpnResult};
+
+/// Refresh interval for process exclusion scanning (ms)
+/// Lower = faster detection of new processes, slightly higher CPU
+/// 250ms is a good balance - new process excluded within quarter second
+const REFRESH_INTERVAL_MS: u64 = 250;
 
 /// VPN connection state
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
-    /// Not connected
     Disconnected,
-    /// Fetching configuration from API
     FetchingConfig,
-    /// Creating network adapter
     CreatingAdapter,
-    /// Establishing WireGuard tunnel
     Connecting,
-    /// Configuring split tunneling
     ConfiguringSplitTunnel,
-    /// Connected and running
+    /// Adding routes through VPN interface
+    ConfiguringRoutes,
     Connected {
         since: Instant,
         server_region: String,
         server_endpoint: String,
         assigned_ip: String,
         split_tunnel_active: bool,
-        /// Names of processes currently being tunneled (e.g., ["RobloxPlayerBeta.exe"])
         tunneled_processes: Vec<String>,
     },
-    /// Disconnecting
     Disconnecting,
-    /// Error state
     Error(String),
 }
 
 impl ConnectionState {
-    /// Check if connected
     pub fn is_connected(&self) -> bool {
         matches!(self, ConnectionState::Connected { .. })
     }
 
-    /// Check if in a connecting state (any state between Disconnected and Connected)
     pub fn is_connecting(&self) -> bool {
         matches!(
             self,
@@ -63,15 +60,14 @@ impl ConnectionState {
                 | ConnectionState::CreatingAdapter
                 | ConnectionState::Connecting
                 | ConnectionState::ConfiguringSplitTunnel
+                | ConnectionState::ConfiguringRoutes
         )
     }
 
-    /// Check if in error state
     pub fn is_error(&self) -> bool {
         matches!(self, ConnectionState::Error(_))
     }
 
-    /// Get error message if in error state
     pub fn error_message(&self) -> Option<&str> {
         match self {
             ConnectionState::Error(msg) => Some(msg),
@@ -79,7 +75,6 @@ impl ConnectionState {
         }
     }
 
-    /// Get status text for UI display
     pub fn status_text(&self) -> &'static str {
         match self {
             ConnectionState::Disconnected => "Disconnected",
@@ -87,6 +82,7 @@ impl ConnectionState {
             ConnectionState::CreatingAdapter => "Creating network adapter...",
             ConnectionState::Connecting => "Connecting to server...",
             ConnectionState::ConfiguringSplitTunnel => "Configuring split tunnel...",
+            ConnectionState::ConfiguringRoutes => "Setting up routes...",
             ConnectionState::Connected { .. } => "Connected",
             ConnectionState::Disconnecting => "Disconnecting...",
             ConnectionState::Error(_) => "Error",
@@ -106,15 +102,13 @@ pub struct VpnConnection {
     adapter: Option<Arc<WintunAdapter>>,
     tunnel: Option<Arc<WireguardTunnel>>,
     split_tunnel: Option<Arc<Mutex<SplitTunnelDriver>>>,
-    /// WFP engine for split tunnel filtering (must be kept alive while split tunnel is active)
     wfp_engine: Option<WfpEngine>,
+    route_manager: Option<RouteManager>,
     config: Option<VpnConfig>,
-    /// Flag to stop the process monitor task
     process_monitor_stop: Arc<AtomicBool>,
 }
 
 impl VpnConnection {
-    /// Create a new VPN connection manager
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
@@ -122,22 +116,20 @@ impl VpnConnection {
             tunnel: None,
             split_tunnel: None,
             wfp_engine: None,
+            route_manager: None,
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Get current connection state
     pub async fn state(&self) -> ConnectionState {
         self.state.lock().await.clone()
     }
 
-    /// Get a clone of the state Arc for sharing
     pub fn state_handle(&self) -> Arc<Mutex<ConnectionState>> {
         Arc::clone(&self.state)
     }
 
-    /// Set connection state
     async fn set_state(&self, state: ConnectionState) {
         log::info!("Connection state: {:?}", state);
         *self.state.lock().await = state;
@@ -148,14 +140,13 @@ impl VpnConnection {
     /// # Arguments
     /// * `access_token` - Bearer token for API authentication
     /// * `region` - Server region to connect to
-    /// * `split_tunnel_apps` - Applications to route through VPN (empty = all traffic)
+    /// * `tunnel_apps` - Apps that SHOULD use VPN (games). Everything else bypasses.
     pub async fn connect(
         &mut self,
         access_token: &str,
         region: &str,
-        split_tunnel_apps: Vec<String>,
+        tunnel_apps: Vec<String>,
     ) -> VpnResult<()> {
-        // Check if already connected or connecting
         {
             let state = self.state.lock().await;
             if state.is_connected() {
@@ -167,10 +158,11 @@ impl VpnConnection {
         }
 
         log::info!("Starting VPN connection to region: {}", region);
+        log::info!("Apps to tunnel through VPN: {:?}", tunnel_apps);
 
         // Step 1: Fetch configuration
         self.set_state(ConnectionState::FetchingConfig).await;
-        let config: VpnConfig = match fetch_vpn_config(access_token, region).await {
+        let config = match fetch_vpn_config(access_token, region).await {
             Ok(c) => c,
             Err(e) => {
                 self.set_state(ConnectionState::Error(e.to_string())).await;
@@ -199,14 +191,12 @@ impl VpnConnection {
             }
         };
 
-        // Set DNS servers
+        // Set DNS and MTU
         if !config.dns.is_empty() {
             if let Err(e) = adapter.set_dns(&config.dns) {
                 log::warn!("Failed to set DNS: {}", e);
             }
         }
-
-        // Set MTU
         if let Err(e) = adapter.set_mtu(super::adapter::DEFAULT_MTU) {
             log::warn!("Failed to set MTU: {}", e);
         }
@@ -224,7 +214,7 @@ impl VpnConnection {
             }
         };
 
-        // Start tunnel in background task
+        // Start tunnel
         let tunnel_clone = Arc::clone(&tunnel);
         let adapter_clone = Arc::clone(&adapter);
         let state_clone = Arc::clone(&self.state);
@@ -238,16 +228,26 @@ impl VpnConnection {
 
         self.tunnel = Some(tunnel);
 
-        // Step 4: Configure split tunneling (if apps specified and driver available)
+        // Give tunnel a moment to establish
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Step 4: Configure split tunneling (BEFORE routes)
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
-        let (split_tunnel_active, tunneled_processes) = if !split_tunnel_apps.is_empty() {
-            self.setup_split_tunnel(&config, &adapter, split_tunnel_apps).await
+        let (split_tunnel_active, tunneled_processes) = if !tunnel_apps.is_empty() {
+            self.setup_split_tunnel(&config, &adapter, tunnel_apps).await
         } else {
-            log::info!("No split tunnel apps specified, routing all traffic through VPN");
+            log::info!("No tunnel apps specified, all traffic will use VPN");
             (false, Vec::new())
         };
 
-        // Step 5: Mark as connected
+        // Step 5: Setup routes AFTER split tunnel exclusions
+        self.set_state(ConnectionState::ConfiguringRoutes).await;
+        if let Err(e) = self.setup_routes(&config, &adapter).await {
+            log::warn!("Failed to setup routes: {}", e);
+            // Continue anyway - split tunnel might still work partially
+        }
+
+        // Step 6: Mark as connected
         self.set_state(ConnectionState::Connected {
             since: Instant::now(),
             server_region: config.region.clone(),
@@ -255,30 +255,62 @@ impl VpnConnection {
             assigned_ip: config.assigned_ip.clone(),
             split_tunnel_active,
             tunneled_processes,
-        })
-        .await;
+        }).await;
 
         log::info!("VPN connected successfully");
         Ok(())
     }
 
-    /// Setup split tunneling
+    /// Setup routes through VPN interface
+    async fn setup_routes(&mut self, config: &VpnConfig, adapter: &WintunAdapter) -> VpnResult<()> {
+        // Parse VPN server IP
+        let endpoint = &config.endpoint;
+        let server_ip: std::net::Ipv4Addr = endpoint
+            .split(':')
+            .next()
+            .ok_or_else(|| VpnError::Route("Invalid endpoint format".to_string()))?
+            .parse()
+            .map_err(|e| VpnError::Route(format!("Invalid server IP: {}", e)))?;
+
+        // Get interface index
+        let if_index = match get_interface_index("SwiftTunnel") {
+            Ok(idx) => idx,
+            Err(e) => {
+                log::warn!("Could not get interface index: {}", e);
+                // Try to get LUID-based index as fallback
+                1 // Default fallback
+            }
+        };
+
+        log::info!("Setting up VPN routes (server: {}, interface: {})", server_ip, if_index);
+
+        let mut route_manager = RouteManager::new(server_ip, if_index);
+
+        if let Err(e) = route_manager.apply_routes() {
+            log::error!("Failed to apply VPN routes: {}", e);
+            return Err(e);
+        }
+
+        self.route_manager = Some(route_manager);
+        log::info!("VPN routes configured successfully");
+        Ok(())
+    }
+
+    /// Setup split tunneling with exclude-all-except logic
     async fn setup_split_tunnel(
         &mut self,
         config: &VpnConfig,
         adapter: &WintunAdapter,
-        apps: Vec<String>,
+        tunnel_apps: Vec<String>,
     ) -> (bool, Vec<String>) {
-        // Check if driver is available
         if !SplitTunnelDriver::is_available() {
-            log::warn!("Split tunnel driver not available, routing all traffic through VPN");
+            log::warn!("Split tunnel driver not available");
             return (false, Vec::new());
         }
 
-        // Step 1: Setup WFP (Windows Filtering Platform) BEFORE opening the driver
-        // The Mullvad split tunnel driver requires WFP provider/sublayer to exist
+        // Setup WFP first
         let interface_luid = adapter.get_luid();
-        log::info!("Setting up WFP for split tunneling (interface LUID: {})...", interface_luid);
+        log::info!("Setting up WFP for split tunnel (LUID: {})...", interface_luid);
 
         match setup_wfp_for_split_tunnel(interface_luid) {
             Ok(engine) => {
@@ -286,120 +318,112 @@ impl VpnConnection {
                 self.wfp_engine = Some(engine);
             }
             Err(e) => {
-                log::warn!("Failed to setup WFP for split tunnel: {}", e);
-                log::warn!("Split tunneling may not work correctly. Continuing anyway...");
-                // Don't fail completely - the driver might still work for process detection
+                log::warn!("WFP setup failed: {}", e);
             }
         }
 
         let mut driver = SplitTunnelDriver::new();
 
-        // Open driver
         if let Err(e) = driver.open() {
             log::warn!("Failed to open split tunnel driver: {}", e);
-            // Clean up WFP if driver fails
             self.wfp_engine = None;
             return (false, Vec::new());
         }
 
-        // Configure
-        let split_config = SplitTunnelConfig {
-            include_apps: apps,
-            tunnel_ip: config.assigned_ip.clone(),
-            tunnel_interface_luid: interface_luid,
-        };
+        // Create config with tunnel apps (these will NOT be excluded)
+        let split_config = SplitTunnelConfig::new(
+            tunnel_apps,
+            config.assigned_ip.clone(),
+            interface_luid,
+        );
 
         if let Err(e) = driver.configure(split_config) {
             log::warn!("Failed to configure split tunnel: {}", e);
-            // Clean up WFP if configuration fails
             self.wfp_engine = None;
             return (false, Vec::new());
         }
 
-        // Get initial running processes
-        let running = driver.get_running_target_names();
+        let running = driver.get_running_tunnel_apps();
         if !running.is_empty() {
-            log::info!("Currently tunneling processes: {:?}", running);
+            log::info!("Currently tunneling: {:?}", running);
         }
 
         let driver = Arc::new(Mutex::new(driver));
         self.split_tunnel = Some(Arc::clone(&driver));
 
-        // Start background process monitor
+        // Start fast refresh loop (250ms)
         self.process_monitor_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
 
         tokio::spawn(async move {
-            log::info!("Process monitor started - watching for Roblox");
+            log::info!("Process monitor started ({}ms interval)", REFRESH_INTERVAL_MS);
 
             loop {
-                // Check if we should stop
-                if stop_flag.load(Ordering::SeqCst) {
-                    log::info!("Process monitor stopping");
-                    break;
-                }
-
-                // Wait before checking (1 second interval)
-                tokio::time::sleep(Duration::from_secs(1)).await;
-
-                // Check if still stopping
                 if stop_flag.load(Ordering::SeqCst) {
                     break;
                 }
 
-                // Refresh processes
+                tokio::time::sleep(Duration::from_millis(REFRESH_INTERVAL_MS)).await;
+
+                if stop_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+
                 let mut driver_guard = driver.lock().await;
-                match driver_guard.refresh_processes() {
-                    Ok(_has_processes) => {
-                        // Update state with current tunneled processes
-                        let running_names = driver_guard.get_running_target_names();
-                        // Drop driver lock before acquiring state lock to avoid potential deadlock
+                match driver_guard.refresh_exclusions() {
+                    Ok(_) => {
+                        let running_names = driver_guard.get_running_tunnel_apps();
                         drop(driver_guard);
 
-                        // Update the connection state's tunneled_processes list
                         let mut state = state_handle.lock().await;
                         if let ConnectionState::Connected {
                             ref mut tunneled_processes,
                             ..
                         } = *state {
                             if *tunneled_processes != running_names {
-                                if running_names.is_empty() && !tunneled_processes.is_empty() {
-                                    log::info!("All target processes exited");
-                                } else if !running_names.is_empty() && tunneled_processes.is_empty() {
-                                    log::info!("Roblox detected and being tunneled: {:?}", running_names);
+                                if !running_names.is_empty() && tunneled_processes.is_empty() {
+                                    log::info!("Game detected, tunneling: {:?}", running_names);
+                                } else if running_names.is_empty() && !tunneled_processes.is_empty() {
+                                    log::info!("All games exited");
                                 }
                                 *tunneled_processes = running_names;
                             }
                         }
                     }
                     Err(e) => {
-                        log::warn!("Error refreshing processes: {}", e);
+                        log::warn!("Exclusion refresh error: {}", e);
                     }
                 }
             }
+
+            log::info!("Process monitor stopped");
         });
 
-        log::info!("Split tunneling configured successfully");
+        log::info!("Split tunnel configured - only selected games use VPN");
         (true, running)
     }
 
-    /// Disconnect from VPN
     pub async fn disconnect(&mut self) -> VpnResult<()> {
         log::info!("Disconnecting VPN");
         self.set_state(ConnectionState::Disconnecting).await;
-
         self.cleanup().await;
-
         self.set_state(ConnectionState::Disconnected).await;
         log::info!("VPN disconnected");
         Ok(())
     }
 
-    /// Cleanup resources
     async fn cleanup(&mut self) {
-        // Stop the process monitor task
+        // Stop process monitor
         self.process_monitor_stop.store(true, Ordering::SeqCst);
+
+        // Remove routes first
+        if let Some(ref mut route_manager) = self.route_manager {
+            if let Err(e) = route_manager.remove_routes() {
+                log::warn!("Error removing routes: {}", e);
+            }
+        }
+        self.route_manager = None;
 
         // Stop tunnel
         if let Some(ref tunnel) = self.tunnel {
@@ -409,18 +433,15 @@ impl VpnConnection {
 
         // Clear split tunnel
         if let Some(ref driver) = self.split_tunnel {
-            let mut driver_guard = driver.lock().await;
-            if let Err(e) = driver_guard.close() {
-                log::warn!("Error closing split tunnel driver: {}", e);
+            let mut guard = driver.lock().await;
+            if let Err(e) = guard.close() {
+                log::warn!("Error closing split tunnel: {}", e);
             }
         }
         self.split_tunnel = None;
 
-        // Clean up WFP engine (drop will close it)
-        if self.wfp_engine.is_some() {
-            log::info!("Cleaning up WFP engine...");
-            self.wfp_engine = None;
-        }
+        // Clean up WFP
+        self.wfp_engine = None;
 
         // Shutdown adapter
         if let Some(ref adapter) = self.adapter {
@@ -431,41 +452,51 @@ impl VpnConnection {
         self.config = None;
     }
 
-    /// Get tunnel statistics
     pub fn stats(&self) -> Option<TunnelStats> {
         self.tunnel.as_ref().map(|t| t.stats())
     }
 
-    /// Get current config
     pub fn config(&self) -> Option<&VpnConfig> {
         self.config.as_ref()
     }
 
-    /// Check if split tunneling is active
     pub fn is_split_tunnel_active(&self) -> bool {
         self.split_tunnel.is_some()
     }
 
-    /// Add an app to split tunnel (while connected)
-    pub async fn add_split_tunnel_app(&mut self, exe_path: &str) -> VpnResult<()> {
+    pub async fn add_tunnel_app(&mut self, exe_name: &str) -> VpnResult<()> {
         if let Some(ref driver) = self.split_tunnel {
-            let mut driver_guard = driver.lock().await;
-            driver_guard.add_app(exe_path)?;
+            let mut guard = driver.lock().await;
+            if let Some(config) = guard.config.as_mut() {
+                config.tunnel_apps.insert(exe_name.to_lowercase());
+            }
+            guard.refresh_exclusions()?;
             Ok(())
         } else {
             Err(VpnError::SplitTunnel("Split tunnel not active".to_string()))
         }
     }
 
-    /// Remove an app from split tunnel (while connected)
-    pub async fn remove_split_tunnel_app(&mut self, exe_path: &str) -> VpnResult<()> {
+    pub async fn remove_tunnel_app(&mut self, exe_name: &str) -> VpnResult<()> {
         if let Some(ref driver) = self.split_tunnel {
-            let mut driver_guard = driver.lock().await;
-            driver_guard.remove_app(exe_path)?;
+            let mut guard = driver.lock().await;
+            if let Some(config) = guard.config.as_mut() {
+                config.tunnel_apps.remove(&exe_name.to_lowercase());
+            }
+            guard.refresh_exclusions()?;
             Ok(())
         } else {
             Err(VpnError::SplitTunnel("Split tunnel not active".to_string()))
         }
+    }
+
+    // Legacy compatibility
+    pub async fn add_split_tunnel_app(&mut self, exe_path: &str) -> VpnResult<()> {
+        self.add_tunnel_app(exe_path).await
+    }
+
+    pub async fn remove_split_tunnel_app(&mut self, exe_path: &str) -> VpnResult<()> {
+        self.remove_tunnel_app(exe_path).await
     }
 }
 
@@ -477,24 +508,20 @@ impl Default for VpnConnection {
 
 impl Drop for VpnConnection {
     fn drop(&mut self) {
-        // Signal process monitor to stop
         self.process_monitor_stop.store(true, Ordering::SeqCst);
 
-        // Synchronous cleanup
+        // Remove routes synchronously
+        if let Some(ref mut route_manager) = self.route_manager {
+            let _ = route_manager.remove_routes();
+        }
+
         if let Some(ref tunnel) = self.tunnel {
             tunnel.stop();
         }
         if let Some(ref driver) = self.split_tunnel {
-            // Use try_lock since we can't await in Drop
-            if let Ok(mut driver_guard) = driver.try_lock() {
-                let _ = driver_guard.close();
-            } else {
-                log::warn!("Could not acquire split tunnel lock during drop");
+            if let Ok(mut guard) = driver.try_lock() {
+                let _ = guard.close();
             }
-        }
-        // WFP engine will be cleaned up automatically when dropped (its Drop impl closes it)
-        if self.wfp_engine.is_some() {
-            log::info!("Dropping WFP engine...");
         }
         if let Some(ref adapter) = self.adapter {
             adapter.shutdown();
