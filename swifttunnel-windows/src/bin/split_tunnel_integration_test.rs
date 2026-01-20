@@ -1458,18 +1458,24 @@ fn cleanup_wfp_objects(handle: HANDLE) {
     // CRITICAL: Delete Mullvad callouts FIRST
     // These are registered by the driver with PERSISTENT flag and survive across sessions
     // If not deleted, driver INITIALIZE will fail with FWP_E_ALREADY_EXISTS (0x80320009)
+    println!("    Attempting to delete 12 Mullvad WFP callouts...");
     let mut callouts_deleted = 0;
-    for guid in MULLVAD_CALLOUT_GUIDS.iter() {
+    let mut not_found = 0;
+    let mut other_errors = 0;
+    for (i, guid) in MULLVAD_CALLOUT_GUIDS.iter().enumerate() {
         let result = unsafe {
             FwpmCalloutDeleteByKey0(handle, guid)
         };
         if result == 0 {
             callouts_deleted += 1;
+        } else if result == 0x80320002 { // FWP_E_CALLOUT_NOT_FOUND
+            not_found += 1;
+        } else {
+            other_errors += 1;
+            println!("    [DEBUG] Callout {} delete error: 0x{:08X}", i, result);
         }
     }
-    if callouts_deleted > 0 {
-        println!("    Deleted {} Mullvad WFP callouts (PERSISTENT)", callouts_deleted);
-    }
+    println!("    Callouts: {} deleted, {} not found, {} errors", callouts_deleted, not_found, other_errors);
 
     // Delete sublayers (this will also delete associated filters)
     let result = unsafe {
