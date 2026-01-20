@@ -191,7 +191,7 @@ pub fn region_card(
 
                     // Latency
                     if is_loading && latency.is_none() {
-                        let dots = match ((ui.ctx().input(|i| i.time) * 2.0) as i32 % 4) {
+                        let dots = match (ui.ctx().input(|i| i.time) * 2.0) as i32 % 4 {
                             0 => ".",
                             1 => "..",
                             2 => "...",
