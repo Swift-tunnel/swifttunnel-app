@@ -632,10 +632,12 @@ async fn run_test(config: TestConfig) -> TestResult {
     // ═══════════════════════════════════════════════════════════════════════
     println!("\n[8/9] Testing traffic routing through split tunnel + WireGuard...");
     println!("    (WireGuard tunnel is ACTIVE - packets will be encrypted and forwarded)");
+    println!("    Watching for packets on Wintun adapter...");
 
     // Small delay to let filters settle
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
+    println!("    Running test command: {}", config.test_exe);
     let vpn_ip = match run_test_exe(&config.test_exe) {
         Ok(ip) => {
             println!("    IP through split tunnel: {}", ip);
@@ -984,6 +986,10 @@ fn start_packet_forwarding(
     socket: Arc<UdpSocket>,
     running: Arc<AtomicBool>,
 ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+    // Counters for debug logging
+    let outbound_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let inbound_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     // Outbound: Wintun adapter -> encrypt -> UDP to server
     // Uses a channel to bridge blocking wintun receive with async send
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
@@ -993,12 +999,27 @@ fn start_packet_forwarding(
         let session = Arc::clone(&session);
         let running = Arc::clone(&running);
         let tx = tx;
+        let outbound_count = Arc::clone(&outbound_count);
 
         std::thread::spawn(move || {
             while running.load(Ordering::SeqCst) {
                 match session.receive_blocking() {
                     Ok(packet) => {
-                        if tx.blocking_send(packet.bytes().to_vec()).is_err() {
+                        let count = outbound_count.fetch_add(1, Ordering::SeqCst) + 1;
+                        let bytes = packet.bytes();
+                        if count <= 5 {
+                            println!("    [OUTBOUND] Packet #{}: {} bytes", count, bytes.len());
+                            if bytes.len() >= 20 {
+                                // Parse IP header
+                                let src_ip = format!("{}.{}.{}.{}", bytes[12], bytes[13], bytes[14], bytes[15]);
+                                let dst_ip = format!("{}.{}.{}.{}", bytes[16], bytes[17], bytes[18], bytes[19]);
+                                let protocol = bytes[9];
+                                println!("              {} -> {} (proto {})", src_ip, dst_ip, protocol);
+                            }
+                        } else if count % 10 == 0 {
+                            println!("    [OUTBOUND] {} packets total", count);
+                        }
+                        if tx.blocking_send(bytes.to_vec()).is_err() {
                             break; // Channel closed
                         }
                     }
@@ -1008,6 +1029,7 @@ fn start_packet_forwarding(
                     }
                 }
             }
+            println!("    [OUTBOUND] Thread exiting, total packets: {}", outbound_count.load(Ordering::SeqCst));
         })
     };
 
@@ -1063,6 +1085,7 @@ fn start_packet_forwarding(
         let tunn = Arc::clone(&tunn);
         let socket = Arc::clone(&socket);
         let running = Arc::clone(&running);
+        let inbound_count = Arc::clone(&inbound_count);
 
         tokio::spawn(async move {
             let mut recv_buf = vec![0u8; 65535];
@@ -1093,7 +1116,18 @@ fn start_packet_forwarding(
                 match decrypted {
                     TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
                         // Write to adapter
+                        let count = inbound_count.fetch_add(1, Ordering::SeqCst) + 1;
                         let len = data.len();
+                        if count <= 5 {
+                            println!("    [INBOUND] Packet #{}: {} bytes", count, len);
+                            if len >= 20 {
+                                let src_ip = format!("{}.{}.{}.{}", data[12], data[13], data[14], data[15]);
+                                let dst_ip = format!("{}.{}.{}.{}", data[16], data[17], data[18], data[19]);
+                                println!("              {} -> {}", src_ip, dst_ip);
+                            }
+                        } else if count % 10 == 0 {
+                            println!("    [INBOUND] {} packets total", count);
+                        }
                         if let Ok(mut send_packet) = session.allocate_send_packet(len as u16) {
                             send_packet.bytes_mut().copy_from_slice(data);
                             session.send_packet(send_packet);
