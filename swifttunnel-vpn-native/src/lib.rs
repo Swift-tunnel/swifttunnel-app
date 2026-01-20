@@ -421,11 +421,7 @@ pub extern "C" fn swifttunnel_split_tunnel_configure(
         return ERROR_INTERNAL;
     }
 
-    let config = SplitTunnelConfig {
-        include_apps: apps,
-        tunnel_ip: ip_str,
-        tunnel_interface_luid: interface_luid,
-    };
+    let config = SplitTunnelConfig::new(apps, ip_str, interface_luid);
 
     if let Err(e) = driver.configure(config) {
         set_error(e.to_string());
