@@ -52,7 +52,7 @@ pub fn render_sidebar(
     ui.painter().rect_filled(border_rect, 0.0, BG_ELEVATED);
 
     // Sidebar content
-    ui.allocate_ui_at_rect(sidebar_rect, |ui| {
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(sidebar_rect), |ui| {
         ui.vertical(|ui| {
             ui.set_min_width(SIDEBAR_WIDTH);
             ui.set_max_width(SIDEBAR_WIDTH);
@@ -197,7 +197,7 @@ fn render_nav_item(
 
     // Tooltip
     if response.hovered() {
-        egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new(&item_id).with("tooltip"), |ui| {
+        egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new(&item_id).with("tooltip"), |ui: &mut egui::Ui| {
             ui.label(egui::RichText::new(item.label)
                 .size(12.0)
                 .color(TEXT_PRIMARY));

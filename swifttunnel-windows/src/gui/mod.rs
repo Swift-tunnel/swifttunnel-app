@@ -484,26 +484,22 @@ impl BoosterApp {
 
     fn start_oauth(&mut self) {
         let auth_manager = Arc::clone(&self.auth_manager);
-        let rt = Arc::clone(&self.runtime);
         let tx = self.auth_update_tx.clone();
 
         std::thread::spawn(move || {
-            rt.block_on(async {
-                if let Ok(auth) = auth_manager.lock() {
-                    match auth.start_oauth().await {
-                        Ok(url) => {
-                            let _ = tx.send(AuthState::AwaitingOAuthCallback(url));
-                            if let Err(e) = open::that(&auth.oauth_url().unwrap_or_default()) {
-                                log::error!("Failed to open browser: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            log::error!("OAuth start failed: {}", e);
-                            let _ = tx.send(AuthState::Error(e));
-                        }
+            if let Ok(auth) = auth_manager.lock() {
+                match auth.start_google_sign_in() {
+                    Ok(_state) => {
+                        // Browser was opened by start_google_sign_in
+                        // State is set to AwaitingOAuthCallback inside start_google_sign_in
+                        let _ = tx.send(auth.get_state());
+                    }
+                    Err(e) => {
+                        log::error!("OAuth start failed: {}", e);
+                        let _ = tx.send(AuthState::Error(e.to_string()));
                     }
                 }
-            });
+            }
         });
     }
 
@@ -597,28 +593,32 @@ impl BoosterApp {
 
     fn start_update_check(&mut self) {
         let state_clone = Arc::clone(&self.update_state);
+        let rt = Arc::clone(&self.runtime);
 
         std::thread::spawn(move || {
-            match UpdateChecker::check_for_updates() {
-                Ok(Some(info)) => {
-                    log::info!("Update available: {}", info.version);
-                    if let Ok(mut state) = state_clone.lock() {
-                        *state = UpdateState::Available(info);
+            rt.block_on(async {
+                let checker = UpdateChecker::new();
+                match checker.check_for_update().await {
+                    Ok(Some(info)) => {
+                        log::info!("Update available: {}", info.version);
+                        if let Ok(mut state) = state_clone.lock() {
+                            *state = UpdateState::Available(info);
+                        }
+                    }
+                    Ok(None) => {
+                        log::info!("No updates available");
+                        if let Ok(mut state) = state_clone.lock() {
+                            *state = UpdateState::UpToDate;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Update check failed: {}", e);
+                        if let Ok(mut state) = state_clone.lock() {
+                            *state = UpdateState::Failed(e);
+                        }
                     }
                 }
-                Ok(None) => {
-                    log::info!("No updates available");
-                    if let Ok(mut state) = state_clone.lock() {
-                        *state = UpdateState::UpToDate;
-                    }
-                }
-                Err(e) => {
-                    log::error!("Update check failed: {}", e);
-                    if let Ok(mut state) = state_clone.lock() {
-                        *state = UpdateState::Error(e);
-                    }
-                }
-            }
+            });
         });
     }
 }

@@ -43,7 +43,7 @@ pub fn render_header(
     );
     ui.painter().rect_filled(border_rect, 0.0, BG_ELEVATED);
 
-    ui.allocate_ui_at_rect(header_rect, |ui| {
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(header_rect), |ui| {
         ui.horizontal(|ui| {
             ui.set_min_height(HEADER_HEIGHT);
 
