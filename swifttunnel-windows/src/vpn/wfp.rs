@@ -50,6 +50,88 @@ static LEGACY_ST_SUBLAYER_KEY: GUID = GUID::from_values(
     [0x9f, 0x70, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x70],
 );
 
+// =============================================================================
+// Mullvad Split Tunnel WFP Callout GUIDs
+// These are registered by the driver with PERSISTENT flag and must be cleaned up
+// before re-initializing the driver, otherwise we get FWP_E_ALREADY_EXISTS
+// =============================================================================
+
+/// ST_FW_CALLOUT_CLASSIFY_BIND_IPV4_KEY
+static ST_FW_CALLOUT_CLASSIFY_BIND_IPV4: GUID = GUID::from_values(
+    0x76653805, 0x1972, 0x45D1, [0xB4, 0x7C, 0x31, 0x40, 0xAE, 0xBA, 0xBC, 0x49]
+);
+
+/// ST_FW_CALLOUT_CLASSIFY_BIND_IPV6_KEY
+static ST_FW_CALLOUT_CLASSIFY_BIND_IPV6: GUID = GUID::from_values(
+    0x53FB3120, 0xB6A4, 0x462B, [0xBF, 0xFC, 0x69, 0x78, 0xAA, 0xDA, 0x1D, 0xA2]
+);
+
+/// ST_FW_CALLOUT_CLASSIFY_CONNECT_IPV4_KEY
+static ST_FW_CALLOUT_CLASSIFY_CONNECT_IPV4: GUID = GUID::from_values(
+    0xA4E010B5, 0xDC3F, 0x474A, [0xB7, 0xC2, 0x2F, 0x32, 0x69, 0x94, 0x5F, 0x41]
+);
+
+/// ST_FW_CALLOUT_CLASSIFY_CONNECT_IPV6_KEY
+static ST_FW_CALLOUT_CLASSIFY_CONNECT_IPV6: GUID = GUID::from_values(
+    0x6B634022, 0xB3D3, 0x4667, [0x88, 0xBA, 0xBF, 0x50, 0x28, 0x85, 0x8F, 0x52]
+);
+
+/// ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV4_CONN_KEY
+static ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV4_CONN: GUID = GUID::from_values(
+    0x33F3EDCC, 0xEB5E, 0x41CF, [0x92, 0x50, 0x70, 0x2C, 0x94, 0xA2, 0x8E, 0x39]
+);
+
+/// ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV4_RECV_KEY
+static ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV4_RECV: GUID = GUID::from_values(
+    0xA7A13809, 0x0DE6, 0x48AB, [0x9B, 0xB8, 0x20, 0xA8, 0xBC, 0xEC, 0x37, 0xAB]
+);
+
+/// ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV6_CONN_KEY
+static ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV6_CONN: GUID = GUID::from_values(
+    0x7B7E0055, 0x89F5, 0x4760, [0x89, 0x28, 0xCC, 0xD5, 0x7C, 0x88, 0x30, 0xAB]
+);
+
+/// ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV6_RECV_KEY
+static ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV6_RECV: GUID = GUID::from_values(
+    0xB40B78EF, 0x5642, 0x40EF, [0xAC, 0x4D, 0xF9, 0x65, 0x12, 0x61, 0xF9, 0xE7]
+);
+
+/// ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV4_CONN_KEY
+static ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV4_CONN: GUID = GUID::from_values(
+    0x974AA588, 0x397A, 0x483E, [0xAC, 0x29, 0x88, 0xF4, 0xF4, 0x11, 0x2A, 0xC2]
+);
+
+/// ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV4_RECV_KEY
+static ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV4_RECV: GUID = GUID::from_values(
+    0x8E314FD7, 0xBDD3, 0x45A4, [0xA7, 0x12, 0x46, 0x03, 0x6B, 0x25, 0xB3, 0xE1]
+);
+
+/// ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV6_CONN_KEY
+static ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV6_CONN: GUID = GUID::from_values(
+    0x466B7800, 0x5EF4, 0x4772, [0xAA, 0x79, 0xE0, 0xA8, 0x34, 0x32, 0x82, 0x14]
+);
+
+/// ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV6_RECV_KEY
+static ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV6_RECV: GUID = GUID::from_values(
+    0xD25AFB1B, 0x4645, 0x43CB, [0xB0, 0xBE, 0x37, 0x94, 0xFE, 0x48, 0x7B, 0xAC]
+);
+
+/// All Mullvad callout GUIDs in an array for easy iteration
+static MULLVAD_CALLOUT_GUIDS: [GUID; 12] = [
+    ST_FW_CALLOUT_CLASSIFY_BIND_IPV4,
+    ST_FW_CALLOUT_CLASSIFY_BIND_IPV6,
+    ST_FW_CALLOUT_CLASSIFY_CONNECT_IPV4,
+    ST_FW_CALLOUT_CLASSIFY_CONNECT_IPV6,
+    ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV4_CONN,
+    ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV4_RECV,
+    ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV6_CONN,
+    ST_FW_CALLOUT_PERMIT_SPLIT_APPS_IPV6_RECV,
+    ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV4_CONN,
+    ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV4_RECV,
+    ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV6_CONN,
+    ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV6_RECV,
+];
+
 /// Provider name
 const PROVIDER_NAME: &str = "Mullvad Split Tunnel";
 const PROVIDER_DESC: &str = "Mullvad Split Tunnel WFP provider";
@@ -311,9 +393,40 @@ impl WfpEngine {
         }
     }
 
+    /// Delete Mullvad WFP callouts that may be left from a previous session
+    /// This is CRITICAL - the callouts are registered with PERSISTENT flag and survive
+    /// across sessions. If not deleted, driver INITIALIZE will fail with FWP_E_ALREADY_EXISTS.
+    /// Call this before initializing the split tunnel driver.
+    pub fn cleanup_mullvad_callouts(&self) -> usize {
+        let mut deleted_count = 0;
+
+        log::info!("Cleaning up Mullvad WFP callouts (12 callouts)...");
+
+        for guid in MULLVAD_CALLOUT_GUIDS.iter() {
+            let result = unsafe {
+                FwpmCalloutDeleteByKey0(self.handle, guid)
+            };
+            if result == 0 {
+                deleted_count += 1;
+            }
+            // Ignore errors - callout may not exist
+        }
+
+        if deleted_count > 0 {
+            log::info!("Deleted {} Mullvad WFP callouts", deleted_count);
+        } else {
+            log::debug!("No Mullvad WFP callouts found to delete");
+        }
+
+        deleted_count
+    }
+
     /// Cleanup all SwiftTunnel WFP objects (for uninstall)
     pub fn cleanup_all(&self) -> VpnResult<()> {
         log::info!("Cleaning up all SwiftTunnel WFP objects...");
+
+        // First, delete Mullvad callouts (MUST be done before sublayers/provider)
+        self.cleanup_mullvad_callouts();
 
         // Delete sublayer (will delete associated filters)
         let result = unsafe {
