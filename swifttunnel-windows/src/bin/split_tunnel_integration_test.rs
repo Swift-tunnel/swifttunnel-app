@@ -415,6 +415,10 @@ async fn run_test(config: TestConfig) -> TestResult {
     };
     println!("    ✓ Adapter session started");
 
+    // Get interface index for later route setup
+    let interface_index = adapter.get_adapter_index().unwrap_or(0);
+    println!("    Interface index: {}", interface_index);
+
     // Parse server endpoint
     let endpoint: SocketAddr = match vpn_config.endpoint.parse() {
         Ok(e) => e,
@@ -481,6 +485,53 @@ async fn run_test(config: TestConfig) -> TestResult {
         Arc::clone(&running),
     );
     println!("    ✓ Packet forwarding tasks started");
+
+    // Add default route through VPN interface
+    // This is needed for traffic to flow through the VPN tunnel
+    println!("    Adding routes through VPN interface...");
+
+    // First, get the default gateway so we can route VPN server traffic directly
+    let route_output = std::process::Command::new("powershell")
+        .args(["-Command", "(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1).NextHop"])
+        .output();
+    let default_gateway = match route_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => "0.0.0.0".to_string()
+    };
+    println!("    Default gateway: {}", default_gateway);
+
+    // Add route for VPN server IP through default gateway (to avoid routing loop)
+    let vpn_server_ip = vpn_config.endpoint.split(':').next().unwrap_or("54.255.205.216");
+    let server_route_result = std::process::Command::new("route")
+        .args(["add", vpn_server_ip, "mask", "255.255.255.255", &default_gateway, "metric", "1"])
+        .output();
+    if let Ok(output) = server_route_result {
+        if output.status.success() {
+            println!("    ✓ VPN server route added ({} via {})", vpn_server_ip, default_gateway);
+        } else {
+            println!("    ⚠ VPN server route failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    // Add a default route (0.0.0.0/0) through the VPN interface
+    // Using metric 5 (lower than default ~35) so it takes priority
+    let route_result = std::process::Command::new("route")
+        .args(["add", "0.0.0.0", "mask", "0.0.0.0", "10.0.0.1", "metric", "5", "if", &interface_index.to_string()])
+        .output();
+    match route_result {
+        Ok(output) => {
+            if output.status.success() {
+                println!("    ✓ Default route added through VPN (metric 5)");
+            } else {
+                println!("    ⚠ Route add failed: {}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
+        Err(e) => {
+            println!("    ⚠ Route command failed: {}", e);
+        }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 5: Setup WFP (STRICT - fail if WFP fails!)
@@ -664,6 +715,16 @@ async fn run_test(config: TestConfig) -> TestResult {
     // STEP 9: Cleanup
     // ═══════════════════════════════════════════════════════════════════════
     println!("\n[9/9] Cleaning up...");
+
+    // Remove routes we added
+    println!("    Removing VPN routes...");
+    let vpn_server_ip_cleanup = vpn_config.endpoint.split(':').next().unwrap_or("54.255.205.216");
+    let _ = std::process::Command::new("route")
+        .args(["delete", "0.0.0.0", "mask", "0.0.0.0", "10.0.0.1"])
+        .output();
+    let _ = std::process::Command::new("route")
+        .args(["delete", vpn_server_ip_cleanup])
+        .output();
 
     // Stop packet forwarding
     running.store(false, Ordering::SeqCst);
