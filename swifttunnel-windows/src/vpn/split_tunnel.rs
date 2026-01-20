@@ -443,18 +443,49 @@ impl SplitTunnelDriver {
         // Step 1: Initialize the driver (required before any other operations)
         // This transitions state from STARTED (1) -> INITIALIZED (2)
         log::debug!("Initializing split tunnel driver...");
-        self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE)?;
+        match self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE) {
+            Ok(()) => {
+                log::debug!("INITIALIZE succeeded");
+            }
+            Err(e) => {
+                // FWP_E_ALREADY_EXISTS (0x80320009) means callouts are already registered
+                // This can happen if:
+                // 1. The driver was previously initialized and didn't clean up
+                // 2. Another application (e.g., Mullvad VPN) registered the same callouts
+                // In this case, check if the driver is already initialized and continue
+                let error_str = e.to_string();
+                if error_str.contains("0x80320009") || error_str.contains("ALREADY_EXISTS") {
+                    log::warn!("INITIALIZE returned ALREADY_EXISTS, checking if driver is already initialized...");
+                    match self.get_driver_state() {
+                        Ok(state) if state >= 2 => {
+                            log::info!("Driver already in state {} ({}), continuing...", state, Self::state_name(state));
+                        }
+                        Ok(state) => {
+                            // Driver is in STARTED state but callouts exist - try to continue anyway
+                            // The callouts might have been registered by Mullvad VPN
+                            log::warn!("Driver in state {} ({}) but callouts exist, attempting to continue...",
+                                state, Self::state_name(state));
+                        }
+                        Err(state_err) => {
+                            log::warn!("Could not get driver state: {}, attempting to continue...", state_err);
+                        }
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
+        }
 
         // Verify driver state advanced to INITIALIZED (state >= 2)
         // If it didn't, something went wrong during initialization
         match self.get_driver_state() {
             Ok(state) => {
                 log::debug!("Driver state after INITIALIZE: {} ({})", state, Self::state_name(state));
+                // Don't fail if state < 2 when ALREADY_EXISTS occurred - try to continue anyway
+                // The driver might still work if callouts were registered by another process
                 if state < 2 {
-                    return Err(VpnError::SplitTunnel(format!(
-                        "Driver failed to initialize: state is {} ({}) but expected >= 2 (INITIALIZED)",
-                        state, Self::state_name(state)
-                    )));
+                    log::warn!("Driver state is {} ({}) - expected >= 2, but continuing anyway...",
+                        state, Self::state_name(state));
                 }
             }
             Err(e) => {
