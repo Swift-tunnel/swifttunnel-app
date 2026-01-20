@@ -63,7 +63,7 @@ fn render_game_selection(
 
         ui.add_space(12.0);
 
-        // Game preset cards in a row
+        // Game preset cards in a row using Grid
         let is_connected = state.vpn_state.is_connected();
         let presets = [
             (GamePreset::Roblox, "🎮", "Roblox"),
@@ -71,12 +71,12 @@ fn render_game_selection(
             (GamePreset::Fortnite, "🏝", "Fortnite"),
         ];
 
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            let card_width = (ui.available_width() - 20.0) / 3.0;
-
-            for (preset, icon, name) in presets {
-                ui.allocate_ui(Vec2::new(card_width, 100.0), |ui| {
+        egui::Grid::new("game_presets_grid")
+            .num_columns(3)
+            .spacing([10.0, 10.0])
+            .min_col_width((ui.available_width() - 20.0) / 3.0)
+            .show(ui, |ui| {
+                for (preset, icon, name) in presets {
                     let is_selected = state.selected_presets.contains(&preset);
 
                     if game_card(
@@ -90,9 +90,8 @@ fn render_game_selection(
                     ) {
                         action = GamesPageAction::TogglePreset(preset);
                     }
-                });
-            }
-        });
+                }
+            });
 
         // Info about split tunneling
         ui.add_space(12.0);

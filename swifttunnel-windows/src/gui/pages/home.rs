@@ -60,14 +60,14 @@ pub fn render_home_page(
 fn render_connection_status(
     ui: &mut Ui,
     state: &HomePageState,
-    animations: &mut AnimationManager,
+    _animations: &mut AnimationManager,
 ) -> HomePageAction {
     let mut action = HomePageAction::None;
 
     let is_connected = state.vpn_state.is_connected();
     let is_connecting = state.vpn_state.is_connecting();
 
-    // Determine status badge text
+    // Status badge
     let status_badge = if is_connected {
         Some("PROTECTED")
     } else if is_connecting {
@@ -78,69 +78,50 @@ fn render_connection_status(
 
     section_card(ui, "CONNECTION STATUS", Some("⚡"), status_badge, |ui| {
         ui.horizontal(|ui| {
-            // Large status indicator with animation
-            let indicator_size = 72.0;
+            // Status indicator
+            let indicator_size = 56.0;
             let (rect, _) = ui.allocate_exact_size(Vec2::new(indicator_size, indicator_size), Sense::hover());
             let center = rect.center();
+            let radius = indicator_size / 2.0 - 4.0;
 
             if is_connected {
-                // Breathing glow animation
+                // Green connected state with pulse
                 let elapsed = state.app_start_time.elapsed().as_secs_f32();
-                let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
-
-                // Outer glow rings
-                let glow_radius = indicator_size / 2.0 + pulse * 6.0;
-                ui.painter().circle_filled(center, glow_radius, STATUS_CONNECTED.gamma_multiply(0.08 + pulse * 0.04));
-                ui.painter().circle_filled(center, glow_radius - 4.0, STATUS_CONNECTED.gamma_multiply(0.12 + pulse * 0.06));
-
-                // Inner circle with gradient-like effect
-                ui.painter().circle_filled(center, indicator_size / 2.0 - 6.0, STATUS_CONNECTED.gamma_multiply(0.25));
-                ui.painter().circle_stroke(center, indicator_size / 2.0 - 6.0, egui::Stroke::new(3.0, STATUS_CONNECTED));
-
-                // Checkmark icon
-                let font = egui::FontId::proportional(32.0);
+                let pulse = ((elapsed * 2.0).sin() + 1.0) / 2.0;
+                ui.painter().circle_filled(center, radius + pulse * 3.0, STATUS_CONNECTED.gamma_multiply(0.15));
+                ui.painter().circle_filled(center, radius, STATUS_CONNECTED.gamma_multiply(0.3));
+                ui.painter().circle_stroke(center, radius, egui::Stroke::new(2.0, STATUS_CONNECTED));
+                // Checkmark
+                let font = egui::FontId::proportional(24.0);
                 let galley = ui.painter().layout_no_wrap("✓".to_string(), font, STATUS_CONNECTED);
-                let icon_pos = Pos2::new(center.x - galley.size().x / 2.0, center.y - galley.size().y / 2.0);
-                ui.painter().galley(icon_pos, galley, STATUS_CONNECTED);
+                let pos = Pos2::new(center.x - galley.size().x / 2.0, center.y - galley.size().y / 2.0);
+                ui.painter().galley(pos, galley, STATUS_CONNECTED);
 
             } else if is_connecting {
-                // Spinning animation with multiple rings
+                // Spinning indicator
                 let elapsed = state.app_start_time.elapsed().as_secs_f32();
-                let rotation = elapsed * 3.0;
-
-                // Outer track
-                ui.painter().circle_stroke(center, indicator_size / 2.0 - 6.0, egui::Stroke::new(3.0, BG_ELEVATED));
-
-                // Spinning dots with trail effect
-                for i in 0..4 {
-                    let angle = rotation + i as f32 * std::f32::consts::TAU / 4.0;
-                    let arc_pos = center + Vec2::new(angle.cos(), angle.sin()) * (indicator_size / 2.0 - 6.0);
-                    let alpha = 1.0 - (i as f32 / 4.0) * 0.7;
-                    let dot_size = 5.0 - (i as f32 * 0.8);
-                    ui.painter().circle_filled(arc_pos, dot_size, STATUS_WARNING.gamma_multiply(alpha));
+                ui.painter().circle_stroke(center, radius, egui::Stroke::new(2.0, BG_HOVER));
+                for i in 0..3 {
+                    let angle = elapsed * 3.0 + i as f32 * std::f32::consts::TAU / 3.0;
+                    let dot_pos = center + Vec2::new(angle.cos(), angle.sin()) * radius;
+                    let alpha = 1.0 - (i as f32 / 3.0) * 0.6;
+                    ui.painter().circle_filled(dot_pos, 4.0 - i as f32, STATUS_WARNING.gamma_multiply(alpha));
                 }
 
-                // Center pulse
-                let pulse = ((elapsed * 4.0).sin() + 1.0) / 2.0;
-                ui.painter().circle_filled(center, 8.0 + pulse * 3.0, STATUS_WARNING.gamma_multiply(0.3));
-
             } else {
-                // Disconnected state - subtle and muted
-                ui.painter().circle_filled(center, indicator_size / 2.0 - 6.0, BG_ELEVATED);
-                ui.painter().circle_stroke(center, indicator_size / 2.0 - 6.0, egui::Stroke::new(2.0, BG_HOVER));
-
-                // Shield icon (Unicode)
-                let font = egui::FontId::proportional(28.0);
+                // Disconnected - muted
+                ui.painter().circle_filled(center, radius, BG_ELEVATED);
+                ui.painter().circle_stroke(center, radius, egui::Stroke::new(1.5, BG_HOVER));
+                let font = egui::FontId::proportional(20.0);
                 let galley = ui.painter().layout_no_wrap("○".to_string(), font, TEXT_DIMMED);
-                let icon_pos = Pos2::new(center.x - galley.size().x / 2.0, center.y - galley.size().y / 2.0);
-                ui.painter().galley(icon_pos, galley, TEXT_DIMMED);
+                let pos = Pos2::new(center.x - galley.size().x / 2.0, center.y - galley.size().y / 2.0);
+                ui.painter().galley(pos, galley, TEXT_DIMMED);
             }
 
-            ui.add_space(24.0);
+            ui.add_space(16.0);
 
-            // Status text and button column
+            // Status text and button
             ui.vertical(|ui| {
-                // Main status text
                 let (status_text, status_detail) = if is_connected {
                     if let ConnectionState::Connected { server_region, .. } = state.vpn_state {
                         use crate::gui::theme::get_region_code;
@@ -161,19 +142,19 @@ fn render_connection_status(
                     else { TEXT_MUTED };
 
                 ui.label(egui::RichText::new(status_text)
-                    .size(22.0)
+                    .size(18.0)
                     .color(status_color)
                     .strong());
 
-                ui.add_space(4.0);
+                ui.add_space(2.0);
 
                 ui.label(egui::RichText::new(status_detail)
-                    .size(12.0)
+                    .size(11.0)
                     .color(TEXT_SECONDARY));
 
-                ui.add_space(16.0);
+                ui.add_space(12.0);
 
-                // Connect/Disconnect button with proper styling
+                // Connect/Disconnect button
                 let button_text = if is_connected { "Disconnect" }
                     else if is_connecting { "Connecting..." }
                     else { "Connect" };
@@ -182,37 +163,26 @@ fn render_connection_status(
                     else if is_connecting { STATUS_WARNING }
                     else { ACCENT_PRIMARY };
 
-                let text_color = if is_connecting {
-                    Color32::from_rgb(40, 40, 40)
-                } else {
-                    TEXT_PRIMARY
-                };
-
                 let button = egui::Button::new(
                     egui::RichText::new(button_text)
-                        .size(14.0)
-                        .color(text_color)
+                        .size(13.0)
+                        .color(if is_connecting { Color32::from_rgb(40, 40, 40) } else { TEXT_PRIMARY })
                         .strong()
                 )
                 .fill(if is_connecting { button_color.gamma_multiply(0.6) } else { button_color })
-                .stroke(egui::Stroke::new(1.0, button_color.gamma_multiply(0.8)))
-                .rounding(10.0)
-                .min_size(Vec2::new(160.0, 44.0));
+                .rounding(8.0)
+                .min_size(Vec2::new(140.0, 36.0));
 
                 if ui.add_enabled(!is_connecting, button).clicked() {
-                    if is_connected {
-                        action = HomePageAction::Disconnect;
-                    } else {
-                        action = HomePageAction::Connect;
-                    }
+                    action = if is_connected { HomePageAction::Disconnect } else { HomePageAction::Connect };
                 }
             });
         });
 
-        // Connection progress steps (when connecting)
+        // Progress steps when connecting
         if is_connecting {
-            ui.add_space(20.0);
-            render_connection_progress(ui, state, animations);
+            ui.add_space(16.0);
+            render_connection_progress(ui, state, &mut AnimationManager::default());
         }
     });
 
@@ -329,7 +299,7 @@ fn render_region_selector(
 
     let region_count = state.regions.len();
     let badge_text = if state.finding_best {
-        "Measuring latency...".to_string()
+        "Measuring...".to_string()
     } else {
         format!("{} regions", region_count)
     };
@@ -337,95 +307,59 @@ fn render_region_selector(
     section_card(ui, "SELECT REGION", Some("🌐"), Some(&badge_text), |ui| {
         if state.regions.is_empty() {
             if state.is_loading {
-                // Show loading state with skeleton cards
                 ui.vertical_centered(|ui| {
-                    ui.add_space(20.0);
+                    ui.add_space(16.0);
                     ui.spinner();
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
                     ui.label(egui::RichText::new("Loading servers...")
                         .size(12.0)
                         .color(TEXT_MUTED));
-                    ui.add_space(20.0);
+                    ui.add_space(16.0);
                 });
             } else {
                 ui.vertical_centered(|ui| {
-                    ui.add_space(20.0);
+                    ui.add_space(16.0);
                     ui.label(egui::RichText::new("No servers available")
                         .size(12.0)
                         .color(TEXT_MUTED));
-                    ui.add_space(20.0);
+                    ui.add_space(16.0);
                 });
             }
             return;
         }
 
-        // Calculate grid dimensions - 2 columns with proper spacing
-        let total_width = ui.available_width();
-        let gap = 12.0;
-        let card_width = (total_width - gap) / 2.0;
-        let card_height = 76.0; // Fixed height for all cards
-
-        // Collect regions into pairs for 2-column layout
-        let regions: Vec<_> = state.regions.iter().collect();
-        let mut i = 0;
-
-        while i < regions.len() {
-            ui.horizontal(|ui| {
-                // First column
-                if i < regions.len() {
-                    let region = &regions[i];
+        // Simple 2-column grid using egui's Grid
+        let num_columns = 2;
+        egui::Grid::new("region_grid")
+            .num_columns(num_columns)
+            .spacing([10.0, 10.0])
+            .min_col_width((ui.available_width() - 10.0) / 2.0)
+            .show(ui, |ui| {
+                for (i, region) in state.regions.iter().enumerate() {
                     let latency = state.latencies.get(&region.id).and_then(|l| *l);
                     let is_selected = state.selected_region == region.id;
                     let is_last = state.last_connected_region == Some(region.id.as_str());
 
-                    ui.allocate_ui(Vec2::new(card_width, card_height), |ui| {
-                        if region_card(
-                            ui,
-                            &region.id,
-                            get_region_flag(&region.id),
-                            get_region_name(&region.id),
-                            latency,
-                            is_selected,
-                            is_last,
-                            state.finding_best,
-                            animations,
-                        ) {
-                            action = HomePageAction::SelectRegion(region.id.clone());
-                        }
-                    });
-                }
+                    if region_card(
+                        ui,
+                        &region.id,
+                        get_region_flag(&region.id),
+                        get_region_name(&region.id),
+                        latency,
+                        is_selected,
+                        is_last,
+                        state.finding_best,
+                        animations,
+                    ) {
+                        action = HomePageAction::SelectRegion(region.id.clone());
+                    }
 
-                ui.add_space(gap);
-
-                // Second column
-                if i + 1 < regions.len() {
-                    let region = &regions[i + 1];
-                    let latency = state.latencies.get(&region.id).and_then(|l| *l);
-                    let is_selected = state.selected_region == region.id;
-                    let is_last = state.last_connected_region == Some(region.id.as_str());
-
-                    ui.allocate_ui(Vec2::new(card_width, card_height), |ui| {
-                        if region_card(
-                            ui,
-                            &region.id,
-                            get_region_flag(&region.id),
-                            get_region_name(&region.id),
-                            latency,
-                            is_selected,
-                            is_last,
-                            state.finding_best,
-                            animations,
-                        ) {
-                            action = HomePageAction::SelectRegion(region.id.clone());
-                        }
-                    });
+                    // End row after every 2 cards
+                    if (i + 1) % num_columns == 0 {
+                        ui.end_row();
+                    }
                 }
             });
-
-            // Row spacing
-            ui.add_space(gap);
-            i += 2;
-        }
     });
 
     action

@@ -124,7 +124,7 @@ pub fn region_card(
     let card_id = format!("region_card_{}", id);
     let hover_val = animations.get_hover_value(&card_id);
 
-    // Calculate colors based on selection and hover
+    // Colors based on selection and hover
     let (bg_color, border_color, border_width) = if is_selected {
         (
             lerp_color(ACCENT_PRIMARY.gamma_multiply(0.15), ACCENT_PRIMARY.gamma_multiply(0.22), hover_val),
@@ -133,110 +133,89 @@ pub fn region_card(
         )
     } else {
         (
-            lerp_color(BG_CARD, BG_HOVER, hover_val * 0.4),
-            lerp_color(BG_ELEVATED, ACCENT_PRIMARY.gamma_multiply(0.5), hover_val),
-            1.0 + hover_val * 0.5
+            lerp_color(BG_ELEVATED, BG_HOVER, hover_val * 0.5),
+            lerp_color(BG_HOVER, ACCENT_PRIMARY.gamma_multiply(0.5), hover_val),
+            1.0
         )
     };
 
-    // Calculate card dimensions
-    let card_width = ui.available_width();
-    let card_height = 72.0; // Fixed height for consistency
+    let mut clicked = false;
 
-    let response = egui::Frame::none()
+    egui::Frame::none()
         .fill(bg_color)
         .stroke(egui::Stroke::new(border_width, border_color))
-        .rounding(12.0)
-        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .rounding(10.0)
+        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
         .show(ui, |ui| {
-            // Constrain the inner UI to the card dimensions
-            ui.set_width(card_width - 28.0); // Account for margins
-            ui.set_min_height(card_height - 24.0);
-            ui.set_max_height(card_height - 24.0);
+            let response = ui.interact(
+                ui.max_rect(),
+                egui::Id::new(&card_id),
+                Sense::click(),
+            );
+
+            if response.clicked() {
+                clicked = true;
+            }
+
+            animations.animate_hover(&card_id, response.hovered(), hover_val);
 
             ui.horizontal(|ui| {
-                // Country code badge (replaces flag emoji)
+                // Country code badge
                 render_country_badge(ui, id);
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
-                // Name and latency column
+                // Name and latency
                 ui.vertical(|ui| {
-                    // Region name with optional badges
+                    // Region name with badges
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(name)
-                            .size(14.0)
-                            .color(if is_selected { TEXT_PRIMARY } else { TEXT_PRIMARY })
+                            .size(13.0)
+                            .color(TEXT_PRIMARY)
                             .strong());
 
                         if is_selected {
-                            ui.add_space(6.0);
-                            egui::Frame::none()
-                                .fill(ACCENT_PRIMARY.gamma_multiply(0.25))
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                                .show(ui, |ui| {
-                                    ui.label(egui::RichText::new("✓")
-                                        .size(10.0)
-                                        .color(ACCENT_PRIMARY));
-                                });
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("✓")
+                                .size(11.0)
+                                .color(ACCENT_PRIMARY));
                         } else if is_last_used {
-                            ui.add_space(6.0);
-                            egui::Frame::none()
-                                .fill(ACCENT_SECONDARY.gamma_multiply(0.2))
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                                .show(ui, |ui| {
-                                    ui.label(egui::RichText::new("LAST")
-                                        .size(9.0)
-                                        .color(ACCENT_SECONDARY));
-                                });
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("LAST")
+                                .size(9.0)
+                                .color(ACCENT_SECONDARY));
                         }
                     });
 
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
 
-                    // Latency display
+                    // Latency
                     if is_loading && latency.is_none() {
-                        // Animated loading dots
-                        ui.horizontal(|ui| {
-                            let dots = match ((ui.ctx().input(|i| i.time) * 2.0) as i32 % 4) {
-                                0 => "•",
-                                1 => "••",
-                                2 => "•••",
-                                _ => "••••",
-                            };
-                            ui.label(egui::RichText::new(format!("Measuring{}", dots))
-                                .size(11.0)
-                                .color(TEXT_MUTED));
-                        });
+                        let dots = match ((ui.ctx().input(|i| i.time) * 2.0) as i32 % 4) {
+                            0 => ".",
+                            1 => "..",
+                            2 => "...",
+                            _ => "....",
+                        };
+                        ui.label(egui::RichText::new(format!("Measuring{}", dots))
+                            .size(11.0)
+                            .color(TEXT_MUTED));
                     } else if let Some(ms) = latency {
                         let color = latency_color(ms);
-                        let fill = latency_fill_percent(ms);
-
                         ui.horizontal(|ui| {
-                            // Latency bar with track
-                            let bar_width = 60.0;
-                            let bar_height = 5.0;
+                            // Small latency bar
+                            let bar_width = 50.0;
+                            let bar_height = 4.0;
+                            let fill = latency_fill_percent(ms);
                             let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_width, bar_height), Sense::hover());
+                            ui.painter().rect_filled(rect, 2.0, BG_CARD);
+                            let fill_rect = egui::Rect::from_min_size(rect.min, Vec2::new(bar_width * fill, bar_height));
+                            ui.painter().rect_filled(fill_rect, 2.0, color);
 
-                            // Track background
-                            ui.painter().rect_filled(rect, 3.0, BG_ELEVATED);
-
-                            // Filled portion
-                            let fill_rect = egui::Rect::from_min_size(
-                                rect.min,
-                                Vec2::new(bar_width * fill, bar_height),
-                            );
-                            ui.painter().rect_filled(fill_rect, 3.0, color);
-
-                            ui.add_space(10.0);
-
-                            // Latency value
+                            ui.add_space(8.0);
                             ui.label(egui::RichText::new(format!("{}ms", ms))
-                                .size(12.0)
-                                .color(color)
-                                .strong());
+                                .size(11.0)
+                                .color(color));
                         });
                     } else {
                         ui.label(egui::RichText::new("—")
@@ -245,14 +224,9 @@ pub fn region_card(
                     }
                 });
             });
-        })
-        .response;
+        });
 
-    // Handle click and hover with proper interaction rect
-    let sense_response = ui.interact(response.rect, egui::Id::new(&card_id), Sense::click());
-    animations.animate_hover(&card_id, sense_response.hovered(), hover_val);
-
-    sense_response.clicked()
+    clicked
 }
 
 /// Boost preset card (Performance, Balanced, Quality)
@@ -321,20 +295,15 @@ pub fn section_card<R>(
     badge: Option<&str>,
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> R {
-    let available_width = ui.available_width();
-
     egui::Frame::none()
         .fill(BG_CARD)
         .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
         .rounding(CARD_ROUNDING)
-        .inner_margin(egui::Margin::symmetric(20.0, 18.0))
+        .inner_margin(egui::Margin::symmetric(20.0, 16.0))
         .show(ui, |ui| {
-            ui.set_min_width(available_width - 40.0); // Account for margins
-            ui.set_max_width(available_width - 40.0);
-
-            // Section header with clear visual styling
+            // Section header
             ui.horizontal(|ui| {
-                // Icon with subtle background
+                // Icon badge
                 if let Some(icon) = icon {
                     egui::Frame::none()
                         .fill(ACCENT_PRIMARY.gamma_multiply(0.1))
@@ -346,7 +315,7 @@ pub fn section_card<R>(
                     ui.add_space(8.0);
                 }
 
-                // Title with proper typography
+                // Title
                 ui.label(egui::RichText::new(title)
                     .size(13.0)
                     .color(TEXT_SECONDARY)
@@ -368,14 +337,10 @@ pub fn section_card<R>(
                 }
             });
 
-            // Separator line
+            // Separator
             ui.add_space(12.0);
-            let sep_rect = egui::Rect::from_min_size(
-                ui.cursor().min,
-                Vec2::new(ui.available_width(), 1.0),
-            );
-            ui.painter().rect_filled(sep_rect, 0.0, BG_ELEVATED);
-            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(12.0);
 
             add_contents(ui)
         })

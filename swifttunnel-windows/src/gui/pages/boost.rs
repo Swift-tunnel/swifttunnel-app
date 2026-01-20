@@ -117,26 +117,25 @@ fn render_profile_presets(
 ) -> BoostPageAction {
     let mut action = BoostPageAction::None;
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
-        let card_width = (ui.available_width() - 20.0) / 3.0;
+    let presets = [
+        (OptimizationProfile::LowEnd, "🚀", "Performance", "Max FPS"),
+        (OptimizationProfile::Balanced, "⚖", "Balanced", "Recommended"),
+        (OptimizationProfile::HighEnd, "✨", "Quality", "Stability"),
+    ];
 
-        let presets = [
-            (OptimizationProfile::LowEnd, "🚀", "Performance", "Max FPS"),
-            (OptimizationProfile::Balanced, "⚖", "Balanced", "Recommended"),
-            (OptimizationProfile::HighEnd, "✨", "Quality", "Stability"),
-        ];
-
-        for (profile, icon, name, desc) in presets {
-            ui.allocate_ui(Vec2::new(card_width, 80.0), |ui| {
+    egui::Grid::new("profile_presets_grid")
+        .num_columns(3)
+        .spacing([10.0, 10.0])
+        .min_col_width((ui.available_width() - 20.0) / 3.0)
+        .show(ui, |ui| {
+            for (profile, icon, name, desc) in presets {
                 let is_selected = state.selected_profile == profile;
 
                 if preset_card(ui, &format!("{:?}", profile), icon, name, desc, is_selected, animations) {
                     action = BoostPageAction::SelectProfile(profile);
                 }
-            });
-        }
-    });
+            }
+        });
 
     action
 }
@@ -174,44 +173,39 @@ fn render_system_optimizations(
             ("throttling", "⚡", "No Throttling", "Disable network throttling", net.disable_network_throttling, BoostSetting::DisableThrottling),
         ];
 
-        // 2-column layout
-        let columns = 2;
-        for chunk in settings.chunks(columns) {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                let item_width = (ui.available_width() - 10.0) / columns as f32;
+        // 2-column grid layout
+        egui::Grid::new("boost_settings_grid")
+            .num_columns(2)
+            .spacing([10.0, 8.0])
+            .min_col_width((ui.available_width() - 10.0) / 2.0)
+            .show(ui, |ui| {
+                for (i, (id, icon, title, desc, enabled, setting)) in settings.iter().enumerate() {
+                    let is_expanded = state.expanded_info.contains(*id);
 
-                for (id, icon, title, desc, enabled, setting) in chunk {
-                    ui.allocate_ui(Vec2::new(item_width, 0.0), |ui| {
-                        let is_expanded = state.expanded_info.contains(*id);
+                    let (clicked, expand_clicked) = boost_toggle(
+                        ui,
+                        id,
+                        icon,
+                        title,
+                        desc,
+                        *enabled && state.optimizations_active,
+                        animations,
+                        is_expanded,
+                    );
 
-                        let (clicked, expand_clicked) = boost_toggle(
-                            ui,
-                            id,
-                            icon,
-                            title,
-                            desc,
-                            *enabled && state.optimizations_active,
-                            animations,
-                            is_expanded,
-                        );
+                    if clicked {
+                        action = BoostPageAction::ToggleSetting(*setting);
+                    }
+                    if expand_clicked {
+                        action = BoostPageAction::ToggleExpand(id.to_string());
+                    }
 
-                        if clicked {
-                            action = BoostPageAction::ToggleSetting(*setting);
-                        }
-                        if expand_clicked {
-                            action = BoostPageAction::ToggleExpand(id.to_string());
-                        }
-                    });
-                }
-
-                // Pad incomplete row
-                for _ in chunk.len()..columns {
-                    ui.allocate_space(Vec2::new((ui.available_width() - 10.0) / columns as f32, 0.0));
+                    // End row after every 2 items
+                    if (i + 1) % 2 == 0 {
+                        ui.end_row();
+                    }
                 }
             });
-            ui.add_space(8.0);
-        }
     });
 
     action
