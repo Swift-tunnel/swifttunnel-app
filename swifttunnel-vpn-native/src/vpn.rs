@@ -238,7 +238,7 @@ impl VpnManager {
         let error_msg = Arc::clone(&self.error_msg);
 
         let tunnel_thread = thread::spawn(move || {
-            run_tunnel(tunn, socket, session, state_code, stop_flag, error_msg);
+            run_tunnel(Box::new(tunn), socket, session, state_code, stop_flag, error_msg);
         });
 
         self.tunnel_thread = Some(tunnel_thread);
