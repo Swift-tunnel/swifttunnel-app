@@ -3791,7 +3791,7 @@ impl BoosterApp {
                 if let Ok(mut connection) = vpn.lock() {
                     connection.disconnect().await
                 } else {
-                    Err(anyhow::anyhow!("Failed to acquire VPN lock"))
+                    Err(crate::vpn::VpnError::Connection("Failed to acquire VPN lock".to_string()))
                 }
             }).await
         });
