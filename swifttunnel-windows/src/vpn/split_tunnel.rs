@@ -384,13 +384,12 @@ impl SplitTunnelDriver {
         log::debug!("Initializing split tunnel driver...");
         self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE)?;
 
-        // Step 2: Register process tree (required before SET_CONFIGURATION)
-        // The driver needs to know about processes BEFORE we can configure routing
-        // This will scan for running Roblox processes and register them
-        let config_clone = config.clone();
-        let proc_data = self.serialize_process_tree(&config_clone)?;
-        log::debug!("Registering process tree ({} bytes)...", proc_data.len());
-        self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
+        // Step 2: Register process tree with System placeholder FIRST
+        // IMPORTANT: The Mullvad driver requires SET_CONFIGURATION before registering
+        // actual process PIDs. We register a placeholder first, then refresh after config.
+        let placeholder_data = self.serialize_placeholder_process_tree()?;
+        log::debug!("Registering placeholder process tree ({} bytes)...", placeholder_data.len());
+        self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &placeholder_data)?;
 
         // Step 3: Register IP addresses for the tunnel interface
         // Uses ST_IP_ADDRESSES struct (40 bytes)
@@ -407,7 +406,81 @@ impl SplitTunnelDriver {
         self.state = DriverState::Active;
 
         log::info!("Split tunnel configured successfully");
+
+        // Step 5: NOW refresh to detect any already-running target processes
+        // This is the key fix - we must register actual PIDs AFTER SET_CONFIGURATION
+        log::debug!("Refreshing process list to detect already-running targets...");
+        match self.refresh_processes() {
+            Ok(has_processes) => {
+                if has_processes {
+                    log::info!("Already-running target processes detected and registered");
+                } else {
+                    log::info!("No target processes currently running, will detect when they start");
+                }
+            }
+            Err(e) => {
+                // Don't fail configuration if refresh fails - processes will be detected on next refresh
+                log::warn!("Failed to refresh processes after configuration: {}", e);
+            }
+        }
+
         Ok(())
+    }
+
+    /// Serialize a placeholder process tree (just System process)
+    /// Used during initial configuration before SET_CONFIGURATION is called
+    fn serialize_placeholder_process_tree(&mut self) -> VpnResult<Vec<u8>> {
+        // Register System process (PID 4) as placeholder
+        // The driver needs at least one entry, but we can't register actual target PIDs
+        // until after SET_CONFIGURATION is complete
+        let processes_to_register: Vec<(u64, u64, String)> = vec![(4, 0, "System".to_string())];
+
+        // Clear registered PIDs - will be populated by refresh_processes()
+        self.registered_pids.clear();
+
+        // Calculate sizes
+        let header_size: usize = 16;
+        let entry_size: usize = 32;
+        let num_entries = processes_to_register.len();
+
+        // Convert paths to wide strings
+        let wide_paths: Vec<Vec<u16>> = processes_to_register
+            .iter()
+            .map(|(_, _, path)| path.encode_utf16().collect())
+            .collect();
+
+        let string_buffer_size: usize = wide_paths.iter().map(|w| w.len() * 2).sum();
+        let total_size = header_size + (entry_size * num_entries) + string_buffer_size;
+
+        let mut data = Vec::with_capacity(total_size);
+
+        // Header
+        data.extend_from_slice(&(num_entries as u64).to_le_bytes()); // num_entries
+        data.extend_from_slice(&(total_size as u64).to_le_bytes()); // total_length
+
+        // Entries - calculate relative offsets
+        let mut relative_offset: usize = 0;
+        for (i, (pid, parent_pid, _)) in processes_to_register.iter().enumerate() {
+            let byte_length = (wide_paths[i].len() * 2) as u16;
+
+            data.extend_from_slice(&(*pid as u64).to_le_bytes()); // pid
+            data.extend_from_slice(&(*parent_pid as u64).to_le_bytes()); // parent_pid
+            data.extend_from_slice(&(relative_offset as u64).to_le_bytes()); // image_name_offset (RELATIVE)
+            data.extend_from_slice(&byte_length.to_le_bytes()); // image_name_size (2 bytes)
+            data.extend_from_slice(&[0u8; 6]); // padding to 32 bytes
+
+            relative_offset += byte_length as usize;
+        }
+
+        // String buffer
+        for wide in &wide_paths {
+            for w in wide {
+                data.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+
+        log::debug!("Placeholder process tree: {} entries, {} total bytes", num_entries, data.len());
+        Ok(data)
     }
 
     /// Serialize process tree for REGISTER_PROCESSES
