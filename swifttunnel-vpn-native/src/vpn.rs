@@ -143,7 +143,9 @@ impl VpnManager {
         self.state_code.store(STATE_CREATING_ADAPTER, Ordering::SeqCst);
         log::info!("Creating Wintun adapter with IP: {}", ip);
 
-        let wintun = match wintun::load() {
+        // SAFETY: wintun.dll must be available in the executable directory or system path.
+        // This is checked by swifttunnel_is_available() before connecting.
+        let wintun = match unsafe { wintun::load() } {
             Ok(w) => w,
             Err(e) => {
                 let msg = format!("Failed to load wintun.dll: {}", e);
