@@ -2,6 +2,7 @@
 //!
 //! Saves and loads app settings to/from disk
 
+use crate::network_analyzer::NetworkTestResultsCache;
 use crate::structs::Config;
 use crate::updater::UpdateSettings;
 use log::{debug, error, info};
@@ -75,6 +76,9 @@ pub struct AppSettings {
     /// Selected game presets for split tunneling (stored as strings: "roblox", "valorant", "fortnite")
     #[serde(default = "default_game_presets")]
     pub selected_game_presets: Vec<String>,
+    /// Cached network test results
+    #[serde(default)]
+    pub network_test_results: NetworkTestResultsCache,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -108,6 +112,7 @@ impl Default for AppSettings {
             last_connected_region: None,
             expanded_boost_info: Vec::new(),
             selected_game_presets: default_game_presets(),
+            network_test_results: NetworkTestResultsCache::default(),
         }
     }
 }
