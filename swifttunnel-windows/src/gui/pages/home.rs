@@ -312,7 +312,7 @@ fn render_region_selector(
 
 /// Render quick info stats when connected
 fn render_quick_info(ui: &mut Ui, state: &HomePageState) {
-    if let ConnectionState::Connected { assigned_ip, connected_at, tunneled_processes, .. } = state.vpn_state {
+    if let ConnectionState::Connected { ref assigned_ip, since, ref tunneled_processes, .. } = state.vpn_state {
         ui.horizontal(|ui| {
             let card_width = (ui.available_width() - 20.0) / 3.0;
 
@@ -323,7 +323,7 @@ fn render_quick_info(ui: &mut Ui, state: &HomePageState) {
             ui.add_space(10.0);
 
             ui.allocate_ui(Vec2::new(card_width, 60.0), |ui| {
-                let uptime = connected_at.elapsed();
+                let uptime = since.elapsed();
                 let hours = uptime.as_secs() / 3600;
                 let minutes = (uptime.as_secs() % 3600) / 60;
                 let seconds = uptime.as_secs() % 60;

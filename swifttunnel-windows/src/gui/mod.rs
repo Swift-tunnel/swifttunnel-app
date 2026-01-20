@@ -474,7 +474,7 @@ impl BoosterApp {
                         }
                         Err(e) => {
                             log::error!("Login failed: {}", e);
-                            let _ = tx.send(AuthState::Error(e));
+                            let _ = tx.send(AuthState::Error(e.to_string()));
                         }
                     }
                 }
