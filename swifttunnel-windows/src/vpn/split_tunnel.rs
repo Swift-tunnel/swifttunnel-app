@@ -327,6 +327,59 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Reset the split tunnel driver on startup to clean up any stale state
+    /// from a previous crash or force kill. This is a static function that
+    /// doesn't require an instance.
+    pub fn cleanup_stale_state() {
+        use windows::core::PCSTR;
+        use windows::Win32::Foundation::*;
+        use windows::Win32::Storage::FileSystem::*;
+        use windows::Win32::System::IO::DeviceIoControl;
+
+        log::info!("Checking for stale split tunnel state...");
+
+        unsafe {
+            let path = std::ffi::CString::new(DEVICE_PATH).unwrap();
+            let handle = CreateFileA(
+                PCSTR(path.as_ptr() as *const u8),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            );
+
+            match handle {
+                Ok(h) => {
+                    // Send RESET command to clear any stale state
+                    let mut bytes_returned: u32 = 0;
+                    let result = DeviceIoControl(
+                        h,
+                        ioctl::IOCTL_ST_RESET,
+                        None,
+                        0,
+                        None,
+                        0,
+                        Some(&mut bytes_returned),
+                        None,
+                    );
+
+                    if result.is_ok() {
+                        log::info!("Split tunnel driver reset successfully");
+                    } else {
+                        log::debug!("Split tunnel reset returned error (may be already clean)");
+                    }
+
+                    let _ = CloseHandle(h);
+                }
+                Err(_) => {
+                    log::debug!("Split tunnel driver not available for cleanup (not installed)");
+                }
+            }
+        }
+    }
+
     /// Open connection to the driver
     pub fn open(&mut self) -> VpnResult<()> {
         use windows::core::PCSTR;

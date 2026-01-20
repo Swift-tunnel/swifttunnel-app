@@ -776,9 +776,14 @@ impl eframe::App for BoosterApp {
         }
 
         // Only actually quit when tray "Quit" is clicked
-        if quit {
+        if quit && !self.force_quit {
             log::info!("Tray Quit clicked - forcing quit");
             self.force_quit = true;
+
+            // Shutdown tray threads first
+            if let Some(ref tray) = self.system_tray {
+                tray.shutdown();
+            }
 
             // Disconnect VPN before quitting to ensure proper adapter cleanup
             self.disconnect_vpn_sync();
@@ -787,7 +792,10 @@ impl eframe::App for BoosterApp {
             self.settings_dirty = true;
             self.last_save_time = std::time::Instant::now() - std::time::Duration::from_secs(10);
             self.save_if_needed(ctx);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+
+            // Force immediate process exit - ViewportCommand::Close is unreliable after rt.block_on()
+            log::info!("Exiting process...");
+            std::process::exit(0);
         }
 
         // Handle close button - minimize to tray instead of closing if enabled
