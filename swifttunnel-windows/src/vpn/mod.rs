@@ -8,6 +8,7 @@
 //! - tunnel.rs: WireGuard tunnel using BoringTun
 //! - wfp.rs: Windows Filtering Platform integration for split tunneling
 //! - split_tunnel.rs: Per-process routing via win-split-tunnel driver
+//! - routes.rs: Route management for VPN traffic routing
 //! - connection.rs: Connection state machine and lifecycle management
 //! - servers.rs: Server list and latency measurement
 
@@ -16,6 +17,7 @@ pub mod adapter;
 pub mod tunnel;
 pub mod wfp;
 pub mod split_tunnel;
+pub mod routes;
 pub mod connection;
 pub mod servers;
 
@@ -23,7 +25,8 @@ pub use config::{fetch_vpn_config, VpnConfigRequest};
 pub use adapter::WintunAdapter;
 pub use tunnel::WireguardTunnel;
 pub use wfp::{WfpEngine, setup_wfp_for_split_tunnel};
-pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set};
+pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
+pub use routes::RouteManager;
 pub use connection::{VpnConnection, ConnectionState};
 pub use servers::{
     DynamicServerList, DynamicServerInfo, DynamicGamingRegion,
@@ -53,6 +56,9 @@ pub enum VpnError {
 
     #[error("Network error: {0}")]
     Network(String),
+
+    #[error("Route error: {0}")]
+    Route(String),
 
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
