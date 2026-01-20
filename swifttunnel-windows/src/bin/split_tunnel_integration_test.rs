@@ -1190,21 +1190,26 @@ fn build_configuration(exe_path: &str) -> Vec<u8> {
     let wide: Vec<u16> = device_path.encode_utf16().collect();
     let string_bytes = wide.len() * 2;
 
-    let total_size = 16 + 32 + string_bytes; // header + 1 entry + strings
+    // ConfigurationEntry layout (24 bytes total):
+    //   protocol: u64 (8 bytes)
+    //   image_name_offset: u64 (8 bytes) - offset from start of strings section
+    //   image_name_size: u16 (2 bytes) - size in bytes
+    //   _padding: [u8; 6] (6 bytes)
+    let entry_size = 24;
+    let total_size = 16 + entry_size + string_bytes; // header + 1 entry + strings
     let mut data = Vec::with_capacity(total_size);
 
     // Header
     data.extend_from_slice(&1u64.to_le_bytes()); // num_entries
     data.extend_from_slice(&(total_size as u64).to_le_bytes()); // total_length
 
-    // ConfigurationEntry (32 bytes)
+    // ConfigurationEntry (24 bytes - NOT 32!)
     data.extend_from_slice(&0u64.to_le_bytes()); // protocol (unused)
-    data.extend_from_slice(&0u64.to_le_bytes()); // padding
-    data.extend_from_slice(&0u64.to_le_bytes()); // image_name_offset = 0 (relative)
+    data.extend_from_slice(&0u64.to_le_bytes()); // image_name_offset = 0 (relative to strings section)
     data.extend_from_slice(&(string_bytes as u16).to_le_bytes()); // image_name_size
     data.extend_from_slice(&[0u8; 6]); // padding
 
-    // Strings
+    // Strings section
     for w in &wide {
         data.extend_from_slice(&w.to_le_bytes());
     }
