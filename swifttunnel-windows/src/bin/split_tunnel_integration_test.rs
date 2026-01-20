@@ -1351,7 +1351,9 @@ impl Drop for WfpEngineHandle {
 }
 
 /// Setup WFP with STRICT error handling
-/// Returns Err if WFP setup fails (split tunnel will not work without it)
+/// NOTE: We do NOT create provider/sublayer ourselves anymore.
+/// The Mullvad driver creates its own provider with FWPM_SESSION_FLAG_DYNAMIC.
+/// If we create them first, driver INITIALIZE fails with ALREADY_EXISTS.
 fn setup_wfp_strict(interface_luid: u64) -> Result<WfpEngineHandle, String> {
     println!("    Opening WFP engine...");
 
@@ -1376,77 +1378,10 @@ fn setup_wfp_strict(interface_luid: u64) -> Result<WfpEngineHandle, String> {
     println!("    Cleaning up stale WFP objects...");
     cleanup_wfp_objects(handle);
 
-    // Create provider (or verify it exists)
-    let provider_name: Vec<u16> = "Mullvad Split Tunnel".encode_utf16().chain(std::iter::once(0)).collect();
-    let provider_desc: Vec<u16> = "Mullvad Split Tunnel WFP provider".encode_utf16().chain(std::iter::once(0)).collect();
-
-    let provider = FWPM_PROVIDER0 {
-        providerKey: ST_FW_PROVIDER_KEY,
-        displayData: FWPM_DISPLAY_DATA0 {
-            name: windows::core::PWSTR(provider_name.as_ptr() as *mut u16),
-            description: windows::core::PWSTR(provider_desc.as_ptr() as *mut u16),
-        },
-        flags: 0, // Non-persistent
-        providerData: FWP_BYTE_BLOB::default(),
-        serviceName: windows::core::PWSTR::null(),
-    };
-
-    let result = unsafe { FwpmProviderAdd0(handle, &provider, None) };
-    if result != 0 && result != FWP_E_ALREADY_EXISTS.0 as u32 {
-        unsafe { let _ = FwpmEngineClose0(handle); }
-        return Err(format!("Failed to add WFP provider: 0x{:08X}", result));
-    }
-    println!("    ✓ WFP provider registered (GUID: {:?})", ST_FW_PROVIDER_KEY);
-
-    // Create baseline sublayer (REQUIRED for split tunnel filters)
-    let sublayer_name: Vec<u16> = "WinFW Baseline Sublayer".encode_utf16().chain(std::iter::once(0)).collect();
-    let sublayer_desc: Vec<u16> = "Mullvad split tunnel WFP sublayer".encode_utf16().chain(std::iter::once(0)).collect();
-
-    let sublayer = FWPM_SUBLAYER0 {
-        subLayerKey: ST_FW_WINFW_BASELINE_SUBLAYER_KEY,
-        displayData: FWPM_DISPLAY_DATA0 {
-            name: windows::core::PWSTR(sublayer_name.as_ptr() as *mut u16),
-            description: windows::core::PWSTR(sublayer_desc.as_ptr() as *mut u16),
-        },
-        flags: 0, // Non-persistent
-        providerKey: std::ptr::null_mut(),
-        providerData: FWP_BYTE_BLOB::default(),
-        weight: 0x8000,
-    };
-
-    let result = unsafe { FwpmSubLayerAdd0(handle, &sublayer, None) };
-    if result != 0 && result != FWP_E_ALREADY_EXISTS.0 as u32 {
-        unsafe { let _ = FwpmEngineClose0(handle); }
-        return Err(format!(
-            "Failed to add WFP baseline sublayer: 0x{:08X}\nThe driver needs this sublayer to create filters.",
-            result
-        ));
-    }
-    println!("    ✓ WFP baseline sublayer created (GUID: {:?})", ST_FW_WINFW_BASELINE_SUBLAYER_KEY);
-
-    // Create DNS sublayer (for DNS filtering)
-    let dns_sublayer_name: Vec<u16> = "WinFW DNS Sublayer".encode_utf16().chain(std::iter::once(0)).collect();
-    let dns_sublayer_desc: Vec<u16> = "Mullvad DNS traffic sublayer".encode_utf16().chain(std::iter::once(0)).collect();
-
-    let dns_sublayer = FWPM_SUBLAYER0 {
-        subLayerKey: ST_FW_WINFW_DNS_SUBLAYER_KEY,
-        displayData: FWPM_DISPLAY_DATA0 {
-            name: windows::core::PWSTR(dns_sublayer_name.as_ptr() as *mut u16),
-            description: windows::core::PWSTR(dns_sublayer_desc.as_ptr() as *mut u16),
-        },
-        flags: 0,
-        providerKey: std::ptr::null_mut(),
-        providerData: FWP_BYTE_BLOB::default(),
-        weight: 0x9000,
-    };
-
-    let result = unsafe { FwpmSubLayerAdd0(handle, &dns_sublayer, None) };
-    if result != 0 && result != FWP_E_ALREADY_EXISTS.0 as u32 {
-        println!("    ⚠ DNS sublayer not created (0x{:08X}) - DNS filtering may not work", result);
-    } else {
-        println!("    ✓ WFP DNS sublayer created");
-    }
-
+    // NOTE: We intentionally do NOT create provider or sublayers here!
+    // The Mullvad driver creates its own provider during INITIALIZE with
+    // FWPM_SESSION_FLAG_DYNAMIC. If we create them first, driver fails.
+    println!("    ✓ WFP cleanup complete (driver will create its own provider)");
     println!("    Interface LUID for filters: {} (0x{:016X})", interface_luid, interface_luid);
 
     Ok(WfpEngineHandle { handle })
