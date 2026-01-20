@@ -433,9 +433,34 @@ impl SplitTunnelDriver {
             config.tunnel_interface_luid
         );
 
+        // Step 0: Reset any stale state from previous session
+        // This clears WFP callouts that might conflict with re-initialization
+        // CRITICAL: Without this, driver INITIALIZE fails with ALREADY_EXISTS if
+        // there's leftover state from a previous app crash or force kill
+        log::debug!("Resetting split tunnel driver (clearing stale state)...");
+        let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET);
+
         // Step 1: Initialize the driver (required before any other operations)
+        // This transitions state from STARTED (1) -> INITIALIZED (2)
         log::debug!("Initializing split tunnel driver...");
         self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE)?;
+
+        // Verify driver state advanced to INITIALIZED (state >= 2)
+        // If it didn't, something went wrong during initialization
+        match self.get_driver_state() {
+            Ok(state) => {
+                log::debug!("Driver state after INITIALIZE: {} ({})", state, Self::state_name(state));
+                if state < 2 {
+                    return Err(VpnError::SplitTunnel(format!(
+                        "Driver failed to initialize: state is {} ({}) but expected >= 2 (INITIALIZED)",
+                        state, Self::state_name(state)
+                    )));
+                }
+            }
+            Err(e) => {
+                log::warn!("Could not verify driver state after INITIALIZE: {}", e);
+            }
+        }
 
         // Step 2: Register process tree with System placeholder FIRST
         // IMPORTANT: The Mullvad driver requires SET_CONFIGURATION before registering
@@ -451,9 +476,27 @@ impl SplitTunnelDriver {
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
 
         // Step 4: Set configuration (which apps to tunnel)
+        // This transitions state from READY (3) -> ENGAGED (4)
         let config_data = self.serialize_config(&config)?;
         log::debug!("Setting split tunnel configuration ({} bytes)...", config_data.len());
         self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
+
+        // Verify driver reached ENGAGED state (4)
+        // This is CRITICAL - if driver isn't ENGAGED, traffic won't be routed
+        match self.get_driver_state() {
+            Ok(state) => {
+                log::info!("Driver state after configuration: {} ({})", state, Self::state_name(state));
+                if state != 4 {
+                    log::warn!(
+                        "Driver not in ENGAGED state! Traffic routing may not work. State: {} ({})",
+                        state, Self::state_name(state)
+                    );
+                }
+            }
+            Err(e) => {
+                log::warn!("Could not verify final driver state: {}", e);
+            }
+        }
 
         self.config = Some(config);
         self.state = DriverState::Active;
@@ -775,6 +818,19 @@ impl SplitTunnelDriver {
         self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
 
         Ok(())
+    }
+
+    /// Convert driver state code to human-readable name
+    fn state_name(state: u64) -> &'static str {
+        match state {
+            0 => "NONE",
+            1 => "STARTED",
+            2 => "INITIALIZED",
+            3 => "READY",
+            4 => "ENGAGED",
+            5 => "ZOMBIE",
+            _ => "UNKNOWN",
+        }
     }
 
     /// Get current driver state from kernel

@@ -113,7 +113,9 @@ impl WfpEngine {
                 name: windows::core::PWSTR(name_wide.as_ptr() as *mut u16),
                 description: windows::core::PWSTR(desc_wide.as_ptr() as *mut u16),
             },
-            flags: FWPM_PROVIDER_FLAG_PERSISTENT,
+            // Non-persistent: cleaned up when WFP engine closes (session-scoped)
+            // PERSISTENT flag caused driver INITIALIZE to fail with ALREADY_EXISTS
+            flags: FWPM_PROVIDER_FLAGS(0),
             providerData: FWP_BYTE_BLOB::default(),
             serviceName: windows::core::PWSTR::null(),
         };
@@ -167,7 +169,9 @@ impl WfpEngine {
                 name: windows::core::PWSTR(name_wide.as_ptr() as *mut u16),
                 description: windows::core::PWSTR(desc_wide.as_ptr() as *mut u16),
             },
-            flags: FWPM_SUBLAYER_FLAG_PERSISTENT,
+            // Non-persistent: cleaned up when WFP engine closes (session-scoped)
+            // PERSISTENT flag caused driver INITIALIZE to fail with ALREADY_EXISTS
+            flags: FWPM_SUBLAYER_FLAGS(0),
             providerKey: ptr::addr_of!(ST_FW_PROVIDER_KEY) as *mut GUID,
             providerData: FWP_BYTE_BLOB::default(),
             weight: 0x8000, // Medium-high weight
