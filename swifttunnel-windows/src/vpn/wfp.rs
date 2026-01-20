@@ -32,6 +32,24 @@ static ST_FW_WINFW_BASELINE_SUBLAYER_KEY: GUID = GUID::from_values(
     [0xAA, 0xDD, 0x7F, 0x35, 0x8D, 0xEF, 0x20, 0x2D],
 );
 
+/// Legacy SwiftTunnel VPN Provider GUID (from old code, has PERSISTENT flag)
+/// Must be cleaned up to prevent driver INITIALIZE failures
+static LEGACY_ST_PROVIDER_KEY: GUID = GUID::from_values(
+    0x5f7b3a1e,
+    0x9d4c,
+    0x4b2a,
+    [0x8e, 0x6f, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f],
+);
+
+/// Legacy SwiftTunnel Split Tunnel Sublayer GUID (from old code, has PERSISTENT flag)
+/// Must be cleaned up to prevent driver INITIALIZE failures
+static LEGACY_ST_SUBLAYER_KEY: GUID = GUID::from_values(
+    0x6a8c4b2f,
+    0xae5d,
+    0x5c3b,
+    [0x9f, 0x70, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x70],
+);
+
 /// Provider name
 const PROVIDER_NAME: &str = "Mullvad Split Tunnel";
 const PROVIDER_DESC: &str = "Mullvad Split Tunnel WFP provider";
@@ -301,7 +319,9 @@ impl WfpEngine {
         let result = unsafe {
             FwpmSubLayerDeleteByKey0(self.handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
         };
-        if result != 0 && result != FWP_E_SUBLAYER_NOT_FOUND.0 as u32 {
+        if result == 0 {
+            log::info!("Deleted Mullvad baseline sublayer");
+        } else if result != FWP_E_SUBLAYER_NOT_FOUND.0 as u32 {
             log::warn!("Failed to delete sublayer: 0x{:08X}", result);
         }
 
@@ -309,8 +329,26 @@ impl WfpEngine {
         let result = unsafe {
             FwpmProviderDeleteByKey0(self.handle, &ST_FW_PROVIDER_KEY)
         };
-        if result != 0 && result != FWP_E_PROVIDER_NOT_FOUND.0 as u32 {
+        if result == 0 {
+            log::info!("Deleted Mullvad provider");
+        } else if result != FWP_E_PROVIDER_NOT_FOUND.0 as u32 {
             log::warn!("Failed to delete provider: 0x{:08X}", result);
+        }
+
+        // Clean up LEGACY SwiftTunnel WFP objects (from old code with PERSISTENT flags)
+        // These must be removed or driver INITIALIZE will fail with ALREADY_EXISTS
+        let result = unsafe {
+            FwpmSubLayerDeleteByKey0(self.handle, &LEGACY_ST_SUBLAYER_KEY)
+        };
+        if result == 0 {
+            log::info!("Deleted legacy SwiftTunnel sublayer");
+        }
+
+        let result = unsafe {
+            FwpmProviderDeleteByKey0(self.handle, &LEGACY_ST_PROVIDER_KEY)
+        };
+        if result == 0 {
+            log::info!("Deleted legacy SwiftTunnel provider");
         }
 
         log::info!("WFP cleanup complete");

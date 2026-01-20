@@ -915,6 +915,24 @@ static ST_FW_WINFW_DNS_SUBLAYER_KEY: GUID = GUID::from_values(
     [0xAA, 0xCE, 0x51, 0x25, 0x6E, 0xF4, 0x81, 0xF3],
 );
 
+/// Legacy SwiftTunnel VPN Provider GUID (from old code, has PERSISTENT flag)
+/// Must be cleaned up to prevent driver INITIALIZE failures
+static LEGACY_ST_PROVIDER_KEY: GUID = GUID::from_values(
+    0x5f7b3a1e,
+    0x9d4c,
+    0x4b2a,
+    [0x8e, 0x6f, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f],
+);
+
+/// Legacy SwiftTunnel Split Tunnel Sublayer GUID (from old code, has PERSISTENT flag)
+/// Must be cleaned up to prevent driver INITIALIZE failures
+static LEGACY_ST_SUBLAYER_KEY: GUID = GUID::from_values(
+    0x6a8c4b2f,
+    0xae5d,
+    0x5c3b,
+    [0x9f, 0x70, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x70],
+);
+
 /// RPC authentication constant
 const RPC_C_AUTHN_WINNT: u32 = 10;
 
@@ -1043,14 +1061,14 @@ fn cleanup_wfp_objects(handle: HANDLE) {
         FwpmSubLayerDeleteByKey0(handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
     };
     if result == 0 {
-        println!("    Deleted stale baseline sublayer");
+        println!("    Deleted stale baseline sublayer (Mullvad)");
     }
 
     let result = unsafe {
         FwpmSubLayerDeleteByKey0(handle, &ST_FW_WINFW_DNS_SUBLAYER_KEY)
     };
     if result == 0 {
-        println!("    Deleted stale DNS sublayer");
+        println!("    Deleted stale DNS sublayer (Mullvad)");
     }
 
     // Delete provider
@@ -1058,6 +1076,22 @@ fn cleanup_wfp_objects(handle: HANDLE) {
         FwpmProviderDeleteByKey0(handle, &ST_FW_PROVIDER_KEY)
     };
     if result == 0 {
-        println!("    Deleted stale provider");
+        println!("    Deleted stale provider (Mullvad)");
+    }
+
+    // Clean up LEGACY SwiftTunnel WFP objects (from old code with PERSISTENT flags)
+    // These must be removed or driver INITIALIZE will fail with ALREADY_EXISTS
+    let result = unsafe {
+        FwpmSubLayerDeleteByKey0(handle, &LEGACY_ST_SUBLAYER_KEY)
+    };
+    if result == 0 {
+        println!("    Deleted legacy SwiftTunnel sublayer (PERSISTENT)");
+    }
+
+    let result = unsafe {
+        FwpmProviderDeleteByKey0(handle, &LEGACY_ST_PROVIDER_KEY)
+    };
+    if result == 0 {
+        println!("    Deleted legacy SwiftTunnel provider (PERSISTENT)");
     }
 }
