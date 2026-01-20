@@ -78,12 +78,13 @@ pub fn render_header(
                 ui.add_space(14.0);
                 let status_text = if is_connected {
                     if let Some(region) = connected_region {
-                        let flag = get_region_flag(region);
+                        use crate::gui::theme::get_region_code;
+                        let code = get_region_code(region);
                         let name = get_region_name(region);
                         if let Some(ms) = connected_latency {
-                            format!("Protected • {} {} • {}ms", flag, name, ms)
+                            format!("Protected • [{}] {} • {}ms", code, name, ms)
                         } else {
-                            format!("Protected • {} {}", flag, name)
+                            format!("Protected • [{}] {}", code, name)
                         }
                     } else {
                         "Protected".to_string()

@@ -243,8 +243,40 @@ pub fn ease_in_out_sine(t: f32) -> f32 {
     -(((t * std::f32::consts::PI).cos() - 1.0) / 2.0)
 }
 
-/// Get country flag emoji for region
+/// Get ISO country code for region (Windows can't render flag emojis properly)
+pub fn get_region_code(region_id: &str) -> &'static str {
+    match region_id {
+        "singapore" => "SG",
+        "mumbai" => "IN",
+        "tokyo" => "JP",
+        "sydney" => "AU",
+        "germany" => "DE",
+        "paris" => "FR",
+        "america" => "US",
+        "brazil" => "BR",
+        _ => "??",
+    }
+}
+
+/// Get flag color for region (used for colored country code background)
+pub fn get_region_flag_color(region_id: &str) -> (Color32, Color32) {
+    // Returns (primary_color, secondary_color) for gradient effect
+    match region_id {
+        "singapore" => (Color32::from_rgb(237, 28, 36), Color32::from_rgb(255, 255, 255)),   // Red/White
+        "mumbai" => (Color32::from_rgb(255, 153, 51), Color32::from_rgb(19, 136, 8)),       // Orange/Green
+        "tokyo" => (Color32::from_rgb(255, 255, 255), Color32::from_rgb(188, 0, 45)),       // White/Red
+        "sydney" => (Color32::from_rgb(0, 0, 139), Color32::from_rgb(255, 255, 255)),       // Blue/White
+        "germany" => (Color32::from_rgb(0, 0, 0), Color32::from_rgb(255, 206, 0)),          // Black/Gold
+        "paris" => (Color32::from_rgb(0, 85, 164), Color32::from_rgb(239, 65, 53)),         // Blue/Red
+        "america" => (Color32::from_rgb(60, 59, 110), Color32::from_rgb(178, 34, 52)),      // Blue/Red
+        "brazil" => (Color32::from_rgb(0, 156, 59), Color32::from_rgb(255, 223, 0)),        // Green/Yellow
+        _ => (TEXT_MUTED, TEXT_DIMMED),
+    }
+}
+
+/// Get country flag emoji for region (kept for backwards compatibility, but prefer get_region_code)
 pub fn get_region_flag(region_id: &str) -> &'static str {
+    // Note: Windows doesn't render these properly, use get_region_code instead
     match region_id {
         "singapore" => "🇸🇬",
         "mumbai" => "🇮🇳",

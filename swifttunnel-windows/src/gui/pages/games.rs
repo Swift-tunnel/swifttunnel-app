@@ -179,8 +179,9 @@ fn render_connection_stats(ui: &mut Ui, state: &GamesPageState) {
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     // Server
-                                    let flag = get_region_flag(server_region);
-                                    ui.label(egui::RichText::new(format!("{} {}", flag, get_region_name(server_region)))
+                                    use crate::gui::theme::get_region_code;
+                                    let code = get_region_code(server_region);
+                                    ui.label(egui::RichText::new(format!("[{}] {}", code, get_region_name(server_region)))
                                         .size(11.0)
                                         .color(TEXT_SECONDARY));
 
