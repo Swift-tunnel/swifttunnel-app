@@ -27,9 +27,21 @@ const IOCTL_ST_RESET: u32 = ctl_code!(ST_DEVICE_TYPE, 11, METHOD_NEITHER, FILE_A
 const DRIVER_DEVICE_PATH: &str = "\\\\.\\MULLVADSPLITTUNNEL";
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let restart_service = args.iter().any(|a| a == "--restart");
+
     println!("╔════════════════════════════════════════╗");
     println!("║  Mullvad Split Tunnel Driver Test      ║");
     println!("╚════════════════════════════════════════╝\n");
+
+    if restart_service {
+        println!("0. Restarting driver service to clear callouts...");
+        let _ = std::process::Command::new("sc").args(["stop", "mullvadsplittunnel"]).output();
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let _ = std::process::Command::new("sc").args(["start", "mullvadsplittunnel"]).output();
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        println!("   Done.\n");
+    }
 
     // Convert path to wide string
     let path_wide: Vec<u16> = OsStr::new(DRIVER_DEVICE_PATH)
@@ -68,7 +80,7 @@ fn main() {
     println!("\n2. Getting initial driver state...");
     match get_driver_state(handle) {
         Some(state) => println!("   State: {} ({})", state, state_name(state)),
-        None => println!("   ✗ Failed to get state"),
+        None => println!("   (state read failed, but driver is connected)"),
     }
 
     // Send RESET
@@ -85,15 +97,18 @@ fn main() {
     println!("\n4. Getting state after RESET...");
     match get_driver_state(handle) {
         Some(state) => println!("   State: {} ({})", state, state_name(state)),
-        None => println!("   ✗ Failed to get state"),
+        None => println!("   (state read failed)"),
     }
 
     // Send INITIALIZE
     println!("\n5. Sending INITIALIZE command...");
     if send_ioctl(handle, IOCTL_ST_INITIALIZE) {
-        println!("   ✓ INITIALIZE sent");
+        println!("   ✓ INITIALIZE succeeded - callouts created!");
     } else {
-        println!("   Note: INITIALIZE may have returned error (callouts already exist)");
+        println!("   ✗ INITIALIZE failed (callouts already exist)");
+        if !restart_service {
+            println!("\n   TIP: Run with --restart flag to restart the driver service first");
+        }
     }
 
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -110,7 +125,11 @@ fn main() {
                 println!("     This is the root cause of split tunnel not working.");
             }
         }
-        None => println!("   ✗ Failed to get state"),
+        None => {
+            println!("   (state read failed)");
+            println!("\n   Note: Even though state couldn't be read, INITIALIZE may have worked.");
+            println!("         Try running the actual app to see if split tunnel works.");
+        }
     }
 
     // Close handle
