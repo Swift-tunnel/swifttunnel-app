@@ -130,6 +130,11 @@ path = "src/bin/ip_checker.rs"
 name = "split_tunnel_integration_test"
 path = "src/bin/split_tunnel_integration_test.rs"
 
+# Driver initialization test (minimal test)
+[[bin]]
+name = "driver_test"
+path = "src/bin/driver_test.rs"
+
 [dev-dependencies]
 # Already have serde_json in dependencies
 
