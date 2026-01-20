@@ -9,7 +9,8 @@ use windows::Win32::Storage::FileSystem::*;
 use windows::Win32::System::IO::DeviceIoControl;
 
 // IOCTL codes from Mullvad driver
-const FILE_DEVICE_UNKNOWN: u32 = 0x22;
+const ST_DEVICE_TYPE: u32 = 0x8000;  // Custom device type used by Mullvad driver
+const METHOD_BUFFERED: u32 = 0;
 const METHOD_NEITHER: u32 = 3;
 const FILE_ANY_ACCESS: u32 = 0;
 
@@ -19,9 +20,9 @@ macro_rules! ctl_code {
     };
 }
 
-const IOCTL_ST_GET_STATE: u32 = ctl_code!(FILE_DEVICE_UNKNOWN, 1, METHOD_NEITHER, FILE_ANY_ACCESS);
-const IOCTL_ST_RESET: u32 = ctl_code!(FILE_DEVICE_UNKNOWN, 7, METHOD_NEITHER, FILE_ANY_ACCESS);
-const IOCTL_ST_INITIALIZE: u32 = ctl_code!(FILE_DEVICE_UNKNOWN, 8, METHOD_NEITHER, FILE_ANY_ACCESS);
+const IOCTL_ST_INITIALIZE: u32 = ctl_code!(ST_DEVICE_TYPE, 1, METHOD_NEITHER, FILE_ANY_ACCESS);
+const IOCTL_ST_GET_STATE: u32 = ctl_code!(ST_DEVICE_TYPE, 9, METHOD_BUFFERED, FILE_ANY_ACCESS);
+const IOCTL_ST_RESET: u32 = ctl_code!(ST_DEVICE_TYPE, 11, METHOD_NEITHER, FILE_ANY_ACCESS);
 
 const DRIVER_DEVICE_PATH: &str = "\\\\.\\MULLVADSPLITTUNNEL";
 
