@@ -490,7 +490,7 @@ async fn run_test(config: TestConfig) -> TestResult {
     println!("\n[5/9] Setting up WFP for split tunneling (STRICT MODE)...");
     println!("    ⚠ WFP failure is FATAL - the driver cannot route without WFP");
 
-    let _wfp_engine = match setup_wfp_strict(interface_luid) {
+    let wfp_engine = match setup_wfp_strict(interface_luid) {
         Ok(engine) => {
             println!("    ✓ WFP setup complete");
             engine
@@ -551,6 +551,15 @@ async fn run_test(config: TestConfig) -> TestResult {
     if post_init_state < STATE_INITIALIZED {
         cleanup_driver(driver_handle);
         return TestResult::DriverNotEngaged(post_init_state);
+    }
+
+    // CRITICAL: Create WFP sublayers AFTER driver INITIALIZE
+    // The driver creates its provider during INITIALIZE, but does NOT create sublayers.
+    // SET_CONFIGURATION needs sublayers to attach filters to, so we create them now.
+    println!("    Ensuring WFP sublayers exist...");
+    if let Err(e) = wfp_engine.ensure_sublayers() {
+        cleanup_driver(driver_handle);
+        return TestResult::WfpSetupFailed(format!("Failed to create sublayers: {}", e));
     }
 
     // Register process tree (transitions from INITIALIZED -> READY)
@@ -1340,6 +1349,13 @@ struct WfpEngineHandle {
     handle: HANDLE,
 }
 
+impl WfpEngineHandle {
+    /// Create sublayers if they don't exist (called after driver INITIALIZE)
+    fn ensure_sublayers(&self) -> Result<(), String> {
+        create_sublayers_if_needed(self.handle)
+    }
+}
+
 impl Drop for WfpEngineHandle {
     fn drop(&mut self) {
         if !self.handle.is_invalid() {
@@ -1412,22 +1428,12 @@ fn cleanup_wfp_objects(handle: HANDLE) {
     }
     println!("    Callouts: {} deleted, {} not found, {} errors", callouts_deleted, not_found, other_errors);
 
-    // Delete sublayers (this will also delete associated filters)
-    let result = unsafe {
-        FwpmSubLayerDeleteByKey0(handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
-    };
-    if result == 0 {
-        println!("    Deleted stale baseline sublayer (Mullvad)");
-    }
+    // NOTE: Do NOT delete sublayers here!
+    // The driver needs sublayers to exist for SET_CONFIGURATION to work.
+    // The driver creates a provider during INITIALIZE but NOT sublayers.
+    // We will create sublayers if they don't exist in create_sublayers_if_needed().
 
-    let result = unsafe {
-        FwpmSubLayerDeleteByKey0(handle, &ST_FW_WINFW_DNS_SUBLAYER_KEY)
-    };
-    if result == 0 {
-        println!("    Deleted stale DNS sublayer (Mullvad)");
-    }
-
-    // Delete provider
+    // Delete provider ONLY (so driver INITIALIZE can create its own)
     let result = unsafe {
         FwpmProviderDeleteByKey0(handle, &ST_FW_PROVIDER_KEY)
     };
@@ -1450,4 +1456,90 @@ fn cleanup_wfp_objects(handle: HANDLE) {
     if result == 0 {
         println!("    Deleted legacy SwiftTunnel provider (PERSISTENT)");
     }
+}
+
+/// Create sublayers if they don't exist
+/// Called AFTER driver INITIALIZE creates the provider
+fn create_sublayers_if_needed(handle: HANDLE) -> Result<(), String> {
+    use std::mem::MaybeUninit;
+
+    // Check if baseline sublayer exists
+    let mut sublayer_ptr: *mut FWPM_SUBLAYER0 = std::ptr::null_mut();
+    let result = unsafe {
+        FwpmSubLayerGetByKey0(handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY, &mut sublayer_ptr)
+    };
+
+    if result == 0 {
+        // Sublayer exists
+        if !sublayer_ptr.is_null() {
+            unsafe { FwpmFreeMemory0(sublayer_ptr as *mut *mut std::ffi::c_void) };
+        }
+        println!("    Baseline sublayer already exists");
+    } else {
+        // Create it
+        println!("    Creating baseline sublayer...");
+
+        let name: Vec<u16> = "SwiftTunnel Baseline Sublayer".encode_utf16().chain(std::iter::once(0)).collect();
+        let sublayer = FWPM_SUBLAYER0 {
+            subLayerKey: ST_FW_WINFW_BASELINE_SUBLAYER_KEY,
+            displayData: FWPM_DISPLAY_DATA0 {
+                name: windows::core::PWSTR(name.as_ptr() as *mut u16),
+                description: windows::core::PWSTR::null(),
+            },
+            flags: 0, // No PERSISTENT flag - use dynamic session
+            providerKey: std::ptr::null_mut(), // Will reference driver's provider
+            providerData: FWP_BYTE_BLOB::default(),
+            weight: 0xFFFF, // High weight
+        };
+
+        let result = unsafe {
+            FwpmSubLayerAdd0(handle, &sublayer, None)
+        };
+
+        if result != 0 && result != 0x80320009 { // 0x80320009 = ALREADY_EXISTS is OK
+            return Err(format!("Failed to create baseline sublayer: 0x{:08X}", result));
+        }
+        println!("    ✓ Created baseline sublayer");
+    }
+
+    // Check if DNS sublayer exists
+    let mut sublayer_ptr: *mut FWPM_SUBLAYER0 = std::ptr::null_mut();
+    let result = unsafe {
+        FwpmSubLayerGetByKey0(handle, &ST_FW_WINFW_DNS_SUBLAYER_KEY, &mut sublayer_ptr)
+    };
+
+    if result == 0 {
+        // Sublayer exists
+        if !sublayer_ptr.is_null() {
+            unsafe { FwpmFreeMemory0(sublayer_ptr as *mut *mut std::ffi::c_void) };
+        }
+        println!("    DNS sublayer already exists");
+    } else {
+        // Create it
+        println!("    Creating DNS sublayer...");
+
+        let name: Vec<u16> = "SwiftTunnel DNS Sublayer".encode_utf16().chain(std::iter::once(0)).collect();
+        let sublayer = FWPM_SUBLAYER0 {
+            subLayerKey: ST_FW_WINFW_DNS_SUBLAYER_KEY,
+            displayData: FWPM_DISPLAY_DATA0 {
+                name: windows::core::PWSTR(name.as_ptr() as *mut u16),
+                description: windows::core::PWSTR::null(),
+            },
+            flags: 0, // No PERSISTENT flag - use dynamic session
+            providerKey: std::ptr::null_mut(),
+            providerData: FWP_BYTE_BLOB::default(),
+            weight: 0xFFFE, // Slightly lower weight
+        };
+
+        let result = unsafe {
+            FwpmSubLayerAdd0(handle, &sublayer, None)
+        };
+
+        if result != 0 && result != 0x80320009 { // ALREADY_EXISTS is OK
+            return Err(format!("Failed to create DNS sublayer: 0x{:08X}", result));
+        }
+        println!("    ✓ Created DNS sublayer");
+    }
+
+    Ok(())
 }
