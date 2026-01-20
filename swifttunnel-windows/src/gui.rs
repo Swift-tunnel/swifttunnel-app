@@ -291,7 +291,8 @@ pub struct BoosterApp {
     server_list_source: ServerListSource,
     selected_region: String,
     selected_server: String,
-    region_latencies: Arc<Mutex<HashMap<String, Option<u32>>>>,
+    /// Maps gaming region ID -> (best_server_id, latency_ms)
+    region_latencies: Arc<Mutex<HashMap<String, (String, u32)>>>,
     finding_best_server: Arc<AtomicBool>,
     /// Selected game presets for split tunneling (multi-select)
     selected_game_presets: std::collections::HashSet<GamePreset>,
@@ -303,7 +304,7 @@ pub struct BoosterApp {
     last_vpn_check: std::time::Instant,
 
     // Performance: cached values to avoid per-frame mutex locks
-    cached_latencies: HashMap<String, Option<u32>>,
+    cached_latencies: HashMap<String, (String, u32)>,
     cached_regions: Vec<DynamicGamingRegion>,
     last_cache_update: std::time::Instant,
 
@@ -427,10 +428,10 @@ impl BoosterApp {
                                 })
                                 .collect();
                             
-                            if let Some(best_latency) = ping_region_async(&server_ips).await {
+                            if let Some((best_server_id, latency)) = ping_region_async(&server_ips).await {
                                 if let Ok(mut lat) = latencies_clone.lock() {
-                                    lat.insert(region.id.clone(), Some(best_latency));
-                                    log::info!("Region {} best latency: {}ms", region.id, best_latency);
+                                    lat.insert(region.id.clone(), (best_server_id.clone(), latency));
+                                    log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
                                 }
                             }
                         }
@@ -645,10 +646,11 @@ impl BoosterApp {
 }
 
 /// Async ping function that doesn't block the main thread
-async fn ping_region_async(servers: &[(String, String)]) -> Option<u32> {
+/// Returns (best_server_id, latency_ms) for the server with lowest latency
+async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)> {
     use crate::hidden_command;
 
-    let mut best_latency: Option<u32> = None;
+    let mut best_result: Option<(String, u32)> = None;
 
     for (server_id, server_ip) in servers {
         let mut total = 0u32;
@@ -665,7 +667,7 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<u32> {
                         .ok()
                 }
             }).await.ok().flatten();
-            
+
             if let Some(output) = output {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if let Some(ms) = parse_ping_output(&stdout) {
@@ -673,20 +675,24 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<u32> {
                     count += 1;
                 }
             }
-            
+
             // Small delay between pings
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
-        
+
         if count > 0 {
             let avg = total / count;
-            if best_latency.is_none() || avg < best_latency.unwrap() {
-                best_latency = Some(avg);
+            let is_better = match &best_result {
+                None => true,
+                Some((_, best_latency)) => avg < *best_latency,
+            };
+            if is_better {
+                best_result = Some((server_id.clone(), avg));
             }
         }
     }
-    
-    best_latency
+
+    best_result
 }
 
 fn parse_ping_output(stdout: &str) -> Option<u32> {
@@ -1992,7 +1998,7 @@ impl BoosterApp {
                 for _ in 0..2 {
                     if let Some(region) = region_iter.next() {
                         let is_selected = self.selected_region == region.id;
-                        let latency = latencies.get(&region.id).and_then(|l| *l);
+                        let latency = latencies.get(&region.id).map(|(_, l)| *l);
                         let card_id = format!("region_{}", region.id);
 
                         // Get hover animation value
@@ -3709,10 +3715,30 @@ impl BoosterApp {
             return;
         }
 
-        let region = self.selected_server.clone();
+        // Use the best server for the selected region (based on latency measurements)
+        // Fall back to selected_server if no latency data exists
+        let region = if let Ok(latencies) = self.region_latencies.try_lock() {
+            if let Some((best_server_id, latency)) = latencies.get(&self.selected_region) {
+                log::info!(
+                    "Using best server '{}' ({}ms) for region '{}'",
+                    best_server_id, latency, self.selected_region
+                );
+                best_server_id.clone()
+            } else {
+                log::info!(
+                    "No latency data for region '{}', using default server '{}'",
+                    self.selected_region, self.selected_server
+                );
+                self.selected_server.clone()
+            }
+        } else {
+            log::warn!("Could not acquire latencies lock, using default server");
+            self.selected_server.clone()
+        };
+
         // Get apps from selected game presets
         let apps = get_apps_for_preset_set(&self.selected_game_presets);
-        log::info!("Connecting with split tunnel apps: {:?}", apps);
+        log::info!("Connecting to server '{}' with split tunnel apps: {:?}", region, apps);
 
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
@@ -3748,6 +3774,7 @@ impl BoosterApp {
 
     /// Disconnect VPN synchronously (blocks until complete)
     /// Used when quitting the app to ensure proper cleanup
+    /// Includes a 3-second timeout to prevent hanging on quit
     fn disconnect_vpn_sync(&mut self) {
         if !self.vpn_state.is_connected() && !self.vpn_state.is_connecting() {
             return;
@@ -3758,19 +3785,25 @@ impl BoosterApp {
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
 
-        // Block on the disconnect to ensure cleanup completes
-        rt.block_on(async {
-            if let Ok(mut connection) = vpn.lock() {
-                if let Err(e) = connection.disconnect().await {
-                    log::error!("VPN disconnect on quit failed: {}", e);
+        // Use timeout to prevent hanging on quit - max 3 seconds
+        let disconnect_result = rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                if let Ok(mut connection) = vpn.lock() {
+                    connection.disconnect().await
                 } else {
-                    log::info!("VPN disconnected successfully before quit");
+                    Err(anyhow::anyhow!("Failed to acquire VPN lock"))
                 }
-            }
+            }).await
         });
 
-        // Give a moment for adapter cleanup
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        match disconnect_result {
+            Ok(Ok(_)) => log::info!("VPN disconnected successfully before quit"),
+            Ok(Err(e)) => log::warn!("VPN disconnect failed: {} - forcing quit anyway", e),
+            Err(_) => log::warn!("VPN disconnect timed out after 3s - forcing quit anyway"),
+        }
+
+        // Brief cleanup delay
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
     fn retry_load_servers(&mut self) {
@@ -3805,9 +3838,10 @@ impl BoosterApp {
                                 })
                                 .collect();
                             
-                            if let Some(best_latency) = ping_region_async(&server_ips).await {
+                            if let Some((best_server_id, latency)) = ping_region_async(&server_ips).await {
                                 if let Ok(mut lat) = latencies_clone.lock() {
-                                    lat.insert(region.id.clone(), Some(best_latency));
+                                    lat.insert(region.id.clone(), (best_server_id.clone(), latency));
+                                    log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
                                 }
                             }
                         }
