@@ -1,6 +1,6 @@
 //! Games page - Game selection and connection stats
 //!
-//! ExitLag-style game cards with split tunnel toggles.
+//! Modern game cards with split tunnel toggles.
 
 use eframe::egui::{self, Ui, Vec2};
 use std::collections::HashSet;

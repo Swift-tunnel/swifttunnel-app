@@ -1,6 +1,6 @@
 //! SwiftTunnel GUI Module
 //!
-//! ExitLag-inspired UI with sidebar navigation and modern card layouts.
+//! Modern UI with sidebar navigation and card layouts.
 
 pub mod theme;
 pub mod animations;
@@ -890,7 +890,7 @@ impl eframe::App for BoosterApp {
             .frame(egui::Frame::none().fill(BG_SIDEBAR))
             .show(ctx, |ui| {
                 if is_logged_in {
-                    // New ExitLag-style layout with sidebar
+                    // Modern layout with sidebar
                     ui.horizontal(|ui| {
                         // Sidebar
                         ui.allocate_ui(egui::vec2(SIDEBAR_WIDTH, ui.available_height()), |ui| {

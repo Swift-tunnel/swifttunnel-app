@@ -1,6 +1,6 @@
 //! Sidebar navigation component
 //!
-//! ExitLag-inspired icon-only sidebar with tooltips
+//! Icon-only sidebar with tooltips
 
 use eframe::egui::{self, Color32, Ui, Sense, Vec2, Pos2, Rect};
 use crate::gui::theme::*;

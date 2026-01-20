@@ -1,5 +1,5 @@
 //! SwiftTunnel Design System v6
-//! ExitLag-inspired layout with SwiftTunnel's blue/cyan color scheme
+//! Modern layout with SwiftTunnel's blue/cyan color scheme
 //!
 //! This module contains all design tokens, colors, spacing, and visual constants.
 
@@ -64,7 +64,7 @@ pub const BG_DARKEST: Color32 = Color32::from_rgb(6, 9, 18);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ACCENT COLORS
-//  SwiftTunnel brand colors (blue/cyan, NOT ExitLag green/red)
+//  SwiftTunnel brand colors (blue/cyan)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Primary accent - blue
