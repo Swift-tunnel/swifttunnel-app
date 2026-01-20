@@ -26,6 +26,7 @@ use crate::network_booster::NetworkBooster;
 use crate::gui::BoosterApp;
 use crate::settings::load_settings;
 use crate::updater::{run_auto_updater, AutoUpdateResult};
+use crate::vpn::split_tunnel::SplitTunnelDriver;
 
 use eframe::NativeOptions;
 use log::{error, info, warn};
@@ -280,6 +281,10 @@ fn main() -> eframe::Result<()> {
 
     // Create tokio runtime for async operations
     let rt = Runtime::new().expect("Failed to create tokio runtime");
+
+    // Clean up any stale state from previous crash/force kill
+    // This ensures split tunnel driver is reset before we start
+    SplitTunnelDriver::cleanup_stale_state();
 
     // Create shared state
     let app_state = Arc::new(Mutex::new(AppState::default()));

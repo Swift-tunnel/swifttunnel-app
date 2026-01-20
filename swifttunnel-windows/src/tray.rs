@@ -161,9 +161,9 @@ impl SystemTray {
         self.show_window.swap(false, Ordering::SeqCst)
     }
 
-    /// Check if quit was requested
+    /// Check if quit was requested and reset the flag
     pub fn check_quit_requested(&self) -> bool {
-        self.quit_requested.load(Ordering::SeqCst)
+        self.quit_requested.swap(false, Ordering::SeqCst)
     }
 
     /// Check if toggle optimizations was requested and reset the flag
