@@ -1426,7 +1426,7 @@ impl WfpEngineHandle {
             providerKey: std::ptr::null_mut(),
             layerKey: GUID::zeroed(),
             enumType: FWP_FILTER_ENUM_FULLY_CONTAINED,
-            flags: FWP_FILTER_ENUM_FLAG_NONE,
+            flags: 0, // FWP_FILTER_ENUM_FLAG_NONE = 0
             providerContextTemplate: std::ptr::null_mut(),
             numFilterConditions: 0,
             filterCondition: std::ptr::null_mut(),
