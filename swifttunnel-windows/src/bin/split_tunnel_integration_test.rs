@@ -954,6 +954,11 @@ fn setup_wfp_strict(interface_luid: u64) -> Result<WfpEngineHandle, String> {
     }
     println!("    ✓ WFP engine opened");
 
+    // CRITICAL: Clean up any stale WFP objects from previous sessions
+    // This prevents ALREADY_EXISTS errors when driver tries to create callouts
+    println!("    Cleaning up stale WFP objects...");
+    cleanup_wfp_objects(handle);
+
     // Create provider (or verify it exists)
     let provider_name: Vec<u16> = "Mullvad Split Tunnel".encode_utf16().chain(std::iter::once(0)).collect();
     let provider_desc: Vec<u16> = "Mullvad Split Tunnel WFP provider".encode_utf16().chain(std::iter::once(0)).collect();
@@ -1028,4 +1033,31 @@ fn setup_wfp_strict(interface_luid: u64) -> Result<WfpEngineHandle, String> {
     println!("    Interface LUID for filters: {} (0x{:016X})", interface_luid, interface_luid);
 
     Ok(WfpEngineHandle { handle })
+}
+
+/// Clean up stale WFP objects from previous sessions
+/// This is critical to prevent ALREADY_EXISTS errors when the driver initializes
+fn cleanup_wfp_objects(handle: HANDLE) {
+    // Delete sublayers first (this will also delete associated filters)
+    let result = unsafe {
+        FwpmSubLayerDeleteByKey0(handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
+    };
+    if result == 0 {
+        println!("    Deleted stale baseline sublayer");
+    }
+
+    let result = unsafe {
+        FwpmSubLayerDeleteByKey0(handle, &ST_FW_WINFW_DNS_SUBLAYER_KEY)
+    };
+    if result == 0 {
+        println!("    Deleted stale DNS sublayer");
+    }
+
+    // Delete provider
+    let result = unsafe {
+        FwpmProviderDeleteByKey0(handle, &ST_FW_PROVIDER_KEY)
+    };
+    if result == 0 {
+        println!("    Deleted stale provider");
+    }
 }

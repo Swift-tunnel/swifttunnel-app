@@ -363,6 +363,10 @@ pub fn setup_wfp_for_split_tunnel(interface_luid: u64) -> VpnResult<WfpEngine> {
 
     let mut engine = WfpEngine::open()?;
 
+    // CRITICAL: Clean up any stale WFP objects from previous sessions
+    // This prevents ALREADY_EXISTS errors when driver tries to create callouts
+    engine.cleanup_all().ok(); // Ignore errors if objects don't exist
+
     // Register provider and create sublayer
     engine.register_provider()?;
     engine.create_sublayer()?;
