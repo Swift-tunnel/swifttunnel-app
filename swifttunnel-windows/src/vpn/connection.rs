@@ -23,8 +23,8 @@ use super::{VpnError, VpnResult};
 
 /// Refresh interval for process exclusion scanning (ms)
 /// Lower = faster detection of new processes, slightly higher CPU
-/// 250ms is a good balance - new process excluded within quarter second
-const REFRESH_INTERVAL_MS: u64 = 250;
+/// 50ms ensures game traffic is tunneled almost instantly on launch
+const REFRESH_INTERVAL_MS: u64 = 50;
 
 /// VPN connection state
 #[derive(Debug, Clone, PartialEq)]
@@ -351,7 +351,7 @@ impl VpnConnection {
         let driver = Arc::new(Mutex::new(driver));
         self.split_tunnel = Some(Arc::clone(&driver));
 
-        // Start fast refresh loop (250ms)
+        // Start fast refresh loop (50ms for instant game detection)
         self.process_monitor_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
