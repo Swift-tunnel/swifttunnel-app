@@ -589,11 +589,10 @@ async fn run_test(config: TestConfig) -> TestResult {
     println!("    State after REGISTER_IP_ADDRESSES: {} ({})", post_ip_state, state_name(post_ip_state));
 
     // Set configuration (transitions from READY -> ENGAGED)
-    // IMPORTANT: Always configure curl.exe for split tunneling since that's what makes
-    // network requests. When using a batch file as test_exe, the actual network request
-    // is made by curl.exe, not the batch file itself (which runs via cmd.exe).
+    // Configure the test executable (ip_checker.exe) for split tunneling, NOT curl.exe.
+    // The split tunnel driver only intercepts traffic from processes matching the configured path.
     println!("    Sending SET_CONFIGURATION...");
-    let tunnel_exe = r"C:\Windows\System32\curl.exe";
+    let tunnel_exe = &config.test_exe;
     let config_data = build_configuration(tunnel_exe);
     let device_path = to_device_path(tunnel_exe).unwrap_or_else(|_| tunnel_exe.to_string());
     println!("    Config size: {} bytes", config_data.len());
