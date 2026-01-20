@@ -38,52 +38,98 @@ pub fn install_update(msi_path: &Path) -> Result<(), String> {
         .and_then(|n| n.to_str())
         .unwrap_or("swifttunnel-fps-booster.exe");
 
-    // Batch script that performs the update
-    // Uses taskkill to ensure the app is closed, then installs
+    // Get LocalAppData path for logs
+    let local_app_data = std::env::var("LOCALAPPDATA")
+        .unwrap_or_else(|_| "C:\\Users\\Public".to_string());
+    let log_dir = format!("{}\\SwiftTunnel", local_app_data);
+
+    // Batch script that performs the update with proper waiting and verification
+    // Key improvements:
+    // - Uses start /wait for msiexec to ensure completion
+    // - Adds logging for debugging
+    // - Uses timeout instead of ping for delays
+    // - Limits wait loop to prevent infinite loops
+    // - Verifies installation success before restarting
     let batch_content = format!(
         r#"@echo off
-:: SwiftTunnel Update Script
-:: First, try to gracefully wait for the app to close
-ping -n 2 127.0.0.1 > nul
+setlocal EnableDelayedExpansion
 
-:: Kill any remaining instances of the app (force close)
+:: SwiftTunnel Update Script v2
+set "LOGDIR={log_dir}"
+set "LOGFILE=%LOGDIR%\update_install.log"
+
+:: Ensure log directory exists
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+
+echo [%date% %time%] === Starting update === >> "%LOGFILE%"
+echo [%date% %time%] Target: {msi_path} >> "%LOGFILE%"
+
+:: Step 1: Wait 2 seconds for graceful close
+echo [%date% %time%] Waiting for app to close... >> "%LOGFILE%"
+timeout /t 2 /nobreak > nul
+
+:: Step 2: Force kill any remaining instances
+echo [%date% %time%] Force killing {exe_name}... >> "%LOGFILE%"
 taskkill /f /im "{exe_name}" >nul 2>&1
 
-:: Wait a bit more to ensure file handles are released
-ping -n 3 127.0.0.1 > nul
+:: Step 3: Wait for file handles to release
+timeout /t 2 /nobreak > nul
 
-:: Try to delete the old exe to verify it's not locked
-:: If this fails, wait and try again
+:: Step 4: Wait for exe to be unlocked (max 30 attempts = 30 seconds)
+set "WAIT_COUNT=0"
 :waitloop
-del "{exe_path}" >nul 2>&1
-if exist "{exe_path}" (
-    ping -n 2 127.0.0.1 > nul
-    goto waitloop
+del /f "{exe_path}" >nul 2>&1
+if not exist "{exe_path}" goto install
+set /a WAIT_COUNT+=1
+echo [%date% %time%] Wait attempt %WAIT_COUNT% of 30... >> "%LOGFILE%"
+if %WAIT_COUNT% geq 30 (
+    echo [%date% %time%] TIMEOUT: Exe still locked after 30 seconds >> "%LOGFILE%"
+    goto error
+)
+timeout /t 1 /nobreak > nul
+goto waitloop
+
+:install
+echo [%date% %time%] Exe unlocked, starting MSI install... >> "%LOGFILE%"
+
+:: Step 5: Run MSI with explicit wait and verbose logging
+start /wait msiexec /i "{msi_path}" /qn /norestart /l*v "%LOGDIR%\msi_install.log"
+set "MSI_EXIT=%errorlevel%"
+echo [%date% %time%] MSI exit code: %MSI_EXIT% >> "%LOGFILE%"
+
+if %MSI_EXIT% neq 0 (
+    echo [%date% %time%] MSI installation failed with code %MSI_EXIT% >> "%LOGFILE%"
+    goto error
 )
 
-:: Run the MSI installer silently
-:: /qn = completely silent
-:: /norestart = don't restart computer
-msiexec /i "{msi_path}" /qn /norestart
+:: Step 6: Wait for msiexec cleanup
+timeout /t 3 /nobreak > nul
 
-:: Wait for installation to complete
-ping -n 3 127.0.0.1 > nul
-
-:: Verify the new exe exists before starting
-if exist "{exe_path}" (
-    start "" "{exe_path}"
-) else (
-    :: Installation may have failed, show error
-    echo Update installation failed. Please reinstall SwiftTunnel manually.
-    pause
+:: Step 7: Verify exe exists after installation
+if not exist "{exe_path}" (
+    echo [%date% %time%] ERROR: Exe not found after installation >> "%LOGFILE%"
+    goto error
 )
 
-:: Clean up the downloaded MSI
-del "{msi_path}" >nul 2>&1
+echo [%date% %time%] Installation successful! >> "%LOGFILE%"
 
+:: Step 8: Clean up MSI and start app
+del /f "{msi_path}" >nul 2>&1
+echo [%date% %time%] Starting new version... >> "%LOGFILE%"
+start "" "{exe_path}"
+goto cleanup
+
+:error
+echo [%date% %time%] === UPDATE FAILED === >> "%LOGFILE%"
+msg "%USERNAME%" "SwiftTunnel update failed (code: %MSI_EXIT%). Please reinstall manually. Check log: %LOGFILE%"
+goto cleanup
+
+:cleanup
+echo [%date% %time%] Cleanup complete >> "%LOGFILE%"
 :: Delete this script
 del "%~f0"
 "#,
+        log_dir = log_dir,
         exe_name = exe_name,
         msi_path = msi_path_str,
         exe_path = exe_path_str
