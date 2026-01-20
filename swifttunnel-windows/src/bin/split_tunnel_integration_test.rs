@@ -2,11 +2,11 @@
 //!
 //! Full end-to-end test of split tunnel functionality:
 //! 1. Fetches VPN config from API (or uses local config file)
-//! 2. Creates VPN tunnel (Wintun + WireGuard)
+//! 2. Creates VPN tunnel (Wintun + WireGuard with FULL packet forwarding)
 //! 3. Sets up WFP (with STRICT error handling - fails if WFP fails)
 //! 4. Configures split tunnel for test process
 //! 5. Verifies driver state == ENGAGED (4)
-//! 6. Runs test process to verify traffic routing
+//! 6. Runs test process to verify traffic routing through actual VPN tunnel
 //!
 //! Usage with API token:
 //!   split_tunnel_integration_test.exe --token ACCESS_TOKEN --region singapore [--test-exe path]
@@ -24,8 +24,13 @@
 //!   1 = Test failed (prerequisites, WFP, driver, or routing failure)
 //!   2 = Usage error
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::net::UdpSocket;
+use boringtun::noise::{Tunn, TunnResult};
 use windows::core::{GUID, PCSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::*;
@@ -365,9 +370,9 @@ async fn run_test(config: TestConfig) -> TestResult {
     };
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 4: Create Wintun adapter
+    // STEP 4: Create Wintun adapter + WireGuard tunnel (FULL PACKET FORWARDING)
     // ═══════════════════════════════════════════════════════════════════════
-    println!("\n[4/8] Creating VPN tunnel...");
+    println!("\n[4/9] Creating VPN tunnel with WireGuard...");
 
     let wintun = match unsafe { wintun::load_from_path(&wintun_path) } {
         Ok(w) => w,
@@ -402,20 +407,87 @@ async fn run_test(config: TestConfig) -> TestResult {
     println!("    ✓ IP address set: {}", assigned_ip);
 
     // Start session
-    let _session = match adapter.start_session(0x400000) {
-        Ok(s) => s,
+    let session = match adapter.start_session(0x400000) {
+        Ok(s) => Arc::new(s),
         Err(e) => {
             return TestResult::PrerequisiteFailed(format!("Failed to start session: {:?}", e));
         }
     };
     println!("    ✓ Adapter session started");
 
+    // Parse server endpoint
+    let endpoint: SocketAddr = match vpn_config.endpoint.parse() {
+        Ok(e) => e,
+        Err(e) => {
+            return TestResult::PrerequisiteFailed(format!("Invalid endpoint: {}", e));
+        }
+    };
+
+    // Create BoringTun instance
+    let private_key = match parse_wireguard_key(&vpn_config.private_key) {
+        Ok(k) => k,
+        Err(e) => {
+            return TestResult::PrerequisiteFailed(format!("Invalid private key: {}", e));
+        }
+    };
+    let server_public_key = match parse_wireguard_key(&vpn_config.server_public_key) {
+        Ok(k) => k,
+        Err(e) => {
+            return TestResult::PrerequisiteFailed(format!("Invalid server public key: {}", e));
+        }
+    };
+
+    let tunn = match Tunn::new(
+        private_key.into(),
+        server_public_key.into(),
+        None, // No preshared key
+        Some(25), // 25s keepalive
+        0, // Tunnel index
+        None, // No rate limiter
+    ) {
+        Ok(t) => Arc::new(std::sync::Mutex::new(t)),
+        Err(e) => {
+            return TestResult::PrerequisiteFailed(format!("Failed to create BoringTun: {:?}", e));
+        }
+    };
+    println!("    ✓ BoringTun instance created");
+
+    // Create UDP socket for VPN server
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(e) => {
+            return TestResult::PrerequisiteFailed(format!("Failed to bind UDP socket: {}", e));
+        }
+    };
+    if let Err(e) = socket.connect(endpoint).await {
+        return TestResult::PrerequisiteFailed(format!("Failed to connect to VPN server: {}", e));
+    }
+    let socket = Arc::new(socket);
+    println!("    ✓ UDP socket connected to {}", endpoint);
+
+    // Perform WireGuard handshake
+    println!("    Performing WireGuard handshake...");
+    if let Err(e) = wireguard_handshake(&tunn, &socket).await {
+        return TestResult::PrerequisiteFailed(format!("WireGuard handshake failed: {}", e));
+    }
+    println!("    ✓ WireGuard handshake completed!");
+
+    // Start packet forwarding tasks
+    let running = Arc::new(AtomicBool::new(true));
+    let (outbound_handle, inbound_handle, keepalive_handle) = start_packet_forwarding(
+        Arc::clone(&session),
+        Arc::clone(&tunn),
+        Arc::clone(&socket),
+        Arc::clone(&running),
+    );
+    println!("    ✓ Packet forwarding tasks started");
+
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 5: Setup WFP (STRICT - fail if WFP fails!)
     // NOTE: The driver's INITIALIZE creates its own WFP callouts. We only need
     // to ensure the provider/sublayer exist for the callouts to attach to.
     // ═══════════════════════════════════════════════════════════════════════
-    println!("\n[5/8] Setting up WFP for split tunneling (STRICT MODE)...");
+    println!("\n[5/9] Setting up WFP for split tunneling (STRICT MODE)...");
     println!("    ⚠ WFP failure is FATAL - the driver cannot route without WFP");
 
     let _wfp_engine = match setup_wfp_strict(interface_luid) {
@@ -431,7 +503,7 @@ async fn run_test(config: TestConfig) -> TestResult {
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 6: Configure split tunnel driver
     // ═══════════════════════════════════════════════════════════════════════
-    println!("\n[6/8] Configuring split tunnel driver...");
+    println!("\n[6/9] Configuring split tunnel driver...");
 
     let driver_handle = match open_split_tunnel_driver() {
         Ok(h) => h,
@@ -527,7 +599,7 @@ async fn run_test(config: TestConfig) -> TestResult {
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 7: Verify driver state == ENGAGED (CRITICAL CHECK)
     // ═══════════════════════════════════════════════════════════════════════
-    println!("\n[7/8] Verifying driver state (CRITICAL)...");
+    println!("\n[7/9] Verifying driver state (CRITICAL)...");
 
     let final_state = get_driver_state(driver_handle).unwrap_or(0);
     println!("    Final state: {} ({})", final_state, state_name(final_state));
@@ -543,12 +615,13 @@ async fn run_test(config: TestConfig) -> TestResult {
     println!("    ✓ Driver is ENGAGED - ready to route traffic");
 
     // ═══════════════════════════════════════════════════════════════════════
-    // STEP 8: Test traffic routing
+    // STEP 8: Test traffic routing through WireGuard tunnel
     // ═══════════════════════════════════════════════════════════════════════
-    println!("\n[8/8] Testing traffic routing through split tunnel...");
+    println!("\n[8/9] Testing traffic routing through split tunnel + WireGuard...");
+    println!("    (WireGuard tunnel is ACTIVE - packets will be encrypted and forwarded)");
 
     // Small delay to let filters settle
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(1000));
 
     let vpn_ip = match run_test_exe(&config.test_exe) {
         Ok(ip) => {
@@ -556,13 +629,33 @@ async fn run_test(config: TestConfig) -> TestResult {
             ip
         }
         Err(e) => {
+            // Cleanup
+            running.store(false, Ordering::SeqCst);
             cleanup_driver(driver_handle);
             return TestResult::TestExeFailed(e);
         }
     };
 
-    // Cleanup
+    // ═══════════════════════════════════════════════════════════════════════
+    // STEP 9: Cleanup
+    // ═══════════════════════════════════════════════════════════════════════
+    println!("\n[9/9] Cleaning up...");
+
+    // Stop packet forwarding
+    running.store(false, Ordering::SeqCst);
+    println!("    Stopping packet forwarding...");
+
+    // Give tasks time to stop
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Abort the tasks (they may be blocked on receive)
+    outbound_handle.abort();
+    inbound_handle.abort();
+    keepalive_handle.abort();
+
+    // Reset split tunnel driver
     cleanup_driver(driver_handle);
+    println!("    ✓ Cleanup complete");
 
     // Compare IPs
     if baseline_ip.is_empty() {
@@ -796,6 +889,244 @@ fn state_name(state: u64) -> &'static str {
 fn cleanup_driver(handle: HANDLE) {
     let _ = send_ioctl_neither(handle, IOCTL_ST_RESET);
     unsafe { let _ = CloseHandle(handle); }
+}
+
+// ============================================================================
+// WireGuard Tunnel Functions
+// ============================================================================
+
+/// Parse base64 WireGuard key to 32-byte array
+fn parse_wireguard_key(key: &str) -> Result<[u8; 32], String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let decoded = STANDARD.decode(key)
+        .map_err(|e| format!("Invalid base64: {}", e))?;
+
+    if decoded.len() != 32 {
+        return Err(format!("Key must be 32 bytes, got {}", decoded.len()));
+    }
+
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(&decoded);
+    Ok(key_bytes)
+}
+
+/// Perform WireGuard handshake with the server
+async fn wireguard_handshake(
+    tunn: &Arc<std::sync::Mutex<Tunn>>,
+    socket: &Arc<UdpSocket>,
+) -> Result<(), String> {
+    let mut buf = vec![0u8; 65535];
+
+    // Generate handshake initiation
+    let init_data = {
+        let mut tunn = tunn.lock().unwrap();
+        match tunn.format_handshake_initiation(&mut buf, false) {
+            TunnResult::WriteToNetwork(data) => data.to_vec(),
+            other => return Err(format!("Failed to generate handshake: {:?}", other)),
+        }
+    };
+
+    // Send handshake initiation
+    socket.send(&init_data).await
+        .map_err(|e| format!("Failed to send handshake: {}", e))?;
+
+    // Wait for response with timeout
+    let mut response_buf = vec![0u8; 65535];
+    let timeout = Duration::from_secs(10);
+
+    match tokio::time::timeout(timeout, socket.recv(&mut response_buf)).await {
+        Ok(Ok(n)) => {
+            // Process response
+            let response_data = {
+                let mut tunn = tunn.lock().unwrap();
+                match tunn.decapsulate(None, &response_buf[..n], &mut buf) {
+                    TunnResult::Done => None,
+                    TunnResult::WriteToNetwork(data) => Some(data.to_vec()),
+                    TunnResult::Err(e) => return Err(format!("Handshake error: {:?}", e)),
+                    other => {
+                        // May still be OK
+                        println!("    Unexpected handshake result: {:?}", other);
+                        None
+                    }
+                }
+            };
+
+            // Send response if needed
+            if let Some(data) = response_data {
+                socket.send(&data).await.ok();
+            }
+
+            Ok(())
+        }
+        Ok(Err(e)) => Err(format!("Receive error: {}", e)),
+        Err(_) => Err("Handshake timeout - server may be unreachable".to_string()),
+    }
+}
+
+/// Start packet forwarding tasks (outbound, inbound, keepalive)
+fn start_packet_forwarding(
+    session: Arc<wintun::Session>,
+    tunn: Arc<std::sync::Mutex<Tunn>>,
+    socket: Arc<UdpSocket>,
+    running: Arc<AtomicBool>,
+) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+    // Outbound: Wintun adapter -> encrypt -> UDP to server
+    // Uses a channel to bridge blocking wintun receive with async send
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+
+    // Spawn blocking task for wintun receive
+    let outbound_recv_handle = {
+        let session = Arc::clone(&session);
+        let running = Arc::clone(&running);
+        let tx = tx;
+
+        std::thread::spawn(move || {
+            while running.load(Ordering::SeqCst) {
+                match session.receive_blocking() {
+                    Ok(packet) => {
+                        if tx.blocking_send(packet.bytes().to_vec()).is_err() {
+                            break; // Channel closed
+                        }
+                    }
+                    Err(_) => {
+                        // Session shutdown
+                        break;
+                    }
+                }
+            }
+        })
+    };
+
+    let outbound_handle = {
+        let tunn = Arc::clone(&tunn);
+        let socket = Arc::clone(&socket);
+        let running = Arc::clone(&running);
+
+        tokio::spawn(async move {
+            let mut encrypt_buf = vec![0u8; 65535];
+
+            while running.load(Ordering::SeqCst) {
+                // Receive from channel with timeout
+                let packet_data = match tokio::time::timeout(
+                    Duration::from_millis(100),
+                    rx.recv()
+                ).await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => break, // Channel closed
+                    Err(_) => continue, // Timeout
+                };
+
+                // Encrypt packet
+                let encrypted = {
+                    let mut tunn = tunn.lock().unwrap();
+                    tunn.encapsulate(&packet_data, &mut encrypt_buf)
+                };
+
+                match encrypted {
+                    TunnResult::WriteToNetwork(data) => {
+                        if let Err(e) = socket.send(data).await {
+                            eprintln!("Send error: {}", e);
+                        }
+                    }
+                    TunnResult::Err(e) => {
+                        eprintln!("Encrypt error: {:?}", e);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Drop the receiver to signal the blocking thread to stop
+            drop(rx);
+            // Note: outbound_recv_handle thread will exit when running becomes false
+            // or when the session is shutdown
+            let _ = outbound_recv_handle;
+        })
+    };
+
+    // Inbound: UDP from server -> decrypt -> Wintun adapter
+    let inbound_handle = {
+        let session = Arc::clone(&session);
+        let tunn = Arc::clone(&tunn);
+        let socket = Arc::clone(&socket);
+        let running = Arc::clone(&running);
+
+        tokio::spawn(async move {
+            let mut recv_buf = vec![0u8; 65535];
+            let mut decrypt_buf = vec![0u8; 65535];
+
+            while running.load(Ordering::SeqCst) {
+                // Receive from server with timeout
+                let recv_result = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    socket.recv(&mut recv_buf),
+                ).await;
+
+                let n = match recv_result {
+                    Ok(Ok(n)) => n,
+                    Ok(Err(e)) => {
+                        eprintln!("Recv error: {}", e);
+                        continue;
+                    }
+                    Err(_) => continue, // Timeout
+                };
+
+                // Decrypt packet
+                let decrypted = {
+                    let mut tunn = tunn.lock().unwrap();
+                    tunn.decapsulate(None, &recv_buf[..n], &mut decrypt_buf)
+                };
+
+                match decrypted {
+                    TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
+                        // Write to adapter
+                        let len = data.len();
+                        if let Ok(mut send_packet) = session.allocate_send_packet(len as u16) {
+                            send_packet.bytes_mut().copy_from_slice(data);
+                            session.send_packet(send_packet);
+                        }
+                    }
+                    TunnResult::WriteToNetwork(data) => {
+                        // Send response (e.g., keepalive)
+                        let _ = socket.send(data).await;
+                    }
+                    TunnResult::Err(e) => {
+                        eprintln!("Decrypt error: {:?}", e);
+                    }
+                    _ => {}
+                }
+            }
+        })
+    };
+
+    // Keepalive: Timer tick for BoringTun internal state
+    let keepalive_handle = {
+        let tunn = Arc::clone(&tunn);
+        let socket = Arc::clone(&socket);
+        let running = Arc::clone(&running);
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+
+            while running.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+
+                let result = {
+                    let mut tunn = tunn.lock().unwrap();
+                    tunn.update_timers(&mut buf)
+                };
+
+                match result {
+                    TunnResult::WriteToNetwork(data) => {
+                        let _ = socket.send(data).await;
+                    }
+                    _ => {}
+                }
+            }
+        })
+    };
+
+    (outbound_handle, inbound_handle, keepalive_handle)
 }
 
 /// Build process tree with System process placeholder
