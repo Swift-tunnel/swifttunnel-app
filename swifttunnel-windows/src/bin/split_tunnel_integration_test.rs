@@ -1461,8 +1461,6 @@ fn cleanup_wfp_objects(handle: HANDLE) {
 /// Create sublayers if they don't exist
 /// Called AFTER driver INITIALIZE creates the provider
 fn create_sublayers_if_needed(handle: HANDLE) -> Result<(), String> {
-    use std::mem::MaybeUninit;
-
     // Check if baseline sublayer exists
     let mut sublayer_ptr: *mut FWPM_SUBLAYER0 = std::ptr::null_mut();
     let result = unsafe {
@@ -1472,7 +1470,7 @@ fn create_sublayers_if_needed(handle: HANDLE) -> Result<(), String> {
     if result == 0 {
         // Sublayer exists
         if !sublayer_ptr.is_null() {
-            unsafe { FwpmFreeMemory0(sublayer_ptr as *mut *mut std::ffi::c_void) };
+            unsafe { FwpmFreeMemory0(&mut sublayer_ptr as *mut _ as *mut *mut std::ffi::c_void) };
         }
         println!("    Baseline sublayer already exists");
     } else {
@@ -1511,7 +1509,7 @@ fn create_sublayers_if_needed(handle: HANDLE) -> Result<(), String> {
     if result == 0 {
         // Sublayer exists
         if !sublayer_ptr.is_null() {
-            unsafe { FwpmFreeMemory0(sublayer_ptr as *mut *mut std::ffi::c_void) };
+            unsafe { FwpmFreeMemory0(&mut sublayer_ptr as *mut _ as *mut *mut std::ffi::c_void) };
         }
         println!("    DNS sublayer already exists");
     } else {
