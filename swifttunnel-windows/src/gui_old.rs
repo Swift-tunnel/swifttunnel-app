@@ -1458,7 +1458,7 @@ impl BoosterApp {
         self.render_quick_info(ui);
     }
 
-    /// Render game preset selector cards (ExitLag-style)
+    /// Render game preset selector cards
     fn render_game_preset_selector(&mut self, ui: &mut egui::Ui) {
         egui::Frame::none()
             .fill(BG_CARD)
