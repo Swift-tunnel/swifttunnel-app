@@ -91,6 +91,13 @@ impl SystemTray {
                     } else if event.id == quit_id {
                         info!("Tray: Quit requested");
                         quit_clone.store(true, Ordering::SeqCst);
+
+                        // Fallback: Force exit after 2s if GUI doesn't respond (window may be hidden)
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            log::warn!("Tray: Fallback exit - GUI did not process quit in time");
+                            std::process::exit(0);
+                        });
                     }
                 }
             }
