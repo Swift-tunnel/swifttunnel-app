@@ -133,7 +133,7 @@ impl WfpEngine {
             },
             // Non-persistent: cleaned up when WFP engine closes (session-scoped)
             // PERSISTENT flag caused driver INITIALIZE to fail with ALREADY_EXISTS
-            flags: FWPM_PROVIDER_FLAGS::default(),
+            flags: 0u32,
             providerData: FWP_BYTE_BLOB::default(),
             serviceName: windows::core::PWSTR::null(),
         };
@@ -189,7 +189,7 @@ impl WfpEngine {
             },
             // Non-persistent: cleaned up when WFP engine closes (session-scoped)
             // PERSISTENT flag caused driver INITIALIZE to fail with ALREADY_EXISTS
-            flags: FWPM_SUBLAYER_FLAGS::default(),
+            flags: 0u32,
             providerKey: ptr::addr_of!(ST_FW_PROVIDER_KEY) as *mut GUID,
             providerData: FWP_BYTE_BLOB::default(),
             weight: 0x8000, // Medium-high weight
