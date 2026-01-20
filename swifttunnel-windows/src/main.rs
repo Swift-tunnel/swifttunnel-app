@@ -3,6 +3,7 @@
 
 mod auth;
 mod gui;
+mod network_analyzer;
 mod network_booster;
 mod performance_monitor;
 mod roblox_optimizer;
