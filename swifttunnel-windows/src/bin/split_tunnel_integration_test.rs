@@ -443,14 +443,14 @@ async fn run_test(config: TestConfig) -> TestResult {
     let initial_state = get_driver_state(driver_handle).unwrap_or(0);
     println!("    Initial state: {} ({})", initial_state, state_name(initial_state));
 
-    // Reset driver if not in STARTED state
-    if initial_state != STATE_STARTED {
-        println!("    Resetting driver to clean state...");
-        let _ = send_ioctl_neither(driver_handle, IOCTL_ST_RESET);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        if let Some(state) = get_driver_state(driver_handle) {
-            println!("    State after reset: {} ({})", state, state_name(state));
-        }
+    // ALWAYS reset driver to clear stale WFP callouts from previous sessions
+    // This is CRITICAL: without reset, INITIALIZE fails with ALREADY_EXISTS
+    // if there are leftover callouts from a previous app crash or test run
+    println!("    Resetting driver to clear stale callouts...");
+    let _ = send_ioctl_neither(driver_handle, IOCTL_ST_RESET);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    if let Some(state) = get_driver_state(driver_handle) {
+        println!("    State after reset: {} ({})", state, state_name(state));
     }
 
     // Initialize driver (transitions from STARTED -> INITIALIZED)
