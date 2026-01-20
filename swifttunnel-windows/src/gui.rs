@@ -227,6 +227,7 @@ impl ConnectionStep {
             ConnectionState::CreatingAdapter => ConnectionStep::Adapter,
             ConnectionState::Connecting => ConnectionStep::Tunnel,
             ConnectionState::ConfiguringSplitTunnel => ConnectionStep::Routing,
+            ConnectionState::ConfiguringRoutes => ConnectionStep::Routing,
             ConnectionState::Connected { .. } => ConnectionStep::Connected,
             ConnectionState::Disconnecting => ConnectionStep::Idle,
             ConnectionState::Error(_) => ConnectionStep::Idle,
@@ -1604,7 +1605,8 @@ impl BoosterApp {
             ConnectionState::FetchingConfig => ("Connecting", "◐", STATUS_WARNING, "Fetching config...".to_string(), false),
             ConnectionState::CreatingAdapter => ("Connecting", "◑", STATUS_WARNING, "Creating adapter...".to_string(), false),
             ConnectionState::Connecting => ("Connecting", "◒", STATUS_WARNING, "Establishing tunnel...".to_string(), false),
-            ConnectionState::ConfiguringSplitTunnel => ("Connecting", "◓", STATUS_WARNING, "Configuring routing...".to_string(), false),
+            ConnectionState::ConfiguringSplitTunnel => ("Connecting", "◓", STATUS_WARNING, "Configuring split tunnel...".to_string(), false),
+            ConnectionState::ConfiguringRoutes => ("Connecting", "◓", STATUS_WARNING, "Setting up routes...".to_string(), false),
             ConnectionState::Connected { server_region, .. } => {
                 let name = if let Ok(list) = self.dynamic_server_list.lock() {
                     list.get_server(server_region)
