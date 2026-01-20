@@ -446,12 +446,19 @@ async fn run_test(config: TestConfig) -> TestResult {
     // ALWAYS reset driver to clear stale WFP callouts from previous sessions
     // This is CRITICAL: without reset, INITIALIZE fails with ALREADY_EXISTS
     // if there are leftover callouts from a previous app crash or test run
-    println!("    Resetting driver to clear stale callouts...");
+    println!("    Resetting driver to clear stale callouts (twice for good measure)...");
     let _ = send_ioctl_neither(driver_handle, IOCTL_ST_RESET);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let _ = send_ioctl_neither(driver_handle, IOCTL_ST_RESET);
+    std::thread::sleep(std::time::Duration::from_millis(500));
     if let Some(state) = get_driver_state(driver_handle) {
         println!("    State after reset: {} ({})", state, state_name(state));
     }
+
+    // DEBUG: Also try CLEAR_CONFIGURATION to ensure clean slate
+    println!("    Sending CLEAR_CONFIGURATION...");
+    let _ = send_ioctl_neither(driver_handle, IOCTL_ST_CLEAR_CONFIGURATION);
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Initialize driver (transitions from STARTED -> INITIALIZED)
     println!("    Sending INITIALIZE...");
