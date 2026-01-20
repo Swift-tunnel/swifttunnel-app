@@ -100,6 +100,17 @@ pub fn run_auto_updater() -> AutoUpdateResult {
 
 /// Check for updates and download/install if available
 async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpdateResult, String> {
+    // Check marker before GitHub check to prevent update loops
+    let current_version = env!("CARGO_PKG_VERSION");
+    if let Some(reason) = super::should_skip_update_check(current_version) {
+        info!("Skipping update check: {}", reason);
+        if let Ok(mut s) = state.lock() {
+            *s = AutoUpdateState::NoUpdate;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        return Ok(AutoUpdateResult::NoUpdate);
+    }
+
     // Small delay to show the "Checking" state
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
@@ -193,6 +204,12 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
     // Install update
     if let Ok(mut s) = state.lock() {
         *s = AutoUpdateState::Installing;
+    }
+
+    // Write marker before install to track this attempt
+    if let Err(e) = super::write_marker(&update_info.version) {
+        error!("Failed to write update marker: {}", e);
+        // Continue anyway - not critical
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
