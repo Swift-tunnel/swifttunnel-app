@@ -134,10 +134,19 @@ fn get_driver_state(handle: HANDLE) -> Option<u32> {
         )
     };
 
-    if result.is_ok() && bytes_returned == 4 {
-        Some(state)
-    } else {
-        None
+    match result {
+        Ok(_) => {
+            if bytes_returned == 4 {
+                Some(state)
+            } else {
+                println!("   (unexpected bytes_returned: {})", bytes_returned);
+                None
+            }
+        }
+        Err(e) => {
+            println!("   (error: {:?})", e);
+            None
+        }
     }
 }
 
@@ -157,7 +166,13 @@ fn send_ioctl(handle: HANDLE, ioctl: u32) -> bool {
         )
     };
 
-    result.is_ok()
+    match result {
+        Ok(_) => true,
+        Err(e) => {
+            println!("   (error: {:?})", e);
+            false
+        }
+    }
 }
 
 fn state_name(state: u32) -> &'static str {
