@@ -279,45 +279,43 @@ fn render_region_selector(
             return;
         }
 
-        // 2-column grid
-        let columns = 2;
-        let spacing = 10.0;
-        let available = ui.available_width();
-        let card_width = (available - spacing) / columns as f32;
+        // 2-column grid - match old working code layout
+        let available_width = ui.available_width();
+        let card_spacing = 12.0;
+        let card_width = (available_width - card_spacing) / 2.0;
 
-        let regions: Vec<_> = state.regions.iter().collect();
-        for chunk in regions.chunks(columns) {
+        // Use peekable iterator like old code
+        let mut region_iter = state.regions.iter().peekable();
+        while region_iter.peek().is_some() {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = spacing;
+                ui.spacing_mut().item_spacing.x = card_spacing;
 
-                for region in chunk {
-                    let latency = state.latencies.get(&region.id).and_then(|l| *l);
-                    let is_selected = state.selected_region == region.id;
-                    let is_last = state.last_connected_region == Some(region.id.as_str());
+                for _ in 0..2 {
+                    if let Some(region) = region_iter.next() {
+                        let latency = state.latencies.get(&region.id).and_then(|l| *l);
+                        let is_selected = state.selected_region == region.id;
+                        let is_last = state.last_connected_region == Some(region.id.as_str());
 
-                    ui.allocate_ui(Vec2::new(card_width, 70.0), |ui| {
-                        if region_card(
-                            ui,
-                            &region.id,
-                            get_region_flag(&region.id),
-                            get_region_name(&region.id),
-                            latency,
-                            is_selected,
-                            is_last,
-                            state.is_loading,
-                            animations,
-                        ) {
-                            action = HomePageAction::SelectRegion(region.id.clone());
-                        }
-                    });
-                }
-
-                // Pad incomplete row
-                for _ in chunk.len()..columns {
-                    ui.allocate_space(Vec2::new(card_width, 70.0));
+                        // Allocate fixed width for each card
+                        ui.allocate_ui(Vec2::new(card_width, 90.0), |ui| {
+                            if region_card(
+                                ui,
+                                &region.id,
+                                get_region_flag(&region.id),
+                                get_region_name(&region.id),
+                                latency,
+                                is_selected,
+                                is_last,
+                                state.finding_best,
+                                animations,
+                            ) {
+                                action = HomePageAction::SelectRegion(region.id.clone());
+                            }
+                        });
+                    }
                 }
             });
-            ui.add_space(spacing);
+            ui.add_space(card_spacing);
         }
     });
 

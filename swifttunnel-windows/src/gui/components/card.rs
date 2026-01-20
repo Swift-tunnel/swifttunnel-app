@@ -101,32 +101,39 @@ pub fn region_card(
     let card_id = format!("region_card_{}", id);
     let hover_val = animations.get_hover_value(&card_id);
 
-    let card_bg = if is_selected {
-        ACCENT_PRIMARY.gamma_multiply(0.15)
+    // Calculate colors based on selection and hover
+    let (bg_color, border_color, border_width) = if is_selected {
+        (
+            lerp_color(ACCENT_PRIMARY.gamma_multiply(0.12), ACCENT_PRIMARY.gamma_multiply(0.18), hover_val),
+            ACCENT_PRIMARY,
+            2.0
+        )
     } else {
-        BG_ELEVATED
+        (
+            lerp_color(BG_CARD, BG_ELEVATED, hover_val * 0.5),
+            lerp_color(BG_ELEVATED, ACCENT_PRIMARY.gamma_multiply(0.4), hover_val),
+            1.0 + hover_val * 0.5
+        )
     };
 
-    let card_border = if is_selected {
-        ACCENT_PRIMARY
-    } else {
-        BG_HOVER
-    };
+    let available_width = ui.available_width();
 
-    let frame_response = egui::Frame::none()
-        .fill(lerp_color(card_bg, BG_HOVER, hover_val * 0.3))
-        .stroke(egui::Stroke::new(if is_selected { 2.0 } else { 1.0 }, card_border))
-        .rounding(CARD_ROUNDING)
-        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+    let response = egui::Frame::none()
+        .fill(bg_color)
+        .stroke(egui::Stroke::new(border_width, border_color))
+        .rounding(14.0)
+        .inner_margin(egui::Margin::symmetric(14.0, 14.0))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            // Set explicit dimensions like the old working code
+            ui.set_width(available_width - 28.0);
+            ui.set_min_height(50.0);
 
             ui.horizontal(|ui| {
-                // Flag emoji
-                ui.label(egui::RichText::new(flag).size(24.0));
-                ui.add_space(10.0);
+                // Flag emoji (larger)
+                ui.label(egui::RichText::new(flag).size(28.0));
+                ui.add_space(12.0);
 
-                // Name and latency
+                // Name and latency column
                 ui.vertical(|ui| {
                     // Region name with optional LAST badge
                     ui.horizontal(|ui| {
@@ -149,7 +156,7 @@ pub fn region_card(
                         }
                     });
 
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
 
                     // Latency display
                     if is_loading && latency.is_none() {
@@ -185,7 +192,7 @@ pub fn region_card(
                     }
                 });
 
-                // Checkmark for selected
+                // Checkmark for selected (right-aligned)
                 if is_selected {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new("✓")
@@ -194,18 +201,14 @@ pub fn region_card(
                     });
                 }
             });
-        });
+        })
+        .response;
 
-    // Handle click interaction
-    let response = ui.interact(
-        frame_response.response.rect,
-        egui::Id::new(&card_id),
-        Sense::click()
-    );
+    // Handle click and hover
+    let sense_response = ui.interact(response.rect, egui::Id::new(&card_id), Sense::click());
+    animations.animate_hover(&card_id, sense_response.hovered(), hover_val);
 
-    animations.animate_hover(&card_id, response.hovered(), hover_val);
-
-    response.clicked()
+    sense_response.clicked()
 }
 
 /// Boost preset card (Performance, Balanced, Quality)
