@@ -303,9 +303,9 @@ impl VpnConnection {
         adapter: &WintunAdapter,
         tunnel_apps: Vec<String>,
     ) -> (bool, Vec<String>) {
-        // Try to ensure the driver is started (will install if needed)
-        if !SplitTunnelDriver::ensure_driver_started() {
-            log::warn!("Split tunnel driver not available and couldn't be started");
+        // Check if driver is available (MSI installer must have set it up)
+        if !SplitTunnelDriver::check_driver_available() {
+            log::error!("Split tunnel driver not available - split tunneling disabled");
             return (false, Vec::new());
         }
 
