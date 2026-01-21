@@ -485,14 +485,15 @@ impl SplitTunnelDriver {
         }
     }
 
-    fn start_service_and_wait(scm: SC_HANDLE, service: SC_HANDLE) -> Result<(), String> {
+    fn start_service_and_wait(scm: windows::Win32::System::Services::SC_HANDLE, service: windows::Win32::System::Services::SC_HANDLE) -> Result<(), String> {
+        use windows::Win32::System::Services::*;
         unsafe {
             let mut status = SERVICE_STATUS::default();
 
             // Start the service
             log::info!("Starting driver service...");
             if let Err(e) = StartServiceW(service, None) {
-                let error_code = e.code().0 as u32;
+                let error_code: u32 = e.code().0 as u32;
                 // ERROR_SERVICE_ALREADY_RUNNING = 1056
                 if error_code != 1056 {
                     let _ = CloseServiceHandle(service);
@@ -537,7 +538,8 @@ impl SplitTunnelDriver {
         }
     }
 
-    fn get_service_binary_path(service: SC_HANDLE) -> Option<String> {
+    fn get_service_binary_path(service: windows::Win32::System::Services::SC_HANDLE) -> Option<String> {
+        use windows::Win32::System::Services::*;
         unsafe {
             let mut bytes_needed: u32 = 0;
             let _ = QueryServiceConfigW(service, None, 0, &mut bytes_needed);
