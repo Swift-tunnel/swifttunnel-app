@@ -351,7 +351,7 @@ fn verify_traffic_routing() {
     // Step 9: Now setup split tunnel
     println!("\nStep 9: Setting up split tunnel (testbench.exe should bypass VPN)...");
 
-    // Open and initialize driver
+    // Open driver FIRST
     let mut driver = SplitTunnelDriver::new();
     if let Err(e) = driver.open() {
         println!("   ❌ Failed to open driver: {}", e);
@@ -360,20 +360,12 @@ fn verify_traffic_routing() {
         adapter.shutdown();
         return;
     }
+    println!("   ✅ Driver opened");
 
-    if let Err(e) = driver.initialize() {
-        println!("   ❌ Failed to initialize driver: {}", e);
-        let _ = driver.close();
-        route_manager.remove_routes().ok();
-        tunnel.stop();
-        adapter.shutdown();
-        return;
-    }
-
-    // Setup WFP
+    // Setup WFP BEFORE initialize (creates provider + sublayer)
     let _wfp_engine = match setup_wfp_for_split_tunnel(interface_luid) {
         Ok(engine) => {
-            println!("   ✅ WFP setup complete");
+            println!("   ✅ WFP setup complete (provider + sublayer created)");
             Some(engine)
         }
         Err(e) => {
@@ -385,6 +377,17 @@ fn verify_traffic_routing() {
             return;
         }
     };
+
+    // NOW initialize driver (registers WFP callouts using the sublayer)
+    if let Err(e) = driver.initialize() {
+        println!("   ❌ Failed to initialize driver: {}", e);
+        let _ = driver.close();
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+    println!("   ✅ Driver initialized (WFP callouts registered)");
 
     // Configure split tunnel with Roblox apps only
     // testbench.exe is NOT in this list, so it should bypass VPN
@@ -571,13 +574,27 @@ fn test_split_tunnel_driver() {
         Ok(_) => {
             println!("   ✅ Driver handle opened");
 
-            println!("\n2. Initializing driver (registering WFP callouts)...");
+            // Setup WFP BEFORE initialize (creates provider + sublayer)
+            println!("\n2. Setting up WFP (BEFORE initialize)...");
+            let _wfp_engine = match setup_wfp_for_split_tunnel(0) {
+                Ok(wfp_engine) => {
+                    println!("   ✅ WFP setup complete");
+                    Some(wfp_engine)
+                }
+                Err(e) => {
+                    println!("   ❌ WFP setup failed: {}", e);
+                    let _ = driver.close();
+                    return;
+                }
+            };
+
+            println!("\n3. Initializing driver (registering WFP callouts)...");
             match driver.initialize() {
                 Ok(_) => {
                     println!("   ✅ Driver initialized");
                     println!("   Driver state: {:?}", driver.state());
 
-                    println!("\n3. Cleaning up...");
+                    println!("\n4. Cleaning up...");
                     let _ = driver.close();
                     println!("   ✅ Driver closed");
                 }
@@ -634,14 +651,14 @@ fn test_wfp_setup() {
 
 fn test_full_split_tunnel_flow() {
     println!("═══ Full Split Tunnel Flow Test ═══\n");
-    println!("This tests the complete flow: Driver → WFP → Configure\n");
+    println!("This tests the complete flow: WFP Setup → Driver Open → Initialize → Configure\n");
 
     // Step 0: Clean up stale WFP callouts from previous sessions
     println!("Step 0: Cleaning up stale WFP callouts...");
     cleanup_stale_wfp_callouts();
     println!("   ✅ Cleanup complete\n");
 
-    // Step 1: Open driver
+    // Step 1: Open driver FIRST
     println!("Step 1: Opening driver handle...");
     let mut driver = SplitTunnelDriver::new();
 
@@ -655,29 +672,30 @@ fn test_full_split_tunnel_flow() {
         }
     }
 
-    // Step 2: Initialize driver (registers WFP callouts)
-    println!("\nStep 2: Initializing driver (registering WFP callouts)...");
+    // Step 2: Setup WFP BEFORE initialize (creates provider + sublayer that driver will use)
+    // CRITICAL: This MUST happen before driver.initialize()!
+    // The driver's IOCTL_ST_INITIALIZE registers WFP callouts that reference the sublayer.
+    println!("\nStep 2: Setting up WFP for split tunnel (BEFORE initialize)...");
+    let _wfp_engine = match setup_wfp_for_split_tunnel(0) {
+        Ok(wfp_engine) => {
+            println!("   ✅ WFP setup complete (provider + sublayer created)");
+            Some(wfp_engine)
+        }
+        Err(e) => {
+            println!("   ❌ WFP setup failed: {}", e);
+            let _ = driver.close();
+            return;
+        }
+    };
+
+    // Step 3: Initialize driver (registers WFP callouts using the sublayer from step 2)
+    println!("\nStep 3: Initializing driver (registering WFP callouts)...");
     match driver.initialize() {
         Ok(_) => {
             println!("   ✅ Driver initialized - WFP callouts registered");
         }
         Err(e) => {
             println!("   ❌ Initialize failed: {}", e);
-            let _ = driver.close();
-            return;
-        }
-    }
-
-    // Step 3: Setup WFP filters
-    println!("\nStep 3: Setting up WFP for split tunnel...");
-    match setup_wfp_for_split_tunnel(0) {
-        Ok(wfp_engine) => {
-            println!("   ✅ WFP setup complete");
-            // Keep wfp_engine alive
-            std::mem::forget(wfp_engine);
-        }
-        Err(e) => {
-            println!("   ❌ WFP setup failed: {}", e);
             let _ = driver.close();
             return;
         }
