@@ -108,6 +108,9 @@ tray-icon = "0.19"
 # Image loading for tray icon
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Ctrl+C handler for CLI tools
+ctrlc = "3.4"
+
 # Test configuration
 [[test]]
 name = "vpn_tests"
@@ -137,6 +140,11 @@ path = "src/bin/split_tunnel_integration_test.rs"
 [[bin]]
 name = "driver_test"
 path = "src/bin/driver_test.rs"
+
+# CLI testbench for headless testing
+[[bin]]
+name = "testbench"
+path = "src/bin/testbench/main.rs"
 
 [dev-dependencies]
 # Already have serde_json in dependencies

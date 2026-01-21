@@ -1,32 +1,35 @@
 // Hide console window in release builds on Windows
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod auth;
+// GUI module is only used by the main binary, not the library
 mod gui;
-mod network_analyzer;
-mod network_booster;
-mod performance_monitor;
-mod roblox_optimizer;
-mod settings;
-mod structs;
-mod system_optimizer;
 mod tray;
-mod updater;
-mod utils;
-mod vpn;
+
+// Use modules from the library crate
+use swifttunnel_fps_booster::auth;
+use swifttunnel_fps_booster::network_analyzer;
+use swifttunnel_fps_booster::network_booster;
+use swifttunnel_fps_booster::performance_monitor;
+use swifttunnel_fps_booster::roblox_optimizer;
+use swifttunnel_fps_booster::settings;
+use swifttunnel_fps_booster::structs;
+use swifttunnel_fps_booster::system_optimizer;
+use swifttunnel_fps_booster::updater;
+use swifttunnel_fps_booster::utils;
+use swifttunnel_fps_booster::vpn;
 
 // Re-export hidden_command for use in other modules
-pub use utils::hidden_command;
+pub use swifttunnel_fps_booster::hidden_command;
 
-use crate::structs::*;
-use crate::system_optimizer::SystemOptimizer;
-use crate::roblox_optimizer::RobloxOptimizer;
-use crate::performance_monitor::PerformanceMonitor;
-use crate::network_booster::NetworkBooster;
-use crate::gui::BoosterApp;
-use crate::settings::load_settings;
-use crate::updater::{run_auto_updater, AutoUpdateResult};
-use crate::vpn::split_tunnel::SplitTunnelDriver;
+use structs::*;
+use system_optimizer::SystemOptimizer;
+use roblox_optimizer::RobloxOptimizer;
+use performance_monitor::PerformanceMonitor;
+use network_booster::NetworkBooster;
+use crate::gui::BoosterApp;  // Local module
+use settings::load_settings;
+use updater::{run_auto_updater, AutoUpdateResult};
+use vpn::split_tunnel::SplitTunnelDriver;
 
 use eframe::NativeOptions;
 use log::{error, info, warn};
