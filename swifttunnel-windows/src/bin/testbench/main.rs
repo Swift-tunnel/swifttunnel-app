@@ -106,6 +106,11 @@ fn print_usage() {
 }
 
 /// Check public IP using multiple services
+/// Get public IP using direct HTTP request from THIS process.
+/// This is critical for split tunnel testing - we need the request to come from
+/// the testbench.exe process itself, not a spawned child process.
+/// The testbench.exe process is registered as excluded from VPN, so its sockets
+/// should be bound to the internet IP if split tunnel is working.
 fn get_public_ip() -> Option<String> {
     let services = [
         "https://api.ipify.org",
@@ -113,17 +118,36 @@ fn get_public_ip() -> Option<String> {
         "https://icanhazip.com",
     ];
 
-    for service in services {
-        let output = std::process::Command::new("powershell")
-            .args(["-Command", &format!("(Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 5).Content.Trim()", service)])
-            .output();
+    // Create a small runtime for the HTTP request
+    // IMPORTANT: We use reqwest directly instead of spawning PowerShell because:
+    // 1. This process (testbench.exe) is registered with the split tunnel driver
+    // 2. Spawned processes (PowerShell) have new PIDs not registered with the driver
+    // 3. The driver tracks by PID, so only registered processes get their sockets redirected
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return None,
+    };
 
-        if let Ok(out) = output {
-            if out.status.success() {
-                let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !ip.is_empty() && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                    return Some(ip);
-                }
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+
+    for service in services {
+        let result = rt.block_on(async {
+            client.get(service).send().await?.text().await
+        });
+
+        if let Ok(ip) = result {
+            let ip = ip.trim().to_string();
+            if !ip.is_empty() && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                return Some(ip);
             }
         }
     }
