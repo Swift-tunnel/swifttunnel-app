@@ -111,6 +111,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Ctrl+C handler for CLI tools
 ctrlc = "3.4"
 
+# Fast mutex for CLI testbench
+parking_lot = "0.12"
+
 # Test configuration
 [[test]]
 name = "vpn_tests"
