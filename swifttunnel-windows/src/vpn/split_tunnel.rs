@@ -576,14 +576,82 @@ impl SplitTunnelDriver {
         let expected = expected.to_string_lossy().to_lowercase();
         let mut actual = actual.trim().trim_matches('"').to_lowercase();
 
-        if let Some(stripped) = actual.strip_prefix(r"\\??\\") {
-            actual = stripped.to_string();
-        }
-        if let Some(stripped) = actual.strip_prefix(r"\\\\?\\") {
-            actual = stripped.to_string();
+        for prefix in [r"\??\", r"\\?\"] {
+            if let Some(stripped) = actual.strip_prefix(prefix) {
+                actual = stripped.to_string();
+                break;
+            }
         }
 
         actual == expected
+    }
+
+    pub fn stop_driver_service() -> Result<(), String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Services::*;
+
+        const SERVICE_NAME: &str = "MullvadSplitTunnel";
+
+        log::info!("Stopping split tunnel driver service...");
+
+        unsafe {
+            let scm = OpenSCManagerW(
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SC_MANAGER_ALL_ACCESS,
+            ).map_err(|e| format!("Failed to open SCM: {}", e))?;
+
+            let service_name_wide: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+            let service = match OpenServiceW(
+                scm,
+                PCWSTR(service_name_wide.as_ptr()),
+                SERVICE_ALL_ACCESS,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let error_code = e.code().0 as u32;
+                    let _ = CloseServiceHandle(scm);
+                    // ERROR_SERVICE_DOES_NOT_EXIST = 1060
+                    if error_code == 1060 {
+                        log::info!("Driver service not found (already removed)");
+                        return Ok(());
+                    }
+                    return Err(format!("Failed to open service: {}", e));
+                }
+            };
+
+            let mut status = SERVICE_STATUS::default();
+            if QueryServiceStatus(service, &mut status).is_ok() {
+                if status.dwCurrentState == SERVICE_STOPPED {
+                    log::info!("Driver service already stopped");
+                    let _ = CloseServiceHandle(service);
+                    let _ = CloseServiceHandle(scm);
+                    return Ok(());
+                }
+            }
+
+            let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
+
+            for i in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if QueryServiceStatus(service, &mut status).is_ok() {
+                    if status.dwCurrentState == SERVICE_STOPPED {
+                        log::info!("Driver service stopped successfully");
+                        let _ = CloseServiceHandle(service);
+                        let _ = CloseServiceHandle(scm);
+                        return Ok(());
+                    }
+                }
+                if i == 10 {
+                    log::debug!("Still waiting for driver service to stop...");
+                }
+            }
+
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+
+            Err("Timeout waiting for service to stop".to_string())
+        }
     }
 
     /// Restart the driver service to fully reset its internal state
