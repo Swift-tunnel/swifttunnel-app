@@ -383,7 +383,7 @@ impl SplitTunnelDriver {
 
             let service = match service {
                 Ok(s) => {
-                    log::info!("Service already exists, checking status...");
+                    log::info!("Service already exists, checking config...");
                     s
                 }
                 Err(_) => {
@@ -412,6 +412,64 @@ impl SplitTunnelDriver {
                 }
             };
 
+            if let Some(existing_path) = Self::get_service_binary_path(service) {
+                if !Self::service_path_matches(&existing_path, &driver_path) {
+                    log::warn!(
+                        "Driver service points to a different binary ({}). Recreating service...",
+                        existing_path
+                    );
+
+                    let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut SERVICE_STATUS::default());
+                    for _ in 0..10 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let mut status = SERVICE_STATUS::default();
+                        if QueryServiceStatus(service, &mut status).is_ok()
+                            && status.dwCurrentState == SERVICE_STOPPED
+                        {
+                            break;
+                        }
+                    }
+
+                    let _ = DeleteService(service);
+                    let _ = CloseServiceHandle(service);
+
+                    let driver_path_str = driver_path.to_string_lossy();
+                    let binary_path_wide: Vec<u16> = driver_path_str.encode_utf16().chain(std::iter::once(0)).collect();
+                    let display_name_wide: Vec<u16> = "Mullvad Split Tunnel".encode_utf16().chain(std::iter::once(0)).collect();
+
+                    let service = CreateServiceW(
+                        scm,
+                        PCWSTR(service_name_wide.as_ptr()),
+                        PCWSTR(display_name_wide.as_ptr()),
+                        SERVICE_ALL_ACCESS,
+                        SERVICE_KERNEL_DRIVER,
+                        SERVICE_DEMAND_START,
+                        SERVICE_ERROR_NORMAL,
+                        PCWSTR(binary_path_wide.as_ptr()),
+                        PCWSTR::null(), // No load order group
+                        None,           // No tag
+                        PCWSTR::null(), // No dependencies
+                        PCWSTR::null(), // LocalSystem account
+                        PCWSTR::null(), // No password
+                    ).map_err(|e| format!("Failed to recreate service: {}", e))?;
+
+                    // Replace handle for start/status checks below.
+                    let _ = CloseServiceHandle(service);
+                    let service = OpenServiceW(
+                        scm,
+                        PCWSTR(service_name_wide.as_ptr()),
+                        SERVICE_ALL_ACCESS,
+                    ).map_err(|e| format!("Failed to reopen service: {}", e))?;
+                    return Self::start_service_and_wait(scm, service);
+                }
+            } else {
+                log::warn!("Unable to read existing driver service config; recreating service...");
+                let _ = DeleteService(service);
+                let _ = CloseServiceHandle(service);
+                let _ = CloseServiceHandle(scm);
+                return Self::ensure_driver_service();
+            }
+
             // Check service status
             let mut status = SERVICE_STATUS::default();
             if QueryServiceStatus(service, &mut status).is_ok() {
@@ -422,6 +480,14 @@ impl SplitTunnelDriver {
                     return Ok(());
                 }
             }
+
+            Self::start_service_and_wait(scm, service)
+        }
+    }
+
+    fn start_service_and_wait(scm: SC_HANDLE, service: SC_HANDLE) -> Result<(), String> {
+        unsafe {
+            let mut status = SERVICE_STATUS::default();
 
             // Start the service
             log::info!("Starting driver service...");
@@ -448,7 +514,6 @@ impl SplitTunnelDriver {
                         return Ok(());
                     }
                     if status.dwCurrentState == SERVICE_STOPPED {
-                        // Check for error
                         if status.dwWin32ExitCode != 0 {
                             let _ = CloseServiceHandle(service);
                             let _ = CloseServiceHandle(scm);
@@ -470,6 +535,60 @@ impl SplitTunnelDriver {
 
             Err("Timeout waiting for service to start".to_string())
         }
+    }
+
+    fn get_service_binary_path(service: SC_HANDLE) -> Option<String> {
+        unsafe {
+            let mut bytes_needed: u32 = 0;
+            let _ = QueryServiceConfigW(service, None, 0, &mut bytes_needed);
+            if bytes_needed == 0 {
+                return None;
+            }
+
+            let mut buffer = vec![0u8; bytes_needed as usize];
+            let config_ptr = buffer.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+            if QueryServiceConfigW(
+                service,
+                Some(&mut *config_ptr),
+                bytes_needed,
+                &mut bytes_needed,
+            )
+            .is_ok()
+            {
+                let binary = (*config_ptr).lpBinaryPathName;
+                Some(Self::pwstr_to_string(binary))
+            } else {
+                None
+            }
+        }
+    }
+
+    fn pwstr_to_string(pw: windows::core::PWSTR) -> String {
+        if pw.is_null() {
+            return String::new();
+        }
+        unsafe {
+            let mut len = 0usize;
+            while *pw.0.add(len) != 0 {
+                len += 1;
+            }
+            let slice = std::slice::from_raw_parts(pw.0, len);
+            String::from_utf16_lossy(slice)
+        }
+    }
+
+    fn service_path_matches(actual: &str, expected: &std::path::Path) -> bool {
+        let expected = expected.to_string_lossy().to_lowercase();
+        let mut actual = actual.trim().trim_matches('"').to_lowercase();
+
+        if let Some(stripped) = actual.strip_prefix(r"\\??\\") {
+            actual = stripped.to_string();
+        }
+        if let Some(stripped) = actual.strip_prefix(r"\\\\?\\") {
+            actual = stripped.to_string();
+        }
+
+        actual == expected
     }
 
     /// Restart the driver service to fully reset its internal state
