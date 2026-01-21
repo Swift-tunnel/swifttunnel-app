@@ -361,8 +361,16 @@ impl SplitTunnelDriver {
     }
 
     /// Initialize the driver - registers WFP callouts
-    /// MUST be called BEFORE WFP filters are added (setup_wfp_for_split_tunnel)
-    /// This is a separate step from configure() to allow proper initialization order
+    ///
+    /// CRITICAL: setup_wfp_for_split_tunnel() MUST be called BEFORE this method!
+    /// The driver's IOCTL_ST_INITIALIZE registers WFP callouts that REFERENCE
+    /// the sublayer created by setup_wfp_for_split_tunnel().
+    ///
+    /// Correct order:
+    /// 1. driver.open()
+    /// 2. setup_wfp_for_split_tunnel() - creates provider + sublayer
+    /// 3. driver.initialize() - THIS METHOD (registers callouts using the sublayer)
+    /// 4. driver.configure()
     pub fn initialize(&mut self) -> VpnResult<()> {
         let handle = self.device_handle.ok_or(VpnError::DriverNotOpen)?;
 
@@ -488,12 +496,11 @@ impl SplitTunnelDriver {
 
     /// Configure split tunnel with EXCLUDE-ALL-EXCEPT logic
     ///
-    /// IMPORTANT: Call initialize() FIRST, then setup WFP, THEN call this method.
-    /// The initialization order MUST be:
+    /// IMPORTANT: The correct initialization order is:
     /// 1. driver.open()
-    /// 2. driver.initialize() - registers WFP callouts
-    /// 3. setup_wfp_for_split_tunnel() - adds WFP filters (needs callouts to exist)
-    /// 4. driver.configure() - this method
+    /// 2. setup_wfp_for_split_tunnel() - creates WFP provider + sublayer
+    /// 3. driver.initialize() - registers WFP callouts (need sublayer to exist!)
+    /// 4. driver.configure() - THIS METHOD
     pub fn configure(&mut self, config: SplitTunnelConfig) -> VpnResult<()> {
         let handle = self.device_handle.ok_or(VpnError::DriverNotOpen)?;
 
