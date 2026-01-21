@@ -1,10 +1,18 @@
 //! SwiftTunnel CLI Testbench
 //!
 //! A headless CLI tool for testing VPN and split tunnel functionality
-//! without requiring a GUI or OpenGL support.
+//! without requiring a GUI or user interaction.
+//!
+//! Usage:
+//!   testbench              - Run all tests
+//!   testbench driver       - Check driver status only
+//!   testbench init         - Test driver initialization
+//!   testbench wfp          - Test WFP setup
+//!   testbench full         - Test full split tunnel flow
+//!   testbench info         - Show system info
 
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::env;
 
 use anyhow::Result;
 
@@ -23,53 +31,62 @@ fn main() -> Result<()> {
     println!("║          Headless testing for VPN & Split Tunnel           ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
 
-    // Main menu loop
-    loop {
-        print_menu();
+    let args: Vec<String> = env::args().collect();
+    let command = args.get(1).map(|s| s.as_str()).unwrap_or("all");
 
-        let choice = read_input("Select option: ");
-
-        match choice.trim() {
-            "1" => check_driver_status(),
-            "2" => test_split_tunnel_driver(),
-            "3" => test_wfp_setup(),
-            "4" => test_full_split_tunnel_flow(),
-            "5" => show_system_info(),
-            "0" | "q" | "quit" | "exit" => {
-                println!("\nExiting testbench. Goodbye!");
-                break;
-            }
-            _ => println!("\n⚠ Invalid option. Please try again.\n"),
+    match command {
+        "driver" => {
+            check_driver_status();
+        }
+        "init" => {
+            test_split_tunnel_driver();
+        }
+        "wfp" => {
+            test_wfp_setup();
+        }
+        "full" => {
+            test_full_split_tunnel_flow();
+        }
+        "info" => {
+            show_system_info();
+        }
+        "all" => {
+            println!("Running all tests...\n");
+            check_driver_status();
+            test_split_tunnel_driver();
+            test_wfp_setup();
+            test_full_split_tunnel_flow();
+            show_system_info();
+        }
+        "help" | "-h" | "--help" => {
+            print_usage();
+        }
+        _ => {
+            println!("Unknown command: {}\n", command);
+            print_usage();
+            std::process::exit(1);
         }
     }
 
+    println!("\nTestbench complete.");
     Ok(())
 }
 
-fn print_menu() {
-    println!("┌──────────────────────────────────────┐");
-    println!("│            MAIN MENU                 │");
-    println!("├──────────────────────────────────────┤");
-    println!("│  1. Check Driver Status              │");
-    println!("│  2. Test Split Tunnel Driver         │");
-    println!("│  3. Test WFP Setup                   │");
-    println!("│  4. Test Full Split Tunnel Flow      │");
-    println!("│  5. Show System Info                 │");
-    println!("│  0. Exit                             │");
-    println!("└──────────────────────────────────────┘");
-}
-
-fn read_input(prompt: &str) -> String {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    input
+fn print_usage() {
+    println!("Usage: testbench [COMMAND]");
+    println!();
+    println!("Commands:");
+    println!("  all      Run all tests (default)");
+    println!("  driver   Check driver status");
+    println!("  init     Test driver initialization");
+    println!("  wfp      Test WFP setup");
+    println!("  full     Test full split tunnel flow");
+    println!("  info     Show system info");
+    println!("  help     Show this help message");
 }
 
 fn check_driver_status() {
-    println!("\n═══ Driver Status ═══\n");
+    println!("═══ Driver Status ═══\n");
 
     // Check if driver service exists
     let output = std::process::Command::new("sc")
@@ -115,7 +132,7 @@ fn check_driver_status() {
 }
 
 fn test_split_tunnel_driver() {
-    println!("\n═══ Split Tunnel Driver Test ═══\n");
+    println!("═══ Split Tunnel Driver Test ═══\n");
 
     println!("1. Opening driver handle...");
     let mut driver = SplitTunnelDriver::new();
@@ -131,12 +148,12 @@ fn test_split_tunnel_driver() {
                     println!("   Driver state: {:?}", driver.state());
 
                     println!("\n3. Cleaning up...");
-                    driver.close();
+                    let _ = driver.close();
                     println!("   ✅ Driver closed");
                 }
                 Err(e) => {
                     println!("   ❌ Initialize failed: {}", e);
-                    driver.close();
+                    let _ = driver.close();
                 }
             }
         }
@@ -152,11 +169,11 @@ fn test_split_tunnel_driver() {
 }
 
 fn test_wfp_setup() {
-    println!("\n═══ WFP Setup Test ═══\n");
+    println!("═══ WFP Setup Test ═══\n");
 
     println!("1. Opening WFP engine...");
     match WfpEngine::open() {
-        Ok(mut engine) => {
+        Ok(engine) => {
             println!("   ✅ WFP engine opened");
 
             println!("\n2. Cleaning up legacy objects...");
@@ -186,7 +203,7 @@ fn test_wfp_setup() {
 }
 
 fn test_full_split_tunnel_flow() {
-    println!("\n═══ Full Split Tunnel Flow Test ═══\n");
+    println!("═══ Full Split Tunnel Flow Test ═══\n");
     println!("This tests the complete flow: Driver → WFP → Configure\n");
 
     // Step 1: Open driver
@@ -211,7 +228,7 @@ fn test_full_split_tunnel_flow() {
         }
         Err(e) => {
             println!("   ❌ Initialize failed: {}", e);
-            driver.close();
+            let _ = driver.close();
             return;
         }
     }
@@ -226,7 +243,7 @@ fn test_full_split_tunnel_flow() {
         }
         Err(e) => {
             println!("   ❌ WFP setup failed: {}", e);
-            driver.close();
+            let _ = driver.close();
             return;
         }
     }
@@ -256,7 +273,7 @@ fn test_full_split_tunnel_flow() {
 
     // Step 5: Cleanup
     println!("\nStep 5: Cleaning up...");
-    driver.close();
+    let _ = driver.close();
     println!("   ✅ Driver closed");
 
     println!("\n════════════════════════════════════════");
@@ -265,7 +282,7 @@ fn test_full_split_tunnel_flow() {
 }
 
 fn show_system_info() {
-    println!("\n═══ System Info ═══\n");
+    println!("═══ System Info ═══\n");
 
     // OS info
     println!("Operating System:");
