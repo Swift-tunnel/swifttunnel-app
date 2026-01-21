@@ -530,49 +530,52 @@ impl FilterLayer {
 
 /// Helper to setup WFP for split tunneling
 ///
-/// IMPORTANT: This must be called AFTER driver.initialize() which registers
-/// the WFP callouts. The initialization order is:
+/// Setup WFP infrastructure BEFORE driver.initialize()
+///
+/// CRITICAL: This must be called BEFORE driver.initialize()!
+/// The Mullvad driver's IOCTL_ST_INITIALIZE registers WFP callouts that REFERENCE
+/// the sublayer - so the sublayer must exist first!
+///
+/// Correct initialization order:
 /// 1. driver.open()
-/// 2. driver.initialize() - registers WFP callouts via IOCTL_ST_INITIALIZE
-/// 3. setup_wfp_for_split_tunnel() - this function (adds filters)
+/// 2. setup_wfp_for_split_tunnel() - THIS FUNCTION (creates provider + sublayer)
+/// 3. driver.initialize() - registers WFP callouts that use the sublayer
 /// 4. driver.configure()
 ///
-/// Do NOT call cleanup_all() here - the driver has already registered callouts
-/// during initialize(), and cleanup would delete them!
-///
-/// NOTE: We do NOT add our own WFP filters anymore. The Mullvad split tunnel driver
-/// handles all WFP filtering internally through its callouts. Adding our own filters
-/// was causing FWP_E_PROVIDER_NOT_FOUND errors because of provider/callout conflicts.
+/// If the sublayer doesn't exist when driver.initialize() or configure() runs,
+/// you'll get FWP_E_SUBLAYER_NOT_FOUND (0x80320007).
 pub fn setup_wfp_for_split_tunnel(_interface_luid: u64) -> VpnResult<WfpEngine> {
-    log::info!("Setting up WFP for split tunneling...");
+    log::info!("Setting up WFP infrastructure for split tunneling...");
 
     let mut engine = WfpEngine::open()?;
 
-    // NOTE: We do NOT call cleanup_all() here anymore!
-    // The driver's initialize() already called IOCTL_ST_RESET which clears stale state,
-    // and IOCTL_ST_INITIALIZE which registers fresh callouts. Calling cleanup_all()
-    // would DELETE those callouts we just registered!
-    //
-    // Only cleanup legacy SwiftTunnel objects (not Mullvad callouts)
+    // Step 1: Clean up any stale Mullvad callouts from previous sessions
+    // These are registered with PERSISTENT flag, so they survive across sessions
+    // If not cleaned up, driver INITIALIZE will fail with FWP_E_ALREADY_EXISTS
+    log::info!("Cleaning up stale WFP objects...");
+    let deleted = engine.cleanup_mullvad_callouts();
+    if deleted > 0 {
+        log::info!("Cleaned up {} stale Mullvad callouts", deleted);
+    }
+
+    // Also cleanup legacy SwiftTunnel objects
     engine.cleanup_legacy_objects();
 
-    // The Mullvad driver creates its own provider and sublayer during IOCTL_ST_INITIALIZE
-    // We no longer need to register our own - the driver handles all WFP infrastructure
-    //
-    // Previous code tried to:
-    // 1. Register our own provider (ST_FW_PROVIDER_KEY)
-    // 2. Create our own sublayer (ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
-    // 3. Add permit filters for VPN interface
-    //
-    // This caused conflicts because:
-    // - The driver might register the same provider internally
-    // - Our filters referenced a provider that may not exist in the correct state
-    // - We got FWP_E_PROVIDER_NOT_FOUND (0x80320027) errors
-    //
-    // The driver's IOCTL_ST_SET_CONFIGURATION handles all the WFP rules needed
-    // for split tunneling based on the process tree we provide.
+    // Step 2: Register provider (required before sublayer)
+    log::info!("Registering WFP provider...");
+    if let Err(e) = engine.register_provider() {
+        // Provider might already exist - that's OK
+        log::warn!("Provider registration: {} (may already exist)", e);
+    }
 
-    log::info!("WFP setup complete - driver handles all filtering");
+    // Step 3: Register sublayer (CRITICAL - driver callouts reference this!)
+    log::info!("Registering WFP sublayer...");
+    if let Err(e) = engine.register_sublayer() {
+        // Sublayer might already exist - that's OK
+        log::warn!("Sublayer registration: {} (may already exist)", e);
+    }
+
+    log::info!("WFP infrastructure ready - provider and sublayer registered");
     Ok(engine)
 }
 

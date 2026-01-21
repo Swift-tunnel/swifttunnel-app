@@ -346,19 +346,13 @@ impl VpnConnection {
         })?;
         log::info!("Split tunnel driver opened");
 
-        // Step 3: Initialize driver - this registers WFP callouts
-        // MUST happen BEFORE WFP filter setup
-        driver.initialize().map_err(|e| {
-            VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
-        })?;
-        log::info!("Split tunnel driver initialized (WFP callouts registered)");
-
-        // Step 4: Setup WFP AFTER driver initialization
-        // Now the callouts exist, so filters can reference them
-        log::info!("Setting up WFP filters for split tunnel...");
+        // Step 3: Setup WFP infrastructure BEFORE driver initialization
+        // CRITICAL: The driver's IOCTL_ST_INITIALIZE registers WFP callouts that
+        // REFERENCE the sublayer - so the sublayer MUST exist first!
+        log::info!("Setting up WFP infrastructure (provider + sublayer)...");
         match setup_wfp_for_split_tunnel(interface_luid) {
             Ok(engine) => {
-                log::info!("WFP setup complete");
+                log::info!("WFP infrastructure ready");
                 self.wfp_engine = Some(engine);
             }
             Err(e) => {
@@ -367,6 +361,14 @@ impl VpnConnection {
                 return Err(VpnError::WfpSetupFailed(e.to_string()));
             }
         }
+
+        // Step 4: NOW initialize driver - this registers WFP callouts
+        // The callouts reference the sublayer we just created
+        driver.initialize().map_err(|e| {
+            self.wfp_engine = None;
+            VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
+        })?;
+        log::info!("Split tunnel driver initialized (WFP callouts registered)");
 
         // Step 5: Get internet interface IP for socket redirection
         // This tells the driver where to redirect excluded app traffic
