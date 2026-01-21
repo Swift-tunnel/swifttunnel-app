@@ -214,7 +214,7 @@ fn verify_traffic_routing() {
         }
     };
 
-    let adapter = match WintunAdapter::create(ip, cidr) {
+    let adapter = match WintunAdapter::create(std::net::IpAddr::V4(ip), cidr) {
         Ok(a) => {
             println!("   ✅ Wintun adapter created");
             std::sync::Arc::new(a)
