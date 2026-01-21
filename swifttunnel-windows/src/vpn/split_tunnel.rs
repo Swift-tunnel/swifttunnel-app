@@ -857,7 +857,17 @@ impl SplitTunnelDriver {
             ioctl::IOCTL_ST_REGISTER_PROCESSES,
             proc_data.len()
         );
-        self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
+        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data) {
+            if Self::is_invalid_function_error(&e) {
+                log::warn!(
+                    "REGISTER_PROCESSES rejected with INVALID_FUNCTION - reinitializing driver and retrying"
+                );
+                self.reinitialize_for_configure()?;
+                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
+            } else {
+                return Err(e);
+            }
+        }
 
         // Verify state after REGISTER_PROCESSES - should be READY(3)
         if let Ok(state) = self.get_driver_state() {
@@ -867,7 +877,18 @@ impl SplitTunnelDriver {
         // Register IP addresses
         log::info!("Registering IPs with driver - Tunnel: {}, Internet: {}", config.tunnel_ip, config.internet_ip);
         let ip_data = self.serialize_ip_addresses(&config)?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
+        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data) {
+            if Self::is_invalid_function_error(&e) {
+                log::warn!(
+                    "REGISTER_IP_ADDRESSES rejected with INVALID_FUNCTION - reinitializing driver and retrying"
+                );
+                self.reinitialize_for_configure()?;
+                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
+                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
+            } else {
+                return Err(e);
+            }
+        }
 
         // Verify state after REGISTER_IP_ADDRESSES - should still be READY(3)
         if let Ok(state) = self.get_driver_state() {
@@ -914,6 +935,22 @@ impl SplitTunnelDriver {
     fn is_already_exists_error(err: &VpnError) -> bool {
         let msg = err.to_string().to_lowercase();
         msg.contains("0x80320009") || msg.contains("already exists")
+    }
+
+    fn is_invalid_function_error(err: &VpnError) -> bool {
+        let msg = err.to_string().to_lowercase();
+        msg.contains("0x80070001") || msg.contains("invalid function")
+    }
+
+    fn reinitialize_for_configure(&mut self) -> VpnResult<()> {
+        if let Ok(state) = self.get_driver_state() {
+            log::warn!(
+                "Driver state before reinitialize: {} ({})",
+                state,
+                Self::state_name(state)
+            );
+        }
+        self.initialize()
     }
 
     /// Efficient refresh - only update changed processes
