@@ -48,8 +48,9 @@
         -->
 
         <!-- Set command for driver installation (immediate - expands properties) -->
+        <!-- WixQuietExec64 requires command to start with quoted executable path -->
         <SetProperty Id="InstallSplitTunnelDriver"
-                     Value="cmd /c &quot;sc delete MullvadSplitTunnel 2&gt;nul &amp; sc create MullvadSplitTunnel type= kernel start= demand binpath= &quot;&quot;[DriversFolder]mullvad-split-tunnel.sys&quot;&quot;&quot;"
+                     Value="&quot;cmd.exe&quot; /c sc delete MullvadSplitTunnel 2&gt;nul &amp; sc create MullvadSplitTunnel type= kernel start= demand binpath= &quot;[DriversFolder]mullvad-split-tunnel.sys&quot;"
                      Before="InstallSplitTunnelDriver"
                      Sequence="execute" />
 
@@ -63,7 +64,7 @@
 
         <!-- Set command for starting driver -->
         <SetProperty Id="StartSplitTunnelDriver"
-                     Value="cmd /c &quot;sc start MullvadSplitTunnel&quot;"
+                     Value="&quot;cmd.exe&quot; /c sc start MullvadSplitTunnel"
                      Before="StartSplitTunnelDriver"
                      Sequence="execute" />
 
@@ -77,7 +78,7 @@
 
         <!-- Set command for stopping driver -->
         <SetProperty Id="StopSplitTunnelDriver"
-                     Value="cmd /c &quot;sc stop MullvadSplitTunnel 2&gt;nul&quot;"
+                     Value="&quot;cmd.exe&quot; /c sc stop MullvadSplitTunnel 2&gt;nul"
                      Before="StopSplitTunnelDriver"
                      Sequence="execute" />
 
@@ -91,7 +92,7 @@
 
         <!-- Set command for deleting driver service -->
         <SetProperty Id="UninstallSplitTunnelDriver"
-                     Value="cmd /c &quot;sc delete MullvadSplitTunnel 2&gt;nul&quot;"
+                     Value="&quot;cmd.exe&quot; /c sc delete MullvadSplitTunnel 2&gt;nul"
                      Before="UninstallSplitTunnelDriver"
                      Sequence="execute" />
 
