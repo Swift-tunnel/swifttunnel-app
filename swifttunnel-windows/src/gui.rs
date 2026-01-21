@@ -445,6 +445,8 @@ impl BoosterApp {
                                 if let Ok(mut lat) = latencies_clone.lock() {
                                     lat.insert(region.id.clone(), (best_server_id.clone(), latency));
                                     log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
+                                } else {
+                                    log::error!("Region '{}' failed to store latency - mutex poisoned", region.id);
                                 }
                             } else {
                                 log::warn!("Region '{}' ping failed - no servers responded", region.id);
@@ -671,7 +673,7 @@ impl BoosterApp {
 async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)> {
     use crate::hidden_command;
 
-    log::debug!("ping_region_async: starting for {} servers", servers.len());
+    log::info!("ping_region_async: starting for {} servers", servers.len());
 
     let mut best_result: Option<(String, u32)> = None;
 
@@ -679,19 +681,30 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
         let mut total = 0u32;
         let mut count = 0u32;
 
-        log::debug!("Pinging server {} at {}", server_id, server_ip);
-
         // Do 2 pings per server (faster than 3)
         for ping_num in 0..2 {
-            let output = tokio::task::spawn_blocking({
+            // Use spawn_blocking to run the ping command without blocking the async runtime
+            let ping_result = tokio::task::spawn_blocking({
                 let ip = server_ip.clone();
                 move || {
                     hidden_command("ping")
                         .args(["-n", "1", "-w", "1000", &ip])
                         .output()
-                        .ok()
                 }
-            }).await.ok().flatten();
+            }).await;
+
+            // Handle spawn_blocking result
+            let output = match ping_result {
+                Ok(Ok(output)) => Some(output),
+                Ok(Err(e)) => {
+                    log::warn!("  Ping {} to {}: IO error: {}", ping_num + 1, server_ip, e);
+                    None
+                }
+                Err(e) => {
+                    log::warn!("  Ping {} to {}: spawn_blocking failed: {}", ping_num + 1, server_ip, e);
+                    None
+                }
+            };
 
             if let Some(output) = output {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -707,10 +720,8 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
                     total += ms;
                     count += 1;
                 } else {
-                    log::debug!("  Ping {} to {}: failed to parse output: {}", ping_num + 1, server_ip, stdout.lines().next().unwrap_or("(empty)"));
+                    log::warn!("  Ping {} to {}: failed to parse output: '{}'", ping_num + 1, server_ip, stdout.lines().next().unwrap_or("(empty)"));
                 }
-            } else {
-                log::debug!("  Ping {} to {}: command failed to execute", ping_num + 1, server_ip);
             }
 
             // Small delay between pings
@@ -719,7 +730,7 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
 
         if count > 0 {
             let avg = total / count;
-            log::debug!("Server {} avg latency: {}ms ({} successful pings)", server_id, avg, count);
+            log::info!("  Server {} latency: {}ms ({} pings)", server_id, avg, count);
             let is_better = match &best_result {
                 None => true,
                 Some((_, best_latency)) => avg < *best_latency,
@@ -728,11 +739,11 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
                 best_result = Some((server_id.clone(), avg));
             }
         } else {
-            log::debug!("Server {} all pings failed", server_id);
+            log::warn!("  Server {} all pings failed", server_id);
         }
     }
 
-    log::debug!("ping_region_async result: {:?}", best_result);
+    log::info!("ping_region_async result: {:?}", best_result);
     best_result
 }
 
@@ -4147,11 +4158,17 @@ impl BoosterApp {
                                 })
                                 .collect();
                             
+                            log::info!("Re-pinging region '{}' with {} servers", region.id, server_ips.len());
+
                             if let Some((best_server_id, latency)) = ping_region_async(&server_ips).await {
                                 if let Ok(mut lat) = latencies_clone.lock() {
                                     lat.insert(region.id.clone(), (best_server_id.clone(), latency));
                                     log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
+                                } else {
+                                    log::error!("Region '{}' failed to store latency - mutex poisoned", region.id);
                                 }
+                            } else {
+                                log::warn!("Region '{}' re-ping failed - no servers responded", region.id);
                             }
                         }
                         finding_clone.store(false, Ordering::SeqCst);
