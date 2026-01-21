@@ -548,25 +548,60 @@ impl SplitTunnelDriver {
     pub fn initialize(&mut self) -> VpnResult<()> {
         let handle = self.device_handle.ok_or(VpnError::DriverNotOpen)?;
 
+        // Query state BEFORE any operations - helps diagnose issues
+        match self.get_driver_state() {
+            Ok(state) => log::info!("Driver state before init: {} ({})", state, Self::state_name(state)),
+            Err(e) => log::warn!("Could not query initial driver state: {}", e),
+        }
+
         // Reset any stale state from previous sessions
-        log::debug!("Resetting driver state...");
-        let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET);
+        log::debug!("Sending IOCTL_ST_RESET...");
+        if let Err(e) = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET) {
+            log::warn!("RESET failed (may be expected): {}", e);
+        }
+
+        // Query state after RESET
+        match self.get_driver_state() {
+            Ok(state) => log::debug!("Driver state after RESET: {} ({})", state, Self::state_name(state)),
+            Err(e) => log::warn!("Could not query driver state after RESET: {}", e),
+        }
 
         // Initialize driver - this registers WFP callouts
-        log::info!("Initializing split tunnel driver (registering WFP callouts)...");
+        log::info!("Sending IOCTL_ST_INITIALIZE (0x{:08X})...", ioctl::IOCTL_ST_INITIALIZE);
         if let Err(e) = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE) {
             let err_str = e.to_string();
             // 0x80320009 = FWP_E_ALREADY_EXISTS - driver already initialized, that's OK
             if !err_str.contains("0x80320009") && !err_str.contains("ALREADY_EXISTS") {
-                log::error!("Driver initialization failed: {}", e);
+                log::error!("IOCTL_ST_INITIALIZE failed: {}", e);
                 self.state = DriverState::Error(err_str);
                 return Err(e);
             }
-            log::debug!("Driver already initialized (OK to continue)");
+            log::debug!("Driver already initialized (FWP_E_ALREADY_EXISTS - OK)");
+        }
+
+        // CRITICAL: Verify driver state is now INITIALIZED (state 2)
+        // This catches silent failures where INITIALIZE returns OK but driver didn't transition
+        let driver_state = self.get_driver_state().map_err(|e| {
+            VpnError::SplitTunnel(format!("Failed to query driver state after INITIALIZE: {}", e))
+        })?;
+
+        log::info!("Driver state after INITIALIZE: {} ({})", driver_state, Self::state_name(driver_state));
+
+        // Must be in INITIALIZED (2) state to proceed
+        if driver_state != 2 {
+            let err = format!(
+                "Driver not in INITIALIZED state after INITIALIZE. Expected state 2 (INITIALIZED), got {} ({}). \
+                This usually means INITIALIZE failed silently or the driver rejected it.",
+                driver_state,
+                Self::state_name(driver_state)
+            );
+            log::error!("{}", err);
+            self.state = DriverState::Error(err.clone());
+            return Err(VpnError::SplitTunnel(err));
         }
 
         self.state = DriverState::Initialized;
-        log::info!("Split tunnel driver initialized - WFP callouts registered");
+        log::info!("Split tunnel driver initialized - confirmed state INITIALIZED (2)");
         Ok(())
     }
 
@@ -678,13 +713,32 @@ impl SplitTunnelDriver {
     pub fn configure(&mut self, config: SplitTunnelConfig) -> VpnResult<()> {
         let handle = self.device_handle.ok_or(VpnError::DriverNotOpen)?;
 
-        // Check state - must be Initialized (after initialize() was called)
+        // Check Rust state - must be Initialized (after initialize() was called)
         if self.state != DriverState::Initialized {
             log::error!(
-                "configure() called in wrong state: {:?} (expected Initialized)",
+                "configure() called in wrong Rust state: {:?} (expected Initialized)",
                 self.state
             );
             return Err(VpnError::DriverNotInitialized);
+        }
+
+        // VERIFY DRIVER STATE before proceeding - this is the critical diagnostic check
+        let driver_state = self.get_driver_state()?;
+        log::info!(
+            "Driver state before REGISTER_PROCESSES: {} ({})",
+            driver_state,
+            Self::state_name(driver_state)
+        );
+
+        if driver_state != 2 {
+            let err = format!(
+                "Cannot call REGISTER_PROCESSES - driver in state {} ({}), expected INITIALIZED (2). \
+                The driver may have been reset or is in an unexpected state.",
+                driver_state,
+                Self::state_name(driver_state)
+            );
+            log::error!("{}", err);
+            return Err(VpnError::SplitTunnel(err));
         }
 
         log::info!(
@@ -710,6 +764,11 @@ impl SplitTunnelDriver {
         self.excluded_paths = to_exclude.iter().map(|p| p.exe_path.clone()).collect();
 
         let proc_data = self.serialize_process_tree_for_exclusion(&to_exclude)?;
+        log::info!(
+            "Sending IOCTL_ST_REGISTER_PROCESSES (0x{:08X}) with {} bytes...",
+            ioctl::IOCTL_ST_REGISTER_PROCESSES,
+            proc_data.len()
+        );
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
 
         // Register IP addresses
@@ -1003,6 +1062,19 @@ impl SplitTunnelDriver {
         }
     }
 
+    fn ioctl_name(code: u32) -> &'static str {
+        match code {
+            ioctl::IOCTL_ST_INITIALIZE => "INITIALIZE",
+            ioctl::IOCTL_ST_REGISTER_PROCESSES => "REGISTER_PROCESSES",
+            ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES => "REGISTER_IP_ADDRESSES",
+            ioctl::IOCTL_ST_SET_CONFIGURATION => "SET_CONFIGURATION",
+            ioctl::IOCTL_ST_CLEAR_CONFIGURATION => "CLEAR_CONFIGURATION",
+            ioctl::IOCTL_ST_GET_STATE => "GET_STATE",
+            ioctl::IOCTL_ST_RESET => "RESET",
+            _ => "UNKNOWN",
+        }
+    }
+
     pub fn get_driver_state(&self) -> VpnResult<u64> {
         let handle = self.device_handle.ok_or_else(|| {
             VpnError::SplitTunnel("Driver not open".to_string())
@@ -1052,6 +1124,13 @@ impl SplitTunnelDriver {
     fn send_ioctl(&self, handle: windows::Win32::Foundation::HANDLE, code: u32, input: &[u8]) -> VpnResult<Vec<u8>> {
         use windows::Win32::System::IO::DeviceIoControl;
 
+        log::debug!(
+            "Sending IOCTL 0x{:08X} ({}) with {} bytes input",
+            code,
+            Self::ioctl_name(code),
+            input.len()
+        );
+
         let mut output = vec![0u8; 4096];
         let mut returned: u32 = 0;
 
@@ -1064,13 +1143,54 @@ impl SplitTunnelDriver {
             );
 
             if result.is_ok() {
+                log::debug!(
+                    "IOCTL 0x{:08X} ({}) succeeded, {} bytes returned",
+                    code,
+                    Self::ioctl_name(code),
+                    returned
+                );
                 output.truncate(returned as usize);
                 Ok(output)
             } else {
-                Err(VpnError::SplitTunnel(format!(
-                    "IOCTL 0x{:08X} failed: {}",
+                let win_error = windows::core::Error::from_win32();
+                let error_code = win_error.code().0 as u32;
+
+                // Provide detailed diagnostics for common errors
+                let extra_info = match error_code {
+                    0x80070001 => {
+                        // ERROR_INVALID_FUNCTION - IOCTL code not recognized
+                        format!(
+                            " This usually means the IOCTL code doesn't match what the driver expects. \
+                            Function code: {}, Method: {}",
+                            (code >> 2) & 0xFFF,
+                            code & 0x3
+                        )
+                    }
+                    0x80070016 => {
+                        // ERROR_BAD_COMMAND - Driver state machine rejected
+                        " The driver rejected this IOCTL for the current state.".to_string()
+                    }
+                    0x80070057 => {
+                        // ERROR_INVALID_PARAMETER - Bad input data
+                        format!(" Input buffer may be malformed. Size: {} bytes", input.len())
+                    }
+                    _ => String::new(),
+                };
+
+                log::error!(
+                    "IOCTL 0x{:08X} ({}) failed: {} (code: 0x{:08X}){}",
                     code,
-                    windows::core::Error::from_win32()
+                    Self::ioctl_name(code),
+                    win_error,
+                    error_code,
+                    extra_info
+                );
+
+                Err(VpnError::SplitTunnel(format!(
+                    "IOCTL 0x{:08X} ({}) failed: {}",
+                    code,
+                    Self::ioctl_name(code),
+                    win_error
                 )))
             }
         }
@@ -1079,16 +1199,39 @@ impl SplitTunnelDriver {
     fn send_ioctl_neither(&self, handle: windows::Win32::Foundation::HANDLE, code: u32) -> VpnResult<()> {
         use windows::Win32::System::IO::DeviceIoControl;
 
+        log::debug!(
+            "Sending IOCTL 0x{:08X} ({}) [METHOD_NEITHER, no buffers]",
+            code,
+            Self::ioctl_name(code)
+        );
+
         let mut returned: u32 = 0;
         unsafe {
             let result = DeviceIoControl(handle, code, None, 0, None, 0, Some(&mut returned), None);
             if result.is_ok() {
+                log::debug!(
+                    "IOCTL 0x{:08X} ({}) succeeded",
+                    code,
+                    Self::ioctl_name(code)
+                );
                 Ok(())
             } else {
-                Err(VpnError::SplitTunnel(format!(
-                    "IOCTL 0x{:08X} failed: {}",
+                let win_error = windows::core::Error::from_win32();
+                let error_code = win_error.code().0 as u32;
+
+                log::error!(
+                    "IOCTL 0x{:08X} ({}) failed: {} (code: 0x{:08X})",
                     code,
-                    windows::core::Error::from_win32()
+                    Self::ioctl_name(code),
+                    win_error,
+                    error_code
+                );
+
+                Err(VpnError::SplitTunnel(format!(
+                    "IOCTL 0x{:08X} ({}) failed: {}",
+                    code,
+                    Self::ioctl_name(code),
+                    win_error
                 )))
             }
         }
