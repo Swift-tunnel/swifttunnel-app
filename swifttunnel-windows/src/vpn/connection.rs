@@ -16,7 +16,7 @@ use crate::auth::types::VpnConfig;
 use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
-use super::wfp::cleanup_stale_wfp_callouts;
+use super::wfp::{cleanup_stale_wfp_callouts, WfpEngine};
 use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::{VpnError, VpnResult};
@@ -362,21 +362,38 @@ impl VpnConnection {
         })?;
         log::info!("Split tunnel driver opened");
 
-        // Step 3: Initialize driver (creates WFP provider + callouts + sublayer internally)
-        // HYPOTHESIS TEST (v0.5.30): The driver creates everything during INITIALIZE
-        // Perplexity research says: "ST_DRIVER_STATE_INITIALIZED | sublayer/provider created"
-        // Previous approach of creating sublayer ourselves may have been causing conflicts
+        // Step 3: Initialize driver (creates WFP provider + callouts)
+        // NOTE: Driver creates provider and callouts during INITIALIZE, but NOT the sublayer
+        // v0.5.30 confirmed this - removing sublayer creation caused FWP_E_SUBLAYER_NOT_FOUND
         driver.initialize().map_err(|e| {
             let _ = driver.close();
             VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
         })?;
-        log::info!("Split tunnel driver initialized (driver handles all WFP setup internally)");
+        log::info!("Split tunnel driver initialized (provider + callouts created)");
 
-        // REMOVED (v0.5.30): Skip sublayer creation - let driver handle everything
-        // The driver creates provider + sublayer + callouts during INITIALIZE
-        // Our previous sublayer creation may have been interfering with SET_CONFIGURATION
-        // If this fails with "sublayer not found", we know we need to re-add this
-        log::info!("Skipping WFP sublayer creation (driver handles internally)");
+        // DEBUG (v0.5.31): Enumerate WFP objects to diagnose what exists
+        // This helps us understand what "already exists" when SET_CONFIGURATION fails
+        if let Ok(wfp_debug) = WfpEngine::open() {
+            wfp_debug.debug_enumerate_wfp_objects();
+        }
+
+        // Step 3b: Create sublayer AFTER driver.initialize()
+        // RESTORED (v0.5.31): v0.5.30 proved driver does NOT create sublayer internally
+        // The driver's filters reference this sublayer, so it MUST exist before SET_CONFIGURATION
+        log::info!("Creating WFP sublayer (required for SET_CONFIGURATION)...");
+        let mut wfp_engine = WfpEngine::open().map_err(|e| {
+            let _ = driver.close();
+            VpnError::SplitTunnelSetupFailed(format!("Failed to open WFP engine: {}", e))
+        })?;
+
+        wfp_engine.create_sublayer_standalone().map_err(|e| {
+            let _ = driver.close();
+            VpnError::SplitTunnelSetupFailed(format!("Failed to create WFP sublayer: {}", e))
+        })?;
+        log::info!("WFP sublayer created successfully");
+
+        // DEBUG: Enumerate again after sublayer creation to see full state
+        wfp_engine.debug_enumerate_wfp_objects();
 
         // Step 4: Get internet interface IP for socket redirection
         // This tells the driver where to redirect excluded app traffic

@@ -313,6 +313,42 @@ static MULLVAD_FILTER_GUIDS: [GUID; 16] = [
     ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV6_RECV,
 ];
 
+/// Filter GUID names for logging
+static MULLVAD_FILTER_NAMES: [&str; 16] = [
+    "CLASSIFY_BIND_IPV4",
+    "CLASSIFY_BIND_IPV6",
+    "CLASSIFY_CONNECT_IPV4",
+    "CLASSIFY_CONNECT_IPV6",
+    "PERMIT_SPLIT_APPS_IPV4_CONN",
+    "PERMIT_SPLIT_APPS_IPV4_RECV",
+    "PERMIT_SPLIT_APPS_IPV6_CONN",
+    "PERMIT_SPLIT_APPS_IPV6_RECV",
+    "PERMIT_SPLIT_APPS_IPV4_DNS_CONN",
+    "PERMIT_SPLIT_APPS_IPV4_DNS_RECV",
+    "PERMIT_SPLIT_APPS_IPV6_DNS_CONN",
+    "PERMIT_SPLIT_APPS_IPV6_DNS_RECV",
+    "BLOCK_SPLIT_APPS_TUNNEL_IPV4_CONN",
+    "BLOCK_SPLIT_APPS_TUNNEL_IPV4_RECV",
+    "BLOCK_SPLIT_APPS_TUNNEL_IPV6_CONN",
+    "BLOCK_SPLIT_APPS_TUNNEL_IPV6_RECV",
+];
+
+/// Callout GUID names for logging
+static MULLVAD_CALLOUT_NAMES: [&str; 12] = [
+    "CLASSIFY_BIND_IPV4",
+    "CLASSIFY_BIND_IPV6",
+    "CLASSIFY_CONNECT_IPV4",
+    "CLASSIFY_CONNECT_IPV6",
+    "PERMIT_SPLIT_APPS_IPV4_CONN",
+    "PERMIT_SPLIT_APPS_IPV4_RECV",
+    "PERMIT_SPLIT_APPS_IPV6_CONN",
+    "PERMIT_SPLIT_APPS_IPV6_RECV",
+    "BLOCK_SPLIT_APPS_IPV4_CONN",
+    "BLOCK_SPLIT_APPS_IPV4_RECV",
+    "BLOCK_SPLIT_APPS_IPV6_CONN",
+    "BLOCK_SPLIT_APPS_IPV6_RECV",
+];
+
 /// Provider name
 const PROVIDER_NAME: &str = "Mullvad Split Tunnel";
 const PROVIDER_DESC: &str = "Mullvad Split Tunnel WFP provider";
@@ -824,6 +860,76 @@ impl WfpEngine {
             total_filters, sublayer_matches, provider_matches, deleted_count);
 
         deleted_count
+    }
+
+    /// DEBUG: Enumerate what WFP objects exist (for diagnosing FWP_E_ALREADY_EXISTS)
+    /// This helps understand what "already exists" when SET_CONFIGURATION fails
+    pub fn debug_enumerate_wfp_objects(&self) {
+        log::info!("=== DEBUG: Enumerating WFP objects ===");
+
+        // Check provider
+        let mut provider_ptr: *mut FWPM_PROVIDER0 = ptr::null_mut();
+        let result = unsafe {
+            FwpmProviderGetByKey0(self.handle, &ST_FW_PROVIDER_KEY, &mut provider_ptr)
+        };
+        if result == 0 {
+            log::info!("  [EXISTS] Mullvad Provider");
+            unsafe { FwpmFreeMemory0(&mut (provider_ptr as *mut _)); }
+        } else {
+            log::info!("  [MISSING] Mullvad Provider");
+        }
+
+        // Check sublayer
+        let mut sublayer_ptr: *mut FWPM_SUBLAYER0 = ptr::null_mut();
+        let result = unsafe {
+            FwpmSubLayerGetByKey0(self.handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY, &mut sublayer_ptr)
+        };
+        if result == 0 {
+            log::info!("  [EXISTS] Mullvad Sublayer");
+            unsafe { FwpmFreeMemory0(&mut (sublayer_ptr as *mut _)); }
+        } else {
+            log::info!("  [MISSING] Mullvad Sublayer");
+        }
+
+        // Check callouts
+        let mut callout_count = 0;
+        for (i, guid) in MULLVAD_CALLOUT_GUIDS.iter().enumerate() {
+            let mut callout_ptr: *mut FWPM_CALLOUT0 = ptr::null_mut();
+            let result = unsafe {
+                FwpmCalloutGetByKey0(self.handle, guid, &mut callout_ptr)
+            };
+            if result == 0 {
+                callout_count += 1;
+                log::info!("  [EXISTS] Callout: {}", MULLVAD_CALLOUT_NAMES[i]);
+                unsafe { FwpmFreeMemory0(&mut (callout_ptr as *mut _)); }
+            }
+        }
+        if callout_count == 0 {
+            log::info!("  [MISSING] All 12 callouts");
+        } else {
+            log::info!("  Callouts: {}/12 exist", callout_count);
+        }
+
+        // Check filters - THIS IS THE KEY DIAGNOSTIC
+        let mut filter_count = 0;
+        for (i, guid) in MULLVAD_FILTER_GUIDS.iter().enumerate() {
+            let mut filter_ptr: *mut FWPM_FILTER0 = ptr::null_mut();
+            let result = unsafe {
+                FwpmFilterGetByKey0(self.handle, guid, &mut filter_ptr)
+            };
+            if result == 0 {
+                filter_count += 1;
+                log::warn!("  [EXISTS] Filter: {} <-- THIS WILL CAUSE FWP_E_ALREADY_EXISTS!", MULLVAD_FILTER_NAMES[i]);
+                unsafe { FwpmFreeMemory0(&mut (filter_ptr as *mut _)); }
+            }
+        }
+        if filter_count == 0 {
+            log::info!("  [MISSING] All 16 filters (good - SET_CONFIGURATION will create them)");
+        } else {
+            log::warn!("  FILTERS: {}/16 already exist - SET_CONFIGURATION WILL FAIL!", filter_count);
+        }
+
+        log::info!("=== END WFP enumeration ===");
     }
 
     /// Cleanup all SwiftTunnel WFP objects (for uninstall)
