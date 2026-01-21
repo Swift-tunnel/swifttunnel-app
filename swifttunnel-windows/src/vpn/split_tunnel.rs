@@ -878,7 +878,27 @@ impl SplitTunnelDriver {
         // The driver needs to know which executables should bypass the VPN
         let config_data = self.serialize_split_config()?;
         log::info!("Sending SET_CONFIGURATION with {} bytes...", config_data.len());
-        self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
+        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data) {
+            if Self::is_already_exists_error(&e) {
+                log::warn!(
+                    "SET_CONFIGURATION hit ALREADY_EXISTS - attempting CLEAR_CONFIGURATION + retry"
+                );
+
+                let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
+
+                // Re-register to be safe in case CLEAR_CONFIGURATION reset driver state.
+                log::info!("Re-sending REGISTER_PROCESSES after CLEAR_CONFIGURATION...");
+                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
+
+                log::info!("Re-sending REGISTER_IP_ADDRESSES after CLEAR_CONFIGURATION...");
+                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
+
+                log::info!("Retrying SET_CONFIGURATION after CLEAR_CONFIGURATION...");
+                self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
+            } else {
+                return Err(e);
+            }
+        }
 
         // Verify state
         if let Ok(state) = self.get_driver_state() {
@@ -889,6 +909,11 @@ impl SplitTunnelDriver {
         log::info!("Split tunnel configured - only selected games will use VPN");
 
         Ok(())
+    }
+
+    fn is_already_exists_error(err: &VpnError) -> bool {
+        let msg = err.to_string().to_lowercase();
+        msg.contains("0x80320009") || msg.contains("already exists")
     }
 
     /// Efficient refresh - only update changed processes
@@ -1201,6 +1226,7 @@ impl SplitTunnelDriver {
         use windows::Win32::Foundation::CloseHandle;
 
         if let Some(handle) = self.device_handle.take() {
+            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
             let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET);
             unsafe { let _ = CloseHandle(handle); }
         }
