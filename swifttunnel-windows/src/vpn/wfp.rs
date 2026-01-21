@@ -382,6 +382,26 @@ impl WfpEngine {
         self.provider_registered && self.sublayer_registered
     }
 
+    /// Cleanup only legacy SwiftTunnel WFP objects (NOT Mullvad callouts)
+    /// Use this when driver has already called initialize() and registered callouts
+    pub fn cleanup_legacy_objects(&self) {
+        // Clean up LEGACY SwiftTunnel WFP objects (from old code with PERSISTENT flags)
+        // These must be removed or they could cause conflicts
+        let result = unsafe {
+            FwpmSubLayerDeleteByKey0(self.handle, &LEGACY_ST_SUBLAYER_KEY)
+        };
+        if result == 0 {
+            log::info!("Deleted legacy SwiftTunnel sublayer");
+        }
+
+        let result = unsafe {
+            FwpmProviderDeleteByKey0(self.handle, &LEGACY_ST_PROVIDER_KEY)
+        };
+        if result == 0 {
+            log::info!("Deleted legacy SwiftTunnel provider");
+        }
+    }
+
     /// Close the WFP engine (filters persist)
     pub fn close(&mut self) {
         if !self.handle.is_invalid() {
@@ -509,14 +529,28 @@ impl FilterLayer {
 }
 
 /// Helper to setup WFP for split tunneling
+///
+/// IMPORTANT: This must be called AFTER driver.initialize() which registers
+/// the WFP callouts. The initialization order is:
+/// 1. driver.open()
+/// 2. driver.initialize() - registers WFP callouts via IOCTL_ST_INITIALIZE
+/// 3. setup_wfp_for_split_tunnel() - this function (adds filters)
+/// 4. driver.configure()
+///
+/// Do NOT call cleanup_all() here - the driver has already registered callouts
+/// during initialize(), and cleanup would delete them!
 pub fn setup_wfp_for_split_tunnel(interface_luid: u64) -> VpnResult<WfpEngine> {
     log::info!("Setting up WFP for split tunneling...");
 
     let mut engine = WfpEngine::open()?;
 
-    // CRITICAL: Clean up any stale WFP objects from previous sessions
-    // This prevents ALREADY_EXISTS errors when driver tries to create callouts
-    engine.cleanup_all().ok(); // Ignore errors if objects don't exist
+    // NOTE: We do NOT call cleanup_all() here anymore!
+    // The driver's initialize() already called IOCTL_ST_RESET which clears stale state,
+    // and IOCTL_ST_INITIALIZE which registers fresh callouts. Calling cleanup_all()
+    // would DELETE those callouts we just registered!
+    //
+    // Only cleanup legacy SwiftTunnel objects (not Mullvad callouts)
+    engine.cleanup_legacy_objects();
 
     // Register provider and create sublayer
     engine.register_provider()?;

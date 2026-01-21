@@ -189,6 +189,8 @@ impl SplitTunnelConfig {
 pub enum DriverState {
     NotAvailable,
     NotConfigured,
+    /// Driver is initialized (WFP callouts registered) but not yet configured
+    Initialized,
     Active,
     Error(String),
 }
@@ -349,6 +351,34 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Initialize the driver - registers WFP callouts
+    /// MUST be called BEFORE WFP filters are added (setup_wfp_for_split_tunnel)
+    /// This is a separate step from configure() to allow proper initialization order
+    pub fn initialize(&mut self) -> VpnResult<()> {
+        let handle = self.device_handle.ok_or(VpnError::DriverNotOpen)?;
+
+        // Reset any stale state from previous sessions
+        log::debug!("Resetting driver state...");
+        let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET);
+
+        // Initialize driver - this registers WFP callouts
+        log::info!("Initializing split tunnel driver (registering WFP callouts)...");
+        if let Err(e) = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE) {
+            let err_str = e.to_string();
+            // 0x80320009 = FWP_E_ALREADY_EXISTS - driver already initialized, that's OK
+            if !err_str.contains("0x80320009") && !err_str.contains("ALREADY_EXISTS") {
+                log::error!("Driver initialization failed: {}", e);
+                self.state = DriverState::Error(err_str);
+                return Err(e);
+            }
+            log::debug!("Driver already initialized (OK to continue)");
+        }
+
+        self.state = DriverState::Initialized;
+        log::info!("Split tunnel driver initialized - WFP callouts registered");
+        Ok(())
+    }
+
     /// Check if process should be excluded (not a tunnel app and not a system process)
     #[inline]
     fn should_exclude(&self, name_lower: &str) -> bool {
@@ -447,27 +477,32 @@ impl SplitTunnelDriver {
     }
 
     /// Configure split tunnel with EXCLUDE-ALL-EXCEPT logic
+    ///
+    /// IMPORTANT: Call initialize() FIRST, then setup WFP, THEN call this method.
+    /// The initialization order MUST be:
+    /// 1. driver.open()
+    /// 2. driver.initialize() - registers WFP callouts
+    /// 3. setup_wfp_for_split_tunnel() - adds WFP filters (needs callouts to exist)
+    /// 4. driver.configure() - this method
     pub fn configure(&mut self, config: SplitTunnelConfig) -> VpnResult<()> {
-        let handle = self.device_handle.ok_or_else(|| {
-            VpnError::SplitTunnel("Driver not open".to_string())
-        })?;
+        let handle = self.device_handle.ok_or(VpnError::DriverNotOpen)?;
+
+        // Check state - must be Initialized (after initialize() was called)
+        if self.state != DriverState::Initialized {
+            log::error!(
+                "configure() called in wrong state: {:?} (expected Initialized)",
+                self.state
+            );
+            return Err(VpnError::DriverNotInitialized);
+        }
 
         log::info!(
             "Configuring split tunnel - {} apps will use VPN, everything else excluded",
             config.tunnel_apps.len()
         );
 
-        // Reset any stale state
-        let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET);
-
-        // Initialize driver
-        if let Err(e) = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE) {
-            let err_str = e.to_string();
-            if !err_str.contains("0x80320009") && !err_str.contains("ALREADY_EXISTS") {
-                return Err(e);
-            }
-            log::debug!("Driver already initialized, continuing...");
-        }
+        // NOTE: RESET and INITIALIZE are NOT called here - they're done in initialize()
+        // This is critical: WFP filters can only be added AFTER initialize() registers callouts
 
         self.config = Some(config.clone());
 

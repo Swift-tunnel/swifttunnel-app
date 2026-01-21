@@ -51,6 +51,21 @@ pub enum VpnError {
     #[error("Split tunnel driver error: {0}")]
     SplitTunnel(String),
 
+    #[error("Split tunnel driver not available - please reinstall SwiftTunnel")]
+    SplitTunnelNotAvailable,
+
+    #[error("Split tunnel setup failed: {0}")]
+    SplitTunnelSetupFailed(String),
+
+    #[error("Split tunnel driver not open")]
+    DriverNotOpen,
+
+    #[error("Split tunnel driver not initialized - call initialize() first")]
+    DriverNotInitialized,
+
+    #[error("WFP setup failed: {0}")]
+    WfpSetupFailed(String),
+
     #[error("Connection error: {0}")]
     Connection(String),
 
