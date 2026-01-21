@@ -653,10 +653,36 @@ fn test_full_split_tunnel_flow() {
     println!("═══ Full Split Tunnel Flow Test ═══\n");
     println!("This tests the complete flow: WFP Setup → Driver Open → Initialize → Configure\n");
 
-    // Step 0: Clean up stale WFP callouts from previous sessions
-    println!("Step 0: Cleaning up stale WFP callouts...");
+    // Step 0: Restart driver service for clean state
+    println!("Step 0: Restarting driver service for clean state...");
+    let _ = std::process::Command::new("sc").args(["stop", "MullvadSplitTunnel"]).output();
+    std::thread::sleep(Duration::from_secs(1));
+
+    // Clean up WFP callouts while driver is stopped
     cleanup_stale_wfp_callouts();
-    println!("   ✅ Cleanup complete\n");
+
+    // Start the driver service
+    match std::process::Command::new("sc").args(["start", "MullvadSplitTunnel"]).output() {
+        Ok(output) => {
+            if output.status.success() {
+                println!("   ✅ Driver service restarted");
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // 1056 = service already running, that's OK
+                if !stderr.contains("1056") {
+                    println!("   ⚠ Service start issue: {}", String::from_utf8_lossy(&output.stdout));
+                } else {
+                    println!("   ✅ Driver service already running");
+                }
+            }
+        }
+        Err(e) => {
+            println!("   ❌ Failed to start service: {}", e);
+            return;
+        }
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    println!();
 
     // Step 1: Open driver FIRST
     println!("Step 1: Opening driver handle...");
