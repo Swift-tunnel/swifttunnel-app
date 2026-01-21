@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="SwiftTunnel"
              Language="1033"
-             Version="0.5.19.0"
+             Version="0.5.20.0"
              Manufacturer="SwiftTunnel"
              UpgradeCode="8B5E7A12-4F3D-4A2B-9C5E-1D2F3A4B5C6D">
 
@@ -49,19 +49,21 @@
 
         <!-- Set command for driver installation (immediate - expands properties) -->
         <!-- WixQuietExec64 requires command to start with quoted executable path -->
-        <!-- timeout /t 2 gives Windows time to fully delete service before recreating -->
+        <!-- Note: removed timeout command as it can hang in non-interactive MSI sessions -->
+        <!-- Using ping as a delay instead (works reliably in all contexts) -->
         <SetProperty Id="InstallSplitTunnelDriver"
-                     Value="&quot;cmd.exe&quot; /c sc delete MullvadSplitTunnel 2&gt;nul &amp; timeout /t 2 /nobreak &gt;nul &amp; sc create MullvadSplitTunnel type= kernel start= demand binpath= &quot;[DriversFolder]mullvad-split-tunnel.sys&quot;"
+                     Value="&quot;cmd.exe&quot; /c sc stop MullvadSplitTunnel 2&gt;nul &amp; sc delete MullvadSplitTunnel 2&gt;nul &amp; ping -n 2 127.0.0.1 &gt;nul &amp; sc create MullvadSplitTunnel type= kernel start= demand binpath= &quot;[DriversFolder]mullvad-split-tunnel.sys&quot;"
                      Before="InstallSplitTunnelDriver"
                      Sequence="execute" />
 
         <!-- Execute driver installation (deferred - uses CustomActionData from SetProperty) -->
+        <!-- Return="ignore" so app installs even if driver setup fails (app works without split tunnel) -->
         <CustomAction Id="InstallSplitTunnelDriver"
                       BinaryKey="WixCA"
                       DllEntry="WixQuietExec64"
                       Execute="deferred"
                       Impersonate="no"
-                      Return="check" />
+                      Return="ignore" />
 
         <!-- Set command for starting driver -->
         <SetProperty Id="StartSplitTunnelDriver"
