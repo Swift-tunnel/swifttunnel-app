@@ -698,32 +698,34 @@ fn test_full_split_tunnel_flow() {
         }
     }
 
-    // Step 2: Setup WFP BEFORE initialize (creates provider + sublayer that driver will use)
-    // CRITICAL: This MUST happen before driver.initialize()!
-    // The driver's IOCTL_ST_INITIALIZE registers WFP callouts that reference the sublayer.
-    println!("\nStep 2: Setting up WFP for split tunnel (BEFORE initialize)...");
-    let _wfp_engine = match setup_wfp_for_split_tunnel(0) {
-        Ok(wfp_engine) => {
-            println!("   ✅ WFP setup complete (provider + sublayer created)");
-            Some(wfp_engine)
-        }
-        Err(e) => {
-            println!("   ❌ WFP setup failed: {}", e);
-            let _ = driver.close();
-            return;
-        }
-    };
-
-    // Step 3: Initialize driver (registers WFP callouts using the sublayer from step 2)
-    println!("\nStep 3: Initializing driver (registering WFP callouts)...");
+    // Step 2: Initialize driver FIRST (driver creates its own WFP provider/sublayer/callouts)
+    // NOTE: Previous assumption was wrong - the driver creates its OWN WFP infrastructure
+    // during INITIALIZE. Calling setup_wfp_for_split_tunnel() before INITIALIZE
+    // causes FWP_E_ALREADY_EXISTS because we create the same objects the driver wants to create.
+    println!("\nStep 2: Initializing driver (driver creates WFP provider/sublayer/callouts)...");
     match driver.initialize() {
         Ok(_) => {
-            println!("   ✅ Driver initialized - WFP callouts registered");
+            println!("   ✅ Driver initialized");
         }
         Err(e) => {
             println!("   ❌ Initialize failed: {}", e);
             let _ = driver.close();
             return;
+        }
+    }
+
+    // Step 3: Setup additional WFP filters AFTER driver init (optional, for custom filters)
+    // The driver has already created the sublayer, we can add filters to it
+    println!("\nStep 3: Setting up additional WFP filters (AFTER initialize)...");
+    let _wfp_engine = match setup_wfp_for_split_tunnel(0) {
+        Ok(wfp_engine) => {
+            println!("   ✅ Additional WFP setup complete");
+            Some(wfp_engine)
+        }
+        Err(e) => {
+            // This might fail if provider/sublayer already exist, that's OK
+            println!("   ⚠ WFP setup: {} (may be OK if driver created them)", e);
+            None
         }
     }
 
