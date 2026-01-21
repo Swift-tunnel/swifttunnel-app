@@ -34,10 +34,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::panic;
 use tokio::runtime::Runtime;
-use url::Url;
 use windows::core::PCSTR;
 use windows::Win32::Foundation::{HANDLE, CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Threading::CreateMutexA;
+
+// Note: OAuth callback is now handled via localhost HTTP server (auth::oauth_server)
+// instead of deep links. This eliminates the second-instance problem.
 
 /// Single-instance mutex name
 const SINGLE_INSTANCE_MUTEX: &str = "SwiftTunnel_SingleInstance_Mutex_v1";
@@ -84,60 +86,6 @@ fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
         }
     }
 }
-
-/// Parsed OAuth callback data from deep link
-#[derive(Debug, Clone)]
-pub struct OAuthCallbackData {
-    pub token: String,
-    pub state: String,
-}
-
-/// Parse command line args for OAuth deep link callback
-/// Returns Some(OAuthCallbackData) if a valid swifttunnel://callback URL was found
-fn parse_deep_link_args() -> Option<OAuthCallbackData> {
-    let args: Vec<String> = std::env::args().collect();
-
-    // Log all args for debugging
-    info!("Command line args: {:?}", args);
-
-    for arg in args.iter().skip(1) { // Skip the executable name
-        if arg.starts_with("swifttunnel://") {
-            info!("Found deep link URL: {}", arg);
-
-            match Url::parse(arg) {
-                Ok(url) => {
-                    // Check if this is a callback URL
-                    if url.host_str() == Some("callback") || url.path() == "/callback" {
-                        let mut token = None;
-                        let mut state = None;
-
-                        for (key, value) in url.query_pairs() {
-                            match key.as_ref() {
-                                "token" => token = Some(value.to_string()),
-                                "state" => state = Some(value.to_string()),
-                                _ => {}
-                            }
-                        }
-
-                        if let (Some(t), Some(s)) = (token, state) {
-                            info!("Parsed OAuth callback: token={}..., state={}...",
-                                &t[..t.len().min(8)], &s[..s.len().min(8)]);
-                            return Some(OAuthCallbackData { token: t, state: s });
-                        } else {
-                            warn!("OAuth callback URL missing token or state parameter");
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to parse deep link URL: {}", e);
-                }
-            }
-        }
-    }
-
-    None
-}
-
 
 /// Set up crash logging to capture panics
 fn setup_panic_hook() {
@@ -223,60 +171,37 @@ fn main() -> eframe::Result<()> {
     info!("Log level: {:?}", log_level);
 
     // Single-instance check - prevent multiple app instances (and multiple tray icons)
+    // Note: OAuth is now handled via localhost HTTP server, so we don't need to handle
+    // second instances for OAuth callbacks anymore.
     let _instance_guard = match try_acquire_single_instance() {
         Some(guard) => {
             info!("Single-instance lock acquired");
             guard
         }
         None => {
-            // Another instance is running
-            // For OAuth callbacks, we should pass the data to the existing instance
-            // For now, just exit silently
-            let args: Vec<String> = std::env::args().collect();
-            let is_oauth_callback = args.iter().any(|a| a.starts_with("swifttunnel://"));
-
-            if is_oauth_callback {
-                warn!("Another instance is running. OAuth callback should be handled by existing instance.");
-                // TODO: Use IPC to send the OAuth callback to the running instance
-            } else {
-                info!("Another instance of SwiftTunnel is already running. Exiting.");
-            }
+            info!("Another instance of SwiftTunnel is already running. Exiting.");
             return Ok(());
         }
     };
 
     // Run Discord-like auto-updater before main app (splash screen)
-    // Skip auto-updater if this is an OAuth callback (deep link)
-    let args: Vec<String> = std::env::args().collect();
-    let is_oauth_callback = args.iter().any(|a| a.starts_with("swifttunnel://"));
-
-    if !is_oauth_callback {
-        info!("Running auto-updater check...");
-        match run_auto_updater() {
-            AutoUpdateResult::NoUpdate => {
-                info!("No update available, continuing to main app");
-            }
-            AutoUpdateResult::UpdateInstalled => {
-                info!("Update installed, exiting for restart");
-                // The installer will restart the app
-                return Ok(());
-            }
-            AutoUpdateResult::Failed(e) => {
-                // Don't block app launch on update failure
-                warn!("Auto-update failed: {}, continuing to main app", e);
-            }
-            AutoUpdateResult::Skipped => {
-                info!("Auto-update skipped");
-            }
+    info!("Running auto-updater check...");
+    match run_auto_updater() {
+        AutoUpdateResult::NoUpdate => {
+            info!("No update available, continuing to main app");
         }
-    } else {
-        info!("OAuth callback detected, skipping auto-updater");
-    }
-
-    // Check for OAuth callback deep link in command line args
-    let oauth_callback = parse_deep_link_args();
-    if oauth_callback.is_some() {
-        info!("OAuth callback detected in command line args");
+        AutoUpdateResult::UpdateInstalled => {
+            info!("Update installed, exiting for restart");
+            // The installer will restart the app
+            return Ok(());
+        }
+        AutoUpdateResult::Failed(e) => {
+            // Don't block app launch on update failure
+            warn!("Auto-update failed: {}, continuing to main app", e);
+        }
+        AutoUpdateResult::Skipped => {
+            info!("Auto-update skipped");
+        }
     }
 
     // Create tokio runtime for async operations
@@ -439,11 +364,9 @@ fn main() -> eframe::Result<()> {
             let monitor = PerformanceMonitor::new();
             app.set_system_info(monitor.get_system_info());
 
-            // Process OAuth callback if present (from deep link)
-            if let Some(callback) = oauth_callback {
-                info!("Processing OAuth callback from deep link...");
-                app.process_oauth_callback(&callback.token, &callback.state);
-            }
+            // Note: OAuth callback is now handled via localhost HTTP server
+            // (auth::oauth_server) and processed in the GUI update loop,
+            // not from deep links.
 
             // Update app state periodically from background thread
             let state_for_gui = Arc::clone(&app_state);

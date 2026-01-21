@@ -7,6 +7,7 @@ use crate::structs::Config;
 use crate::updater::UpdateSettings;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -79,6 +80,10 @@ pub struct AppSettings {
     /// Cached network test results
     #[serde(default)]
     pub network_test_results: NetworkTestResultsCache,
+    /// Forced server selection per region (region_id -> server_id)
+    /// If a region has an entry, that server will be used instead of auto-selecting best ping
+    #[serde(default)]
+    pub forced_servers: HashMap<String, String>,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -113,6 +118,7 @@ impl Default for AppSettings {
             expanded_boost_info: Vec::new(),
             selected_game_presets: default_game_presets(),
             network_test_results: NetworkTestResultsCache::default(),
+            forced_servers: HashMap::new(),
         }
     }
 }

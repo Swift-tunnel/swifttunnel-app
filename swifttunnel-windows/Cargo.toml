@@ -99,6 +99,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Open URLs in browser
 open = "5"
 
+# Lightweight HTTP server for OAuth callback
+tiny_http = "0.12"
+
 # System tray support
 tray-icon = "0.19"
 

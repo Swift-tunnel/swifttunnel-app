@@ -1,20 +1,27 @@
 //! Authentication manager - handles login/logout and token management
 
 use super::http_client::AuthClient;
+use super::oauth_server::{OAuthServer, OAuthServerResult, DEFAULT_OAUTH_PORT};
 use super::storage::SecureStorage;
 use super::types::{AuthError, AuthSession, AuthState, OAuthPendingState, UserInfo};
 use chrono::{Duration, Utc};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rand::Rng;
 use std::sync::{Arc, Mutex};
+use std::time::Duration as StdDuration;
 
 const OAUTH_LOGIN_URL: &str = "https://swifttunnel.net/login";
+
+/// Maximum number of token refresh retries
+const MAX_REFRESH_RETRIES: u32 = 3;
 
 /// Authentication manager
 pub struct AuthManager {
     state: Arc<Mutex<AuthState>>,
     storage: SecureStorage,
     client: AuthClient,
+    /// Active OAuth server (if awaiting callback)
+    oauth_server: Arc<Mutex<Option<OAuthServer>>>,
 }
 
 impl AuthManager {
@@ -68,6 +75,7 @@ impl AuthManager {
             state: Arc::new(Mutex::new(initial_state)),
             storage,
             client,
+            oauth_server: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -137,41 +145,105 @@ impl AuthManager {
     }
 
     /// Refresh the access token if needed
+    ///
+    /// This method implements robust token refresh with:
+    /// - Automatic refresh when token is expired OR expiring soon
+    /// - Retry logic with exponential backoff
+    /// - Silent failure handling (keeps user logged in with stale data)
     pub async fn refresh_if_needed(&self) -> Result<(), AuthError> {
         let session = match self.get_state() {
             AuthState::LoggedIn(session) => session,
             _ => return Err(AuthError::NotAuthenticated),
         };
 
-        if !session.expires_soon() {
+        // Check if refresh is needed (expired OR expiring soon)
+        let needs_refresh = session.is_expired() || session.expires_soon();
+        if !needs_refresh {
             debug!("Token still valid, no refresh needed");
             return Ok(());
         }
 
-        info!("Token expiring soon, refreshing...");
+        if session.is_expired() {
+            info!("Token expired, attempting refresh...");
+        } else {
+            info!("Token expiring soon, refreshing proactively...");
+        }
 
+        // Try to refresh with retries
+        let mut last_error = None;
+        for attempt in 1..=MAX_REFRESH_RETRIES {
+            match self.try_refresh_token(&session).await {
+                Ok(new_session) => {
+                    // Store and update state
+                    if let Err(e) = self.storage.store_session(&new_session) {
+                        warn!("Failed to store refreshed session: {}", e);
+                        // Continue anyway - session is valid in memory
+                    }
+
+                    // Reset refresh failure count on success
+                    self.storage.reset_refresh_failures();
+
+                    {
+                        let mut state = self.state.lock().unwrap();
+                        *state = AuthState::LoggedIn(new_session);
+                    }
+
+                    info!("Token refreshed successfully on attempt {}", attempt);
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Token refresh attempt {} failed: {}", attempt, e);
+                    last_error = Some(e);
+
+                    // Wait before retry (exponential backoff: 1s, 2s, 4s)
+                    if attempt < MAX_REFRESH_RETRIES {
+                        let delay = StdDuration::from_secs(1 << (attempt - 1));
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        // All retries failed - track the failure
+        let failure_count = self.storage.increment_refresh_failures();
+        warn!("Token refresh failed after {} attempts (total failures: {})", MAX_REFRESH_RETRIES, failure_count);
+
+        // If too many consecutive failures, the refresh token may be invalid
+        // But we don't kick the user out - let them continue with stale data
+        // They'll only be forced to re-login when they try an action that requires valid auth
+        if failure_count >= 5 {
+            warn!("Too many consecutive refresh failures - refresh token may be invalid");
+            // Don't return error yet - let the user continue until an API call fails
+        }
+
+        // Return OK even though refresh failed - user stays logged in with stale data
+        // This prevents "session expired" messages for temporary network issues
+        if !session.is_expired() {
+            // Token not yet expired, user can continue
+            info!("Refresh failed but token not yet expired - continuing with existing session");
+            Ok(())
+        } else {
+            // Token is expired - we couldn't refresh it
+            // But we still don't kick the user out immediately
+            // Let the API call that needs auth decide what to do
+            warn!("Token expired and refresh failed - user may need to re-login soon");
+            Err(last_error.unwrap_or(AuthError::ApiError("Token refresh failed".to_string())))
+        }
+    }
+
+    /// Attempt a single token refresh
+    async fn try_refresh_token(&self, session: &AuthSession) -> Result<AuthSession, AuthError> {
         let refresh_response = self.client.refresh_token(&session.refresh_token).await?;
 
-        let new_session = AuthSession {
+        Ok(AuthSession {
             access_token: refresh_response.access_token,
             refresh_token: refresh_response.refresh_token,
             expires_at: Utc::now() + Duration::seconds(refresh_response.expires_in),
             user: UserInfo {
                 id: refresh_response.user.id,
-                email: refresh_response.user.email.unwrap_or(session.user.email),
+                email: refresh_response.user.email.unwrap_or_else(|| session.user.email.clone()),
             },
-        };
-
-        // Store and update state
-        self.storage.store_session(&new_session)?;
-
-        {
-            let mut state = self.state.lock().unwrap();
-            *state = AuthState::LoggedIn(new_session);
-        }
-
-        info!("Token refreshed successfully");
-        Ok(())
+        })
     }
 
     /// Get a valid access token, refreshing if needed
@@ -214,10 +286,37 @@ impl AuthManager {
         }
     }
 
-    /// Start Google OAuth sign-in flow
-    /// Opens the browser to the login page and sets state to AwaitingOAuthCallback
+    /// Start Google OAuth sign-in flow using localhost callback server
+    ///
+    /// This method:
+    /// 1. Starts a localhost HTTP server to receive the OAuth callback
+    /// 2. Opens the browser to the login page with the server port
+    /// 3. Sets state to AwaitingOAuthCallback
+    ///
+    /// Returns the OAuth state string for verification.
     pub fn start_google_sign_in(&self) -> Result<String, AuthError> {
-        info!("Starting Google OAuth sign-in flow");
+        info!("Starting Google OAuth sign-in flow with localhost server");
+
+        // Stop any existing OAuth server
+        {
+            let mut server_guard = self.oauth_server.lock().unwrap();
+            if let Some(mut server) = server_guard.take() {
+                info!("Stopping previous OAuth server");
+                server.stop();
+            }
+        }
+
+        // Start the localhost OAuth server
+        let oauth_server = match OAuthServer::start() {
+            Ok(server) => server,
+            Err(e) => {
+                error!("Failed to start OAuth server: {}", e);
+                return Err(AuthError::ApiError(format!("Failed to start OAuth server: {}", e)));
+            }
+        };
+
+        let port = oauth_server.port();
+        info!("OAuth server started on port {}", port);
 
         // Generate a random state parameter for CSRF protection
         let state: String = rand::thread_rng()
@@ -226,11 +325,12 @@ impl AuthManager {
             .map(char::from)
             .collect();
 
-        // Build the OAuth URL
+        // Build the OAuth URL with the redirect port
         let oauth_url = format!(
-            "{}?desktop=true&state={}&provider=google",
+            "{}?desktop=true&state={}&provider=google&redirect_port={}",
             OAUTH_LOGIN_URL,
-            urlencoding::encode(&state)
+            urlencoding::encode(&state),
+            port
         );
 
         info!("Opening browser to: {}", oauth_url);
@@ -238,7 +338,16 @@ impl AuthManager {
         // Open the browser
         if let Err(e) = open::that(&oauth_url) {
             error!("Failed to open browser: {}", e);
+            // Clean up the server
+            let mut server_guard = self.oauth_server.lock().unwrap();
+            *server_guard = None;
             return Err(AuthError::ApiError(format!("Failed to open browser: {}", e)));
+        }
+
+        // Store the OAuth server
+        {
+            let mut server_guard = self.oauth_server.lock().unwrap();
+            *server_guard = Some(oauth_server);
         }
 
         // Create the pending state
@@ -247,24 +356,39 @@ impl AuthManager {
             started_at: Utc::now(),
         };
 
-        // Save OAuth state to disk for deep link callback after potential app restart
-        if let Err(e) = self.storage.save_oauth_state(&pending) {
-            error!("Failed to save OAuth state to disk: {}", e);
-            // Continue anyway - this just means restart won't work
-        }
-
         // Set state to awaiting OAuth callback
         {
             let mut auth_state = self.state.lock().unwrap();
             *auth_state = AuthState::AwaitingOAuthCallback(pending);
         }
 
-        info!("OAuth flow started, waiting for callback with state: {}...", &state[..8]);
+        info!("OAuth flow started, waiting for localhost callback with state: {}...", &state[..8]);
         Ok(state)
     }
 
+    /// Poll for OAuth callback (non-blocking)
+    ///
+    /// Call this periodically to check if the OAuth callback has been received.
+    /// Returns Some(callback_data) if callback received, None otherwise.
+    pub fn poll_oauth_callback(&self) -> Option<super::oauth_server::OAuthCallbackData> {
+        let server_guard = self.oauth_server.lock().unwrap();
+        if let Some(ref server) = *server_guard {
+            server.try_recv_callback()
+        } else {
+            None
+        }
+    }
+
+    /// Get the OAuth server port (if active)
+    pub fn get_oauth_port(&self) -> Option<u16> {
+        let server_guard = self.oauth_server.lock().unwrap();
+        server_guard.as_ref().map(|s| s.port())
+    }
+
     /// Complete OAuth callback - exchange token and verify
-    /// Can work with state in memory (same instance) or loaded from disk (app restart via deep link)
+    ///
+    /// This is called when the localhost server receives the callback.
+    /// The state parameter is verified against the expected state in memory.
     pub async fn complete_oauth_callback(
         &self,
         exchange_token: &str,
@@ -274,7 +398,7 @@ impl AuthManager {
             &exchange_token[..exchange_token.len().min(8)],
             &callback_state[..callback_state.len().min(8)]);
 
-        // Try to get expected state from memory first, then from disk
+        // Get expected state from memory
         let expected_state = {
             let state = self.state.lock().unwrap();
             match &*state {
@@ -289,45 +413,30 @@ impl AuthManager {
             }
         };
 
-        // If not in memory, try loading from disk (app was restarted via deep link)
         let expected_state = match expected_state {
             Some(s) => s,
             None => {
-                info!("OAuth state not in memory, checking disk...");
-                match self.storage.load_oauth_state() {
-                    Ok(Some(pending)) => {
-                        // Check if expired
-                        if Utc::now() - pending.started_at > Duration::minutes(10) {
-                            let _ = self.storage.clear_oauth_state();
-                            return Err(AuthError::ApiError("OAuth flow expired. Please try again.".to_string()));
-                        }
-                        info!("Loaded OAuth state from disk");
-                        pending.state
-                    }
-                    Ok(None) => {
-                        return Err(AuthError::ApiError("Not waiting for OAuth callback. Please start sign-in again.".to_string()));
-                    }
-                    Err(e) => {
-                        error!("Failed to load OAuth state from disk: {}", e);
-                        return Err(AuthError::ApiError("Could not verify OAuth callback. Please try again.".to_string()));
-                    }
-                }
+                error!("OAuth state not found in memory");
+                return Err(AuthError::ApiError("Not waiting for OAuth callback. Please start sign-in again.".to_string()));
             }
         };
 
         if callback_state != expected_state {
-            error!("State mismatch: expected {}, got {}", &expected_state[..8], &callback_state[..8.min(callback_state.len())]);
-            // Reset state and clear disk
+            error!("State mismatch: expected {}..., got {}...",
+                &expected_state[..expected_state.len().min(8)],
+                &callback_state[..callback_state.len().min(8)]);
+            // Reset state
             {
                 let mut state = self.state.lock().unwrap();
                 *state = AuthState::Error("Security error: state mismatch. Please try again.".to_string());
             }
-            let _ = self.storage.clear_oauth_state();
+            // Stop OAuth server
+            self.stop_oauth_server();
             return Err(AuthError::ApiError("Security error: state mismatch".to_string()));
         }
 
-        // Clear OAuth state from disk now that we've validated it
-        let _ = self.storage.clear_oauth_state();
+        // Stop the OAuth server now that we've received the callback
+        self.stop_oauth_server();
 
         // Set state to logging in
         {
@@ -396,12 +505,23 @@ impl AuthManager {
     /// Cancel OAuth flow and return to logged out state
     pub fn cancel_oauth(&self) {
         info!("Cancelling OAuth flow");
-        // Clear OAuth state from disk
-        let _ = self.storage.clear_oauth_state();
+
+        // Stop the OAuth server
+        self.stop_oauth_server();
+
         // Clear state in memory
         let mut state = self.state.lock().unwrap();
         if matches!(*state, AuthState::AwaitingOAuthCallback(_)) {
             *state = AuthState::LoggedOut;
+        }
+    }
+
+    /// Stop the OAuth server if it's running
+    fn stop_oauth_server(&self) {
+        let mut server_guard = self.oauth_server.lock().unwrap();
+        if let Some(mut server) = server_guard.take() {
+            info!("Stopping OAuth server");
+            server.stop();
         }
     }
 
