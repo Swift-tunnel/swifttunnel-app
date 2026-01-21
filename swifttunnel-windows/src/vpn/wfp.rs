@@ -568,11 +568,11 @@ pub fn setup_wfp_for_split_tunnel(_interface_luid: u64) -> VpnResult<WfpEngine> 
         log::warn!("Provider registration: {} (may already exist)", e);
     }
 
-    // Step 3: Register sublayer (CRITICAL - driver callouts reference this!)
-    log::info!("Registering WFP sublayer...");
-    if let Err(e) = engine.register_sublayer() {
+    // Step 3: Create sublayer (CRITICAL - driver callouts reference this!)
+    log::info!("Creating WFP sublayer...");
+    if let Err(e) = engine.create_sublayer() {
         // Sublayer might already exist - that's OK
-        log::warn!("Sublayer registration: {} (may already exist)", e);
+        log::warn!("Sublayer creation: {} (may already exist)", e);
     }
 
     log::info!("WFP infrastructure ready - provider and sublayer registered");
