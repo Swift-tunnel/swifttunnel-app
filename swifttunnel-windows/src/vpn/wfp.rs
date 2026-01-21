@@ -206,6 +206,113 @@ static MULLVAD_CALLOUT_GUIDS: [GUID; 12] = [
     ST_FW_CALLOUT_BLOCK_SPLIT_APPS_IPV6_RECV,
 ];
 
+// =============================================================================
+// Mullvad Split Tunnel WFP FILTER GUIDs
+// These are the FIXED GUIDs for filters created during ApplyConfiguration()
+// Unlike callouts, filters are created during SET_CONFIGURATION, not INITIALIZE
+// If these exist when SET_CONFIGURATION runs, we get FWP_E_ALREADY_EXISTS
+// =============================================================================
+
+/// ST_FW_FILTER_CLASSIFY_BIND_IPV4_KEY
+static ST_FW_FILTER_CLASSIFY_BIND_IPV4: GUID = GUID::from_values(
+    0xb47d14a7, 0xaeed, 0x48b9, [0xad, 0x4e, 0x55, 0x29, 0x61, 0x9f, 0x13, 0x37]
+);
+
+/// ST_FW_FILTER_CLASSIFY_BIND_IPV6_KEY
+static ST_FW_FILTER_CLASSIFY_BIND_IPV6: GUID = GUID::from_values(
+    0x2f607222, 0xb2eb, 0x443c, [0xb6, 0xe0, 0x64, 0x10, 0x67, 0x37, 0x54, 0x78]
+);
+
+/// ST_FW_FILTER_CLASSIFY_CONNECT_IPV4_KEY
+static ST_FW_FILTER_CLASSIFY_CONNECT_IPV4: GUID = GUID::from_values(
+    0x4207f127, 0xcc80, 0x477e, [0xad, 0xdf, 0x26, 0xf7, 0x65, 0x85, 0xe0, 0x73]
+);
+
+/// ST_FW_FILTER_CLASSIFY_CONNECT_IPV6_KEY
+static ST_FW_FILTER_CLASSIFY_CONNECT_IPV6: GUID = GUID::from_values(
+    0x9a87f137, 0x5112, 0x4427, [0xb3, 0x15, 0x4f, 0x87, 0xb3, 0xe8, 0x4d, 0xcc]
+);
+
+/// ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_CONN_KEY
+static ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_CONN: GUID = GUID::from_values(
+    0x66ced079, 0xc270, 0x4b4d, [0xa4, 0x5c, 0xd1, 0x17, 0x11, 0xc0, 0xd6, 0x00]
+);
+
+/// ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_RECV_KEY
+static ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_RECV: GUID = GUID::from_values(
+    0x37972155, 0xebdb, 0x49fc, [0x9a, 0x37, 0x3a, 0x0b, 0x3b, 0x0a, 0xa1, 0x00]
+);
+
+/// ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_CONN_KEY
+static ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_CONN: GUID = GUID::from_values(
+    0x0afa08e3, 0xb010, 0x4082, [0x9e, 0x03, 0x1c, 0xc4, 0xbe, 0x1c, 0x6c, 0xf8]
+);
+
+/// ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_RECV_KEY
+static ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_RECV: GUID = GUID::from_values(
+    0x7835dfd7, 0x24ae, 0x44f4, [0x8a, 0x8a, 0x5e, 0x9c, 0x76, 0x6a, 0xae, 0x63]
+);
+
+/// ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_DNS_CONN_KEY
+static ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_DNS_CONN: GUID = GUID::from_values(
+    0xedb743a8, 0x1a77, 0x4ba9, [0x90, 0x6b, 0xc5, 0x94, 0xa7, 0xdd, 0xb7, 0x5b]
+);
+
+/// ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_DNS_RECV_KEY
+static ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_DNS_RECV: GUID = GUID::from_values(
+    0x5373bf17, 0x937e, 0x438b, [0xa3, 0x07, 0xcd, 0x50, 0xe1, 0x25, 0xdf, 0xf9]
+);
+
+/// ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_DNS_CONN_KEY
+static ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_DNS_CONN: GUID = GUID::from_values(
+    0x355f9524, 0x8ce0, 0x4c85, [0x90, 0x2f, 0xed, 0xf0, 0x25, 0x25, 0x56, 0xd4]
+);
+
+/// ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_DNS_RECV_KEY
+static ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_DNS_RECV: GUID = GUID::from_values(
+    0x282b9c48, 0x4029, 0x4d27, [0x8f, 0xe0, 0x8c, 0x3c, 0x4b, 0x84, 0xf9, 0x52]
+);
+
+/// ST_FW_FILTER_BLOCK_ALL_SPLIT_APPS_TUNNEL_IPV4_CONN_KEY
+static ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV4_CONN: GUID = GUID::from_values(
+    0xd8602ff5, 0x436b, 0x414a, [0xa2, 0x21, 0x7b, 0x4d, 0xe8, 0xce, 0x96, 0xc7]
+);
+
+/// ST_FW_FILTER_BLOCK_ALL_SPLIT_APPS_TUNNEL_IPV4_RECV_KEY
+static ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV4_RECV: GUID = GUID::from_values(
+    0xfc3f8d71, 0x33f7, 0x4d24, [0x93, 0x06, 0xa3, 0xde, 0xe3, 0xf7, 0xc8, 0x65]
+);
+
+/// ST_FW_FILTER_BLOCK_ALL_SPLIT_APPS_TUNNEL_IPV6_CONN_KEY
+static ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV6_CONN: GUID = GUID::from_values(
+    0x05cb3c5e, 0x6f64, 0x44f7, [0x81, 0xb1, 0xc8, 0x90, 0x56, 0x3f, 0xa2, 0x80]
+);
+
+/// ST_FW_FILTER_BLOCK_ALL_SPLIT_APPS_TUNNEL_IPV6_RECV_KEY
+static ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV6_RECV: GUID = GUID::from_values(
+    0xc854e73a, 0x81c8, 0x4814, [0x9a, 0x55, 0x55, 0xba, 0xf2, 0xc3, 0xbd, 0x17]
+);
+
+/// All Mullvad FILTER GUIDs in an array for easy iteration
+static MULLVAD_FILTER_GUIDS: [GUID; 16] = [
+    ST_FW_FILTER_CLASSIFY_BIND_IPV4,
+    ST_FW_FILTER_CLASSIFY_BIND_IPV6,
+    ST_FW_FILTER_CLASSIFY_CONNECT_IPV4,
+    ST_FW_FILTER_CLASSIFY_CONNECT_IPV6,
+    ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_CONN,
+    ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_RECV,
+    ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_CONN,
+    ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_RECV,
+    ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_DNS_CONN,
+    ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV4_DNS_RECV,
+    ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_DNS_CONN,
+    ST_FW_FILTER_PERMIT_SPLIT_APPS_IPV6_DNS_RECV,
+    ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV4_CONN,
+    ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV4_RECV,
+    ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV6_CONN,
+    ST_FW_FILTER_BLOCK_SPLIT_APPS_TUNNEL_IPV6_RECV,
+];
+
 /// Provider name
 const PROVIDER_NAME: &str = "Mullvad Split Tunnel";
 const PROVIDER_DESC: &str = "Mullvad Split Tunnel WFP provider";
@@ -569,13 +676,59 @@ impl WfpEngine {
         deleted_count
     }
 
+    /// Delete Mullvad WFP filters by their SPECIFIC GUIDs
+    /// The Mullvad driver creates filters with FIXED GUIDs (not dynamic IDs)
+    /// These must be deleted before SET_CONFIGURATION or we get FWP_E_ALREADY_EXISTS
+    /// THIS IS THE KEY FIX - filters have fixed GUIDs, not dynamic sublayer matching!
+    pub fn cleanup_mullvad_filter_guids(&self) -> usize {
+        let mut deleted_count = 0;
+
+        log::info!("Cleaning up Mullvad WFP filters by GUID (16 filters)...");
+
+        for guid in MULLVAD_FILTER_GUIDS.iter() {
+            let result = unsafe {
+                FwpmFilterDeleteByKey0(self.handle, guid)
+            };
+            if result == 0 {
+                deleted_count += 1;
+                log::debug!("Deleted filter {:08X}-{:04X}-{:04X}-{:02X}{:02X}...",
+                    guid.data1, guid.data2, guid.data3, guid.data4[0], guid.data4[1]);
+            }
+            // Ignore errors - filter may not exist
+        }
+
+        if deleted_count > 0 {
+            log::info!("Deleted {} Mullvad WFP filters by GUID", deleted_count);
+        } else {
+            log::debug!("No Mullvad WFP filters found to delete");
+        }
+
+        deleted_count
+    }
+
     /// Delete ALL filters associated with the Mullvad sublayer or provider
     /// This is more thorough than relying on sublayer cascade deletion
     /// Filters created by the driver's Firewall::ApplyConfiguration() have dynamic IDs
     pub fn cleanup_mullvad_filters(&self) -> usize {
         let mut deleted_count = 0;
+        let mut total_filters = 0;
+        let mut sublayer_matches = 0;
+        let mut provider_matches = 0;
 
         log::info!("Enumerating and deleting Mullvad WFP filters...");
+        log::info!("Looking for sublayer: {:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data1,
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data2,
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data3,
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data4[0],
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data4[1],
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data4[2],
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data4[3],
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data4[4],
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data4[5],
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data4[6],
+            ST_FW_WINFW_BASELINE_SUBLAYER_KEY.data4[7],
+        );
 
         unsafe {
             // Pass None for template to enumerate ALL filters
@@ -607,9 +760,18 @@ impl WfpEngine {
                     &mut num_entries,
                 );
 
-                if result != 0 || num_entries == 0 {
+                if result != 0 {
+                    if result != 0x80320003 { // FWP_E_NO_MORE_ITEMS
+                        log::warn!("Filter enumeration error: 0x{:08X}", result);
+                    }
                     break;
                 }
+
+                if num_entries == 0 {
+                    break;
+                }
+
+                total_filters += num_entries;
 
                 // Process each filter
                 for i in 0..num_entries as isize {
@@ -622,19 +784,30 @@ impl WfpEngine {
 
                     // Check if this filter belongs to the Mullvad sublayer
                     if filter_ref.subLayerKey == ST_FW_WINFW_BASELINE_SUBLAYER_KEY {
+                        sublayer_matches += 1;
+                        log::debug!("Found filter {} in Mullvad sublayer", filter_ref.filterId);
                         let delete_result = FwpmFilterDeleteById0(self.handle, filter_ref.filterId);
                         if delete_result == 0 {
                             deleted_count += 1;
+                            log::debug!("Deleted filter {}", filter_ref.filterId);
+                        } else {
+                            log::warn!("Failed to delete filter {}: 0x{:08X}", filter_ref.filterId, delete_result);
                         }
+                        continue; // Don't double-delete
                     }
 
                     // Also check if it belongs to the Mullvad provider
                     if !filter_ref.providerKey.is_null() {
                         let provider_key = &*filter_ref.providerKey;
                         if *provider_key == ST_FW_PROVIDER_KEY {
+                            provider_matches += 1;
+                            log::debug!("Found filter {} from Mullvad provider", filter_ref.filterId);
                             let delete_result = FwpmFilterDeleteById0(self.handle, filter_ref.filterId);
                             if delete_result == 0 {
                                 deleted_count += 1;
+                                log::debug!("Deleted filter {}", filter_ref.filterId);
+                            } else {
+                                log::warn!("Failed to delete filter {}: 0x{:08X}", filter_ref.filterId, delete_result);
                             }
                         }
                     }
@@ -647,11 +820,8 @@ impl WfpEngine {
             let _ = FwpmFilterDestroyEnumHandle0(self.handle, enum_handle);
         }
 
-        if deleted_count > 0 {
-            log::info!("Deleted {} Mullvad WFP filters", deleted_count);
-        } else {
-            log::debug!("No Mullvad WFP filters found to delete");
-        }
+        log::info!("Filter cleanup: {} total filters, {} sublayer matches, {} provider matches, {} deleted",
+            total_filters, sublayer_matches, provider_matches, deleted_count);
 
         deleted_count
     }
@@ -754,7 +924,7 @@ impl FilterLayer {
 /// we'd delete the objects that were just registered.
 ///
 /// Order of deletion matters (most dependent first):
-/// 1. Filters first (they reference callouts and sublayer)
+/// 1. Filters first (they reference callouts and sublayer) - BY GUID!
 /// 2. Callouts second (they reference the sublayer)
 /// 3. Sublayer third (it references the provider)
 /// 4. Provider last
@@ -762,12 +932,18 @@ pub fn cleanup_stale_wfp_callouts() {
     log::info!("Cleaning up stale WFP objects from previous sessions...");
 
     if let Ok(engine) = WfpEngine::open() {
-        // Step 0: Delete ALL filters associated with Mullvad sublayer/provider
-        // CRITICAL: Filters must be deleted FIRST - they reference callouts
-        // This fixes the FWP_E_ALREADY_EXISTS error on SET_CONFIGURATION
+        // Step 0: Delete filters by their SPECIFIC GUIDs
+        // CRITICAL FIX: The Mullvad driver creates filters with FIXED GUIDs
+        // Our previous approach of enumerating by sublayer was failing!
+        let filter_guids_deleted = engine.cleanup_mullvad_filter_guids();
+        if filter_guids_deleted > 0 {
+            log::info!("Deleted {} stale Mullvad WFP filters by GUID", filter_guids_deleted);
+        }
+
+        // Step 0.5: Also try enumeration-based cleanup (catches any we might miss)
         let filters_deleted = engine.cleanup_mullvad_filters();
         if filters_deleted > 0 {
-            log::info!("Deleted {} stale Mullvad WFP filters", filters_deleted);
+            log::info!("Deleted {} additional Mullvad WFP filters by enumeration", filters_deleted);
         }
 
         // Step 1: Delete Mullvad callouts (they reference sublayer)
