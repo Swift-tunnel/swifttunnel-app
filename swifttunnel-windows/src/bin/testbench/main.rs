@@ -662,7 +662,7 @@ fn test_full_split_tunnel_flow() {
     std::thread::sleep(Duration::from_secs(1));
     println!();
 
-    // Step 1: Open driver FIRST
+    // Step 1: Open driver
     println!("Step 1: Opening driver handle...");
     let mut driver = SplitTunnelDriver::new();
 
@@ -676,8 +676,23 @@ fn test_full_split_tunnel_flow() {
         }
     }
 
-    // Step 2: Initialize driver (driver creates provider + callouts, but NOT sublayer)
-    println!("\nStep 2: Initializing driver (creates provider + callouts)...");
+    // Step 2: Create provider + sublayer BEFORE initialize
+    // The driver's callouts reference the sublayer, so it must exist before INITIALIZE
+    println!("\nStep 2: Creating WFP provider + sublayer (BEFORE initialize)...");
+    let _wfp_engine = match setup_wfp_for_split_tunnel(0) {
+        Ok(engine) => {
+            println!("   ✅ WFP provider + sublayer created");
+            Some(engine)
+        }
+        Err(e) => {
+            println!("   ❌ WFP setup failed: {}", e);
+            let _ = driver.close();
+            return;
+        }
+    };
+
+    // Step 3: Initialize driver (creates callouts that reference the sublayer)
+    println!("\nStep 3: Initializing driver (creates callouts using sublayer)...");
     match driver.initialize() {
         Ok(_) => {
             println!("   ✅ Driver initialized");
@@ -688,32 +703,6 @@ fn test_full_split_tunnel_flow() {
             return;
         }
     }
-
-    // Step 3: Create sublayer AFTER initialize (required for SET_CONFIGURATION)
-    // Driver creates provider + callouts, but WE need to create the sublayer
-    println!("\nStep 3: Creating WFP sublayer (required for SET_CONFIGURATION)...");
-    let _wfp_engine = match WfpEngine::open() {
-        Ok(mut engine) => {
-            // Don't register provider - driver already created it
-            // Just create sublayer
-            match engine.create_sublayer() {
-                Ok(_) => {
-                    println!("   ✅ Sublayer created");
-                    Some(engine)
-                }
-                Err(e) => {
-                    println!("   ❌ Sublayer creation failed: {}", e);
-                    let _ = driver.close();
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            println!("   ❌ WFP engine open failed: {}", e);
-            let _ = driver.close();
-            return;
-        }
-    };
 
     // Step 4: Configure split tunnel with Roblox apps
     println!("\nStep 4: Configuring split tunnel with Roblox apps...");
