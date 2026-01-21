@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use sysinfo::{System, ProcessesToUpdate, ProcessRefreshKind};
+use sysinfo::{System, ProcessesToUpdate, ProcessRefreshKind, UpdateKind};
 use super::{VpnError, VpnResult};
 
 /// Driver device path (Mullvad split tunnel driver)
@@ -408,11 +408,12 @@ impl SplitTunnelDriver {
 
     /// Scan all processes and return those that should be excluded
     fn scan_processes_to_exclude(&mut self) -> Vec<ProcessInfo> {
-        // Efficient refresh - only get what we need
+        // Refresh with exe paths - critical for getting process paths
+        // ProcessRefreshKind::new() alone doesn't refresh exe paths!
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::new(), // We only need basic info
+            ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet),
         );
 
         let mut to_exclude = Vec::with_capacity(200);
@@ -526,8 +527,16 @@ impl SplitTunnelDriver {
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
 
         // Set configuration (paths to exclude)
-        let config_data = self.serialize_exclusion_config()?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
+        // Only send SET_CONFIGURATION if we have paths to exclude
+        // The driver doesn't accept empty configuration - use CLEAR_CONFIGURATION instead
+        if !self.excluded_paths.is_empty() {
+            let config_data = self.serialize_exclusion_config()?;
+            self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
+        } else {
+            log::info!("No processes to exclude - clearing any existing configuration");
+            // Clear any existing exclusion config
+            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
+        }
 
         // Verify state
         if let Ok(state) = self.get_driver_state() {
@@ -581,9 +590,14 @@ impl SplitTunnelDriver {
         let proc_data = self.serialize_process_tree_for_exclusion(&current_exclude)?;
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
 
-        // Update config
-        let config_data = self.serialize_exclusion_config()?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
+        // Update exclusion config only if we have paths
+        if !self.excluded_paths.is_empty() {
+            let config_data = self.serialize_exclusion_config()?;
+            self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
+        } else {
+            // Clear any existing exclusion config
+            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
+        }
 
         let tunnel_running = !self.get_running_tunnel_apps().is_empty();
         Ok(tunnel_running)

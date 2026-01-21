@@ -19,7 +19,7 @@ fn main() -> Result<()> {
         .init();
 
     println!("\n╔════════════════════════════════════════════════════════════╗");
-    println!("║          SwiftTunnel CLI Testbench v0.5.16                 ║");
+    println!("║          SwiftTunnel CLI Testbench v0.5.17                 ║");
     println!("║          Headless testing for VPN & Split Tunnel           ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
 
