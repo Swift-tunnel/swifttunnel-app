@@ -1937,7 +1937,8 @@ impl BoosterApp {
 
     fn render_region_selector(&mut self, ui: &mut egui::Ui) {
         let mut clicked_region: Option<String> = None;
-        let mut gear_clicked = false; // Track if gear button was clicked (to prevent card click)
+        // Use Cell for interior mutability - allows modification inside nested closures
+        let gear_clicked = std::cell::Cell::new(false);
         let is_finding = self.finding_best_server.load(Ordering::Relaxed);
 
         // PERFORMANCE: Use cached values instead of locking mutexes every frame
@@ -2207,7 +2208,7 @@ impl BoosterApp {
                                                 } else {
                                                     self.server_selection_popup = Some(region.id.clone());
                                                 }
-                                                gear_clicked = true; // Prevent card click from also triggering
+                                                gear_clicked.set(true); // Prevent card click from also triggering
                                             }
                                             if gear_btn.hovered() {
                                                 egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("gear_tooltip"), |ui| {
@@ -2251,7 +2252,7 @@ impl BoosterApp {
                         self.animations.animate_hover(&card_id, is_hovered, hover_val);
 
                         // Only select region if gear button wasn't clicked
-                        if !gear_clicked && response.response.interact(egui::Sense::click()).clicked() {
+                        if !gear_clicked.get() && response.response.interact(egui::Sense::click()).clicked() {
                             clicked_region = Some(region.id.clone());
                         }
                     }
