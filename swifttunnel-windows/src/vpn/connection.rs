@@ -320,6 +320,7 @@ impl VpnConnection {
     /// The user expects split tunneling - proceeding without it could leak traffic.
     ///
     /// Initialization order (CRITICAL - fixes FWP_E_ALREADY_EXISTS and FWP_E_SUBLAYER_NOT_FOUND):
+    /// 0. Clean up stale WFP objects from previous connections (CRITICAL for reconnection)
     /// 1. Check driver availability
     /// 2. Open driver
     /// 3. Initialize driver (creates WFP provider + callouts)
@@ -331,6 +332,12 @@ impl VpnConnection {
         adapter: &WintunAdapter,
         tunnel_apps: Vec<String>,
     ) -> VpnResult<Vec<String>> {
+        // Step 0: ALWAYS clean up stale WFP objects BEFORE anything else
+        // This is CRITICAL for reconnection - previous connection's WFP objects must be deleted
+        // Otherwise we get FWP_E_ALREADY_EXISTS (0x80320009) on SET_CONFIGURATION
+        log::info!("Cleaning up stale WFP objects before split tunnel setup...");
+        WfpEngine::cleanup_stale_wfp_callouts();
+
         // Step 1: Check if driver is available (MSI installer must have set it up)
         if !SplitTunnelDriver::check_driver_available() {
             return Err(VpnError::SplitTunnelNotAvailable);
