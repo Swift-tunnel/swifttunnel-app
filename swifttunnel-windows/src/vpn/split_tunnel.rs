@@ -49,14 +49,21 @@ mod ioctl {
 
 /// System processes that don't generate meaningful network traffic
 /// Skipping these reduces driver overhead
+///
+/// IMPORTANT: Processes in this list are NOT added to the exclude list,
+/// which means they will use VPN by default. Only add processes here that:
+/// 1. Don't do ANY network I/O, OR
+/// 2. MUST use VPN (like our own app to prevent detection loops)
+///
+/// Do NOT add: cmd.exe, powershell.exe, openssh.exe, conhost.exe, dllhost.exe
+/// These all can do network I/O and should be excluded (bypass VPN).
 const SKIP_PROCESSES: &[&str] = &[
-    // Windows core (no network or internal only)
+    // Windows core (internal IPC only, no user-facing network)
     "system", "idle", "registry", "smss.exe", "csrss.exe", "wininit.exe",
     "services.exe", "lsass.exe", "winlogon.exe", "fontdrvhost.exe",
-    "dwm.exe", "sihost.exe", "taskhostw.exe", "ctfmon.exe", "dllhost.exe",
-    "conhost.exe", "cmd.exe", "powershell.exe", "openssh.exe",
-    // Our own app
-    "swifttunnel.exe",
+    "dwm.exe", "sihost.exe", "taskhostw.exe", "ctfmon.exe",
+    // Our own app - must use VPN to prevent IP detection from showing tunnel IP
+    "swifttunnel.exe", "swifttunnel-fps-booster.exe",
     // Memory compression
     "memory compression",
 ];
