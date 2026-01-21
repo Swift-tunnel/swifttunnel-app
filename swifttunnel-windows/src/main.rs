@@ -214,6 +214,10 @@ fn main() -> eframe::Result<()> {
     // This ensures split tunnel driver is reset before we start
     SplitTunnelDriver::cleanup_stale_state();
 
+    // Ensure Base Filtering Engine (BFE) service is running
+    // BFE is required for WFP operations - auto-start if stopped
+    let _ = vpn::ensure_bfe_running();
+
     // Clean up any stale WFP callouts from previous sessions
     // This MUST happen before any driver.initialize() calls
     vpn::cleanup_stale_wfp_callouts();
