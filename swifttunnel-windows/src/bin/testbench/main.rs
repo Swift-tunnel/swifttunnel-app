@@ -10,15 +10,31 @@
 //!   testbench wfp          - Test WFP setup
 //!   testbench full         - Test full split tunnel flow
 //!   testbench info         - Show system info
+//!   testbench verify       - Verify actual traffic routing (requires network)
 
 use std::collections::HashSet;
 use std::env;
+use std::time::Duration;
 
 use anyhow::Result;
+use tokio::runtime::Runtime;
 
-// Import from main crate - only what we need for driver testing
-use swifttunnel_fps_booster::vpn::split_tunnel::{SplitTunnelDriver, GamePreset, get_apps_for_preset_set};
+// Import from main crate
+use swifttunnel_fps_booster::auth::AuthManager;
+use swifttunnel_fps_booster::vpn::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_preset_set};
 use swifttunnel_fps_booster::vpn::wfp::{WfpEngine, setup_wfp_for_split_tunnel};
+use swifttunnel_fps_booster::vpn::adapter::WintunAdapter;
+use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
+use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
+use swifttunnel_fps_booster::vpn::routes::RouteManager;
+use swifttunnel_fps_booster::auth::types::AuthState;
+
+/// Testbench credentials
+const TESTBENCH_EMAIL: &str = "testbench@swifttunnel.net";
+const TESTBENCH_PASSWORD: &str = "TestBench2026!";
+
+/// Test region
+const TEST_REGION: &str = "singapore";
 
 fn main() -> Result<()> {
     // Initialize logging
@@ -49,6 +65,9 @@ fn main() -> Result<()> {
         }
         "info" => {
             show_system_info();
+        }
+        "verify" => {
+            verify_traffic_routing();
         }
         "all" => {
             println!("Running all tests...\n");
@@ -82,7 +101,351 @@ fn print_usage() {
     println!("  wfp      Test WFP setup");
     println!("  full     Test full split tunnel flow");
     println!("  info     Show system info");
+    println!("  verify   Verify actual traffic routing (connects to VPN)");
     println!("  help     Show this help message");
+}
+
+/// Check public IP using multiple services
+fn get_public_ip() -> Option<String> {
+    let services = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ];
+
+    for service in services {
+        let output = std::process::Command::new("powershell")
+            .args(["-Command", &format!("(Invoke-WebRequest -Uri '{}' -UseBasicParsing -TimeoutSec 5).Content.Trim()", service)])
+            .output();
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !ip.is_empty() && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn verify_traffic_routing() {
+    println!("═══ Traffic Routing Verification ═══\n");
+    println!("This test connects to a real VPN server and verifies traffic routing.\n");
+
+    // Create tokio runtime
+    let rt = Runtime::new().expect("Failed to create tokio runtime");
+
+    // Step 1: Get original IP before VPN
+    println!("Step 1: Getting original IP (before VPN)...");
+    let original_ip = match get_public_ip() {
+        Some(ip) => {
+            println!("   ✅ Original IP: {}", ip);
+            ip
+        }
+        None => {
+            println!("   ❌ Failed to get original IP");
+            return;
+        }
+    };
+
+    // Step 2: Authenticate
+    println!("\nStep 2: Authenticating with testbench account...");
+    let auth_manager = match AuthManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            println!("   ❌ Failed to create AuthManager: {}", e);
+            return;
+        }
+    };
+
+    let access_token = rt.block_on(async {
+        // Sign in
+        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+            println!("   ❌ Sign in failed: {}", e);
+            return None;
+        }
+        println!("   ✅ Signed in as {}", TESTBENCH_EMAIL);
+
+        // Get access token
+        match auth_manager.get_state() {
+            AuthState::LoggedIn(session) => Some(session.access_token),
+            _ => {
+                println!("   ❌ Not logged in after sign_in");
+                None
+            }
+        }
+    });
+
+    let access_token = match access_token {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Step 3: Fetch VPN config
+    println!("\nStep 3: Fetching VPN config for region '{}'...", TEST_REGION);
+    let vpn_config = rt.block_on(async {
+        match fetch_vpn_config(&access_token, TEST_REGION).await {
+            Ok(config) => {
+                println!("   ✅ Got VPN config: endpoint={}", config.endpoint);
+                println!("   Assigned IP: {}", config.assigned_ip);
+                Some(config)
+            }
+            Err(e) => {
+                println!("   ❌ Failed to fetch VPN config: {}", e);
+                None
+            }
+        }
+    });
+
+    let vpn_config = match vpn_config {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Step 4: Create Wintun adapter
+    println!("\nStep 4: Creating Wintun adapter...");
+    let (ip, cidr) = match parse_ip_cidr(&vpn_config.assigned_ip) {
+        Ok((ip, cidr)) => (ip, cidr),
+        Err(e) => {
+            println!("   ❌ Failed to parse assigned IP: {}", e);
+            return;
+        }
+    };
+
+    let adapter = match WintunAdapter::create(ip, cidr) {
+        Ok(a) => {
+            println!("   ✅ Wintun adapter created");
+            std::sync::Arc::new(a)
+        }
+        Err(e) => {
+            println!("   ❌ Failed to create adapter: {}", e);
+            return;
+        }
+    };
+
+    // Set DNS
+    if !vpn_config.dns.is_empty() {
+        if let Err(e) = adapter.set_dns(&vpn_config.dns) {
+            println!("   ⚠ Failed to set DNS: {}", e);
+        }
+    }
+
+    let interface_luid = adapter.get_luid();
+    println!("   Interface LUID: {}", interface_luid);
+
+    // Step 5: Create and start WireGuard tunnel
+    println!("\nStep 5: Starting WireGuard tunnel...");
+    let tunnel = match WireguardTunnel::new(vpn_config.clone()) {
+        Ok(t) => {
+            println!("   ✅ WireGuard tunnel created");
+            std::sync::Arc::new(t)
+        }
+        Err(e) => {
+            println!("   ❌ Failed to create tunnel: {}", e);
+            adapter.shutdown();
+            return;
+        }
+    };
+
+    // Start tunnel in background
+    let tunnel_clone = tunnel.clone();
+    let adapter_clone = adapter.clone();
+    rt.spawn(async move {
+        if let Err(e) = tunnel_clone.start(adapter_clone).await {
+            log::error!("Tunnel error: {}", e);
+        }
+    });
+
+    // Wait for tunnel to establish
+    println!("   Waiting for tunnel handshake...");
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Step 6: Setup routes (WITHOUT split tunnel first)
+    println!("\nStep 6: Setting up routes (NO split tunnel)...");
+    let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
+        .split(':')
+        .next()
+        .unwrap_or("0.0.0.0")
+        .parse()
+        .unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
+
+    let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
+    let mut route_manager = RouteManager::new(server_ip, if_index);
+
+    if let Err(e) = route_manager.apply_routes() {
+        println!("   ⚠ Failed to apply routes: {}", e);
+    } else {
+        println!("   ✅ Routes applied");
+    }
+
+    // Wait for routes to settle
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Step 7: Check IP (should be VPN IP)
+    println!("\nStep 7: Checking IP (should be VPN IP, all traffic through tunnel)...");
+    let vpn_ip = match get_public_ip() {
+        Some(ip) => {
+            println!("   Current IP: {}", ip);
+            if ip != original_ip {
+                println!("   ✅ IP changed from {} to {} - VPN is working!", original_ip, ip);
+            } else {
+                println!("   ❌ IP unchanged - VPN routing may not be working");
+            }
+            ip
+        }
+        None => {
+            println!("   ❌ Failed to get public IP");
+            route_manager.remove_routes().ok();
+            tunnel.stop();
+            adapter.shutdown();
+            return;
+        }
+    };
+
+    // Step 8: Now setup split tunnel
+    println!("\nStep 8: Setting up split tunnel (testbench.exe should bypass VPN)...");
+
+    // Open and initialize driver
+    let mut driver = SplitTunnelDriver::new();
+    if let Err(e) = driver.open() {
+        println!("   ❌ Failed to open driver: {}", e);
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+
+    if let Err(e) = driver.initialize() {
+        println!("   ❌ Failed to initialize driver: {}", e);
+        let _ = driver.close();
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+
+    // Setup WFP
+    let _wfp_engine = match setup_wfp_for_split_tunnel(interface_luid) {
+        Ok(engine) => {
+            println!("   ✅ WFP setup complete");
+            Some(engine)
+        }
+        Err(e) => {
+            println!("   ❌ WFP setup failed: {}", e);
+            let _ = driver.close();
+            route_manager.remove_routes().ok();
+            tunnel.stop();
+            adapter.shutdown();
+            return;
+        }
+    };
+
+    // Configure split tunnel with Roblox apps only
+    // testbench.exe is NOT in this list, so it should bypass VPN
+    let presets = HashSet::from([GamePreset::Roblox]);
+    let tunnel_apps = get_apps_for_preset_set(&presets);
+    println!("   Tunnel apps (will use VPN): {:?}", tunnel_apps);
+    println!("   Everything else (including testbench.exe) will BYPASS VPN");
+
+    let split_config = SplitTunnelConfig::new(
+        tunnel_apps,
+        vpn_config.assigned_ip.clone(),
+        interface_luid,
+    );
+
+    if let Err(e) = driver.configure(split_config) {
+        println!("   ❌ Split tunnel configure failed: {}", e);
+        let _ = driver.close();
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+    println!("   ✅ Split tunnel configured");
+
+    // Wait for split tunnel to take effect
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Step 9: Check IP again (should be ORIGINAL IP since testbench.exe bypasses)
+    println!("\nStep 9: Checking IP (testbench.exe should bypass VPN)...");
+    let split_ip = match get_public_ip() {
+        Some(ip) => {
+            println!("   Current IP: {}", ip);
+            ip
+        }
+        None => {
+            println!("   ❌ Failed to get public IP");
+            "unknown".to_string()
+        }
+    };
+
+    // Step 10: Results
+    println!("\n════════════════════════════════════════");
+    println!("         TRAFFIC ROUTING RESULTS        ");
+    println!("════════════════════════════════════════\n");
+    println!("   Original IP (no VPN):      {}", original_ip);
+    println!("   VPN IP (no split tunnel):  {}", vpn_ip);
+    println!("   IP with split tunnel:      {}", split_ip);
+    println!();
+
+    if vpn_ip != original_ip && split_ip == original_ip {
+        println!("   ✅ SPLIT TUNNEL WORKING CORRECTLY!");
+        println!("   - Without split tunnel: traffic goes through VPN (IP changed)");
+        println!("   - With split tunnel: testbench.exe bypasses VPN (original IP)");
+        println!("   - Only Roblox apps would use the VPN tunnel");
+    } else if vpn_ip == original_ip {
+        println!("   ❌ VPN CONNECTION ISSUE");
+        println!("   - VPN doesn't seem to be routing traffic");
+    } else if split_ip != original_ip {
+        println!("   ⚠ SPLIT TUNNEL MAY NOT BE WORKING");
+        println!("   - VPN is working (IP changed)");
+        println!("   - But testbench.exe is still using VPN after split tunnel setup");
+        println!("   - Expected testbench.exe to bypass VPN");
+    } else {
+        println!("   ⚠ UNEXPECTED RESULTS");
+    }
+
+    println!("\n════════════════════════════════════════\n");
+
+    // Cleanup
+    println!("Cleaning up...");
+    let _ = driver.close();
+    let _ = route_manager.remove_routes();
+    tunnel.stop();
+    adapter.shutdown();
+    println!("   ✅ Cleanup complete");
+}
+
+fn parse_ip_cidr(ip_cidr: &str) -> Result<(std::net::Ipv4Addr, u8), String> {
+    let parts: Vec<&str> = ip_cidr.split('/').collect();
+    let ip: std::net::Ipv4Addr = parts[0].parse().map_err(|e| format!("Invalid IP: {}", e))?;
+    let cidr: u8 = if parts.len() > 1 {
+        parts[1].parse().unwrap_or(24)
+    } else {
+        24
+    };
+    Ok((ip, cidr))
+}
+
+fn get_interface_index(name: &str) -> Result<u32, String> {
+    use std::process::Command;
+
+    let output = Command::new("powershell")
+        .args(["-Command", &format!(
+            "(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex",
+            name
+        )])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        let index_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        index_str.parse().map_err(|e| format!("Parse error: {}", e))
+    } else {
+        Err("Adapter not found".to_string())
+    }
 }
 
 fn check_driver_status() {
@@ -258,7 +621,6 @@ fn test_full_split_tunnel_flow() {
     let tunnel_ip = "10.64.0.1".to_string();
     let tunnel_luid: u64 = 0;
 
-    use swifttunnel_fps_booster::vpn::split_tunnel::SplitTunnelConfig;
     let config = SplitTunnelConfig::new(tunnel_apps, tunnel_ip, tunnel_luid);
 
     match driver.configure(config) {
