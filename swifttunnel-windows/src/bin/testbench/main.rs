@@ -31,7 +31,7 @@ use swifttunnel_fps_booster::auth::types::AuthState;
 
 /// Testbench credentials
 const TESTBENCH_EMAIL: &str = "testbench@swifttunnel.net";
-const TESTBENCH_PASSWORD: &str = "TestBench2026!";
+const TESTBENCH_PASSWORD: &str = "TestBench2026";
 
 /// Test region
 const TEST_REGION: &str = "singapore";
