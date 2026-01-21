@@ -214,6 +214,10 @@ fn main() -> eframe::Result<()> {
     // This ensures split tunnel driver is reset before we start
     SplitTunnelDriver::cleanup_stale_state();
 
+    // Clean up any stale WFP callouts from previous sessions
+    // This MUST happen before any driver.initialize() calls
+    vpn::cleanup_stale_wfp_callouts();
+
     // Create shared state
     let app_state = Arc::new(Mutex::new(AppState::default()));
     let state_clone = Arc::clone(&app_state);
