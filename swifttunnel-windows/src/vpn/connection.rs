@@ -332,20 +332,26 @@ impl VpnConnection {
         adapter: &WintunAdapter,
         tunnel_apps: Vec<String>,
     ) -> VpnResult<Vec<String>> {
-        // Step 0a: Restart driver service to fully reset internal state
-        // This is CRITICAL because the driver's state machine persists between connections
-        // IOCTL_ST_RESET only works in READY/ENGAGED states, not INITIALIZED
-        // If a previous connection left driver in INITIALIZED state, we MUST restart the service
-        log::info!("Restarting split tunnel driver service...");
-        if let Err(e) = SplitTunnelDriver::restart_driver_service() {
-            log::warn!("Failed to restart driver service: {} (may not exist yet)", e);
-            // Continue anyway - check_driver_available will create it if needed
-        }
+        // Step 0a: STOP driver service first
+        // CRITICAL: We must cleanup WFP objects WHILE the driver is stopped
+        // If we cleanup after restart, the driver has already re-registered its objects
+        log::info!("Stopping split tunnel driver service...");
+        let _ = std::process::Command::new("sc")
+            .args(["stop", "MullvadSplitTunnel"])
+            .output();
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
-        // Step 0b: Clean up stale WFP objects from previous connections
-        // This removes old provider/sublayer/callouts that the driver created
-        log::info!("Cleaning up stale WFP objects...");
+        // Step 0b: Clean up stale WFP objects WHILE DRIVER IS STOPPED
+        // This removes old provider/sublayer/callouts/filters from previous sessions
+        log::info!("Cleaning up stale WFP objects (driver stopped)...");
         cleanup_stale_wfp_callouts();
+
+        // Step 0c: START driver service
+        log::info!("Starting split tunnel driver service...");
+        let _ = std::process::Command::new("sc")
+            .args(["start", "MullvadSplitTunnel"])
+            .output();
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         // Step 1: Check if driver is available (creates service if needed)
         if !SplitTunnelDriver::check_driver_available() {
