@@ -3,6 +3,7 @@
 //! A headless CLI tool for testing VPN and split tunnel functionality
 //! without requiring a GUI or OpenGL support.
 
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,11 +13,13 @@ use anyhow::Result;
 use tokio::runtime::Runtime;
 
 // Import from main crate
-use swifttunnel_fps_booster::vpn::{
-    VpnConnection, VpnState, GamePreset, get_apps_for_preset_set,
-    DynamicServerList,
-};
-use swifttunnel_fps_booster::auth::{AuthManager, AuthState};
+use swifttunnel_fps_booster::vpn::connection::VpnConnection;
+use swifttunnel_fps_booster::vpn::VpnState;
+use swifttunnel_fps_booster::vpn::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_preset_set};
+use swifttunnel_fps_booster::vpn::servers::DynamicServerList;
+use swifttunnel_fps_booster::vpn::wfp::{WfpEngine, setup_wfp_for_split_tunnel};
+use swifttunnel_fps_booster::auth::manager::AuthManager;
+use swifttunnel_fps_booster::auth::AuthState;
 
 fn main() -> Result<()> {
     // Initialize logging
@@ -42,7 +45,7 @@ fn main() -> Result<()> {
             "1" => check_driver_status(),
             "2" => rt.block_on(check_auth_status()),
             "3" => rt.block_on(list_servers()),
-            "4" => rt.block_on(test_vpn_connection()),
+            "4" => rt.block_on(test_vpn_connection(&rt)),
             "5" => test_split_tunnel_driver(),
             "6" => show_system_info(),
             "7" => rt.block_on(ping_regions()),
@@ -132,22 +135,27 @@ fn check_driver_status() {
 async fn check_auth_status() {
     println!("\n═══ Auth Status ═══\n");
 
-    let auth_manager = AuthManager::new();
-
-    match auth_manager.get_state() {
-        AuthState::LoggedIn { user_id, email, .. } => {
-            println!("✅ Logged in");
-            println!("   User ID: {}", user_id);
-            println!("   Email: {}", email);
+    match AuthManager::new() {
+        Ok(auth_manager) => {
+            match auth_manager.get_state() {
+                AuthState::LoggedIn { user_id, email, .. } => {
+                    println!("✅ Logged in");
+                    println!("   User ID: {}", user_id);
+                    println!("   Email: {}", email);
+                }
+                AuthState::LoggedOut => {
+                    println!("❌ Not logged in");
+                }
+                AuthState::Loading => {
+                    println!("⏳ Loading auth state...");
+                }
+                AuthState::Error(e) => {
+                    println!("❌ Auth error: {}", e);
+                }
+            }
         }
-        AuthState::LoggedOut => {
-            println!("❌ Not logged in");
-        }
-        AuthState::Loading => {
-            println!("⏳ Loading auth state...");
-        }
-        AuthState::Error(e) => {
-            println!("❌ Auth error: {}", e);
+        Err(e) => {
+            println!("❌ Failed to initialize auth manager: {}", e);
         }
     }
 
@@ -158,19 +166,20 @@ async fn list_servers() {
     println!("\n═══ VPN Servers ═══\n");
     println!("Fetching server list from API...\n");
 
-    let server_list = DynamicServerList::new();
+    let server_list = Arc::new(parking_lot::Mutex::new(DynamicServerList::new_empty()));
 
     // Fetch servers
-    server_list.fetch().await;
+    DynamicServerList::fetch(server_list.clone()).await;
 
     // Wait a moment for fetch to complete
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let regions = server_list.get_gaming_regions();
+    let list = server_list.lock();
+    let regions = list.get_gaming_regions();
 
     if regions.is_empty() {
         println!("❌ No servers found. Check network connection or auth status.");
-        if let Some(err) = server_list.error_message() {
+        if let Some(err) = list.error_message() {
             println!("   Error: {}", err);
         }
     } else {
@@ -186,15 +195,22 @@ async fn list_servers() {
     }
 }
 
-async fn test_vpn_connection() {
+async fn test_vpn_connection(rt: &Runtime) {
     println!("\n═══ VPN Connection Test ═══\n");
 
     // Check auth first
-    let auth_manager = AuthManager::new();
-    if !matches!(auth_manager.get_state(), AuthState::LoggedIn { .. }) {
-        println!("❌ Must be logged in to test VPN connection.");
-        println!("   Use the GUI app to log in first, then run this test.");
-        return;
+    match AuthManager::new() {
+        Ok(auth_manager) => {
+            if !matches!(auth_manager.get_state(), AuthState::LoggedIn { .. }) {
+                println!("❌ Must be logged in to test VPN connection.");
+                println!("   Use the GUI app to log in first, then run this test.");
+                return;
+            }
+        }
+        Err(e) => {
+            println!("❌ Failed to check auth: {}", e);
+            return;
+        }
     }
 
     let region = read_input("Enter region ID (e.g., 'singapore', 'tokyo'): ");
@@ -205,7 +221,11 @@ async fn test_vpn_connection() {
         return;
     }
 
-    println!("\nConnecting to {}...", region);
+    let server = read_input("Enter server ID (or press Enter for first server): ");
+    let server = server.trim();
+    let server_id = if server.is_empty() { region.to_string() } else { server.to_string() };
+
+    println!("\nConnecting to {} (server: {})...", region, server_id);
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -216,18 +236,19 @@ async fn test_vpn_connection() {
     });
 
     // Create VPN connection
-    let presets = std::collections::HashSet::from([GamePreset::Roblox]);
-    let vpn = VpnConnection::new(presets);
+    let presets = HashSet::from([GamePreset::Roblox]);
+    let tunnel_apps = get_apps_for_preset_set(&presets);
+    let vpn = VpnConnection::new();
 
     // Connect
-    match vpn.connect(region, None).await {
+    match vpn.connect(region, &server_id, tunnel_apps).await {
         Ok(_) => {
             println!("✅ VPN connected successfully!");
             println!("\nConnection active. Press Ctrl+C to disconnect...\n");
 
             // Monitor connection
             while running.load(Ordering::SeqCst) {
-                let state = vpn.get_state();
+                let state = vpn.state();
                 match state.status {
                     VpnState::Connected => {
                         print!("\r🟢 Connected | Split Tunnel: {} | Processes: {}   ",
@@ -260,8 +281,6 @@ async fn test_vpn_connection() {
 fn test_split_tunnel_driver() {
     println!("\n═══ Split Tunnel Driver Test ═══\n");
 
-    use swifttunnel_fps_booster::vpn::split_tunnel::SplitTunnelDriver;
-
     println!("1. Opening driver handle...");
     let mut driver = SplitTunnelDriver::new();
 
@@ -276,16 +295,19 @@ fn test_split_tunnel_driver() {
 
                     println!("\n3. Configuring split tunnel...");
                     // Get Roblox apps
-                    let presets = std::collections::HashSet::from([GamePreset::Roblox]);
+                    let presets = HashSet::from([GamePreset::Roblox]);
                     let tunnel_apps = get_apps_for_preset_set(&presets);
 
                     println!("   Tunnel apps: {:?}", tunnel_apps);
 
-                    match driver.configure(&tunnel_apps) {
+                    // Create config
+                    let config = SplitTunnelConfig::new(tunnel_apps);
+
+                    match driver.configure(config) {
                         Ok(_) => {
                             println!("   ✅ Split tunnel configured");
 
-                            println!("\n4. Driver state: {:?}", driver.get_state());
+                            println!("\n4. Driver state: {:?}", driver.state());
 
                             println!("\n5. Cleaning up...");
                             driver.close();
@@ -369,11 +391,12 @@ fn show_system_info() {
 async fn ping_regions() {
     println!("\n═══ Ping All Regions ═══\n");
 
-    let server_list = DynamicServerList::new();
-    server_list.fetch().await;
+    let server_list = Arc::new(parking_lot::Mutex::new(DynamicServerList::new_empty()));
+    DynamicServerList::fetch(server_list.clone()).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let regions = server_list.get_gaming_regions();
+    let list = server_list.lock();
+    let regions = list.get_gaming_regions();
 
     if regions.is_empty() {
         println!("❌ No regions available. Check auth/network.");
@@ -387,7 +410,7 @@ async fn ping_regions() {
         io::stdout().flush().unwrap();
 
         // Get first server IP for ping
-        if let Some(server_id) = region.servers.first() {
+        if let Some(_server_id) = region.servers.first() {
             // Try to resolve server endpoint
             // For now just show placeholder
             println!("(ping not implemented in CLI yet)");
@@ -401,8 +424,6 @@ async fn ping_regions() {
 
 fn test_wfp_setup() {
     println!("\n═══ WFP Setup Test ═══\n");
-
-    use swifttunnel_fps_booster::vpn::wfp::{WfpEngine, setup_wfp_for_split_tunnel};
 
     println!("1. Opening WFP engine...");
     match WfpEngine::open() {
