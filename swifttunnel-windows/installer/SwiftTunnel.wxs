@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="SwiftTunnel"
              Language="1033"
-             Version="0.5.13.0"
+             Version="0.5.14.0"
              Manufacturer="SwiftTunnel"
              UpgradeCode="8B5E7A12-4F3D-4A2B-9C5E-1D2F3A4B5C6D">
 
@@ -41,38 +41,64 @@
                       Return="ignore" />
 
         <!-- Custom Actions for Split Tunnel Driver -->
-        <!-- Store the driver path for deferred custom actions -->
-        <SetProperty Id="InstallSplitTunnelDriver" Value="&quot;[DriversFolder]mullvad-split-tunnel.sys&quot;" Before="InstallSplitTunnelDriver" Sequence="execute" />
-        <SetProperty Id="UninstallSplitTunnelDriver" Value="MullvadSplitTunnel" Before="UninstallSplitTunnelDriver" Sequence="execute" />
+        <!--
+             Pattern: SetProperty (immediate) + WixQuietExec64 (deferred)
+             The SetProperty runs during immediate phase and expands [DriversFolder] to actual path.
+             The value becomes CustomActionData for the deferred WixQuietExec64 action.
+        -->
 
-        <!-- Install the split tunnel driver as a kernel driver service -->
+        <!-- Set command for driver installation (immediate - expands properties) -->
+        <SetProperty Id="InstallSplitTunnelDriver"
+                     Value="cmd /c &quot;sc delete MullvadSplitTunnel 2&gt;nul &amp; sc create MullvadSplitTunnel type= kernel start= demand binpath= &quot;&quot;[DriversFolder]mullvad-split-tunnel.sys&quot;&quot;&quot;"
+                     Before="InstallSplitTunnelDriver"
+                     Sequence="execute" />
+
+        <!-- Execute driver installation (deferred - uses CustomActionData from SetProperty) -->
         <CustomAction Id="InstallSplitTunnelDriver"
-                      Directory="INSTALLFOLDER"
-                      ExeCommand="sc create MullvadSplitTunnel type= kernel start= demand binpath= [InstallSplitTunnelDriver]"
+                      BinaryKey="WixCA"
+                      DllEntry="WixQuietExec64"
                       Execute="deferred"
                       Impersonate="no"
-                      Return="ignore" />
+                      Return="check" />
+
+        <!-- Set command for starting driver -->
+        <SetProperty Id="StartSplitTunnelDriver"
+                     Value="cmd /c &quot;sc start MullvadSplitTunnel&quot;"
+                     Before="StartSplitTunnelDriver"
+                     Sequence="execute" />
 
         <!-- Start the split tunnel driver service -->
         <CustomAction Id="StartSplitTunnelDriver"
-                      Directory="INSTALLFOLDER"
-                      ExeCommand="sc start MullvadSplitTunnel"
+                      BinaryKey="WixCA"
+                      DllEntry="WixQuietExec64"
                       Execute="deferred"
                       Impersonate="no"
                       Return="ignore" />
+
+        <!-- Set command for stopping driver -->
+        <SetProperty Id="StopSplitTunnelDriver"
+                     Value="cmd /c &quot;sc stop MullvadSplitTunnel 2&gt;nul&quot;"
+                     Before="StopSplitTunnelDriver"
+                     Sequence="execute" />
 
         <!-- Stop the split tunnel driver service before uninstall -->
         <CustomAction Id="StopSplitTunnelDriver"
-                      Directory="INSTALLFOLDER"
-                      ExeCommand="sc stop MullvadSplitTunnel"
+                      BinaryKey="WixCA"
+                      DllEntry="WixQuietExec64"
                       Execute="deferred"
                       Impersonate="no"
                       Return="ignore" />
 
+        <!-- Set command for deleting driver service -->
+        <SetProperty Id="UninstallSplitTunnelDriver"
+                     Value="cmd /c &quot;sc delete MullvadSplitTunnel 2&gt;nul&quot;"
+                     Before="UninstallSplitTunnelDriver"
+                     Sequence="execute" />
+
         <!-- Remove the split tunnel driver service on uninstall -->
         <CustomAction Id="UninstallSplitTunnelDriver"
-                      Directory="INSTALLFOLDER"
-                      ExeCommand="sc delete MullvadSplitTunnel"
+                      BinaryKey="WixCA"
+                      DllEntry="WixQuietExec64"
                       Execute="deferred"
                       Impersonate="no"
                       Return="ignore" />

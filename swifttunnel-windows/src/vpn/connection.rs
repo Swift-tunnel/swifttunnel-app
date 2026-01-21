@@ -232,9 +232,27 @@ impl VpnConnection {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Step 4: Configure split tunneling (BEFORE routes)
+        // CRITICAL: Split tunnel MUST succeed - we fail the connection if it doesn't
+        // This prevents the user from thinking they're protected when they're not
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
         let (split_tunnel_active, tunneled_processes) = if !tunnel_apps.is_empty() {
-            self.setup_split_tunnel(&config, &adapter, tunnel_apps).await
+            match self.setup_split_tunnel(&config, &adapter, tunnel_apps).await {
+                Ok(processes) => {
+                    log::info!("Split tunnel setup succeeded");
+                    (true, processes)
+                }
+                Err(e) => {
+                    log::error!("Split tunnel setup FAILED: {}", e);
+                    log::error!("Aborting connection - cannot proceed without split tunnel");
+                    // Clean up and fail the connection
+                    self.cleanup().await;
+                    self.set_state(ConnectionState::Error(format!(
+                        "Split tunnel failed: {}",
+                        e
+                    ))).await;
+                    return Err(e);
+                }
+            }
         } else {
             log::info!("No tunnel apps specified, all traffic will use VPN");
             (false, Vec::new())
@@ -297,41 +315,60 @@ impl VpnConnection {
     }
 
     /// Setup split tunneling with exclude-all-except logic
+    ///
+    /// CRITICAL: This function now FAILS the connection if split tunnel setup fails.
+    /// The user expects split tunneling - proceeding without it could leak traffic.
+    ///
+    /// Initialization order (IMPORTANT - fixes WFP error 0x80320027):
+    /// 1. Check driver availability
+    /// 2. Open driver
+    /// 3. Initialize driver (registers WFP callouts)
+    /// 4. Setup WFP filters (now callouts exist, so filters can reference them)
+    /// 5. Configure driver (register processes, IPs, set config)
     async fn setup_split_tunnel(
         &mut self,
         config: &VpnConfig,
         adapter: &WintunAdapter,
         tunnel_apps: Vec<String>,
-    ) -> (bool, Vec<String>) {
-        // Check if driver is available (MSI installer must have set it up)
+    ) -> VpnResult<Vec<String>> {
+        // Step 1: Check if driver is available (MSI installer must have set it up)
         if !SplitTunnelDriver::check_driver_available() {
-            log::error!("Split tunnel driver not available - split tunneling disabled");
-            return (false, Vec::new());
+            return Err(VpnError::SplitTunnelNotAvailable);
         }
 
-        // Setup WFP first
         let interface_luid = adapter.get_luid();
-        log::info!("Setting up WFP for split tunnel (LUID: {})...", interface_luid);
+        log::info!("Setting up split tunnel (LUID: {})...", interface_luid);
 
+        // Step 2: Open driver FIRST
+        let mut driver = SplitTunnelDriver::new();
+        driver.open().map_err(|e| {
+            VpnError::SplitTunnelSetupFailed(format!("Failed to open driver: {}", e))
+        })?;
+        log::info!("Split tunnel driver opened");
+
+        // Step 3: Initialize driver - this registers WFP callouts
+        // MUST happen BEFORE WFP filter setup
+        driver.initialize().map_err(|e| {
+            VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
+        })?;
+        log::info!("Split tunnel driver initialized (WFP callouts registered)");
+
+        // Step 4: Setup WFP AFTER driver initialization
+        // Now the callouts exist, so filters can reference them
+        log::info!("Setting up WFP filters for split tunnel...");
         match setup_wfp_for_split_tunnel(interface_luid) {
             Ok(engine) => {
                 log::info!("WFP setup complete");
                 self.wfp_engine = Some(engine);
             }
             Err(e) => {
-                log::warn!("WFP setup failed: {}", e);
+                // WFP setup is critical - fail the connection
+                let _ = driver.close();
+                return Err(VpnError::WfpSetupFailed(e.to_string()));
             }
         }
 
-        let mut driver = SplitTunnelDriver::new();
-
-        if let Err(e) = driver.open() {
-            log::warn!("Failed to open split tunnel driver: {}", e);
-            self.wfp_engine = None;
-            return (false, Vec::new());
-        }
-
-        // Create config with tunnel apps (these will NOT be excluded)
+        // Step 5: Configure driver (register processes, IPs, set config)
         let split_config = SplitTunnelConfig::new(
             tunnel_apps,
             config.assigned_ip.clone(),
@@ -339,9 +376,13 @@ impl VpnConnection {
         );
 
         if let Err(e) = driver.configure(split_config) {
-            log::warn!("Failed to configure split tunnel: {}", e);
+            // Configuration failed - clean up and fail
             self.wfp_engine = None;
-            return (false, Vec::new());
+            let _ = driver.close();
+            return Err(VpnError::SplitTunnelSetupFailed(format!(
+                "Failed to configure split tunnel: {}",
+                e
+            )));
         }
 
         let running = driver.get_running_tunnel_apps();
@@ -401,8 +442,8 @@ impl VpnConnection {
             log::info!("Process monitor stopped");
         });
 
-        log::info!("Split tunnel configured - only selected games use VPN");
-        (true, running)
+        log::info!("Split tunnel configured successfully - only selected games use VPN");
+        Ok(running)
     }
 
     pub async fn disconnect(&mut self) -> VpnResult<()> {

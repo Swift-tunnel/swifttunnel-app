@@ -49,8 +49,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Linking MSI package..." -ForegroundColor Yellow
-# Run light (linker) with WixUIExtension for install dialog
-& $lightExe -ext WixUIExtension -out $msiFile $wixobjFile
+# Run light (linker) with WixUIExtension for install dialog and WixUtilExtension for WixQuietExec64
+& $lightExe -ext WixUIExtension -ext WixUtilExtension -out $msiFile $wixobjFile
 if ($LASTEXITCODE -ne 0) {
     Write-Host "WiX linking failed!" -ForegroundColor Red
     exit 1
