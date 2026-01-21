@@ -14,6 +14,7 @@ const SERVICE_NAME: &str = "SwiftTunnel";
 const SESSION_KEY: &str = "auth_session";
 const OAUTH_STATE_FILE: &str = "oauth_pending.json";
 const AUTH_SESSION_FILE: &str = "auth_session.dat";
+const REFRESH_FAILURES_FILE: &str = "refresh_failures.txt";
 
 // Simple obfuscation key - not cryptographically secure but prevents casual reading
 // In a real production app, you'd use proper encryption with DPAPI or similar
@@ -361,6 +362,53 @@ impl SecureStorage {
         }
 
         Ok(())
+    }
+
+    /// Get the refresh failures file path
+    fn refresh_failures_path(&self) -> PathBuf {
+        self.data_dir.join(REFRESH_FAILURES_FILE)
+    }
+
+    /// Increment the refresh failure counter and return the new count
+    pub fn increment_refresh_failures(&self) -> u32 {
+        let path = self.refresh_failures_path();
+        let current = self.get_refresh_failures();
+        let new_count = current + 1;
+
+        if let Err(e) = std::fs::write(&path, new_count.to_string()) {
+            warn!("Failed to write refresh failures count: {}", e);
+        } else {
+            debug!("Incremented refresh failures to {}", new_count);
+        }
+
+        new_count
+    }
+
+    /// Get the current refresh failure count
+    pub fn get_refresh_failures(&self) -> u32 {
+        let path = self.refresh_failures_path();
+
+        if !path.exists() {
+            return 0;
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(content) => content.trim().parse().unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
+    /// Reset the refresh failure counter (called on successful refresh)
+    pub fn reset_refresh_failures(&self) {
+        let path = self.refresh_failures_path();
+
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                warn!("Failed to remove refresh failures file: {}", e);
+            } else {
+                debug!("Reset refresh failures counter");
+            }
+        }
     }
 }
 

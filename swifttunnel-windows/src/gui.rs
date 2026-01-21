@@ -337,6 +337,11 @@ pub struct BoosterApp {
     previously_tunneled: std::collections::HashSet<String>,
     // Flag to force quit (bypass minimize-to-tray)
     force_quit: bool,
+    // Forced server selection per region (region_id -> server_id)
+    // When set, this server is used instead of auto-selecting best ping
+    forced_servers: HashMap<String, String>,
+    // Which region's server selection popup is open (None = no popup)
+    server_selection_popup: Option<String>,
 
     // Network Analyzer state
     network_analyzer_state: NetworkAnalyzerState,
@@ -522,6 +527,10 @@ impl BoosterApp {
             previously_tunneled: std::collections::HashSet::new(),
             // Force quit flag (bypass minimize-to-tray)
             force_quit: false,
+            // Forced server selection per region (restored from settings)
+            forced_servers: saved_settings.forced_servers.clone(),
+            // Server selection popup (none open initially)
+            server_selection_popup: None,
 
             // Network Analyzer - initialize state and channels
             network_analyzer_state: {
@@ -633,6 +642,8 @@ impl BoosterApp {
                 last_stability: self.network_analyzer_state.stability.results.clone(),
                 last_speed: self.network_analyzer_state.speed.results.clone(),
             },
+            // Save forced server selections
+            forced_servers: self.forced_servers.clone(),
         };
 
         let _ = save_settings(&settings);
@@ -743,6 +754,18 @@ impl eframe::App for BoosterApp {
 
         // Clean up completed animations
         self.animations.cleanup_completed();
+
+        // Poll for OAuth callback from localhost server
+        // This checks if the browser has redirected back to our localhost server
+        if matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_)) {
+            if let Ok(auth) = self.auth_manager.lock() {
+                if let Some(callback_data) = auth.poll_oauth_callback() {
+                    log::info!("Received OAuth callback from localhost server");
+                    drop(auth); // Release the lock before processing
+                    self.process_oauth_callback(&callback_data.token, &callback_data.state);
+                }
+            }
+        }
 
         // PERFORMANCE FIX: Only request continuous repaint when actually needed
         let is_loading = self.servers_loading || self.finding_best_server.load(Ordering::Relaxed);
@@ -2100,17 +2123,62 @@ impl BoosterApp {
                                                 ui.label(egui::RichText::new(format!("ping{}", dots))
                                                     .size(11.0)
                                                     .color(TEXT_DIMMED));
+                                            } else {
+                                                // No latency data and not currently measuring - show "--"
+                                                ui.label(egui::RichText::new("--")
+                                                    .size(12.0)
+                                                    .color(TEXT_DIMMED));
                                             }
                                         });
                                     });
 
                                     ui.add_space(10.0);
 
-                                    // Region name
-                                    ui.label(egui::RichText::new(&region.name)
-                                        .size(15.0)
-                                        .color(if is_selected { TEXT_PRIMARY } else { TEXT_PRIMARY })
-                                        .strong());
+                                    // Region name with gear icon for server selection
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(&region.name)
+                                            .size(15.0)
+                                            .color(TEXT_PRIMARY)
+                                            .strong());
+
+                                        // Show forced server indicator if set
+                                        let has_forced_server = self.forced_servers.contains_key(&region.id);
+                                        if has_forced_server {
+                                            ui.add_space(4.0);
+                                            egui::Frame::none()
+                                                .fill(ACCENT_SECONDARY.gamma_multiply(0.15))
+                                                .rounding(4.0)
+                                                .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+                                                .show(ui, |ui| {
+                                                    ui.label(egui::RichText::new("⚙")
+                                                        .size(9.0)
+                                                        .color(ACCENT_SECONDARY));
+                                                });
+                                        }
+
+                                        // Gear icon for server selection (right-aligned)
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let gear_btn = ui.add(
+                                                egui::Button::new(egui::RichText::new("⚙").size(14.0).color(TEXT_MUTED))
+                                                    .fill(egui::Color32::TRANSPARENT)
+                                                    .stroke(egui::Stroke::NONE)
+                                                    .rounding(4.0)
+                                            );
+                                            if gear_btn.clicked() {
+                                                // Toggle popup for this region
+                                                if self.server_selection_popup.as_ref() == Some(&region.id) {
+                                                    self.server_selection_popup = None;
+                                                } else {
+                                                    self.server_selection_popup = Some(region.id.clone());
+                                                }
+                                            }
+                                            if gear_btn.hovered() {
+                                                egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("gear_tooltip"), |ui| {
+                                                    ui.label("Select specific server");
+                                                });
+                                            }
+                                        });
+                                    });
 
                                     ui.add_space(2.0);
 
@@ -2158,6 +2226,200 @@ impl BoosterApp {
         if let Some(region_id) = clicked_region {
             self.select_region(&region_id);
         }
+
+        // Render server selection popup if open
+        self.render_server_selection_popup(ui);
+    }
+
+    /// Render the server selection popup for a region
+    fn render_server_selection_popup(&mut self, ui: &mut egui::Ui) {
+        let popup_region_id = match &self.server_selection_popup {
+            Some(id) => id.clone(),
+            None => return,
+        };
+
+        // Get servers for this region
+        let (servers_in_region, region_name): (Vec<(String, Option<u32>)>, String) = {
+            let regions = &self.cached_regions;
+            let latencies = &self.cached_latencies;
+
+            if let Some(region) = regions.iter().find(|r| r.id == popup_region_id) {
+                // For each server in the region, try to get individual latency
+                // We only have region-level latency (best server), so show that for best
+                let best_server_latency = latencies.get(&popup_region_id);
+
+                let server_list: Vec<(String, Option<u32>)> = region.servers.iter()
+                    .map(|server_id| {
+                        // Check if this is the best server
+                        let latency = if best_server_latency.map(|(best_id, _)| best_id == server_id).unwrap_or(false) {
+                            best_server_latency.map(|(_, lat)| *lat)
+                        } else {
+                            None // We don't have individual server latencies
+                        };
+                        (server_id.clone(), latency)
+                    })
+                    .collect();
+                (server_list, region.name.clone())
+            } else {
+                return;
+            }
+        };
+
+        // Check if the current forced server is set for this region
+        let current_forced = self.forced_servers.get(&popup_region_id).cloned();
+
+        // Show popup window
+        let popup_id = egui::Id::new("server_selection_popup");
+        let close_popup = egui::Window::new(format!("⚙ Select Server - {}", region_name))
+            .id(popup_id)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(egui::Frame::popup(ui.style())
+                .fill(BG_CARD)
+                .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+                .rounding(12.0)
+                .inner_margin(16.0))
+            .show(ui.ctx(), |ui| {
+                let mut should_close = false;
+
+                ui.set_min_width(280.0);
+
+                // "Auto (Best Ping)" option
+                let is_auto = current_forced.is_none();
+                let auto_response = egui::Frame::none()
+                    .fill(if is_auto { ACCENT_PRIMARY.gamma_multiply(0.15) } else { BG_ELEVATED.gamma_multiply(0.5) })
+                    .stroke(egui::Stroke::new(
+                        if is_auto { 1.5 } else { 1.0 },
+                        if is_auto { ACCENT_PRIMARY } else { BG_ELEVATED }
+                    ))
+                    .rounding(8.0)
+                    .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width() - 24.0);
+                        ui.horizontal(|ui| {
+                            if is_auto {
+                                ui.label(egui::RichText::new("✓").size(14.0).color(ACCENT_PRIMARY).strong());
+                                ui.add_space(6.0);
+                            }
+                            ui.label(egui::RichText::new("Auto (Best Ping)")
+                                .size(13.0)
+                                .color(if is_auto { TEXT_PRIMARY } else { TEXT_SECONDARY })
+                                .strong());
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(egui::RichText::new("Recommended")
+                                    .size(10.0)
+                                    .color(ACCENT_CYAN));
+                            });
+                        });
+                    });
+
+                if auto_response.response.interact(egui::Sense::click()).clicked() {
+                    // Remove forced server - use auto
+                    self.forced_servers.remove(&popup_region_id);
+                    self.mark_dirty();
+                    should_close = true;
+                }
+
+                ui.add_space(8.0);
+
+                // Divider
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Or select specific server:")
+                        .size(11.0)
+                        .color(TEXT_MUTED));
+                });
+
+                ui.add_space(6.0);
+
+                // Server list
+                for (server_id, latency) in &servers_in_region {
+                    let is_selected = current_forced.as_ref() == Some(server_id);
+                    let display_name = self.format_server_display_name(server_id);
+
+                    let server_response = egui::Frame::none()
+                        .fill(if is_selected { ACCENT_SECONDARY.gamma_multiply(0.15) } else { egui::Color32::TRANSPARENT })
+                        .stroke(egui::Stroke::new(
+                            if is_selected { 1.5 } else { 1.0 },
+                            if is_selected { ACCENT_SECONDARY } else { BG_ELEVATED.gamma_multiply(0.5) }
+                        ))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width() - 24.0);
+                            ui.horizontal(|ui| {
+                                if is_selected {
+                                    ui.label(egui::RichText::new("✓").size(14.0).color(ACCENT_SECONDARY).strong());
+                                    ui.add_space(6.0);
+                                }
+                                ui.label(egui::RichText::new(&display_name)
+                                    .size(12.0)
+                                    .color(if is_selected { TEXT_PRIMARY } else { TEXT_SECONDARY }));
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if let Some(ms) = latency {
+                                        let lat_color = latency_color(*ms);
+                                        ui.label(egui::RichText::new(format!("{}ms", ms))
+                                            .size(11.0)
+                                            .color(lat_color));
+                                        ui.label(egui::RichText::new("★")
+                                            .size(10.0)
+                                            .color(STATUS_CONNECTED));
+                                    }
+                                });
+                            });
+                        });
+
+                    if server_response.response.interact(egui::Sense::click()).clicked() {
+                        // Force this server
+                        self.forced_servers.insert(popup_region_id.clone(), server_id.clone());
+                        self.mark_dirty();
+                        should_close = true;
+                    }
+
+                    ui.add_space(4.0);
+                }
+
+                ui.add_space(8.0);
+
+                // Close button
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(
+                            egui::Button::new(egui::RichText::new("Close").size(12.0))
+                                .fill(BG_ELEVATED)
+                                .rounding(6.0)
+                        ).clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+
+                should_close
+            });
+
+        // Close popup if requested
+        if let Some(inner) = close_popup {
+            if let Some(true) = inner.inner {
+                self.server_selection_popup = None;
+            }
+        }
+    }
+
+    /// Format server ID for display (e.g., "singapore-02" -> "Singapore 02")
+    fn format_server_display_name(&self, server_id: &str) -> String {
+        // Split on dash, capitalize first letter of each part
+        server_id.split('-')
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(c) => c.to_uppercase().chain(chars).collect::<String>(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Render skeleton loading cards with shimmer effect
@@ -3715,9 +3977,17 @@ impl BoosterApp {
             return;
         }
 
-        // Use the best server for the selected region (based on latency measurements)
-        // Fall back to selected_server if no latency data exists
-        let region = if let Ok(latencies) = self.region_latencies.try_lock() {
+        // Determine which server to use:
+        // 1. If user has forced a specific server for this region, use that
+        // 2. Otherwise, use the best server based on latency measurements
+        // 3. Fall back to selected_server if no latency data exists
+        let region = if let Some(forced_server) = self.forced_servers.get(&self.selected_region) {
+            log::info!(
+                "Using forced server '{}' for region '{}' (user override)",
+                forced_server, self.selected_region
+            );
+            forced_server.clone()
+        } else if let Ok(latencies) = self.region_latencies.try_lock() {
             if let Some((best_server_id, latency)) = latencies.get(&self.selected_region) {
                 log::info!(
                     "Using best server '{}' ({}ms) for region '{}'",
