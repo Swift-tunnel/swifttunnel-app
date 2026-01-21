@@ -69,6 +69,9 @@ fn main() -> Result<()> {
         "verify" => {
             verify_traffic_routing();
         }
+        "ping" => {
+            test_ping_functionality();
+        }
         "all" => {
             println!("Running all tests...\n");
             check_driver_status();
@@ -102,6 +105,7 @@ fn print_usage() {
     println!("  full     Test full split tunnel flow");
     println!("  info     Show system info");
     println!("  verify   Verify actual traffic routing (connects to VPN)");
+    println!("  ping     Test ping functionality (fetch servers & measure latency)");
     println!("  help     Show this help message");
 }
 
@@ -792,4 +796,159 @@ fn is_elevated() -> bool {
 
         result.is_ok() && elevation.TokenIsElevated != 0
     }
+}
+
+/// Test ping functionality - fetches server list and pings all servers
+fn test_ping_functionality() {
+    use swifttunnel_fps_booster::vpn::servers::load_server_list;
+
+    println!("═══ Ping Functionality Test ═══\n");
+
+    let rt = Runtime::new().expect("Failed to create tokio runtime");
+
+    // Step 1: Fetch server list
+    println!("Step 1: Fetching server list from API...");
+    let (servers, regions, source) = match rt.block_on(load_server_list()) {
+        Ok(data) => {
+            println!("   ✅ Loaded {} servers, {} regions from {}", data.0.len(), data.1.len(), data.2);
+            data
+        }
+        Err(e) => {
+            println!("   ❌ Failed to load server list: {}", e);
+            return;
+        }
+    };
+
+    // Step 2: Test raw ping command
+    println!("\nStep 2: Testing raw ping command...");
+    let test_ip = servers.first().map(|s| s.ip.as_str()).unwrap_or("1.1.1.1");
+    println!("   Testing ping to: {}", test_ip);
+
+    let ping_output = std::process::Command::new("ping")
+        .args(["-n", "1", "-w", "2000", test_ip])
+        .output();
+
+    match ping_output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!("   Status: {:?}", output.status);
+            println!("   Stdout: {}", stdout.lines().take(5).collect::<Vec<_>>().join("\n          "));
+            if !stderr.is_empty() {
+                println!("   Stderr: {}", stderr.trim());
+            }
+
+            // Test parse function
+            if let Some(ms) = parse_ping_output_test(&stdout) {
+                println!("   ✅ Parsed latency: {}ms", ms);
+            } else {
+                println!("   ❌ Failed to parse latency from output");
+            }
+        }
+        Err(e) => {
+            println!("   ❌ Ping command failed: {}", e);
+        }
+    }
+
+    // Step 3: Test server mapping
+    println!("\nStep 3: Testing server-to-region mapping...");
+    for region in regions.iter().take(3) {
+        println!("\n   Region '{}' ({}):", region.id, region.name);
+        println!("   Server IDs in region: {:?}", region.servers);
+
+        let server_ips: Vec<(String, String)> = region.servers.iter()
+            .filter_map(|server_id| {
+                servers.iter()
+                    .find(|s| &s.region == server_id)
+                    .map(|s| (server_id.clone(), s.ip.clone()))
+            })
+            .collect();
+
+        println!("   Mapped server IPs: {:?}", server_ips);
+
+        if server_ips.is_empty() {
+            println!("   ⚠ No servers found for this region!");
+        }
+    }
+
+    // Step 4: Ping first 3 servers from first region
+    println!("\nStep 4: Pinging servers in first region...");
+    if let Some(region) = regions.first() {
+        println!("   Region: {} ({})", region.id, region.name);
+
+        let server_ips: Vec<(String, String)> = region.servers.iter()
+            .filter_map(|server_id| {
+                servers.iter()
+                    .find(|s| &s.region == server_id)
+                    .map(|s| (server_id.clone(), s.ip.clone()))
+            })
+            .take(3)
+            .collect();
+
+        for (server_id, ip) in &server_ips {
+            println!("\n   Pinging {} ({})...", server_id, ip);
+
+            // Do 2 pings like the real code
+            let mut total = 0u32;
+            let mut count = 0u32;
+
+            for ping_num in 0..2 {
+                let output = std::process::Command::new("ping")
+                    .args(["-n", "1", "-w", "1000", ip])
+                    .output();
+
+                match output {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        if out.status.success() {
+                            if let Some(ms) = parse_ping_output_test(&stdout) {
+                                println!("      Ping {}: {}ms", ping_num + 1, ms);
+                                total += ms;
+                                count += 1;
+                            } else {
+                                println!("      Ping {}: success but parse failed", ping_num + 1);
+                                println!("         Output: {}", stdout.lines().next().unwrap_or("(empty)"));
+                            }
+                        } else {
+                            println!("      Ping {}: command failed (status: {})", ping_num + 1, out.status);
+                        }
+                    }
+                    Err(e) => {
+                        println!("      Ping {}: error: {}", ping_num + 1, e);
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
+            if count > 0 {
+                let avg = total / count;
+                println!("      ✅ Average: {}ms ({} successful)", avg, count);
+            } else {
+                println!("      ❌ All pings failed");
+            }
+        }
+    }
+
+    println!("\n════════════════════════════════════════");
+    println!("Ping functionality test complete!");
+    println!("════════════════════════════════════════\n");
+}
+
+/// Parse ping output - copied from gui.rs for testing
+fn parse_ping_output_test(stdout: &str) -> Option<u32> {
+    for line in stdout.lines() {
+        if let Some(idx) = line.find("time=") {
+            let rest = &line[idx + 5..];
+            if let Some(ms_idx) = rest.find("ms") {
+                let time_str = rest[..ms_idx].trim();
+                if let Ok(ms) = time_str.parse::<u32>() {
+                    return Some(ms);
+                }
+            }
+        } else if line.contains("time<1ms") {
+            return Some(1);
+        }
+    }
+    None
 }
