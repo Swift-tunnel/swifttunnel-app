@@ -385,11 +385,23 @@ fn verify_traffic_routing() {
     }
     println!("   ✅ Split tunnel configured");
 
-    // Wait for split tunnel to take effect
-    std::thread::sleep(Duration::from_secs(2));
+    // Wait for split tunnel to take effect and refresh to catch any new processes
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Refresh exclusions multiple times to ensure we catch PowerShell when it spawns
+    println!("   Refreshing exclusions to catch new processes...");
+    for i in 0..5 {
+        if let Err(e) = driver.refresh_exclusions() {
+            println!("   ⚠ Refresh {} failed: {}", i, e);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let excluded_count = driver.get_excluded_count();
+    println!("   Currently excluding {} processes", excluded_count);
 
     // Step 10: Check IP again (should be ORIGINAL IP since testbench.exe bypasses)
-    println!("\nStep 10: Checking IP (testbench.exe should bypass VPN)...");
+    println!("\nStep 10: Checking IP (PowerShell should bypass VPN)...");
     let split_ip = match get_public_ip() {
         Some(ip) => {
             println!("   Current IP: {}", ip);
