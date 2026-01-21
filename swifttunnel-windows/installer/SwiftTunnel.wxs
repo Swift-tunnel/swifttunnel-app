@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="SwiftTunnel"
              Language="1033"
-             Version="0.5.12.0"
+             Version="0.5.13.0"
              Manufacturer="SwiftTunnel"
              UpgradeCode="8B5E7A12-4F3D-4A2B-9C5E-1D2F3A4B5C6D">
 
@@ -27,6 +27,7 @@
         <!-- Features -->
         <Feature Id="ProductFeature" Title="SwiftTunnel" Level="1">
             <ComponentGroupRef Id="ProductComponents" />
+            <ComponentGroupRef Id="DriverComponents" />
             <ComponentGroupRef Id="StartMenuShortcuts" />
             <ComponentGroupRef Id="DesktopShortcuts" />
         </Feature>
@@ -39,14 +40,57 @@
                       Impersonate="no"
                       Return="ignore" />
 
+        <!-- Custom Actions for Split Tunnel Driver -->
+        <!-- Store the driver path for deferred custom actions -->
+        <SetProperty Id="InstallSplitTunnelDriver" Value="&quot;[DriversFolder]mullvad-split-tunnel.sys&quot;" Before="InstallSplitTunnelDriver" Sequence="execute" />
+        <SetProperty Id="UninstallSplitTunnelDriver" Value="MullvadSplitTunnel" Before="UninstallSplitTunnelDriver" Sequence="execute" />
+
+        <!-- Install the split tunnel driver as a kernel driver service -->
+        <CustomAction Id="InstallSplitTunnelDriver"
+                      Directory="INSTALLFOLDER"
+                      ExeCommand="sc create MullvadSplitTunnel type= kernel start= demand binpath= [InstallSplitTunnelDriver]"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore" />
+
+        <!-- Start the split tunnel driver service -->
+        <CustomAction Id="StartSplitTunnelDriver"
+                      Directory="INSTALLFOLDER"
+                      ExeCommand="sc start MullvadSplitTunnel"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore" />
+
+        <!-- Stop the split tunnel driver service before uninstall -->
+        <CustomAction Id="StopSplitTunnelDriver"
+                      Directory="INSTALLFOLDER"
+                      ExeCommand="sc stop MullvadSplitTunnel"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore" />
+
+        <!-- Remove the split tunnel driver service on uninstall -->
+        <CustomAction Id="UninstallSplitTunnelDriver"
+                      Directory="INSTALLFOLDER"
+                      ExeCommand="sc delete MullvadSplitTunnel"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore" />
+
         <InstallExecuteSequence>
             <Custom Action="AddFirewallRule" After="InstallFiles">NOT Installed</Custom>
+            <Custom Action="InstallSplitTunnelDriver" After="InstallFiles">NOT Installed</Custom>
+            <Custom Action="StartSplitTunnelDriver" After="InstallSplitTunnelDriver">NOT Installed</Custom>
+            <Custom Action="StopSplitTunnelDriver" Before="RemoveFiles">REMOVE="ALL"</Custom>
+            <Custom Action="UninstallSplitTunnelDriver" After="StopSplitTunnelDriver">REMOVE="ALL"</Custom>
         </InstallExecuteSequence>
 
         <!-- Directory Structure -->
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="ProgramFiles64Folder">
-                <Directory Id="INSTALLFOLDER" Name="SwiftTunnel" />
+                <Directory Id="INSTALLFOLDER" Name="SwiftTunnel">
+                    <Directory Id="DriversFolder" Name="drivers" />
+                </Directory>
             </Directory>
             <Directory Id="ProgramMenuFolder">
                 <Directory Id="ApplicationProgramsFolder" Name="SwiftTunnel" />
@@ -104,6 +148,14 @@
                           Icon="SwiftTunnelIcon" />
                 <RemoveFolder Id="CleanUpDesktopShortcut" Directory="DesktopFolder" On="uninstall" />
                 <RegistryValue Root="HKCU" Key="Software\SwiftTunnel" Name="desktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
+        <ComponentGroup Id="DriverComponents" Directory="DriversFolder">
+            <Component Id="SplitTunnelDriver" Guid="F6A7B8C9-D0E1-2345-F012-678901234567" Win64="yes">
+                <File Id="MullvadSplitTunnelSys"
+                      Source="$(var.SourceDir)\drivers\mullvad-split-tunnel.sys"
+                      KeyPath="yes" />
             </Component>
         </ComponentGroup>
     </Fragment>
