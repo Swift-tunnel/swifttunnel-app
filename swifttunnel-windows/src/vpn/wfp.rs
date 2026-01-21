@@ -602,26 +602,54 @@ impl FilterLayer {
     }
 }
 
-/// Cleanup stale WFP callouts from previous sessions
+/// Cleanup stale WFP objects from previous sessions
 ///
 /// MUST be called at app startup BEFORE any VPN/driver operations.
-/// This cleans up persistent Mullvad callouts that may exist from a previous
-/// session that crashed or didn't clean up properly.
+/// This cleans up persistent Mullvad WFP objects (callouts, sublayer, provider)
+/// that may exist from a previous session that crashed or didn't clean up properly.
 ///
-/// If stale callouts exist when driver.initialize() runs, it might fail with
-/// FWP_E_ALREADY_EXISTS. And if we clean up AFTER initialize(), we'd delete
-/// the callouts that were just registered.
+/// If stale objects exist when driver.initialize() runs, it will fail with
+/// FWP_E_ALREADY_EXISTS (0x80320009). And if we clean up AFTER initialize(),
+/// we'd delete the objects that were just registered.
+///
+/// Order of deletion matters:
+/// 1. Callouts first (they reference the sublayer)
+/// 2. Sublayer second (it references the provider)
+/// 3. Provider last
 pub fn cleanup_stale_wfp_callouts() {
-    log::info!("Cleaning up stale WFP callouts from previous sessions...");
+    log::info!("Cleaning up stale WFP objects from previous sessions...");
 
-    if let Ok(mut engine) = WfpEngine::open() {
+    if let Ok(engine) = WfpEngine::open() {
+        // Step 1: Delete Mullvad callouts (must be first - they reference sublayer)
         let deleted = engine.cleanup_mullvad_callouts();
         if deleted > 0 {
-            log::info!("Cleaned up {} stale Mullvad WFP callouts", deleted);
-        } else {
-            log::debug!("No stale WFP callouts found");
+            log::info!("Deleted {} stale Mullvad WFP callouts", deleted);
         }
+
+        // Step 2: Delete Mullvad sublayer (must be before provider)
+        let result = unsafe {
+            FwpmSubLayerDeleteByKey0(engine.handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
+        };
+        if result == 0 {
+            log::info!("Deleted stale Mullvad sublayer");
+        } else if result != FWP_E_SUBLAYER_NOT_FOUND.0 as u32 {
+            log::debug!("Mullvad sublayer delete: 0x{:08X} (may not exist)", result);
+        }
+
+        // Step 3: Delete Mullvad provider
+        let result = unsafe {
+            FwpmProviderDeleteByKey0(engine.handle, &ST_FW_PROVIDER_KEY)
+        };
+        if result == 0 {
+            log::info!("Deleted stale Mullvad provider");
+        } else if result != FWP_E_PROVIDER_NOT_FOUND.0 as u32 {
+            log::debug!("Mullvad provider delete: 0x{:08X} (may not exist)", result);
+        }
+
+        // Step 4: Cleanup legacy SwiftTunnel objects (old code with different GUIDs)
         engine.cleanup_legacy_objects();
+
+        log::info!("WFP stale object cleanup complete");
     } else {
         log::warn!("Could not open WFP engine for cleanup (may need admin rights)");
     }
