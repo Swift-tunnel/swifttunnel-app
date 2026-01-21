@@ -539,7 +539,11 @@ impl FilterLayer {
 ///
 /// Do NOT call cleanup_all() here - the driver has already registered callouts
 /// during initialize(), and cleanup would delete them!
-pub fn setup_wfp_for_split_tunnel(interface_luid: u64) -> VpnResult<WfpEngine> {
+///
+/// NOTE: We do NOT add our own WFP filters anymore. The Mullvad split tunnel driver
+/// handles all WFP filtering internally through its callouts. Adding our own filters
+/// was causing FWP_E_PROVIDER_NOT_FOUND errors because of provider/callout conflicts.
+pub fn setup_wfp_for_split_tunnel(_interface_luid: u64) -> VpnResult<WfpEngine> {
     log::info!("Setting up WFP for split tunneling...");
 
     let mut engine = WfpEngine::open()?;
@@ -552,15 +556,23 @@ pub fn setup_wfp_for_split_tunnel(interface_luid: u64) -> VpnResult<WfpEngine> {
     // Only cleanup legacy SwiftTunnel objects (not Mullvad callouts)
     engine.cleanup_legacy_objects();
 
-    // Register provider and create sublayer
-    engine.register_provider()?;
-    engine.create_sublayer()?;
+    // The Mullvad driver creates its own provider and sublayer during IOCTL_ST_INITIALIZE
+    // We no longer need to register our own - the driver handles all WFP infrastructure
+    //
+    // Previous code tried to:
+    // 1. Register our own provider (ST_FW_PROVIDER_KEY)
+    // 2. Create our own sublayer (ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
+    // 3. Add permit filters for VPN interface
+    //
+    // This caused conflicts because:
+    // - The driver might register the same provider internally
+    // - Our filters referenced a provider that may not exist in the correct state
+    // - We got FWP_E_PROVIDER_NOT_FOUND (0x80320027) errors
+    //
+    // The driver's IOCTL_ST_SET_CONFIGURATION handles all the WFP rules needed
+    // for split tunneling based on the process tree we provide.
 
-    // Add permit filters for the VPN interface
-    engine.add_tunnel_filter(interface_luid, FilterLayer::AleConnectV4)?;
-    engine.add_tunnel_filter(interface_luid, FilterLayer::AleRecvAcceptV4)?;
-
-    log::info!("WFP setup complete for interface LUID {}", interface_luid);
+    log::info!("WFP setup complete - driver handles all filtering");
     Ok(engine)
 }
 
