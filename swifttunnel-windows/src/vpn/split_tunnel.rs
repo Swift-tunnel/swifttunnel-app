@@ -535,10 +535,9 @@ impl SplitTunnelDriver {
         let ip_data = self.serialize_ip_addresses(&config)?;
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
 
-        // Set tunnel interface configuration
-        // The driver needs to know which interface is the VPN tunnel (LUID)
-        // This is ALWAYS required, regardless of how many processes are excluded
-        let config_data = self.serialize_tunnel_config(&config);
+        // Set split tunnel configuration (paths to exclude from VPN)
+        // The driver needs to know which executables should bypass the VPN
+        let config_data = self.serialize_split_config()?;
         self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
 
         // Verify state
@@ -675,16 +674,83 @@ impl SplitTunnelDriver {
     }
 
     /// Serialize configuration for IOCTL_ST_SET_CONFIGURATION
-    /// The Mullvad driver expects just the tunnel interface LUID (8 bytes)
-    /// This tells the driver which interface is the VPN tunnel, so it can:
-    /// 1. Keep included process traffic (games) on the tunnel interface
-    /// 2. Redirect excluded process traffic to the internet interface
-    fn serialize_tunnel_config(&self, config: &SplitTunnelConfig) -> Vec<u8> {
+    ///
+    /// The Mullvad driver expects a variable-length buffer with:
+    /// - ST_CONFIGURATION_HEADER (16 bytes): NumEntries (u64) + TotalLength (u64)
+    /// - ST_CONFIGURATION_ENTRY[N] (16 bytes each): ImageNameOffset (u64) + ImageNameLength (u16) + padding (6 bytes)
+    /// - String buffer: UTF-16 device paths (no null terminators)
+    ///
+    /// The paths specify which executables should be split tunneled (excluded from VPN).
+    fn serialize_split_config(&self) -> VpnResult<Vec<u8>> {
+        if self.excluded_paths.is_empty() {
+            // Driver rejects empty configuration, so return error
+            return Err(VpnError::SplitTunnel(
+                "No processes to exclude - configuration cannot be empty".to_string(),
+            ));
+        }
+
+        // Convert paths to device paths and deduplicate
+        let unique_paths: Vec<_> = self.excluded_paths
+            .iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let device_paths: Vec<String> = unique_paths
+            .iter()
+            .filter_map(|p| Self::to_device_path(p).ok())
+            .collect();
+
+        if device_paths.is_empty() {
+            return Err(VpnError::SplitTunnel(
+                "Failed to convert any paths to device paths".to_string(),
+            ));
+        }
+
+        // Convert to UTF-16 (no null terminators)
+        let wide_paths: Vec<Vec<u16>> = device_paths
+            .iter()
+            .map(|p| p.encode_utf16().collect())
+            .collect();
+
+        // Calculate sizes
+        let header_size = 16usize;  // NumEntries (8) + TotalLength (8)
+        let entry_size = 16usize;   // ImageNameOffset (8) + ImageNameLength (2) + padding (6)
+        let string_size: usize = wide_paths.iter().map(|w| w.len() * 2).sum();
+        let total_size = header_size + (entry_size * device_paths.len()) + string_size;
+
+        let mut data = Vec::with_capacity(total_size);
+
+        // Header
+        data.extend_from_slice(&(device_paths.len() as u64).to_le_bytes()); // NumEntries
+        data.extend_from_slice(&(total_size as u64).to_le_bytes());          // TotalLength
+
+        // Entries
+        let mut string_offset = 0usize;
+        for wide in &wide_paths {
+            let byte_len = (wide.len() * 2) as u16;
+
+            data.extend_from_slice(&(string_offset as u64).to_le_bytes()); // ImageNameOffset
+            data.extend_from_slice(&byte_len.to_le_bytes());                // ImageNameLength
+            data.extend_from_slice(&[0u8; 6]);                              // Padding
+
+            string_offset += byte_len as usize;
+        }
+
+        // String buffer
+        for wide in &wide_paths {
+            for w in wide {
+                data.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+
         log::info!(
-            "SET_CONFIGURATION: tunnel_interface_luid={}",
-            config.tunnel_interface_luid
+            "SET_CONFIGURATION: {} paths, {} bytes total",
+            device_paths.len(),
+            data.len()
         );
-        config.tunnel_interface_luid.to_le_bytes().to_vec()
+
+        Ok(data)
     }
 
     /// Serialize IP addresses for IOCTL_ST_REGISTER_IP_ADDRESSES
