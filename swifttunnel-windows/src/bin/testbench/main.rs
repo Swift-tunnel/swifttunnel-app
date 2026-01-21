@@ -727,7 +727,7 @@ fn test_full_split_tunnel_flow() {
             println!("   ⚠ WFP setup: {} (may be OK if driver created them)", e);
             None
         }
-    }
+    };
 
     // Step 4: Configure split tunnel with Roblox apps
     println!("\nStep 4: Configuring split tunnel with Roblox apps...");
