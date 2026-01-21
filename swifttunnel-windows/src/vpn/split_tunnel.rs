@@ -163,18 +163,20 @@ pub fn get_apps_for_preset_set(presets: &HashSet<GamePreset>) -> Vec<String> {
 pub struct SplitTunnelConfig {
     /// Apps that SHOULD use VPN (will NOT be excluded)
     pub tunnel_apps: HashSet<String>,
-    /// VPN tunnel IP address
+    /// VPN tunnel IP address (assigned by VPN server)
     pub tunnel_ip: String,
-    /// VPN interface LUID
+    /// Real internet IP address (from default gateway interface)
+    pub internet_ip: String,
+    /// VPN interface LUID (not used by driver, kept for compatibility)
     pub tunnel_interface_luid: u64,
 }
 
-// Legacy compatibility - convert old format
 impl SplitTunnelConfig {
-    pub fn new(tunnel_apps: Vec<String>, tunnel_ip: String, tunnel_interface_luid: u64) -> Self {
+    pub fn new(tunnel_apps: Vec<String>, tunnel_ip: String, internet_ip: String, tunnel_interface_luid: u64) -> Self {
         Self {
             tunnel_apps: tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect(),
             tunnel_ip,
+            internet_ip,
             tunnel_interface_luid,
         }
     }
@@ -732,19 +734,34 @@ impl SplitTunnelDriver {
         Ok(data)
     }
 
-    /// Serialize IP addresses
+    /// Serialize IP addresses for IOCTL_ST_REGISTER_IP_ADDRESSES
+    ///
+    /// The driver expects ST_IP_ADDRESSES struct (40 bytes):
+    /// - TunnelIpv4: 4 bytes (VPN assigned IP)
+    /// - InternetIpv4: 4 bytes (real internet interface IP)
+    /// - TunnelIpv6: 16 bytes (zeros if not using IPv6)
+    /// - InternetIpv6: 16 bytes (zeros if not using IPv6)
     fn serialize_ip_addresses(&self, config: &SplitTunnelConfig) -> VpnResult<Vec<u8>> {
-        let ip_str = config.tunnel_ip.split('/').next().unwrap_or(&config.tunnel_ip);
-        let ip: std::net::Ipv4Addr = ip_str.parse()
-            .map_err(|e| VpnError::SplitTunnel(format!("Invalid tunnel IP: {}", e)))?;
+        // Parse tunnel IP (VPN assigned IP)
+        let tunnel_ip_str = config.tunnel_ip.split('/').next().unwrap_or(&config.tunnel_ip);
+        let tunnel_ipv4: std::net::Ipv4Addr = tunnel_ip_str.parse()
+            .map_err(|e| VpnError::SplitTunnel(format!("Invalid tunnel IP '{}': {}", tunnel_ip_str, e)))?;
 
+        // Parse internet IP (real interface IP)
+        let internet_ip_str = config.internet_ip.split('/').next().unwrap_or(&config.internet_ip);
+        let internet_ipv4: std::net::Ipv4Addr = internet_ip_str.parse()
+            .map_err(|e| VpnError::SplitTunnel(format!("Invalid internet IP '{}': {}", internet_ip_str, e)))?;
+
+        log::info!("Registering IPs with driver - Tunnel: {}, Internet: {}", tunnel_ipv4, internet_ipv4);
+
+        // Build ST_IP_ADDRESSES struct (40 bytes)
         let mut data = Vec::with_capacity(40);
-        data.extend_from_slice(&config.tunnel_interface_luid.to_le_bytes());
-        data.extend_from_slice(&ip.octets());
-        data.extend_from_slice(&[0u8; 16]); // IPv6
-        data.push(1); // has_ipv4
-        data.push(0); // has_ipv6
-        data.extend_from_slice(&[0u8; 10]); // padding
+        data.extend_from_slice(&tunnel_ipv4.octets());    // TunnelIpv4: 4 bytes
+        data.extend_from_slice(&internet_ipv4.octets());  // InternetIpv4: 4 bytes
+        data.extend_from_slice(&[0u8; 16]);               // TunnelIpv6: 16 bytes (zeros)
+        data.extend_from_slice(&[0u8; 16]);               // InternetIpv6: 16 bytes (zeros)
+
+        debug_assert_eq!(data.len(), 40, "ST_IP_ADDRESSES must be exactly 40 bytes");
 
         Ok(data)
     }

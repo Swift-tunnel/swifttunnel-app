@@ -26,7 +26,7 @@ use swifttunnel_fps_booster::vpn::wfp::{WfpEngine, setup_wfp_for_split_tunnel};
 use swifttunnel_fps_booster::vpn::adapter::WintunAdapter;
 use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
 use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
-use swifttunnel_fps_booster::vpn::routes::RouteManager;
+use swifttunnel_fps_booster::vpn::routes::{RouteManager, get_internet_interface_ip};
 use swifttunnel_fps_booster::auth::types::AuthState;
 
 /// Testbench credentials
@@ -43,7 +43,7 @@ fn main() -> Result<()> {
         .init();
 
     println!("\n╔════════════════════════════════════════════════════════════╗");
-    println!("║          SwiftTunnel CLI Testbench v0.5.17                 ║");
+    println!("║          SwiftTunnel CLI Testbench v0.5.18                 ║");
     println!("║          Headless testing for VPN & Split Tunnel           ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
 
@@ -349,9 +349,26 @@ fn verify_traffic_routing() {
     println!("   Tunnel apps (will use VPN): {:?}", tunnel_apps);
     println!("   Everything else (including testbench.exe) will BYPASS VPN");
 
+    // Get internet interface IP for socket redirection
+    let internet_ip = match get_internet_interface_ip() {
+        Ok(ip) => {
+            println!("   Internet interface IP: {}", ip);
+            ip.to_string()
+        }
+        Err(e) => {
+            println!("   ❌ Failed to get internet interface IP: {}", e);
+            let _ = driver.close();
+            route_manager.remove_routes().ok();
+            tunnel.stop();
+            adapter.shutdown();
+            return;
+        }
+    };
+
     let split_config = SplitTunnelConfig::new(
         tunnel_apps,
         vpn_config.assigned_ip.clone(),
+        internet_ip,
         interface_luid,
     );
 
@@ -621,7 +638,14 @@ fn test_full_split_tunnel_flow() {
     let tunnel_ip = "10.64.0.1".to_string();
     let tunnel_luid: u64 = 0;
 
-    let config = SplitTunnelConfig::new(tunnel_apps, tunnel_ip, tunnel_luid);
+    // Get real internet interface IP (or use dummy for testing)
+    let internet_ip = match get_internet_interface_ip() {
+        Ok(ip) => ip.to_string(),
+        Err(_) => "192.168.1.1".to_string(), // fallback for testing
+    };
+    println!("   Internet IP: {} (for socket redirection)", internet_ip);
+
+    let config = SplitTunnelConfig::new(tunnel_apps, tunnel_ip, internet_ip, tunnel_luid);
 
     match driver.configure(config) {
         Ok(_) => {
