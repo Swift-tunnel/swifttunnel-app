@@ -22,7 +22,7 @@ use tokio::runtime::Runtime;
 // Import from main crate
 use swifttunnel_fps_booster::auth::AuthManager;
 use swifttunnel_fps_booster::vpn::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_preset_set};
-use swifttunnel_fps_booster::vpn::wfp::{WfpEngine, setup_wfp_for_split_tunnel};
+use swifttunnel_fps_booster::vpn::wfp::{WfpEngine, setup_wfp_for_split_tunnel, cleanup_stale_wfp_callouts};
 use swifttunnel_fps_booster::vpn::adapter::WintunAdapter;
 use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
 use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
@@ -635,6 +635,11 @@ fn test_wfp_setup() {
 fn test_full_split_tunnel_flow() {
     println!("═══ Full Split Tunnel Flow Test ═══\n");
     println!("This tests the complete flow: Driver → WFP → Configure\n");
+
+    // Step 0: Clean up stale WFP callouts from previous sessions
+    println!("Step 0: Cleaning up stale WFP callouts...");
+    cleanup_stale_wfp_callouts();
+    println!("   ✅ Cleanup complete\n");
 
     // Step 1: Open driver
     println!("Step 1: Opening driver handle...");

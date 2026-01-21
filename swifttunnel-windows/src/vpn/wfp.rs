@@ -528,6 +528,31 @@ impl FilterLayer {
     }
 }
 
+/// Cleanup stale WFP callouts from previous sessions
+///
+/// MUST be called at app startup BEFORE any VPN/driver operations.
+/// This cleans up persistent Mullvad callouts that may exist from a previous
+/// session that crashed or didn't clean up properly.
+///
+/// If stale callouts exist when driver.initialize() runs, it might fail with
+/// FWP_E_ALREADY_EXISTS. And if we clean up AFTER initialize(), we'd delete
+/// the callouts that were just registered.
+pub fn cleanup_stale_wfp_callouts() {
+    log::info!("Cleaning up stale WFP callouts from previous sessions...");
+
+    if let Ok(mut engine) = WfpEngine::open() {
+        let deleted = engine.cleanup_mullvad_callouts();
+        if deleted > 0 {
+            log::info!("Cleaned up {} stale Mullvad WFP callouts", deleted);
+        } else {
+            log::debug!("No stale WFP callouts found");
+        }
+        engine.cleanup_legacy_objects();
+    } else {
+        log::warn!("Could not open WFP engine for cleanup (may need admin rights)");
+    }
+}
+
 /// Helper to setup WFP for split tunneling
 ///
 /// Setup WFP infrastructure BEFORE driver.initialize()
@@ -549,16 +574,13 @@ pub fn setup_wfp_for_split_tunnel(_interface_luid: u64) -> VpnResult<WfpEngine> 
 
     let mut engine = WfpEngine::open()?;
 
-    // Step 1: Clean up any stale Mullvad callouts from previous sessions
-    // These are registered with PERSISTENT flag, so they survive across sessions
-    // If not cleaned up, driver INITIALIZE will fail with FWP_E_ALREADY_EXISTS
-    log::info!("Cleaning up stale WFP objects...");
-    let deleted = engine.cleanup_mullvad_callouts();
-    if deleted > 0 {
-        log::info!("Cleaned up {} stale Mullvad callouts", deleted);
-    }
+    // NOTE: Do NOT cleanup Mullvad callouts here!
+    // The driver's IOCTL_ST_INITIALIZE registers callouts, so if we call this
+    // after driver.initialize(), we'll delete the callouts it just registered.
+    // Cleanup of stale callouts from previous sessions should be done once at
+    // app startup via cleanup_stale_state() BEFORE any driver operations.
 
-    // Also cleanup legacy SwiftTunnel objects
+    // Only cleanup legacy SwiftTunnel objects (not Mullvad driver objects)
     engine.cleanup_legacy_objects();
 
     // Step 2: Register provider (required before sublayer)
