@@ -16,6 +16,52 @@ use super::{VpnError, VpnResult};
 use crate::hidden_command;
 use std::net::Ipv4Addr;
 
+/// Get the local IP address of the internet interface (default gateway interface)
+///
+/// This is needed for split tunneling - the driver needs to know the real
+/// internet interface IP to redirect excluded app traffic there.
+pub fn get_internet_interface_ip() -> VpnResult<Ipv4Addr> {
+    log::debug!("Getting internet interface IP...");
+
+    // Get the IP address of the interface that has the default route
+    // This uses PowerShell to find the local IP on the interface with the default gateway
+    let output = hidden_command("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            r#"
+            $route = Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Where-Object { $_.NextHop -ne '0.0.0.0' } | Select-Object -First 1
+            if ($route) {
+                $addr = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 | Select-Object -First 1
+                if ($addr) { $addr.IPAddress }
+            }
+            "#,
+        ])
+        .output()
+        .map_err(|e| VpnError::Route(format!("Failed to run PowerShell: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(VpnError::Route(
+            "Failed to get internet interface IP".to_string(),
+        ));
+    }
+
+    let ip_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if ip_str.is_empty() {
+        return Err(VpnError::Route(
+            "No internet interface IP found".to_string(),
+        ));
+    }
+
+    let ip = ip_str
+        .parse()
+        .map_err(|e| VpnError::Route(format!("Invalid internet IP '{}': {}", ip_str, e)))?;
+
+    log::info!("Internet interface IP: {}", ip);
+    Ok(ip)
+}
+
 /// Route manager for VPN traffic routing
 pub struct RouteManager {
     /// VPN server IP (needs route through real gateway)

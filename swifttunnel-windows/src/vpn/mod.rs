@@ -26,7 +26,7 @@ pub use adapter::WintunAdapter;
 pub use tunnel::WireguardTunnel;
 pub use wfp::{WfpEngine, setup_wfp_for_split_tunnel};
 pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
-pub use routes::RouteManager;
+pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 pub use connection::{VpnConnection, ConnectionState};
 pub use servers::{
     DynamicServerList, DynamicServerInfo, DynamicGamingRegion,

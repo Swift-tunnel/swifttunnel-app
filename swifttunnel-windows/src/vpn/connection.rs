@@ -17,7 +17,7 @@ use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
 use super::wfp::{WfpEngine, setup_wfp_for_split_tunnel};
-use super::routes::{RouteManager, get_interface_index};
+use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::{VpnError, VpnResult};
 
@@ -368,10 +368,23 @@ impl VpnConnection {
             }
         }
 
-        // Step 5: Configure driver (register processes, IPs, set config)
+        // Step 5: Get internet interface IP for socket redirection
+        // This tells the driver where to redirect excluded app traffic
+        let internet_ip = get_internet_interface_ip().map_err(|e| {
+            let _ = driver.close();
+            self.wfp_engine = None;
+            VpnError::SplitTunnelSetupFailed(format!(
+                "Failed to get internet interface IP: {}",
+                e
+            ))
+        })?;
+        log::info!("Internet interface IP for split tunnel: {}", internet_ip);
+
+        // Step 6: Configure driver (register processes, IPs, set config)
         let split_config = SplitTunnelConfig::new(
             tunnel_apps,
             config.assigned_ip.clone(),
+            internet_ip.to_string(),
             interface_luid,
         );
 
