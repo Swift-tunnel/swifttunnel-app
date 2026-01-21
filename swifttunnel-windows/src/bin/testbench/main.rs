@@ -262,8 +262,24 @@ fn verify_traffic_routing() {
     println!("   Waiting for tunnel handshake...");
     std::thread::sleep(Duration::from_secs(3));
 
-    // Step 6: Setup routes (WITHOUT split tunnel first)
-    println!("\nStep 6: Setting up routes (NO split tunnel)...");
+    // Step 6: Get internet IP BEFORE applying routes
+    // This is critical - after routes are applied, the default gateway changes to VPN
+    println!("\nStep 6: Getting internet IP (BEFORE routes change default gateway)...");
+    let original_internet_ip = match get_internet_interface_ip() {
+        Ok(ip) => {
+            println!("   ✅ Internet interface IP: {} (will use for split tunnel)", ip);
+            ip.to_string()
+        }
+        Err(e) => {
+            println!("   ❌ Failed to get internet IP: {}", e);
+            tunnel.stop();
+            adapter.shutdown();
+            return;
+        }
+    };
+
+    // Step 7: Setup routes (WITHOUT split tunnel first)
+    println!("\nStep 7: Setting up routes (NO split tunnel)...");
     let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
         .split(':')
         .next()
@@ -283,8 +299,8 @@ fn verify_traffic_routing() {
     // Wait for routes to settle
     std::thread::sleep(Duration::from_secs(2));
 
-    // Step 7: Check IP (should be VPN IP)
-    println!("\nStep 7: Checking IP (should be VPN IP, all traffic through tunnel)...");
+    // Step 8: Check IP (should be VPN IP)
+    println!("\nStep 8: Checking IP (should be VPN IP, all traffic through tunnel)...");
     let vpn_ip = match get_public_ip() {
         Some(ip) => {
             println!("   Current IP: {}", ip);
@@ -304,8 +320,8 @@ fn verify_traffic_routing() {
         }
     };
 
-    // Step 8: Now setup split tunnel
-    println!("\nStep 8: Setting up split tunnel (testbench.exe should bypass VPN)...");
+    // Step 9: Now setup split tunnel
+    println!("\nStep 9: Setting up split tunnel (testbench.exe should bypass VPN)...");
 
     // Open and initialize driver
     let mut driver = SplitTunnelDriver::new();
@@ -349,26 +365,13 @@ fn verify_traffic_routing() {
     println!("   Tunnel apps (will use VPN): {:?}", tunnel_apps);
     println!("   Everything else (including testbench.exe) will BYPASS VPN");
 
-    // Get internet interface IP for socket redirection
-    let internet_ip = match get_internet_interface_ip() {
-        Ok(ip) => {
-            println!("   Internet interface IP: {}", ip);
-            ip.to_string()
-        }
-        Err(e) => {
-            println!("   ❌ Failed to get internet interface IP: {}", e);
-            let _ = driver.close();
-            route_manager.remove_routes().ok();
-            tunnel.stop();
-            adapter.shutdown();
-            return;
-        }
-    };
+    // Use the internet IP we captured BEFORE routes were applied
+    println!("   Using saved internet IP: {} (captured before VPN routes)", original_internet_ip);
 
     let split_config = SplitTunnelConfig::new(
         tunnel_apps,
         vpn_config.assigned_ip.clone(),
-        internet_ip,
+        original_internet_ip.clone(),
         interface_luid,
     );
 
@@ -385,8 +388,8 @@ fn verify_traffic_routing() {
     // Wait for split tunnel to take effect
     std::thread::sleep(Duration::from_secs(2));
 
-    // Step 9: Check IP again (should be ORIGINAL IP since testbench.exe bypasses)
-    println!("\nStep 9: Checking IP (testbench.exe should bypass VPN)...");
+    // Step 10: Check IP again (should be ORIGINAL IP since testbench.exe bypasses)
+    println!("\nStep 10: Checking IP (testbench.exe should bypass VPN)...");
     let split_ip = match get_public_ip() {
         Some(ip) => {
             println!("   Current IP: {}", ip);
