@@ -859,13 +859,25 @@ impl SplitTunnelDriver {
         );
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
 
+        // Verify state after REGISTER_PROCESSES - should be READY(3)
+        if let Ok(state) = self.get_driver_state() {
+            log::info!("Driver state after REGISTER_PROCESSES: {} ({})", state, Self::state_name(state));
+        }
+
         // Register IP addresses
+        log::info!("Registering IPs with driver - Tunnel: {}, Internet: {}", config.tunnel_ip, config.internet_ip);
         let ip_data = self.serialize_ip_addresses(&config)?;
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
+
+        // Verify state after REGISTER_IP_ADDRESSES - should still be READY(3)
+        if let Ok(state) = self.get_driver_state() {
+            log::info!("Driver state after REGISTER_IP_ADDRESSES: {} ({})", state, Self::state_name(state));
+        }
 
         // Set split tunnel configuration (paths to exclude from VPN)
         // The driver needs to know which executables should bypass the VPN
         let config_data = self.serialize_split_config()?;
+        log::info!("Sending SET_CONFIGURATION with {} bytes...", config_data.len());
         self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
 
         // Verify state
@@ -1098,8 +1110,6 @@ impl SplitTunnelDriver {
         let internet_ip_str = config.internet_ip.split('/').next().unwrap_or(&config.internet_ip);
         let internet_ipv4: std::net::Ipv4Addr = internet_ip_str.parse()
             .map_err(|e| VpnError::SplitTunnel(format!("Invalid internet IP '{}': {}", internet_ip_str, e)))?;
-
-        log::info!("Registering IPs with driver - Tunnel: {}, Internet: {}", tunnel_ipv4, internet_ipv4);
 
         // Build ST_IP_ADDRESSES struct (40 bytes)
         let mut data = Vec::with_capacity(40);
