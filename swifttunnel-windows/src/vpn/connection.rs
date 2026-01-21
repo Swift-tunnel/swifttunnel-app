@@ -16,7 +16,7 @@ use crate::auth::types::VpnConfig;
 use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
-use super::wfp::WfpEngine;
+use super::wfp::{WfpEngine, cleanup_stale_wfp_callouts};
 use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::{VpnError, VpnResult};
@@ -336,7 +336,7 @@ impl VpnConnection {
         // This is CRITICAL for reconnection - previous connection's WFP objects must be deleted
         // Otherwise we get FWP_E_ALREADY_EXISTS (0x80320009) on SET_CONFIGURATION
         log::info!("Cleaning up stale WFP objects before split tunnel setup...");
-        WfpEngine::cleanup_stale_wfp_callouts();
+        cleanup_stale_wfp_callouts();
 
         // Step 1: Check if driver is available (MSI installer must have set it up)
         if !SplitTunnelDriver::check_driver_available() {
