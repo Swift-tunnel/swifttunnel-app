@@ -365,7 +365,7 @@ fn verify_traffic_routing() {
     }
     println!("   ✅ Driver opened");
 
-    // Initialize driver (driver creates its own WFP provider/sublayer/callouts)
+    // Initialize driver (creates provider + callouts)
     if let Err(e) = driver.initialize() {
         println!("   ❌ Failed to initialize driver: {}", e);
         let _ = driver.close();
@@ -374,7 +374,35 @@ fn verify_traffic_routing() {
         adapter.shutdown();
         return;
     }
-    println!("   ✅ Driver initialized (WFP provider/sublayer/callouts created)");
+    println!("   ✅ Driver initialized (provider + callouts created)");
+
+    // Create sublayer after initialize (standalone, no provider association)
+    let _wfp_engine = match WfpEngine::open() {
+        Ok(mut engine) => {
+            match engine.create_sublayer_standalone() {
+                Ok(_) => {
+                    println!("   ✅ Sublayer created");
+                    Some(engine)
+                }
+                Err(e) => {
+                    println!("   ❌ Sublayer creation failed: {}", e);
+                    let _ = driver.close();
+                    route_manager.remove_routes().ok();
+                    tunnel.stop();
+                    adapter.shutdown();
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            println!("   ❌ WFP engine failed: {}", e);
+            let _ = driver.close();
+            route_manager.remove_routes().ok();
+            tunnel.stop();
+            adapter.shutdown();
+            return;
+        }
+    };
 
     // Configure split tunnel with Roblox apps only
     // testbench.exe is NOT in this list, so it should bypass VPN
@@ -565,14 +593,26 @@ fn test_split_tunnel_driver() {
         Ok(_) => {
             println!("   ✅ Driver handle opened");
 
-            // Let driver create its own WFP objects during initialize
-            println!("\n2. Initializing driver (driver creates WFP provider/sublayer/callouts)...");
+            // Driver creates provider + callouts during initialize
+            println!("\n2. Initializing driver (creates provider + callouts)...");
             match driver.initialize() {
                 Ok(_) => {
                     println!("   ✅ Driver initialized");
                     println!("   Driver state: {:?}", driver.state());
 
-                    println!("\n3. Cleaning up...");
+                    // Create sublayer (required for SET_CONFIGURATION)
+                    println!("\n3. Creating sublayer (standalone)...");
+                    match WfpEngine::open() {
+                        Ok(mut engine) => {
+                            match engine.create_sublayer_standalone() {
+                                Ok(_) => println!("   ✅ Sublayer created"),
+                                Err(e) => println!("   ❌ Sublayer failed: {}", e),
+                            }
+                        }
+                        Err(e) => println!("   ❌ WFP engine failed: {}", e),
+                    }
+
+                    println!("\n4. Cleaning up...");
                     let _ = driver.close();
                     println!("   ✅ Driver closed");
                 }
