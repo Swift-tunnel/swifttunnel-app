@@ -390,15 +390,22 @@ fn verify_traffic_routing() {
 
     // Refresh exclusions multiple times to ensure we catch PowerShell when it spawns
     println!("   Refreshing exclusions to catch new processes...");
+    let mut refresh_count = 0;
     for i in 0..5 {
-        if let Err(e) = driver.refresh_exclusions() {
-            println!("   ⚠ Refresh {} failed: {}", i, e);
+        match driver.refresh_exclusions() {
+            Ok(changed) => {
+                if changed {
+                    refresh_count += 1;
+                    println!("   Refresh {}: processes updated", i + 1);
+                }
+            }
+            Err(e) => {
+                println!("   ⚠ Refresh {} failed: {}", i + 1, e);
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-
-    let excluded_count = driver.get_excluded_count();
-    println!("   Currently excluding {} processes", excluded_count);
+    println!("   Refreshes complete ({} updates)", refresh_count);
 
     // Step 10: Check IP again (should be ORIGINAL IP since testbench.exe bypasses)
     println!("\nStep 10: Checking IP (PowerShell should bypass VPN)...");
