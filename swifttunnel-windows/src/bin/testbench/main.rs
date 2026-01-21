@@ -43,7 +43,7 @@ fn main() -> Result<()> {
         .init();
 
     println!("\n╔════════════════════════════════════════════════════════════╗");
-    println!("║          SwiftTunnel CLI Testbench v0.5.24                 ║");
+    println!("║          SwiftTunnel CLI Testbench v0.5.31                 ║");
     println!("║          Headless testing for VPN & Split Tunnel           ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
 
@@ -730,6 +730,12 @@ fn test_full_split_tunnel_flow() {
         }
     }
 
+    // DEBUG: Enumerate WFP objects AFTER initialize to see what driver created
+    println!("\n   [DEBUG] WFP state after INITIALIZE:");
+    if let Ok(wfp_debug) = WfpEngine::open() {
+        wfp_debug.debug_enumerate_wfp_objects();
+    }
+
     // Step 3: Create sublayer AFTER initialize (required for SET_CONFIGURATION)
     // Use standalone method - no provider association to avoid FWP_E_CALLOUT_NOTIFICATION_FAILED
     println!("\nStep 3: Creating WFP sublayer (standalone, no provider)...");
@@ -738,6 +744,11 @@ fn test_full_split_tunnel_flow() {
             match engine.create_sublayer_standalone() {
                 Ok(_) => {
                     println!("   ✅ Sublayer created");
+
+                    // DEBUG: Enumerate again after sublayer
+                    println!("\n   [DEBUG] WFP state after sublayer creation:");
+                    engine.debug_enumerate_wfp_objects();
+
                     Some(engine)
                 }
                 Err(e) => {
