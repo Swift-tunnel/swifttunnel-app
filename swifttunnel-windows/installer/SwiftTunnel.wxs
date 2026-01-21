@@ -49,8 +49,9 @@
 
         <!-- Set command for driver installation (immediate - expands properties) -->
         <!-- WixQuietExec64 requires command to start with quoted executable path -->
+        <!-- timeout /t 2 gives Windows time to fully delete service before recreating -->
         <SetProperty Id="InstallSplitTunnelDriver"
-                     Value="&quot;cmd.exe&quot; /c sc delete MullvadSplitTunnel 2&gt;nul &amp; sc create MullvadSplitTunnel type= kernel start= demand binpath= &quot;[DriversFolder]mullvad-split-tunnel.sys&quot;"
+                     Value="&quot;cmd.exe&quot; /c sc delete MullvadSplitTunnel 2&gt;nul &amp; timeout /t 2 /nobreak &gt;nul &amp; sc create MullvadSplitTunnel type= kernel start= demand binpath= &quot;[DriversFolder]mullvad-split-tunnel.sys&quot;"
                      Before="InstallSplitTunnelDriver"
                      Sequence="execute" />
 
