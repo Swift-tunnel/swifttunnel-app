@@ -84,8 +84,7 @@ impl OAuthServer {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = Arc::clone(&stop_flag);
 
-        // Set a timeout for incoming requests so we can check the stop flag
-        server.set_incoming_timeout(Duration::from_millis(100)).ok();
+        // Note: recv_timeout is used in run_server to check stop flag periodically
 
         let thread_handle = thread::spawn(move || {
             Self::run_server(server, tx, stop_flag_clone);

@@ -757,14 +757,19 @@ impl eframe::App for BoosterApp {
 
         // Poll for OAuth callback from localhost server
         // This checks if the browser has redirected back to our localhost server
-        if matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_)) {
+        let oauth_callback = if matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_)) {
             if let Ok(auth) = self.auth_manager.lock() {
-                if let Some(callback_data) = auth.poll_oauth_callback() {
-                    log::info!("Received OAuth callback from localhost server");
-                    drop(auth); // Release the lock before processing
-                    self.process_oauth_callback(&callback_data.token, &callback_data.state);
-                }
+                auth.poll_oauth_callback()
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        // Process callback outside the lock scope to avoid borrow checker issues
+        if let Some(callback_data) = oauth_callback {
+            log::info!("Received OAuth callback from localhost server");
+            self.process_oauth_callback(&callback_data.token, &callback_data.state);
         }
 
         // PERFORMANCE FIX: Only request continuous repaint when actually needed
