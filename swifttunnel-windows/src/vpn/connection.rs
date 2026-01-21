@@ -102,7 +102,6 @@ pub struct VpnConnection {
     adapter: Option<Arc<WintunAdapter>>,
     tunnel: Option<Arc<WireguardTunnel>>,
     split_tunnel: Option<Arc<Mutex<SplitTunnelDriver>>>,
-    wfp_engine: Option<WfpEngine>,
     route_manager: Option<RouteManager>,
     config: Option<VpnConfig>,
     process_monitor_stop: Arc<AtomicBool>,
@@ -115,7 +114,6 @@ impl VpnConnection {
             adapter: None,
             tunnel: None,
             split_tunnel: None,
-            wfp_engine: None,
             route_manager: None,
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
@@ -504,9 +502,6 @@ impl VpnConnection {
             }
         }
         self.split_tunnel = None;
-
-        // Clean up WFP
-        self.wfp_engine = None;
 
         // Shutdown adapter
         if let Some(ref adapter) = self.adapter {
