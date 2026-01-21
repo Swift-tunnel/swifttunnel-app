@@ -289,26 +289,19 @@ impl SplitTunnelDriver {
     /// Returns true if driver is running and accessible, false otherwise
     /// Will attempt to create/start the driver service if not available
     pub fn check_driver_available() -> bool {
-        if Self::is_available() {
-            log::debug!("Split tunnel driver is available");
-            return true;
-        }
-
-        log::warn!("Split tunnel driver not available, attempting to create/start service...");
-
-        // Try to ensure the driver service exists and is started
+        // Always validate the service configuration so we don't talk to a different
+        // MullvadSplitTunnel binary that doesn't recognize our IOCTLs.
         if let Err(e) = Self::ensure_driver_service() {
             log::error!("Failed to ensure driver service: {}", e);
             return false;
         }
 
-        // Check again after ensuring service
         if Self::is_available() {
-            log::info!("Split tunnel driver is now available after service setup");
+            log::info!("Split tunnel driver is available after service validation");
             return true;
         }
 
-        log::error!("Split tunnel driver still not available after service setup");
+        log::error!("Split tunnel driver not available after service setup");
         false
     }
 
@@ -973,22 +966,7 @@ impl SplitTunnelDriver {
         self.excluded_paths = to_exclude.iter().map(|p| p.exe_path.clone()).collect();
 
         let proc_data = self.serialize_process_tree_for_exclusion(&to_exclude)?;
-        log::info!(
-            "Sending IOCTL_ST_REGISTER_PROCESSES (0x{:08X}) with {} bytes...",
-            ioctl::IOCTL_ST_REGISTER_PROCESSES,
-            proc_data.len()
-        );
-        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data) {
-            if Self::is_invalid_function_error(&e) {
-                log::warn!(
-                    "REGISTER_PROCESSES rejected with INVALID_FUNCTION - reinitializing driver and retrying"
-                );
-                self.reinitialize_for_configure()?;
-                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
-            } else {
-                return Err(e);
-            }
-        }
+        self.register_processes_with_retry(handle, &proc_data)?;
 
         // Verify state after REGISTER_PROCESSES - should be READY(3)
         if let Ok(state) = self.get_driver_state() {
@@ -998,18 +976,7 @@ impl SplitTunnelDriver {
         // Register IP addresses
         log::info!("Registering IPs with driver - Tunnel: {}, Internet: {}", config.tunnel_ip, config.internet_ip);
         let ip_data = self.serialize_ip_addresses(&config)?;
-        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data) {
-            if Self::is_invalid_function_error(&e) {
-                log::warn!(
-                    "REGISTER_IP_ADDRESSES rejected with INVALID_FUNCTION - reinitializing driver and retrying"
-                );
-                self.reinitialize_for_configure()?;
-                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
-                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
-            } else {
-                return Err(e);
-            }
-        }
+        self.register_ips_with_retry(handle, &ip_data, &proc_data)?;
 
         // Verify state after REGISTER_IP_ADDRESSES - should still be READY(3)
         if let Ok(state) = self.get_driver_state() {
@@ -1028,12 +995,21 @@ impl SplitTunnelDriver {
 
                 let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
 
-                // Re-register to be safe in case CLEAR_CONFIGURATION reset driver state.
-                log::info!("Re-sending REGISTER_PROCESSES after CLEAR_CONFIGURATION...");
-                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
+                if let Ok(state) = self.get_driver_state() {
+                    log::warn!(
+                        "Driver state after CLEAR_CONFIGURATION: {} ({})",
+                        state,
+                        Self::state_name(state)
+                    );
+                    if state != 2 {
+                        self.reinitialize_for_configure()?;
+                    }
+                } else {
+                    self.reinitialize_for_configure()?;
+                }
 
-                log::info!("Re-sending REGISTER_IP_ADDRESSES after CLEAR_CONFIGURATION...");
-                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
+                self.register_processes_with_retry(handle, &proc_data)?;
+                self.register_ips_with_retry(handle, &ip_data, &proc_data)?;
 
                 log::info!("Retrying SET_CONFIGURATION after CLEAR_CONFIGURATION...");
                 self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
@@ -1070,8 +1046,60 @@ impl SplitTunnelDriver {
                 state,
                 Self::state_name(state)
             );
+            if state == 2 {
+                return Ok(());
+            }
         }
         self.initialize()
+    }
+
+    fn register_processes_with_retry(
+        &mut self,
+        handle: windows::Win32::Foundation::HANDLE,
+        proc_data: &[u8],
+    ) -> VpnResult<()> {
+        log::info!(
+            "Sending IOCTL_ST_REGISTER_PROCESSES (0x{:08X}) with {} bytes...",
+            ioctl::IOCTL_ST_REGISTER_PROCESSES,
+            proc_data.len()
+        );
+        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, proc_data) {
+            if Self::is_invalid_function_error(&e) {
+                log::warn!(
+                    "REGISTER_PROCESSES rejected with INVALID_FUNCTION - reinitializing driver and retrying"
+                );
+                self.reinitialize_for_configure()?;
+                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, proc_data)?;
+            } else {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    fn register_ips_with_retry(
+        &mut self,
+        handle: windows::Win32::Foundation::HANDLE,
+        ip_data: &[u8],
+        proc_data: &[u8],
+    ) -> VpnResult<()> {
+        log::info!(
+            "Registering IPs with driver ({} bytes)...",
+            ip_data.len()
+        );
+        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, ip_data) {
+            if Self::is_invalid_function_error(&e) {
+                log::warn!(
+                    "REGISTER_IP_ADDRESSES rejected with INVALID_FUNCTION - reinitializing driver and retrying"
+                );
+                self.reinitialize_for_configure()?;
+                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, proc_data)?;
+                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, ip_data)?;
+            } else {
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Efficient refresh - only update changed processes
