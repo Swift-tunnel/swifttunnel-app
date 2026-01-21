@@ -11,6 +11,80 @@ use std::ptr;
 use windows::core::GUID;
 use windows::Win32::Foundation::*;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::*;
+use windows::Win32::System::Services::*;
+
+/// Ensure the Base Filtering Engine (BFE) service is running
+/// BFE is required for WFP operations - without it, FwpmEngineOpen0 fails with 0x6D9
+pub fn ensure_bfe_running() -> VpnResult<()> {
+    log::info!("Checking Base Filtering Engine (BFE) service status...");
+
+    unsafe {
+        // Open Service Control Manager
+        let scm = OpenSCManagerW(None, None, SC_MANAGER_CONNECT);
+        if scm.is_err() {
+            let err = GetLastError();
+            log::warn!("Could not open SCM: {:?}", err);
+            return Ok(()); // Continue anyway, WFP open will give better error
+        }
+        let scm = scm.unwrap();
+
+        // Open BFE service
+        let service = OpenServiceW(scm, windows::core::w!("BFE"), SERVICE_QUERY_STATUS | SERVICE_START);
+        if service.is_err() {
+            let _ = CloseServiceHandle(scm);
+            let err = GetLastError();
+            log::warn!("Could not open BFE service: {:?}", err);
+            return Ok(()); // Continue anyway
+        }
+        let service = service.unwrap();
+
+        // Query service status
+        let mut status: SERVICE_STATUS = std::mem::zeroed();
+        if QueryServiceStatus(service, &mut status).is_ok() {
+            if status.dwCurrentState == SERVICE_RUNNING {
+                log::info!("BFE service is already running");
+                let _ = CloseServiceHandle(service);
+                let _ = CloseServiceHandle(scm);
+                return Ok(());
+            }
+
+            log::warn!("BFE service is not running (state: {}), attempting to start...", status.dwCurrentState.0);
+
+            // Try to start the service
+            if StartServiceW(service, None).is_ok() {
+                log::info!("BFE service start initiated");
+
+                // Wait for service to start (up to 10 seconds)
+                for i in 0..20 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if QueryServiceStatus(service, &mut status).is_ok() {
+                        if status.dwCurrentState == SERVICE_RUNNING {
+                            log::info!("BFE service started successfully after {}ms", (i + 1) * 500);
+                            break;
+                        }
+                        if status.dwCurrentState == SERVICE_STOPPED {
+                            log::error!("BFE service failed to start");
+                            break;
+                        }
+                    }
+                }
+            } else {
+                let err = GetLastError();
+                // ERROR_SERVICE_ALREADY_RUNNING (1056) is OK
+                if err.0 == 1056 {
+                    log::info!("BFE service is already running");
+                } else {
+                    log::error!("Failed to start BFE service: {:?}", err);
+                }
+            }
+        }
+
+        let _ = CloseServiceHandle(service);
+        let _ = CloseServiceHandle(scm);
+    }
+
+    Ok(())
+}
 
 /// Mullvad Split Tunnel WFP Provider GUID
 /// Must match the GUID expected by the Mullvad split tunnel driver

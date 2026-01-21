@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-fps-booster"
-version = "0.5.21"
+version = "0.5.22"
 edition = "2021"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel - Game Booster with PC Optimizations"
@@ -35,6 +35,8 @@ windows = { version = "0.58", features = [
     "Win32_System_Rpc",
     # Timer APIs for 1ms resolution (PC Boosts)
     "Win32_Media",
+    # Service Control Manager for BFE auto-start
+    "Win32_System_Services",
 ] }
 
 # System utilities
