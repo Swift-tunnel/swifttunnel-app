@@ -1,4 +1,9 @@
-//! Update installer - performs MSI silent installation
+//! Update installer - performs MSI installation with proper elevation
+//!
+//! Key improvements in v3:
+//! - Uses PowerShell to request UAC elevation for msiexec
+//! - Proper error handling and logging
+//! - Fallback to interactive UI if silent install fails
 
 use log::{error, info};
 use std::path::Path;
@@ -10,12 +15,11 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-/// Install an update by creating a batch script and launching it
-/// The batch script will:
-/// 1. Wait for the current app to exit
-/// 2. Run the MSI installer silently
-/// 3. Launch the new version
-/// 4. Delete itself
+/// Install an update by creating a PowerShell script that:
+/// 1. Waits for the current app to exit
+/// 2. Runs the MSI installer with elevation (UAC prompt)
+/// 3. Launches the new version
+/// 4. Cleans up
 pub fn install_update(msi_path: &Path) -> Result<(), String> {
     if !msi_path.exists() {
         return Err(format!("MSI file not found: {}", msi_path.display()));
@@ -25,12 +29,12 @@ pub fn install_update(msi_path: &Path) -> Result<(), String> {
     let exe_path = std::env::current_exe()
         .map_err(|e| format!("Failed to get current exe path: {}", e))?;
 
-    // Create batch script in temp directory
+    // Create PowerShell script in temp directory
     let temp_dir = std::env::temp_dir();
-    let batch_path = temp_dir.join("swifttunnel_update.bat");
+    let ps_path = temp_dir.join("swifttunnel_update.ps1");
 
-    let msi_path_str = msi_path.to_string_lossy();
-    let exe_path_str = exe_path.to_string_lossy();
+    let msi_path_str = msi_path.to_string_lossy().replace("'", "''");
+    let exe_path_str = exe_path.to_string_lossy().replace("'", "''");
 
     // Get just the exe filename for taskkill
     let exe_name = exe_path
@@ -41,93 +45,142 @@ pub fn install_update(msi_path: &Path) -> Result<(), String> {
     // Get LocalAppData path for logs
     let local_app_data = std::env::var("LOCALAPPDATA")
         .unwrap_or_else(|_| "C:\\Users\\Public".to_string());
-    let log_dir = format!("{}\\SwiftTunnel", local_app_data);
+    let log_dir = format!("{}\\SwiftTunnel", local_app_data).replace("\\", "\\\\");
 
-    // Batch script that performs the update with proper waiting and verification
-    // Key improvements:
-    // - Uses start /wait for msiexec to ensure completion
-    // - Adds logging for debugging
-    // - Uses timeout instead of ping for delays
-    // - Limits wait loop to prevent infinite loops
-    // - Verifies installation success before restarting
-    let batch_content = format!(
-        r#"@echo off
-setlocal EnableDelayedExpansion
+    // PowerShell script that performs the update with proper elevation
+    // Key: Uses Start-Process -Verb RunAs to trigger UAC for msiexec
+    let ps_content = format!(
+        r#"# SwiftTunnel Update Script v3
+$ErrorActionPreference = 'Continue'
 
-:: SwiftTunnel Update Script v2
-set "LOGDIR={log_dir}"
-set "LOGFILE=%LOGDIR%\update_install.log"
+$logDir = '{log_dir}'
+$logFile = "$logDir\update_install.log"
+$msiPath = '{msi_path}'
+$exePath = '{exe_path}'
+$exeName = '{exe_name}'
 
-:: Ensure log directory exists
-if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+# Ensure log directory exists
+if (-not (Test-Path $logDir)) {{
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+}}
 
-echo [%date% %time%] === Starting update === >> "%LOGFILE%"
-echo [%date% %time%] Target: {msi_path} >> "%LOGFILE%"
+function Log {{
+    param([string]$message)
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    "[$timestamp] $message" | Add-Content -Path $logFile -Encoding UTF8
+}}
 
-:: Step 1: Wait 2 seconds for graceful close
-echo [%date% %time%] Waiting for app to close... >> "%LOGFILE%"
-timeout /t 2 /nobreak > nul
+Log "=== Starting update ==="
+Log "MSI: $msiPath"
+Log "Target: $exePath"
 
-:: Step 2: Force kill any remaining instances
-echo [%date% %time%] Force killing {exe_name}... >> "%LOGFILE%"
-taskkill /f /im "{exe_name}" >nul 2>&1
+# Step 1: Wait for graceful close
+Log "Waiting for app to close..."
+Start-Sleep -Seconds 2
 
-:: Step 3: Wait for file handles to release
-timeout /t 2 /nobreak > nul
+# Step 2: Force kill any remaining instances
+Log "Force killing $exeName..."
+Get-Process -Name ($exeName -replace '\.exe$','') -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-:: Step 4: Wait for exe to be unlocked (max 30 attempts = 30 seconds)
-set "WAIT_COUNT=0"
-:waitloop
-del /f "{exe_path}" >nul 2>&1
-if not exist "{exe_path}" goto install
-set /a WAIT_COUNT+=1
-echo [%date% %time%] Wait attempt %WAIT_COUNT% of 30... >> "%LOGFILE%"
-if %WAIT_COUNT% geq 30 (
-    echo [%date% %time%] TIMEOUT: Exe still locked after 30 seconds >> "%LOGFILE%"
-    goto error
-)
-timeout /t 1 /nobreak > nul
-goto waitloop
+# Step 3: Wait for file handles to release
+Start-Sleep -Seconds 2
 
-:install
-echo [%date% %time%] Exe unlocked, starting MSI install... >> "%LOGFILE%"
+# Step 4: Wait for exe to be deletable (max 30 seconds)
+$waitCount = 0
+while ($waitCount -lt 30) {{
+    try {{
+        if (Test-Path $exePath) {{
+            Remove-Item $exePath -Force -ErrorAction Stop
+        }}
+        break
+    }} catch {{
+        $waitCount++
+        Log "Wait attempt $waitCount of 30..."
+        Start-Sleep -Seconds 1
+    }}
+}}
 
-:: Step 5: Run MSI with explicit wait and verbose logging
-start /wait msiexec /i "{msi_path}" /qn /norestart /l*v "%LOGDIR%\msi_install.log"
-set "MSI_EXIT=%errorlevel%"
-echo [%date% %time%] MSI exit code: %MSI_EXIT% >> "%LOGFILE%"
+if ($waitCount -ge 30) {{
+    Log "TIMEOUT: Exe still locked after 30 seconds"
+    # Continue anyway - MSI might be able to handle it
+}}
 
-if %MSI_EXIT% neq 0 (
-    echo [%date% %time%] MSI installation failed with code %MSI_EXIT% >> "%LOGFILE%"
-    goto error
-)
+# Step 5: Run MSI with elevation
+Log "Starting MSI install with elevation..."
 
-:: Step 6: Wait for msiexec cleanup
-timeout /t 3 /nobreak > nul
+$msiLogPath = "$logDir\msi_install.log"
+$msiArgs = "/i `"$msiPath`" /qb /norestart /l*v `"$msiLogPath`""
 
-:: Step 7: Verify exe exists after installation
-if not exist "{exe_path}" (
-    echo [%date% %time%] ERROR: Exe not found after installation >> "%LOGFILE%"
-    goto error
-)
+try {{
+    # Run msiexec elevated - this will trigger UAC prompt
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Verb RunAs -Wait -PassThru
+    $exitCode = $process.ExitCode
+    Log "MSI exit code: $exitCode"
 
-echo [%date% %time%] Installation successful! >> "%LOGFILE%"
+    if ($exitCode -eq 0 -or $exitCode -eq 3010) {{
+        Log "Installation successful!"
 
-:: Step 8: Clean up MSI and start app
-del /f "{msi_path}" >nul 2>&1
-echo [%date% %time%] Starting new version... >> "%LOGFILE%"
-start "" "{exe_path}"
-goto cleanup
+        # Step 6: Wait for msiexec cleanup
+        Start-Sleep -Seconds 3
 
-:error
-echo [%date% %time%] === UPDATE FAILED === >> "%LOGFILE%"
-msg "%USERNAME%" "SwiftTunnel update failed (code: %MSI_EXIT%). Please reinstall manually. Check log: %LOGFILE%"
-goto cleanup
+        # Step 7: Clean up MSI
+        if (Test-Path $msiPath) {{
+            Remove-Item $msiPath -Force -ErrorAction SilentlyContinue
+        }}
 
-:cleanup
-echo [%date% %time%] Cleanup complete >> "%LOGFILE%"
-:: Delete this script
-del "%~f0"
+        # Step 8: Start new version
+        Log "Starting new version..."
+        if (Test-Path $exePath) {{
+            Start-Process -FilePath $exePath
+        }} else {{
+            Log "WARNING: Exe not found at $exePath after install"
+        }}
+    }} else {{
+        Log "MSI installation failed with code $exitCode"
+
+        # Try again with full UI if silent failed
+        if ($exitCode -eq 1603 -or $exitCode -eq 1602) {{
+            Log "Retrying with interactive UI..."
+            $msiArgsInteractive = "/i `"$msiPath`" /l*v `"$msiLogPath`""
+            $retryProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgsInteractive -Verb RunAs -Wait -PassThru
+            $retryExit = $retryProcess.ExitCode
+            Log "Retry MSI exit code: $retryExit"
+
+            if ($retryExit -eq 0 -or $retryExit -eq 3010) {{
+                Log "Retry installation successful!"
+                Start-Sleep -Seconds 3
+                if (Test-Path $msiPath) {{
+                    Remove-Item $msiPath -Force -ErrorAction SilentlyContinue
+                }}
+                if (Test-Path $exePath) {{
+                    Start-Process -FilePath $exePath
+                }}
+            }} else {{
+                Log "Retry also failed. Please reinstall manually."
+                [System.Windows.Forms.MessageBox]::Show("SwiftTunnel update failed (code: $retryExit). Please download and reinstall manually from swifttunnel.net", "Update Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }}
+        }} else {{
+            [System.Windows.Forms.MessageBox]::Show("SwiftTunnel update failed (code: $exitCode). Please download and reinstall manually from swifttunnel.net", "Update Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        }}
+    }}
+}} catch {{
+    $err = $_.Exception.Message
+    Log "ERROR: $err"
+
+    # If elevation was cancelled, show message
+    if ($err -match "canceled by the user") {{
+        Log "UAC elevation was cancelled"
+        [System.Windows.Forms.MessageBox]::Show("Update was cancelled. The app will continue with the current version.", "Update Cancelled", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    }} else {{
+        [System.Windows.Forms.MessageBox]::Show("SwiftTunnel update error: $err", "Update Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }}
+}}
+
+Log "=== Update script finished ==="
+
+# Clean up this script
+Start-Sleep -Seconds 1
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 "#,
         log_dir = log_dir,
         exe_name = exe_name,
@@ -135,17 +188,22 @@ del "%~f0"
         exe_path = exe_path_str
     );
 
-    // Write the batch script
-    std::fs::write(&batch_path, &batch_content)
+    // Write the PowerShell script
+    std::fs::write(&ps_path, &ps_content)
         .map_err(|e| format!("Failed to write update script: {}", e))?;
 
-    info!("Created update script at: {}", batch_path.display());
+    info!("Created update script at: {}", ps_path.display());
     info!("Launching update installer...");
 
-    // Launch the batch script completely hidden (no console window at all)
-    // Using CREATE_NO_WINDOW flag to prevent any visible window
-    let mut cmd = Command::new("cmd");
-    cmd.args(["/c", &batch_path.to_string_lossy().to_string()]);
+    // Launch PowerShell to run the script
+    // Using -ExecutionPolicy Bypass to allow the script to run
+    // Using -WindowStyle Hidden to minimize visual disturbance
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-ExecutionPolicy", "Bypass",
+        "-WindowStyle", "Hidden",
+        "-File", &ps_path.to_string_lossy(),
+    ]);
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -159,8 +217,8 @@ del "%~f0"
         }
         Err(e) => {
             error!("Failed to launch update script: {}", e);
-            // Try to clean up the batch file
-            let _ = std::fs::remove_file(&batch_path);
+            // Try to clean up the script file
+            let _ = std::fs::remove_file(&ps_path);
             Err(format!("Failed to launch installer: {}", e))
         }
     }
