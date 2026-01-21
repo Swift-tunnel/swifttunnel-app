@@ -535,17 +535,11 @@ impl SplitTunnelDriver {
         let ip_data = self.serialize_ip_addresses(&config)?;
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
 
-        // Set configuration (paths to exclude)
-        // Only send SET_CONFIGURATION if we have paths to exclude
-        // The driver doesn't accept empty configuration - use CLEAR_CONFIGURATION instead
-        if !self.excluded_paths.is_empty() {
-            let config_data = self.serialize_exclusion_config()?;
-            self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
-        } else {
-            log::info!("No processes to exclude - clearing any existing configuration");
-            // Clear any existing exclusion config
-            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
-        }
+        // Set tunnel interface configuration
+        // The driver needs to know which interface is the VPN tunnel (LUID)
+        // This is ALWAYS required, regardless of how many processes are excluded
+        let config_data = self.serialize_tunnel_config(&config);
+        self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
 
         // Verify state
         if let Ok(state) = self.get_driver_state() {
@@ -595,18 +589,11 @@ impl SplitTunnelDriver {
         self.excluded_pids = current_pids;
         self.excluded_paths = current_exclude.iter().map(|p| p.exe_path.clone()).collect();
 
-        // Re-register with driver
+        // Re-register processes with driver
+        // Note: We DON'T resend SET_CONFIGURATION here because the tunnel LUID
+        // doesn't change during a session - it was set once during configure()
         let proc_data = self.serialize_process_tree_for_exclusion(&current_exclude)?;
         self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
-
-        // Update exclusion config only if we have paths
-        if !self.excluded_paths.is_empty() {
-            let config_data = self.serialize_exclusion_config()?;
-            self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
-        } else {
-            // Clear any existing exclusion config
-            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
-        }
 
         let tunnel_running = !self.get_running_tunnel_apps().is_empty();
         Ok(tunnel_running)
@@ -687,58 +674,17 @@ impl SplitTunnelDriver {
         Ok(data)
     }
 
-    /// Serialize configuration (paths to exclude from VPN)
-    fn serialize_exclusion_config(&self) -> VpnResult<Vec<u8>> {
-        if self.excluded_paths.is_empty() {
-            let mut data = Vec::with_capacity(16);
-            data.extend_from_slice(&0u64.to_le_bytes());
-            data.extend_from_slice(&16u64.to_le_bytes());
-            return Ok(data);
-        }
-
-        // Deduplicate paths
-        let unique_paths: Vec<_> = self.excluded_paths.iter().collect::<HashSet<_>>().into_iter().collect();
-
-        let device_paths: Vec<String> = unique_paths
-            .iter()
-            .filter_map(|p| Self::to_device_path(p).ok())
-            .collect();
-
-        let wide_paths: Vec<Vec<u16>> = device_paths
-            .iter()
-            .map(|p| p.encode_utf16().collect())
-            .collect();
-
-        let header_size = 16usize;
-        let entry_size = 32usize;
-        let string_size: usize = wide_paths.iter().map(|w| w.len() * 2).sum();
-        let total_size = header_size + (entry_size * wide_paths.len()) + string_size;
-
-        let mut data = Vec::with_capacity(total_size);
-
-        data.extend_from_slice(&(wide_paths.len() as u64).to_le_bytes());
-        data.extend_from_slice(&(total_size as u64).to_le_bytes());
-
-        let mut rel_offset = 0usize;
-        for wide in &wide_paths {
-            let byte_len = (wide.len() * 2) as u16;
-
-            data.extend_from_slice(&0u64.to_le_bytes()); // protocol (unused)
-            data.extend_from_slice(&0u64.to_le_bytes()); // padding
-            data.extend_from_slice(&(rel_offset as u64).to_le_bytes());
-            data.extend_from_slice(&byte_len.to_le_bytes());
-            data.extend_from_slice(&[0u8; 6]);
-
-            rel_offset += byte_len as usize;
-        }
-
-        for wide in &wide_paths {
-            for w in wide {
-                data.extend_from_slice(&w.to_le_bytes());
-            }
-        }
-
-        Ok(data)
+    /// Serialize configuration for IOCTL_ST_SET_CONFIGURATION
+    /// The Mullvad driver expects just the tunnel interface LUID (8 bytes)
+    /// This tells the driver which interface is the VPN tunnel, so it can:
+    /// 1. Keep included process traffic (games) on the tunnel interface
+    /// 2. Redirect excluded process traffic to the internet interface
+    fn serialize_tunnel_config(&self, config: &SplitTunnelConfig) -> Vec<u8> {
+        log::info!(
+            "SET_CONFIGURATION: tunnel_interface_luid={}",
+            config.tunnel_interface_luid
+        );
+        config.tunnel_interface_luid.to_le_bytes().to_vec()
     }
 
     /// Serialize IP addresses for IOCTL_ST_REGISTER_IP_ADDRESSES
