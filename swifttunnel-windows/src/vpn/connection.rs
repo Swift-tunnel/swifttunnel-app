@@ -332,13 +332,22 @@ impl VpnConnection {
         adapter: &WintunAdapter,
         tunnel_apps: Vec<String>,
     ) -> VpnResult<Vec<String>> {
-        // Step 0: ALWAYS clean up stale WFP objects BEFORE anything else
-        // This is CRITICAL for reconnection - previous connection's WFP objects must be deleted
-        // Otherwise we get FWP_E_ALREADY_EXISTS (0x80320009) on SET_CONFIGURATION
-        log::info!("Cleaning up stale WFP objects before split tunnel setup...");
+        // Step 0a: Restart driver service to fully reset internal state
+        // This is CRITICAL because the driver's state machine persists between connections
+        // IOCTL_ST_RESET only works in READY/ENGAGED states, not INITIALIZED
+        // If a previous connection left driver in INITIALIZED state, we MUST restart the service
+        log::info!("Restarting split tunnel driver service...");
+        if let Err(e) = SplitTunnelDriver::restart_driver_service() {
+            log::warn!("Failed to restart driver service: {} (may not exist yet)", e);
+            // Continue anyway - check_driver_available will create it if needed
+        }
+
+        // Step 0b: Clean up stale WFP objects from previous connections
+        // This removes old provider/sublayer/callouts that the driver created
+        log::info!("Cleaning up stale WFP objects...");
         cleanup_stale_wfp_callouts();
 
-        // Step 1: Check if driver is available (MSI installer must have set it up)
+        // Step 1: Check if driver is available (creates service if needed)
         if !SplitTunnelDriver::check_driver_available() {
             return Err(VpnError::SplitTunnelNotAvailable);
         }

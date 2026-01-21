@@ -472,6 +472,94 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Restart the driver service to fully reset its internal state
+    /// This is necessary because:
+    /// 1. The driver's state machine persists between connections
+    /// 2. IOCTL_ST_RESET only works in READY/ENGAGED states, not INITIALIZED
+    /// 3. If a previous connection left driver in INITIALIZED state, we can't reset via IOCTL
+    /// 4. The only way to get back to STARTED state is to restart the service
+    pub fn restart_driver_service() -> Result<(), String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Services::*;
+
+        const SERVICE_NAME: &str = "MullvadSplitTunnel";
+
+        log::info!("Restarting split tunnel driver service to reset state...");
+
+        unsafe {
+            // Open Service Control Manager
+            let scm = OpenSCManagerW(
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SC_MANAGER_ALL_ACCESS,
+            ).map_err(|e| format!("Failed to open SCM: {}", e))?;
+
+            let service_name_wide: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+            let service = match OpenServiceW(
+                scm,
+                PCWSTR(service_name_wide.as_ptr()),
+                SERVICE_ALL_ACCESS,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = CloseServiceHandle(scm);
+                    return Err(format!("Failed to open service: {}", e));
+                }
+            };
+
+            // Stop the service if running
+            let mut status = SERVICE_STATUS::default();
+            if QueryServiceStatus(service, &mut status).is_ok() {
+                if status.dwCurrentState == SERVICE_RUNNING {
+                    log::debug!("Stopping driver service...");
+                    let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
+
+                    // Wait for service to stop (up to 5 seconds)
+                    for _ in 0..10 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if QueryServiceStatus(service, &mut status).is_ok() {
+                            if status.dwCurrentState == SERVICE_STOPPED {
+                                log::debug!("Service stopped");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Start the service
+            log::debug!("Starting driver service...");
+            if let Err(e) = StartServiceW(service, None) {
+                let error_code = e.code().0 as u32;
+                if error_code != 1056 { // ERROR_SERVICE_ALREADY_RUNNING
+                    let _ = CloseServiceHandle(service);
+                    let _ = CloseServiceHandle(scm);
+                    return Err(format!("Failed to start service: {}", e));
+                }
+            }
+
+            // Wait for service to start (up to 5 seconds)
+            for i in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if QueryServiceStatus(service, &mut status).is_ok() {
+                    if status.dwCurrentState == SERVICE_RUNNING {
+                        log::info!("Driver service restarted successfully");
+                        let _ = CloseServiceHandle(service);
+                        let _ = CloseServiceHandle(scm);
+                        return Ok(());
+                    }
+                }
+                if i == 5 {
+                    log::debug!("Still waiting for service to start...");
+                }
+            }
+
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+            Err("Timeout waiting for service to restart".to_string())
+        }
+    }
+
     /// Cleanup stale state on startup
     pub fn cleanup_stale_state() {
         use windows::core::PCSTR;
