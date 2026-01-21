@@ -676,23 +676,9 @@ fn test_full_split_tunnel_flow() {
         }
     }
 
-    // Step 2: Create provider + sublayer BEFORE initialize
-    // The driver's callouts reference the sublayer, so it must exist before INITIALIZE
-    println!("\nStep 2: Creating WFP provider + sublayer (BEFORE initialize)...");
-    let _wfp_engine = match setup_wfp_for_split_tunnel(0) {
-        Ok(engine) => {
-            println!("   ✅ WFP provider + sublayer created");
-            Some(engine)
-        }
-        Err(e) => {
-            println!("   ❌ WFP setup failed: {}", e);
-            let _ = driver.close();
-            return;
-        }
-    };
-
-    // Step 3: Initialize driver (creates callouts that reference the sublayer)
-    println!("\nStep 3: Initializing driver (creates callouts using sublayer)...");
+    // Step 2: Initialize driver (creates provider + callouts)
+    // The driver creates the provider during INITIALIZE, but NOT the sublayer
+    println!("\nStep 2: Initializing driver (creates provider + callouts)...");
     match driver.initialize() {
         Ok(_) => {
             println!("   ✅ Driver initialized");
@@ -703,6 +689,30 @@ fn test_full_split_tunnel_flow() {
             return;
         }
     }
+
+    // Step 3: Create sublayer AFTER initialize (required for SET_CONFIGURATION)
+    // Use standalone method - no provider association to avoid FWP_E_CALLOUT_NOTIFICATION_FAILED
+    println!("\nStep 3: Creating WFP sublayer (standalone, no provider)...");
+    let _wfp_engine = match WfpEngine::open() {
+        Ok(mut engine) => {
+            match engine.create_sublayer_standalone() {
+                Ok(_) => {
+                    println!("   ✅ Sublayer created");
+                    Some(engine)
+                }
+                Err(e) => {
+                    println!("   ❌ Sublayer creation failed: {}", e);
+                    let _ = driver.close();
+                    return;
+                }
+            }
+        }
+        Err(e) => {
+            println!("   ❌ WFP engine open failed: {}", e);
+            let _ = driver.close();
+            return;
+        }
+    };
 
     // Step 4: Configure split tunnel with Roblox apps
     println!("\nStep 4: Configuring split tunnel with Roblox apps...");

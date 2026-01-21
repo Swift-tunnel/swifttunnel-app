@@ -365,6 +365,60 @@ impl WfpEngine {
         Ok(())
     }
 
+    /// Create sublayer without provider association (for use after driver creates provider)
+    pub fn create_sublayer_standalone(&mut self) -> VpnResult<()> {
+        if self.sublayer_registered {
+            return Ok(());
+        }
+
+        // Check if sublayer already exists
+        let mut sublayer_ptr: *mut FWPM_SUBLAYER0 = ptr::null_mut();
+        let get_result = unsafe {
+            FwpmSubLayerGetByKey0(self.handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY, &mut sublayer_ptr)
+        };
+
+        if get_result == 0 {
+            // Sublayer already exists
+            unsafe {
+                FwpmFreeMemory0(&mut (sublayer_ptr as *mut _));
+            }
+            log::info!("WFP sublayer already exists");
+            self.sublayer_registered = true;
+            return Ok(());
+        }
+
+        // Create sublayer name as wide string
+        let name_wide: Vec<u16> = SUBLAYER_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+        let desc_wide: Vec<u16> = SUBLAYER_DESC.encode_utf16().chain(std::iter::once(0)).collect();
+
+        // Create sublayer WITHOUT providerKey - no association with any provider
+        // This avoids potential issues with the driver's provider
+        let sublayer = FWPM_SUBLAYER0 {
+            subLayerKey: ST_FW_WINFW_BASELINE_SUBLAYER_KEY,
+            displayData: FWPM_DISPLAY_DATA0 {
+                name: windows::core::PWSTR(name_wide.as_ptr() as *mut u16),
+                description: windows::core::PWSTR(desc_wide.as_ptr() as *mut u16),
+            },
+            flags: 0u32, // Non-persistent
+            providerKey: ptr::null_mut(), // NO provider association
+            providerData: FWP_BYTE_BLOB::default(),
+            weight: 0x8000, // Medium-high weight
+        };
+
+        let result = unsafe { FwpmSubLayerAdd0(self.handle, &sublayer, None) };
+
+        if result != 0 && result != FWP_E_ALREADY_EXISTS.0 as u32 {
+            return Err(VpnError::SplitTunnel(format!(
+                "Failed to add standalone WFP sublayer: 0x{:08X}",
+                result
+            )));
+        }
+
+        self.sublayer_registered = true;
+        log::info!("WFP sublayer created (standalone): {}", SUBLAYER_NAME);
+        Ok(())
+    }
+
     /// Add a permit filter for the VPN interface
     /// This allows traffic through the VPN tunnel
     pub fn add_tunnel_filter(&self, interface_luid: u64, layer: FilterLayer) -> VpnResult<u64> {
