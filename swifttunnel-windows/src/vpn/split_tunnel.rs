@@ -287,15 +287,189 @@ impl SplitTunnelDriver {
 
     /// Check if the split tunnel driver is available
     /// Returns true if driver is running and accessible, false otherwise
-    /// Note: Driver must be installed via MSI installer - no auto-installation
+    /// Will attempt to create/start the driver service if not available
     pub fn check_driver_available() -> bool {
         if Self::is_available() {
             log::debug!("Split tunnel driver is available");
             return true;
         }
 
-        log::error!("Split tunnel driver not available. Please reinstall SwiftTunnel to fix this.");
+        log::warn!("Split tunnel driver not available, attempting to create/start service...");
+
+        // Try to ensure the driver service exists and is started
+        if let Err(e) = Self::ensure_driver_service() {
+            log::error!("Failed to ensure driver service: {}", e);
+            return false;
+        }
+
+        // Check again after ensuring service
+        if Self::is_available() {
+            log::info!("Split tunnel driver is now available after service setup");
+            return true;
+        }
+
+        log::error!("Split tunnel driver still not available after service setup");
         false
+    }
+
+    /// Get the path to the driver file
+    fn get_driver_path() -> Option<std::path::PathBuf> {
+        // First try: Same directory as executable (for dev builds)
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let driver_path = exe_dir.join("drivers").join("mullvad-split-tunnel.sys");
+                if driver_path.exists() {
+                    return Some(driver_path);
+                }
+                // Also check directly in exe dir
+                let driver_path = exe_dir.join("mullvad-split-tunnel.sys");
+                if driver_path.exists() {
+                    return Some(driver_path);
+                }
+            }
+        }
+
+        // Second try: Program Files installation
+        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let install_path = std::path::PathBuf::from(&program_files)
+            .join("SwiftTunnel")
+            .join("drivers")
+            .join("mullvad-split-tunnel.sys");
+        if install_path.exists() {
+            return Some(install_path);
+        }
+
+        // Third try: Program Files (x86)
+        let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
+        let install_path_x86 = std::path::PathBuf::from(&program_files_x86)
+            .join("SwiftTunnel")
+            .join("drivers")
+            .join("mullvad-split-tunnel.sys");
+        if install_path_x86.exists() {
+            return Some(install_path_x86);
+        }
+
+        None
+    }
+
+    /// Ensure the driver service exists and is started
+    fn ensure_driver_service() -> Result<(), String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Services::*;
+
+        const SERVICE_NAME: &str = "MullvadSplitTunnel";
+
+        // Get driver path first
+        let driver_path = Self::get_driver_path()
+            .ok_or_else(|| "Driver file not found. Please reinstall SwiftTunnel.".to_string())?;
+
+        log::info!("Found driver at: {}", driver_path.display());
+
+        unsafe {
+            // Open Service Control Manager
+            let scm = OpenSCManagerW(
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SC_MANAGER_ALL_ACCESS,
+            ).map_err(|e| format!("Failed to open SCM (run as admin?): {}", e))?;
+
+            // Try to open existing service
+            let service_name_wide: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+            let service = OpenServiceW(
+                scm,
+                PCWSTR(service_name_wide.as_ptr()),
+                SERVICE_ALL_ACCESS,
+            );
+
+            let service = match service {
+                Ok(s) => {
+                    log::info!("Service already exists, checking status...");
+                    s
+                }
+                Err(_) => {
+                    // Service doesn't exist, create it
+                    log::info!("Creating driver service...");
+
+                    let driver_path_str = driver_path.to_string_lossy();
+                    let binary_path_wide: Vec<u16> = driver_path_str.encode_utf16().chain(std::iter::once(0)).collect();
+                    let display_name_wide: Vec<u16> = "Mullvad Split Tunnel".encode_utf16().chain(std::iter::once(0)).collect();
+
+                    CreateServiceW(
+                        scm,
+                        PCWSTR(service_name_wide.as_ptr()),
+                        PCWSTR(display_name_wide.as_ptr()),
+                        SERVICE_ALL_ACCESS,
+                        SERVICE_KERNEL_DRIVER,
+                        SERVICE_DEMAND_START,
+                        SERVICE_ERROR_NORMAL,
+                        PCWSTR(binary_path_wide.as_ptr()),
+                        PCWSTR::null(), // No load order group
+                        None,           // No tag
+                        PCWSTR::null(), // No dependencies
+                        PCWSTR::null(), // LocalSystem account
+                        PCWSTR::null(), // No password
+                    ).map_err(|e| format!("Failed to create service: {}", e))?
+                }
+            };
+
+            // Check service status
+            let mut status = SERVICE_STATUS::default();
+            if QueryServiceStatus(service, &mut status).is_ok() {
+                if status.dwCurrentState == SERVICE_RUNNING {
+                    log::info!("Driver service is already running");
+                    let _ = CloseServiceHandle(service);
+                    let _ = CloseServiceHandle(scm);
+                    return Ok(());
+                }
+            }
+
+            // Start the service
+            log::info!("Starting driver service...");
+            if let Err(e) = StartServiceW(service, None) {
+                let error_code = e.code().0 as u32;
+                // ERROR_SERVICE_ALREADY_RUNNING = 1056
+                if error_code != 1056 {
+                    let _ = CloseServiceHandle(service);
+                    let _ = CloseServiceHandle(scm);
+                    return Err(format!("Failed to start service: {} (code: 0x{:08X})", e, error_code));
+                }
+                log::debug!("Service already running");
+            }
+
+            // Wait for service to start (up to 10 seconds)
+            for i in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+
+                if QueryServiceStatus(service, &mut status).is_ok() {
+                    if status.dwCurrentState == SERVICE_RUNNING {
+                        log::info!("Driver service started successfully");
+                        let _ = CloseServiceHandle(service);
+                        let _ = CloseServiceHandle(scm);
+                        return Ok(());
+                    }
+                    if status.dwCurrentState == SERVICE_STOPPED {
+                        // Check for error
+                        if status.dwWin32ExitCode != 0 {
+                            let _ = CloseServiceHandle(service);
+                            let _ = CloseServiceHandle(scm);
+                            return Err(format!(
+                                "Service stopped with error: 0x{:08X}",
+                                status.dwWin32ExitCode
+                            ));
+                        }
+                    }
+                }
+
+                if i == 10 {
+                    log::debug!("Still waiting for service to start...");
+                }
+            }
+
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+
+            Err("Timeout waiting for service to start".to_string())
+        }
     }
 
     /// Cleanup stale state on startup
