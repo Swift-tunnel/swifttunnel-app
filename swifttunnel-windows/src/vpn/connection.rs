@@ -303,8 +303,9 @@ impl VpnConnection {
         adapter: &WintunAdapter,
         tunnel_apps: Vec<String>,
     ) -> (bool, Vec<String>) {
-        if !SplitTunnelDriver::is_available() {
-            log::warn!("Split tunnel driver not available");
+        // Try to ensure the driver is started (will install if needed)
+        if !SplitTunnelDriver::ensure_driver_started() {
+            log::warn!("Split tunnel driver not available and couldn't be started");
             return (false, Vec::new());
         }
 

@@ -274,6 +274,102 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Ensure the split tunnel driver is installed and started
+    /// Returns true if driver is now available, false if it couldn't be started
+    pub fn ensure_driver_started() -> bool {
+        use crate::hidden_command;
+
+        // First check if driver is already available
+        if Self::is_available() {
+            log::debug!("Split tunnel driver already running");
+            return true;
+        }
+
+        log::info!("Split tunnel driver not running, attempting to start...");
+
+        // Try to start the driver service
+        let start_result = hidden_command("sc")
+            .args(["start", "MullvadSplitTunnel"])
+            .output();
+
+        match start_result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                if output.status.success() {
+                    log::info!("Split tunnel driver started successfully");
+                    // Give it a moment to initialize
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    return Self::is_available();
+                }
+
+                // Check if service doesn't exist - need to create it
+                if stderr.contains("1060") || stderr.contains("service does not exist") ||
+                   stdout.contains("1060") || stdout.contains("service does not exist") {
+                    log::warn!("Split tunnel driver service not installed");
+
+                    // Try to find the driver file
+                    let driver_paths = [
+                        // Next to the exe
+                        std::env::current_exe().ok().map(|p| p.parent().map(|d| d.join("drivers").join("mullvad-split-tunnel.sys"))).flatten(),
+                        // In Program Files
+                        Some(PathBuf::from(r"C:\Program Files\SwiftTunnel\drivers\mullvad-split-tunnel.sys")),
+                    ];
+
+                    for path in driver_paths.iter().flatten() {
+                        if path.exists() {
+                            log::info!("Found driver at: {:?}, attempting to install...", path);
+
+                            // Create the service
+                            let create_result = hidden_command("sc")
+                                .args([
+                                    "create", "MullvadSplitTunnel",
+                                    "type=", "kernel",
+                                    "start=", "demand",
+                                    &format!("binpath={}", path.display()),
+                                ])
+                                .output();
+
+                            if let Ok(create_output) = create_result {
+                                if create_output.status.success() {
+                                    log::info!("Split tunnel driver service created, starting...");
+
+                                    // Now start it
+                                    let _ = hidden_command("sc")
+                                        .args(["start", "MullvadSplitTunnel"])
+                                        .output();
+
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                    let available = Self::is_available();
+                                    if available {
+                                        log::info!("Split tunnel driver started successfully after install");
+                                    }
+                                    return available;
+                                } else {
+                                    let err = String::from_utf8_lossy(&create_output.stderr);
+                                    log::error!("Failed to create driver service: {}", err);
+                                }
+                            }
+                            break;
+                        }
+                    }
+
+                    log::error!("Split tunnel driver file not found");
+                    return false;
+                }
+
+                // Service exists but failed to start
+                log::warn!("Failed to start split tunnel driver: {} {}", stdout.trim(), stderr.trim());
+            }
+            Err(e) => {
+                log::error!("Failed to execute sc command: {}", e);
+            }
+        }
+
+        false
+    }
+
     /// Cleanup stale state on startup
     pub fn cleanup_stale_state() {
         use windows::core::PCSTR;
