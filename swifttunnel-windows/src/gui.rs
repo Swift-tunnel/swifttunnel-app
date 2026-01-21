@@ -423,7 +423,7 @@ impl BoosterApp {
                         // Now ping all regions in the background
                         finding_clone.store(true, Ordering::SeqCst);
                         log::info!("Starting background latency measurement for {} regions...", regions.len());
-                        
+
                         for region in &regions {
                             let server_ips: Vec<(String, String)> = region.servers.iter()
                                 .filter_map(|server_id| {
@@ -432,12 +432,22 @@ impl BoosterApp {
                                         .map(|s| (server_id.clone(), s.ip.clone()))
                                 })
                                 .collect();
-                            
+
+                            log::info!("Pinging region '{}' with {} servers: {:?}", region.id, server_ips.len(),
+                                server_ips.iter().map(|(id, ip)| format!("{}={}", id, ip)).collect::<Vec<_>>());
+
+                            if server_ips.is_empty() {
+                                log::warn!("Region '{}' has no pingable servers! region.servers={:?}", region.id, region.servers);
+                                continue;
+                            }
+
                             if let Some((best_server_id, latency)) = ping_region_async(&server_ips).await {
                                 if let Ok(mut lat) = latencies_clone.lock() {
                                     lat.insert(region.id.clone(), (best_server_id.clone(), latency));
                                     log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
                                 }
+                            } else {
+                                log::warn!("Region '{}' ping failed - no servers responded", region.id);
                             }
                         }
                         
@@ -661,19 +671,23 @@ impl BoosterApp {
 async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)> {
     use crate::hidden_command;
 
+    log::debug!("ping_region_async: starting for {} servers", servers.len());
+
     let mut best_result: Option<(String, u32)> = None;
 
     for (server_id, server_ip) in servers {
         let mut total = 0u32;
         let mut count = 0u32;
 
+        log::debug!("Pinging server {} at {}", server_id, server_ip);
+
         // Do 2 pings per server (faster than 3)
-        for _ in 0..2 {
+        for ping_num in 0..2 {
             let output = tokio::task::spawn_blocking({
                 let ip = server_ip.clone();
                 move || {
                     hidden_command("ping")
-                        .args(["-n", "1", "-w", "500", &ip])
+                        .args(["-n", "1", "-w", "1000", &ip])
                         .output()
                         .ok()
                 }
@@ -681,10 +695,22 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
 
             if let Some(output) = output {
                 let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                if !output.status.success() {
+                    log::debug!("  Ping {} failed: status={}, stderr={}", ping_num + 1, output.status, stderr.trim());
+                    continue;
+                }
+
                 if let Some(ms) = parse_ping_output(&stdout) {
+                    log::debug!("  Ping {} to {}: {}ms", ping_num + 1, server_ip, ms);
                     total += ms;
                     count += 1;
+                } else {
+                    log::debug!("  Ping {} to {}: failed to parse output: {}", ping_num + 1, server_ip, stdout.lines().next().unwrap_or("(empty)"));
                 }
+            } else {
+                log::debug!("  Ping {} to {}: command failed to execute", ping_num + 1, server_ip);
             }
 
             // Small delay between pings
@@ -693,6 +719,7 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
 
         if count > 0 {
             let avg = total / count;
+            log::debug!("Server {} avg latency: {}ms ({} successful pings)", server_id, avg, count);
             let is_better = match &best_result {
                 None => true,
                 Some((_, best_latency)) => avg < *best_latency,
@@ -700,9 +727,12 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
             if is_better {
                 best_result = Some((server_id.clone(), avg));
             }
+        } else {
+            log::debug!("Server {} all pings failed", server_id);
         }
     }
 
+    log::debug!("ping_region_async result: {:?}", best_result);
     best_result
 }
 
@@ -1907,6 +1937,7 @@ impl BoosterApp {
 
     fn render_region_selector(&mut self, ui: &mut egui::Ui) {
         let mut clicked_region: Option<String> = None;
+        let mut gear_clicked = false; // Track if gear button was clicked (to prevent card click)
         let is_finding = self.finding_best_server.load(Ordering::Relaxed);
 
         // PERFORMANCE: Use cached values instead of locking mutexes every frame
@@ -2176,6 +2207,7 @@ impl BoosterApp {
                                                 } else {
                                                     self.server_selection_popup = Some(region.id.clone());
                                                 }
+                                                gear_clicked = true; // Prevent card click from also triggering
                                             }
                                             if gear_btn.hovered() {
                                                 egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("gear_tooltip"), |ui| {
@@ -2218,7 +2250,8 @@ impl BoosterApp {
                         let is_hovered = response.response.hovered();
                         self.animations.animate_hover(&card_id, is_hovered, hover_val);
 
-                        if response.response.interact(egui::Sense::click()).clicked() {
+                        // Only select region if gear button wasn't clicked
+                        if !gear_clicked && response.response.interact(egui::Sense::click()).clicked() {
                             clicked_region = Some(region.id.clone());
                         }
                     }
