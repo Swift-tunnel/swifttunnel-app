@@ -569,7 +569,7 @@ impl WfpEngine {
         deleted_count
     }
 
-    /// Delete ALL filters associated with the Mullvad sublayer
+    /// Delete ALL filters associated with the Mullvad sublayer or provider
     /// This is more thorough than relying on sublayer cascade deletion
     /// Filters created by the driver's Firewall::ApplyConfiguration() have dynamic IDs
     pub fn cleanup_mullvad_filters(&self) -> usize {
@@ -578,23 +578,12 @@ impl WfpEngine {
         log::info!("Enumerating and deleting Mullvad WFP filters...");
 
         unsafe {
-            // Create enum template to filter by sublayer
-            let template = FWPM_FILTER_ENUM_TEMPLATE0 {
-                providerKey: ptr::null_mut(),
-                layerKey: GUID::zeroed(),
-                enumType: FWP_FILTER_ENUM_FULLY_CONTAINED,
-                flags: 0,
-                providerContextTemplate: ptr::null_mut(),
-                numFilterConditions: 0,
-                filterCondition: ptr::null_mut(),
-                actionMask: 0xFFFFFFFF, // All action types
-                calloutKey: ptr::null_mut(),
-            };
-
+            // Pass None for template to enumerate ALL filters
+            // We'll filter by sublayer/provider in our code
             let mut enum_handle = HANDLE::default();
             let result = FwpmFilterCreateEnumHandle0(
                 self.handle,
-                Some(&template),
+                None,  // NULL template = enumerate ALL filters
                 &mut enum_handle,
             );
 
@@ -602,6 +591,8 @@ impl WfpEngine {
                 log::warn!("Failed to create filter enum handle: 0x{:08X}", result);
                 return 0;
             }
+
+            log::debug!("Filter enum handle created, enumerating all filters...");
 
             // Enumerate filters in batches
             loop {
