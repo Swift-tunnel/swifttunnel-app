@@ -569,6 +569,102 @@ impl WfpEngine {
         deleted_count
     }
 
+    /// Delete ALL filters associated with the Mullvad sublayer
+    /// This is more thorough than relying on sublayer cascade deletion
+    /// Filters created by the driver's Firewall::ApplyConfiguration() have dynamic IDs
+    pub fn cleanup_mullvad_filters(&self) -> usize {
+        let mut deleted_count = 0;
+
+        log::info!("Enumerating and deleting Mullvad WFP filters...");
+
+        unsafe {
+            // Create enum template to filter by sublayer
+            let template = FWPM_FILTER_ENUM_TEMPLATE0 {
+                providerKey: ptr::null_mut(),
+                layerKey: GUID::zeroed(),
+                enumType: FWP_FILTER_ENUM_FULLY_CONTAINED,
+                flags: 0,
+                providerContextTemplate: ptr::null_mut(),
+                numFilterConditions: 0,
+                filterCondition: ptr::null_mut(),
+                actionMask: 0xFFFFFFFF, // All action types
+                calloutKey: ptr::null_mut(),
+            };
+
+            let mut enum_handle = HANDLE::default();
+            let result = FwpmFilterCreateEnumHandle0(
+                self.handle,
+                Some(&template),
+                &mut enum_handle,
+            );
+
+            if result != 0 {
+                log::warn!("Failed to create filter enum handle: 0x{:08X}", result);
+                return 0;
+            }
+
+            // Enumerate filters in batches
+            loop {
+                let mut entries: *mut *mut FWPM_FILTER0 = ptr::null_mut();
+                let mut num_entries: u32 = 0;
+
+                let result = FwpmFilterEnum0(
+                    self.handle,
+                    enum_handle,
+                    100, // Batch size
+                    &mut entries,
+                    &mut num_entries,
+                );
+
+                if result != 0 || num_entries == 0 {
+                    break;
+                }
+
+                // Process each filter
+                for i in 0..num_entries as isize {
+                    let filter = *entries.offset(i);
+                    if filter.is_null() {
+                        continue;
+                    }
+
+                    let filter_ref = &*filter;
+
+                    // Check if this filter belongs to the Mullvad sublayer
+                    if filter_ref.subLayerKey == ST_FW_WINFW_BASELINE_SUBLAYER_KEY {
+                        let delete_result = FwpmFilterDeleteById0(self.handle, filter_ref.filterId);
+                        if delete_result == 0 {
+                            deleted_count += 1;
+                        }
+                    }
+
+                    // Also check if it belongs to the Mullvad provider
+                    if !filter_ref.providerKey.is_null() {
+                        let provider_key = &*filter_ref.providerKey;
+                        if *provider_key == ST_FW_PROVIDER_KEY {
+                            let delete_result = FwpmFilterDeleteById0(self.handle, filter_ref.filterId);
+                            if delete_result == 0 {
+                                deleted_count += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Free the memory
+                FwpmFreeMemory0(&mut (entries as *mut _));
+            }
+
+            let _ = FwpmFilterDestroyEnumHandle0(self.handle, enum_handle);
+        }
+
+        if deleted_count > 0 {
+            log::info!("Deleted {} Mullvad WFP filters", deleted_count);
+        } else {
+            log::debug!("No Mullvad WFP filters found to delete");
+        }
+
+        deleted_count
+    }
+
     /// Cleanup all SwiftTunnel WFP objects (for uninstall)
     pub fn cleanup_all(&self) -> VpnResult<()> {
         log::info!("Cleaning up all SwiftTunnel WFP objects...");
@@ -659,28 +755,37 @@ impl FilterLayer {
 /// Cleanup stale WFP objects from previous sessions
 ///
 /// MUST be called at app startup BEFORE any VPN/driver operations.
-/// This cleans up persistent Mullvad WFP objects (callouts, sublayer, provider)
+/// This cleans up persistent Mullvad WFP objects (filters, callouts, sublayer, provider)
 /// that may exist from a previous session that crashed or didn't clean up properly.
 ///
 /// If stale objects exist when driver.initialize() runs, it will fail with
 /// FWP_E_ALREADY_EXISTS (0x80320009). And if we clean up AFTER initialize(),
 /// we'd delete the objects that were just registered.
 ///
-/// Order of deletion matters:
-/// 1. Callouts first (they reference the sublayer)
-/// 2. Sublayer second (it references the provider)
-/// 3. Provider last
+/// Order of deletion matters (most dependent first):
+/// 1. Filters first (they reference callouts and sublayer)
+/// 2. Callouts second (they reference the sublayer)
+/// 3. Sublayer third (it references the provider)
+/// 4. Provider last
 pub fn cleanup_stale_wfp_callouts() {
     log::info!("Cleaning up stale WFP objects from previous sessions...");
 
     if let Ok(engine) = WfpEngine::open() {
-        // Step 1: Delete Mullvad callouts (must be first - they reference sublayer)
-        let deleted = engine.cleanup_mullvad_callouts();
-        if deleted > 0 {
-            log::info!("Deleted {} stale Mullvad WFP callouts", deleted);
+        // Step 0: Delete ALL filters associated with Mullvad sublayer/provider
+        // CRITICAL: Filters must be deleted FIRST - they reference callouts
+        // This fixes the FWP_E_ALREADY_EXISTS error on SET_CONFIGURATION
+        let filters_deleted = engine.cleanup_mullvad_filters();
+        if filters_deleted > 0 {
+            log::info!("Deleted {} stale Mullvad WFP filters", filters_deleted);
         }
 
-        // Step 2: Delete Mullvad sublayer (must be before provider)
+        // Step 1: Delete Mullvad callouts (they reference sublayer)
+        let callouts_deleted = engine.cleanup_mullvad_callouts();
+        if callouts_deleted > 0 {
+            log::info!("Deleted {} stale Mullvad WFP callouts", callouts_deleted);
+        }
+
+        // Step 2: Delete Mullvad sublayer (it references provider)
         let result = unsafe {
             FwpmSubLayerDeleteByKey0(engine.handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
         };
