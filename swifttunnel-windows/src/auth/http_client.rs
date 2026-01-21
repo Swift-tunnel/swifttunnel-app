@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde_json::json;
 
 const API_BASE_URL: &str = "https://swifttunnel.net";
-const SUPABASE_URL: &str = "https://auth.swifttunnel.net";
+const SUPABASE_URL: &str = "https://zonugjvoqklvgbnhxshg.supabase.co";
 const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvbnVnanZvcWtsdmdibmh4c2hnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyNTU3ODksImV4cCI6MjA4MDgzMTc4OX0.Jmme0whahuX2KEmklBZQzCcJnsHJemyO8U9TdynbyNE";
 
 /// HTTP client for authentication API calls
