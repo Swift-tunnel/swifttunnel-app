@@ -1040,7 +1040,14 @@ fn parse_ports(data: &[u8]) -> Option<(u16, u16)> {
 }
 
 /// Check if packet should be routed to VPN
-#[inline(always)]
+///
+/// Uses two-phase lookup:
+/// 1. Fast path: Check cached snapshot (lock-free, O(1))
+/// 2. Slow path: Inline GetExtendedTcpTable lookup if cache misses
+///
+/// The slow path is critical for catching new connections before the cache
+/// refreshes. Without it, the first packets of a new connection would bypass
+/// the VPN because the cache hasn't seen them yet.
 fn should_route_to_vpn(data: &[u8], snapshot: &ProcessSnapshot) -> bool {
     // Skip Ethernet header (14 bytes)
     if data.len() < 14 + 20 + 4 {
@@ -1084,8 +1091,183 @@ fn should_route_to_vpn(data: &[u8], snapshot: &ProcessSnapshot) -> bool {
 
     let src_port = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
 
-    // Lock-free lookup!
-    snapshot.should_tunnel(src_ip, src_port, protocol)
+    // Fast path: Lock-free cache lookup (O(1))
+    if snapshot.should_tunnel(src_ip, src_port, protocol) {
+        return true;
+    }
+
+    // Slow path: Inline lookup for new connections not yet in cache
+    // This catches packets from apps that just started (like ip_checker.exe)
+    // before the 30ms cache refresh picks them up
+    inline_connection_lookup(src_ip, src_port, protocol, &snapshot.tunnel_apps)
+}
+
+/// Inline connection table lookup for cache misses
+///
+/// This is slower than the cache but ensures we don't miss new connections.
+/// Called only when the cache doesn't have the connection yet.
+fn inline_connection_lookup(
+    src_ip: Ipv4Addr,
+    src_port: u16,
+    protocol: Protocol,
+    tunnel_apps: &std::collections::HashSet<String>,
+) -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::NetworkManagement::IpHelper::*;
+
+    // Look up PID from connection table
+    let pid = match protocol {
+        Protocol::Tcp => lookup_tcp_pid(src_ip, src_port),
+        Protocol::Udp => lookup_udp_pid(src_ip, src_port),
+    };
+
+    let pid = match pid {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Get process name for PID
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+        true,
+        ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet),
+    );
+
+    if let Some(process) = system.process(sysinfo::Pid::from_u32(pid)) {
+        let name = process.name().to_string_lossy().to_lowercase();
+        let name_stem = name.trim_end_matches(".exe");
+
+        for app in tunnel_apps {
+            let app_stem = app.trim_end_matches(".exe");
+            if name.contains(app_stem) || app_stem.contains(name_stem) {
+                log::info!(
+                    "inline_connection_lookup: TUNNEL MATCH! {}:{} -> PID {} ({})",
+                    src_ip, src_port, pid, name
+                );
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Look up TCP connection PID from system table
+fn lookup_tcp_pid(src_ip: Ipv4Addr, src_port: u16) -> Option<u32> {
+    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::NetworkManagement::IpHelper::*;
+
+    unsafe {
+        let mut size: u32 = 0;
+        let _ = GetExtendedTcpTable(
+            None,
+            &mut size,
+            false,
+            2,
+            TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+            0,
+        );
+
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        if GetExtendedTcpTable(
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut size,
+            false,
+            2,
+            TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+            0,
+        ) != NO_ERROR.0
+        {
+            return None;
+        }
+
+        let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+        let entries = std::slice::from_raw_parts(
+            table.table.as_ptr(),
+            table.dwNumEntries as usize,
+        );
+
+        for entry in entries {
+            let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
+            let local_port = u16::from_be(entry.dwLocalPort as u16);
+
+            // Exact match
+            if local_ip == src_ip && local_port == src_port {
+                return Some(entry.dwOwningPid);
+            }
+
+            // 0.0.0.0 binding match
+            if local_ip == Ipv4Addr::UNSPECIFIED && local_port == src_port {
+                return Some(entry.dwOwningPid);
+            }
+        }
+    }
+
+    None
+}
+
+/// Look up UDP connection PID from system table
+fn lookup_udp_pid(src_ip: Ipv4Addr, src_port: u16) -> Option<u32> {
+    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::NetworkManagement::IpHelper::*;
+
+    unsafe {
+        let mut size: u32 = 0;
+        let _ = GetExtendedUdpTable(
+            None,
+            &mut size,
+            false,
+            2,
+            UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
+            0,
+        );
+
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        if GetExtendedUdpTable(
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut size,
+            false,
+            2,
+            UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
+            0,
+        ) != NO_ERROR.0
+        {
+            return None;
+        }
+
+        let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
+        let entries = std::slice::from_raw_parts(
+            table.table.as_ptr(),
+            table.dwNumEntries as usize,
+        );
+
+        for entry in entries {
+            let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
+            let local_port = u16::from_be(entry.dwLocalPort as u16);
+
+            // Exact match
+            if local_ip == src_ip && local_port == src_port {
+                return Some(entry.dwOwningPid);
+            }
+
+            // 0.0.0.0 binding match
+            if local_ip == Ipv4Addr::UNSPECIFIED && local_port == src_port {
+                return Some(entry.dwOwningPid);
+            }
+        }
+    }
+
+    None
 }
 
 /// Get adapter friendly name
