@@ -40,12 +40,45 @@ use tokio::runtime::Runtime;
 use windows::core::PCSTR;
 use windows::Win32::Foundation::{HANDLE, CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Threading::CreateMutexA;
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
 
 // Note: OAuth callback is now handled via localhost HTTP server (auth::oauth_server)
 // instead of deep links. This eliminates the second-instance problem.
 
 /// Single-instance mutex name
 const SINGLE_INSTANCE_MUTEX: &str = "SwiftTunnel_SingleInstance_Mutex_v1";
+
+/// Check if running in a Remote Desktop (RDP) session
+/// Uses GetSystemMetrics(SM_REMOTESESSION) which returns nonzero if in RDP
+fn is_rdp_session() -> bool {
+    unsafe {
+        GetSystemMetrics(SM_REMOTESESSION) != 0
+    }
+}
+
+/// Detect if we're likely in an environment without OpenGL support
+/// Returns true if we should use wgpu (software rendering) instead of glow (OpenGL)
+fn should_use_software_renderer() -> bool {
+    // Check for RDP session
+    if is_rdp_session() {
+        info!("Detected RDP session - will use wgpu (software) renderer");
+        return true;
+    }
+
+    // Check for --wgpu command line flag (manual override)
+    if std::env::args().any(|arg| arg == "--wgpu" || arg == "--software-render") {
+        info!("Manual wgpu renderer requested via command line");
+        return true;
+    }
+
+    // Check for environment variable override
+    if std::env::var("SWIFTTUNNEL_RENDERER").map(|v| v.to_lowercase()) == Ok("wgpu".to_string()) {
+        info!("wgpu renderer requested via SWIFTTUNNEL_RENDERER environment variable");
+        return true;
+    }
+
+    false
+}
 
 /// RAII wrapper for Windows mutex handle
 struct SingleInstanceGuard {
@@ -350,10 +383,20 @@ fn main() -> eframe::Result<()> {
         .with_transparent(false)        // Solid window background
         .with_maximized(true);          // FORCE maximized on startup
 
-    // Launch GUI with glow (OpenGL) for better performance and compatibility
+    // Choose renderer based on environment
+    // - glow (OpenGL) for native desktop with GPU - best performance
+    // - wgpu (software) for RDP/VM without GPU support - compatibility fallback
+    let renderer = if should_use_software_renderer() {
+        info!("Using wgpu (software) renderer for RDP/VM compatibility");
+        eframe::Renderer::Wgpu
+    } else {
+        info!("Using glow (OpenGL) renderer for native performance");
+        eframe::Renderer::Glow
+    };
+
     let options = NativeOptions {
         viewport,
-        renderer: eframe::Renderer::Glow,
+        renderer,
         ..Default::default()
     };
 
