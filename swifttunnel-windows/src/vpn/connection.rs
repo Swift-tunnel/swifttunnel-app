@@ -417,6 +417,11 @@ impl VpnConnection {
                             }
                         }
 
+                        // Set socket timeout for inbound receiver loop (100ms to match timer interval)
+                        // This allows periodic keepalive checking without blocking forever
+                        socket.set_read_timeout(Some(Duration::from_millis(100)))
+                            .unwrap_or_else(|e| log::warn!("Failed to set socket read timeout: {}", e));
+
                         if let Err(e) = socket.connect(endpoint) {
                             log::warn!("Failed to connect encryption socket: {}", e);
                         } else {
@@ -426,7 +431,7 @@ impl VpnConnection {
                                 server_addr: endpoint,
                             };
                             driver.set_vpn_encrypt_context(ctx);
-                            log::info!("Direct encryption enabled for split tunnel (inbound receiver will start)");
+                            log::info!("Direct encryption enabled for split tunnel (inbound receiver will start with keepalives)");
                         }
                     }
                     Err(e) => {
