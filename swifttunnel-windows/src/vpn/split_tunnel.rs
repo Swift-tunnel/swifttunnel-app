@@ -456,9 +456,23 @@ impl SplitTunnelDriver {
                         }
                     }
                     None => {
-                        // Can't read config, need to recreate
+                        // Can't read config - but check if service is already running
+                        // If running, just use it (don't recreate unnecessarily)
+                        let mut status = SERVICE_STATUS::default();
+                        if QueryServiceStatus(service, &mut status).is_ok() {
+                            if status.dwCurrentState == SERVICE_RUNNING {
+                                log::info!("Driver service is running (config unreadable but service works)");
+                                let _ = CloseServiceHandle(service);
+                                let _ = CloseServiceHandle(scm);
+                                return Ok(());
+                            }
+                            // Service exists but not running - try to start it first
+                            log::info!("Service exists but not running, attempting to start...");
+                            return Self::start_service_and_wait(scm, service);
+                        }
+                        // Can't query status either, try to recreate
                         log::warn!(
-                            "Unable to read driver service config. Recreating... (attempt {})",
+                            "Unable to read driver service config or status. Recreating... (attempt {})",
                             recreate_attempts + 1
                         );
                     }
