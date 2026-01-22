@@ -7,7 +7,9 @@
 //! - adapter.rs: Wintun virtual network adapter management
 //! - tunnel.rs: WireGuard tunnel using BoringTun
 //! - process_tracker.rs: Maps network connections to PIDs via IP Helper APIs
+//! - process_cache.rs: Lock-free RCU-style process cache for <0.1ms lookups
 //! - packet_interceptor.rs: ndisapi-based packet interception for split tunneling
+//! - parallel_interceptor.rs: Per-CPU parallel packet processing (WireGuard-like)
 //! - split_tunnel.rs: Per-process routing coordination
 //! - routes.rs: Route management for VPN traffic routing
 //! - connection.rs: Connection state machine and lifecycle management
@@ -17,7 +19,9 @@ pub mod config;
 pub mod adapter;
 pub mod tunnel;
 pub mod process_tracker;
+pub mod process_cache;
 pub mod packet_interceptor;
+pub mod parallel_interceptor;
 pub mod split_tunnel;
 pub mod routes;
 pub mod connection;
@@ -27,6 +31,8 @@ pub use config::{fetch_vpn_config, VpnConfigRequest};
 pub use adapter::WintunAdapter;
 pub use tunnel::WireguardTunnel;
 pub use packet_interceptor::WireguardContext;
+pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
+pub use parallel_interceptor::ParallelInterceptor;
 pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
 pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 pub use connection::{VpnConnection, ConnectionState};
