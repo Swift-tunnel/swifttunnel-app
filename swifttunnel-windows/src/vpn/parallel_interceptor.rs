@@ -57,8 +57,9 @@ struct PacketWork {
     data: Vec<u8>,
     /// Whether packet is outbound
     is_outbound: bool,
-    /// Physical adapter index (for sending bypass packets)
-    physical_adapter_idx: usize,
+    /// Physical adapter internal name (GUID) - shared across all work items
+    /// Using Arc to avoid copying the string for every packet
+    physical_adapter_name: Arc<String>,
 }
 
 /// Per-worker statistics
@@ -136,6 +137,8 @@ pub struct ParallelInterceptor {
     refresher_handle: Option<JoinHandle<()>>,
     /// Physical adapter index
     physical_adapter_idx: Option<usize>,
+    /// Physical adapter internal name (GUID) for cross-thread lookup
+    physical_adapter_name: Option<String>,
     /// VPN adapter index
     vpn_adapter_idx: Option<usize>,
     /// Wintun session for VPN injection
@@ -175,6 +178,7 @@ impl ParallelInterceptor {
             reader_handle: None,
             refresher_handle: None,
             physical_adapter_idx: None,
+            physical_adapter_name: None,
             vpn_adapter_idx: None,
             wintun_session: None,
             active: false,
@@ -246,7 +250,8 @@ impl ParallelInterceptor {
         log::info!("Found {} adapters", adapters.len());
 
         let mut vpn_adapter: Option<(usize, String)> = None;
-        let mut physical_candidates: Vec<(usize, String, i32)> = Vec::new();
+        // (idx, friendly_name, internal_name, score)
+        let mut physical_candidates: Vec<(usize, String, String, i32)> = Vec::new();
 
         for (idx, adapter) in adapters.iter().enumerate() {
             let internal_name = adapter.get_name();
@@ -290,14 +295,15 @@ impl ParallelInterceptor {
                     score += 50;
                 }
                 score += (10 - idx.min(10)) as i32;
-                physical_candidates.push((idx, friendly_name.clone(), score));
+                physical_candidates.push((idx, friendly_name.clone(), internal_name.clone(), score));
             }
         }
 
         // Select physical adapter
-        if let Some((idx, name, _)) = physical_candidates.into_iter().max_by_key(|x| x.2) {
+        if let Some((idx, friendly_name, internal_name, _)) = physical_candidates.into_iter().max_by_key(|x| x.3) {
             self.physical_adapter_idx = Some(idx);
-            log::info!("Selected physical adapter: {} (index {})", name, idx);
+            self.physical_adapter_name = Some(internal_name.clone());
+            log::info!("Selected physical adapter: {} (index {}, internal: '{}')", friendly_name, idx, internal_name);
         } else {
             return Err(VpnError::SplitTunnel(
                 "No physical adapter found".to_string(),
@@ -380,9 +386,14 @@ impl ParallelInterceptor {
         // Start packet reader/dispatcher thread
         let reader_stop = Arc::clone(&self.stop_flag);
         let num_workers = self.num_workers;
+        let physical_name = Arc::new(
+            self.physical_adapter_name
+                .clone()
+                .ok_or_else(|| VpnError::SplitTunnel("Physical adapter name not set".to_string()))?
+        );
 
         self.reader_handle = Some(thread::spawn(move || {
-            if let Err(e) = run_packet_reader(physical_idx, senders, reader_stop, num_workers) {
+            if let Err(e) = run_packet_reader(physical_idx, physical_name, senders, reader_stop, num_workers) {
                 log::error!("Packet reader error: {}", e);
             }
         }));
@@ -464,6 +475,7 @@ fn set_thread_affinity(core_id: usize) {
 /// Packet reader thread - reads from ndisapi and dispatches to workers
 fn run_packet_reader(
     physical_idx: usize,
+    physical_name: Arc<String>,
     senders: Vec<crossbeam_channel::Sender<PacketWork>>,
     stop_flag: Arc<AtomicBool>,
     num_workers: usize,
@@ -473,8 +485,9 @@ fn run_packet_reader(
     const BATCH_SIZE: usize = 64; // Read up to 64 packets per syscall
 
     log::info!(
-        "Packet reader started (physical idx: {}, {} workers)",
+        "Packet reader started (physical idx: {}, name: '{}', {} workers)",
         physical_idx,
+        physical_name,
         num_workers
     );
 
@@ -560,7 +573,7 @@ fn run_packet_reader(
                     let work = PacketWork {
                         data: data.to_vec(), // Copy packet data
                         is_outbound: true,
-                        physical_adapter_idx: physical_idx,  // Pass index, not handle!
+                        physical_adapter_name: Arc::clone(&physical_name),  // Pass name, not index!
                     };
 
                     // If worker queue is full, send as passthrough
@@ -766,13 +779,13 @@ fn send_bypass_packet(
 ) {
     use ndisapi::{EthMRequest, IntermediateBuffer};
 
-    // Get adapter by index (not handle comparison - handles differ between driver instances!)
-    let adapter = match adapters.get(work.physical_adapter_idx) {
+    // Find adapter by internal name (GUID) - this is consistent across driver instances
+    let adapter = match adapters.iter().find(|a| a.get_name() == work.physical_adapter_name.as_str()) {
         Some(a) => a,
         None => {
             log::warn!(
-                "send_bypass_packet: adapter index {} out of range (have {} adapters)",
-                work.physical_adapter_idx,
+                "send_bypass_packet: adapter '{}' not found in worker's adapter list ({} adapters)",
+                work.physical_adapter_name,
                 adapters.len()
             );
             return;
