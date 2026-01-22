@@ -1182,34 +1182,15 @@ fn test_split_tunnel_two_apps() {
         return;
     }
 
-    // Set Wintun injection context
+    // Set Wintun injection context (fallback)
     let wg_ctx = std::sync::Arc::new(WireguardContext {
         session: adapter.session(),
         packets_injected: std::sync::atomic::AtomicU64::new(0),
     });
     driver.set_wireguard_context(wg_ctx.clone());
 
-    // TUNNEL ONLY ip_checker.exe
-    let tunnel_apps = vec!["ip_checker.exe".to_string()];
-
-    let split_config = SplitTunnelConfig::new(
-        tunnel_apps,
-        vpn_config.assigned_ip.clone(),
-        original_internet_ip.clone(),
-        interface_luid,
-    );
-
-    if let Err(e) = driver.configure(split_config) {
-        println!("   ❌ Configure failed: {}", e);
-        let _ = driver.close();
-        route_manager.remove_routes().ok();
-        tunnel.stop();
-        adapter.shutdown();
-        return;
-    }
-    println!("   ✅ Split tunnel started");
-
-    // Set up VpnEncryptContext for direct encryption (bypasses Wintun injection)
+    // Set up VpnEncryptContext for direct encryption BEFORE configure()
+    // Workers start during configure(), so they need the context available beforehand
     // This is critical for split tunnel - without it, tunnel packets won't actually go through VPN
     if let Some(tunn) = tunnel.get_tunn() {
         let endpoint = tunnel.get_endpoint();
@@ -1235,6 +1216,26 @@ fn test_split_tunnel_two_apps() {
     } else {
         println!("   ⚠ Could not get tunnel context (falling back to Wintun injection)");
     }
+
+    // TUNNEL ONLY ip_checker.exe
+    let tunnel_apps = vec!["ip_checker.exe".to_string()];
+
+    let split_config = SplitTunnelConfig::new(
+        tunnel_apps,
+        vpn_config.assigned_ip.clone(),
+        original_internet_ip.clone(),
+        interface_luid,
+    );
+
+    if let Err(e) = driver.configure(split_config) {
+        println!("   ❌ Configure failed: {}", e);
+        let _ = driver.close();
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+    println!("   ✅ Split tunnel started");
 
     // Set up inbound handler so VPN responses get injected to physical adapter
     if let Some(handler) = driver.create_inbound_handler() {
