@@ -297,6 +297,10 @@ impl VpnConnection {
 
         let mut route_manager = RouteManager::new(server_ip, if_index);
 
+        // Enable split tunnel mode - only tunnel app traffic will use VPN
+        // Non-tunnel apps will bypass VPN and use direct internet connection
+        route_manager.set_split_tunnel_mode(true);
+
         if let Err(e) = route_manager.apply_routes() {
             log::error!("Failed to apply VPN routes: {}", e);
             return Err(e);
