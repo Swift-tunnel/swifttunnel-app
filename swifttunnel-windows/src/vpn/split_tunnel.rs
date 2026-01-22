@@ -235,17 +235,84 @@ impl SplitTunnelDriver {
         // Try to start the driver service
         if let Err(e) = Self::ensure_driver_service() {
             log::error!("Failed to ensure driver service: {}", e);
-            return false;
+        } else {
+            // Check again after service start
+            if PacketInterceptor::check_driver_available() {
+                log::info!("Windows Packet Filter driver available after service start");
+                return true;
+            }
         }
 
-        // Check again
-        if PacketInterceptor::check_driver_available() {
-            log::info!("Windows Packet Filter driver available after service start");
-            return true;
+        // Try to install from bundled MSI
+        log::info!("Attempting to install WinpkFilter from bundled MSI...");
+        if let Err(e) = Self::install_driver_from_msi() {
+            log::warn!("Failed to install from bundled MSI: {}", e);
+        } else {
+            // Check again after MSI install
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if PacketInterceptor::check_driver_available() {
+                log::info!("Windows Packet Filter driver available after MSI install");
+                return true;
+            }
         }
 
         log::error!("Windows Packet Filter driver not available");
         false
+    }
+
+    /// Try to install the driver from bundled MSI
+    fn install_driver_from_msi() -> Result<(), String> {
+        // Look for bundled MSI in common locations
+        let msi_paths = [
+            // Same directory as exe (for portable/dev)
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))),
+            // Program Files installation
+            Some(PathBuf::from(r"C:\Program Files\SwiftTunnel\drivers\WinpkFilter-x64.msi")),
+        ];
+
+        let mut msi_path = None;
+        for path_opt in &msi_paths {
+            if let Some(path) = path_opt {
+                if path.exists() {
+                    msi_path = Some(path.clone());
+                    break;
+                }
+            }
+        }
+
+        let msi_path = msi_path.ok_or_else(|| {
+            "WinpkFilter-x64.msi not found. Please download from: https://github.com/wiresock/ndisapi/releases".to_string()
+        })?;
+
+        log::info!("Installing WinpkFilter from: {}", msi_path.display());
+
+        // Run msiexec to install silently
+        let output = std::process::Command::new("msiexec")
+            .args([
+                "/i",
+                &msi_path.to_string_lossy(),
+                "/qn",      // Quiet, no UI
+                "/norestart",
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run msiexec: {}", e))?;
+
+        if output.status.success() {
+            log::info!("WinpkFilter MSI installation completed successfully");
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let code = output.status.code().unwrap_or(-1);
+            // Exit code 1638 = another version already installed (not an error)
+            if code == 1638 {
+                log::info!("WinpkFilter already installed (different version)");
+                Ok(())
+            } else {
+                Err(format!("msiexec failed with code {}: {}", code, stderr))
+            }
+        }
     }
 
     /// Get the path to the driver file
