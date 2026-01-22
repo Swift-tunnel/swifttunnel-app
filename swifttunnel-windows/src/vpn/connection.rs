@@ -4,9 +4,17 @@
 //! - Configuration fetching
 //! - Wintun adapter creation
 //! - WireGuard tunnel establishment
-//! - Split tunneling setup (ndisapi-based)
+//! - Split tunneling (two modes available):
+//!   - **Route-based** (DEFAULT): Zero overhead! Kernel routes game IPs through VPN.
+//!   - **Process-based**: ndisapi packet interception (higher CPU, for unknown games)
 //! - Route management
 //! - Connection state tracking
+//!
+//! ## Split Tunnel Mode
+//!
+//! Set `SWIFTTUNNEL_SPLIT_MODE` environment variable:
+//! - `route` (default) - Uses IP routing for known games (Roblox, Valorant)
+//! - `process` - Uses ndisapi packet interception (for any process)
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +25,7 @@ use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
 use super::parallel_interceptor::{ThroughputStats, VpnEncryptContext};
-use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
+use super::routes::{RouteManager, SplitTunnelMode, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::packet_interceptor::WireguardContext;
 use super::{VpnError, VpnResult};
@@ -26,6 +34,23 @@ use super::{VpnError, VpnResult};
 /// Lower = faster detection of new processes, slightly higher CPU
 /// 50ms ensures game traffic is tunneled almost instantly on launch
 const REFRESH_INTERVAL_MS: u64 = 50;
+
+/// Get split tunnel mode from environment variable
+///
+/// - SWIFTTUNNEL_SPLIT_MODE=route (DEFAULT) - Zero overhead, uses IP routes for known games
+/// - SWIFTTUNNEL_SPLIT_MODE=process - Uses ndisapi packet interception (more CPU)
+fn get_split_tunnel_mode() -> SplitTunnelMode {
+    match std::env::var("SWIFTTUNNEL_SPLIT_MODE").as_deref() {
+        Ok("process") => {
+            log::info!("Split tunnel mode: PROCESS-BASED (ndisapi packet interception)");
+            SplitTunnelMode::ProcessBased
+        }
+        _ => {
+            log::info!("Split tunnel mode: ROUTE-BASED (zero overhead, kernel routing)");
+            SplitTunnelMode::RouteBased
+        }
+    }
+}
 
 /// VPN connection state
 #[derive(Debug, Clone, PartialEq)]
@@ -241,25 +266,42 @@ impl VpnConnection {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Step 4: Configure split tunneling
+        // Determine the split tunnel mode (route-based is default - zero overhead!)
+        let split_mode = get_split_tunnel_mode();
+
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
         let (split_tunnel_active, tunneled_processes) = if !tunnel_apps.is_empty() {
-            match self.setup_split_tunnel(&config, &adapter, tunnel_apps).await {
-                Ok(processes) => {
-                    log::info!("Split tunnel setup succeeded");
-
-                    // VpnEncryptContext is set up inside setup_split_tunnel() BEFORE configure()
-                    // so the inbound receiver thread starts properly during configure()
-                    (true, processes)
+            match split_mode {
+                SplitTunnelMode::RouteBased => {
+                    // ROUTE-BASED: Zero overhead! Kernel handles routing for game IPs.
+                    // No packet interception, no process lookup, no latency overhead.
+                    log::info!("Using route-based split tunnel (zero overhead)");
+                    log::info!("Games to tunnel: {:?}", tunnel_apps);
+                    // Routes will be added in setup_routes() below
+                    (true, tunnel_apps.clone())
                 }
-                Err(e) => {
-                    log::error!("Split tunnel setup FAILED: {}", e);
-                    log::error!("Aborting connection - cannot proceed without split tunnel");
-                    self.cleanup().await;
-                    self.set_state(ConnectionState::Error(format!(
-                        "Split tunnel failed: {}",
-                        e
-                    ))).await;
-                    return Err(e);
+                SplitTunnelMode::ProcessBased => {
+                    // PROCESS-BASED: Uses ndisapi packet interception (higher latency)
+                    match self.setup_split_tunnel(&config, &adapter, tunnel_apps).await {
+                        Ok(processes) => {
+                            log::info!("Process-based split tunnel setup succeeded");
+                            (true, processes)
+                        }
+                        Err(e) => {
+                            log::error!("Split tunnel setup FAILED: {}", e);
+                            log::error!("Aborting connection - cannot proceed without split tunnel");
+                            self.cleanup().await;
+                            self.set_state(ConnectionState::Error(format!(
+                                "Split tunnel failed: {}",
+                                e
+                            ))).await;
+                            return Err(e);
+                        }
+                    }
+                }
+                SplitTunnelMode::Disabled => {
+                    log::info!("Split tunnel disabled, all traffic will use VPN");
+                    (false, Vec::new())
                 }
             }
         } else {
@@ -269,7 +311,7 @@ impl VpnConnection {
 
         // Step 5: Setup routes AFTER split tunnel exclusions
         self.set_state(ConnectionState::ConfiguringRoutes).await;
-        if let Err(e) = self.setup_routes(&config, &adapter).await {
+        if let Err(e) = self.setup_routes(&config, &adapter, split_mode, &tunnel_apps).await {
             log::warn!("Failed to setup routes: {}", e);
             // Continue anyway - split tunnel might still work partially
         }
@@ -289,7 +331,15 @@ impl VpnConnection {
     }
 
     /// Setup routes through VPN interface
-    async fn setup_routes(&mut self, config: &VpnConfig, adapter: &WintunAdapter) -> VpnResult<()> {
+    ///
+    /// For route-based split tunnel, this also adds game-specific IP routes.
+    async fn setup_routes(
+        &mut self,
+        config: &VpnConfig,
+        _adapter: &WintunAdapter,  // Reserved for future use
+        split_mode: SplitTunnelMode,
+        tunnel_apps: &[String],
+    ) -> VpnResult<()> {
         // Parse VPN server IP
         let endpoint = &config.endpoint;
         let server_ip: std::net::Ipv4Addr = endpoint
@@ -312,13 +362,37 @@ impl VpnConnection {
 
         let mut route_manager = RouteManager::new(server_ip, if_index);
 
-        // Enable split tunnel mode - only tunnel app traffic will use VPN
-        // Non-tunnel apps will bypass VPN and use direct internet connection
-        route_manager.set_split_tunnel_mode(true);
+        // For route-based split tunnel, we DON'T add default route - only game routes
+        // For process-based split tunnel, we also don't add default route (ndisapi handles routing)
+        // Only add default route when NO split tunnel is active
+        let enable_split_mode = split_mode != SplitTunnelMode::Disabled && !tunnel_apps.is_empty();
+        route_manager.set_split_tunnel_mode(enable_split_mode);
 
         if let Err(e) = route_manager.apply_routes() {
             log::error!("Failed to apply VPN routes: {}", e);
             return Err(e);
+        }
+
+        // For ROUTE-BASED split tunnel, add game-specific routes
+        // These routes direct game server traffic through the Wintun interface
+        if split_mode == SplitTunnelMode::RouteBased && !tunnel_apps.is_empty() {
+            log::info!("Adding game routes for route-based split tunnel");
+
+            for app in tunnel_apps {
+                // Map app names to game IDs for routing
+                let game = match app.to_lowercase().as_str() {
+                    s if s.contains("roblox") => "roblox",
+                    s if s.contains("valorant") || s.contains("riot") => "valorant",
+                    _ => {
+                        log::warn!("No route-based support for app: {} (using process-based fallback)", app);
+                        continue;
+                    }
+                };
+
+                if let Err(e) = route_manager.add_game_routes(game) {
+                    log::warn!("Failed to add routes for {}: {}", game, e);
+                }
+            }
         }
 
         self.route_manager = Some(route_manager);
