@@ -806,16 +806,35 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
 
     log::info!("Cache refresher started (30ms refresh interval)");
 
+    // Log tunnel apps at startup
+    let tunnel_apps = cache.tunnel_apps();
+    log::info!(
+        "Cache refresher: tunnel_apps = {:?} ({} apps)",
+        tunnel_apps.iter().take(5).collect::<Vec<_>>(),
+        tunnel_apps.len()
+    );
+
+    if tunnel_apps.is_empty() {
+        log::warn!("Cache refresher: WARNING - tunnel_apps is EMPTY! No traffic will be tunneled!");
+    }
+
     let mut system = System::new();
     let mut refresh_count = 0u64;
+    let mut first_run = true;
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
             break;
         }
 
-        // Refresh every 30ms for fast game detection
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        // On first run, don't sleep - immediately refresh to populate cache
+        if first_run {
+            first_run = false;
+            log::info!("Cache refresher: Performing initial refresh immediately");
+        } else {
+            // Refresh every 30ms for fast game detection
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
 
         // Collect connections
         let mut connections: HashMap<ConnectionKey, u32> = HashMap::with_capacity(1024);
