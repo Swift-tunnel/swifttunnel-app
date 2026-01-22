@@ -19,6 +19,72 @@ use super::process_tracker::{ProcessTracker, Protocol};
 use super::{VpnError, VpnResult};
 use windows::Win32::Foundation::{HANDLE, CloseHandle};
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersInfo, IP_ADAPTER_INFO};
+
+/// Get the friendly name for an adapter given its internal name (device GUID)
+fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
+    // Extract GUID from internal name like "\DEVICE\{GUID}"
+    let guid = internal_name
+        .rsplit('\\')
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c| c == '{' || c == '}');
+
+    if guid.is_empty() {
+        return None;
+    }
+
+    // Use GetAdaptersInfo to find the adapter by GUID
+    unsafe {
+        let mut buf_len: u32 = 0;
+        // First call to get required buffer size
+        let _ = GetAdaptersInfo(None, &mut buf_len);
+
+        if buf_len == 0 {
+            return None;
+        }
+
+        // Allocate buffer
+        let mut buffer: Vec<u8> = vec![0; buf_len as usize];
+        let adapter_info_ptr = buffer.as_mut_ptr() as *mut IP_ADAPTER_INFO;
+
+        // Second call to get actual data
+        let result = GetAdaptersInfo(Some(adapter_info_ptr), &mut buf_len);
+        if result != 0 {
+            log::debug!("GetAdaptersInfo failed with error: {}", result);
+            return None;
+        }
+
+        // Iterate through adapters
+        let mut current = adapter_info_ptr;
+        while !current.is_null() {
+            let adapter = &*current;
+
+            // Get adapter name (GUID) - null-terminated string
+            let adapter_name_bytes: Vec<u8> = adapter.AdapterName
+                .iter()
+                .take_while(|&&b| b != 0)
+                .map(|&b| b as u8)
+                .collect();
+            let adapter_guid = String::from_utf8_lossy(&adapter_name_bytes);
+
+            // Check if this is our adapter
+            if adapter_guid.to_lowercase().contains(&guid.to_lowercase()) {
+                // Get description (friendly name) - null-terminated string
+                let desc_bytes: Vec<u8> = adapter.Description
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| b as u8)
+                    .collect();
+                return Some(String::from_utf8_lossy(&desc_bytes).to_string());
+            }
+
+            current = adapter.Next;
+        }
+    }
+
+    None
+}
 
 /// Packet direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,16 +249,31 @@ impl PacketInterceptor {
         // Find physical adapter (first non-VPN adapter with an IP)
         // and VPN adapter (by name match)
         for (idx, adapter) in adapters.iter().enumerate() {
-            let name = adapter.get_name();
-            log::debug!("  Adapter {}: {}", idx, name);
+            let internal_name = adapter.get_name();
 
-            if name.contains(vpn_adapter_name) || name.contains("SwiftTunnel") || name.contains("Wintun") {
+            // Try to get the friendly name using Windows API
+            let friendly_name = get_adapter_friendly_name(&internal_name).unwrap_or_default();
+
+            log::info!("  Adapter {}: internal='{}' friendly='{}'", idx, internal_name, friendly_name);
+
+            // Check both internal name and friendly name for VPN adapter
+            let is_vpn_adapter = internal_name.to_lowercase().contains(&vpn_adapter_name.to_lowercase())
+                || internal_name.to_lowercase().contains("swifttunnel")
+                || internal_name.to_lowercase().contains("wintun")
+                || friendly_name.to_lowercase().contains(&vpn_adapter_name.to_lowercase())
+                || friendly_name.to_lowercase().contains("swifttunnel")
+                || friendly_name.to_lowercase().contains("wintun");
+
+            let is_loopback = internal_name.to_lowercase().contains("loopback")
+                || friendly_name.to_lowercase().contains("loopback");
+
+            if is_vpn_adapter {
                 self.vpn_adapter_idx = Some(idx);
-                log::info!("Found VPN adapter at index {}: {}", idx, name);
-            } else if self.physical_adapter_idx.is_none() && !name.contains("Loopback") {
+                log::info!("Found VPN adapter at index {}: {} ({})", idx, friendly_name, internal_name);
+            } else if self.physical_adapter_idx.is_none() && !is_loopback {
                 // Use first non-loopback, non-VPN adapter as physical
                 self.physical_adapter_idx = Some(idx);
-                log::info!("Using physical adapter at index {}: {}", idx, name);
+                log::info!("Using physical adapter at index {}: {} ({})", idx, friendly_name, internal_name);
             }
         }
 
