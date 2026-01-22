@@ -1176,18 +1176,39 @@ fn inject_inbound_packet(
     use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
     if ip_packet.len() < 20 {
+        log::warn!("inject_inbound_packet: packet too small ({} bytes)", ip_packet.len());
         return None;
     }
 
     // Parse IP header
+    let src_ip = std::net::Ipv4Addr::new(
+        ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+    );
     let dst_ip = std::net::Ipv4Addr::new(
         ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
     );
     let protocol = ip_packet[9];
 
+    // Log every packet for debugging (first 10)
+    if packet_count < 10 {
+        log::info!(
+            "inject_inbound_packet #{}: {} -> {}, proto={}, {} bytes, config.tunnel_ip={:?}, config.internet_ip={:?}",
+            packet_count, src_ip, dst_ip, protocol, ip_packet.len(),
+            config.tunnel_ip, config.internet_ip
+        );
+    }
+
     // Check if we need to do NAT (rewrite destination IP from tunnel_ip to internet_ip)
     let needs_nat = config.tunnel_ip.is_some() && config.internet_ip.is_some()
         && Some(dst_ip) == config.tunnel_ip;
+
+    // Log NAT decision for debugging (first 10 packets)
+    if packet_count < 10 {
+        log::info!(
+            "inject_inbound_packet #{}: needs_nat={} (dst={}, tunnel_ip={:?})",
+            packet_count, needs_nat, dst_ip, config.tunnel_ip
+        );
+    }
 
     // Make a mutable copy for NAT rewriting
     let mut packet = ip_packet.to_vec();
@@ -1195,11 +1216,11 @@ fn inject_inbound_packet(
     if needs_nat {
         let new_dst = config.internet_ip.unwrap();
 
-        // Log first few NAT rewrites
-        if packet_count < 5 {
+        // Log NAT rewrites (first 10)
+        if packet_count < 10 {
             log::info!(
-                "Inbound NAT: {} -> {}, proto={}, {} bytes",
-                dst_ip, new_dst, protocol, packet.len()
+                "Inbound NAT #{}: {} -> {}, proto={}, {} bytes",
+                packet_count, dst_ip, new_dst, protocol, packet.len()
             );
         }
 
@@ -2060,6 +2081,9 @@ fn should_route_to_vpn(data: &[u8], snapshot: &ProcessSnapshot) -> bool {
 ///
 /// This is slower than the cache but ensures we don't miss new connections.
 /// Called only when the cache doesn't have the connection yet.
+/// Counter for inline lookup debug logging
+static INLINE_LOOKUP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn inline_connection_lookup(
     src_ip: Ipv4Addr,
     src_port: u16,
@@ -2070,6 +2094,8 @@ fn inline_connection_lookup(
     use windows::Win32::Foundation::NO_ERROR;
     use windows::Win32::NetworkManagement::IpHelper::*;
 
+    let count = INLINE_LOOKUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     // Look up PID from connection table
     let pid = match protocol {
         Protocol::Tcp => lookup_tcp_pid(src_ip, src_port),
@@ -2078,7 +2104,16 @@ fn inline_connection_lookup(
 
     let pid = match pid {
         Some(p) => p,
-        None => return false,
+        None => {
+            // Log first 10 PID lookup failures
+            if count < 10 {
+                log::info!(
+                    "inline_connection_lookup #{}: NO PID for {}:{} (proto={:?})",
+                    count, src_ip, src_port, protocol
+                );
+            }
+            return false;
+        }
     };
 
     // Get process name for PID
@@ -2103,6 +2138,19 @@ fn inline_connection_lookup(
                 return true;
             }
         }
+
+        // Log first 10 name mismatches
+        if count < 10 {
+            log::info!(
+                "inline_connection_lookup #{}: PID {} = '{}' NOT in tunnel_apps {:?}",
+                count, pid, name, tunnel_apps
+            );
+        }
+    } else if count < 10 {
+        log::info!(
+            "inline_connection_lookup #{}: process not found for PID {}",
+            count, pid
+        );
     }
 
     false
@@ -2281,7 +2329,9 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
 }
 
 /// Update transport (TCP/UDP) checksum after NAT IP change
-/// Uses incremental checksum update per RFC 1624
+/// Uses incremental checksum update per RFC 1624:
+/// HC' = ~(~HC + ~m + m')
+/// Where HC is old checksum, m is old value, m' is new value
 fn update_transport_checksum(
     packet: &mut [u8],
     checksum_offset: usize,
@@ -2294,30 +2344,30 @@ fn update_transport_checksum(
         packet[checksum_offset + 1],
     ]);
 
-    // Incrementally update checksum
-    // ~(~C + ~old + new) where ~ is one's complement
-    let mut sum: i32 = (!old_checksum) as i32;
+    // RFC 1624 formula: HC' = ~(~HC + ~m + m')
+    // ~HC: one's complement of old checksum
+    // ~m: one's complement of old IP (both 16-bit words)
+    // m': new IP (both 16-bit words)
+    let mut sum: u32 = (!old_checksum) as u32;
 
-    // Subtract old IP (as two 16-bit words)
+    // Add one's complement of old IP words (~m)
     let old_ip_hi = u16::from_be_bytes([old_ip[0], old_ip[1]]);
     let old_ip_lo = u16::from_be_bytes([old_ip[2], old_ip[3]]);
-    sum -= old_ip_hi as i32;
-    sum -= old_ip_lo as i32;
+    sum += (!old_ip_hi) as u32;
+    sum += (!old_ip_lo) as u32;
 
-    // Add new IP (as two 16-bit words)
+    // Add new IP words (m')
     let new_ip_hi = u16::from_be_bytes([new_ip[0], new_ip[1]]);
     let new_ip_lo = u16::from_be_bytes([new_ip[2], new_ip[3]]);
-    sum += new_ip_hi as i32;
-    sum += new_ip_lo as i32;
+    sum += new_ip_hi as u32;
+    sum += new_ip_lo as u32;
 
-    // Fold and complement
-    while sum < 0 {
-        sum += 0x10000;
-    }
+    // Fold 32-bit sum to 16 bits
     while sum > 0xFFFF {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
+    // One's complement of result
     let new_checksum = !(sum as u16);
     packet[checksum_offset] = (new_checksum >> 8) as u8;
     packet[checksum_offset + 1] = (new_checksum & 0xFF) as u8;
