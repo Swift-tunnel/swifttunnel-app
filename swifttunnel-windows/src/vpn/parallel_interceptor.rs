@@ -386,6 +386,8 @@ impl ParallelInterceptor {
             let wintun_session = self.wintun_session.clone();
             let stats = Arc::clone(&self.worker_stats[worker_id]);
             let throughput = self.throughput_stats.clone();
+            let tunnel_ip = self.tunnel_ip;
+            let internet_ip = self.internet_ip;
 
             let handle = thread::spawn(move || {
                 // Set CPU affinity for this worker
@@ -399,6 +401,8 @@ impl ParallelInterceptor {
                     stats,
                     throughput,
                     stop_flag,
+                    tunnel_ip,
+                    internet_ip,
                 );
             });
 
@@ -852,6 +856,8 @@ fn run_packet_worker(
     stats: Arc<WorkerStats>,
     throughput: ThroughputStats,
     stop_flag: Arc<AtomicBool>,
+    tunnel_ip: Option<std::net::Ipv4Addr>,
+    internet_ip: Option<std::net::Ipv4Addr>,
 ) {
     log::info!("Worker {} started", worker_id);
 
@@ -960,9 +966,49 @@ fn run_packet_worker(
                     if work.data.len() > 14 {
                         let ip_packet = &work.data[14..];
 
-                        match session.allocate_send_packet(ip_packet.len() as u16) {
+                        // Do source NAT if configured: rewrite src from internet_ip to tunnel_ip
+                        // This is needed because the app's socket is bound to the physical adapter IP,
+                        // but the VPN server expects packets from the tunnel IP.
+                        let mut nat_packet;
+                        let packet_to_send = if ip_packet.len() >= 20 {
+                            let src_ip = std::net::Ipv4Addr::new(
+                                ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+                            );
+
+                            // Check if we need source NAT
+                            if tunnel_ip.is_some() && internet_ip.is_some() && Some(src_ip) == internet_ip {
+                                nat_packet = ip_packet.to_vec();
+                                let new_src = tunnel_ip.unwrap();
+
+                                // Rewrite source IP (bytes 12-15)
+                                nat_packet[12] = new_src.octets()[0];
+                                nat_packet[13] = new_src.octets()[1];
+                                nat_packet[14] = new_src.octets()[2];
+                                nat_packet[15] = new_src.octets()[3];
+
+                                // Recalculate IP header checksum
+                                nat_packet[10] = 0;
+                                nat_packet[11] = 0;
+                                let ihl = ((nat_packet[0] & 0x0F) as usize) * 4;
+                                let checksum = calculate_ip_checksum(&nat_packet[..ihl]);
+                                nat_packet[10] = (checksum >> 8) as u8;
+                                nat_packet[11] = (checksum & 0xFF) as u8;
+
+                                if worker_id == 0 && wintun_inject_success % 100 == 0 {
+                                    log::debug!("Worker 0: Source NAT {} -> {}", src_ip, new_src);
+                                }
+
+                                &nat_packet[..]
+                            } else {
+                                ip_packet
+                            }
+                        } else {
+                            ip_packet
+                        };
+
+                        match session.allocate_send_packet(packet_to_send.len() as u16) {
                             Ok(mut packet) => {
-                                packet.bytes_mut().copy_from_slice(ip_packet);
+                                packet.bytes_mut().copy_from_slice(packet_to_send);
                                 session.send_packet(packet);
                                 wintun_inject_success += 1;
                             }
