@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="SwiftTunnel"
              Language="1033"
-             Version="0.5.41.0"
+             Version="0.6.0.0"
              Manufacturer="SwiftTunnel"
              UpgradeCode="8B5E7A12-4F3D-4A2B-9C5E-1D2F3A4B5C6D">
 
@@ -40,67 +40,21 @@
                       Impersonate="no"
                       Return="ignore" />
 
-        <!-- Custom Actions for Split Tunnel Driver -->
         <!--
-             Pattern: SetProperty (immediate) + WixQuietExec64 (deferred)
-             The SetProperty runs during immediate phase and expands [DriversFolder] to actual path.
-             The value becomes CustomActionData for the deferred WixQuietExec64 action.
+            Windows Packet Filter Driver Installation
+            The driver MSI is bundled and installed silently.
+            Using msiexec /i with /qn (quiet, no UI) and /norestart
         -->
 
-        <!-- Set command for driver installation (immediate - expands properties) -->
-        <!-- WixQuietExec64 requires command to start with quoted executable path -->
-        <!-- Note: removed timeout command as it can hang in non-interactive MSI sessions -->
-        <!-- Using ping as a delay instead (works reliably in all contexts) -->
-        <SetProperty Id="InstallSplitTunnelDriver"
-                     Value="&quot;cmd.exe&quot; /c sc stop MullvadSplitTunnel 2&gt;nul &amp; sc delete MullvadSplitTunnel 2&gt;nul &amp; ping -n 2 127.0.0.1 &gt;nul &amp; sc create MullvadSplitTunnel type= kernel start= demand binpath= &quot;[DriversFolder]mullvad-split-tunnel.sys&quot;"
-                     Before="InstallSplitTunnelDriver"
+        <!-- Set command for WinPkFilter driver installation (immediate - expands properties) -->
+        <SetProperty Id="InstallWinPkFilter"
+                     Value="&quot;msiexec.exe&quot; /i &quot;[DriversFolder]WinpkFilter-x64.msi&quot; /qn /norestart"
+                     Before="InstallWinPkFilter"
                      Sequence="execute" />
 
-        <!-- Execute driver installation (deferred - uses CustomActionData from SetProperty) -->
-        <!-- Return="ignore" so app installs even if driver setup fails (app works without split tunnel) -->
-        <CustomAction Id="InstallSplitTunnelDriver"
-                      BinaryKey="WixCA"
-                      DllEntry="WixQuietExec64"
-                      Execute="deferred"
-                      Impersonate="no"
-                      Return="ignore" />
-
-        <!-- Set command for starting driver -->
-        <SetProperty Id="StartSplitTunnelDriver"
-                     Value="&quot;cmd.exe&quot; /c sc start MullvadSplitTunnel"
-                     Before="StartSplitTunnelDriver"
-                     Sequence="execute" />
-
-        <!-- Start the split tunnel driver service -->
-        <CustomAction Id="StartSplitTunnelDriver"
-                      BinaryKey="WixCA"
-                      DllEntry="WixQuietExec64"
-                      Execute="deferred"
-                      Impersonate="no"
-                      Return="ignore" />
-
-        <!-- Set command for stopping driver -->
-        <SetProperty Id="StopSplitTunnelDriver"
-                     Value="&quot;cmd.exe&quot; /c sc stop MullvadSplitTunnel 2&gt;nul"
-                     Before="StopSplitTunnelDriver"
-                     Sequence="execute" />
-
-        <!-- Stop the split tunnel driver service before uninstall -->
-        <CustomAction Id="StopSplitTunnelDriver"
-                      BinaryKey="WixCA"
-                      DllEntry="WixQuietExec64"
-                      Execute="deferred"
-                      Impersonate="no"
-                      Return="ignore" />
-
-        <!-- Set command for deleting driver service -->
-        <SetProperty Id="UninstallSplitTunnelDriver"
-                     Value="&quot;cmd.exe&quot; /c sc delete MullvadSplitTunnel 2&gt;nul"
-                     Before="UninstallSplitTunnelDriver"
-                     Sequence="execute" />
-
-        <!-- Remove the split tunnel driver service on uninstall -->
-        <CustomAction Id="UninstallSplitTunnelDriver"
+        <!-- Execute WinPkFilter driver installation (deferred) -->
+        <!-- Return="ignore" so app installs even if driver already exists or fails -->
+        <CustomAction Id="InstallWinPkFilter"
                       BinaryKey="WixCA"
                       DllEntry="WixQuietExec64"
                       Execute="deferred"
@@ -108,11 +62,9 @@
                       Return="ignore" />
 
         <InstallExecuteSequence>
-            <Custom Action="AddFirewallRule" After="InstallFiles">NOT Installed</Custom>
-            <Custom Action="InstallSplitTunnelDriver" After="InstallFiles">NOT Installed</Custom>
-            <Custom Action="StartSplitTunnelDriver" After="InstallSplitTunnelDriver">NOT Installed</Custom>
-            <Custom Action="StopSplitTunnelDriver" Before="RemoveFiles">REMOVE="ALL"</Custom>
-            <Custom Action="UninstallSplitTunnelDriver" After="StopSplitTunnelDriver">REMOVE="ALL"</Custom>
+            <!-- Install WinPkFilter driver first, then firewall rule -->
+            <Custom Action="InstallWinPkFilter" After="InstallFiles">NOT Installed</Custom>
+            <Custom Action="AddFirewallRule" After="InstallWinPkFilter">NOT Installed</Custom>
         </InstallExecuteSequence>
 
         <!-- Directory Structure -->
@@ -155,6 +107,15 @@
             </Component>
         </ComponentGroup>
 
+        <ComponentGroup Id="DriverComponents" Directory="DriversFolder">
+            <!-- Windows Packet Filter driver MSI - bundled for silent installation -->
+            <Component Id="WinPkFilterMsi" Guid="G7H8I9J0-K1L2-M3N4-O5P6-Q7R8S9T0U1V2" Win64="yes">
+                <File Id="WinpkFilterMsi"
+                      Source="$(var.SourceDir)\drivers\WinpkFilter-x64.msi"
+                      KeyPath="yes" />
+            </Component>
+        </ComponentGroup>
+
         <ComponentGroup Id="StartMenuShortcuts" Directory="ApplicationProgramsFolder">
             <Component Id="ApplicationShortcut" Guid="C3D4E5F6-A7B8-9012-CDEF-345678901234">
                 <Shortcut Id="ApplicationStartMenuShortcut"
@@ -178,14 +139,6 @@
                           Icon="SwiftTunnelIcon" />
                 <RemoveFolder Id="CleanUpDesktopShortcut" Directory="DesktopFolder" On="uninstall" />
                 <RegistryValue Root="HKCU" Key="Software\SwiftTunnel" Name="desktopShortcut" Type="integer" Value="1" KeyPath="yes" />
-            </Component>
-        </ComponentGroup>
-
-        <ComponentGroup Id="DriverComponents" Directory="DriversFolder">
-            <Component Id="SplitTunnelDriver" Guid="F6A7B8C9-D0E1-2345-F012-678901234567" Win64="yes">
-                <File Id="MullvadSplitTunnelSys"
-                      Source="$(var.SourceDir)\drivers\mullvad-split-tunnel.sys"
-                      KeyPath="yes" />
             </Component>
         </ComponentGroup>
     </Fragment>

@@ -4,7 +4,7 @@
 //! - Configuration fetching
 //! - Wintun adapter creation
 //! - WireGuard tunnel establishment
-//! - Split tunneling setup (exclude-all-except mode)
+//! - Split tunneling setup (ndisapi-based)
 //! - Route management
 //! - Connection state tracking
 
@@ -16,7 +16,6 @@ use crate::auth::types::VpnConfig;
 use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
-use super::wfp::{cleanup_stale_wfp_callouts, WfpEngine};
 use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::{VpnError, VpnResult};
@@ -229,9 +228,7 @@ impl VpnConnection {
         // Give tunnel a moment to establish
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Step 4: Configure split tunneling (BEFORE routes)
-        // CRITICAL: Split tunnel MUST succeed - we fail the connection if it doesn't
-        // This prevents the user from thinking they're protected when they're not
+        // Step 4: Configure split tunneling
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
         let (split_tunnel_active, tunneled_processes) = if !tunnel_apps.is_empty() {
             match self.setup_split_tunnel(&config, &adapter, tunnel_apps).await {
@@ -242,7 +239,6 @@ impl VpnConnection {
                 Err(e) => {
                     log::error!("Split tunnel setup FAILED: {}", e);
                     log::error!("Aborting connection - cannot proceed without split tunnel");
-                    // Clean up and fail the connection
                     self.cleanup().await;
                     self.set_state(ConnectionState::Error(format!(
                         "Split tunnel failed: {}",
@@ -293,7 +289,6 @@ impl VpnConnection {
             Ok(idx) => idx,
             Err(e) => {
                 log::warn!("Could not get interface index: {}", e);
-                // Try to get LUID-based index as fallback
                 1 // Default fallback
             }
         };
@@ -312,20 +307,13 @@ impl VpnConnection {
         Ok(())
     }
 
-    /// Setup split tunneling with exclude-all-except logic
+    /// Setup split tunneling with ndisapi-based approach
     ///
-    /// CRITICAL: This function now FAILS the connection if split tunnel setup fails.
-    /// The user expects split tunneling - proceeding without it could leak traffic.
-    ///
-    /// Initialization order (v0.5.30 - HYPOTHESIS: driver handles all WFP internally):
-    /// 0. Restart driver service (reset internal state)
-    /// 1. Clean up stale WFP objects from previous connections (callouts, filters, sublayer, provider)
-    /// 2. Check driver availability
-    /// 3. Open driver
-    /// 4. Initialize driver (creates WFP provider + sublayer + callouts internally)
-    /// 5. Configure driver (register processes, IPs, set config)
-    ///
-    /// NOTE: v0.5.30 removes manual sublayer creation - testing if driver handles everything
+    /// Simplified initialization (no WFP complexity):
+    /// 1. Check driver availability
+    /// 2. Open driver
+    /// 3. Initialize driver
+    /// 4. Configure with tunnel apps
     async fn setup_split_tunnel(
         &mut self,
         config: &VpnConfig,
@@ -335,8 +323,7 @@ impl VpnConnection {
         let interface_luid = adapter.get_luid();
         log::info!("Setting up split tunnel (LUID: {})...", interface_luid);
 
-        // Step 4: Get internet interface IP for socket redirection
-        // This tells the driver where to redirect excluded app traffic
+        // Get internet interface IP for socket redirection
         let internet_ip = get_internet_interface_ip().map_err(|e| {
             VpnError::SplitTunnelSetupFailed(format!(
                 "Failed to get internet interface IP: {}",
@@ -345,161 +332,99 @@ impl VpnConnection {
         })?;
         log::info!("Internet interface IP for split tunnel: {}", internet_ip);
 
-        let mut last_err: Option<VpnError> = None;
-
-        for attempt in 0..2 {
-            if attempt == 0 {
-                log::info!("Preparing split tunnel driver...");
-            } else {
-                log::warn!(
-                    "Retrying split tunnel setup after full driver restart (attempt {})...",
-                    attempt + 1
-                );
-            }
-
-            if let Err(e) = SplitTunnelDriver::stop_driver_service() {
-                log::warn!("Failed to stop split tunnel driver service: {}", e);
-            }
-
-            // Clean up stale WFP objects WHILE DRIVER IS STOPPED
-            log::info!("Cleaning up stale WFP objects (driver stopped)...");
-            cleanup_stale_wfp_callouts();
-
-            // Check if driver is available (creates service if needed)
-            if !SplitTunnelDriver::check_driver_available() {
-                return Err(VpnError::SplitTunnelNotAvailable);
-            }
-
-            // Open driver
-            let mut driver = SplitTunnelDriver::new();
-            driver.open().map_err(|e| {
-                VpnError::SplitTunnelSetupFailed(format!("Failed to open driver: {}", e))
-            })?;
-            log::info!("Split tunnel driver opened");
-
-            // Initialize driver (creates WFP provider + callouts)
-            driver.initialize().map_err(|e| {
-                let _ = driver.close();
-                VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
-            })?;
-            log::info!("Split tunnel driver initialized (provider + callouts created)");
-
-            // DEBUG: Enumerate WFP objects to diagnose what exists
-            if let Ok(wfp_debug) = WfpEngine::open() {
-                wfp_debug.debug_enumerate_wfp_objects();
-            }
-
-            // Create sublayer AFTER driver.initialize()
-            log::info!("Creating WFP sublayer (required for SET_CONFIGURATION)...");
-            let mut wfp_engine = WfpEngine::open().map_err(|e| {
-                let _ = driver.close();
-                VpnError::SplitTunnelSetupFailed(format!("Failed to open WFP engine: {}", e))
-            })?;
-
-            wfp_engine.create_sublayer_standalone().map_err(|e| {
-                let _ = driver.close();
-                VpnError::SplitTunnelSetupFailed(format!("Failed to create WFP sublayer: {}", e))
-            })?;
-            log::info!("WFP sublayer created successfully");
-
-            // DEBUG: Enumerate again after sublayer creation to see full state
-            wfp_engine.debug_enumerate_wfp_objects();
-
-            // Configure driver (register processes, IPs, set config)
-            let split_config = SplitTunnelConfig::new(
-                tunnel_apps.clone(),
-                config.assigned_ip.clone(),
-                internet_ip.to_string(),
-                interface_luid,
-            );
-
-            if let Err(e) = driver.configure(split_config) {
-                let _ = driver.close();
-                let err_msg = e.to_string();
-                let should_retry = attempt == 0
-                    && (err_msg.contains("0x80320009")
-                        || err_msg.to_lowercase().contains("already exists"));
-                if should_retry {
-                    log::warn!(
-                        "SET_CONFIGURATION failed with ALREADY_EXISTS; restarting driver and retrying"
-                    );
-                    last_err = Some(VpnError::SplitTunnelSetupFailed(format!(
-                        "Failed to configure split tunnel: {}",
-                        e
-                    )));
-                    continue;
-                }
-
-                return Err(VpnError::SplitTunnelSetupFailed(format!(
-                    "Failed to configure split tunnel: {}",
-                    e
-                )));
-            }
-
-            let running = driver.get_running_tunnel_apps();
-            if !running.is_empty() {
-                log::info!("Currently tunneling: {:?}", running);
-            }
-
-            let driver = Arc::new(Mutex::new(driver));
-            self.split_tunnel = Some(Arc::clone(&driver));
-
-            // Start fast refresh loop (50ms for instant game detection)
-            self.process_monitor_stop.store(false, Ordering::SeqCst);
-            let stop_flag = Arc::clone(&self.process_monitor_stop);
-            let state_handle = Arc::clone(&self.state);
-
-            tokio::spawn(async move {
-                log::info!("Process monitor started ({}ms interval)", REFRESH_INTERVAL_MS);
-
-                loop {
-                    if stop_flag.load(Ordering::SeqCst) {
-                        break;
-                    }
-
-                    tokio::time::sleep(Duration::from_millis(REFRESH_INTERVAL_MS)).await;
-
-                    if stop_flag.load(Ordering::SeqCst) {
-                        break;
-                    }
-
-                    let mut driver_guard = driver.lock().await;
-                    match driver_guard.refresh_exclusions() {
-                        Ok(_) => {
-                            let running_names = driver_guard.get_running_tunnel_apps();
-                            drop(driver_guard);
-
-                            let mut state = state_handle.lock().await;
-                            if let ConnectionState::Connected {
-                                ref mut tunneled_processes,
-                                ..
-                            } = *state {
-                                if *tunneled_processes != running_names {
-                                    if !running_names.is_empty() && tunneled_processes.is_empty() {
-                                        log::info!("Game detected, tunneling: {:?}", running_names);
-                                    } else if running_names.is_empty() && !tunneled_processes.is_empty() {
-                                        log::info!("All games exited");
-                                    }
-                                    *tunneled_processes = running_names;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Exclusion refresh error: {}", e);
-                        }
-                    }
-                }
-
-                log::info!("Process monitor stopped");
-            });
-
-            log::info!("Split tunnel configured successfully - only selected games use VPN");
-            return Ok(running);
+        // Check if driver is available
+        if !SplitTunnelDriver::check_driver_available() {
+            return Err(VpnError::SplitTunnelNotAvailable);
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            VpnError::SplitTunnelSetupFailed("Failed to configure split tunnel".to_string())
-        }))
+        // Create and configure driver
+        let mut driver = SplitTunnelDriver::new();
+
+        // Open driver
+        driver.open().map_err(|e| {
+            VpnError::SplitTunnelSetupFailed(format!("Failed to open driver: {}", e))
+        })?;
+        log::info!("Split tunnel driver opened");
+
+        // Initialize driver
+        driver.initialize().map_err(|e| {
+            let _ = driver.close();
+            VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
+        })?;
+        log::info!("Split tunnel driver initialized");
+
+        // Configure driver
+        let split_config = SplitTunnelConfig::new(
+            tunnel_apps.clone(),
+            config.assigned_ip.clone(),
+            internet_ip.to_string(),
+            interface_luid,
+        );
+
+        driver.configure(split_config).map_err(|e| {
+            let _ = driver.close();
+            VpnError::SplitTunnelSetupFailed(format!("Failed to configure split tunnel: {}", e))
+        })?;
+
+        let running = driver.get_running_tunnel_apps();
+        if !running.is_empty() {
+            log::info!("Currently tunneling: {:?}", running);
+        }
+
+        let driver = Arc::new(Mutex::new(driver));
+        self.split_tunnel = Some(Arc::clone(&driver));
+
+        // Start fast refresh loop (50ms for instant game detection)
+        self.process_monitor_stop.store(false, Ordering::SeqCst);
+        let stop_flag = Arc::clone(&self.process_monitor_stop);
+        let state_handle = Arc::clone(&self.state);
+
+        tokio::spawn(async move {
+            log::info!("Process monitor started ({}ms interval)", REFRESH_INTERVAL_MS);
+
+            loop {
+                if stop_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(REFRESH_INTERVAL_MS)).await;
+
+                if stop_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let mut driver_guard = driver.lock().await;
+                match driver_guard.refresh_exclusions() {
+                    Ok(_) => {
+                        let running_names = driver_guard.get_running_tunnel_apps();
+                        drop(driver_guard);
+
+                        let mut state = state_handle.lock().await;
+                        if let ConnectionState::Connected {
+                            ref mut tunneled_processes,
+                            ..
+                        } = *state {
+                            if *tunneled_processes != running_names {
+                                if !running_names.is_empty() && tunneled_processes.is_empty() {
+                                    log::info!("Game detected, tunneling: {:?}", running_names);
+                                } else if running_names.is_empty() && !tunneled_processes.is_empty() {
+                                    log::info!("All games exited");
+                                }
+                                *tunneled_processes = running_names;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Exclusion refresh error: {}", e);
+                    }
+                }
+            }
+
+            log::info!("Process monitor stopped");
+        });
+
+        log::info!("Split tunnel configured successfully - only selected games use VPN");
+        Ok(running)
     }
 
     pub async fn disconnect(&mut self) -> VpnResult<()> {

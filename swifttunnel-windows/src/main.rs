@@ -214,17 +214,6 @@ fn main() -> eframe::Result<()> {
     // This ensures split tunnel driver is reset before we start
     SplitTunnelDriver::cleanup_stale_state();
 
-    // Ensure Base Filtering Engine (BFE) service is running
-    // BFE is required for WFP operations - auto-start if stopped
-    let _ = vpn::ensure_bfe_running();
-
-    // Clean up any stale WFP callouts from previous sessions
-    // This MUST happen before any driver.initialize() calls
-    if let Err(e) = SplitTunnelDriver::stop_driver_service() {
-        warn!("Failed to stop split tunnel driver service on startup: {}", e);
-    }
-    vpn::cleanup_stale_wfp_callouts();
-
     // Create shared state
     let app_state = Arc::new(Mutex::new(AppState::default()));
     let state_clone = Arc::clone(&app_state);

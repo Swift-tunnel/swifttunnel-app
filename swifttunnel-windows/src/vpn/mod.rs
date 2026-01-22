@@ -6,8 +6,9 @@
 //! - config.rs: VPN configuration types and API fetching
 //! - adapter.rs: Wintun virtual network adapter management
 //! - tunnel.rs: WireGuard tunnel using BoringTun
-//! - wfp.rs: Windows Filtering Platform integration for split tunneling
-//! - split_tunnel.rs: Per-process routing via win-split-tunnel driver
+//! - process_tracker.rs: Maps network connections to PIDs via IP Helper APIs
+//! - packet_interceptor.rs: ndisapi-based packet interception for split tunneling
+//! - split_tunnel.rs: Per-process routing coordination
 //! - routes.rs: Route management for VPN traffic routing
 //! - connection.rs: Connection state machine and lifecycle management
 //! - servers.rs: Server list and latency measurement
@@ -15,7 +16,8 @@
 pub mod config;
 pub mod adapter;
 pub mod tunnel;
-pub mod wfp;
+pub mod process_tracker;
+pub mod packet_interceptor;
 pub mod split_tunnel;
 pub mod routes;
 pub mod connection;
@@ -24,7 +26,6 @@ pub mod servers;
 pub use config::{fetch_vpn_config, VpnConfigRequest};
 pub use adapter::WintunAdapter;
 pub use tunnel::WireguardTunnel;
-pub use wfp::{WfpEngine, setup_wfp_for_split_tunnel, cleanup_stale_wfp_callouts, ensure_bfe_running};
 pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
 pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 pub use connection::{VpnConnection, ConnectionState};
@@ -51,7 +52,7 @@ pub enum VpnError {
     #[error("Split tunnel driver error: {0}")]
     SplitTunnel(String),
 
-    #[error("Split tunnel driver not available - please reinstall SwiftTunnel")]
+    #[error("Split tunnel driver not available - please install Windows Packet Filter driver")]
     SplitTunnelNotAvailable,
 
     #[error("Split tunnel setup failed: {0}")]
@@ -62,9 +63,6 @@ pub enum VpnError {
 
     #[error("Split tunnel driver not initialized - call initialize() first")]
     DriverNotInitialized,
-
-    #[error("WFP setup failed: {0}")]
-    WfpSetupFailed(String),
 
     #[error("Connection error: {0}")]
     Connection(String),
