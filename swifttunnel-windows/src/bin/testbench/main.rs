@@ -1535,11 +1535,35 @@ fn run_vpn_benchmark() {
         return;
     }
 
-    // Set VPN encrypt context for direct encryption
-    let vpn_ctx = VpnEncryptContext::new(tunnel.get_tunn_arc(), vpn_config.endpoint.clone())
-        .expect("Failed to create VPN encrypt context");
-    driver.set_vpn_encrypt_context(vpn_ctx.clone());
-    println!("   ✅ VPN encrypt context set");
+    // Set Wintun injection context (fallback)
+    let wg_ctx = std::sync::Arc::new(WireguardContext {
+        session: adapter.session(),
+        packets_injected: std::sync::atomic::AtomicU64::new(0),
+    });
+    driver.set_wireguard_context(wg_ctx.clone());
+
+    // Set up VpnEncryptContext for direct encryption
+    if let Some(tunn) = tunnel.get_tunn() {
+        let endpoint = tunnel.get_endpoint();
+        match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => {
+                if let Err(e) = socket.connect(endpoint) {
+                    println!("   ⚠ Failed to connect encryption socket: {}", e);
+                } else {
+                    let ctx = VpnEncryptContext {
+                        tunn,
+                        socket: std::sync::Arc::new(socket),
+                        server_addr: endpoint,
+                    };
+                    driver.set_vpn_encrypt_context(ctx);
+                    println!("   ✅ VPN encrypt context set");
+                }
+            }
+            Err(e) => {
+                println!("   ⚠ Failed to create encryption socket: {}", e);
+            }
+        }
+    }
 
     // Configure with ip_checker.exe as tunnel app
     let tunnel_apps = vec!["ip_checker.exe".to_string()];
@@ -1560,12 +1584,9 @@ fn run_vpn_benchmark() {
     }
 
     // Set inbound handler for responses
-    let wg_ctx = std::sync::Arc::new(WireguardContext {
-        session: adapter.session(),
-        packets_injected: std::sync::atomic::AtomicU64::new(0),
-    });
-    driver.set_wireguard_context(wg_ctx);
-    tunnel.set_inbound_handler(driver.get_inbound_handler());
+    if let Some(handler) = driver.create_inbound_handler() {
+        tunnel.set_inbound_handler(handler);
+    }
     println!("   ✅ Split tunnel configured");
 
     std::thread::sleep(Duration::from_millis(500));
@@ -1600,8 +1621,8 @@ fn run_vpn_benchmark() {
         println!("║  VPN Overhead:         {:>8.1}%                            ║", overhead);
     }
     if let Some(s) = stats {
-        println!("║  TX (to VPN):          {:>8} bytes                        ║", s.tx_bytes.load(std::sync::atomic::Ordering::Relaxed));
-        println!("║  RX (from VPN):        {:>8} bytes                        ║", s.rx_bytes.load(std::sync::atomic::Ordering::Relaxed));
+        println!("║  TX (to VPN):          {:>8} bytes                        ║", s.bytes_tx.load(std::sync::atomic::Ordering::Relaxed));
+        println!("║  RX (from VPN):        {:>8} bytes                        ║", s.bytes_rx.load(std::sync::atomic::Ordering::Relaxed));
     }
     println!("╚═══════════════════════════════════════════════════════════════╝");
 
