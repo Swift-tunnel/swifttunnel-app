@@ -21,6 +21,7 @@ use tokio::runtime::Runtime;
 // Import from main crate
 use swifttunnel_fps_booster::auth::AuthManager;
 use swifttunnel_fps_booster::vpn::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_preset_set};
+use swifttunnel_fps_booster::vpn::WireguardContext;
 use swifttunnel_fps_booster::vpn::adapter::WintunAdapter;
 use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
 use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
@@ -380,6 +381,15 @@ fn verify_traffic_routing() {
         return;
     }
     println!("   ✅ Driver initialized");
+
+    // Create WireGuard context for packet injection into Wintun
+    // This allows tunnel app packets to be injected into Wintun -> tunnel.rs encrypts -> VPN server
+    let wg_ctx = std::sync::Arc::new(WireguardContext {
+        session: adapter.session(),
+        packets_injected: std::sync::atomic::AtomicU64::new(0),
+    });
+    driver.set_wireguard_context(wg_ctx.clone());
+    println!("   ✅ Wintun injection context set");
 
     // Configure split tunnel with Roblox apps only
     // testbench.exe is NOT in this list, so it should bypass VPN
