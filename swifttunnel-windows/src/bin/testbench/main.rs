@@ -21,7 +21,7 @@ use tokio::runtime::Runtime;
 // Import from main crate
 use swifttunnel_fps_booster::auth::AuthManager;
 use swifttunnel_fps_booster::vpn::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_preset_set};
-use swifttunnel_fps_booster::vpn::WireguardContext;
+use swifttunnel_fps_booster::vpn::{WireguardContext, VpnEncryptContext};
 use swifttunnel_fps_booster::vpn::adapter::WintunAdapter;
 use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
 use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
@@ -1208,6 +1208,33 @@ fn test_split_tunnel_two_apps() {
         return;
     }
     println!("   ✅ Split tunnel started");
+
+    // Set up VpnEncryptContext for direct encryption (bypasses Wintun injection)
+    // This is critical for split tunnel - without it, tunnel packets won't actually go through VPN
+    if let Some(tunn) = tunnel.get_tunn() {
+        let endpoint = tunnel.get_endpoint();
+        match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => {
+                if let Err(e) = socket.connect(endpoint) {
+                    println!("   ⚠ Failed to connect encryption socket: {}", e);
+                } else {
+                    let ctx = VpnEncryptContext {
+                        tunn,
+                        socket: std::sync::Arc::new(socket),
+                        server_addr: endpoint,
+                    };
+                    driver.set_vpn_encrypt_context(ctx);
+                    println!("   ✅ VPN encrypt context set (direct encryption enabled)");
+                }
+            }
+            Err(e) => {
+                println!("   ⚠ Failed to create encryption socket: {}", e);
+                println!("   Falling back to Wintun injection (may not work for tunnel apps)");
+            }
+        }
+    } else {
+        println!("   ⚠ Could not get tunnel context (falling back to Wintun injection)");
+    }
 
     // Set up inbound handler so VPN responses get injected to physical adapter
     if let Some(handler) = driver.create_inbound_handler() {
