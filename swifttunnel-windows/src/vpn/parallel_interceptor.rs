@@ -961,7 +961,7 @@ fn run_inbound_receiver(
     stop_flag: Arc<AtomicBool>,
     throughput: ThroughputStats,
 ) {
-    log::info!("Inbound receiver started (optimized - single driver handle)");
+    log::info!("Inbound receiver started (optimized - single driver handle, with keepalives)");
 
     // Open driver ONCE at thread start (not per-packet!)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
@@ -993,14 +993,53 @@ fn run_inbound_receiver(
 
     let mut recv_buf = vec![0u8; 2048]; // Max WireGuard packet size
     let mut decrypt_buf = vec![0u8; 2048];
+    let mut timer_buf = vec![0u8; 256]; // For keepalive packets
     let mut packets_received = 0u64;
     let mut packets_decrypted = 0u64;
     let mut packets_injected = 0u64;
     let mut inject_errors = 0u64;
+    let mut keepalives_sent = 0u64;
+
+    // For keepalive timer - call update_timers() every 100ms
+    // This is critical because tunnel's keepalive task is disabled when split tunnel is active
+    // to avoid endpoint confusion. We must send keepalives from THIS socket.
+    let mut last_timer_check = std::time::Instant::now();
+    const TIMER_INTERVAL_MS: u64 = 100;
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
             break;
+        }
+
+        // Check if we need to call update_timers() for keepalives
+        // CRITICAL: This keeps the WireGuard session alive and sends keepalives
+        // from the correct socket (VpnEncryptContext.socket, not tunnel.socket)
+        let now = std::time::Instant::now();
+        if now.duration_since(last_timer_check).as_millis() >= TIMER_INTERVAL_MS as u128 {
+            last_timer_check = now;
+
+            let timer_result = {
+                let mut tunn = ctx.tunn.lock().unwrap();
+                tunn.update_timers(&mut timer_buf)
+            };
+
+            match timer_result {
+                TunnResult::WriteToNetwork(data) => {
+                    // Send keepalive from this socket (the correct one!)
+                    if let Err(e) = ctx.socket.send(data) {
+                        log::warn!("Inbound receiver: failed to send keepalive: {}", e);
+                    } else {
+                        keepalives_sent += 1;
+                        if keepalives_sent == 1 || keepalives_sent % 50 == 0 {
+                            log::debug!("Inbound receiver: sent keepalive #{} ({} bytes)", keepalives_sent, data.len());
+                        }
+                    }
+                }
+                TunnResult::Err(e) => {
+                    log::warn!("Inbound receiver: timer error: {:?}", e);
+                }
+                _ => {}
+            }
         }
 
         // Read encrypted packet from socket (with timeout for clean shutdown)
@@ -1079,8 +1118,8 @@ fn run_inbound_receiver(
 
     // Final stats
     log::info!(
-        "Inbound receiver stopped - FINAL: {} recv, {} decrypt, {} inject, {} errors, {} bytes RX",
-        packets_received, packets_decrypted, packets_injected, inject_errors,
+        "Inbound receiver stopped - FINAL: {} recv, {} decrypt, {} inject, {} errors, {} keepalives, {} bytes RX",
+        packets_received, packets_decrypted, packets_injected, inject_errors, keepalives_sent,
         throughput.bytes_rx.load(Ordering::Relaxed)
     );
 }

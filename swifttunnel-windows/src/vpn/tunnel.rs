@@ -55,6 +55,11 @@ pub struct WireguardTunnel {
     inbound_handler: Arc<std::sync::Mutex<Option<InboundHandler>>>,
     /// Shared Tunn instance for direct encryption by split tunnel workers
     tunn: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Tunn>>>>>,
+    /// When true, suppress keepalives from tunnel socket (split tunnel handles them)
+    /// CRITICAL: When split tunnel is active, VpnEncryptContext uses a different socket.
+    /// If tunnel sends keepalives from its socket, server switches peer endpoint,
+    /// causing bulk traffic responses to go to wrong socket.
+    skip_keepalives: Arc<AtomicBool>,
 }
 
 impl WireguardTunnel {
@@ -71,6 +76,7 @@ impl WireguardTunnel {
             stats: Arc::new(std::sync::Mutex::new(TunnelStats::default())),
             inbound_handler: Arc::new(std::sync::Mutex::new(None)),
             tunn: Arc::new(std::sync::Mutex::new(None)),
+            skip_keepalives: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -79,9 +85,26 @@ impl WireguardTunnel {
     /// When set, decrypted inbound packets are passed to this handler
     /// instead of being written to the Wintun adapter. The handler should
     /// inject the packets to the appropriate network interface.
+    ///
+    /// NOTE: This also disables keepalives from the tunnel's socket, since
+    /// split tunnel parallel mode uses a separate VpnEncryptContext socket
+    /// and we don't want endpoint confusion on the VPN server.
     pub fn set_inbound_handler(&self, handler: InboundHandler) {
         log::info!("Setting inbound packet handler for split tunnel");
         *self.inbound_handler.lock().unwrap() = Some(handler);
+        // Disable tunnel keepalives - parallel interceptor will handle them
+        self.skip_keepalives.store(true, Ordering::SeqCst);
+        log::info!("Disabled tunnel keepalives (split tunnel mode active)");
+    }
+
+    /// Disable or enable keepalives from the tunnel socket
+    ///
+    /// When split tunnel is active with VpnEncryptContext, set this to true
+    /// to prevent endpoint confusion. The parallel interceptor should then
+    /// handle keepalives from its own socket.
+    pub fn set_skip_keepalives(&self, skip: bool) {
+        self.skip_keepalives.store(skip, Ordering::SeqCst);
+        log::info!("Tunnel keepalives: {}", if skip { "DISABLED" } else { "enabled" });
     }
 
     /// Get the inbound handler (for passing to tasks)
@@ -180,6 +203,7 @@ impl WireguardTunnel {
             Arc::clone(&tunn),
             Arc::clone(&socket),
             Arc::clone(&self.running),
+            Arc::clone(&self.skip_keepalives),
             shutdown_tx.subscribe(),
         );
 
@@ -466,21 +490,31 @@ impl WireguardTunnel {
     /// - Handshake initiation and completion
     /// - Keepalive packet generation
     /// - Connection timeout detection
+    ///
+    /// When skip_keepalives is true (split tunnel mode), we still call update_timers()
+    /// for internal state management, but we DON'T send the keepalive packets from
+    /// this socket. The parallel interceptor's inbound receiver handles keepalives
+    /// from the VpnEncryptContext socket instead.
     fn spawn_keepalive_task(
         &self,
         tunn: Arc<std::sync::Mutex<Tunn>>,
         socket: Arc<UdpSocket>,
         running: Arc<AtomicBool>,
+        skip_keepalives: Arc<AtomicBool>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_PACKET_SIZE];
             // Use 100ms tick interval for BoringTun timer management
             let tick_interval = Duration::from_millis(TICK_INTERVAL_MS);
+            let mut skip_logged = false;
 
             while running.load(Ordering::SeqCst) {
                 tokio::select! {
                     _ = tokio::time::sleep(tick_interval) => {
+                        // Check if keepalives should be skipped (split tunnel mode)
+                        let should_skip = skip_keepalives.load(Ordering::SeqCst);
+
                         // Call update_timers to handle handshakes, keepalives, timeouts
                         let result = {
                             let mut tunn = tunn.lock().unwrap();
@@ -489,10 +523,19 @@ impl WireguardTunnel {
 
                         match result {
                             TunnResult::WriteToNetwork(data) => {
-                                if let Err(e) = socket.send(data).await {
-                                    log::warn!("Failed to send timer packet: {}", e);
+                                if should_skip {
+                                    // Split tunnel mode: DON'T send from tunnel socket
+                                    // This prevents endpoint confusion on VPN server
+                                    if !skip_logged {
+                                        log::info!("Tunnel keepalive suppressed (split tunnel mode) - {} bytes would have been sent", data.len());
+                                        skip_logged = true;
+                                    }
                                 } else {
-                                    log::trace!("Timer packet sent ({} bytes)", data.len());
+                                    if let Err(e) = socket.send(data).await {
+                                        log::warn!("Failed to send timer packet: {}", e);
+                                    } else {
+                                        log::trace!("Timer packet sent ({} bytes)", data.len());
+                                    }
                                 }
                             }
                             TunnResult::Err(e) => {
