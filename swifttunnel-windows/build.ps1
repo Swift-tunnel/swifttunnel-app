@@ -98,26 +98,6 @@ if ($LASTEXITCODE -eq 0) {
         Write-Host "Wintun DLL already present." -ForegroundColor Gray
     }
 
-    # Download split tunnel driver if not present
-    $driverDir = "drivers"
-    $driverFile = "$driverDir\mullvad-split-tunnel.sys"
-
-    if (-not (Test-Path $driverFile)) {
-        Write-Host "`nDownloading Mullvad Split Tunnel driver..." -ForegroundColor Cyan
-
-        # Note: The driver needs to be downloaded from Mullvad VPN releases
-        # and requires code signing. For development, we'll note this.
-        Write-Host "NOTE: Split tunnel driver requires manual download." -ForegroundColor Yellow
-        Write-Host "Download from: https://github.com/mullvad/mullvadvpn-app/releases" -ForegroundColor Yellow
-        Write-Host "Extract: windows/x64/mullvad-split-tunnel.sys" -ForegroundColor Yellow
-
-        if (-not (Test-Path $driverDir)) {
-            New-Item -ItemType Directory -Path $driverDir | Out-Null
-        }
-    } else {
-        Write-Host "Split tunnel driver present." -ForegroundColor Gray
-    }
-
     # Create distribution folder
     $distDir = "dist"
     Write-Host "`nCreating distribution package..." -ForegroundColor Cyan
@@ -132,22 +112,39 @@ if ($LASTEXITCODE -eq 0) {
     Copy-Item "target\release\swifttunnel-fps-booster.exe" "$distDir\" -Force
     Copy-Item "target\release\wintun.dll" "$distDir\" -Force
 
-    # Copy driver if present
-    if (Test-Path $driverFile) {
-        Copy-Item $driverFile "$distDir\drivers\" -Force
-        Write-Host "  - drivers\mullvad-split-tunnel.sys" -ForegroundColor White
+    # Download Windows Packet Filter driver MSI
+    $driverMsi = "$distDir\drivers\WinpkFilter-x64.msi"
+    if (-not (Test-Path $driverMsi)) {
+        Write-Host "`nDownloading Windows Packet Filter driver..." -ForegroundColor Cyan
+
+        $driverUrl = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/WinpkFilter-x64.msi"
+
+        try {
+            Invoke-WebRequest -Uri $driverUrl -OutFile $driverMsi -UseBasicParsing
+            $fileSize = (Get-Item $driverMsi).Length / 1MB
+            Write-Host "WinPkFilter driver downloaded successfully! ({0:N2} MB)" -f $fileSize -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to download WinPkFilter driver: $_" -ForegroundColor Red
+            Write-Host "Please manually download from: https://github.com/wiresock/ndisapi/releases" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "WinPkFilter driver already present." -ForegroundColor Gray
     }
 
     # Get file sizes
     $exeSize = (Get-Item "$distDir\swifttunnel-fps-booster.exe").Length / 1MB
     $dllSize = (Get-Item "$distDir\wintun.dll").Length / 1MB
-    $totalSize = $exeSize + $dllSize
+    $driverSize = if (Test-Path $driverMsi) { (Get-Item $driverMsi).Length / 1MB } else { 0 }
+    $totalSize = $exeSize + $dllSize + $driverSize
 
     Write-Host "`n========================================" -ForegroundColor Green
     Write-Host "Distribution package created in: dist\" -ForegroundColor Green
     Write-Host "Contents:" -ForegroundColor Cyan
     Write-Host "  - swifttunnel-fps-booster.exe ({0:N2} MB)" -f $exeSize -ForegroundColor White
     Write-Host "  - wintun.dll ({0:N2} MB)" -f $dllSize -ForegroundColor White
+    if (Test-Path $driverMsi) {
+        Write-Host "  - drivers\WinpkFilter-x64.msi ({0:N2} MB)" -f $driverSize -ForegroundColor White
+    }
     Write-Host "  Total size: {0:N2} MB" -f $totalSize -ForegroundColor Green
     Write-Host "========================================" -ForegroundColor Green
 } else {

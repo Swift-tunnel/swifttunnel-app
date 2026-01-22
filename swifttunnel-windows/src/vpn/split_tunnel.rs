@@ -1,72 +1,25 @@
-//! Split Tunnel Driver Interface - Exclude-All-Except Mode
+//! Split Tunnel - ndisapi-based Implementation
 //!
-//! Uses the Mullvad split tunnel kernel driver in EXCLUDE mode, but with inverted logic:
-//! - All processes are EXCLUDED from VPN by default (bypass tunnel)
-//! - Only user-selected apps (games) are NOT excluded (use VPN tunnel)
+//! Uses Windows Packet Filter (ndisapi) for packet-level split tunneling.
+//! This replaces the Mullvad WFP-based driver with a simpler approach:
 //!
-//! This achieves "include mode" behavior using the exclude-only driver:
-//! - User selects "Roblox" to tunnel → Roblox is NOT in exclude list → uses VPN
-//! - Everything else IS in exclude list → bypasses VPN
+//! Architecture:
+//! - ndisapi intercepts packets at NDIS layer
+//! - ProcessTracker maps connections to PIDs via GetExtendedTcpTable/UdpTable
+//! - Tunnel app packets are routed through VPN, others pass through
 //!
-//! Optimizations:
-//! - HashSet for O(1) process lookups
-//! - Differential updates (only add/remove changed processes)
-//! - Skip system processes that don't need exclusion
-//! - Configurable refresh interval
+//! Benefits over Mullvad driver:
+//! - No WFP complexity (callouts, filters, sublayers, providers)
+//! - No service state management issues
+//! - Simpler initialization (no IOCTL sequence)
+//! - Easier debugging (standard packet handling)
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use sysinfo::{System, ProcessesToUpdate, ProcessRefreshKind, UpdateKind};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use super::packet_interceptor::PacketInterceptor;
 use super::{VpnError, VpnResult};
-
-/// Driver device path (Mullvad split tunnel driver)
-const DEVICE_PATH: &str = r"\\.\MULLVADSPLITTUNNEL";
-
-/// IOCTL codes for Mullvad split tunnel driver communication
-mod ioctl {
-    pub const ST_DEVICE_TYPE: u32 = 0x8000;
-    pub const METHOD_BUFFERED: u32 = 0;
-    pub const METHOD_NEITHER: u32 = 3;
-    pub const FILE_ANY_ACCESS: u32 = 0;
-
-    #[allow(non_snake_case)]
-    pub const fn CTL_CODE(device_type: u32, function: u32, method: u32, access: u32) -> u32 {
-        (device_type << 16) | (access << 14) | (function << 2) | method
-    }
-
-    pub const IOCTL_ST_INITIALIZE: u32 = CTL_CODE(ST_DEVICE_TYPE, 1, METHOD_NEITHER, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_REGISTER_PROCESSES: u32 = CTL_CODE(ST_DEVICE_TYPE, 3, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_REGISTER_IP_ADDRESSES: u32 = CTL_CODE(ST_DEVICE_TYPE, 4, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_SET_CONFIGURATION: u32 = CTL_CODE(ST_DEVICE_TYPE, 6, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_CLEAR_CONFIGURATION: u32 = CTL_CODE(ST_DEVICE_TYPE, 8, METHOD_NEITHER, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_GET_STATE: u32 = CTL_CODE(ST_DEVICE_TYPE, 9, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_RESET: u32 = CTL_CODE(ST_DEVICE_TYPE, 11, METHOD_NEITHER, FILE_ANY_ACCESS);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SYSTEM PROCESSES TO SKIP (don't need exclusion - no user network traffic)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// System processes that don't generate meaningful network traffic
-/// Skipping these reduces driver overhead
-///
-/// IMPORTANT: Processes in this list are NOT added to the exclude list,
-/// which means they will use VPN by default. Only add processes here that:
-/// 1. Don't do ANY network I/O, OR
-/// 2. MUST use VPN (like our own app to prevent detection loops)
-///
-/// Do NOT add: cmd.exe, powershell.exe, openssh.exe, conhost.exe, dllhost.exe
-/// These all can do network I/O and should be excluded (bypass VPN).
-const SKIP_PROCESSES: &[&str] = &[
-    // Windows core (internal IPC only, no user-facing network)
-    "system", "idle", "registry", "smss.exe", "csrss.exe", "wininit.exe",
-    "services.exe", "lsass.exe", "winlogon.exe", "fontdrvhost.exe",
-    "dwm.exe", "sihost.exe", "taskhostw.exe", "ctfmon.exe",
-    // Our own app - must use VPN to prevent IP detection from showing tunnel IP
-    "swifttunnel.exe", "swifttunnel-fps-booster.exe",
-    // Memory compression
-    "memory compression",
-];
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  GAME PRESETS
@@ -84,7 +37,7 @@ impl GamePreset {
         &[GamePreset::Roblox, GamePreset::Valorant, GamePreset::Fortnite]
     }
 
-    /// Process names that should use VPN (NOT be excluded)
+    /// Process names that should use VPN
     pub fn process_names(&self) -> &'static [&'static str] {
         match self {
             GamePreset::Roblox => &[
@@ -145,7 +98,7 @@ pub fn get_tunnel_apps_for_presets(presets: &HashSet<GamePreset>) -> HashSet<Str
         .collect()
 }
 
-// Legacy compatibility
+/// Legacy compatibility
 pub fn get_apps_for_presets(presets: &[GamePreset]) -> Vec<String> {
     presets
         .iter()
@@ -168,18 +121,23 @@ pub fn get_apps_for_preset_set(presets: &HashSet<GamePreset>) -> Vec<String> {
 
 #[derive(Debug, Clone)]
 pub struct SplitTunnelConfig {
-    /// Apps that SHOULD use VPN (will NOT be excluded)
+    /// Apps that SHOULD use VPN
     pub tunnel_apps: HashSet<String>,
     /// VPN tunnel IP address (assigned by VPN server)
     pub tunnel_ip: String,
     /// Real internet IP address (from default gateway interface)
     pub internet_ip: String,
-    /// VPN interface LUID (not used by driver, kept for compatibility)
+    /// VPN interface LUID (for adapter identification)
     pub tunnel_interface_luid: u64,
 }
 
 impl SplitTunnelConfig {
-    pub fn new(tunnel_apps: Vec<String>, tunnel_ip: String, internet_ip: String, tunnel_interface_luid: u64) -> Self {
+    pub fn new(
+        tunnel_apps: Vec<String>,
+        tunnel_ip: String,
+        internet_ip: String,
+        tunnel_interface_luid: u64,
+    ) -> Self {
         Self {
             tunnel_apps: tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect(),
             tunnel_ip,
@@ -188,56 +146,42 @@ impl SplitTunnelConfig {
         }
     }
 
-    // For backwards compatibility with old code that uses include_apps
+    /// For backwards compatibility
     pub fn include_apps(&self) -> Vec<String> {
         self.tunnel_apps.iter().cloned().collect()
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  DRIVER STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverState {
     NotAvailable,
     NotConfigured,
-    /// Driver is initialized (WFP callouts registered) but not yet configured
     Initialized,
     Active,
     Error(String),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  LIGHTWEIGHT PROCESS INFO
+//  SPLIT TUNNEL DRIVER (ndisapi-based)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Minimal process info for exclusion tracking
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct ProcessInfo {
-    pid: u32,
-    name_lower: String,
-    exe_path: String,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SPLIT TUNNEL DRIVER
-// ═══════════════════════════════════════════════════════════════════════════════
-
+/// Split tunnel driver using Windows Packet Filter (ndisapi)
+///
+/// This replaces the Mullvad WFP-based driver with a simpler NDIS-level approach.
+/// Maintains API compatibility with the old implementation.
 pub struct SplitTunnelDriver {
-    device_handle: Option<windows::Win32::Foundation::HANDLE>,
-    /// Current configuration (public for dynamic updates)
+    /// Packet interceptor using ndisapi
+    interceptor: Option<PacketInterceptor>,
+    /// Current configuration
     pub config: Option<SplitTunnelConfig>,
+    /// Current state
     state: DriverState,
-
-    // Efficient tracking with HashSets
-    /// Currently excluded PIDs (processes bypassing VPN)
-    excluded_pids: HashSet<u32>,
-    /// PIDs of tunnel apps (games using VPN)
-    tunnel_pids: HashSet<u32>,
-    /// Cached process paths for driver config
-    excluded_paths: Vec<String>,
-
-    /// System info - reused for efficiency
-    system: System,
-    /// Skip set for O(1) lookup
-    skip_set: HashSet<&'static str>,
+    /// Stop flag for background tasks
+    stop_flag: Arc<AtomicBool>,
 }
 
 unsafe impl Send for SplitTunnelDriver {}
@@ -246,76 +190,49 @@ unsafe impl Sync for SplitTunnelDriver {}
 impl SplitTunnelDriver {
     pub fn new() -> Self {
         Self {
-            device_handle: None,
+            interceptor: None,
             config: None,
             state: DriverState::NotAvailable,
-            excluded_pids: HashSet::with_capacity(256),
-            tunnel_pids: HashSet::with_capacity(16),
-            excluded_paths: Vec::with_capacity(256),
-            system: System::new(),
-            skip_set: SKIP_PROCESSES.iter().copied().collect(),
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Check if driver is available
+    /// Check if driver is available (can open device)
     pub fn is_available() -> bool {
-        use windows::core::PCSTR;
-        use windows::Win32::Foundation::*;
-        use windows::Win32::Storage::FileSystem::*;
-
-        unsafe {
-            let path = std::ffi::CString::new(DEVICE_PATH).unwrap();
-            let handle = CreateFileA(
-                PCSTR(path.as_ptr() as *const u8),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            );
-
-            match handle {
-                Ok(h) => {
-                    let _ = CloseHandle(h);
-                    true
-                }
-                Err(_) => false,
-            }
-        }
+        PacketInterceptor::check_driver_available()
     }
 
     /// Check if the split tunnel driver is available
-    /// Returns true if driver is running and accessible, false otherwise
-    /// Will attempt to create/start the driver service if not available
+    /// Will attempt to load the driver if not available
     pub fn check_driver_available() -> bool {
-        // Always validate the service configuration so we don't talk to a different
-        // MullvadSplitTunnel binary that doesn't recognize our IOCTLs.
+        // Check if WinpkFilter driver is installed
+        if PacketInterceptor::check_driver_available() {
+            log::info!("Windows Packet Filter driver is available");
+            return true;
+        }
+
+        // Try to start the driver service
         if let Err(e) = Self::ensure_driver_service() {
             log::error!("Failed to ensure driver service: {}", e);
             return false;
         }
 
-        if Self::is_available() {
-            log::info!("Split tunnel driver is available after service validation");
+        // Check again
+        if PacketInterceptor::check_driver_available() {
+            log::info!("Windows Packet Filter driver available after service start");
             return true;
         }
 
-        log::error!("Split tunnel driver not available after service setup");
+        log::error!("Windows Packet Filter driver not available");
         false
     }
 
     /// Get the path to the driver file
-    fn get_driver_path() -> Option<std::path::PathBuf> {
+    fn get_driver_path() -> Option<PathBuf> {
         // First try: Same directory as executable (for dev builds)
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                let driver_path = exe_dir.join("drivers").join("mullvad-split-tunnel.sys");
-                if driver_path.exists() {
-                    return Some(driver_path);
-                }
-                // Also check directly in exe dir
-                let driver_path = exe_dir.join("mullvad-split-tunnel.sys");
+                let driver_path = exe_dir.join("drivers").join("ndisrd.sys");
                 if driver_path.exists() {
                     return Some(driver_path);
                 }
@@ -323,23 +240,20 @@ impl SplitTunnelDriver {
         }
 
         // Second try: Program Files installation
-        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
-        let install_path = std::path::PathBuf::from(&program_files)
+        let program_files =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let install_path = PathBuf::from(&program_files)
             .join("SwiftTunnel")
             .join("drivers")
-            .join("mullvad-split-tunnel.sys");
+            .join("ndisrd.sys");
         if install_path.exists() {
             return Some(install_path);
         }
 
-        // Third try: Program Files (x86)
-        let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
-        let install_path_x86 = std::path::PathBuf::from(&program_files_x86)
-            .join("SwiftTunnel")
-            .join("drivers")
-            .join("mullvad-split-tunnel.sys");
-        if install_path_x86.exists() {
-            return Some(install_path_x86);
+        // Third try: System32 drivers folder (default WinpkFilter location)
+        let system_path = PathBuf::from(r"C:\Windows\System32\drivers\ndisrd.sys");
+        if system_path.exists() {
+            return Some(system_path);
         }
 
         None
@@ -350,1331 +264,294 @@ impl SplitTunnelDriver {
         use windows::core::PCWSTR;
         use windows::Win32::System::Services::*;
 
-        const SERVICE_NAME: &str = "MullvadSplitTunnel";
-        const MAX_RECREATE_ATTEMPTS: u32 = 3;
+        const SERVICE_NAME: &str = "NDISRD";
 
-        // Get driver path first
-        let driver_path = Self::get_driver_path()
-            .ok_or_else(|| "Driver file not found. Please reinstall SwiftTunnel.".to_string())?;
-
-        log::info!("Found driver at: {}", driver_path.display());
-
-        let driver_path_str = driver_path.to_string_lossy();
-        let binary_path_wide: Vec<u16> = driver_path_str.encode_utf16().chain(std::iter::once(0)).collect();
-        let display_name_wide: Vec<u16> = "Mullvad Split Tunnel".encode_utf16().chain(std::iter::once(0)).collect();
+        // Get driver path
+        let driver_path = Self::get_driver_path();
 
         unsafe {
             // Open Service Control Manager
-            let scm = OpenSCManagerW(
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SC_MANAGER_ALL_ACCESS,
-            ).map_err(|e| format!("Failed to open SCM (run as admin?): {}", e))?;
+            let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+                .map_err(|e| format!("Failed to open SCM: {}", e))?;
 
-            let service_name_wide: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+            let service_name_wide: Vec<u16> =
+                SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
 
-            // Loop to handle service recreation (replaces infinite recursion)
-            let mut recreate_attempts = 0u32;
-            loop {
-                if recreate_attempts >= MAX_RECREATE_ATTEMPTS {
-                    let _ = CloseServiceHandle(scm);
-                    return Err(format!(
-                        "Failed to set up driver service after {} attempts. Try restarting Windows.",
-                        MAX_RECREATE_ATTEMPTS
-                    ));
-                }
+            // Try to open existing service
+            match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_ALL_ACCESS) {
+                Ok(service) => {
+                    log::info!("NDISRD service exists, checking status...");
 
-                // Try to open existing service
-                let service = match OpenServiceW(
-                    scm,
-                    PCWSTR(service_name_wide.as_ptr()),
-                    SERVICE_ALL_ACCESS,
-                ) {
-                    Ok(s) => {
-                        if recreate_attempts == 0 {
-                            log::info!("Service already exists, checking config...");
-                        }
-                        s
-                    }
-                    Err(e) => {
-                        let error_code = e.code().0 as u32;
-                        // ERROR_SERVICE_DOES_NOT_EXIST = 1060
-                        if error_code == 1060 {
-                            // Service doesn't exist, create it
-                            log::info!("Creating driver service...");
-                            match CreateServiceW(
-                                scm,
-                                PCWSTR(service_name_wide.as_ptr()),
-                                PCWSTR(display_name_wide.as_ptr()),
-                                SERVICE_ALL_ACCESS,
-                                SERVICE_KERNEL_DRIVER,
-                                SERVICE_DEMAND_START,
-                                SERVICE_ERROR_NORMAL,
-                                PCWSTR(binary_path_wide.as_ptr()),
-                                PCWSTR::null(),
-                                None,
-                                PCWSTR::null(),
-                                PCWSTR::null(),
-                                PCWSTR::null(),
-                            ) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    let _ = CloseServiceHandle(scm);
-                                    return Err(format!("Failed to create service: {}", e));
-                                }
-                            }
-                        } else {
-                            let _ = CloseServiceHandle(scm);
-                            return Err(format!("Failed to open service: {} (code: {})", e, error_code));
-                        }
-                    }
-                };
-
-                // Check if service config is readable and points to correct binary
-                match Self::get_service_binary_path(service) {
-                    Some(existing_path) => {
-                        if Self::service_path_matches(&existing_path, &driver_path) {
-                            // Config is correct, check if running
-                            let mut status = SERVICE_STATUS::default();
-                            if QueryServiceStatus(service, &mut status).is_ok() {
-                                if status.dwCurrentState == SERVICE_RUNNING {
-                                    log::info!("Driver service is already running with correct config");
-                                    let _ = CloseServiceHandle(service);
-                                    let _ = CloseServiceHandle(scm);
-                                    return Ok(());
-                                }
-                            }
-                            // Config correct but not running, start it
-                            return Self::start_service_and_wait(scm, service);
-                        } else {
-                            // Wrong binary path, need to recreate
-                            log::warn!(
-                                "Driver service points to wrong binary ({}). Recreating... (attempt {})",
-                                existing_path,
-                                recreate_attempts + 1
-                            );
-                        }
-                    }
-                    None => {
-                        // Can't read config - but check if service is already running
-                        // If running, just use it (don't recreate unnecessarily)
-                        let mut status = SERVICE_STATUS::default();
-                        if QueryServiceStatus(service, &mut status).is_ok() {
-                            if status.dwCurrentState == SERVICE_RUNNING {
-                                log::info!("Driver service is running (config unreadable but service works)");
-                                let _ = CloseServiceHandle(service);
-                                let _ = CloseServiceHandle(scm);
-                                return Ok(());
-                            }
-                            // Service exists but not running - try to start it first
-                            log::info!("Service exists but not running, attempting to start...");
-                            return Self::start_service_and_wait(scm, service);
-                        }
-                        // Can't query status either, try to recreate
-                        log::warn!(
-                            "Unable to read driver service config or status. Recreating... (attempt {})",
-                            recreate_attempts + 1
-                        );
-                    }
-                }
-
-                // Need to recreate service: stop -> delete -> recreate
-                recreate_attempts += 1;
-
-                // Step 1: Stop the service (MUST do this before delete)
-                log::info!("Stopping service before recreation...");
-                let mut status = SERVICE_STATUS::default();
-                let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
-
-                // Wait for service to stop (up to 5 seconds)
-                let mut stopped = false;
-                for _ in 0..10 {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    if QueryServiceStatus(service, &mut status).is_ok() {
-                        if status.dwCurrentState == SERVICE_STOPPED {
-                            stopped = true;
-                            break;
-                        }
-                    }
-                }
-
-                if !stopped {
-                    log::warn!("Service did not stop cleanly, attempting forceful recreation anyway");
-                }
-
-                // Step 2: Delete the service
-                if let Err(e) = DeleteService(service) {
-                    let error_code = e.code().0 as u32;
-                    // ERROR_SERVICE_MARKED_FOR_DELETE = 1072 - already marked, will be deleted when handles close
-                    if error_code != 1072 {
-                        log::warn!("DeleteService failed: {} (code: {})", e, error_code);
-                    }
-                }
-
-                let _ = CloseServiceHandle(service);
-
-                // Small delay to let SCM process the delete
-                std::thread::sleep(std::time::Duration::from_millis(500));
-
-                // Step 3: Create new service (will happen on next loop iteration)
-                // The loop will try to open/create the service again
-            }
-        }
-    }
-
-    fn start_service_and_wait(scm: windows::Win32::System::Services::SC_HANDLE, service: windows::Win32::System::Services::SC_HANDLE) -> Result<(), String> {
-        use windows::Win32::System::Services::*;
-        unsafe {
-            let mut status = SERVICE_STATUS::default();
-
-            // Start the service
-            log::info!("Starting driver service...");
-            if let Err(e) = StartServiceW(service, None) {
-                let error_code: u32 = e.code().0 as u32;
-                // ERROR_SERVICE_ALREADY_RUNNING = 1056
-                if error_code != 1056 {
-                    let _ = CloseServiceHandle(service);
-                    let _ = CloseServiceHandle(scm);
-                    return Err(format!("Failed to start service: {} (code: 0x{:08X})", e, error_code));
-                }
-                log::debug!("Service already running");
-            }
-
-            // Wait for service to start (up to 10 seconds)
-            for i in 0..20 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-
-                if QueryServiceStatus(service, &mut status).is_ok() {
-                    if status.dwCurrentState == SERVICE_RUNNING {
-                        log::info!("Driver service started successfully");
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                        let _ = CloseServiceHandle(service);
-                        let _ = CloseServiceHandle(scm);
-                        return Ok(());
-                    }
-                    if status.dwCurrentState == SERVICE_STOPPED {
-                        if status.dwWin32ExitCode != 0 {
+                    // Query status
+                    let mut status = SERVICE_STATUS::default();
+                    if let Ok(_) = QueryServiceStatus(service, &mut status) {
+                        if status.dwCurrentState == SERVICE_RUNNING {
+                            log::info!("NDISRD service is running");
                             let _ = CloseServiceHandle(service);
                             let _ = CloseServiceHandle(scm);
-                            return Err(format!(
-                                "Service stopped with error: 0x{:08X}",
-                                status.dwWin32ExitCode
-                            ));
+                            return Ok(());
+                        }
+
+                        // Try to start it
+                        log::info!("Starting NDISRD service...");
+                        match StartServiceW(service, None) {
+                            Ok(_) => {
+                                log::info!("NDISRD service started");
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to start NDISRD service: {}", e);
+                            }
                         }
                     }
-                }
 
-                if i == 10 {
-                    log::debug!("Still waiting for service to start...");
+                    let _ = CloseServiceHandle(service);
+                }
+                Err(_) => {
+                    log::info!("NDISRD service does not exist");
+
+                    // Only try to create if we have the driver file
+                    if let Some(driver_path) = driver_path {
+                        log::info!("Creating NDISRD service with driver: {}", driver_path.display());
+
+                        let display_name_wide: Vec<u16> = "Windows Packet Filter"
+                            .encode_utf16()
+                            .chain(std::iter::once(0))
+                            .collect();
+                        let binary_path_wide: Vec<u16> = driver_path
+                            .to_string_lossy()
+                            .encode_utf16()
+                            .chain(std::iter::once(0))
+                            .collect();
+
+                        match CreateServiceW(
+                            scm,
+                            PCWSTR(service_name_wide.as_ptr()),
+                            PCWSTR(display_name_wide.as_ptr()),
+                            SERVICE_ALL_ACCESS,
+                            SERVICE_KERNEL_DRIVER,
+                            SERVICE_DEMAND_START,
+                            SERVICE_ERROR_NORMAL,
+                            PCWSTR(binary_path_wide.as_ptr()),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ) {
+                            Ok(service) => {
+                                log::info!("NDISRD service created, starting...");
+                                let _ = StartServiceW(service, None);
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                let _ = CloseServiceHandle(service);
+                            }
+                            Err(e) => {
+                                log::error!("Failed to create NDISRD service: {}", e);
+                            }
+                        }
+                    } else {
+                        log::warn!("Driver file not found, cannot create service");
+                    }
                 }
             }
 
-            let _ = CloseServiceHandle(service);
             let _ = CloseServiceHandle(scm);
-
-            Err("Timeout waiting for service to start".to_string())
         }
+
+        Ok(())
     }
 
-    fn get_service_binary_path(service: windows::Win32::System::Services::SC_HANDLE) -> Option<String> {
-        use windows::Win32::System::Services::*;
-        unsafe {
-            let mut bytes_needed: u32 = 0;
-            let result = QueryServiceConfigW(service, None, 0, &mut bytes_needed);
-
-            // First call should fail with ERROR_INSUFFICIENT_BUFFER and give us the size
-            if let Err(e) = result {
-                let error_code = e.code().0 as u32;
-                // ERROR_INSUFFICIENT_BUFFER = 122 is expected
-                if error_code != 122 {
-                    log::debug!("QueryServiceConfigW size query failed unexpectedly: {} (code: {})", e, error_code);
-                    return None;
-                }
-            }
-
-            if bytes_needed == 0 {
-                log::debug!("QueryServiceConfigW returned 0 bytes needed");
-                return None;
-            }
-
-            let mut buffer = vec![0u8; bytes_needed as usize];
-            let config_ptr = buffer.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
-            match QueryServiceConfigW(
-                service,
-                Some(&mut *config_ptr),
-                bytes_needed,
-                &mut bytes_needed,
-            ) {
-                Ok(_) => {
-                    let binary = (*config_ptr).lpBinaryPathName;
-                    let path = Self::pwstr_to_string(binary);
-                    log::debug!("Service binary path: {}", path);
-                    Some(path)
-                }
-                Err(e) => {
-                    log::debug!("QueryServiceConfigW failed: {} (code: {})", e, e.code().0);
-                    None
-                }
-            }
-        }
-    }
-
-    fn pwstr_to_string(pw: windows::core::PWSTR) -> String {
-        if pw.is_null() {
-            return String::new();
-        }
-        unsafe {
-            let mut len = 0usize;
-            while *pw.0.add(len) != 0 {
-                len += 1;
-            }
-            let slice = std::slice::from_raw_parts(pw.0, len);
-            String::from_utf16_lossy(slice)
-        }
-    }
-
-    fn service_path_matches(actual: &str, expected: &std::path::Path) -> bool {
-        let expected = expected.to_string_lossy().to_lowercase();
-        let mut actual = actual.trim().trim_matches('"').to_lowercase();
-
-        for prefix in [r"\??\", r"\\?\"] {
-            if let Some(stripped) = actual.strip_prefix(prefix) {
-                actual = stripped.to_string();
-                break;
-            }
-        }
-
-        actual == expected
-    }
-
+    /// Stop the driver service
     pub fn stop_driver_service() -> Result<(), String> {
         use windows::core::PCWSTR;
         use windows::Win32::System::Services::*;
 
-        const SERVICE_NAME: &str = "MullvadSplitTunnel";
-
-        log::info!("Stopping split tunnel driver service...");
+        const SERVICE_NAME: &str = "NDISRD";
 
         unsafe {
-            let scm = OpenSCManagerW(
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SC_MANAGER_ALL_ACCESS,
-            ).map_err(|e| format!("Failed to open SCM: {}", e))?;
+            let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+                .map_err(|e| format!("Failed to open SCM: {}", e))?;
 
-            let service_name_wide: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-            let service = match OpenServiceW(
-                scm,
-                PCWSTR(service_name_wide.as_ptr()),
-                SERVICE_ALL_ACCESS,
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    let error_code = e.code().0 as u32;
-                    let _ = CloseServiceHandle(scm);
-                    // ERROR_SERVICE_DOES_NOT_EXIST = 1060
-                    if error_code == 1060 {
-                        log::info!("Driver service not found (already removed)");
-                        return Ok(());
-                    }
-                    return Err(format!("Failed to open service: {}", e));
-                }
-            };
+            let service_name_wide: Vec<u16> =
+                SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
 
-            let mut status = SERVICE_STATUS::default();
-            if QueryServiceStatus(service, &mut status).is_ok() {
-                if status.dwCurrentState == SERVICE_STOPPED {
-                    log::info!("Driver service already stopped");
-                    let _ = CloseServiceHandle(service);
-                    let _ = CloseServiceHandle(scm);
-                    return Ok(());
-                }
-            }
-
-            let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
-
-            for i in 0..20 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                if QueryServiceStatus(service, &mut status).is_ok() {
-                    if status.dwCurrentState == SERVICE_STOPPED {
-                        log::info!("Driver service stopped successfully");
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                        let _ = CloseServiceHandle(service);
-                        let _ = CloseServiceHandle(scm);
-                        return Ok(());
-                    }
-                }
-                if i == 10 {
-                    log::debug!("Still waiting for driver service to stop...");
-                }
-            }
-
-            let _ = CloseServiceHandle(service);
-            let _ = CloseServiceHandle(scm);
-
-            Err("Timeout waiting for service to stop".to_string())
-        }
-    }
-
-    /// Restart the driver service to fully reset its internal state
-    /// This is necessary because:
-    /// 1. The driver's state machine persists between connections
-    /// 2. IOCTL_ST_RESET only works in READY/ENGAGED states, not INITIALIZED
-    /// 3. If a previous connection left driver in INITIALIZED state, we can't reset via IOCTL
-    /// 4. The only way to get back to STARTED state is to restart the service
-    pub fn restart_driver_service() -> Result<(), String> {
-        use windows::core::PCWSTR;
-        use windows::Win32::System::Services::*;
-
-        const SERVICE_NAME: &str = "MullvadSplitTunnel";
-
-        log::info!("Restarting split tunnel driver service to reset state...");
-
-        unsafe {
-            // Open Service Control Manager
-            let scm = OpenSCManagerW(
-                PCWSTR::null(),
-                PCWSTR::null(),
-                SC_MANAGER_ALL_ACCESS,
-            ).map_err(|e| format!("Failed to open SCM: {}", e))?;
-
-            let service_name_wide: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-            let service = match OpenServiceW(
-                scm,
-                PCWSTR(service_name_wide.as_ptr()),
-                SERVICE_ALL_ACCESS,
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = CloseServiceHandle(scm);
-                    return Err(format!("Failed to open service: {}", e));
-                }
-            };
-
-            // Stop the service if running
-            let mut status = SERVICE_STATUS::default();
-            if QueryServiceStatus(service, &mut status).is_ok() {
-                if status.dwCurrentState == SERVICE_RUNNING {
-                    log::debug!("Stopping driver service...");
+            match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_STOP) {
+                Ok(service) => {
+                    let mut status = SERVICE_STATUS::default();
                     let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
-
-                    // Wait for service to stop (up to 5 seconds)
-                    for _ in 0..10 {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        if QueryServiceStatus(service, &mut status).is_ok() {
-                            if status.dwCurrentState == SERVICE_STOPPED {
-                                log::debug!("Service stopped");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Start the service
-            log::debug!("Starting driver service...");
-            if let Err(e) = StartServiceW(service, None) {
-                let error_code = e.code().0 as u32;
-                if error_code != 1056 { // ERROR_SERVICE_ALREADY_RUNNING
                     let _ = CloseServiceHandle(service);
-                    let _ = CloseServiceHandle(scm);
-                    return Err(format!("Failed to start service: {}", e));
+                    log::info!("NDISRD service stop requested");
+                }
+                Err(_) => {
+                    log::debug!("NDISRD service not found (may not be installed)");
                 }
             }
 
-            // Wait for service to start (up to 5 seconds)
-            for i in 0..10 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                if QueryServiceStatus(service, &mut status).is_ok() {
-                    if status.dwCurrentState == SERVICE_RUNNING {
-                        log::info!("Driver service restarted successfully");
-                        let _ = CloseServiceHandle(service);
-                        let _ = CloseServiceHandle(scm);
-                        return Ok(());
-                    }
-                }
-                if i == 5 {
-                    log::debug!("Still waiting for service to start...");
-                }
-            }
-
-            let _ = CloseServiceHandle(service);
             let _ = CloseServiceHandle(scm);
-            Err("Timeout waiting for service to restart".to_string())
-        }
-    }
-
-    /// Cleanup stale state on startup
-    pub fn cleanup_stale_state() {
-        use windows::core::PCSTR;
-        use windows::Win32::Foundation::*;
-        use windows::Win32::Storage::FileSystem::*;
-        use windows::Win32::System::IO::DeviceIoControl;
-
-        log::debug!("Cleaning up stale split tunnel state...");
-
-        unsafe {
-            let path = std::ffi::CString::new(DEVICE_PATH).unwrap();
-            if let Ok(h) = CreateFileA(
-                PCSTR(path.as_ptr() as *const u8),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            ) {
-                let mut bytes_returned: u32 = 0;
-                let _ = DeviceIoControl(h, ioctl::IOCTL_ST_RESET, None, 0, None, 0, Some(&mut bytes_returned), None);
-                let _ = CloseHandle(h);
-            }
-        }
-    }
-
-    /// Open driver connection
-    pub fn open(&mut self) -> VpnResult<()> {
-        use windows::core::PCSTR;
-        use windows::Win32::Foundation::*;
-        use windows::Win32::Storage::FileSystem::*;
-
-        if self.device_handle.is_some() {
-            return Ok(());
         }
 
-        unsafe {
-            let path = std::ffi::CString::new(DEVICE_PATH).unwrap();
-            match CreateFileA(
-                PCSTR(path.as_ptr() as *const u8),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            ) {
-                Ok(h) => {
-                    log::info!("Split tunnel driver opened");
-                    self.device_handle = Some(h);
-                    self.state = DriverState::NotConfigured;
-                    Ok(())
-                }
-                Err(e) => {
-                    self.state = DriverState::NotAvailable;
-                    Err(VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))
-                }
-            }
-        }
-    }
-
-    /// Initialize the driver - registers WFP callouts
-    ///
-    /// CRITICAL: setup_wfp_for_split_tunnel() MUST be called BEFORE this method!
-    /// The driver's IOCTL_ST_INITIALIZE registers WFP callouts that REFERENCE
-    /// the sublayer created by setup_wfp_for_split_tunnel().
-    ///
-    /// Correct order:
-    /// 1. driver.open()
-    /// 2. setup_wfp_for_split_tunnel() - creates provider + sublayer
-    /// 3. driver.initialize() - THIS METHOD (registers callouts using the sublayer)
-    /// 4. driver.configure()
-    pub fn initialize(&mut self) -> VpnResult<()> {
-        let handle = self.device_handle.ok_or(VpnError::DriverNotOpen)?;
-
-        // Query state BEFORE any operations - helps diagnose issues
-        match self.get_driver_state() {
-            Ok(state) => log::info!("Driver state before init: {} ({})", state, Self::state_name(state)),
-            Err(e) => log::warn!("Could not query initial driver state: {}", e),
-        }
-
-        // Reset any stale state from previous sessions
-        log::debug!("Sending IOCTL_ST_RESET...");
-        if let Err(e) = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET) {
-            log::warn!("RESET failed (may be expected): {}", e);
-        }
-
-        // Query state after RESET
-        match self.get_driver_state() {
-            Ok(state) => log::debug!("Driver state after RESET: {} ({})", state, Self::state_name(state)),
-            Err(e) => log::warn!("Could not query driver state after RESET: {}", e),
-        }
-
-        // Initialize driver - this registers WFP callouts
-        log::info!("Sending IOCTL_ST_INITIALIZE (0x{:08X})...", ioctl::IOCTL_ST_INITIALIZE);
-        if let Err(e) = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE) {
-            let err_str = e.to_string();
-            // 0x80320009 = FWP_E_ALREADY_EXISTS - driver already initialized, that's OK
-            if !err_str.contains("0x80320009") && !err_str.contains("ALREADY_EXISTS") {
-                log::error!("IOCTL_ST_INITIALIZE failed: {}", e);
-                self.state = DriverState::Error(err_str);
-                return Err(e);
-            }
-            log::debug!("Driver already initialized (FWP_E_ALREADY_EXISTS - OK)");
-        }
-
-        // CRITICAL: Verify driver state is now INITIALIZED (state 2)
-        // This catches silent failures where INITIALIZE returns OK but driver didn't transition
-        let driver_state = self.get_driver_state().map_err(|e| {
-            VpnError::SplitTunnel(format!("Failed to query driver state after INITIALIZE: {}", e))
-        })?;
-
-        log::info!("Driver state after INITIALIZE: {} ({})", driver_state, Self::state_name(driver_state));
-
-        // Must be in INITIALIZED (2) state to proceed
-        if driver_state != 2 {
-            let err = format!(
-                "Driver not in INITIALIZED state after INITIALIZE. Expected state 2 (INITIALIZED), got {} ({}). \
-                This usually means INITIALIZE failed silently or the driver rejected it.",
-                driver_state,
-                Self::state_name(driver_state)
-            );
-            log::error!("{}", err);
-            self.state = DriverState::Error(err.clone());
-            return Err(VpnError::SplitTunnel(err));
-        }
-
-        self.state = DriverState::Initialized;
-        log::info!("Split tunnel driver initialized - confirmed state INITIALIZED (2)");
         Ok(())
     }
 
-    /// Check if process should be excluded (not a tunnel app and not a system process)
-    #[inline]
-    fn should_exclude(&self, name_lower: &str) -> bool {
-        // Don't exclude if it's a tunnel app (game)
-        if let Some(config) = &self.config {
-            if config.tunnel_apps.contains(name_lower) {
-                return false;
-            }
-            // Also check without .exe for partial matches
-            let name_stem = name_lower.trim_end_matches(".exe");
-            for tunnel_app in &config.tunnel_apps {
-                let app_stem = tunnel_app.trim_end_matches(".exe");
-                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
-                    return false;
-                }
-            }
-        }
-
-        // Skip system processes (don't need to exclude them)
-        if self.skip_set.contains(name_lower) {
-            return false;
-        }
-
-        // Exclude everything else
-        true
+    /// Restart the driver service
+    pub fn restart_driver_service() -> Result<(), String> {
+        Self::stop_driver_service()?;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        Self::ensure_driver_service()
     }
 
-    /// Scan all processes and return those that should be excluded
-    fn scan_processes_to_exclude(&mut self) -> Vec<ProcessInfo> {
-        // Refresh with exe paths - critical for getting process paths
-        // ProcessRefreshKind::new() alone doesn't refresh exe paths!
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet),
-        );
-
-        let mut to_exclude = Vec::with_capacity(200);
-
-        for (pid, process) in self.system.processes() {
-            let pid_u32 = pid.as_u32();
-
-            // Skip PID 0 and 4 (System)
-            if pid_u32 <= 4 {
-                continue;
-            }
-
-            let name = process.name().to_string_lossy().to_lowercase();
-
-            if self.should_exclude(&name) {
-                let exe_path = process
-                    .exe()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                // Skip if no exe path (kernel processes)
-                if exe_path.is_empty() {
-                    continue;
-                }
-
-                to_exclude.push(ProcessInfo {
-                    pid: pid_u32,
-                    name_lower: name,
-                    exe_path,
-                });
-            }
-        }
-
-        to_exclude
+    /// Cleanup stale state from previous sessions
+    pub fn cleanup_stale_state() {
+        log::info!("Cleaning up stale split tunnel state...");
+        // With ndisapi, there's no persistent state to clean up
+        // The driver handles cleanup automatically
+        log::info!("Stale state cleanup complete");
     }
 
-    /// Get names of currently running tunnel apps (for UI)
+    /// Open the driver
+    pub fn open(&mut self) -> VpnResult<()> {
+        if self.interceptor.is_some() {
+            log::warn!("Split tunnel already open");
+            return Ok(());
+        }
+
+        log::info!("Opening split tunnel driver (ndisapi)...");
+
+        // Create packet interceptor
+        let tunnel_apps = self
+            .config
+            .as_ref()
+            .map(|c| c.tunnel_apps.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let interceptor = PacketInterceptor::new(tunnel_apps);
+        self.interceptor = Some(interceptor);
+        self.state = DriverState::NotConfigured;
+
+        log::info!("Split tunnel driver opened");
+        Ok(())
+    }
+
+    /// Initialize the driver
+    pub fn initialize(&mut self) -> VpnResult<()> {
+        let interceptor = self.interceptor.as_mut().ok_or_else(|| {
+            VpnError::SplitTunnel("Driver not open".to_string())
+        })?;
+
+        log::info!("Initializing split tunnel driver...");
+
+        interceptor.initialize()?;
+        self.state = DriverState::Initialized;
+
+        log::info!("Split tunnel driver initialized");
+        Ok(())
+    }
+
+    /// Get running tunnel app names
     pub fn get_running_tunnel_apps(&mut self) -> Vec<String> {
-        let Some(config) = &self.config else {
-            return Vec::new();
-        };
-
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::new(),
-        );
-
-        let mut running = Vec::new();
-        for (_pid, process) in self.system.processes() {
-            let name = process.name().to_string_lossy().to_lowercase();
-            if config.tunnel_apps.contains(&name) {
-                running.push(process.name().to_string_lossy().to_string());
-            }
+        match &mut self.interceptor {
+            Some(interceptor) => interceptor.get_running_tunnel_apps(),
+            None => Vec::new(),
         }
-        running
     }
 
-    // Legacy compatibility
+    /// Get running target names (alias for get_running_tunnel_apps)
     pub fn get_running_target_names(&mut self) -> Vec<String> {
         self.get_running_tunnel_apps()
     }
 
-    /// Configure split tunnel with EXCLUDE-ALL-EXCEPT logic
-    ///
-    /// IMPORTANT: The correct initialization order is:
-    /// 1. driver.open()
-    /// 2. setup_wfp_for_split_tunnel() - creates WFP provider + sublayer
-    /// 3. driver.initialize() - registers WFP callouts (need sublayer to exist!)
-    /// 4. driver.configure() - THIS METHOD
+    /// Configure split tunnel with the given settings
     pub fn configure(&mut self, config: SplitTunnelConfig) -> VpnResult<()> {
-        let handle = self.device_handle.ok_or(VpnError::DriverNotOpen)?;
-
-        // Check Rust state - must be Initialized (after initialize() was called)
-        if self.state != DriverState::Initialized {
-            log::error!(
-                "configure() called in wrong Rust state: {:?} (expected Initialized)",
-                self.state
-            );
-            return Err(VpnError::DriverNotInitialized);
-        }
-
-        // VERIFY DRIVER STATE before proceeding - this is the critical diagnostic check
-        let driver_state = self.get_driver_state()?;
-        log::info!(
-            "Driver state before REGISTER_PROCESSES: {} ({})",
-            driver_state,
-            Self::state_name(driver_state)
-        );
-
-        if driver_state != 2 {
-            let err = format!(
-                "Cannot call REGISTER_PROCESSES - driver in state {} ({}), expected INITIALIZED (2). \
-                The driver may have been reset or is in an unexpected state.",
-                driver_state,
-                Self::state_name(driver_state)
-            );
-            log::error!("{}", err);
-            return Err(VpnError::SplitTunnel(err));
+        if self.state == DriverState::NotAvailable {
+            return Err(VpnError::SplitTunnelNotAvailable);
         }
 
         log::info!(
-            "Configuring split tunnel - {} apps will use VPN, everything else excluded",
+            "Configuring split tunnel: {} apps to tunnel",
             config.tunnel_apps.len()
         );
+        log::debug!("Tunnel apps: {:?}", config.tunnel_apps);
 
-        // NOTE: RESET and INITIALIZE are NOT called here - they're done in initialize()
-        // This is critical: WFP filters can only be added AFTER initialize() registers callouts
-
-        self.config = Some(config.clone());
-
-        // Initial scan - exclude all non-tunnel processes BEFORE setting config
-        let to_exclude = self.scan_processes_to_exclude();
-
-        log::info!(
-            "Initial scan: {} processes to exclude from VPN",
-            to_exclude.len()
-        );
-
-        // Register processes
-        self.excluded_pids = to_exclude.iter().map(|p| p.pid).collect();
-        self.excluded_paths = to_exclude.iter().map(|p| p.exe_path.clone()).collect();
-
-        let proc_data = self.serialize_process_tree_for_exclusion(&to_exclude)?;
-        self.register_processes_with_retry(handle, &proc_data)?;
-
-        // Verify state after REGISTER_PROCESSES - should be READY(3)
-        if let Ok(state) = self.get_driver_state() {
-            log::info!("Driver state after REGISTER_PROCESSES: {} ({})", state, Self::state_name(state));
-        }
-
-        // Register IP addresses
-        log::info!("Registering IPs with driver - Tunnel: {}, Internet: {}", config.tunnel_ip, config.internet_ip);
-        let ip_data = self.serialize_ip_addresses(&config)?;
-        self.register_ips_with_retry(handle, &ip_data, &proc_data)?;
-
-        // Verify state after REGISTER_IP_ADDRESSES - should still be READY(3)
-        if let Ok(state) = self.get_driver_state() {
-            log::info!("Driver state after REGISTER_IP_ADDRESSES: {} ({})", state, Self::state_name(state));
-        }
-
-        // Set split tunnel configuration (paths to exclude from VPN)
-        // The driver needs to know which executables should bypass the VPN
-        let config_data = self.serialize_split_config()?;
-        log::info!("Sending SET_CONFIGURATION with {} bytes...", config_data.len());
-        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data) {
-            if Self::is_already_exists_error(&e) {
-                log::warn!(
-                    "SET_CONFIGURATION hit ALREADY_EXISTS - attempting CLEAR_CONFIGURATION + retry"
-                );
-
-                let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
-
-                if let Ok(state) = self.get_driver_state() {
-                    log::warn!(
-                        "Driver state after CLEAR_CONFIGURATION: {} ({})",
-                        state,
-                        Self::state_name(state)
-                    );
-                    if state != 2 {
-                        self.reinitialize_for_configure()?;
-                    }
-                } else {
-                    self.reinitialize_for_configure()?;
-                }
-
-                self.register_processes_with_retry(handle, &proc_data)?;
-                self.register_ips_with_retry(handle, &ip_data, &proc_data)?;
-
-                log::info!("Retrying SET_CONFIGURATION after CLEAR_CONFIGURATION...");
-                self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
-            } else {
-                return Err(e);
-            }
-        }
-
-        // Verify state
-        if let Ok(state) = self.get_driver_state() {
-            log::info!("Driver state: {} ({})", state, Self::state_name(state));
-        }
-
-        self.state = DriverState::Active;
-        log::info!("Split tunnel configured - only selected games will use VPN");
-
-        Ok(())
-    }
-
-    fn is_already_exists_error(err: &VpnError) -> bool {
-        let msg = err.to_string().to_lowercase();
-        msg.contains("0x80320009") || msg.contains("already exists")
-    }
-
-    fn is_invalid_function_error(err: &VpnError) -> bool {
-        let msg = err.to_string().to_lowercase();
-        msg.contains("0x80070001") || msg.contains("invalid function")
-    }
-
-    fn reinitialize_for_configure(&mut self) -> VpnResult<()> {
-        if let Ok(state) = self.get_driver_state() {
-            log::warn!(
-                "Driver state before reinitialize: {} ({})",
-                state,
-                Self::state_name(state)
-            );
-            if state == 2 {
-                return Ok(());
-            }
-        }
-        self.initialize()
-    }
-
-    fn register_processes_with_retry(
-        &mut self,
-        handle: windows::Win32::Foundation::HANDLE,
-        proc_data: &[u8],
-    ) -> VpnResult<()> {
-        log::info!(
-            "Sending IOCTL_ST_REGISTER_PROCESSES (0x{:08X}) with {} bytes...",
-            ioctl::IOCTL_ST_REGISTER_PROCESSES,
-            proc_data.len()
-        );
-        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, proc_data) {
-            if Self::is_invalid_function_error(&e) {
-                log::warn!(
-                    "REGISTER_PROCESSES rejected with INVALID_FUNCTION - reinitializing driver and retrying"
-                );
-                self.reinitialize_for_configure()?;
-                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, proc_data)?;
-            } else {
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
-
-    fn register_ips_with_retry(
-        &mut self,
-        handle: windows::Win32::Foundation::HANDLE,
-        ip_data: &[u8],
-        proc_data: &[u8],
-    ) -> VpnResult<()> {
-        log::info!(
-            "Registering IPs with driver ({} bytes)...",
-            ip_data.len()
-        );
-        if let Err(e) = self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, ip_data) {
-            if Self::is_invalid_function_error(&e) {
-                log::warn!(
-                    "REGISTER_IP_ADDRESSES rejected with INVALID_FUNCTION - reinitializing driver and retrying"
-                );
-                self.reinitialize_for_configure()?;
-                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, proc_data)?;
-                self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, ip_data)?;
-            } else {
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
-
-    /// Efficient refresh - only update changed processes
-    /// Returns true if any tunnel apps are running
-    pub fn refresh_exclusions(&mut self) -> VpnResult<bool> {
-        let handle = self.device_handle.ok_or_else(|| {
+        let interceptor = self.interceptor.as_mut().ok_or_else(|| {
             VpnError::SplitTunnel("Driver not open".to_string())
         })?;
 
-        if self.config.is_none() {
-            return Ok(false);
-        }
+        // Configure the interceptor
+        interceptor.configure(
+            "SwiftTunnel", // VPN adapter name
+            config.tunnel_apps.iter().cloned().collect(),
+        )?;
 
-        // Scan current processes
-        let current_exclude = self.scan_processes_to_exclude();
-        let current_pids: HashSet<u32> = current_exclude.iter().map(|p| p.pid).collect();
+        // Start packet interception
+        interceptor.start()?;
 
-        // Check if anything changed
-        if current_pids == self.excluded_pids {
-            // No change - check if any tunnel apps running
-            let tunnel_running = !self.get_running_tunnel_apps().is_empty();
-            return Ok(tunnel_running);
-        }
+        self.config = Some(config);
+        self.state = DriverState::Active;
 
-        // Find differences
-        let added: Vec<_> = current_pids.difference(&self.excluded_pids).copied().collect();
-        let removed: Vec<_> = self.excluded_pids.difference(&current_pids).copied().collect();
-
-        if !added.is_empty() {
-            log::debug!("Excluding {} new processes from VPN", added.len());
-        }
-        if !removed.is_empty() {
-            log::debug!("{} excluded processes exited", removed.len());
-        }
-
-        // Update state
-        self.excluded_pids = current_pids;
-        self.excluded_paths = current_exclude.iter().map(|p| p.exe_path.clone()).collect();
-
-        // Re-register processes with driver
-        // Note: We DON'T resend SET_CONFIGURATION here because the tunnel LUID
-        // doesn't change during a session - it was set once during configure()
-        let proc_data = self.serialize_process_tree_for_exclusion(&current_exclude)?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
-
-        let tunnel_running = !self.get_running_tunnel_apps().is_empty();
-        Ok(tunnel_running)
+        log::info!("Split tunnel configured and active");
+        Ok(())
     }
 
-    // Legacy compatibility
+    /// Refresh process exclusions
+    pub fn refresh_exclusions(&mut self) -> VpnResult<bool> {
+        let interceptor = self.interceptor.as_mut().ok_or_else(|| {
+            VpnError::SplitTunnel("Driver not open".to_string())
+        })?;
+
+        interceptor.refresh()
+    }
+
+    /// Refresh processes (alias for refresh_exclusions)
     pub fn refresh_processes(&mut self) -> VpnResult<bool> {
         self.refresh_exclusions()
     }
 
-    /// Serialize process tree for exclusion
-    fn serialize_process_tree_for_exclusion(&self, processes: &[ProcessInfo]) -> VpnResult<Vec<u8>> {
-        if processes.is_empty() {
-            // Empty - just System placeholder
-            let mut data = Vec::with_capacity(64);
-            data.extend_from_slice(&1u64.to_le_bytes()); // num_entries = 1
-            let total_len = 16 + 32 + 12; // header + 1 entry + "System" wide
-            data.extend_from_slice(&(total_len as u64).to_le_bytes());
-
-            // System entry
-            data.extend_from_slice(&4u64.to_le_bytes()); // pid
-            data.extend_from_slice(&0u64.to_le_bytes()); // parent_pid
-            data.extend_from_slice(&0u64.to_le_bytes()); // offset
-            data.extend_from_slice(&12u16.to_le_bytes()); // size (6 chars * 2)
-            data.extend_from_slice(&[0u8; 6]); // padding
-
-            // "System" as wide string
-            for c in "System".encode_utf16() {
-                data.extend_from_slice(&c.to_le_bytes());
-            }
-
-            return Ok(data);
-        }
-
-        // Convert paths to device paths
-        let device_paths: Vec<String> = processes
-            .iter()
-            .map(|p| Self::to_device_path(&p.exe_path).unwrap_or_else(|_| p.exe_path.clone()))
-            .collect();
-
-        let wide_paths: Vec<Vec<u16>> = device_paths
-            .iter()
-            .map(|p| p.encode_utf16().collect())
-            .collect();
-
-        let header_size = 16usize;
-        let entry_size = 32usize;
-        let string_size: usize = wide_paths.iter().map(|w| w.len() * 2).sum();
-        let total_size = header_size + (entry_size * processes.len()) + string_size;
-
-        let mut data = Vec::with_capacity(total_size);
-
-        // Header
-        data.extend_from_slice(&(processes.len() as u64).to_le_bytes());
-        data.extend_from_slice(&(total_size as u64).to_le_bytes());
-
-        // Entries
-        let mut rel_offset = 0usize;
-        for (i, proc) in processes.iter().enumerate() {
-            let byte_len = (wide_paths[i].len() * 2) as u16;
-
-            data.extend_from_slice(&(proc.pid as u64).to_le_bytes());
-            data.extend_from_slice(&0u64.to_le_bytes()); // parent_pid (not used for exclusion)
-            data.extend_from_slice(&(rel_offset as u64).to_le_bytes());
-            data.extend_from_slice(&byte_len.to_le_bytes());
-            data.extend_from_slice(&[0u8; 6]);
-
-            rel_offset += byte_len as usize;
-        }
-
-        // String buffer
-        for wide in &wide_paths {
-            for w in wide {
-                data.extend_from_slice(&w.to_le_bytes());
-            }
-        }
-
-        Ok(data)
-    }
-
-    /// Serialize configuration for IOCTL_ST_SET_CONFIGURATION
-    ///
-    /// The Mullvad driver expects a variable-length buffer with:
-    /// - ST_CONFIGURATION_HEADER (16 bytes): NumEntries (u64) + TotalLength (u64)
-    /// - ST_CONFIGURATION_ENTRY[N] (16 bytes each): ImageNameOffset (u64) + ImageNameLength (u16) + padding (6 bytes)
-    /// - String buffer: UTF-16 device paths (no null terminators)
-    ///
-    /// The paths specify which executables should be split tunneled (excluded from VPN).
-    fn serialize_split_config(&self) -> VpnResult<Vec<u8>> {
-        if self.excluded_paths.is_empty() {
-            // Driver rejects empty configuration, so return error
-            return Err(VpnError::SplitTunnel(
-                "No processes to exclude - configuration cannot be empty".to_string(),
-            ));
-        }
-
-        // Convert paths to device paths and deduplicate
-        let unique_paths: Vec<_> = self.excluded_paths
-            .iter()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        let device_paths: Vec<String> = unique_paths
-            .iter()
-            .filter_map(|p| Self::to_device_path(p).ok())
-            .collect();
-
-        if device_paths.is_empty() {
-            return Err(VpnError::SplitTunnel(
-                "Failed to convert any paths to device paths".to_string(),
-            ));
-        }
-
-        // Convert to UTF-16 (no null terminators)
-        let wide_paths: Vec<Vec<u16>> = device_paths
-            .iter()
-            .map(|p| p.encode_utf16().collect())
-            .collect();
-
-        // Calculate sizes
-        let header_size = 16usize;  // NumEntries (8) + TotalLength (8)
-        let entry_size = 16usize;   // ImageNameOffset (8) + ImageNameLength (2) + padding (6)
-        let string_size: usize = wide_paths.iter().map(|w| w.len() * 2).sum();
-        let total_size = header_size + (entry_size * device_paths.len()) + string_size;
-
-        let mut data = Vec::with_capacity(total_size);
-
-        // Header
-        data.extend_from_slice(&(device_paths.len() as u64).to_le_bytes()); // NumEntries
-        data.extend_from_slice(&(total_size as u64).to_le_bytes());          // TotalLength
-
-        // Entries
-        let mut string_offset = 0usize;
-        for wide in &wide_paths {
-            let byte_len = (wide.len() * 2) as u16;
-
-            data.extend_from_slice(&(string_offset as u64).to_le_bytes()); // ImageNameOffset
-            data.extend_from_slice(&byte_len.to_le_bytes());                // ImageNameLength
-            data.extend_from_slice(&[0u8; 6]);                              // Padding
-
-            string_offset += byte_len as usize;
-        }
-
-        // String buffer
-        for wide in &wide_paths {
-            for w in wide {
-                data.extend_from_slice(&w.to_le_bytes());
-            }
-        }
-
-        log::info!(
-            "SET_CONFIGURATION: {} paths, {} bytes total",
-            device_paths.len(),
-            data.len()
-        );
-
-        Ok(data)
-    }
-
-    /// Serialize IP addresses for IOCTL_ST_REGISTER_IP_ADDRESSES
-    ///
-    /// The driver expects ST_IP_ADDRESSES struct (40 bytes):
-    /// - TunnelIpv4: 4 bytes (VPN assigned IP)
-    /// - InternetIpv4: 4 bytes (real internet interface IP)
-    /// - TunnelIpv6: 16 bytes (zeros if not using IPv6)
-    /// - InternetIpv6: 16 bytes (zeros if not using IPv6)
-    fn serialize_ip_addresses(&self, config: &SplitTunnelConfig) -> VpnResult<Vec<u8>> {
-        // Parse tunnel IP (VPN assigned IP)
-        let tunnel_ip_str = config.tunnel_ip.split('/').next().unwrap_or(&config.tunnel_ip);
-        let tunnel_ipv4: std::net::Ipv4Addr = tunnel_ip_str.parse()
-            .map_err(|e| VpnError::SplitTunnel(format!("Invalid tunnel IP '{}': {}", tunnel_ip_str, e)))?;
-
-        // Parse internet IP (real interface IP)
-        let internet_ip_str = config.internet_ip.split('/').next().unwrap_or(&config.internet_ip);
-        let internet_ipv4: std::net::Ipv4Addr = internet_ip_str.parse()
-            .map_err(|e| VpnError::SplitTunnel(format!("Invalid internet IP '{}': {}", internet_ip_str, e)))?;
-
-        // Build ST_IP_ADDRESSES struct (40 bytes)
-        let mut data = Vec::with_capacity(40);
-        data.extend_from_slice(&tunnel_ipv4.octets());    // TunnelIpv4: 4 bytes
-        data.extend_from_slice(&internet_ipv4.octets());  // InternetIpv4: 4 bytes
-        data.extend_from_slice(&[0u8; 16]);               // TunnelIpv6: 16 bytes (zeros)
-        data.extend_from_slice(&[0u8; 16]);               // InternetIpv6: 16 bytes (zeros)
-
-        debug_assert_eq!(data.len(), 40, "ST_IP_ADDRESSES must be exactly 40 bytes");
-
-        Ok(data)
-    }
-
-    /// Convert Windows path to device path
-    fn to_device_path(path: &str) -> VpnResult<String> {
-        use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
-        use windows::core::PCWSTR;
-
-        if path.len() < 2 || path.chars().nth(1) != Some(':') {
-            if path.starts_with(r"\Device\") {
-                return Ok(path.to_string());
-            }
-            return Err(VpnError::SplitTunnel(format!("Invalid path: {}", path)));
-        }
-
-        let drive = &path[0..2];
-        let rest = &path[2..];
-
-        let drive_wide: Vec<u16> = drive.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut device_name = vec![0u16; 260];
-
-        unsafe {
-            let len = QueryDosDeviceW(PCWSTR(drive_wide.as_ptr()), Some(&mut device_name));
-            if len == 0 {
-                return Ok(format!(r"\Device\HarddiskVolume1{}", rest));
-            }
-            let actual_len = device_name.iter().position(|&c| c == 0).unwrap_or(device_name.len());
-            let device_str = String::from_utf16_lossy(&device_name[..actual_len]);
-            Ok(format!("{}{}", device_str, rest))
-        }
-    }
-
-    fn state_name(state: u64) -> &'static str {
-        match state {
-            0 => "NONE", 1 => "STARTED", 2 => "INITIALIZED",
-            3 => "READY", 4 => "ENGAGED", 5 => "ZOMBIE",
-            _ => "UNKNOWN",
-        }
-    }
-
-    fn ioctl_name(code: u32) -> &'static str {
-        match code {
-            ioctl::IOCTL_ST_INITIALIZE => "INITIALIZE",
-            ioctl::IOCTL_ST_REGISTER_PROCESSES => "REGISTER_PROCESSES",
-            ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES => "REGISTER_IP_ADDRESSES",
-            ioctl::IOCTL_ST_SET_CONFIGURATION => "SET_CONFIGURATION",
-            ioctl::IOCTL_ST_CLEAR_CONFIGURATION => "CLEAR_CONFIGURATION",
-            ioctl::IOCTL_ST_GET_STATE => "GET_STATE",
-            ioctl::IOCTL_ST_RESET => "RESET",
-            _ => "UNKNOWN",
-        }
-    }
-
+    /// Get driver state value (for compatibility)
     pub fn get_driver_state(&self) -> VpnResult<u64> {
-        let handle = self.device_handle.ok_or_else(|| {
-            VpnError::SplitTunnel("Driver not open".to_string())
-        })?;
-
-        let output = self.send_ioctl(handle, ioctl::IOCTL_ST_GET_STATE, &[])?;
-        if output.len() >= 8 {
-            Ok(u64::from_le_bytes(output[..8].try_into().unwrap()))
-        } else {
-            Err(VpnError::SplitTunnel("Invalid state response".to_string()))
+        match &self.state {
+            DriverState::NotAvailable => Ok(0),
+            DriverState::NotConfigured => Ok(1),
+            DriverState::Initialized => Ok(2),
+            DriverState::Active => Ok(4),
+            DriverState::Error(_) => Ok(0),
         }
     }
 
+    /// Clear configuration
     pub fn clear(&mut self) -> VpnResult<()> {
-        if let Some(handle) = self.device_handle {
-            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
+        if let Some(interceptor) = &mut self.interceptor {
+            interceptor.stop();
         }
         self.config = None;
-        self.excluded_pids.clear();
-        self.excluded_paths.clear();
         self.state = DriverState::NotConfigured;
+        log::info!("Split tunnel configuration cleared");
         Ok(())
     }
 
+    /// Close the driver
     pub fn close(&mut self) -> VpnResult<()> {
-        use windows::Win32::Foundation::CloseHandle;
+        log::info!("Closing split tunnel driver...");
 
-        if let Some(handle) = self.device_handle.take() {
-            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
-            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET);
-            unsafe { let _ = CloseHandle(handle); }
+        if let Some(mut interceptor) = self.interceptor.take() {
+            interceptor.stop();
         }
+
         self.config = None;
-        self.excluded_pids.clear();
-        self.excluded_paths.clear();
         self.state = DriverState::NotAvailable;
+        self.stop_flag.store(true, Ordering::SeqCst);
+
+        log::info!("Split tunnel driver closed");
         Ok(())
     }
 
+    /// Get current state
     pub fn state(&self) -> &DriverState {
         &self.state
     }
 
+    /// Get current configuration
     pub fn config(&self) -> Option<&SplitTunnelConfig> {
         self.config.as_ref()
-    }
-
-    fn send_ioctl(&self, handle: windows::Win32::Foundation::HANDLE, code: u32, input: &[u8]) -> VpnResult<Vec<u8>> {
-        use windows::Win32::System::IO::DeviceIoControl;
-
-        log::debug!(
-            "Sending IOCTL 0x{:08X} ({}) with {} bytes input",
-            code,
-            Self::ioctl_name(code),
-            input.len()
-        );
-
-        let mut output = vec![0u8; 4096];
-        let mut returned: u32 = 0;
-
-        unsafe {
-            let result = DeviceIoControl(
-                handle, code,
-                Some(input.as_ptr() as *const _), input.len() as u32,
-                Some(output.as_mut_ptr() as *mut _), output.len() as u32,
-                Some(&mut returned), None,
-            );
-
-            if result.is_ok() {
-                log::debug!(
-                    "IOCTL 0x{:08X} ({}) succeeded, {} bytes returned",
-                    code,
-                    Self::ioctl_name(code),
-                    returned
-                );
-                output.truncate(returned as usize);
-                Ok(output)
-            } else {
-                let win_error = windows::core::Error::from_win32();
-                let error_code = win_error.code().0 as u32;
-
-                // Provide detailed diagnostics for common errors
-                let extra_info = match error_code {
-                    0x80070001 => {
-                        // ERROR_INVALID_FUNCTION - IOCTL code not recognized
-                        format!(
-                            " This usually means the IOCTL code doesn't match what the driver expects. \
-                            Function code: {}, Method: {}",
-                            (code >> 2) & 0xFFF,
-                            code & 0x3
-                        )
-                    }
-                    0x80070016 => {
-                        // ERROR_BAD_COMMAND - Driver state machine rejected
-                        " The driver rejected this IOCTL for the current state.".to_string()
-                    }
-                    0x80070057 => {
-                        // ERROR_INVALID_PARAMETER - Bad input data
-                        format!(" Input buffer may be malformed. Size: {} bytes", input.len())
-                    }
-                    _ => String::new(),
-                };
-
-                log::error!(
-                    "IOCTL 0x{:08X} ({}) failed: {} (code: 0x{:08X}){}",
-                    code,
-                    Self::ioctl_name(code),
-                    win_error,
-                    error_code,
-                    extra_info
-                );
-
-                Err(VpnError::SplitTunnel(format!(
-                    "IOCTL 0x{:08X} ({}) failed: {}",
-                    code,
-                    Self::ioctl_name(code),
-                    win_error
-                )))
-            }
-        }
-    }
-
-    fn send_ioctl_neither(&self, handle: windows::Win32::Foundation::HANDLE, code: u32) -> VpnResult<()> {
-        use windows::Win32::System::IO::DeviceIoControl;
-
-        log::debug!(
-            "Sending IOCTL 0x{:08X} ({}) [METHOD_NEITHER, no buffers]",
-            code,
-            Self::ioctl_name(code)
-        );
-
-        let mut returned: u32 = 0;
-        unsafe {
-            let result = DeviceIoControl(handle, code, None, 0, None, 0, Some(&mut returned), None);
-            if result.is_ok() {
-                log::debug!(
-                    "IOCTL 0x{:08X} ({}) succeeded",
-                    code,
-                    Self::ioctl_name(code)
-                );
-                Ok(())
-            } else {
-                let win_error = windows::core::Error::from_win32();
-                let error_code = win_error.code().0 as u32;
-
-                log::error!(
-                    "IOCTL 0x{:08X} ({}) failed: {} (code: 0x{:08X})",
-                    code,
-                    Self::ioctl_name(code),
-                    win_error,
-                    error_code
-                );
-
-                Err(VpnError::SplitTunnel(format!(
-                    "IOCTL 0x{:08X} ({}) failed: {}",
-                    code,
-                    Self::ioctl_name(code),
-                    win_error
-                )))
-            }
-        }
     }
 }
 
@@ -1691,56 +568,53 @@ impl Drop for SplitTunnelDriver {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  LEGACY TYPES FOR COMPATIBILITY
+//  HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone)]
-pub struct TunneledProcess {
-    pub pid: u32,
-    pub parent_pid: u32,
-    pub exe_path: String,
-    pub name: String,
-}
-
-pub const DEFAULT_TUNNEL_APPS: &[&str] = &[
-    "RobloxPlayerBeta.exe",
-    "RobloxPlayerLauncher.exe",
-    "RobloxStudioBeta.exe",
-];
-
+/// Get default tunnel apps (Roblox by default)
 pub fn get_default_tunnel_apps() -> Vec<String> {
-    DEFAULT_TUNNEL_APPS.iter().map(|s| s.to_string()).collect()
+    GamePreset::Roblox.process_names().iter().map(|s| s.to_string()).collect()
 }
 
+/// Find Roblox player path
 pub fn find_roblox_path() -> Option<PathBuf> {
-    let local = dirs::data_local_dir()?;
-    let versions = local.join("Roblox").join("Versions");
-    if versions.exists() {
-        if let Ok(entries) = std::fs::read_dir(&versions) {
-            for entry in entries.flatten() {
-                let exe = entry.path().join("RobloxPlayerBeta.exe");
-                if exe.exists() {
-                    return Some(exe);
-                }
-            }
+    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
+    let roblox_dir = PathBuf::from(local_app_data).join("Roblox").join("Versions");
+
+    if !roblox_dir.exists() {
+        return None;
+    }
+
+    // Find the version folder with RobloxPlayerBeta.exe
+    for entry in std::fs::read_dir(&roblox_dir).ok()? {
+        let entry = entry.ok()?;
+        let player_exe = entry.path().join("RobloxPlayerBeta.exe");
+        if player_exe.exists() {
+            return Some(player_exe);
         }
     }
+
     None
 }
 
+/// Find Roblox Studio path
 pub fn find_roblox_studio_path() -> Option<PathBuf> {
-    let local = dirs::data_local_dir()?;
-    let versions = local.join("Roblox").join("Versions");
-    if versions.exists() {
-        if let Ok(entries) = std::fs::read_dir(&versions) {
-            for entry in entries.flatten() {
-                let exe = entry.path().join("RobloxStudioBeta.exe");
-                if exe.exists() {
-                    return Some(exe);
-                }
-            }
+    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
+    let roblox_dir = PathBuf::from(local_app_data).join("Roblox").join("Versions");
+
+    if !roblox_dir.exists() {
+        return None;
+    }
+
+    // Find the version folder with RobloxStudioBeta.exe
+    for entry in std::fs::read_dir(&roblox_dir).ok()? {
+        let entry = entry.ok()?;
+        let studio_exe = entry.path().join("RobloxStudioBeta.exe");
+        if studio_exe.exists() {
+            return Some(studio_exe);
         }
     }
+
     None
 }
 
@@ -1749,36 +623,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_exclude_logic() {
-        let mut driver = SplitTunnelDriver::new();
-        let mut tunnel_apps = HashSet::new();
-        tunnel_apps.insert("robloxplayerbeta.exe".to_string());
-
-        driver.config = Some(SplitTunnelConfig {
-            tunnel_apps,
-            tunnel_ip: "10.0.0.1".to_string(),
-            tunnel_interface_luid: 0,
-        });
-
-        // Game should NOT be excluded
-        assert!(!driver.should_exclude("robloxplayerbeta.exe"));
-
-        // Browser SHOULD be excluded
-        assert!(driver.should_exclude("chrome.exe"));
-
-        // System process should NOT be excluded (skipped)
-        assert!(!driver.should_exclude("csrss.exe"));
+    fn test_game_preset_names() {
+        assert!(!GamePreset::Roblox.process_names().is_empty());
+        assert!(!GamePreset::Valorant.process_names().is_empty());
+        assert!(!GamePreset::Fortnite.process_names().is_empty());
     }
 
     #[test]
-    fn test_game_preset_lowercase() {
-        let presets: HashSet<GamePreset> = [GamePreset::Roblox].into_iter().collect();
-        let apps = get_tunnel_apps_for_presets(&presets);
+    fn test_config_creation() {
+        let config = SplitTunnelConfig::new(
+            vec!["robloxplayerbeta.exe".to_string()],
+            "10.0.0.2".to_string(),
+            "192.168.1.100".to_string(),
+            12345,
+        );
+        assert!(config.tunnel_apps.contains("robloxplayerbeta.exe"));
+    }
 
-        assert!(apps.contains("robloxplayerbeta.exe"));
-        // All should be lowercase
-        for app in &apps {
-            assert_eq!(app, &app.to_lowercase());
-        }
+    #[test]
+    fn test_driver_state() {
+        let driver = SplitTunnelDriver::new();
+        assert_eq!(*driver.state(), DriverState::NotAvailable);
     }
 }

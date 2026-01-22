@@ -7,7 +7,6 @@
 //!   testbench              - Run all tests
 //!   testbench driver       - Check driver status only
 //!   testbench init         - Test driver initialization
-//!   testbench wfp          - Test WFP setup
 //!   testbench full         - Test full split tunnel flow
 //!   testbench info         - Show system info
 //!   testbench verify       - Verify actual traffic routing (requires network)
@@ -22,7 +21,6 @@ use tokio::runtime::Runtime;
 // Import from main crate
 use swifttunnel_fps_booster::auth::AuthManager;
 use swifttunnel_fps_booster::vpn::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_preset_set};
-use swifttunnel_fps_booster::vpn::wfp::{WfpEngine, setup_wfp_for_split_tunnel, cleanup_stale_wfp_callouts};
 use swifttunnel_fps_booster::vpn::adapter::WintunAdapter;
 use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
 use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
@@ -43,8 +41,8 @@ fn main() -> Result<()> {
         .init();
 
     println!("\n╔════════════════════════════════════════════════════════════╗");
-    println!("║          SwiftTunnel CLI Testbench v0.5.31                 ║");
-    println!("║          Headless testing for VPN & Split Tunnel           ║");
+    println!("║          SwiftTunnel CLI Testbench v0.6.0                  ║");
+    println!("║          Using ndisapi for split tunnel                    ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
 
     let args: Vec<String> = env::args().collect();
@@ -56,9 +54,6 @@ fn main() -> Result<()> {
         }
         "init" => {
             test_split_tunnel_driver();
-        }
-        "wfp" => {
-            test_wfp_setup();
         }
         "full" => {
             test_full_split_tunnel_flow();
@@ -76,7 +71,6 @@ fn main() -> Result<()> {
             println!("Running all tests...\n");
             check_driver_status();
             test_split_tunnel_driver();
-            test_wfp_setup();
             test_full_split_tunnel_flow();
             show_system_info();
         }
@@ -101,7 +95,6 @@ fn print_usage() {
     println!("  all      Run all tests (default)");
     println!("  driver   Check driver status");
     println!("  init     Test driver initialization");
-    println!("  wfp      Test WFP setup");
     println!("  full     Test full split tunnel flow");
     println!("  info     Show system info");
     println!("  verify   Verify actual traffic routing (connects to VPN)");
@@ -348,61 +341,32 @@ fn verify_traffic_routing() {
         }
     };
 
-    // Step 9: Now setup split tunnel
+    // Step 9: Now setup split tunnel using ndisapi
     println!("\nStep 9: Setting up split tunnel (testbench.exe should bypass VPN)...");
 
-    // Clean up stale WFP objects first
-    cleanup_stale_wfp_callouts();
-
-    // Open driver FIRST
+    // Initialize driver
     let mut driver = SplitTunnelDriver::new();
-    if let Err(e) = driver.open() {
-        println!("   ❌ Failed to open driver: {}", e);
+
+    // Check if driver is available
+    if !driver.is_available() {
+        println!("   ❌ ndisapi driver not available");
+        println!("   Please install Windows Packet Filter driver");
         route_manager.remove_routes().ok();
         tunnel.stop();
         adapter.shutdown();
         return;
     }
-    println!("   ✅ Driver opened");
+    println!("   ✅ ndisapi driver available");
 
-    // Initialize driver (creates provider + callouts)
+    // Initialize the driver
     if let Err(e) = driver.initialize() {
         println!("   ❌ Failed to initialize driver: {}", e);
-        let _ = driver.close();
         route_manager.remove_routes().ok();
         tunnel.stop();
         adapter.shutdown();
         return;
     }
-    println!("   ✅ Driver initialized (provider + callouts created)");
-
-    // Create sublayer after initialize (standalone, no provider association)
-    let _wfp_engine = match WfpEngine::open() {
-        Ok(mut engine) => {
-            match engine.create_sublayer_standalone() {
-                Ok(_) => {
-                    println!("   ✅ Sublayer created");
-                    Some(engine)
-                }
-                Err(e) => {
-                    println!("   ❌ Sublayer creation failed: {}", e);
-                    let _ = driver.close();
-                    route_manager.remove_routes().ok();
-                    tunnel.stop();
-                    adapter.shutdown();
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            println!("   ❌ WFP engine failed: {}", e);
-            let _ = driver.close();
-            route_manager.remove_routes().ok();
-            tunnel.stop();
-            adapter.shutdown();
-            return;
-        }
-    };
+    println!("   ✅ Driver initialized");
 
     // Configure split tunnel with Roblox apps only
     // testbench.exe is NOT in this list, so it should bypass VPN
@@ -423,7 +387,7 @@ fn verify_traffic_routing() {
 
     if let Err(e) = driver.configure(split_config) {
         println!("   ❌ Split tunnel configure failed: {}", e);
-        let _ = driver.close();
+        let _ = driver.stop();
         route_manager.remove_routes().ok();
         tunnel.stop();
         adapter.shutdown();
@@ -431,30 +395,22 @@ fn verify_traffic_routing() {
     }
     println!("   ✅ Split tunnel configured");
 
-    // Wait for split tunnel to take effect and refresh to catch any new processes
+    // Start packet interception
+    if let Err(e) = driver.start(tunnel.clone()) {
+        println!("   ❌ Split tunnel start failed: {}", e);
+        let _ = driver.stop();
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+    println!("   ✅ Split tunnel started");
+
+    // Wait for split tunnel to take effect
     std::thread::sleep(Duration::from_millis(500));
 
-    // Refresh exclusions multiple times to ensure we catch PowerShell when it spawns
-    println!("   Refreshing exclusions to catch new processes...");
-    let mut refresh_count = 0;
-    for i in 0..5 {
-        match driver.refresh_exclusions() {
-            Ok(changed) => {
-                if changed {
-                    refresh_count += 1;
-                    println!("   Refresh {}: processes updated", i + 1);
-                }
-            }
-            Err(e) => {
-                println!("   ⚠ Refresh {} failed: {}", i + 1, e);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    println!("   Refreshes complete ({} updates)", refresh_count);
-
     // Step 10: Check IP again (should be ORIGINAL IP since testbench.exe bypasses)
-    println!("\nStep 10: Checking IP (PowerShell should bypass VPN)...");
+    println!("\nStep 10: Checking IP (testbench.exe should bypass VPN)...");
     let split_ip = match get_public_ip() {
         Some(ip) => {
             println!("   Current IP: {}", ip);
@@ -466,7 +422,7 @@ fn verify_traffic_routing() {
         }
     };
 
-    // Step 10: Results
+    // Results
     println!("\n════════════════════════════════════════");
     println!("         TRAFFIC ROUTING RESULTS        ");
     println!("════════════════════════════════════════\n");
@@ -496,7 +452,7 @@ fn verify_traffic_routing() {
 
     // Cleanup
     println!("Cleaning up...");
-    let _ = driver.close();
+    let _ = driver.stop();
     let _ = route_manager.remove_routes();
     tunnel.stop();
     adapter.shutdown();
@@ -536,9 +492,9 @@ fn get_interface_index(name: &str) -> Result<u32, String> {
 fn check_driver_status() {
     println!("═══ Driver Status ═══\n");
 
-    // Check if driver service exists
+    // Check if ndisapi driver service exists (NDISRD)
     let output = std::process::Command::new("sc")
-        .args(["query", "MullvadSplitTunnel"])
+        .args(["query", "NDISRD"])
         .output();
 
     match output {
@@ -547,20 +503,22 @@ fn check_driver_status() {
             let stderr = String::from_utf8_lossy(&out.stderr);
 
             if out.status.success() {
-                println!("✅ MullvadSplitTunnel service found:\n");
+                println!("✅ NDISRD (Windows Packet Filter) service found:\n");
                 println!("{}", stdout);
 
                 // Also get service config
                 if let Ok(config_out) = std::process::Command::new("sc")
-                    .args(["qc", "MullvadSplitTunnel"])
+                    .args(["qc", "NDISRD"])
                     .output()
                 {
                     println!("Service Configuration:");
                     println!("{}", String::from_utf8_lossy(&config_out.stdout));
                 }
             } else {
-                println!("❌ Driver service not found or not accessible");
+                println!("❌ NDISRD driver service not found or not accessible");
                 println!("Error: {}", stderr);
+                println!("\nPlease install Windows Packet Filter driver from:");
+                println!("  https://www.ntkernel.com/windows-packet-filter/");
             }
         }
         Err(e) => {
@@ -568,205 +526,114 @@ fn check_driver_status() {
         }
     }
 
-    // Check if driver file exists
-    let driver_path = r"C:\Program Files\SwiftTunnel\drivers\mullvad-split-tunnel.sys";
-    if std::path::Path::new(driver_path).exists() {
-        println!("✅ Driver file exists: {}", driver_path);
-    } else {
-        println!("❌ Driver file NOT found: {}", driver_path);
+    // Check if ndisapi driver file exists
+    let driver_paths = [
+        r"C:\Windows\System32\drivers\ndisrd.sys",
+        r"C:\Program Files\SwiftTunnel\drivers\ndisrd.sys",
+    ];
+
+    let mut driver_found = false;
+    for driver_path in &driver_paths {
+        if std::path::Path::new(driver_path).exists() {
+            println!("✅ Driver file exists: {}", driver_path);
+            driver_found = true;
+            break;
+        }
+    }
+
+    if !driver_found {
+        println!("❌ Driver file NOT found in any expected location");
+        for path in &driver_paths {
+            println!("   Checked: {}", path);
+        }
     }
 
     println!();
 }
 
 fn test_split_tunnel_driver() {
-    println!("═══ Split Tunnel Driver Test ═══\n");
+    println!("═══ Split Tunnel Driver Test (ndisapi) ═══\n");
 
-    // Clean up stale WFP objects first
-    println!("0. Cleaning up stale WFP objects...");
-    cleanup_stale_wfp_callouts();
-
-    println!("\n1. Opening driver handle...");
+    println!("1. Creating driver instance...");
     let mut driver = SplitTunnelDriver::new();
 
-    match driver.open() {
+    // Check availability
+    println!("\n2. Checking driver availability...");
+    if driver.is_available() {
+        println!("   ✅ ndisapi driver is available");
+    } else {
+        println!("   ❌ ndisapi driver NOT available");
+        println!("\n   Please install Windows Packet Filter driver:");
+        println!("   https://www.ntkernel.com/windows-packet-filter/");
+        return;
+    }
+
+    // Initialize
+    println!("\n3. Initializing driver...");
+    match driver.initialize() {
         Ok(_) => {
-            println!("   ✅ Driver handle opened");
-
-            // Driver creates provider + callouts during initialize
-            println!("\n2. Initializing driver (creates provider + callouts)...");
-            match driver.initialize() {
-                Ok(_) => {
-                    println!("   ✅ Driver initialized");
-                    println!("   Driver state: {:?}", driver.state());
-
-                    // Create sublayer (required for SET_CONFIGURATION)
-                    println!("\n3. Creating sublayer (standalone)...");
-                    match WfpEngine::open() {
-                        Ok(mut engine) => {
-                            match engine.create_sublayer_standalone() {
-                                Ok(_) => println!("   ✅ Sublayer created"),
-                                Err(e) => println!("   ❌ Sublayer failed: {}", e),
-                            }
-                        }
-                        Err(e) => println!("   ❌ WFP engine failed: {}", e),
-                    }
-
-                    println!("\n4. Cleaning up...");
-                    let _ = driver.close();
-                    println!("   ✅ Driver closed");
-                }
-                Err(e) => {
-                    println!("   ❌ Initialize failed: {}", e);
-                    let _ = driver.close();
-                }
-            }
+            println!("   ✅ Driver initialized");
+            println!("   Driver state: {:?}", driver.state());
         }
         Err(e) => {
-            println!("   ❌ Failed to open driver: {}", e);
-            println!("\n   This usually means:");
-            println!("   - Driver service is not running (run: sc start MullvadSplitTunnel)");
-            println!("   - Not running as Administrator");
+            println!("   ❌ Initialize failed: {}", e);
+            return;
         }
     }
 
-    println!();
-}
+    // Configure with test apps
+    println!("\n4. Configuring with test apps...");
+    let presets = HashSet::from([GamePreset::Roblox]);
+    let tunnel_apps = get_apps_for_preset_set(&presets);
+    println!("   Tunnel apps: {:?}", tunnel_apps);
 
-fn test_wfp_setup() {
-    println!("═══ WFP Setup Test ═══\n");
+    let config = SplitTunnelConfig::new(
+        tunnel_apps,
+        "10.64.0.1".to_string(),
+        "192.168.1.1".to_string(),
+        0,
+    );
 
-    println!("1. Opening WFP engine...");
-    match WfpEngine::open() {
-        Ok(engine) => {
-            println!("   ✅ WFP engine opened");
-
-            println!("\n2. Cleaning up legacy objects...");
-            engine.cleanup_legacy_objects();
-            println!("   ✅ Cleanup complete");
-
-            println!("\n3. Testing setup_wfp_for_split_tunnel()...");
-            // Use a dummy LUID
-            match setup_wfp_for_split_tunnel(0) {
-                Ok(_) => {
-                    println!("   ✅ WFP setup completed successfully");
-                }
-                Err(e) => {
-                    println!("   ❌ WFP setup failed: {}", e);
-                }
-            }
+    match driver.configure(config) {
+        Ok(_) => {
+            println!("   ✅ Configuration applied");
+            println!("   Driver state: {:?}", driver.state());
         }
         Err(e) => {
-            println!("   ❌ Failed to open WFP engine: {}", e);
-            println!("\n   This usually means:");
-            println!("   - Not running as Administrator");
-            println!("   - Windows Filtering Platform service issue");
+            println!("   ❌ Configure failed: {}", e);
         }
     }
+
+    // Cleanup
+    println!("\n5. Cleaning up...");
+    let _ = driver.stop();
+    println!("   ✅ Driver stopped");
 
     println!();
 }
 
 fn test_full_split_tunnel_flow() {
     println!("═══ Full Split Tunnel Flow Test ═══\n");
-    println!("This tests the complete flow: WFP Setup → Driver Open → Initialize → Configure\n");
+    println!("This tests: Initialize → Configure → Start → Stop\n");
 
-    // Step 0: Restart driver service for clean state
-    println!("Step 0: Restarting driver service for clean state...");
-    let _ = std::process::Command::new("sc").args(["stop", "MullvadSplitTunnel"]).output();
-    std::thread::sleep(Duration::from_secs(1));
-
-    // Clean up WFP callouts while driver is stopped
-    cleanup_stale_wfp_callouts();
-
-    // Start the driver service
-    match std::process::Command::new("sc").args(["start", "MullvadSplitTunnel"]).output() {
-        Ok(output) => {
-            if output.status.success() {
-                println!("   ✅ Driver service restarted");
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // 1056 = service already running, that's OK
-                if !stderr.contains("1056") {
-                    println!("   ⚠ Service start issue: {}", String::from_utf8_lossy(&output.stdout));
-                } else {
-                    println!("   ✅ Driver service already running");
-                }
-            }
-        }
-        Err(e) => {
-            println!("   ❌ Failed to start service: {}", e);
-            return;
-        }
-    }
-    std::thread::sleep(Duration::from_secs(1));
-    println!();
-
-    // Step 1: Open driver
-    println!("Step 1: Opening driver handle...");
+    // Step 1: Create and initialize driver
+    println!("Step 1: Creating and initializing driver...");
     let mut driver = SplitTunnelDriver::new();
 
-    match driver.open() {
-        Ok(_) => {
-            println!("   ✅ Driver handle opened");
-        }
-        Err(e) => {
-            println!("   ❌ Failed to open driver: {}", e);
-            return;
-        }
+    if !driver.is_available() {
+        println!("   ❌ ndisapi driver not available");
+        return;
     }
+    println!("   ✅ Driver available");
 
-    // Step 2: Initialize driver (creates provider + callouts)
-    // The driver creates the provider during INITIALIZE, but NOT the sublayer
-    println!("\nStep 2: Initializing driver (creates provider + callouts)...");
-    match driver.initialize() {
-        Ok(_) => {
-            println!("   ✅ Driver initialized");
-        }
-        Err(e) => {
-            println!("   ❌ Initialize failed: {}", e);
-            let _ = driver.close();
-            return;
-        }
+    if let Err(e) = driver.initialize() {
+        println!("   ❌ Initialize failed: {}", e);
+        return;
     }
+    println!("   ✅ Driver initialized");
 
-    // DEBUG: Enumerate WFP objects AFTER initialize to see what driver created
-    println!("\n   [DEBUG] WFP state after INITIALIZE:");
-    if let Ok(wfp_debug) = WfpEngine::open() {
-        wfp_debug.debug_enumerate_wfp_objects();
-    }
-
-    // Step 3: Create sublayer AFTER initialize (required for SET_CONFIGURATION)
-    // Use standalone method - no provider association to avoid FWP_E_CALLOUT_NOTIFICATION_FAILED
-    println!("\nStep 3: Creating WFP sublayer (standalone, no provider)...");
-    let _wfp_engine = match WfpEngine::open() {
-        Ok(mut engine) => {
-            match engine.create_sublayer_standalone() {
-                Ok(_) => {
-                    println!("   ✅ Sublayer created");
-
-                    // DEBUG: Enumerate again after sublayer
-                    println!("\n   [DEBUG] WFP state after sublayer creation:");
-                    engine.debug_enumerate_wfp_objects();
-
-                    Some(engine)
-                }
-                Err(e) => {
-                    println!("   ❌ Sublayer creation failed: {}", e);
-                    let _ = driver.close();
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            println!("   ❌ WFP engine open failed: {}", e);
-            let _ = driver.close();
-            return;
-        }
-    };
-
-    // Step 4: Configure split tunnel with Roblox apps
-    println!("\nStep 4: Configuring split tunnel with Roblox apps...");
+    // Step 2: Configure split tunnel with Roblox apps
+    println!("\nStep 2: Configuring split tunnel with Roblox apps...");
     let presets = HashSet::from([GamePreset::Roblox]);
     let tunnel_apps = get_apps_for_preset_set(&presets);
     println!("   Tunnel apps: {:?}", tunnel_apps);
@@ -780,24 +647,38 @@ fn test_full_split_tunnel_flow() {
         Ok(ip) => ip.to_string(),
         Err(_) => "192.168.1.1".to_string(), // fallback for testing
     };
-    println!("   Internet IP: {} (for socket redirection)", internet_ip);
+    println!("   Internet IP: {}", internet_ip);
 
     let config = SplitTunnelConfig::new(tunnel_apps, tunnel_ip, internet_ip, tunnel_luid);
 
     match driver.configure(config) {
         Ok(_) => {
             println!("   ✅ Split tunnel configured successfully!");
-            println!("\n   Final driver state: {:?}", driver.state());
+            println!("   Driver state: {:?}", driver.state());
         }
         Err(e) => {
             println!("   ❌ Configure failed: {}", e);
+            let _ = driver.stop();
+            return;
         }
     }
 
-    // Step 5: Cleanup
-    println!("\nStep 5: Cleaning up...");
-    let _ = driver.close();
-    println!("   ✅ Driver closed");
+    // Step 3: Show process tracker status
+    println!("\nStep 3: Checking process tracker...");
+    let running_apps = driver.get_running_tunnel_apps();
+    if running_apps.is_empty() {
+        println!("   No tunnel apps currently running (expected if Roblox isn't open)");
+    } else {
+        println!("   Running tunnel apps:");
+        for app in &running_apps {
+            println!("   - {}", app);
+        }
+    }
+
+    // Step 4: Cleanup
+    println!("\nStep 4: Cleaning up...");
+    let _ = driver.stop();
+    println!("   ✅ Driver stopped");
 
     println!("\n════════════════════════════════════════");
     println!("Full split tunnel flow test complete!");

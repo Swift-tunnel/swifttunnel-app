@@ -70,6 +70,10 @@ boringtun = "0.6"
 # Wintun virtual network adapter for Windows
 wintun = "0.5"
 
+# Windows Packet Filter (ndisapi) for packet-level split tunneling
+# Replaces Mullvad WFP driver with simpler NDIS-based approach
+ndisapi = "0.6"
+
 # Curve25519 key exchange - MUST match boringtun's version exactly
 x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
 
@@ -126,25 +130,10 @@ path = "Tests/vpn_tests.rs"
 name = "vpn_test"
 path = "src/bin/vpn_test.rs"
 
-# Split tunnel test binary
-[[bin]]
-name = "split_tunnel_test"
-path = "src/bin/split_tunnel_test.rs"
-
 # IP checker test app (for split tunnel verification)
 [[bin]]
 name = "ip_checker"
 path = "src/bin/ip_checker.rs"
-
-# Split tunnel integration test (full end-to-end test)
-[[bin]]
-name = "split_tunnel_integration_test"
-path = "src/bin/split_tunnel_integration_test.rs"
-
-# Driver initialization test (minimal test)
-[[bin]]
-name = "driver_test"
-path = "src/bin/driver_test.rs"
 
 # CLI testbench for headless testing
 [[bin]]
