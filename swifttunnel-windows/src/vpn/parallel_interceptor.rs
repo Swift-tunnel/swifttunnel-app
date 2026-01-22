@@ -611,13 +611,15 @@ fn run_packet_worker(
     throughput: ThroughputStats,
     stop_flag: Arc<AtomicBool>,
 ) {
+    use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
+
     log::info!("Worker {} started", worker_id);
 
     // Get initial snapshot
     let mut snapshot = process_cache.get_snapshot();
     let mut snapshot_check_counter = 0u32;
 
-    // Open driver for this worker (each worker needs own handle for send)
+    // Open driver for this worker (each worker needs own handle for sending bypass packets)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
         Ok(d) => d,
         Err(e) => {
@@ -626,9 +628,14 @@ fn run_packet_worker(
         }
     };
 
-    // Note: Workers don't send packets directly - they make routing decisions
-    // and inject tunnel packets into Wintun. The reader thread handles passthrough.
-    let _ = driver; // Keep driver alive but don't use it directly
+    // Get adapters to find physical adapter handle
+    let adapters = match driver.get_tcpip_bound_adapters_info() {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!("Worker {} failed to get adapters: {}", worker_id, e);
+            return;
+        }
+    };
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
@@ -674,19 +681,22 @@ fn run_packet_worker(
                                 session.send_packet(packet);
                             }
                             Err(_) => {
-                                // Wintun allocation failed - pass through as fallback
-                                // Note: Reader thread handles passthrough
+                                // Wintun allocation failed - forward to adapter as fallback
+                                send_bypass_packet(&driver, &adapters, &work);
                             }
                         }
                     }
                 } else {
-                    // No Wintun session - pass through
-                    // Note: Reader thread handles passthrough
+                    // No Wintun session - forward to adapter
+                    send_bypass_packet(&driver, &adapters, &work);
                 }
             } else {
                 stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
                 stats.bytes_bypassed.fetch_add(packet_len, Ordering::Relaxed);
-                // Note: Reader thread handles passthrough
+
+                // CRITICAL FIX: Forward bypass packets to adapter
+                // Previously this was missing, causing all non-tunnel traffic to be dropped!
+                send_bypass_packet(&driver, &adapters, &work);
             }
         }
     }
@@ -700,6 +710,37 @@ fn run_packet_worker(
         stats.packets_bypassed.load(Ordering::Relaxed),
         stats.bytes_bypassed.load(Ordering::Relaxed)
     );
+}
+
+/// Send a bypass packet to the physical adapter
+fn send_bypass_packet(
+    driver: &ndisapi::Ndisapi,
+    adapters: &[ndisapi::NetworkAdapterInfo],
+    work: &PacketWork,
+) {
+    use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
+
+    // Find adapter by handle
+    let adapter_handle = HANDLE(work.adapter_handle as isize);
+
+    // Find matching adapter
+    let adapter = adapters.iter().find(|a| a.get_handle() == adapter_handle);
+    if adapter.is_none() {
+        return;
+    }
+
+    // Create IntermediateBuffer with packet data
+    let mut buffer = IntermediateBuffer::default();
+    let data_len = work.data.len().min(buffer.get_data_mut().len());
+    buffer.get_data_mut()[..data_len].copy_from_slice(&work.data[..data_len]);
+    buffer.set_length(data_len);
+    buffer.set_device_flags(DirectionFlags::PACKET_FLAG_ON_SEND);
+
+    // Send to adapter
+    let mut to_adapter: EthMRequest<1> = EthMRequest::new(adapter_handle);
+    if to_adapter.push(&buffer).is_ok() {
+        let _ = driver.send_packets_to_adapter::<1>(&to_adapter);
+    }
 }
 
 
