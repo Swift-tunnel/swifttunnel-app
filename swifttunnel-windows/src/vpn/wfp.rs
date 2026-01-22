@@ -96,6 +96,16 @@ static ST_FW_PROVIDER_KEY: GUID = GUID::from_values(
     [0xA6, 0xCB, 0x3F, 0xA7, 0x99, 0x63, 0x56, 0xD9],
 );
 
+/// Mullvad Split Tunnel WFP Provider Context GUID
+/// Must match the GUID expected by the Mullvad split tunnel driver
+/// Source: {FDC95593-04EF-415C-AE68-46BD8B4821A8}
+static ST_FW_PROVIDER_CONTEXT_KEY: GUID = GUID::from_values(
+    0xFDC95593,
+    0x04EF,
+    0x415C,
+    [0xAE, 0x68, 0x46, 0xBD, 0x8B, 0x48, 0x21, 0xA8],
+);
+
 /// Mullvad Split Tunnel WFP Sublayer GUID (WinFW Baseline Sublayer)
 /// Must match the GUID expected by the Mullvad split tunnel driver
 /// Source: {C78056FF-2BC1-4211-AADD-7F358DEF202D}
@@ -742,6 +752,24 @@ impl WfpEngine {
         deleted_count
     }
 
+    /// Delete Mullvad provider context by GUID
+    pub fn cleanup_mullvad_provider_context(&self) -> bool {
+        let result = unsafe {
+            FwpmProviderContextDeleteByKey0(self.handle, &ST_FW_PROVIDER_CONTEXT_KEY)
+        };
+
+        if result == 0 {
+            log::info!("Deleted Mullvad provider context");
+            return true;
+        }
+
+        log::debug!(
+            "Mullvad provider context delete: 0x{:08X} (may not exist)",
+            result
+        );
+        false
+    }
+
     /// Delete ALL filters associated with the Mullvad sublayer or provider
     /// This is more thorough than relying on sublayer cascade deletion
     /// Filters created by the driver's Firewall::ApplyConfiguration() have dynamic IDs
@@ -891,6 +919,18 @@ impl WfpEngine {
             log::info!("  [MISSING] Mullvad Sublayer");
         }
 
+        // Check provider context
+        let mut context_ptr: *mut FWPM_PROVIDER_CONTEXT0 = ptr::null_mut();
+        let result = unsafe {
+            FwpmProviderContextGetByKey0(self.handle, &ST_FW_PROVIDER_CONTEXT_KEY, &mut context_ptr)
+        };
+        if result == 0 {
+            log::info!("  [EXISTS] Mullvad Provider Context");
+            unsafe { FwpmFreeMemory0(&mut (context_ptr as *mut _)); }
+        } else {
+            log::info!("  [MISSING] Mullvad Provider Context");
+        }
+
         // Check callouts
         let mut callout_count = 0;
         for (i, guid) in MULLVAD_CALLOUT_GUIDS.iter().enumerate() {
@@ -921,6 +961,8 @@ impl WfpEngine {
                 filter_count += 1;
                 log::warn!("  [EXISTS] Filter: {} <-- THIS WILL CAUSE FWP_E_ALREADY_EXISTS!", MULLVAD_FILTER_NAMES[i]);
                 unsafe { FwpmFreeMemory0(&mut (filter_ptr as *mut _)); }
+            } else if result != FWP_E_FILTER_NOT_FOUND.0 as u32 {
+                log::warn!("  [ERROR] Filter lookup failed: 0x{:08X}", result);
             }
         }
         if filter_count == 0 {
@@ -1021,8 +1063,9 @@ impl FilterLayer {
 
 /// Cleanup stale WFP objects from previous sessions
 ///
-/// MUST be called at app startup BEFORE any VPN/driver operations.
-/// This cleans up persistent Mullvad WFP objects (filters, callouts, sublayer, provider)
+/// MUST be called at app startup BEFORE any VPN/driver operations,
+/// and ideally while the driver service is stopped.
+/// This cleans up persistent Mullvad WFP objects (filters, callouts, provider context, provider)
 /// that may exist from a previous session that crashed or didn't clean up properly.
 ///
 /// If stale objects exist when driver.initialize() runs, it will fail with
@@ -1030,10 +1073,13 @@ impl FilterLayer {
 /// we'd delete the objects that were just registered.
 ///
 /// Order of deletion matters (most dependent first):
-/// 1. Filters first (they reference callouts and sublayer) - BY GUID!
-/// 2. Callouts second (they reference the sublayer)
-/// 3. Sublayer third (it references the provider)
+/// 1. Filters first (they reference callouts and provider context) - BY GUID!
+/// 2. Callouts next
+/// 3. Provider context (filters reference it)
 /// 4. Provider last
+///
+/// NOTE: We do NOT delete the WinFW baseline sublayer here. It is owned by
+/// Windows Firewall and should already exist; deleting it can destabilize WFP.
 pub fn cleanup_stale_wfp_callouts() {
     log::info!("Cleaning up stale WFP objects from previous sessions...");
 
@@ -1052,21 +1098,14 @@ pub fn cleanup_stale_wfp_callouts() {
             log::info!("Deleted {} additional Mullvad WFP filters by enumeration", filters_deleted);
         }
 
-        // Step 1: Delete Mullvad callouts (they reference sublayer)
+        // Step 1: Delete Mullvad callouts (filters reference these)
         let callouts_deleted = engine.cleanup_mullvad_callouts();
         if callouts_deleted > 0 {
             log::info!("Deleted {} stale Mullvad WFP callouts", callouts_deleted);
         }
 
-        // Step 2: Delete Mullvad sublayer (it references provider)
-        let result = unsafe {
-            FwpmSubLayerDeleteByKey0(engine.handle, &ST_FW_WINFW_BASELINE_SUBLAYER_KEY)
-        };
-        if result == 0 {
-            log::info!("Deleted stale Mullvad sublayer");
-        } else if result != FWP_E_SUBLAYER_NOT_FOUND.0 as u32 {
-            log::debug!("Mullvad sublayer delete: 0x{:08X} (may not exist)", result);
-        }
+        // Step 2: Delete Mullvad provider context (filters reference this)
+        engine.cleanup_mullvad_provider_context();
 
         // Step 3: Delete Mullvad provider
         let result = unsafe {

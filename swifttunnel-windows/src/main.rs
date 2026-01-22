@@ -220,6 +220,9 @@ fn main() -> eframe::Result<()> {
 
     // Clean up any stale WFP callouts from previous sessions
     // This MUST happen before any driver.initialize() calls
+    if let Err(e) = SplitTunnelDriver::stop_driver_service() {
+        warn!("Failed to stop split tunnel driver service on startup: {}", e);
+    }
     vpn::cleanup_stale_wfp_callouts();
 
     // Create shared state
