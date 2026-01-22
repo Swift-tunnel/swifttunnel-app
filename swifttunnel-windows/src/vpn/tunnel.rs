@@ -491,10 +491,10 @@ impl WireguardTunnel {
     /// - Keepalive packet generation
     /// - Connection timeout detection
     ///
-    /// When skip_keepalives is true (split tunnel mode), we still call update_timers()
-    /// for internal state management, but we DON'T send the keepalive packets from
-    /// this socket. The parallel interceptor's inbound receiver handles keepalives
-    /// from the VpnEncryptContext socket instead.
+    /// When skip_keepalives is true (split tunnel mode), this task does NOT call
+    /// update_timers() at all. The parallel interceptor's inbound receiver takes
+    /// full responsibility for keepalives from the VpnEncryptContext socket.
+    /// This prevents BoringTun state confusion where both tasks try to manage timers.
     fn spawn_keepalive_task(
         &self,
         tunn: Arc<std::sync::Mutex<Tunn>>,
@@ -515,7 +515,20 @@ impl WireguardTunnel {
                         // Check if keepalives should be skipped (split tunnel mode)
                         let should_skip = skip_keepalives.load(Ordering::SeqCst);
 
-                        // Call update_timers to handle handshakes, keepalives, timeouts
+                        if should_skip {
+                            // Split tunnel mode: DON'T call update_timers() at all
+                            // The parallel interceptor's inbound receiver handles ALL
+                            // timer management from its socket. If we call update_timers()
+                            // here, we'd consume BoringTun state that the inbound receiver
+                            // needs.
+                            if !skip_logged {
+                                log::info!("Tunnel timer task: split tunnel mode - delegating to inbound receiver");
+                                skip_logged = true;
+                            }
+                            continue;
+                        }
+
+                        // Normal mode: call update_timers and send from tunnel socket
                         let result = {
                             let mut tunn = tunn.lock().unwrap();
                             tunn.update_timers(&mut buf)
@@ -523,19 +536,10 @@ impl WireguardTunnel {
 
                         match result {
                             TunnResult::WriteToNetwork(data) => {
-                                if should_skip {
-                                    // Split tunnel mode: DON'T send from tunnel socket
-                                    // This prevents endpoint confusion on VPN server
-                                    if !skip_logged {
-                                        log::info!("Tunnel keepalive suppressed (split tunnel mode) - {} bytes would have been sent", data.len());
-                                        skip_logged = true;
-                                    }
+                                if let Err(e) = socket.send(data).await {
+                                    log::warn!("Failed to send timer packet: {}", e);
                                 } else {
-                                    if let Err(e) = socket.send(data).await {
-                                        log::warn!("Failed to send timer packet: {}", e);
-                                    } else {
-                                        log::trace!("Timer packet sent ({} bytes)", data.len());
-                                    }
+                                    log::trace!("Timer packet sent ({} bytes)", data.len());
                                 }
                             }
                             TunnResult::Err(e) => {
