@@ -542,7 +542,22 @@ impl ParallelInterceptor {
         std::sync::Arc::new(move |ip_packet: &[u8]| {
             use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
-            log::info!("inbound_handler: called with {} byte IP packet", ip_packet.len());
+            // Parse IP header to see source and destination
+            if ip_packet.len() >= 20 {
+                let src_ip = std::net::Ipv4Addr::new(
+                    ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+                );
+                let dst_ip = std::net::Ipv4Addr::new(
+                    ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+                );
+                let protocol = ip_packet[9];
+                log::info!(
+                    "inbound_handler: {} byte packet, proto={}, {} -> {}",
+                    ip_packet.len(), protocol, src_ip, dst_ip
+                );
+            } else {
+                log::info!("inbound_handler: {} byte packet (too short for IPv4)", ip_packet.len());
+            }
 
             let physical_name = match &physical_name {
                 Some(name) => name,
