@@ -37,14 +37,27 @@
 //! ```
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+
+use boringtun::noise::{Tunn, TunnResult};
 
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
 use super::{VpnError, VpnResult};
+
+/// Context for direct WireGuard encryption (bypasses OS routing)
+#[derive(Clone)]
+pub struct VpnEncryptContext {
+    /// WireGuard tunnel for encryption
+    pub tunn: Arc<Mutex<Tunn>>,
+    /// UDP socket for sending encrypted packets
+    pub socket: Arc<UdpSocket>,
+    /// VPN server address
+    pub server_addr: SocketAddr,
+}
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersInfo, IP_ADAPTER_INFO};
 use windows::Win32::System::Threading::{
@@ -157,6 +170,8 @@ pub struct ParallelInterceptor {
     tunnel_ip: Option<std::net::Ipv4Addr>,
     /// Physical adapter IP (for NAT rewriting on inbound packets)
     internet_ip: Option<std::net::Ipv4Addr>,
+    /// Context for direct WireGuard encryption (bypasses Wintun for outbound)
+    vpn_encrypt_ctx: Option<VpnEncryptContext>,
 }
 
 impl ParallelInterceptor {
@@ -193,6 +208,7 @@ impl ParallelInterceptor {
             throughput_stats: ThroughputStats::default(),
             tunnel_ip: None,
             internet_ip: None,
+            vpn_encrypt_ctx: None,
         }
     }
 
@@ -220,6 +236,19 @@ impl ParallelInterceptor {
             self.internet_ip = Some(int_ip);
             log::info!("Set NAT internet IP: {}", int_ip);
         }
+    }
+
+    /// Set VPN encryption context for direct WireGuard encryption
+    ///
+    /// This allows workers to encrypt packets directly and send via UDP,
+    /// bypassing Wintun for outbound tunnel traffic. This is faster because
+    /// it eliminates the Wintun buffer copy and context switch.
+    pub fn set_vpn_encrypt_context(&mut self, ctx: VpnEncryptContext) {
+        log::info!(
+            "Set VPN encrypt context: server={}",
+            ctx.server_addr
+        );
+        self.vpn_encrypt_ctx = Some(ctx);
     }
 
     /// Check if driver is available
@@ -388,6 +417,7 @@ impl ParallelInterceptor {
             let throughput = self.throughput_stats.clone();
             let tunnel_ip = self.tunnel_ip;
             let internet_ip = self.internet_ip;
+            let vpn_encrypt_ctx = self.vpn_encrypt_ctx.clone();
 
             let handle = thread::spawn(move || {
                 // Set CPU affinity for this worker
@@ -403,6 +433,7 @@ impl ParallelInterceptor {
                     stop_flag,
                     tunnel_ip,
                     internet_ip,
+                    vpn_encrypt_ctx,
                 );
             });
 
@@ -953,6 +984,7 @@ fn run_packet_worker(
     stop_flag: Arc<AtomicBool>,
     tunnel_ip: Option<std::net::Ipv4Addr>,
     internet_ip: Option<std::net::Ipv4Addr>,
+    vpn_encrypt_ctx: Option<VpnEncryptContext>,
 ) {
     log::info!("Worker {} started", worker_id);
 
@@ -992,12 +1024,18 @@ fn run_packet_worker(
         }
     };
 
-    // Log Wintun session availability
-    if wintun_session.is_some() {
-        log::info!("Worker {}: Wintun session AVAILABLE - tunnel routing enabled", worker_id);
+    // Log VPN encryption context availability
+    if vpn_encrypt_ctx.is_some() {
+        log::info!("Worker {}: VPN encryption context AVAILABLE - direct encryption enabled", worker_id);
+    } else if wintun_session.is_some() {
+        log::info!("Worker {}: Wintun session AVAILABLE - tunnel routing enabled (fallback mode)", worker_id);
     } else {
-        log::warn!("Worker {}: Wintun session NOT AVAILABLE - tunnel packets will be bypassed!", worker_id);
+        log::warn!("Worker {}: NO VPN context - tunnel packets will be bypassed!", worker_id);
     }
+
+    // Track direct encryption stats
+    let mut direct_encrypt_success = 0u64;
+    let mut direct_encrypt_fail = 0u64;
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
@@ -1043,8 +1081,9 @@ fn run_packet_worker(
                 let total = tunneled + bypassed;
                 let tunnel_pct = if total > 0 { (tunneled as f64 / total as f64) * 100.0 } else { 0.0 };
                 log::info!(
-                    "Worker 0 stats: {} tunneled, {} bypassed ({:.1}% tunnel), Wintun: {} ok, {} fail, {} no-session, connections: {}, pids: {}",
+                    "Worker 0 stats: {} tunneled, {} bypassed ({:.1}% tunnel), direct: {} ok/{} fail, Wintun: {} ok/{} fail/{} no-session, conns: {}, pids: {}",
                     tunneled, bypassed, tunnel_pct,
+                    direct_encrypt_success, direct_encrypt_fail,
                     wintun_inject_success, wintun_inject_fail, no_wintun_session,
                     snapshot.connections.len(), snapshot.pid_names.len()
                 );
@@ -1055,102 +1094,153 @@ fn run_packet_worker(
                 stats.bytes_tunneled.fetch_add(packet_len, Ordering::Relaxed);
                 throughput.add_tx(packet_len);
 
-                // Inject into Wintun
-                if let Some(ref session) = wintun_session {
-                    // Extract IP packet from Ethernet frame
-                    if work.data.len() > 14 {
-                        let ip_packet = &work.data[14..];
+                // Extract IP packet from Ethernet frame
+                if work.data.len() <= 14 {
+                    continue;
+                }
+                let ip_packet = &work.data[14..];
 
-                        // Do source NAT if configured: rewrite src from internet_ip to tunnel_ip
-                        // This is needed because the app's socket is bound to the physical adapter IP,
-                        // but the VPN server expects packets from the tunnel IP.
-                        let mut nat_packet;
-                        let packet_to_send = if ip_packet.len() >= 20 {
-                            let src_ip = std::net::Ipv4Addr::new(
-                                ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+                // Do source NAT if configured: rewrite src from internet_ip to tunnel_ip
+                // This is needed because the app's socket is bound to the physical adapter IP,
+                // but the VPN server expects packets from the tunnel IP.
+                let mut nat_packet = Vec::new();
+                let packet_to_send: &[u8] = if ip_packet.len() >= 20 {
+                    let src_ip = std::net::Ipv4Addr::new(
+                        ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+                    );
+
+                    // Check if we need source NAT
+                    if tunnel_ip.is_some() && internet_ip.is_some() && Some(src_ip) == internet_ip {
+                        nat_packet = ip_packet.to_vec();
+                        let new_src = tunnel_ip.unwrap();
+
+                        // Rewrite source IP (bytes 12-15)
+                        nat_packet[12] = new_src.octets()[0];
+                        nat_packet[13] = new_src.octets()[1];
+                        nat_packet[14] = new_src.octets()[2];
+                        nat_packet[15] = new_src.octets()[3];
+
+                        // Recalculate IP header checksum
+                        nat_packet[10] = 0;
+                        nat_packet[11] = 0;
+                        let ihl = ((nat_packet[0] & 0x0F) as usize) * 4;
+                        let checksum = calculate_ip_checksum(&nat_packet[..ihl]);
+                        nat_packet[10] = (checksum >> 8) as u8;
+                        nat_packet[11] = (checksum & 0xFF) as u8;
+
+                        // Update TCP/UDP checksum (pseudo-header includes source IP)
+                        let protocol = nat_packet[9];
+                        let transport_offset = ihl;
+
+                        if protocol == 6 && nat_packet.len() >= transport_offset + 18 {
+                            // TCP: checksum at offset 16 within TCP header
+                            update_transport_checksum(
+                                &mut nat_packet,
+                                transport_offset + 16,
+                                &src_ip.octets(),
+                                &new_src.octets(),
                             );
+                        } else if protocol == 17 && nat_packet.len() >= transport_offset + 8 {
+                            // UDP: checksum at offset 6 within UDP header
+                            // Only update if checksum is non-zero (0 means no checksum)
+                            let udp_checksum = u16::from_be_bytes([
+                                nat_packet[transport_offset + 6],
+                                nat_packet[transport_offset + 7],
+                            ]);
+                            if udp_checksum != 0 {
+                                update_transport_checksum(
+                                    &mut nat_packet,
+                                    transport_offset + 6,
+                                    &src_ip.octets(),
+                                    &new_src.octets(),
+                                );
+                            }
+                        }
 
-                            // Check if we need source NAT
-                            if tunnel_ip.is_some() && internet_ip.is_some() && Some(src_ip) == internet_ip {
-                                nat_packet = ip_packet.to_vec();
-                                let new_src = tunnel_ip.unwrap();
+                        // Log first few NAT operations to verify they're working
+                        if direct_encrypt_success + wintun_inject_success < 5 {
+                            log::info!(
+                                "Worker {}: Source NAT {} -> {}, {} bytes, proto={}",
+                                worker_id, src_ip, new_src, nat_packet.len(),
+                                nat_packet[9]
+                            );
+                        }
 
-                                // Rewrite source IP (bytes 12-15)
-                                nat_packet[12] = new_src.octets()[0];
-                                nat_packet[13] = new_src.octets()[1];
-                                nat_packet[14] = new_src.octets()[2];
-                                nat_packet[15] = new_src.octets()[3];
+                        &nat_packet[..]
+                    } else {
+                        ip_packet
+                    }
+                } else {
+                    ip_packet
+                };
 
-                                // Recalculate IP header checksum
-                                nat_packet[10] = 0;
-                                nat_packet[11] = 0;
-                                let ihl = ((nat_packet[0] & 0x0F) as usize) * 4;
-                                let checksum = calculate_ip_checksum(&nat_packet[..ihl]);
-                                nat_packet[10] = (checksum >> 8) as u8;
-                                nat_packet[11] = (checksum & 0xFF) as u8;
+                // PREFERRED: Direct encryption - encrypts inline and sends via UDP
+                // This is faster than Wintun injection because it eliminates:
+                // - The Wintun buffer copy
+                // - The context switch to the WireGuard outbound task
+                if let Some(ref ctx) = vpn_encrypt_ctx {
+                    let mut encrypted = vec![0u8; packet_to_send.len() + 128]; // Extra space for WG overhead
 
-                                // Update TCP/UDP checksum (pseudo-header includes source IP)
-                                let protocol = nat_packet[9];
-                                let transport_offset = ihl;
+                    // Lock tunnel and encrypt
+                    let result = {
+                        let mut tunn = ctx.tunn.lock().unwrap();
+                        tunn.encapsulate(packet_to_send, &mut encrypted)
+                    };
 
-                                if protocol == 6 && nat_packet.len() >= transport_offset + 18 {
-                                    // TCP: checksum at offset 16 within TCP header
-                                    update_transport_checksum(
-                                        &mut nat_packet,
-                                        transport_offset + 16,
-                                        &src_ip.octets(),
-                                        &new_src.octets(),
-                                    );
-                                } else if protocol == 17 && nat_packet.len() >= transport_offset + 8 {
-                                    // UDP: checksum at offset 6 within UDP header
-                                    // Only update if checksum is non-zero (0 means no checksum)
-                                    let udp_checksum = u16::from_be_bytes([
-                                        nat_packet[transport_offset + 6],
-                                        nat_packet[transport_offset + 7],
-                                    ]);
-                                    if udp_checksum != 0 {
-                                        update_transport_checksum(
-                                            &mut nat_packet,
-                                            transport_offset + 6,
-                                            &src_ip.octets(),
-                                            &new_src.octets(),
+                    match result {
+                        TunnResult::WriteToNetwork(data) => {
+                            // Send encrypted packet directly via UDP
+                            match ctx.socket.send_to(data, ctx.server_addr) {
+                                Ok(_) => {
+                                    direct_encrypt_success += 1;
+                                    if direct_encrypt_success <= 5 {
+                                        log::info!(
+                                            "Worker {}: Direct encrypt OK - {} bytes plaintext -> {} bytes encrypted",
+                                            worker_id, packet_to_send.len(), data.len()
                                         );
                                     }
                                 }
-
-                                // Log first few NAT operations to verify they're working
-                                if wintun_inject_success < 5 {
-                                    log::info!(
-                                        "Worker {}: Source NAT {} -> {}, {} bytes, proto={}",
-                                        worker_id, src_ip, new_src, nat_packet.len(),
-                                        nat_packet[9]
-                                    );
+                                Err(e) => {
+                                    direct_encrypt_fail += 1;
+                                    if direct_encrypt_fail <= 10 {
+                                        log::warn!("Worker {}: UDP send failed: {}", worker_id, e);
+                                    }
                                 }
-
-                                &nat_packet[..]
-                            } else {
-                                ip_packet
                             }
-                        } else {
-                            ip_packet
-                        };
-
-                        match session.allocate_send_packet(packet_to_send.len() as u16) {
-                            Ok(mut packet) => {
-                                packet.bytes_mut().copy_from_slice(packet_to_send);
-                                session.send_packet(packet);
-                                wintun_inject_success += 1;
+                        }
+                        TunnResult::Done => {
+                            // Packet was queued internally (handshake in progress)
+                            direct_encrypt_success += 1;
+                        }
+                        TunnResult::Err(e) => {
+                            direct_encrypt_fail += 1;
+                            if direct_encrypt_fail <= 10 {
+                                log::warn!("Worker {}: Encrypt failed: {:?}", worker_id, e);
                             }
-                            Err(_) => {
-                                wintun_inject_fail += 1;
-                                // Wintun allocation failed - forward to adapter as fallback
-                                send_bypass_packet(&driver, &adapters, &work);
-                            }
+                        }
+                        _ => {
+                            // WriteToTunnelV4/V6 shouldn't happen for encapsulate
+                            direct_encrypt_fail += 1;
+                        }
+                    }
+                }
+                // FALLBACK: Wintun injection (if no encryption context)
+                else if let Some(ref session) = wintun_session {
+                    match session.allocate_send_packet(packet_to_send.len() as u16) {
+                        Ok(mut packet) => {
+                            packet.bytes_mut().copy_from_slice(packet_to_send);
+                            session.send_packet(packet);
+                            wintun_inject_success += 1;
+                        }
+                        Err(_) => {
+                            wintun_inject_fail += 1;
+                            // Wintun allocation failed - forward to adapter as fallback
+                            send_bypass_packet(&driver, &adapters, &work);
                         }
                     }
                 } else {
                     no_wintun_session += 1;
-                    // No Wintun session - forward to adapter
+                    // No VPN context at all - forward to adapter (bypass)
                     send_bypass_packet(&driver, &adapters, &work);
                 }
             } else {

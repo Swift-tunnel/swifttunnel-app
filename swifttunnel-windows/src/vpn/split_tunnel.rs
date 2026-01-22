@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use super::packet_interceptor::{PacketInterceptor, WireguardContext};
-use super::parallel_interceptor::{ParallelInterceptor, ThroughputStats};
+use super::parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
 use super::{VpnError, VpnResult};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -239,6 +239,22 @@ impl SplitTunnelDriver {
             session,
             packets_injected: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Set the VPN encryption context for direct WireGuard encryption
+    ///
+    /// This enables faster outbound path: workers encrypt directly and send via UDP,
+    /// bypassing Wintun. Only applies to parallel mode.
+    pub fn set_vpn_encrypt_context(&mut self, ctx: VpnEncryptContext) {
+        if self.use_parallel {
+            if let Some(ref mut interceptor) = self.parallel_interceptor {
+                interceptor.set_vpn_encrypt_context(ctx);
+            } else {
+                log::warn!("Cannot set VPN encrypt context: parallel interceptor not created yet");
+            }
+        } else {
+            log::info!("VPN encrypt context not used in legacy mode");
+        }
     }
 
     /// Check if driver is available (can open device)

@@ -16,7 +16,7 @@ use crate::auth::types::VpnConfig;
 use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
-use super::parallel_interceptor::ThroughputStats;
+use super::parallel_interceptor::{ThroughputStats, VpnEncryptContext};
 use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::packet_interceptor::WireguardContext;
@@ -254,6 +254,38 @@ impl VpnConnection {
                             log::info!("Setting inbound handler on WireGuard tunnel for split tunnel mode");
                             if let Some(ref tunnel_ref) = self.tunnel {
                                 tunnel_ref.set_inbound_handler(handler);
+                            }
+                        }
+
+                        // Set up direct encryption context for outbound tunnel packets
+                        // This allows workers to encrypt directly, bypassing Wintun for faster path
+                        if let Some(ref tunnel_ref) = self.tunnel {
+                            if let Some(tunn) = tunnel_ref.get_tunn() {
+                                let endpoint = tunnel_ref.get_endpoint();
+                                log::info!("Setting up direct encryption to {}", endpoint);
+
+                                // Create a separate std UdpSocket for sync worker threads
+                                // WireGuard uses receiver_index to identify sessions, not source port,
+                                // so using a separate socket is fine
+                                match std::net::UdpSocket::bind("0.0.0.0:0") {
+                                    Ok(socket) => {
+                                        if let Err(e) = socket.connect(endpoint) {
+                                            log::warn!("Failed to connect encryption socket: {}", e);
+                                        } else {
+                                            let ctx = VpnEncryptContext {
+                                                tunn,
+                                                socket: Arc::new(socket),
+                                                server_addr: endpoint,
+                                            };
+                                            split_tunnel.lock().await.set_vpn_encrypt_context(ctx);
+                                            log::info!("Direct encryption enabled for split tunnel");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::warn!("Failed to bind encryption socket: {}", e);
+                                        log::warn!("Falling back to Wintun injection (slower)");
+                                    }
+                                }
                             }
                         }
                     }

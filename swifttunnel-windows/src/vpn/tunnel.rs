@@ -53,6 +53,8 @@ pub struct WireguardTunnel {
     /// Optional handler for inbound packets when split tunnel is active
     /// If set, decrypted packets are passed to this handler instead of Wintun
     inbound_handler: Arc<std::sync::Mutex<Option<InboundHandler>>>,
+    /// Shared Tunn instance for direct encryption by split tunnel workers
+    tunn: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Tunn>>>>>,
 }
 
 impl WireguardTunnel {
@@ -68,6 +70,7 @@ impl WireguardTunnel {
             running: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(std::sync::Mutex::new(TunnelStats::default())),
             inbound_handler: Arc::new(std::sync::Mutex::new(None)),
+            tunn: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -84,6 +87,20 @@ impl WireguardTunnel {
     /// Get the inbound handler (for passing to tasks)
     fn get_inbound_handler(&self) -> Arc<std::sync::Mutex<Option<InboundHandler>>> {
         Arc::clone(&self.inbound_handler)
+    }
+
+    /// Get the Tunn instance for direct encryption by split tunnel workers
+    ///
+    /// Returns None if the tunnel hasn't been started yet.
+    /// The returned Tunn can be used to encrypt packets directly without
+    /// going through Wintun, which is faster for split tunnel mode.
+    pub fn get_tunn(&self) -> Option<Arc<std::sync::Mutex<Tunn>>> {
+        self.tunn.lock().unwrap().clone()
+    }
+
+    /// Get the VPN server endpoint
+    pub fn get_endpoint(&self) -> SocketAddr {
+        self.endpoint
     }
 
     /// Start the tunnel packet processing loops
@@ -113,6 +130,9 @@ impl WireguardTunnel {
         ).map_err(|e| VpnError::TunnelInit(format!("Failed to create Tunn: {:?}", e)))?;
 
         let tunn = Arc::new(std::sync::Mutex::new(tunn));
+
+        // Store tunn for external access (split tunnel direct encryption)
+        *self.tunn.lock().unwrap() = Some(Arc::clone(&tunn));
 
         // Create UDP socket for server communication
         let socket = UdpSocket::bind("0.0.0.0:0")
