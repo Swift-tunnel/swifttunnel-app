@@ -72,6 +72,8 @@ pub struct RouteManager {
     interface_index: u32,
     /// Whether routes have been applied
     routes_applied: bool,
+    /// Split tunnel mode - don't add default route, only tunnel app traffic uses VPN
+    split_tunnel_mode: bool,
 }
 
 impl RouteManager {
@@ -82,7 +84,15 @@ impl RouteManager {
             original_gateway: None,
             interface_index,
             routes_applied: false,
+            split_tunnel_mode: false,
         }
+    }
+
+    /// Enable split tunnel mode (only tunnel app traffic uses VPN)
+    /// In this mode, we don't add the default route - only the VPN server route
+    pub fn set_split_tunnel_mode(&mut self, enabled: bool) {
+        self.split_tunnel_mode = enabled;
+        log::info!("Split tunnel mode: {}", if enabled { "enabled" } else { "disabled" });
     }
 
     /// Get the current default gateway from the system
@@ -170,41 +180,45 @@ impl RouteManager {
             }
         }
 
-        // Step 3: Add default route through VPN interface
-        // We use 10.0.0.1 as gateway (standard VPN internal gateway) with low metric
-        log::info!(
-            "Adding default route through VPN interface (index: {})",
-            self.interface_index
-        );
+        // Step 3: Add default route through VPN interface (skip in split tunnel mode)
+        if self.split_tunnel_mode {
+            log::info!("Split tunnel mode: skipping default VPN route (only tunnel app traffic will use VPN)");
+        } else {
+            // We use 10.0.0.1 as gateway (standard VPN internal gateway) with low metric
+            log::info!(
+                "Adding default route through VPN interface (index: {})",
+                self.interface_index
+            );
 
-        let default_route = hidden_command("route")
-            .args([
-                "add",
-                "0.0.0.0",
-                "mask",
-                "0.0.0.0",
-                "10.0.0.1",  // VPN internal gateway
-                "metric",
-                "5",  // Lower metric = higher priority
-                "if",
-                &self.interface_index.to_string(),
-            ])
-            .output();
+            let default_route = hidden_command("route")
+                .args([
+                    "add",
+                    "0.0.0.0",
+                    "mask",
+                    "0.0.0.0",
+                    "10.0.0.1",  // VPN internal gateway
+                    "metric",
+                    "5",  // Lower metric = higher priority
+                    "if",
+                    &self.interface_index.to_string(),
+                ])
+                .output();
 
-        match default_route {
-            Ok(out) if out.status.success() => {
-                log::info!("Default route through VPN added successfully");
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                log::warn!("Default route warning: {}", stderr);
-                // Continue - might work anyway
-            }
-            Err(e) => {
-                return Err(VpnError::Route(format!(
-                    "Failed to add default route: {}",
-                    e
-                )));
+            match default_route {
+                Ok(out) if out.status.success() => {
+                    log::info!("Default route through VPN added successfully");
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    log::warn!("Default route warning: {}", stderr);
+                    // Continue - might work anyway
+                }
+                Err(e) => {
+                    return Err(VpnError::Route(format!(
+                        "Failed to add default route: {}",
+                        e
+                    )));
+                }
             }
         }
 
@@ -222,28 +236,32 @@ impl RouteManager {
 
         log::info!("Removing VPN routes...");
 
-        // Remove default route through VPN
-        let remove_default = hidden_command("route")
-            .args([
-                "delete",
-                "0.0.0.0",
-                "mask",
-                "0.0.0.0",
-                "10.0.0.1",
-            ])
-            .output();
+        // Remove default route through VPN (only if not in split tunnel mode)
+        if !self.split_tunnel_mode {
+            let remove_default = hidden_command("route")
+                .args([
+                    "delete",
+                    "0.0.0.0",
+                    "mask",
+                    "0.0.0.0",
+                    "10.0.0.1",
+                ])
+                .output();
 
-        match remove_default {
-            Ok(out) if out.status.success() => {
-                log::info!("Default VPN route removed");
+            match remove_default {
+                Ok(out) if out.status.success() => {
+                    log::info!("Default VPN route removed");
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    log::warn!("Failed to remove default route (may not exist): {}", stderr);
+                }
+                Err(e) => {
+                    log::warn!("Failed to run route delete: {}", e);
+                }
             }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                log::warn!("Failed to remove default route (may not exist): {}", stderr);
-            }
-            Err(e) => {
-                log::warn!("Failed to run route delete: {}", e);
-            }
+        } else {
+            log::info!("Split tunnel mode: no default route to remove");
         }
 
         // Remove VPN server specific route
