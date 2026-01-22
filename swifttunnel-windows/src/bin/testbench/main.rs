@@ -347,8 +347,8 @@ fn verify_traffic_routing() {
     // Initialize driver
     let mut driver = SplitTunnelDriver::new();
 
-    // Check if driver is available
-    if !driver.is_available() {
+    // Check if driver is available (static method)
+    if !SplitTunnelDriver::is_available() {
         println!("   ❌ ndisapi driver not available");
         println!("   Please install Windows Packet Filter driver");
         route_manager.remove_routes().ok();
@@ -358,7 +358,16 @@ fn verify_traffic_routing() {
     }
     println!("   ✅ ndisapi driver available");
 
-    // Initialize the driver
+    // Open and initialize the driver
+    if let Err(e) = driver.open() {
+        println!("   ❌ Failed to open driver: {}", e);
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+    println!("   ✅ Driver opened");
+
     if let Err(e) = driver.initialize() {
         println!("   ❌ Failed to initialize driver: {}", e);
         route_manager.remove_routes().ok();
@@ -387,24 +396,13 @@ fn verify_traffic_routing() {
 
     if let Err(e) = driver.configure(split_config) {
         println!("   ❌ Split tunnel configure failed: {}", e);
-        let _ = driver.stop();
+        let _ = driver.close();
         route_manager.remove_routes().ok();
         tunnel.stop();
         adapter.shutdown();
         return;
     }
-    println!("   ✅ Split tunnel configured");
-
-    // Start packet interception
-    if let Err(e) = driver.start(tunnel.clone()) {
-        println!("   ❌ Split tunnel start failed: {}", e);
-        let _ = driver.stop();
-        route_manager.remove_routes().ok();
-        tunnel.stop();
-        adapter.shutdown();
-        return;
-    }
-    println!("   ✅ Split tunnel started");
+    println!("   ✅ Split tunnel configured and started");
 
     // Wait for split tunnel to take effect
     std::thread::sleep(Duration::from_millis(500));
@@ -452,7 +450,7 @@ fn verify_traffic_routing() {
 
     // Cleanup
     println!("Cleaning up...");
-    let _ = driver.stop();
+    let _ = driver.close();
     let _ = route_manager.remove_routes();
     tunnel.stop();
     adapter.shutdown();
@@ -557,9 +555,9 @@ fn test_split_tunnel_driver() {
     println!("1. Creating driver instance...");
     let mut driver = SplitTunnelDriver::new();
 
-    // Check availability
+    // Check availability (static method)
     println!("\n2. Checking driver availability...");
-    if driver.is_available() {
+    if SplitTunnelDriver::is_available() {
         println!("   ✅ ndisapi driver is available");
     } else {
         println!("   ❌ ndisapi driver NOT available");
@@ -568,8 +566,20 @@ fn test_split_tunnel_driver() {
         return;
     }
 
+    // Open
+    println!("\n3. Opening driver...");
+    match driver.open() {
+        Ok(_) => {
+            println!("   ✅ Driver opened");
+        }
+        Err(e) => {
+            println!("   ❌ Open failed: {}", e);
+            return;
+        }
+    }
+
     // Initialize
-    println!("\n3. Initializing driver...");
+    println!("\n4. Initializing driver...");
     match driver.initialize() {
         Ok(_) => {
             println!("   ✅ Driver initialized");
@@ -582,7 +592,7 @@ fn test_split_tunnel_driver() {
     }
 
     // Configure with test apps
-    println!("\n4. Configuring with test apps...");
+    println!("\n5. Configuring with test apps...");
     let presets = HashSet::from([GamePreset::Roblox]);
     let tunnel_apps = get_apps_for_preset_set(&presets);
     println!("   Tunnel apps: {:?}", tunnel_apps);
@@ -596,7 +606,7 @@ fn test_split_tunnel_driver() {
 
     match driver.configure(config) {
         Ok(_) => {
-            println!("   ✅ Configuration applied");
+            println!("   ✅ Configuration applied and interception started");
             println!("   Driver state: {:?}", driver.state());
         }
         Err(e) => {
@@ -605,9 +615,9 @@ fn test_split_tunnel_driver() {
     }
 
     // Cleanup
-    println!("\n5. Cleaning up...");
-    let _ = driver.stop();
-    println!("   ✅ Driver stopped");
+    println!("\n6. Cleaning up...");
+    let _ = driver.close();
+    println!("   ✅ Driver closed");
 
     println!();
 }
@@ -620,11 +630,17 @@ fn test_full_split_tunnel_flow() {
     println!("Step 1: Creating and initializing driver...");
     let mut driver = SplitTunnelDriver::new();
 
-    if !driver.is_available() {
+    if !SplitTunnelDriver::is_available() {
         println!("   ❌ ndisapi driver not available");
         return;
     }
     println!("   ✅ Driver available");
+
+    if let Err(e) = driver.open() {
+        println!("   ❌ Open failed: {}", e);
+        return;
+    }
+    println!("   ✅ Driver opened");
 
     if let Err(e) = driver.initialize() {
         println!("   ❌ Initialize failed: {}", e);
@@ -658,7 +674,7 @@ fn test_full_split_tunnel_flow() {
         }
         Err(e) => {
             println!("   ❌ Configure failed: {}", e);
-            let _ = driver.stop();
+            let _ = driver.close();
             return;
         }
     }
@@ -677,8 +693,8 @@ fn test_full_split_tunnel_flow() {
 
     // Step 4: Cleanup
     println!("\nStep 4: Cleaning up...");
-    let _ = driver.stop();
-    println!("   ✅ Driver stopped");
+    let _ = driver.close();
+    println!("   ✅ Driver closed");
 
     println!("\n════════════════════════════════════════");
     println!("Full split tunnel flow test complete!");
