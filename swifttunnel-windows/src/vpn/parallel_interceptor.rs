@@ -602,7 +602,16 @@ impl ParallelInterceptor {
 
         // Create Ethernet frame with IP packet payload
         // We need to wrap the IP packet in an Ethernet frame for injection
-        let mut ethernet_frame = vec![0u8; 14 + ip_packet.len()];
+        const MAX_ETHER_FRAME: usize = 1522;
+        let frame_len = 14 + ip_packet.len();
+
+        // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
+        if frame_len > MAX_ETHER_FRAME {
+            log::warn!("inject_inbound: packet too large ({} bytes), dropping", frame_len);
+            return;
+        }
+
+        let mut ethernet_frame = vec![0u8; frame_len];
 
         // Ethernet header:
         // - Destination MAC (6 bytes): Local adapter's MAC (will be filled by stack)
@@ -610,7 +619,7 @@ impl ParallelInterceptor {
         // - EtherType (2 bytes): 0x0800 for IPv4
 
         // Get adapter MAC for destination
-        let medium = adapter.get_medium();
+        let _medium = adapter.get_medium();
         // For now, use a broadcast-like approach - the stack will handle it
         ethernet_frame[0..6].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // Broadcast
         ethernet_frame[6..12].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Source zeros
@@ -798,7 +807,16 @@ impl ParallelInterceptor {
             // Create Ethernet frame with IP packet payload
             // Use physical adapter's MAC as destination (packet is being "received" by this adapter)
             // Use a dummy but valid-looking source MAC (simulating upstream router)
-            let mut ethernet_frame = vec![0u8; 14 + packet.len()];
+            const MAX_ETHER_FRAME: usize = 1522; // Max Ethernet frame size with VLAN tag
+            let frame_len = 14 + packet.len();
+
+            // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
+            if frame_len > MAX_ETHER_FRAME {
+                log::warn!("inbound_handler: packet too large ({} bytes), dropping", frame_len);
+                return;
+            }
+
+            let mut ethernet_frame = vec![0u8; frame_len];
             ethernet_frame[0..6].copy_from_slice(&adapter_mac); // Destination = physical adapter
             ethernet_frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // Locally administered src MAC
             ethernet_frame[12] = 0x08; // EtherType: IPv4
@@ -1441,6 +1459,13 @@ fn send_bypass_packet(
     };
 
     let adapter_handle = adapter.get_handle();
+
+    // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
+    const MAX_ETHER_FRAME: usize = 1522;
+    if work.data.len() > MAX_ETHER_FRAME {
+        log::warn!("send_bypass_packet: packet too large ({} bytes), dropping", work.data.len());
+        return;
+    }
 
     // Create IntermediateBuffer with packet data
     let mut buffer = IntermediateBuffer::default();

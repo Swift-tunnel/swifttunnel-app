@@ -247,49 +247,8 @@ impl VpnConnection {
                 Ok(processes) => {
                     log::info!("Split tunnel setup succeeded");
 
-                    // Configure tunnel inbound handler for split tunnel mode
-                    // This ensures decrypted VPN responses are injected to the physical adapter
-                    if let Some(ref split_tunnel) = self.split_tunnel {
-                        if let Some(handler) = split_tunnel.lock().await.create_inbound_handler() {
-                            log::info!("Setting inbound handler on WireGuard tunnel for split tunnel mode");
-                            if let Some(ref tunnel_ref) = self.tunnel {
-                                tunnel_ref.set_inbound_handler(handler);
-                            }
-                        }
-
-                        // Set up direct encryption context for outbound tunnel packets
-                        // This allows workers to encrypt directly, bypassing Wintun for faster path
-                        if let Some(ref tunnel_ref) = self.tunnel {
-                            if let Some(tunn) = tunnel_ref.get_tunn() {
-                                let endpoint = tunnel_ref.get_endpoint();
-                                log::info!("Setting up direct encryption to {}", endpoint);
-
-                                // Create a separate std UdpSocket for sync worker threads
-                                // WireGuard uses receiver_index to identify sessions, not source port,
-                                // so using a separate socket is fine
-                                match std::net::UdpSocket::bind("0.0.0.0:0") {
-                                    Ok(socket) => {
-                                        if let Err(e) = socket.connect(endpoint) {
-                                            log::warn!("Failed to connect encryption socket: {}", e);
-                                        } else {
-                                            let ctx = VpnEncryptContext {
-                                                tunn,
-                                                socket: Arc::new(socket),
-                                                server_addr: endpoint,
-                                            };
-                                            split_tunnel.lock().await.set_vpn_encrypt_context(ctx);
-                                            log::info!("Direct encryption enabled for split tunnel");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::warn!("Failed to bind encryption socket: {}", e);
-                                        log::warn!("Falling back to Wintun injection (slower)");
-                                    }
-                                }
-                            }
-                        }
-                    }
-
+                    // VpnEncryptContext is set up inside setup_split_tunnel() BEFORE configure()
+                    // so the inbound receiver thread starts properly during configure()
                     (true, processes)
                 }
                 Err(e) => {
@@ -423,7 +382,36 @@ impl VpnConnection {
         driver.set_wireguard_context(wg_ctx);
         log::info!("Wintun injection context set for split tunnel");
 
-        // Configure driver
+        // Set up direct encryption context BEFORE configure() since threads start during configure()
+        // This allows workers to encrypt packets directly and send via UDP (faster than Wintun injection)
+        if let Some(ref tunnel_ref) = self.tunnel {
+            if let Some(tunn) = tunnel_ref.get_tunn() {
+                let endpoint = tunnel_ref.get_endpoint();
+                log::info!("Setting up direct encryption to {} (before configure)", endpoint);
+
+                match std::net::UdpSocket::bind("0.0.0.0:0") {
+                    Ok(socket) => {
+                        if let Err(e) = socket.connect(endpoint) {
+                            log::warn!("Failed to connect encryption socket: {}", e);
+                        } else {
+                            let ctx = VpnEncryptContext {
+                                tunn,
+                                socket: Arc::new(socket),
+                                server_addr: endpoint,
+                            };
+                            driver.set_vpn_encrypt_context(ctx);
+                            log::info!("Direct encryption enabled for split tunnel (inbound receiver will start)");
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to bind encryption socket: {}", e);
+                        log::warn!("Falling back to Wintun injection (no direct encryption)");
+                    }
+                }
+            }
+        }
+
+        // Configure driver - this starts worker threads and inbound receiver
         let split_config = SplitTunnelConfig::new(
             tunnel_apps.clone(),
             config.assigned_ip.clone(),
