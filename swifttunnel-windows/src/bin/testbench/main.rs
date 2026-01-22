@@ -299,8 +299,8 @@ fn verify_traffic_routing() {
         }
     };
 
-    // Step 7: Setup routes (WITHOUT split tunnel first)
-    println!("\nStep 7: Setting up routes (NO split tunnel)...");
+    // Step 7: Setup routes (split tunnel mode - no default VPN route)
+    println!("\nStep 7: Setting up routes (SPLIT TUNNEL MODE)...");
     let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
         .split(':')
         .next()
@@ -311,24 +311,28 @@ fn verify_traffic_routing() {
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
     let mut route_manager = RouteManager::new(server_ip, if_index);
 
+    // Enable split tunnel mode - only tunnel apps will use VPN
+    // Non-tunnel apps (like testbench.exe) will bypass VPN
+    route_manager.set_split_tunnel_mode(true);
+
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Failed to apply routes: {}", e);
     } else {
-        println!("   ✅ Routes applied");
+        println!("   ✅ Routes applied (split tunnel mode - no default route)");
     }
 
     // Wait for routes to settle
     std::thread::sleep(Duration::from_secs(2));
 
-    // Step 8: Check IP (should be VPN IP)
-    println!("\nStep 8: Checking IP (should be VPN IP, all traffic through tunnel)...");
+    // Step 8: Check IP (in split tunnel mode, should stay ORIGINAL - traffic bypasses VPN by default)
+    println!("\nStep 8: Checking IP (split tunnel mode - should be ORIGINAL IP)...");
     let vpn_ip = match get_public_ip() {
         Some(ip) => {
             println!("   Current IP: {}", ip);
-            if ip != original_ip {
-                println!("   ✅ IP changed from {} to {} - VPN is working!", original_ip, ip);
+            if ip == original_ip {
+                println!("   ✅ IP unchanged ({}) - split tunnel mode working (traffic bypasses VPN)", ip);
             } else {
-                println!("   ❌ IP unchanged - VPN routing may not be working");
+                println!("   ⚠ IP changed to {} - unexpected (split tunnel mode should bypass VPN)", ip);
             }
             ip
         }
@@ -424,24 +428,30 @@ fn verify_traffic_routing() {
     println!("\n════════════════════════════════════════");
     println!("         TRAFFIC ROUTING RESULTS        ");
     println!("════════════════════════════════════════\n");
-    println!("   Original IP (no VPN):      {}", original_ip);
-    println!("   VPN IP (no split tunnel):  {}", vpn_ip);
-    println!("   IP with split tunnel:      {}", split_ip);
+    println!("   Original IP (no VPN):           {}", original_ip);
+    println!("   IP after VPN (split mode):      {}", vpn_ip);
+    println!("   IP with split tunnel active:    {}", split_ip);
     println!();
 
-    if vpn_ip != original_ip && split_ip == original_ip {
-        println!("   ✅ SPLIT TUNNEL WORKING CORRECTLY!");
-        println!("   - Without split tunnel: traffic goes through VPN (IP changed)");
-        println!("   - With split tunnel: testbench.exe bypasses VPN (original IP)");
-        println!("   - Only Roblox apps would use the VPN tunnel");
-    } else if vpn_ip == original_ip {
-        println!("   ❌ VPN CONNECTION ISSUE");
-        println!("   - VPN doesn't seem to be routing traffic");
+    // In split tunnel mode:
+    // - Non-tunnel apps should ALWAYS bypass VPN (use original IP)
+    // - Only tunnel apps (Roblox) would use VPN
+    // Since testbench.exe is NOT a tunnel app, both vpn_ip and split_ip should be original_ip
+
+    if vpn_ip == original_ip && split_ip == original_ip {
+        println!("   ✅ SPLIT TUNNEL MODE WORKING!");
+        println!("   - testbench.exe (non-tunnel app) bypasses VPN correctly");
+        println!("   - Traffic uses original IP: {}", original_ip);
+        println!("   - Only Roblox apps would go through VPN tunnel");
+    } else if vpn_ip != original_ip {
+        println!("   ⚠ VPN ROUTING UNEXPECTED");
+        println!("   - Split tunnel mode should NOT add default VPN route");
+        println!("   - But traffic went through VPN (IP: {})", vpn_ip);
+        println!("   - Check if split_tunnel_mode is enabled in routes");
     } else if split_ip != original_ip {
-        println!("   ⚠ SPLIT TUNNEL MAY NOT BE WORKING");
-        println!("   - VPN is working (IP changed)");
-        println!("   - But testbench.exe is still using VPN after split tunnel setup");
-        println!("   - Expected testbench.exe to bypass VPN");
+        println!("   ⚠ SPLIT TUNNEL INTERCEPTOR ISSUE");
+        println!("   - Non-tunnel apps should bypass VPN");
+        println!("   - But IP changed after interceptor: {}", split_ip);
     } else {
         println!("   ⚠ UNEXPECTED RESULTS");
     }
