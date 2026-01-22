@@ -351,12 +351,17 @@ impl SplitTunnelDriver {
         use windows::Win32::System::Services::*;
 
         const SERVICE_NAME: &str = "MullvadSplitTunnel";
+        const MAX_RECREATE_ATTEMPTS: u32 = 3;
 
         // Get driver path first
         let driver_path = Self::get_driver_path()
             .ok_or_else(|| "Driver file not found. Please reinstall SwiftTunnel.".to_string())?;
 
         log::info!("Found driver at: {}", driver_path.display());
+
+        let driver_path_str = driver_path.to_string_lossy();
+        let binary_path_wide: Vec<u16> = driver_path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let display_name_wide: Vec<u16> = "Mullvad Split Tunnel".encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
             // Open Service Control Manager
@@ -366,115 +371,140 @@ impl SplitTunnelDriver {
                 SC_MANAGER_ALL_ACCESS,
             ).map_err(|e| format!("Failed to open SCM (run as admin?): {}", e))?;
 
-            // Try to open existing service
             let service_name_wide: Vec<u16> = SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-            let service = OpenServiceW(
-                scm,
-                PCWSTR(service_name_wide.as_ptr()),
-                SERVICE_ALL_ACCESS,
-            );
 
-            let service = match service {
-                Ok(s) => {
-                    log::info!("Service already exists, checking config...");
-                    s
+            // Loop to handle service recreation (replaces infinite recursion)
+            let mut recreate_attempts = 0u32;
+            loop {
+                if recreate_attempts >= MAX_RECREATE_ATTEMPTS {
+                    let _ = CloseServiceHandle(scm);
+                    return Err(format!(
+                        "Failed to set up driver service after {} attempts. Try restarting Windows.",
+                        MAX_RECREATE_ATTEMPTS
+                    ));
                 }
-                Err(_) => {
-                    // Service doesn't exist, create it
-                    log::info!("Creating driver service...");
 
-                    let driver_path_str = driver_path.to_string_lossy();
-                    let binary_path_wide: Vec<u16> = driver_path_str.encode_utf16().chain(std::iter::once(0)).collect();
-                    let display_name_wide: Vec<u16> = "Mullvad Split Tunnel".encode_utf16().chain(std::iter::once(0)).collect();
+                // Try to open existing service
+                let service = match OpenServiceW(
+                    scm,
+                    PCWSTR(service_name_wide.as_ptr()),
+                    SERVICE_ALL_ACCESS,
+                ) {
+                    Ok(s) => {
+                        if recreate_attempts == 0 {
+                            log::info!("Service already exists, checking config...");
+                        }
+                        s
+                    }
+                    Err(e) => {
+                        let error_code = e.code().0 as u32;
+                        // ERROR_SERVICE_DOES_NOT_EXIST = 1060
+                        if error_code == 1060 {
+                            // Service doesn't exist, create it
+                            log::info!("Creating driver service...");
+                            match CreateServiceW(
+                                scm,
+                                PCWSTR(service_name_wide.as_ptr()),
+                                PCWSTR(display_name_wide.as_ptr()),
+                                SERVICE_ALL_ACCESS,
+                                SERVICE_KERNEL_DRIVER,
+                                SERVICE_DEMAND_START,
+                                SERVICE_ERROR_NORMAL,
+                                PCWSTR(binary_path_wide.as_ptr()),
+                                PCWSTR::null(),
+                                None,
+                                PCWSTR::null(),
+                                PCWSTR::null(),
+                                PCWSTR::null(),
+                            ) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    let _ = CloseServiceHandle(scm);
+                                    return Err(format!("Failed to create service: {}", e));
+                                }
+                            }
+                        } else {
+                            let _ = CloseServiceHandle(scm);
+                            return Err(format!("Failed to open service: {} (code: {})", e, error_code));
+                        }
+                    }
+                };
 
-                    CreateServiceW(
-                        scm,
-                        PCWSTR(service_name_wide.as_ptr()),
-                        PCWSTR(display_name_wide.as_ptr()),
-                        SERVICE_ALL_ACCESS,
-                        SERVICE_KERNEL_DRIVER,
-                        SERVICE_DEMAND_START,
-                        SERVICE_ERROR_NORMAL,
-                        PCWSTR(binary_path_wide.as_ptr()),
-                        PCWSTR::null(), // No load order group
-                        None,           // No tag
-                        PCWSTR::null(), // No dependencies
-                        PCWSTR::null(), // LocalSystem account
-                        PCWSTR::null(), // No password
-                    ).map_err(|e| format!("Failed to create service: {}", e))?
+                // Check if service config is readable and points to correct binary
+                match Self::get_service_binary_path(service) {
+                    Some(existing_path) => {
+                        if Self::service_path_matches(&existing_path, &driver_path) {
+                            // Config is correct, check if running
+                            let mut status = SERVICE_STATUS::default();
+                            if QueryServiceStatus(service, &mut status).is_ok() {
+                                if status.dwCurrentState == SERVICE_RUNNING {
+                                    log::info!("Driver service is already running with correct config");
+                                    let _ = CloseServiceHandle(service);
+                                    let _ = CloseServiceHandle(scm);
+                                    return Ok(());
+                                }
+                            }
+                            // Config correct but not running, start it
+                            return Self::start_service_and_wait(scm, service);
+                        } else {
+                            // Wrong binary path, need to recreate
+                            log::warn!(
+                                "Driver service points to wrong binary ({}). Recreating... (attempt {})",
+                                existing_path,
+                                recreate_attempts + 1
+                            );
+                        }
+                    }
+                    None => {
+                        // Can't read config, need to recreate
+                        log::warn!(
+                            "Unable to read driver service config. Recreating... (attempt {})",
+                            recreate_attempts + 1
+                        );
+                    }
                 }
-            };
 
-            if let Some(existing_path) = Self::get_service_binary_path(service) {
-                if !Self::service_path_matches(&existing_path, &driver_path) {
-                    log::warn!(
-                        "Driver service points to a different binary ({}). Recreating service...",
-                        existing_path
-                    );
+                // Need to recreate service: stop -> delete -> recreate
+                recreate_attempts += 1;
 
-                    let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut SERVICE_STATUS::default());
-                    for _ in 0..10 {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        let mut status = SERVICE_STATUS::default();
-                        if QueryServiceStatus(service, &mut status).is_ok()
-                            && status.dwCurrentState == SERVICE_STOPPED
-                        {
+                // Step 1: Stop the service (MUST do this before delete)
+                log::info!("Stopping service before recreation...");
+                let mut status = SERVICE_STATUS::default();
+                let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
+
+                // Wait for service to stop (up to 5 seconds)
+                let mut stopped = false;
+                for _ in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if QueryServiceStatus(service, &mut status).is_ok() {
+                        if status.dwCurrentState == SERVICE_STOPPED {
+                            stopped = true;
                             break;
                         }
                     }
-
-                    let _ = DeleteService(service);
-                    let _ = CloseServiceHandle(service);
-
-                    let driver_path_str = driver_path.to_string_lossy();
-                    let binary_path_wide: Vec<u16> = driver_path_str.encode_utf16().chain(std::iter::once(0)).collect();
-                    let display_name_wide: Vec<u16> = "Mullvad Split Tunnel".encode_utf16().chain(std::iter::once(0)).collect();
-
-                    let service = CreateServiceW(
-                        scm,
-                        PCWSTR(service_name_wide.as_ptr()),
-                        PCWSTR(display_name_wide.as_ptr()),
-                        SERVICE_ALL_ACCESS,
-                        SERVICE_KERNEL_DRIVER,
-                        SERVICE_DEMAND_START,
-                        SERVICE_ERROR_NORMAL,
-                        PCWSTR(binary_path_wide.as_ptr()),
-                        PCWSTR::null(), // No load order group
-                        None,           // No tag
-                        PCWSTR::null(), // No dependencies
-                        PCWSTR::null(), // LocalSystem account
-                        PCWSTR::null(), // No password
-                    ).map_err(|e| format!("Failed to recreate service: {}", e))?;
-
-                    // Replace handle for start/status checks below.
-                    let _ = CloseServiceHandle(service);
-                    let service = OpenServiceW(
-                        scm,
-                        PCWSTR(service_name_wide.as_ptr()),
-                        SERVICE_ALL_ACCESS,
-                    ).map_err(|e| format!("Failed to reopen service: {}", e))?;
-                    return Self::start_service_and_wait(scm, service);
                 }
-            } else {
-                log::warn!("Unable to read existing driver service config; recreating service...");
-                let _ = DeleteService(service);
+
+                if !stopped {
+                    log::warn!("Service did not stop cleanly, attempting forceful recreation anyway");
+                }
+
+                // Step 2: Delete the service
+                if let Err(e) = DeleteService(service) {
+                    let error_code = e.code().0 as u32;
+                    // ERROR_SERVICE_MARKED_FOR_DELETE = 1072 - already marked, will be deleted when handles close
+                    if error_code != 1072 {
+                        log::warn!("DeleteService failed: {} (code: {})", e, error_code);
+                    }
+                }
+
                 let _ = CloseServiceHandle(service);
-                let _ = CloseServiceHandle(scm);
-                return Self::ensure_driver_service();
-            }
 
-            // Check service status
-            let mut status = SERVICE_STATUS::default();
-            if QueryServiceStatus(service, &mut status).is_ok() {
-                if status.dwCurrentState == SERVICE_RUNNING {
-                    log::info!("Driver service is already running");
-                    let _ = CloseServiceHandle(service);
-                    let _ = CloseServiceHandle(scm);
-                    return Ok(());
-                }
-            }
+                // Small delay to let SCM process the delete
+                std::thread::sleep(std::time::Duration::from_millis(500));
 
-            Self::start_service_and_wait(scm, service)
+                // Step 3: Create new service (will happen on next loop iteration)
+                // The loop will try to open/create the service again
+            }
         }
     }
 
@@ -536,25 +566,41 @@ impl SplitTunnelDriver {
         use windows::Win32::System::Services::*;
         unsafe {
             let mut bytes_needed: u32 = 0;
-            let _ = QueryServiceConfigW(service, None, 0, &mut bytes_needed);
+            let result = QueryServiceConfigW(service, None, 0, &mut bytes_needed);
+
+            // First call should fail with ERROR_INSUFFICIENT_BUFFER and give us the size
+            if let Err(e) = result {
+                let error_code = e.code().0 as u32;
+                // ERROR_INSUFFICIENT_BUFFER = 122 is expected
+                if error_code != 122 {
+                    log::debug!("QueryServiceConfigW size query failed unexpectedly: {} (code: {})", e, error_code);
+                    return None;
+                }
+            }
+
             if bytes_needed == 0 {
+                log::debug!("QueryServiceConfigW returned 0 bytes needed");
                 return None;
             }
 
             let mut buffer = vec![0u8; bytes_needed as usize];
             let config_ptr = buffer.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
-            if QueryServiceConfigW(
+            match QueryServiceConfigW(
                 service,
                 Some(&mut *config_ptr),
                 bytes_needed,
                 &mut bytes_needed,
-            )
-            .is_ok()
-            {
-                let binary = (*config_ptr).lpBinaryPathName;
-                Some(Self::pwstr_to_string(binary))
-            } else {
-                None
+            ) {
+                Ok(_) => {
+                    let binary = (*config_ptr).lpBinaryPathName;
+                    let path = Self::pwstr_to_string(binary);
+                    log::debug!("Service binary path: {}", path);
+                    Some(path)
+                }
+                Err(e) => {
+                    log::debug!("QueryServiceConfigW failed: {} (code: {})", e, e.code().0);
+                    None
+                }
             }
         }
     }
