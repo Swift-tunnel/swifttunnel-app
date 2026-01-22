@@ -617,6 +617,20 @@ fn run_packet_worker(
     let mut snapshot = process_cache.get_snapshot();
     let mut snapshot_check_counter = 0u32;
 
+    // Diagnostic logging
+    let mut diagnostic_counter = 0u64;
+    let mut wintun_inject_success = 0u64;
+    let mut wintun_inject_fail = 0u64;
+    let mut no_wintun_session = 0u64;
+
+    // Log initial tunnel apps
+    if worker_id == 0 {
+        log::info!(
+            "Worker 0: Initial tunnel_apps = {:?}",
+            snapshot.tunnel_apps.iter().collect::<Vec<_>>()
+        );
+    }
+
     // Open driver for this worker (each worker needs own handle for sending bypass packets)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
         Ok(d) => d,
@@ -635,6 +649,13 @@ fn run_packet_worker(
         }
     };
 
+    // Log Wintun session availability
+    if wintun_session.is_some() {
+        log::info!("Worker {}: Wintun session AVAILABLE - tunnel routing enabled", worker_id);
+    } else {
+        log::warn!("Worker {}: Wintun session NOT AVAILABLE - tunnel packets will be bypassed!", worker_id);
+    }
+
     loop {
         if stop_flag.load(Ordering::Relaxed) {
             break;
@@ -651,16 +672,40 @@ fn run_packet_worker(
         snapshot_check_counter += 1;
         if snapshot_check_counter >= 100 {
             snapshot_check_counter = 0;
+            let old_apps_count = snapshot.tunnel_apps.len();
             snapshot = process_cache.get_snapshot();
+
+            // Log if tunnel apps changed (only worker 0)
+            if worker_id == 0 && snapshot.tunnel_apps.len() != old_apps_count {
+                log::info!(
+                    "Worker 0: tunnel_apps updated, now {} apps",
+                    snapshot.tunnel_apps.len()
+                );
+            }
         }
 
         // Process packet
         stats.packets_processed.fetch_add(1, Ordering::Relaxed);
         let packet_len = work.data.len() as u64;
+        diagnostic_counter += 1;
 
         if work.is_outbound {
             // Check if should tunnel
             let should_tunnel = should_route_to_vpn(&work.data, &snapshot);
+
+            // Periodic diagnostic logging (every 500 packets on worker 0)
+            if worker_id == 0 && diagnostic_counter % 500 == 0 {
+                let tunneled = stats.packets_tunneled.load(Ordering::Relaxed);
+                let bypassed = stats.packets_bypassed.load(Ordering::Relaxed);
+                let total = tunneled + bypassed;
+                let tunnel_pct = if total > 0 { (tunneled as f64 / total as f64) * 100.0 } else { 0.0 };
+                log::info!(
+                    "Worker 0 stats: {} tunneled, {} bypassed ({:.1}% tunnel), Wintun: {} ok, {} fail, {} no-session, connections: {}, pids: {}",
+                    tunneled, bypassed, tunnel_pct,
+                    wintun_inject_success, wintun_inject_fail, no_wintun_session,
+                    snapshot.connections.len(), snapshot.pid_names.len()
+                );
+            }
 
             if should_tunnel {
                 stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
@@ -677,14 +722,17 @@ fn run_packet_worker(
                             Ok(mut packet) => {
                                 packet.bytes_mut().copy_from_slice(ip_packet);
                                 session.send_packet(packet);
+                                wintun_inject_success += 1;
                             }
                             Err(_) => {
+                                wintun_inject_fail += 1;
                                 // Wintun allocation failed - forward to adapter as fallback
                                 send_bypass_packet(&driver, &adapters, &work);
                             }
                         }
                     }
                 } else {
+                    no_wintun_session += 1;
                     // No Wintun session - forward to adapter
                     send_bypass_packet(&driver, &adapters, &work);
                 }
@@ -860,27 +908,49 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
 
         // Also scan for tunnel apps
         let tunnel_apps = cache.tunnel_apps();
+        let mut tunnel_pids_found: Vec<(u32, String)> = Vec::new();
+
         for (_pid, process) in system.processes() {
             let name = process.name().to_string_lossy().to_lowercase();
             for app in tunnel_apps {
                 if name.contains(app.trim_end_matches(".exe")) {
                     pid_names.insert(_pid.as_u32(), process.name().to_string_lossy().to_string());
+                    tunnel_pids_found.push((_pid.as_u32(), process.name().to_string_lossy().to_string()));
                     break;
                 }
             }
         }
 
         // Update cache atomically
-        cache.update(connections, pid_names);
+        cache.update(connections.clone(), pid_names.clone());
 
+        // Log tunnel app detection periodically
         refresh_count += 1;
         if refresh_count % 100 == 0 {
             let snap = cache.get_snapshot();
+
+            // Count connections for tunnel PIDs
+            let tunnel_connections: Vec<_> = connections
+                .iter()
+                .filter(|(_, &pid)| tunnel_pids_found.iter().any(|(tp, _)| *tp == pid))
+                .collect();
+
+            if !tunnel_pids_found.is_empty() || tunnel_connections.len() > 0 {
+                log::info!(
+                    "Cache #{}: {} tunnel PIDs found: {:?}, {} tunnel connections",
+                    refresh_count,
+                    tunnel_pids_found.len(),
+                    tunnel_pids_found.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+                    tunnel_connections.len()
+                );
+            }
+
             log::debug!(
-                "Cache refresh #{}: {} connections, {} PIDs",
+                "Cache refresh #{}: {} connections, {} PIDs, tunnel_apps: {:?}",
                 refresh_count,
                 snap.connections.len(),
-                snap.pid_names.len()
+                snap.pid_names.len(),
+                tunnel_apps.iter().collect::<Vec<_>>()
             );
         }
     }
