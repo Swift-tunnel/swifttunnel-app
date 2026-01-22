@@ -472,31 +472,30 @@ impl ParallelInterceptor {
         }));
 
         // Start inbound receiver thread (reads encrypted responses from VpnEncryptContext socket)
-        // We create the inbound handler HERE because it requires physical_adapter_name,
-        // which is only set during configure() (called before start()).
-        // If user already set an inbound_handler, we use that; otherwise create one internally.
-        let inbound_handler = self.inbound_handler.clone().or_else(|| self.create_inbound_handler());
+        // Optimized: opens driver ONCE at thread start, not per-packet
+        if let Some(ref vpn_ctx) = self.vpn_encrypt_ctx {
+            // Create InboundConfig with all necessary parameters
+            let inbound_config = self.create_inbound_config();
 
-        if let (Some(ref vpn_ctx), Some(handler)) = (&self.vpn_encrypt_ctx, inbound_handler) {
-            let ctx = vpn_ctx.clone();
-            let inbound_stop = Arc::clone(&self.stop_flag);
-            let throughput = self.throughput_stats.clone();
+            if let Some(config) = inbound_config {
+                let ctx = vpn_ctx.clone();
+                let inbound_stop = Arc::clone(&self.stop_flag);
+                let throughput = self.throughput_stats.clone();
 
-            // Set socket to non-blocking for clean shutdown
-            if let Err(e) = ctx.socket.set_read_timeout(Some(std::time::Duration::from_millis(100))) {
-                log::warn!("Failed to set socket read timeout: {}", e);
-            }
+                // Set socket to non-blocking for clean shutdown
+                if let Err(e) = ctx.socket.set_read_timeout(Some(std::time::Duration::from_millis(100))) {
+                    log::warn!("Failed to set socket read timeout: {}", e);
+                }
 
-            self.inbound_receiver_handle = Some(thread::spawn(move || {
-                run_inbound_receiver(ctx, handler, inbound_stop, throughput);
-            }));
-            log::info!("Inbound receiver thread started");
-        } else {
-            if self.vpn_encrypt_ctx.is_none() {
-                log::info!("Inbound receiver NOT started (no vpn_encrypt_ctx)");
+                self.inbound_receiver_handle = Some(thread::spawn(move || {
+                    run_inbound_receiver(ctx, config, inbound_stop, throughput);
+                }));
+                log::info!("Inbound receiver thread started (optimized)");
             } else {
-                log::warn!("Inbound receiver NOT started (failed to create inbound_handler - physical_adapter_name not set?)");
+                log::warn!("Inbound receiver NOT started (failed to create config - physical_adapter_name not set?)");
             }
+        } else {
+            log::info!("Inbound receiver NOT started (no vpn_encrypt_ctx)");
         }
 
         log::info!("Parallel interceptor started");
@@ -646,7 +645,55 @@ impl ParallelInterceptor {
         }
     }
 
+    /// Create InboundConfig for the optimized inbound receiver
+    ///
+    /// Returns None if physical adapter cannot be found
+    fn create_inbound_config(&self) -> Option<InboundConfig> {
+        let physical_name = self.physical_adapter_name.clone()?;
+
+        // Open driver to get adapter MAC
+        let driver = match ndisapi::Ndisapi::new("NDISRD") {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("create_inbound_config: failed to open driver: {}", e);
+                return None;
+            }
+        };
+
+        let adapters = match driver.get_tcpip_bound_adapters_info() {
+            Ok(a) => a,
+            Err(e) => {
+                log::error!("create_inbound_config: failed to get adapters: {}", e);
+                return None;
+            }
+        };
+
+        let adapter_mac: [u8; 6] = match adapters.iter().find(|a| a.get_name() == &physical_name) {
+            Some(a) => a.get_hw_address()[0..6].try_into().unwrap_or([0; 6]),
+            None => {
+                log::error!("create_inbound_config: physical adapter '{}' not found", physical_name);
+                return None;
+            }
+        };
+
+        log::info!(
+            "create_inbound_config: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, NAT: {:?} -> {:?}",
+            physical_name,
+            adapter_mac[0], adapter_mac[1], adapter_mac[2],
+            adapter_mac[3], adapter_mac[4], adapter_mac[5],
+            self.tunnel_ip, self.internet_ip
+        );
+
+        Some(InboundConfig {
+            physical_adapter_name: physical_name,
+            adapter_mac,
+            tunnel_ip: self.tunnel_ip,
+            internet_ip: self.internet_ip,
+        })
+    }
+
     /// Get a closure that can be used as an inbound handler for the WireGuard tunnel
+    /// (Legacy - kept for compatibility, prefer using create_inbound_config with run_inbound_receiver)
     ///
     /// This creates a handler that injects packets to the physical adapter.
     /// If NAT IPs are configured, it rewrites destination IP from tunnel_ip to internet_ip.
@@ -897,21 +944,61 @@ fn set_thread_affinity(core_id: usize) {
     }
 }
 
+/// Configuration for inbound packet injection
+#[derive(Clone)]
+struct InboundConfig {
+    physical_adapter_name: String,
+    adapter_mac: [u8; 6],
+    tunnel_ip: Option<std::net::Ipv4Addr>,
+    internet_ip: Option<std::net::Ipv4Addr>,
+}
+
 /// Inbound receiver thread - reads encrypted packets from VpnEncryptContext socket,
-/// decrypts them, and passes to inbound_handler for injection to MSTCP
+/// decrypts them, and injects to MSTCP (opens driver ONCE for performance)
 fn run_inbound_receiver(
     ctx: VpnEncryptContext,
-    inbound_handler: Arc<dyn Fn(&[u8]) + Send + Sync>,
+    config: InboundConfig,
     stop_flag: Arc<AtomicBool>,
     throughput: ThroughputStats,
 ) {
-    log::info!("Inbound receiver started");
+    use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
+
+    log::info!("Inbound receiver started (optimized - single driver handle)");
+
+    // Open driver ONCE at thread start (not per-packet!)
+    let driver = match ndisapi::Ndisapi::new("NDISRD") {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("Inbound receiver: failed to open driver: {}", e);
+            return;
+        }
+    };
+
+    let adapters = match driver.get_tcpip_bound_adapters_info() {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!("Inbound receiver: failed to get adapters: {}", e);
+            return;
+        }
+    };
+
+    let adapter = match adapters.iter().find(|a| a.get_name() == &config.physical_adapter_name) {
+        Some(a) => a,
+        None => {
+            log::error!("Inbound receiver: physical adapter '{}' not found", config.physical_adapter_name);
+            return;
+        }
+    };
+
+    let adapter_handle = adapter.get_handle();
+    log::info!("Inbound receiver: using adapter '{}' for MSTCP injection", config.physical_adapter_name);
 
     let mut recv_buf = vec![0u8; 2048]; // Max WireGuard packet size
     let mut decrypt_buf = vec![0u8; 2048];
     let mut packets_received = 0u64;
     let mut packets_decrypted = 0u64;
     let mut packets_injected = 0u64;
+    let mut inject_errors = 0u64;
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
@@ -922,11 +1009,9 @@ fn run_inbound_receiver(
         let n = match ctx.socket.recv(&mut recv_buf) {
             Ok(n) => n,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Timeout - check stop flag and continue
                 continue;
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                // Windows uses TimedOut instead of WouldBlock for timeout
                 continue;
             }
             Err(e) => {
@@ -950,26 +1035,23 @@ fn run_inbound_receiver(
 
         match result {
             TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
-                // Decrypted IP packet - pass to inbound handler
                 packets_decrypted += 1;
-                packets_injected += 1;
                 throughput.add_rx(data.len() as u64);
 
-                // Log first few to verify
-                if packets_injected <= 5 {
-                    let proto = if data.len() >= 10 { data[9] } else { 0 };
-                    let dst_ip = if data.len() >= 20 {
-                        format!("{}.{}.{}.{}", data[16], data[17], data[18], data[19])
+                // Do NAT and inject to MSTCP
+                if let Some(injected) = inject_inbound_packet(
+                    data,
+                    &config,
+                    adapter_handle,
+                    &driver,
+                    packets_injected,
+                ) {
+                    if injected {
+                        packets_injected += 1;
                     } else {
-                        "?".to_string()
-                    };
-                    log::info!(
-                        "Inbound receiver: decrypted {} bytes, proto={}, dst={} -> injecting to MSTCP",
-                        data.len(), proto, dst_ip
-                    );
+                        inject_errors += 1;
+                    }
                 }
-
-                inbound_handler(data);
             }
             TunnResult::WriteToNetwork(data) => {
                 // Protocol message (keepalive, etc.) - send back to VPN server
@@ -980,22 +1062,139 @@ fn run_inbound_receiver(
             TunnResult::Done => {
                 // Nothing to do
             }
-            TunnResult::Err(e) => {
-                // Don't spam logs for normal WireGuard messages
-                if packets_received > 100 || packets_received % 10 == 1 {
-                    log::debug!("Inbound receiver decrypt error: {:?}", e);
-                }
+            TunnResult::Err(_e) => {
+                // Normal WireGuard protocol messages, don't spam logs
             }
         }
 
         // Periodic logging
         if packets_received > 0 && packets_received % 1000 == 0 {
             log::info!(
-                "Inbound receiver stats: {} received, {} decrypted, {} injected",
-                packets_received, packets_decrypted, packets_injected
+                "Inbound receiver: {} recv, {} decrypt, {} inject, {} errors",
+                packets_received, packets_decrypted, packets_injected, inject_errors
             );
         }
     }
+
+    log::info!("Inbound receiver stopped");
+}
+
+/// Inject a decrypted inbound packet to MSTCP after NAT rewriting
+/// Returns Some(true) on success, Some(false) on error, None if packet should be skipped
+fn inject_inbound_packet(
+    ip_packet: &[u8],
+    config: &InboundConfig,
+    adapter_handle: windows::Win32::Foundation::HANDLE,
+    driver: &ndisapi::Ndisapi,
+    packet_count: u64,
+) -> Option<bool> {
+    use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
+
+    if ip_packet.len() < 20 {
+        return None;
+    }
+
+    // Parse IP header
+    let dst_ip = std::net::Ipv4Addr::new(
+        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+    );
+    let protocol = ip_packet[9];
+
+    // Check if we need to do NAT (rewrite destination IP from tunnel_ip to internet_ip)
+    let needs_nat = config.tunnel_ip.is_some() && config.internet_ip.is_some()
+        && Some(dst_ip) == config.tunnel_ip;
+
+    // Make a mutable copy for NAT rewriting
+    let mut packet = ip_packet.to_vec();
+
+    if needs_nat {
+        let new_dst = config.internet_ip.unwrap();
+
+        // Log first few NAT rewrites
+        if packet_count < 5 {
+            log::info!(
+                "Inbound NAT: {} -> {}, proto={}, {} bytes",
+                dst_ip, new_dst, protocol, packet.len()
+            );
+        }
+
+        // Rewrite destination IP (bytes 16-19)
+        packet[16] = new_dst.octets()[0];
+        packet[17] = new_dst.octets()[1];
+        packet[18] = new_dst.octets()[2];
+        packet[19] = new_dst.octets()[3];
+
+        // Recalculate IP header checksum
+        packet[10] = 0;
+        packet[11] = 0;
+        let ihl = ((packet[0] & 0x0F) as usize) * 4;
+        let checksum = calculate_ip_checksum(&packet[..ihl]);
+        packet[10] = (checksum >> 8) as u8;
+        packet[11] = (checksum & 0xFF) as u8;
+
+        // Update TCP/UDP checksum
+        let transport_offset = ihl;
+        if protocol == 6 && packet.len() >= transport_offset + 18 {
+            // TCP: checksum at offset 16 within TCP header
+            update_transport_checksum(
+                &mut packet,
+                transport_offset + 16,
+                &dst_ip.octets(),
+                &new_dst.octets(),
+            );
+        } else if protocol == 17 && packet.len() >= transport_offset + 8 {
+            // UDP: checksum at offset 6 within UDP header
+            let udp_checksum = u16::from_be_bytes([
+                packet[transport_offset + 6],
+                packet[transport_offset + 7],
+            ]);
+            if udp_checksum != 0 {
+                update_transport_checksum(
+                    &mut packet,
+                    transport_offset + 6,
+                    &dst_ip.octets(),
+                    &new_dst.octets(),
+                );
+            }
+        }
+    }
+
+    // Create Ethernet frame
+    const MAX_ETHER_FRAME: usize = 1522;
+    let frame_len = 14 + packet.len();
+
+    if frame_len > MAX_ETHER_FRAME {
+        log::warn!("Inbound: packet too large ({} bytes), dropping", frame_len);
+        return None;
+    }
+
+    let mut ethernet_frame = vec![0u8; frame_len];
+    ethernet_frame[0..6].copy_from_slice(&config.adapter_mac); // Destination = physical adapter
+    ethernet_frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // Locally administered src MAC
+    ethernet_frame[12] = 0x08; // EtherType: IPv4
+    ethernet_frame[13] = 0x00;
+    ethernet_frame[14..].copy_from_slice(&packet);
+
+    // Create IntermediateBuffer and inject
+    let mut buffer = IntermediateBuffer::default();
+    buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
+    buffer.length = ethernet_frame.len() as u32;
+    buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(&ethernet_frame);
+
+    let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
+    if to_mstcp.push(&buffer).is_err() {
+        log::warn!("Inbound: failed to push buffer");
+        return Some(false);
+    }
+
+    if let Err(e) = driver.send_packets_to_mstcp::<1>(&to_mstcp) {
+        if packet_count < 10 {
+            log::warn!("Inbound: send_packets_to_mstcp failed: {:?}", e);
+        }
+        return Some(false);
+    }
+
+    Some(true)
 
     log::info!(
         "Inbound receiver stopped: {} received, {} decrypted, {} injected",
