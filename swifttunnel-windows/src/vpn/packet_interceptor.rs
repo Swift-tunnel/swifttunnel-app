@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::net::Ipv4Addr;
 use super::process_tracker::{ProcessTracker, Protocol};
+use super::parallel_interceptor::ThroughputStats;
 use super::{VpnError, VpnResult};
 use windows::Win32::Foundation::{HANDLE, CloseHandle};
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
@@ -199,6 +200,8 @@ pub struct PacketInterceptor {
     active: bool,
     /// Shared WireGuard context (set when starting with VPN)
     wireguard_ctx: Option<Arc<WireguardContext>>,
+    /// Throughput stats for GUI display
+    throughput_stats: ThroughputStats,
 }
 
 impl PacketInterceptor {
@@ -212,7 +215,13 @@ impl PacketInterceptor {
             stop_flag: Arc::new(AtomicBool::new(false)),
             active: false,
             wireguard_ctx: None,
+            throughput_stats: ThroughputStats::default(),
         }
+    }
+
+    /// Get throughput stats (cloneable, for GUI access)
+    pub fn get_throughput_stats(&self) -> ThroughputStats {
+        self.throughput_stats.clone()
     }
 
     /// Set the WireGuard context for packet encapsulation
@@ -398,9 +407,13 @@ impl PacketInterceptor {
         self.stop_flag.store(false, Ordering::SeqCst);
         self.active = true;
 
+        // Reset throughput stats on start
+        self.throughput_stats.reset();
+
         // Spawn packet processing task
         let stop_flag = Arc::clone(&self.stop_flag);
         let tunnel_apps = self.process_tracker.tunnel_apps().clone();
+        let throughput_stats = self.throughput_stats.clone();
 
         std::thread::spawn(move || {
             if let Err(e) = Self::packet_processing_loop(
@@ -409,6 +422,7 @@ impl PacketInterceptor {
                 tunnel_apps,
                 stop_flag,
                 wg_ctx,
+                throughput_stats,
             ) {
                 log::error!("Packet processing loop error: {}", e);
             }
@@ -460,6 +474,7 @@ impl PacketInterceptor {
         tunnel_apps: std::collections::HashSet<String>,
         stop_flag: Arc<AtomicBool>,
         wg_ctx: Option<Arc<WireguardContext>>,
+        throughput_stats: ThroughputStats,
     ) -> VpnResult<()> {
         use ndisapi::{DirectionFlags, EthMRequest, EthMRequestMut, FilterFlags, IntermediateBuffer};
 
@@ -599,12 +614,16 @@ impl PacketInterceptor {
                                     packets_injected += 1;
                                     ctx.packets_injected.fetch_add(1, Ordering::Relaxed);
 
+                                    // Track throughput for GUI display
+                                    throughput_stats.add_tx(ip_packet.len() as u64);
+
                                     if packets_injected % 1000 == 0 {
                                         log::info!(
-                                            "Split tunnel stats: {} tunneled, {} total outbound ({:.1}% tunneled), {} injected",
+                                            "Split tunnel stats: {} tunneled, {} total outbound ({:.1}% tunneled), {} injected, {} bytes TX",
                                             tunneled_packets, total_packets,
                                             if total_packets > 0 { (tunneled_packets as f64 / total_packets as f64) * 100.0 } else { 0.0 },
-                                            packets_injected
+                                            packets_injected,
+                                            throughput_stats.get_bytes_tx()
                                         );
                                     }
                                     // Don't forward to adapter - packet goes through VPN via Wintun
@@ -657,10 +676,11 @@ impl PacketInterceptor {
         unsafe { let _ = CloseHandle(event); }
 
         log::info!(
-            "Packet processing loop stopped - Final stats: {} tunneled / {} total ({:.1}%), {} injected into VPN",
+            "Packet processing loop stopped - Final stats: {} tunneled / {} total ({:.1}%), {} injected into VPN, {} bytes TX",
             tunneled_packets, total_packets,
             if total_packets > 0 { (tunneled_packets as f64 / total_packets as f64) * 100.0 } else { 0.0 },
-            packets_injected
+            packets_injected,
+            throughput_stats.get_bytes_tx()
         );
         Ok(())
     }
