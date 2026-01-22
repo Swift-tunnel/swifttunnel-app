@@ -625,6 +625,9 @@ impl SplitTunnelDriver {
                 config.tunnel_apps.iter().cloned().collect(),
             )?;
 
+            // Set NAT IPs for inbound packet rewriting
+            interceptor.set_nat_ips(&config.tunnel_ip, &config.internet_ip);
+
             // Pass Wintun session if available
             if let Some(ref session) = self.wintun_session {
                 interceptor.set_wintun_session(Arc::clone(session));
