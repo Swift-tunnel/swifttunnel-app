@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="SwiftTunnel"
              Language="1033"
-             Version="0.6.0.0"
+             Version="0.5.43.0"
              Manufacturer="SwiftTunnel"
              UpgradeCode="8B5E7A12-4F3D-4A2B-9C5E-1D2F3A4B5C6D">
 
@@ -62,9 +62,9 @@
                       Return="ignore" />
 
         <InstallExecuteSequence>
-            <!-- Install WinPkFilter driver first, then firewall rule -->
-            <Custom Action="InstallWinPkFilter" After="InstallFiles">NOT Installed</Custom>
-            <Custom Action="AddFirewallRule" After="InstallWinPkFilter">NOT Installed</Custom>
+            <!-- Install WinPkFilter driver on fresh install AND upgrades (not on uninstall) -->
+            <Custom Action="InstallWinPkFilter" After="InstallFiles">NOT REMOVE~="ALL"</Custom>
+            <Custom Action="AddFirewallRule" After="InstallWinPkFilter">NOT REMOVE~="ALL"</Custom>
         </InstallExecuteSequence>
 
         <!-- Directory Structure -->
@@ -109,7 +109,7 @@
 
         <ComponentGroup Id="DriverComponents" Directory="DriversFolder">
             <!-- Windows Packet Filter driver MSI - bundled for silent installation -->
-            <Component Id="WinPkFilterMsi" Guid="G7H8I9J0-K1L2-M3N4-O5P6-Q7R8S9T0U1V2" Win64="yes">
+            <Component Id="WinPkFilterMsi" Guid="B9A21C8B-429B-4E3B-92C8-1C4194A0282E" Win64="yes">
                 <File Id="WinpkFilterMsi"
                       Source="$(var.SourceDir)\drivers\WinpkFilter-x64.msi"
                       KeyPath="yes" />
