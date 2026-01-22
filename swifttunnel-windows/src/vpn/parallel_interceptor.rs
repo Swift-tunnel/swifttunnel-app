@@ -57,8 +57,8 @@ struct PacketWork {
     data: Vec<u8>,
     /// Whether packet is outbound
     is_outbound: bool,
-    /// Adapter handle for sending
-    adapter_handle: usize,
+    /// Physical adapter index (for sending bypass packets)
+    physical_adapter_idx: usize,
 }
 
 /// Per-worker statistics
@@ -560,7 +560,7 @@ fn run_packet_reader(
                     let work = PacketWork {
                         data: data.to_vec(), // Copy packet data
                         is_outbound: true,
-                        adapter_handle: physical_handle.0 as usize,
+                        physical_adapter_idx: physical_idx,  // Pass index, not handle!
                     };
 
                     // If worker queue is full, send as passthrough
@@ -766,14 +766,20 @@ fn send_bypass_packet(
 ) {
     use ndisapi::{EthMRequest, IntermediateBuffer};
 
-    // Reconstruct adapter handle from usize
-    let adapter_handle = HANDLE(work.adapter_handle as *mut std::ffi::c_void);
+    // Get adapter by index (not handle comparison - handles differ between driver instances!)
+    let adapter = match adapters.get(work.physical_adapter_idx) {
+        Some(a) => a,
+        None => {
+            log::warn!(
+                "send_bypass_packet: adapter index {} out of range (have {} adapters)",
+                work.physical_adapter_idx,
+                adapters.len()
+            );
+            return;
+        }
+    };
 
-    // Find matching adapter to verify handle is valid
-    let adapter = adapters.iter().find(|a| a.get_handle() == adapter_handle);
-    if adapter.is_none() {
-        return;
-    }
+    let adapter_handle = adapter.get_handle();
 
     // Create IntermediateBuffer with packet data
     let mut buffer = IntermediateBuffer::default();
@@ -785,7 +791,9 @@ fn send_bypass_packet(
     // Send to adapter (bypasses VPN, goes directly to physical network)
     let mut to_adapter: EthMRequest<1> = EthMRequest::new(adapter_handle);
     if to_adapter.push(&buffer).is_ok() {
-        let _ = driver.send_packets_to_adapter::<1>(&to_adapter);
+        if let Err(e) = driver.send_packets_to_adapter::<1>(&to_adapter) {
+            log::warn!("send_bypass_packet: send failed: {:?}", e);
+        }
     }
 }
 
