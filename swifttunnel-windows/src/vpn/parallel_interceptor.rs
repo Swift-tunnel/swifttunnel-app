@@ -295,7 +295,7 @@ impl ParallelInterceptor {
                     score += 50;
                 }
                 score += (10 - idx.min(10)) as i32;
-                physical_candidates.push((idx, friendly_name.clone(), internal_name.clone(), score));
+                physical_candidates.push((idx, friendly_name.clone(), internal_name.to_string(), score));
             }
         }
 
