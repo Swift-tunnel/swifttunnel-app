@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use super::packet_interceptor::{PacketInterceptor, WireguardContext};
-use super::parallel_interceptor::ParallelInterceptor;
+use super::parallel_interceptor::{ParallelInterceptor, ThroughputStats};
 use super::{VpnError, VpnResult};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -739,6 +739,18 @@ impl SplitTunnelDriver {
     /// Get current configuration
     pub fn config(&self) -> Option<&SplitTunnelConfig> {
         self.config.as_ref()
+    }
+
+    /// Get throughput stats for GUI display
+    ///
+    /// Returns a clonable ThroughputStats that tracks bytes sent/received through the VPN tunnel.
+    /// Returns None if not using parallel mode or not active.
+    pub fn get_throughput_stats(&self) -> Option<ThroughputStats> {
+        if self.use_parallel {
+            self.parallel_interceptor.as_ref().map(|p| p.get_throughput_stats())
+        } else {
+            None // Legacy mode doesn't track throughput
+        }
     }
 }
 

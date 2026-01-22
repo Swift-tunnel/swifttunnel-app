@@ -67,6 +67,57 @@ pub struct WorkerStats {
     pub packets_processed: AtomicU64,
     pub packets_tunneled: AtomicU64,
     pub packets_bypassed: AtomicU64,
+    pub bytes_tunneled: AtomicU64,
+    pub bytes_bypassed: AtomicU64,
+}
+
+/// Shared network throughput stats (readable from GUI)
+#[derive(Clone)]
+pub struct ThroughputStats {
+    /// Bytes sent through VPN tunnel
+    pub bytes_tx: Arc<AtomicU64>,
+    /// Bytes received through VPN tunnel
+    pub bytes_rx: Arc<AtomicU64>,
+    /// Timestamp when stats were started
+    pub started_at: std::time::Instant,
+}
+
+impl Default for ThroughputStats {
+    fn default() -> Self {
+        Self {
+            bytes_tx: Arc::new(AtomicU64::new(0)),
+            bytes_rx: Arc::new(AtomicU64::new(0)),
+            started_at: std::time::Instant::now(),
+        }
+    }
+}
+
+impl ThroughputStats {
+    /// Reset stats
+    pub fn reset(&self) {
+        self.bytes_tx.store(0, Ordering::Relaxed);
+        self.bytes_rx.store(0, Ordering::Relaxed);
+    }
+
+    /// Get current bytes TX
+    pub fn get_bytes_tx(&self) -> u64 {
+        self.bytes_tx.load(Ordering::Relaxed)
+    }
+
+    /// Get current bytes RX
+    pub fn get_bytes_rx(&self) -> u64 {
+        self.bytes_rx.load(Ordering::Relaxed)
+    }
+
+    /// Add to TX counter (called when packet sent through tunnel)
+    pub fn add_tx(&self, bytes: u64) {
+        self.bytes_tx.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Add to RX counter (called when packet received through tunnel)
+    pub fn add_rx(&self, bytes: u64) {
+        self.bytes_rx.fetch_add(bytes, Ordering::Relaxed);
+    }
 }
 
 /// Parallel packet interceptor
@@ -97,6 +148,8 @@ pub struct ParallelInterceptor {
     total_packets: AtomicU64,
     total_tunneled: AtomicU64,
     total_injected: AtomicU64,
+    /// Shared throughput stats for GUI
+    throughput_stats: ThroughputStats,
 }
 
 impl ParallelInterceptor {
@@ -129,7 +182,13 @@ impl ParallelInterceptor {
             total_packets: AtomicU64::new(0),
             total_tunneled: AtomicU64::new(0),
             total_injected: AtomicU64::new(0),
+            throughput_stats: ThroughputStats::default(),
         }
+    }
+
+    /// Get throughput stats (cloneable, for GUI access)
+    pub fn get_throughput_stats(&self) -> ThroughputStats {
+        self.throughput_stats.clone()
     }
 
     /// Set Wintun session for VPN packet injection
@@ -289,12 +348,16 @@ impl ParallelInterceptor {
             run_cache_refresher(refresher_cache, refresher_stop);
         }));
 
+        // Reset throughput stats on start
+        self.throughput_stats.reset();
+
         // Start worker threads
         for (worker_id, receiver) in receivers.into_iter().enumerate() {
             let stop_flag = Arc::clone(&self.stop_flag);
             let process_cache = Arc::clone(&self.process_cache);
             let wintun_session = self.wintun_session.clone();
             let stats = Arc::clone(&self.worker_stats[worker_id]);
+            let throughput = self.throughput_stats.clone();
 
             let handle = thread::spawn(move || {
                 // Set CPU affinity for this worker
@@ -306,6 +369,7 @@ impl ParallelInterceptor {
                     process_cache,
                     wintun_session,
                     stats,
+                    throughput,
                     stop_flag,
                 );
             });
@@ -544,6 +608,7 @@ fn run_packet_worker(
     process_cache: Arc<LockFreeProcessCache>,
     wintun_session: Option<Arc<wintun::Session>>,
     stats: Arc<WorkerStats>,
+    throughput: ThroughputStats,
     stop_flag: Arc<AtomicBool>,
 ) {
     log::info!("Worker {} started", worker_id);
@@ -586,6 +651,7 @@ fn run_packet_worker(
 
         // Process packet
         stats.packets_processed.fetch_add(1, Ordering::Relaxed);
+        let packet_len = work.data.len() as u64;
 
         if work.is_outbound {
             // Check if should tunnel
@@ -593,6 +659,8 @@ fn run_packet_worker(
 
             if should_tunnel {
                 stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
+                stats.bytes_tunneled.fetch_add(packet_len, Ordering::Relaxed);
+                throughput.add_tx(packet_len);
 
                 // Inject into Wintun
                 if let Some(ref session) = wintun_session {
@@ -617,17 +685,20 @@ fn run_packet_worker(
                 }
             } else {
                 stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
+                stats.bytes_bypassed.fetch_add(packet_len, Ordering::Relaxed);
                 // Note: Reader thread handles passthrough
             }
         }
     }
 
     log::info!(
-        "Worker {} stopped - processed: {}, tunneled: {}, bypassed: {}",
+        "Worker {} stopped - processed: {}, tunneled: {} ({} bytes), bypassed: {} ({} bytes)",
         worker_id,
         stats.packets_processed.load(Ordering::Relaxed),
         stats.packets_tunneled.load(Ordering::Relaxed),
-        stats.packets_bypassed.load(Ordering::Relaxed)
+        stats.bytes_tunneled.load(Ordering::Relaxed),
+        stats.packets_bypassed.load(Ordering::Relaxed),
+        stats.bytes_bypassed.load(Ordering::Relaxed)
     );
 }
 

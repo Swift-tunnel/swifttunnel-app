@@ -11,9 +11,9 @@ use crate::structs::*;
 use crate::system_optimizer::SystemOptimizer;
 use crate::tray::SystemTray;
 use crate::updater::{UpdateChecker, UpdateInfo, UpdateSettings, UpdateState, download_update, download_checksum, verify_checksum, install_update};
-use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set};
+use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set, ThroughputStats};
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,6 +111,19 @@ fn latency_fill_percent(ms: u32) -> f32 {
     // 0ms = 100%, 200ms+ = 10%
     let normalized = (ms as f32 / 200.0).min(1.0);
     1.0 - (normalized * 0.9) // Range: 1.0 to 0.1
+}
+
+/// Format bytes per second as human-readable string
+fn format_bytes_per_sec(bytes_per_sec: f64) -> String {
+    if bytes_per_sec < 1024.0 {
+        format!("{:.0} B/s", bytes_per_sec)
+    } else if bytes_per_sec < 1024.0 * 1024.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1024.0)
+    } else if bytes_per_sec < 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB/s", bytes_per_sec / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 /// Animation state for a single value
@@ -354,6 +367,15 @@ pub struct BoosterApp {
     // Animation state for speed gauges
     download_gauge_animation: Option<Animation>,
     upload_gauge_animation: Option<Animation>,
+
+    // Network throughput graph state
+    /// Throughput stats handle (when connected)
+    throughput_stats: Option<ThroughputStats>,
+    /// History of throughput readings (bytes/sec) for graph
+    /// Each entry: (timestamp, tx_bytes_per_sec, rx_bytes_per_sec)
+    throughput_history: VecDeque<(std::time::Instant, f64, f64)>,
+    /// Last bytes values for calculating rate
+    last_throughput_bytes: Option<(u64, u64, std::time::Instant)>,
 }
 
 impl BoosterApp {
@@ -558,6 +580,11 @@ impl BoosterApp {
             speed_progress_rx: speed_rx,
             download_gauge_animation: None,
             upload_gauge_animation: None,
+
+            // Network throughput graph
+            throughput_stats: None,
+            throughput_history: VecDeque::with_capacity(120), // 2 minutes at 1 sample/sec
+            last_throughput_bytes: None,
         }
     }
 
@@ -1023,6 +1050,19 @@ impl eframe::App for BoosterApp {
                 // Clear previously tunneled when disconnecting
                 if new_state == ConnectionState::Disconnected {
                     self.previously_tunneled.clear();
+                    // Clear throughput tracking
+                    self.throughput_stats = None;
+                    self.throughput_history.clear();
+                    self.last_throughput_bytes = None;
+                }
+
+                // Get throughput stats when first connecting
+                if !self.vpn_state.is_connected() && new_state.is_connected() {
+                    // Get throughput stats handle from VPN connection
+                    self.throughput_stats = vpn.get_throughput_stats();
+                    self.throughput_history.clear();
+                    self.last_throughput_bytes = None;
+                    log::info!("Throughput stats tracking: {:?}", self.throughput_stats.is_some());
                 }
 
                 self.vpn_state = new_state;
@@ -1031,6 +1071,9 @@ impl eframe::App for BoosterApp {
             if should_mark_dirty {
                 self.mark_dirty();
             }
+
+            // Update throughput history when connected
+            self.update_throughput_history();
 
             // Update auth state only when timer fires (cheap but reduces lock contention)
             if let Ok(auth) = self.auth_manager.try_lock() {
@@ -1939,11 +1982,198 @@ impl BoosterApp {
                                 });
                         }
                     });
+
+                    // Throughput graph (new row)
+                    ui.add_space(10.0);
+                    self.render_throughput_graph(ui);
                 }
             });
 
         if do_connect { self.connect_vpn(); }
         if do_disconnect { self.disconnect_vpn(); }
+    }
+
+    /// Update throughput history from current stats
+    fn update_throughput_history(&mut self) {
+        if !self.vpn_state.is_connected() {
+            return;
+        }
+
+        let Some(stats) = &self.throughput_stats else { return };
+
+        let now = std::time::Instant::now();
+        let current_tx = stats.get_bytes_tx();
+        let current_rx = stats.get_bytes_rx();
+
+        // Calculate rate from last reading
+        if let Some((last_tx, last_rx, last_time)) = self.last_throughput_bytes {
+            let elapsed = now.duration_since(last_time).as_secs_f64();
+            if elapsed >= 0.5 {
+                // At least 500ms between samples for smoother graph
+                let tx_rate = (current_tx.saturating_sub(last_tx)) as f64 / elapsed;
+                let rx_rate = (current_rx.saturating_sub(last_rx)) as f64 / elapsed;
+
+                self.throughput_history.push_back((now, tx_rate, rx_rate));
+
+                // Keep last 60 samples (about 30 seconds at 2 samples/sec)
+                while self.throughput_history.len() > 60 {
+                    self.throughput_history.pop_front();
+                }
+
+                self.last_throughput_bytes = Some((current_tx, current_rx, now));
+            }
+        } else {
+            // First reading
+            self.last_throughput_bytes = Some((current_tx, current_rx, now));
+        }
+    }
+
+    /// Render network throughput graph
+    fn render_throughput_graph(&self, ui: &mut egui::Ui) {
+        if self.throughput_history.is_empty() {
+            // Show placeholder when no data yet
+            egui::Frame::none()
+                .fill(BG_ELEVATED)
+                .rounding(8.0)
+                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(egui::RichText::new("📊").size(12.0));
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(egui::RichText::new("Throughput").size(10.0).color(TEXT_MUTED));
+                            ui.label(egui::RichText::new("Collecting...").size(11.0).color(TEXT_SECONDARY));
+                        });
+                    });
+                });
+            return;
+        }
+
+        // Calculate max value for scaling
+        let max_throughput = self.throughput_history.iter()
+            .map(|(_, tx, rx)| tx.max(*rx))
+            .fold(1.0f64, |a, b| a.max(b));
+
+        // Get current rates
+        let (current_tx, current_rx) = self.throughput_history.back()
+            .map(|(_, tx, rx)| (*tx, *rx))
+            .unwrap_or((0.0, 0.0));
+
+        egui::Frame::none()
+            .fill(BG_ELEVATED)
+            .rounding(8.0)
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // Header with current values
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("📊").size(11.0));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Tunnel Traffic").size(10.0).color(TEXT_MUTED));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // TX in cyan, RX in green
+                            ui.label(egui::RichText::new(format!("↓{}", format_bytes_per_sec(current_rx)))
+                                .size(10.0).color(STATUS_CONNECTED));
+                            ui.label(egui::RichText::new(" / ").size(10.0).color(TEXT_MUTED));
+                            ui.label(egui::RichText::new(format!("↑{}", format_bytes_per_sec(current_tx)))
+                                .size(10.0).color(ACCENT_CYAN));
+                        });
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Graph area
+                    let graph_height = 40.0;
+                    let graph_width = ui.available_width();
+                    let (graph_rect, _) = ui.allocate_exact_size(egui::vec2(graph_width, graph_height), egui::Sense::hover());
+
+                    let painter = ui.painter_at(graph_rect);
+
+                    // Background
+                    painter.rect_filled(graph_rect, 4.0, BG_CARD);
+
+                    // Draw grid lines (2 horizontal)
+                    for i in 1..3 {
+                        let y = graph_rect.top() + (graph_height * i as f32 / 3.0);
+                        painter.line_segment(
+                            [egui::pos2(graph_rect.left(), y), egui::pos2(graph_rect.right(), y)],
+                            egui::Stroke::new(0.5, BG_HOVER)
+                        );
+                    }
+
+                    let num_points = self.throughput_history.len();
+                    if num_points >= 2 {
+                        let x_step = graph_width / (num_points - 1).max(1) as f32;
+
+                        // Draw TX line (cyan)
+                        let tx_points: Vec<egui::Pos2> = self.throughput_history.iter().enumerate()
+                            .map(|(i, (_, tx, _))| {
+                                let x = graph_rect.left() + x_step * i as f32;
+                                let y = graph_rect.bottom() - ((*tx / max_throughput) as f32 * (graph_height - 4.0));
+                                egui::pos2(x, y.max(graph_rect.top() + 2.0))
+                            })
+                            .collect();
+
+                        // Draw RX line (green)
+                        let rx_points: Vec<egui::Pos2> = self.throughput_history.iter().enumerate()
+                            .map(|(i, (_, _, rx))| {
+                                let x = graph_rect.left() + x_step * i as f32;
+                                let y = graph_rect.bottom() - ((*rx / max_throughput) as f32 * (graph_height - 4.0));
+                                egui::pos2(x, y.max(graph_rect.top() + 2.0))
+                            })
+                            .collect();
+
+                        // Draw fill under lines (subtle)
+                        if tx_points.len() >= 2 {
+                            for i in 0..tx_points.len()-1 {
+                                let quad = [
+                                    tx_points[i],
+                                    tx_points[i + 1],
+                                    egui::pos2(tx_points[i + 1].x, graph_rect.bottom()),
+                                    egui::pos2(tx_points[i].x, graph_rect.bottom()),
+                                ];
+                                painter.add(egui::Shape::convex_polygon(
+                                    quad.to_vec(),
+                                    ACCENT_CYAN.gamma_multiply(0.1),
+                                    egui::Stroke::NONE,
+                                ));
+                            }
+                        }
+
+                        if rx_points.len() >= 2 {
+                            for i in 0..rx_points.len()-1 {
+                                let quad = [
+                                    rx_points[i],
+                                    rx_points[i + 1],
+                                    egui::pos2(rx_points[i + 1].x, graph_rect.bottom()),
+                                    egui::pos2(rx_points[i].x, graph_rect.bottom()),
+                                ];
+                                painter.add(egui::Shape::convex_polygon(
+                                    quad.to_vec(),
+                                    STATUS_CONNECTED.gamma_multiply(0.1),
+                                    egui::Stroke::NONE,
+                                ));
+                            }
+                        }
+
+                        // Draw lines
+                        for i in 0..tx_points.len()-1 {
+                            painter.line_segment(
+                                [tx_points[i], tx_points[i + 1]],
+                                egui::Stroke::new(1.5, ACCENT_CYAN.gamma_multiply(0.8))
+                            );
+                        }
+
+                        for i in 0..rx_points.len()-1 {
+                            painter.line_segment(
+                                [rx_points[i], rx_points[i + 1]],
+                                egui::Stroke::new(1.5, STATUS_CONNECTED.gamma_multiply(0.8))
+                            );
+                        }
+                    }
+                });
+            });
     }
 
     fn render_region_selector(&mut self, ui: &mut egui::Ui) {
