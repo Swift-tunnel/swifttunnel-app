@@ -1209,6 +1209,14 @@ fn test_split_tunnel_two_apps() {
     }
     println!("   ✅ Split tunnel started");
 
+    // Set up inbound handler so VPN responses get injected to physical adapter
+    if let Some(handler) = driver.create_inbound_handler() {
+        println!("   ✅ Inbound handler set on tunnel");
+        tunnel.set_inbound_handler(handler);
+    } else {
+        println!("   ⚠ No inbound handler available");
+    }
+
     // Wait for interceptor to start
     std::thread::sleep(Duration::from_secs(2));
 
