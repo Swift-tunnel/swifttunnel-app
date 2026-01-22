@@ -386,56 +386,23 @@ fn main() -> eframe::Result<()> {
 
     // Choose renderer based on environment
     // - glow (OpenGL) for native desktop with GPU - best performance
-    // - wgpu with WARP for RDP/VM without GPU support - compatibility fallback
+    // - wgpu for RDP/VM - fallback to software if available
     let use_software = should_use_software_renderer();
 
     let options = if use_software {
-        info!("Using wgpu with WARP (software) renderer for RDP/VM compatibility");
+        info!("Using wgpu renderer for RDP/VM compatibility");
 
-        // Configure wgpu to use force_fallback_adapter for software rendering (WARP on Windows)
-        use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
-
-        let wgpu_setup = WgpuSetupCreateNew {
-            // Use D3D12 backend which has WARP software adapter on Windows
-            instance_descriptor: wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN | wgpu::Backends::GL,
-                ..Default::default()
-            },
-            // Low power preference tends to select software adapters
-            power_preference: wgpu::PowerPreference::LowPower,
-            // Custom adapter selector that requests the fallback/software adapter
-            native_adapter_selector: Some(std::sync::Arc::new(|adapters, _surface| {
-                // Log available adapters
-                for (i, adapter) in adapters.iter().enumerate() {
-                    let info = adapter.get_info();
-                    log::info!("Adapter {}: {} ({:?}, {:?})", i, info.name, info.device_type, info.backend);
-                }
-
-                // First, look for a software/CPU adapter (WARP, llvmpipe, SwiftShader)
-                if let Some(adapter) = adapters.iter().find(|a| {
-                    let info = a.get_info();
-                    info.device_type == wgpu::DeviceType::Cpu
-                }) {
-                    log::info!("Selected software adapter: {}", adapter.get_info().name);
-                    return Ok(adapter.clone());
-                }
-
-                // Fall back to any available adapter
-                if let Some(adapter) = adapters.first() {
-                    log::info!("Selected fallback adapter: {}", adapter.get_info().name);
-                    return Ok(adapter.clone());
-                }
-
-                Err("No suitable graphics adapter found".to_string())
-            })),
-            ..Default::default()
-        };
+        // Configure wgpu with low power preference to prefer software adapters
+        use eframe::egui_wgpu::WgpuConfiguration;
 
         NativeOptions {
             viewport,
             renderer: eframe::Renderer::Wgpu,
             wgpu_options: WgpuConfiguration {
-                wgpu_setup: WgpuSetup::CreateNew(wgpu_setup),
+                // Include all backends - D3D12 has WARP, GL might have llvmpipe
+                supported_backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN | wgpu::Backends::GL,
+                // Low power preference tends to select software/integrated adapters
+                power_preference: wgpu::PowerPreference::LowPower,
                 ..Default::default()
             },
             ..Default::default()
