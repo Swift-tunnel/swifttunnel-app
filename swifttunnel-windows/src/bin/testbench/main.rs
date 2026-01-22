@@ -71,6 +71,9 @@ fn main() -> Result<()> {
         "split" => {
             test_split_tunnel_two_apps();
         }
+        "bench" => {
+            run_vpn_benchmark();
+        }
         "all" => {
             println!("Running all tests...\n");
             check_driver_status();
@@ -104,6 +107,7 @@ fn print_usage() {
     println!("  verify   Verify actual traffic routing (connects to VPN)");
     println!("  ping     Test ping functionality (fetch servers & measure latency)");
     println!("  split    Test split tunnel with two apps (ip_checker=tunnel, testbench=bypass)");
+    println!("  bench    Run speed benchmark through VPN tunnel (10MB download)");
     println!("  help     Show this help message");
 }
 
@@ -1330,6 +1334,321 @@ fn test_split_tunnel_two_apps() {
     tunnel.stop();
     adapter.shutdown();
     println!("   ✅ Done");
+}
+
+/// Run VPN speed benchmark - downloads 10MB through VPN tunnel
+fn run_vpn_benchmark() {
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║    VPN SPEED BENCHMARK                                         ║");
+    println!("║    Downloads 10MB through VPN tunnel                            ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    let rt = Runtime::new().expect("Failed to create tokio runtime");
+
+    // Find ip_checker.exe
+    let ip_checker_path = find_ip_checker_exe();
+    if ip_checker_path.is_none() {
+        println!("❌ ip_checker.exe not found!");
+        println!("   Build it with: cargo build --release --bin ip_checker");
+        return;
+    }
+    let ip_checker_path = ip_checker_path.unwrap();
+    println!("✅ Found ip_checker.exe: {}\n", ip_checker_path.display());
+
+    // Step 1: Run baseline speed test (without VPN)
+    println!("═══ BASELINE (No VPN) ═══\n");
+    println!("Running speed test WITHOUT VPN...");
+    let baseline = run_ip_checker_speedtest(&ip_checker_path);
+    let baseline_mbps = match &baseline {
+        Some((ip, mbps)) => {
+            println!("   IP: {}", ip);
+            println!("   Speed: {:.2} Mbps", mbps);
+            *mbps
+        }
+        None => {
+            println!("   ❌ Baseline speed test failed");
+            0.0
+        }
+    };
+
+    // Step 2: Authenticate
+    println!("\n═══ CONNECTING VPN ═══\n");
+    println!("Authenticating...");
+    let auth_manager = match AuthManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            return;
+        }
+    };
+
+    let access_token = rt.block_on(async {
+        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+            println!("   ❌ Sign in failed: {}", e);
+            return None;
+        }
+        match auth_manager.get_state() {
+            AuthState::LoggedIn(session) => Some(session.access_token),
+            _ => None,
+        }
+    });
+
+    let access_token = match access_token {
+        Some(t) => {
+            println!("   ✅ Signed in");
+            t
+        }
+        None => return,
+    };
+
+    // Step 3: Fetch VPN config
+    println!("Fetching VPN config...");
+    let vpn_config = rt.block_on(async {
+        match fetch_vpn_config(&access_token, TEST_REGION).await {
+            Ok(config) => {
+                println!("   ✅ Region: {}, Endpoint: {}", TEST_REGION, config.endpoint);
+                Some(config)
+            }
+            Err(e) => {
+                println!("   ❌ Failed: {}", e);
+                None
+            }
+        }
+    });
+
+    let vpn_config = match vpn_config {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Step 4: Create Wintun adapter
+    println!("Creating Wintun adapter...");
+    let (ip, cidr) = match parse_ip_cidr(&vpn_config.assigned_ip) {
+        Ok((ip, cidr)) => (ip, cidr),
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            return;
+        }
+    };
+
+    let adapter = match WintunAdapter::create(std::net::IpAddr::V4(ip), cidr) {
+        Ok(a) => {
+            println!("   ✅ Adapter created");
+            std::sync::Arc::new(a)
+        }
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            return;
+        }
+    };
+
+    if !vpn_config.dns.is_empty() {
+        let _ = adapter.set_dns(&vpn_config.dns);
+    }
+    let interface_luid = adapter.get_luid();
+
+    // Step 5: Start WireGuard tunnel
+    println!("Starting WireGuard tunnel...");
+    let tunnel = match WireguardTunnel::new(vpn_config.clone()) {
+        Ok(t) => {
+            println!("   ✅ Tunnel created");
+            std::sync::Arc::new(t)
+        }
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            adapter.shutdown();
+            return;
+        }
+    };
+
+    let tunnel_clone = tunnel.clone();
+    let adapter_clone = adapter.clone();
+    rt.spawn(async move {
+        if let Err(e) = tunnel_clone.start(adapter_clone).await {
+            log::error!("Tunnel error: {}", e);
+        }
+    });
+
+    println!("   Waiting for handshake...");
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Step 6: Get internet IP before routes
+    println!("Capturing internet IP...");
+    let original_internet_ip = match get_internet_interface_ip() {
+        Ok(ip) => {
+            println!("   ✅ Internet interface IP: {}", ip);
+            ip.to_string()
+        }
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            tunnel.stop();
+            adapter.shutdown();
+            return;
+        }
+    };
+
+    // Step 7: Setup routes (split tunnel mode)
+    println!("Setting up routes...");
+    let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
+        .split(':')
+        .next()
+        .unwrap_or("0.0.0.0")
+        .parse()
+        .unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
+
+    let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
+    let mut route_manager = RouteManager::new(server_ip, if_index);
+    route_manager.set_split_tunnel_mode(true);
+
+    if let Err(e) = route_manager.apply_routes() {
+        println!("   ⚠ Failed: {}", e);
+    } else {
+        println!("   ✅ Routes applied");
+    }
+    std::thread::sleep(Duration::from_secs(1));
+
+    // Step 8: Setup split tunnel with ip_checker.exe as TUNNEL app
+    println!("Setting up split tunnel...");
+    let mut driver = SplitTunnelDriver::new();
+
+    if !SplitTunnelDriver::is_available() {
+        println!("   ❌ ndisapi driver not available");
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+
+    if let Err(e) = driver.open() {
+        println!("   ❌ Open failed: {}", e);
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+
+    if let Err(e) = driver.initialize() {
+        println!("   ❌ Initialize failed: {}", e);
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+
+    // Set VPN encrypt context for direct encryption
+    let vpn_ctx = VpnEncryptContext::new(tunnel.get_tunn_arc(), vpn_config.endpoint.clone())
+        .expect("Failed to create VPN encrypt context");
+    driver.set_vpn_encrypt_context(vpn_ctx.clone());
+    println!("   ✅ VPN encrypt context set");
+
+    // Configure with ip_checker.exe as tunnel app
+    let tunnel_apps = vec!["ip_checker.exe".to_string()];
+    let split_config = SplitTunnelConfig::new(
+        tunnel_apps,
+        vpn_config.assigned_ip.clone(),
+        original_internet_ip.clone(),
+        interface_luid,
+    );
+
+    if let Err(e) = driver.configure(split_config) {
+        println!("   ❌ Configure failed: {}", e);
+        let _ = driver.close();
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+
+    // Set inbound handler for responses
+    let wg_ctx = std::sync::Arc::new(WireguardContext {
+        session: adapter.session(),
+        packets_injected: std::sync::atomic::AtomicU64::new(0),
+    });
+    driver.set_wireguard_context(wg_ctx);
+    tunnel.set_inbound_handler(driver.get_inbound_handler());
+    println!("   ✅ Split tunnel configured");
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Step 9: Run speed test through VPN
+    println!("\n═══ VPN SPEED TEST ═══\n");
+    println!("Running speed test THROUGH VPN tunnel...");
+    let vpn_speed = run_ip_checker_speedtest(&ip_checker_path);
+    let vpn_mbps = match &vpn_speed {
+        Some((ip, mbps)) => {
+            println!("   IP: {} (should be VPN IP)", ip);
+            println!("   Speed: {:.2} Mbps", mbps);
+            *mbps
+        }
+        None => {
+            println!("   ❌ VPN speed test failed");
+            0.0
+        }
+    };
+
+    // Get throughput stats
+    let stats = driver.get_throughput_stats();
+
+    // Results
+    println!("\n╔═══════════════════════════════════════════════════════════════╗");
+    println!("║                    BENCHMARK RESULTS                           ║");
+    println!("╠═══════════════════════════════════════════════════════════════╣");
+    println!("║  Baseline (No VPN):    {:>8.2} Mbps                          ║", baseline_mbps);
+    println!("║  VPN Tunnel:           {:>8.2} Mbps                          ║", vpn_mbps);
+    if baseline_mbps > 0.0 && vpn_mbps > 0.0 {
+        let overhead = ((baseline_mbps - vpn_mbps) / baseline_mbps * 100.0).max(0.0);
+        println!("║  VPN Overhead:         {:>8.1}%                            ║", overhead);
+    }
+    if let Some(s) = stats {
+        println!("║  TX (to VPN):          {:>8} bytes                        ║", s.tx_bytes.load(std::sync::atomic::Ordering::Relaxed));
+        println!("║  RX (from VPN):        {:>8} bytes                        ║", s.rx_bytes.load(std::sync::atomic::Ordering::Relaxed));
+    }
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+
+    // Cleanup
+    println!("\nCleaning up...");
+    let _ = driver.close();
+    let _ = route_manager.remove_routes();
+    tunnel.stop();
+    adapter.shutdown();
+    println!("   ✅ Done");
+}
+
+/// Run ip_checker.exe --speedtest and parse output
+fn run_ip_checker_speedtest(path: &std::path::Path) -> Option<(String, f64)> {
+    use std::process::Command;
+
+    let output = Command::new(path)
+        .arg("--speedtest")
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut ip = String::new();
+    let mut mbps = 0.0;
+
+    for line in stdout.lines() {
+        if line.contains("Checking IP...") {
+            if let Some(ip_str) = line.split("...").last() {
+                ip = ip_str.trim().to_string();
+            }
+        }
+        if line.contains("Speed:") && line.contains("Mbps") {
+            // Parse "  Speed: X.XX Mbps"
+            if let Some(speed_str) = line.split(':').last() {
+                if let Some(num_str) = speed_str.trim().split_whitespace().next() {
+                    mbps = num_str.parse().unwrap_or(0.0);
+                }
+            }
+        }
+    }
+
+    if !ip.is_empty() || mbps > 0.0 {
+        Some((ip, mbps))
+    } else {
+        None
+    }
 }
 
 /// Find ip_checker.exe in common locations
