@@ -252,7 +252,9 @@ impl VpnConnection {
                     if let Some(ref split_tunnel) = self.split_tunnel {
                         if let Some(handler) = split_tunnel.lock().await.create_inbound_handler() {
                             log::info!("Setting inbound handler on WireGuard tunnel for split tunnel mode");
-                            tunnel.set_inbound_handler(handler);
+                            if let Some(ref tunnel_ref) = self.tunnel {
+                                tunnel_ref.set_inbound_handler(handler);
+                            }
                         }
                     }
 
