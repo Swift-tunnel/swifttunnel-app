@@ -611,8 +611,6 @@ fn run_packet_worker(
     throughput: ThroughputStats,
     stop_flag: Arc<AtomicBool>,
 ) {
-    use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
-
     log::info!("Worker {} started", worker_id);
 
     // Get initial snapshot
@@ -718,12 +716,12 @@ fn send_bypass_packet(
     adapters: &[ndisapi::NetworkAdapterInfo],
     work: &PacketWork,
 ) {
-    use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
+    use ndisapi::{EthMRequest, IntermediateBuffer};
 
-    // Find adapter by handle
-    let adapter_handle = HANDLE(work.adapter_handle as isize);
+    // Reconstruct adapter handle from usize
+    let adapter_handle = HANDLE(work.adapter_handle as *mut std::ffi::c_void);
 
-    // Find matching adapter
+    // Find matching adapter to verify handle is valid
     let adapter = adapters.iter().find(|a| a.get_handle() == adapter_handle);
     if adapter.is_none() {
         return;
@@ -733,10 +731,10 @@ fn send_bypass_packet(
     let mut buffer = IntermediateBuffer::default();
     let data_len = work.data.len().min(buffer.get_data_mut().len());
     buffer.get_data_mut()[..data_len].copy_from_slice(&work.data[..data_len]);
-    buffer.set_length(data_len);
-    buffer.set_device_flags(DirectionFlags::PACKET_FLAG_ON_SEND);
+    buffer.set_length(data_len as u32);
+    // Note: Direction flag is implicit - send_packets_to_adapter sends as outbound
 
-    // Send to adapter
+    // Send to adapter (bypasses VPN, goes directly to physical network)
     let mut to_adapter: EthMRequest<1> = EthMRequest::new(adapter_handle);
     if to_adapter.push(&buffer).is_ok() {
         let _ = driver.send_packets_to_adapter::<1>(&to_adapter);
