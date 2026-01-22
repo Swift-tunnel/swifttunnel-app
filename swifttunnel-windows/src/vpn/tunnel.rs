@@ -40,12 +40,19 @@ pub struct TunnelStats {
     pub last_handshake_time: Option<std::time::Instant>,
 }
 
+/// Type for inbound packet handler callback
+/// Called with decrypted IP packets that should be injected to split tunnel apps
+pub type InboundHandler = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 /// WireGuard tunnel wrapper
 pub struct WireguardTunnel {
     config: VpnConfig,
     endpoint: SocketAddr,
     running: Arc<AtomicBool>,
     stats: Arc<std::sync::Mutex<TunnelStats>>,
+    /// Optional handler for inbound packets when split tunnel is active
+    /// If set, decrypted packets are passed to this handler instead of Wintun
+    inbound_handler: Arc<std::sync::Mutex<Option<InboundHandler>>>,
 }
 
 impl WireguardTunnel {
@@ -60,7 +67,23 @@ impl WireguardTunnel {
             endpoint,
             running: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(std::sync::Mutex::new(TunnelStats::default())),
+            inbound_handler: Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    /// Set the inbound packet handler for split tunnel mode
+    ///
+    /// When set, decrypted inbound packets are passed to this handler
+    /// instead of being written to the Wintun adapter. The handler should
+    /// inject the packets to the appropriate network interface.
+    pub fn set_inbound_handler(&self, handler: InboundHandler) {
+        log::info!("Setting inbound packet handler for split tunnel");
+        *self.inbound_handler.lock().unwrap() = Some(handler);
+    }
+
+    /// Get the inbound handler (for passing to tasks)
+    fn get_inbound_handler(&self) -> Arc<std::sync::Mutex<Option<InboundHandler>>> {
+        Arc::clone(&self.inbound_handler)
     }
 
     /// Start the tunnel packet processing loops
@@ -128,6 +151,7 @@ impl WireguardTunnel {
             Arc::clone(&socket),
             Arc::clone(&self.running),
             Arc::clone(&self.stats),
+            self.get_inbound_handler(),
             shutdown_tx.subscribe(),
         );
 
@@ -295,6 +319,9 @@ impl WireguardTunnel {
     }
 
     /// Spawn inbound packet processing task (server -> adapter)
+    ///
+    /// When inbound_handler is set (split tunnel mode), decrypted packets are
+    /// passed to the handler instead of being written to the Wintun adapter.
     fn spawn_inbound_task(
         &self,
         adapter: Arc<WintunAdapter>,
@@ -302,11 +329,13 @@ impl WireguardTunnel {
         socket: Arc<UdpSocket>,
         running: Arc<AtomicBool>,
         stats: Arc<std::sync::Mutex<TunnelStats>>,
+        inbound_handler: Arc<std::sync::Mutex<Option<InboundHandler>>>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut recv_buf = vec![0u8; MAX_PACKET_SIZE];
             let mut decrypt_buf = vec![0u8; MAX_PACKET_SIZE];
+            let mut handler_used = false;
 
             while running.load(Ordering::SeqCst) {
                 // Check for shutdown
@@ -341,16 +370,35 @@ impl WireguardTunnel {
 
                 match decrypted {
                     TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
-                        // Write decrypted packet to adapter
                         let len = data.len();
-                        if let Ok(mut send_packet) = adapter.allocate_send_packet(len as u16) {
-                            send_packet.bytes_mut().copy_from_slice(data);
-                            adapter.send_packet(send_packet);
+
+                        // Check if we have an inbound handler (split tunnel mode)
+                        let handler_opt = inbound_handler.lock().ok().and_then(|g| g.clone());
+
+                        if let Some(handler) = handler_opt {
+                            // Split tunnel mode: pass to handler for injection to physical adapter
+                            if !handler_used {
+                                log::info!("Inbound task: using split tunnel handler for packet delivery");
+                                handler_used = true;
+                            }
+                            handler(data);
 
                             // Update stats
                             if let Ok(mut s) = stats.lock() {
                                 s.bytes_received += len as u64;
                                 s.packets_received += 1;
+                            }
+                        } else {
+                            // Normal mode: write directly to Wintun adapter
+                            if let Ok(mut send_packet) = adapter.allocate_send_packet(len as u16) {
+                                send_packet.bytes_mut().copy_from_slice(data);
+                                adapter.send_packet(send_packet);
+
+                                // Update stats
+                                if let Ok(mut s) = stats.lock() {
+                                    s.bytes_received += len as u64;
+                                    s.packets_received += 1;
+                                }
                             }
                         }
                     }

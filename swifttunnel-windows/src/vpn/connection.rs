@@ -246,6 +246,16 @@ impl VpnConnection {
             match self.setup_split_tunnel(&config, &adapter, tunnel_apps).await {
                 Ok(processes) => {
                     log::info!("Split tunnel setup succeeded");
+
+                    // Configure tunnel inbound handler for split tunnel mode
+                    // This ensures decrypted VPN responses are injected to the physical adapter
+                    if let Some(ref split_tunnel) = self.split_tunnel {
+                        if let Some(handler) = split_tunnel.lock().await.create_inbound_handler() {
+                            log::info!("Setting inbound handler on WireGuard tunnel for split tunnel mode");
+                            tunnel.set_inbound_handler(handler);
+                        }
+                    }
+
                     (true, processes)
                 }
                 Err(e) => {

@@ -29,7 +29,7 @@ pub mod servers;
 
 pub use config::{fetch_vpn_config, VpnConfigRequest};
 pub use adapter::WintunAdapter;
-pub use tunnel::WireguardTunnel;
+pub use tunnel::{WireguardTunnel, InboundHandler};
 pub use packet_interceptor::WireguardContext;
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
 pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats};

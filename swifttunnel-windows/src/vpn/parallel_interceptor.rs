@@ -452,6 +452,156 @@ impl ParallelInterceptor {
     pub fn get_snapshot(&self) -> Arc<ProcessSnapshot> {
         self.process_cache.get_snapshot()
     }
+
+    /// Inject an inbound IP packet to the physical adapter's MSTCP stack
+    ///
+    /// This is called by the WireGuard tunnel inbound task when split tunnel is active.
+    /// The packet is a decrypted IP packet that should be delivered to the original app.
+    pub fn inject_inbound(&self, ip_packet: &[u8]) {
+        use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
+
+        let physical_name = match &self.physical_adapter_name {
+            Some(name) => name,
+            None => {
+                log::warn!("inject_inbound: no physical adapter configured");
+                return;
+            }
+        };
+
+        // Open driver
+        let driver = match ndisapi::Ndisapi::new("NDISRD") {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("inject_inbound: failed to open driver: {}", e);
+                return;
+            }
+        };
+
+        let adapters = match driver.get_tcpip_bound_adapters_info() {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!("inject_inbound: failed to get adapters: {}", e);
+                return;
+            }
+        };
+
+        let adapter = match adapters.iter().find(|a| a.get_name() == physical_name) {
+            Some(a) => a,
+            None => {
+                log::warn!("inject_inbound: physical adapter '{}' not found", physical_name);
+                return;
+            }
+        };
+
+        let adapter_handle = adapter.get_handle();
+
+        // Create Ethernet frame with IP packet payload
+        // We need to wrap the IP packet in an Ethernet frame for injection
+        let mut ethernet_frame = vec![0u8; 14 + ip_packet.len()];
+
+        // Ethernet header:
+        // - Destination MAC (6 bytes): Local adapter's MAC (will be filled by stack)
+        // - Source MAC (6 bytes): Use zeros (will be filled by stack)
+        // - EtherType (2 bytes): 0x0800 for IPv4
+
+        // Get adapter MAC for destination
+        let medium = adapter.get_medium();
+        // For now, use a broadcast-like approach - the stack will handle it
+        ethernet_frame[0..6].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // Broadcast
+        ethernet_frame[6..12].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Source zeros
+        ethernet_frame[12] = 0x08; // EtherType: IPv4
+        ethernet_frame[13] = 0x00;
+        ethernet_frame[14..].copy_from_slice(ip_packet);
+
+        // Create IntermediateBuffer with the Ethernet frame
+        let mut buffer = IntermediateBuffer::default();
+        // CRITICAL: Set direction flag to RECEIVE - we're injecting as if it came from the network
+        buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
+        buffer.length = ethernet_frame.len() as u32;
+        buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(&ethernet_frame);
+
+        // Send to MSTCP (inject into the receive path so the app gets it)
+        let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
+        if to_mstcp.push(&buffer).is_ok() {
+            if let Err(e) = driver.send_packets_to_mstcp::<1>(&to_mstcp) {
+                log::warn!("inject_inbound: send_packets_to_mstcp failed: {:?}", e);
+            } else {
+                // Update RX stats
+                self.throughput_stats.add_rx(ip_packet.len() as u64);
+            }
+        }
+    }
+
+    /// Get a closure that can be used as an inbound handler for the WireGuard tunnel
+    ///
+    /// This creates a handler that injects packets to the physical adapter.
+    pub fn create_inbound_handler(&self) -> std::sync::Arc<dyn Fn(&[u8]) + Send + Sync> {
+        let physical_name = self.physical_adapter_name.clone();
+        let throughput_stats = self.throughput_stats.clone();
+
+        std::sync::Arc::new(move |ip_packet: &[u8]| {
+            use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
+
+            let physical_name = match &physical_name {
+                Some(name) => name,
+                None => {
+                    log::warn!("inbound_handler: no physical adapter configured");
+                    return;
+                }
+            };
+
+            // Open driver
+            let driver = match ndisapi::Ndisapi::new("NDISRD") {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("inbound_handler: failed to open driver: {}", e);
+                    return;
+                }
+            };
+
+            let adapters = match driver.get_tcpip_bound_adapters_info() {
+                Ok(a) => a,
+                Err(e) => {
+                    log::warn!("inbound_handler: failed to get adapters: {}", e);
+                    return;
+                }
+            };
+
+            let adapter = match adapters.iter().find(|a| a.get_name() == physical_name) {
+                Some(a) => a,
+                None => {
+                    log::warn!("inbound_handler: physical adapter '{}' not found", physical_name);
+                    return;
+                }
+            };
+
+            let adapter_handle = adapter.get_handle();
+
+            // Create Ethernet frame with IP packet payload
+            let mut ethernet_frame = vec![0u8; 14 + ip_packet.len()];
+            ethernet_frame[0..6].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // Broadcast dest
+            ethernet_frame[6..12].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Zero src
+            ethernet_frame[12] = 0x08; // EtherType: IPv4
+            ethernet_frame[13] = 0x00;
+            ethernet_frame[14..].copy_from_slice(ip_packet);
+
+            // Create IntermediateBuffer
+            let mut buffer = IntermediateBuffer::default();
+            buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
+            buffer.length = ethernet_frame.len() as u32;
+            buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(&ethernet_frame);
+
+            // Inject to MSTCP
+            let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
+            if to_mstcp.push(&buffer).is_ok() {
+                if let Err(e) = driver.send_packets_to_mstcp::<1>(&to_mstcp) {
+                    log::warn!("inbound_handler: send_packets_to_mstcp failed: {:?}", e);
+                } else {
+                    throughput_stats.add_rx(ip_packet.len() as u64);
+                }
+            }
+        })
+    }
 }
 
 impl Drop for ParallelInterceptor {
