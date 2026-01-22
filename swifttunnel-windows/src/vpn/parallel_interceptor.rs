@@ -153,6 +153,10 @@ pub struct ParallelInterceptor {
     total_injected: AtomicU64,
     /// Shared throughput stats for GUI
     throughput_stats: ThroughputStats,
+    /// VPN tunnel IP (for NAT rewriting on inbound packets)
+    tunnel_ip: Option<std::net::Ipv4Addr>,
+    /// Physical adapter IP (for NAT rewriting on inbound packets)
+    internet_ip: Option<std::net::Ipv4Addr>,
 }
 
 impl ParallelInterceptor {
@@ -187,6 +191,8 @@ impl ParallelInterceptor {
             total_tunneled: AtomicU64::new(0),
             total_injected: AtomicU64::new(0),
             throughput_stats: ThroughputStats::default(),
+            tunnel_ip: None,
+            internet_ip: None,
         }
     }
 
@@ -198,6 +204,22 @@ impl ParallelInterceptor {
     /// Set Wintun session for VPN packet injection
     pub fn set_wintun_session(&mut self, session: Arc<wintun::Session>) {
         self.wintun_session = Some(session);
+    }
+
+    /// Set NAT IPs for inbound packet rewriting
+    ///
+    /// When inbound VPN packets arrive with destination = tunnel_ip,
+    /// the inbound handler rewrites it to internet_ip so the original
+    /// app socket can receive the response.
+    pub fn set_nat_ips(&mut self, tunnel_ip: &str, internet_ip: &str) {
+        if let Ok(tun_ip) = tunnel_ip.split('/').next().unwrap_or(tunnel_ip).parse::<std::net::Ipv4Addr>() {
+            self.tunnel_ip = Some(tun_ip);
+            log::info!("Set NAT tunnel IP: {}", tun_ip);
+        }
+        if let Ok(int_ip) = internet_ip.parse::<std::net::Ipv4Addr>() {
+            self.internet_ip = Some(int_ip);
+            log::info!("Set NAT internet IP: {}", int_ip);
+        }
     }
 
     /// Check if driver is available
@@ -535,28 +557,68 @@ impl ParallelInterceptor {
     /// Get a closure that can be used as an inbound handler for the WireGuard tunnel
     ///
     /// This creates a handler that injects packets to the physical adapter.
+    /// If NAT IPs are configured, it rewrites destination IP from tunnel_ip to internet_ip.
     pub fn create_inbound_handler(&self) -> std::sync::Arc<dyn Fn(&[u8]) + Send + Sync> {
         let physical_name = self.physical_adapter_name.clone();
         let throughput_stats = self.throughput_stats.clone();
+        let tunnel_ip = self.tunnel_ip;
+        let internet_ip = self.internet_ip;
 
         std::sync::Arc::new(move |ip_packet: &[u8]| {
             use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
-            // Parse IP header to see source and destination
-            if ip_packet.len() >= 20 {
-                let src_ip = std::net::Ipv4Addr::new(
-                    ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+            if ip_packet.len() < 20 {
+                log::warn!("inbound_handler: packet too short ({} bytes)", ip_packet.len());
+                return;
+            }
+
+            // Parse IP header
+            let src_ip = std::net::Ipv4Addr::new(
+                ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+            );
+            let dst_ip = std::net::Ipv4Addr::new(
+                ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+            );
+            let protocol = ip_packet[9];
+
+            // Check if we need to do NAT (rewrite destination IP)
+            let needs_nat = tunnel_ip.is_some() && internet_ip.is_some()
+                && Some(dst_ip) == tunnel_ip;
+
+            if needs_nat {
+                log::debug!(
+                    "inbound_handler: NAT {} -> {} (proto={}, {} -> {})",
+                    dst_ip, internet_ip.unwrap(), protocol, src_ip, internet_ip.unwrap()
                 );
-                let dst_ip = std::net::Ipv4Addr::new(
-                    ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
-                );
-                let protocol = ip_packet[9];
-                log::info!(
+            } else {
+                log::debug!(
                     "inbound_handler: {} byte packet, proto={}, {} -> {}",
                     ip_packet.len(), protocol, src_ip, dst_ip
                 );
-            } else {
-                log::info!("inbound_handler: {} byte packet (too short for IPv4)", ip_packet.len());
+            }
+
+            // Make a mutable copy for NAT rewriting
+            let mut packet = ip_packet.to_vec();
+
+            if needs_nat {
+                let new_dst = internet_ip.unwrap();
+                // Rewrite destination IP (bytes 16-19)
+                packet[16] = new_dst.octets()[0];
+                packet[17] = new_dst.octets()[1];
+                packet[18] = new_dst.octets()[2];
+                packet[19] = new_dst.octets()[3];
+
+                // Recalculate IP header checksum
+                // Clear existing checksum
+                packet[10] = 0;
+                packet[11] = 0;
+                // Calculate new checksum
+                let ihl = ((packet[0] & 0x0F) as usize) * 4;
+                let checksum = calculate_ip_checksum(&packet[..ihl]);
+                packet[10] = (checksum >> 8) as u8;
+                packet[11] = (checksum & 0xFF) as u8;
+
+                log::info!("inbound_handler: NAT rewritten dst {} -> {}", dst_ip, new_dst);
             }
 
             let physical_name = match &physical_name {
@@ -594,13 +656,13 @@ impl ParallelInterceptor {
 
             let adapter_handle = adapter.get_handle();
 
-            // Create Ethernet frame with IP packet payload
-            let mut ethernet_frame = vec![0u8; 14 + ip_packet.len()];
+            // Create Ethernet frame with IP packet payload (use NAT-modified packet)
+            let mut ethernet_frame = vec![0u8; 14 + packet.len()];
             ethernet_frame[0..6].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // Broadcast dest
             ethernet_frame[6..12].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Zero src
             ethernet_frame[12] = 0x08; // EtherType: IPv4
             ethernet_frame[13] = 0x00;
-            ethernet_frame[14..].copy_from_slice(ip_packet);
+            ethernet_frame[14..].copy_from_slice(&packet);
 
             // Create IntermediateBuffer
             let mut buffer = IntermediateBuffer::default();
@@ -614,7 +676,7 @@ impl ParallelInterceptor {
                 if let Err(e) = driver.send_packets_to_mstcp::<1>(&to_mstcp) {
                     log::warn!("inbound_handler: send_packets_to_mstcp failed: {:?}", e);
                 } else {
-                    throughput_stats.add_rx(ip_packet.len() as u64);
+                    throughput_stats.add_rx(packet.len() as u64);
                 }
             }
         })
@@ -1491,6 +1553,31 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Calculate IP header checksum (RFC 1071)
+fn calculate_ip_checksum(header: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+
+    // Sum 16-bit words
+    while i + 1 < header.len() {
+        sum += u16::from_be_bytes([header[i], header[i + 1]]) as u32;
+        i += 2;
+    }
+
+    // Handle odd byte
+    if i < header.len() {
+        sum += (header[i] as u32) << 8;
+    }
+
+    // Fold 32-bit sum to 16 bits
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    // One's complement
+    !(sum as u16)
 }
 
 #[cfg(test)]
