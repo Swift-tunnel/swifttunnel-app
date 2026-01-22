@@ -282,7 +282,7 @@ impl VpnConnection {
                 }
                 SplitTunnelMode::ProcessBased => {
                     // PROCESS-BASED: Uses ndisapi packet interception (higher latency)
-                    match self.setup_split_tunnel(&config, &adapter, tunnel_apps).await {
+                    match self.setup_split_tunnel(&config, &adapter, tunnel_apps.clone()).await {
                         Ok(processes) => {
                             log::info!("Process-based split tunnel setup succeeded");
                             (true, processes)
