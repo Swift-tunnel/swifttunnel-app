@@ -351,7 +351,10 @@ impl WireguardTunnel {
                 .await;
 
                 let n = match recv_result {
-                    Ok(Ok(n)) => n,
+                    Ok(Ok(n)) => {
+                        log::debug!("Inbound: received {} bytes from VPN server", n);
+                        n
+                    }
                     Ok(Err(e)) => {
                         log::error!("Receive error: {}", e);
                         continue;
@@ -367,6 +370,14 @@ impl WireguardTunnel {
                     let mut tunn = tunn.lock().unwrap();
                     tunn.decapsulate(None, &recv_buf[..n], &mut decrypt_buf)
                 };
+
+                log::debug!("Inbound: decapsulate result: {:?}", match &decrypted {
+                    TunnResult::WriteToTunnelV4(d, _) => format!("WriteToTunnelV4({} bytes)", d.len()),
+                    TunnResult::WriteToTunnelV6(d, _) => format!("WriteToTunnelV6({} bytes)", d.len()),
+                    TunnResult::WriteToNetwork(d) => format!("WriteToNetwork({} bytes)", d.len()),
+                    TunnResult::Done => "Done".to_string(),
+                    TunnResult::Err(e) => format!("Err({:?})", e),
+                });
 
                 match decrypted {
                     TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {

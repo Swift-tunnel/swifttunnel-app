@@ -542,6 +542,8 @@ impl ParallelInterceptor {
         std::sync::Arc::new(move |ip_packet: &[u8]| {
             use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
+            log::info!("inbound_handler: called with {} byte IP packet", ip_packet.len());
+
             let physical_name = match &physical_name {
                 Some(name) => name,
                 None => {
