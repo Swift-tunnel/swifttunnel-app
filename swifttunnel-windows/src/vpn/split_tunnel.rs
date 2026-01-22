@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use super::packet_interceptor::PacketInterceptor;
+use super::packet_interceptor::{PacketInterceptor, WireguardContext};
 use super::{VpnError, VpnResult};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -182,6 +182,8 @@ pub struct SplitTunnelDriver {
     state: DriverState,
     /// Stop flag for background tasks
     stop_flag: Arc<AtomicBool>,
+    /// WireGuard context for packet encapsulation
+    wireguard_ctx: Option<Arc<WireguardContext>>,
 }
 
 unsafe impl Send for SplitTunnelDriver {}
@@ -194,7 +196,26 @@ impl SplitTunnelDriver {
             config: None,
             state: DriverState::NotAvailable,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            wireguard_ctx: None,
         }
+    }
+
+    /// Set the WireGuard context for packet injection
+    ///
+    /// This enables VPN routing for tunnel app packets by injecting them into Wintun.
+    /// The tunnel.rs outbound loop will then pick them up, encapsulate, and send to VPN.
+    /// Must be called before configure() for packets to be routed through VPN.
+    pub fn set_wireguard_context(&mut self, ctx: Arc<WireguardContext>) {
+        log::info!("Setting Wintun injection context for split tunnel");
+        self.wireguard_ctx = Some(ctx);
+    }
+
+    /// Create a WireGuard context from a Wintun session
+    pub fn create_wireguard_context(session: Arc<wintun::Session>) -> Arc<WireguardContext> {
+        Arc::new(WireguardContext {
+            session,
+            packets_injected: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     /// Check if driver is available (can open device)
@@ -481,6 +502,14 @@ impl SplitTunnelDriver {
             "SwiftTunnel", // VPN adapter name
             config.tunnel_apps.iter().cloned().collect(),
         )?;
+
+        // Pass WireGuard context to interceptor if available
+        if let Some(ref ctx) = self.wireguard_ctx {
+            interceptor.set_wireguard_context(Arc::clone(ctx));
+            log::info!("WireGuard context passed to packet interceptor - VPN routing enabled");
+        } else {
+            log::warn!("No WireGuard context - tunnel app packets will be logged but NOT routed through VPN");
+        }
 
         // Start packet interception
         interceptor.start()?;

@@ -26,6 +26,7 @@ pub mod servers;
 pub use config::{fetch_vpn_config, VpnConfigRequest};
 pub use adapter::WintunAdapter;
 pub use tunnel::WireguardTunnel;
+pub use packet_interceptor::WireguardContext;
 pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
 pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 pub use connection::{VpnConnection, ConnectionState};
