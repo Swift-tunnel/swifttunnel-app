@@ -472,9 +472,13 @@ impl ParallelInterceptor {
         }));
 
         // Start inbound receiver thread (reads encrypted responses from VpnEncryptContext socket)
-        if let (Some(ref vpn_ctx), Some(ref handler)) = (&self.vpn_encrypt_ctx, &self.inbound_handler) {
+        // We create the inbound handler HERE because it requires physical_adapter_name,
+        // which is only set during configure() (called before start()).
+        // If user already set an inbound_handler, we use that; otherwise create one internally.
+        let inbound_handler = self.inbound_handler.clone().or_else(|| self.create_inbound_handler());
+
+        if let (Some(ref vpn_ctx), Some(handler)) = (&self.vpn_encrypt_ctx, inbound_handler) {
             let ctx = vpn_ctx.clone();
-            let inbound_handler = Arc::clone(handler);
             let inbound_stop = Arc::clone(&self.stop_flag);
             let throughput = self.throughput_stats.clone();
 
@@ -484,11 +488,15 @@ impl ParallelInterceptor {
             }
 
             self.inbound_receiver_handle = Some(thread::spawn(move || {
-                run_inbound_receiver(ctx, inbound_handler, inbound_stop, throughput);
+                run_inbound_receiver(ctx, handler, inbound_stop, throughput);
             }));
             log::info!("Inbound receiver thread started");
         } else {
-            log::info!("Inbound receiver NOT started (missing vpn_ctx or inbound_handler)");
+            if self.vpn_encrypt_ctx.is_none() {
+                log::info!("Inbound receiver NOT started (no vpn_encrypt_ctx)");
+            } else {
+                log::warn!("Inbound receiver NOT started (failed to create inbound_handler - physical_adapter_name not set?)");
+            }
         }
 
         log::info!("Parallel interceptor started");
