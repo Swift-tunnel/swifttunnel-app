@@ -132,9 +132,10 @@ impl VpnConnection {
     /// Get throughput stats for GUI display
     ///
     /// Returns the ThroughputStats handle if split tunnel is active and using parallel mode.
+    /// Uses try_lock() to avoid blocking the GUI thread.
     pub fn get_throughput_stats(&self) -> Option<ThroughputStats> {
         self.split_tunnel.as_ref().and_then(|st| {
-            st.lock().ok().and_then(|driver| driver.get_throughput_stats())
+            st.try_lock().ok().and_then(|driver| driver.get_throughput_stats())
         })
     }
 
