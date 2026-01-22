@@ -622,6 +622,32 @@ impl ParallelInterceptor {
                 packet[10] = (checksum >> 8) as u8;
                 packet[11] = (checksum & 0xFF) as u8;
 
+                // Update TCP/UDP checksum (pseudo-header includes destination IP)
+                let transport_offset = ihl;
+                if protocol == 6 && packet.len() >= transport_offset + 18 {
+                    // TCP: checksum at offset 16 within TCP header
+                    update_transport_checksum(
+                        &mut packet,
+                        transport_offset + 16,
+                        &dst_ip.octets(),
+                        &new_dst.octets(),
+                    );
+                } else if protocol == 17 && packet.len() >= transport_offset + 8 {
+                    // UDP: checksum at offset 6 within UDP header
+                    let udp_checksum = u16::from_be_bytes([
+                        packet[transport_offset + 6],
+                        packet[transport_offset + 7],
+                    ]);
+                    if udp_checksum != 0 {
+                        update_transport_checksum(
+                            &mut packet,
+                            transport_offset + 6,
+                            &dst_ip.octets(),
+                            &new_dst.octets(),
+                        );
+                    }
+                }
+
                 log::info!("inbound_handler: NAT rewritten dst {} -> {}", dst_ip, new_dst);
             }
 
@@ -994,8 +1020,42 @@ fn run_packet_worker(
                                 nat_packet[10] = (checksum >> 8) as u8;
                                 nat_packet[11] = (checksum & 0xFF) as u8;
 
-                                if worker_id == 0 && wintun_inject_success % 100 == 0 {
-                                    log::debug!("Worker 0: Source NAT {} -> {}", src_ip, new_src);
+                                // Update TCP/UDP checksum (pseudo-header includes source IP)
+                                let protocol = nat_packet[9];
+                                let transport_offset = ihl;
+
+                                if protocol == 6 && nat_packet.len() >= transport_offset + 18 {
+                                    // TCP: checksum at offset 16 within TCP header
+                                    update_transport_checksum(
+                                        &mut nat_packet,
+                                        transport_offset + 16,
+                                        &src_ip.octets(),
+                                        &new_src.octets(),
+                                    );
+                                } else if protocol == 17 && nat_packet.len() >= transport_offset + 8 {
+                                    // UDP: checksum at offset 6 within UDP header
+                                    // Only update if checksum is non-zero (0 means no checksum)
+                                    let udp_checksum = u16::from_be_bytes([
+                                        nat_packet[transport_offset + 6],
+                                        nat_packet[transport_offset + 7],
+                                    ]);
+                                    if udp_checksum != 0 {
+                                        update_transport_checksum(
+                                            &mut nat_packet,
+                                            transport_offset + 6,
+                                            &src_ip.octets(),
+                                            &new_src.octets(),
+                                        );
+                                    }
+                                }
+
+                                // Log first few NAT operations to verify they're working
+                                if wintun_inject_success < 5 {
+                                    log::info!(
+                                        "Worker {}: Source NAT {} -> {}, {} bytes, proto={}",
+                                        worker_id, src_ip, new_src, nat_packet.len(),
+                                        nat_packet[9]
+                                    );
                                 }
 
                                 &nat_packet[..]
@@ -1599,6 +1659,49 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Update transport (TCP/UDP) checksum after NAT IP change
+/// Uses incremental checksum update per RFC 1624
+fn update_transport_checksum(
+    packet: &mut [u8],
+    checksum_offset: usize,
+    old_ip: &[u8; 4],
+    new_ip: &[u8; 4],
+) {
+    // Read old checksum
+    let old_checksum = u16::from_be_bytes([
+        packet[checksum_offset],
+        packet[checksum_offset + 1],
+    ]);
+
+    // Incrementally update checksum
+    // ~(~C + ~old + new) where ~ is one's complement
+    let mut sum: i32 = (!old_checksum) as i32;
+
+    // Subtract old IP (as two 16-bit words)
+    let old_ip_hi = u16::from_be_bytes([old_ip[0], old_ip[1]]);
+    let old_ip_lo = u16::from_be_bytes([old_ip[2], old_ip[3]]);
+    sum -= old_ip_hi as i32;
+    sum -= old_ip_lo as i32;
+
+    // Add new IP (as two 16-bit words)
+    let new_ip_hi = u16::from_be_bytes([new_ip[0], new_ip[1]]);
+    let new_ip_lo = u16::from_be_bytes([new_ip[2], new_ip[3]]);
+    sum += new_ip_hi as i32;
+    sum += new_ip_lo as i32;
+
+    // Fold and complement
+    while sum < 0 {
+        sum += 0x10000;
+    }
+    while sum > 0xFFFF {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    let new_checksum = !(sum as u16);
+    packet[checksum_offset] = (new_checksum >> 8) as u8;
+    packet[checksum_offset + 1] = (new_checksum & 0xFF) as u8;
 }
 
 /// Calculate IP header checksum (RFC 1071)
