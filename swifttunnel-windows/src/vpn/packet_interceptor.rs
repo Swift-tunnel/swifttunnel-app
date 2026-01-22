@@ -246,8 +246,11 @@ impl PacketInterceptor {
 
         log::info!("Found {} adapters", adapters.len());
 
-        // Find physical adapter (first non-VPN adapter with an IP)
-        // and VPN adapter (by name match)
+        // Collect all adapters with their info
+        let mut vpn_adapter: Option<(usize, String, String)> = None;
+        let mut physical_candidates: Vec<(usize, String, String, i32)> = Vec::new();
+
+        // Find physical adapter (prefer real NICs) and VPN adapter (by name match)
         for (idx, adapter) in adapters.iter().enumerate() {
             let internal_name = adapter.get_name();
 
@@ -256,25 +259,73 @@ impl PacketInterceptor {
 
             log::info!("  Adapter {}: internal='{}' friendly='{}'", idx, internal_name, friendly_name);
 
-            // Check both internal name and friendly name for VPN adapter
-            let is_vpn_adapter = internal_name.to_lowercase().contains(&vpn_adapter_name.to_lowercase())
-                || internal_name.to_lowercase().contains("swifttunnel")
-                || internal_name.to_lowercase().contains("wintun")
-                || friendly_name.to_lowercase().contains(&vpn_adapter_name.to_lowercase())
-                || friendly_name.to_lowercase().contains("swifttunnel")
-                || friendly_name.to_lowercase().contains("wintun");
+            let name_lower = internal_name.to_lowercase();
+            let friendly_lower = friendly_name.to_lowercase();
 
-            let is_loopback = internal_name.to_lowercase().contains("loopback")
-                || friendly_name.to_lowercase().contains("loopback");
+            // Check if this is the VPN adapter
+            let is_vpn_adapter = name_lower.contains(&vpn_adapter_name.to_lowercase())
+                || name_lower.contains("swifttunnel")
+                || name_lower.contains("wintun")
+                || friendly_lower.contains(&vpn_adapter_name.to_lowercase())
+                || friendly_lower.contains("swifttunnel")
+                || friendly_lower.contains("wintun");
+
+            // Check if this looks like a virtual/loopback adapter
+            let is_virtual = name_lower.contains("loopback")
+                || friendly_lower.contains("loopback")
+                || friendly_lower.contains("isatap")
+                || friendly_lower.contains("teredo")
+                || friendly_lower.contains("6to4")
+                || friendly_lower.is_empty(); // Adapters with no friendly name are often virtual
+
+            // Calculate priority score for physical adapter selection
+            // Higher score = more likely to be the real NIC
+            let priority = if is_virtual || is_vpn_adapter {
+                -1 // Skip these
+            } else {
+                let mut score = 0;
+                // Prefer adapters with known physical NIC names
+                if friendly_lower.contains("ethernet")
+                    || friendly_lower.contains("intel")
+                    || friendly_lower.contains("realtek")
+                    || friendly_lower.contains("broadcom")
+                    || friendly_lower.contains("qualcomm")
+                    || friendly_lower.contains("virtio")
+                    || friendly_lower.contains("vmxnet")
+                    || friendly_lower.contains("mellanox")
+                    || friendly_lower.contains("marvell")
+                    || friendly_lower.contains("atheros")
+                    || friendly_lower.contains("killer")
+                    || friendly_lower.contains("aquantia")
+                {
+                    score += 100;
+                }
+                // Prefer adapters with non-empty friendly names
+                if !friendly_name.is_empty() {
+                    score += 50;
+                }
+                // Slightly prefer lower indices (first adapters are often primary)
+                score += (10 - idx.min(10)) as i32;
+                score
+            };
 
             if is_vpn_adapter {
-                self.vpn_adapter_idx = Some(idx);
-                log::info!("Found VPN adapter at index {}: {} ({})", idx, friendly_name, internal_name);
-            } else if self.physical_adapter_idx.is_none() && !is_loopback {
-                // Use first non-loopback, non-VPN adapter as physical
-                self.physical_adapter_idx = Some(idx);
-                log::info!("Using physical adapter at index {}: {} ({})", idx, friendly_name, internal_name);
+                vpn_adapter = Some((idx, friendly_name.clone(), internal_name.clone()));
+            } else if priority > 0 {
+                physical_candidates.push((idx, friendly_name.clone(), internal_name.clone(), priority));
             }
+        }
+
+        // Select best physical adapter (highest priority)
+        if let Some((idx, name, internal, _priority)) = physical_candidates.into_iter().max_by_key(|x| x.3) {
+            self.physical_adapter_idx = Some(idx);
+            log::info!("Selected physical adapter at index {}: {} ({})", idx, name, internal);
+        }
+
+        // Set VPN adapter
+        if let Some((idx, name, internal)) = vpn_adapter {
+            self.vpn_adapter_idx = Some(idx);
+            log::info!("Found VPN adapter at index {}: {} ({})", idx, name, internal);
         }
 
         if self.physical_adapter_idx.is_none() {
