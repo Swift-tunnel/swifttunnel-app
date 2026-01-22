@@ -310,9 +310,9 @@ impl PacketInterceptor {
             };
 
             if is_vpn_adapter {
-                vpn_adapter = Some((idx, friendly_name.clone(), internal_name.clone()));
+                vpn_adapter = Some((idx, friendly_name.clone(), internal_name.to_string()));
             } else if priority > 0 {
-                physical_candidates.push((idx, friendly_name.clone(), internal_name.clone(), priority));
+                physical_candidates.push((idx, friendly_name.clone(), internal_name.to_string(), priority));
             }
         }
 
