@@ -257,6 +257,25 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Set inbound handler for decrypted VPN responses
+    ///
+    /// This handler is called for each decrypted packet received on the
+    /// VpnEncryptContext socket. It performs NAT rewriting and injects
+    /// the packet to MSTCP so the original app can receive the response.
+    ///
+    /// IMPORTANT: Must be called BEFORE configure() since threads start during configure.
+    pub fn set_inbound_handler(&mut self, handler: std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>) {
+        if self.use_parallel {
+            if let Some(ref mut interceptor) = self.parallel_interceptor {
+                interceptor.set_inbound_handler(handler);
+            } else {
+                log::warn!("Cannot set inbound handler: parallel interceptor not created yet");
+            }
+        } else {
+            log::info!("Inbound handler not used in legacy mode");
+        }
+    }
+
     /// Check if driver is available (can open device)
     pub fn is_available() -> bool {
         ParallelInterceptor::check_driver_available()

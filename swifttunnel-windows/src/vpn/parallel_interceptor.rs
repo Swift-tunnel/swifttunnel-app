@@ -172,6 +172,10 @@ pub struct ParallelInterceptor {
     internet_ip: Option<std::net::Ipv4Addr>,
     /// Context for direct WireGuard encryption (bypasses Wintun for outbound)
     vpn_encrypt_ctx: Option<VpnEncryptContext>,
+    /// Inbound handler for decrypted packets (does NAT and injects to MSTCP)
+    inbound_handler: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
+    /// Inbound receiver thread handle (reads from VpnEncryptContext socket)
+    inbound_receiver_handle: Option<JoinHandle<()>>,
 }
 
 impl ParallelInterceptor {
@@ -209,6 +213,8 @@ impl ParallelInterceptor {
             tunnel_ip: None,
             internet_ip: None,
             vpn_encrypt_ctx: None,
+            inbound_handler: None,
+            inbound_receiver_handle: None,
         }
     }
 
@@ -249,6 +255,16 @@ impl ParallelInterceptor {
             ctx.server_addr
         );
         self.vpn_encrypt_ctx = Some(ctx);
+    }
+
+    /// Set inbound handler for decrypted packets
+    ///
+    /// This handler is called for each decrypted packet received on the
+    /// VpnEncryptContext socket. It performs NAT rewriting and injects
+    /// the packet to MSTCP so the original app can receive the response.
+    pub fn set_inbound_handler(&mut self, handler: Arc<dyn Fn(&[u8]) + Send + Sync>) {
+        log::info!("Set inbound handler for VPN responses");
+        self.inbound_handler = Some(handler);
     }
 
     /// Check if driver is available
@@ -455,6 +471,26 @@ impl ParallelInterceptor {
             }
         }));
 
+        // Start inbound receiver thread (reads encrypted responses from VpnEncryptContext socket)
+        if let (Some(ref vpn_ctx), Some(ref handler)) = (&self.vpn_encrypt_ctx, &self.inbound_handler) {
+            let ctx = vpn_ctx.clone();
+            let inbound_handler = Arc::clone(handler);
+            let inbound_stop = Arc::clone(&self.stop_flag);
+            let throughput = self.throughput_stats.clone();
+
+            // Set socket to non-blocking for clean shutdown
+            if let Err(e) = ctx.socket.set_read_timeout(Some(std::time::Duration::from_millis(100))) {
+                log::warn!("Failed to set socket read timeout: {}", e);
+            }
+
+            self.inbound_receiver_handle = Some(thread::spawn(move || {
+                run_inbound_receiver(ctx, inbound_handler, inbound_stop, throughput);
+            }));
+            log::info!("Inbound receiver thread started");
+        } else {
+            log::info!("Inbound receiver NOT started (missing vpn_ctx or inbound_handler)");
+        }
+
         log::info!("Parallel interceptor started");
         Ok(())
     }
@@ -478,6 +514,10 @@ impl ParallelInterceptor {
         }
 
         if let Some(handle) = self.refresher_handle.take() {
+            let _ = handle.join();
+        }
+
+        if let Some(handle) = self.inbound_receiver_handle.take() {
             let _ = handle.join();
         }
 
@@ -829,6 +869,112 @@ fn set_thread_affinity(core_id: usize) {
             mask,
         );
     }
+}
+
+/// Inbound receiver thread - reads encrypted packets from VpnEncryptContext socket,
+/// decrypts them, and passes to inbound_handler for injection to MSTCP
+fn run_inbound_receiver(
+    ctx: VpnEncryptContext,
+    inbound_handler: Arc<dyn Fn(&[u8]) + Send + Sync>,
+    stop_flag: Arc<AtomicBool>,
+    throughput: ThroughputStats,
+) {
+    log::info!("Inbound receiver started");
+
+    let mut recv_buf = vec![0u8; 2048]; // Max WireGuard packet size
+    let mut decrypt_buf = vec![0u8; 2048];
+    let mut packets_received = 0u64;
+    let mut packets_decrypted = 0u64;
+    let mut packets_injected = 0u64;
+
+    loop {
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Read encrypted packet from socket (with timeout for clean shutdown)
+        let n = match ctx.socket.recv(&mut recv_buf) {
+            Ok(n) => n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Timeout - check stop flag and continue
+                continue;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // Windows uses TimedOut instead of WouldBlock for timeout
+                continue;
+            }
+            Err(e) => {
+                log::warn!("Inbound receiver recv error: {}", e);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+        };
+
+        if n == 0 {
+            continue;
+        }
+
+        packets_received += 1;
+
+        // Decrypt the packet
+        let result = {
+            let mut tunn = ctx.tunn.lock().unwrap();
+            tunn.decapsulate(None, &recv_buf[..n], &mut decrypt_buf)
+        };
+
+        match result {
+            TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
+                // Decrypted IP packet - pass to inbound handler
+                packets_decrypted += 1;
+                packets_injected += 1;
+                throughput.add_rx(data.len() as u64);
+
+                // Log first few to verify
+                if packets_injected <= 5 {
+                    let proto = if data.len() >= 10 { data[9] } else { 0 };
+                    let dst_ip = if data.len() >= 20 {
+                        format!("{}.{}.{}.{}", data[16], data[17], data[18], data[19])
+                    } else {
+                        "?".to_string()
+                    };
+                    log::info!(
+                        "Inbound receiver: decrypted {} bytes, proto={}, dst={} -> injecting to MSTCP",
+                        data.len(), proto, dst_ip
+                    );
+                }
+
+                inbound_handler(data);
+            }
+            TunnResult::WriteToNetwork(data) => {
+                // Protocol message (keepalive, etc.) - send back to VPN server
+                if let Err(e) = ctx.socket.send(data) {
+                    log::warn!("Inbound receiver: failed to send protocol message: {}", e);
+                }
+            }
+            TunnResult::Done => {
+                // Nothing to do
+            }
+            TunnResult::Err(e) => {
+                // Don't spam logs for normal WireGuard messages
+                if packets_received > 100 || packets_received % 10 == 1 {
+                    log::debug!("Inbound receiver decrypt error: {:?}", e);
+                }
+            }
+        }
+
+        // Periodic logging
+        if packets_received > 0 && packets_received % 1000 == 0 {
+            log::info!(
+                "Inbound receiver stats: {} received, {} decrypted, {} injected",
+                packets_received, packets_decrypted, packets_injected
+            );
+        }
+    }
+
+    log::info!(
+        "Inbound receiver stopped: {} received, {} decrypted, {} injected",
+        packets_received, packets_decrypted, packets_injected
+    );
 }
 
 /// Packet reader thread - reads from ndisapi and dispatches to workers

@@ -1227,6 +1227,21 @@ fn test_split_tunnel_two_apps() {
         interface_luid,
     );
 
+    // CRITICAL: Set up inbound handler BEFORE configure() since threads start during configure
+    // The inbound handler is needed for:
+    // 1. VpnEncryptContext socket - decrypted responses from split tunnel's direct encryption
+    // 2. Tunnel's main socket - responses received by the WireGuard tunnel
+    if let Some(handler) = driver.create_inbound_handler() {
+        // Set on driver for VpnEncryptContext responses (inbound receiver thread)
+        driver.set_inbound_handler(handler.clone());
+        println!("   ✅ Inbound handler set on driver");
+        // Also set on tunnel for main WireGuard socket responses
+        tunnel.set_inbound_handler(handler);
+        println!("   ✅ Inbound handler set on tunnel");
+    } else {
+        println!("   ⚠ No inbound handler available");
+    }
+
     if let Err(e) = driver.configure(split_config) {
         println!("   ❌ Configure failed: {}", e);
         let _ = driver.close();
@@ -1236,14 +1251,6 @@ fn test_split_tunnel_two_apps() {
         return;
     }
     println!("   ✅ Split tunnel started");
-
-    // Set up inbound handler so VPN responses get injected to physical adapter
-    if let Some(handler) = driver.create_inbound_handler() {
-        println!("   ✅ Inbound handler set on tunnel");
-        tunnel.set_inbound_handler(handler);
-    } else {
-        println!("   ⚠ No inbound handler available");
-    }
 
     // Wait for interceptor to start
     std::thread::sleep(Duration::from_secs(2));
