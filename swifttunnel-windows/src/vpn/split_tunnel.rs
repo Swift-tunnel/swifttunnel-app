@@ -48,7 +48,6 @@ impl GamePreset {
                 "robloxstudiobeta.exe",
                 "robloxstudiolauncherbeta.exe",
                 "robloxstudiolauncher.exe",
-                "windows10universal.exe",
             ],
             GamePreset::Valorant => &[
                 "valorant-win64-shipping.exe",
@@ -744,12 +743,12 @@ impl SplitTunnelDriver {
     /// Get throughput stats for GUI display
     ///
     /// Returns a clonable ThroughputStats that tracks bytes sent/received through the VPN tunnel.
-    /// Returns None if not using parallel mode or not active.
+    /// Returns None if interceptor is not active.
     pub fn get_throughput_stats(&self) -> Option<ThroughputStats> {
         if self.use_parallel {
             self.parallel_interceptor.as_ref().map(|p| p.get_throughput_stats())
         } else {
-            None // Legacy mode doesn't track throughput
+            self.interceptor.as_ref().map(|p| p.get_throughput_stats())
         }
     }
 }
