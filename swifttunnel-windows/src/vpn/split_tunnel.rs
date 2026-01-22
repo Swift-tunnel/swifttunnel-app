@@ -503,6 +503,7 @@ impl SplitTunnelDriver {
                 if QueryServiceStatus(service, &mut status).is_ok() {
                     if status.dwCurrentState == SERVICE_RUNNING {
                         log::info!("Driver service started successfully");
+                        std::thread::sleep(std::time::Duration::from_millis(300));
                         let _ = CloseServiceHandle(service);
                         let _ = CloseServiceHandle(scm);
                         return Ok(());
@@ -637,6 +638,7 @@ impl SplitTunnelDriver {
                 if QueryServiceStatus(service, &mut status).is_ok() {
                     if status.dwCurrentState == SERVICE_STOPPED {
                         log::info!("Driver service stopped successfully");
+                        std::thread::sleep(std::time::Duration::from_millis(300));
                         let _ = CloseServiceHandle(service);
                         let _ = CloseServiceHandle(scm);
                         return Ok(());
