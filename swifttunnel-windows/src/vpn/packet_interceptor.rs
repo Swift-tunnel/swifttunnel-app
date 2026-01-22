@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::net::Ipv4Addr;
 use super::process_tracker::{ProcessTracker, Protocol};
 use super::{VpnError, VpnResult};
+use windows::Win32::Foundation::{HANDLE, CloseHandle};
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
 
 /// Packet direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,26 +230,6 @@ impl PacketInterceptor {
 
         log::info!("Starting packet interception (physical: {}, VPN: {})", physical_idx, vpn_idx);
 
-        // Open driver
-        let mut driver = ndisapi::Ndisapi::new("NDISRD")
-            .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
-
-        // Get adapter handles
-        let adapters = driver.get_tcpip_bound_adapters_info()
-            .map_err(|e| VpnError::SplitTunnel(format!("Failed to get adapters: {}", e)))?;
-
-        if physical_idx >= adapters.len() || vpn_idx >= adapters.len() {
-            return Err(VpnError::SplitTunnel("Adapter index out of range".to_string()));
-        }
-
-        let physical_handle = adapters[physical_idx].get_handle();
-        let vpn_handle = adapters[vpn_idx].get_handle();
-
-        // Set packet filter mode on physical adapter
-        // FILTER_PACKET_DROP_RDR: Intercept and redirect to user-mode
-        driver.set_packet_filter_table(&[(physical_handle, ndisapi::FilterFlags::MSTCP_FLAG_SENT_TUNNEL)])
-            .map_err(|e| VpnError::SplitTunnel(format!("Failed to set filter mode: {}", e)))?;
-
         self.stop_flag.store(false, Ordering::SeqCst);
         self.active = true;
 
@@ -256,13 +238,14 @@ impl PacketInterceptor {
         let tunnel_apps = self.process_tracker.tunnel_apps().clone();
 
         std::thread::spawn(move || {
-            Self::packet_processing_loop(
-                driver,
-                physical_handle,
-                vpn_handle,
+            if let Err(e) = Self::packet_processing_loop(
+                physical_idx,
+                vpn_idx,
                 tunnel_apps,
                 stop_flag,
-            );
+            ) {
+                log::error!("Packet processing loop error: {}", e);
+            }
         });
 
         log::info!("Packet interception started");
@@ -302,29 +285,58 @@ impl PacketInterceptor {
 
     /// Packet processing loop (runs in separate thread)
     fn packet_processing_loop(
-        mut driver: ndisapi::Ndisapi,
-        physical_handle: ndisapi::Handle,
-        vpn_handle: ndisapi::Handle,
+        physical_idx: usize,
+        vpn_idx: usize,
         tunnel_apps: std::collections::HashSet<String>,
         stop_flag: Arc<AtomicBool>,
-    ) {
-        use ndisapi::{IntermediateBuffer, EthRequest, DirectionFlags};
+    ) -> VpnResult<()> {
+        use ndisapi::{DirectionFlags, EthMRequest, EthMRequestMut, FilterFlags, IntermediateBuffer};
+
+        const PACKET_BUFFER_SIZE: usize = 64;
 
         log::info!("Packet processing loop started");
+
+        // Initialize driver
+        let driver = ndisapi::Ndisapi::new("NDISRD")
+            .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
+
+        // Get adapters
+        let adapters = driver.get_tcpip_bound_adapters_info()
+            .map_err(|e| VpnError::SplitTunnel(format!("Failed to get adapters: {}", e)))?;
+
+        if physical_idx >= adapters.len() || vpn_idx >= adapters.len() {
+            return Err(VpnError::SplitTunnel("Adapter index out of range".to_string()));
+        }
+
+        let physical_handle = adapters[physical_idx].get_handle();
+        let _vpn_handle = adapters[vpn_idx].get_handle();
+
+        // Create event for packet notification
+        let event: HANDLE = unsafe {
+            CreateEventW(None, true, false, None)
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to create event: {}", e)))?
+        };
+
+        // Set event for the physical adapter
+        driver.set_packet_event(physical_handle, event)
+            .map_err(|e| VpnError::SplitTunnel(format!("Failed to set packet event: {}", e)))?;
+
+        // Set adapter mode to tunnel mode (intercept sent and received packets)
+        driver.set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
+            .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
 
         let mut process_tracker = ProcessTracker::new(tunnel_apps.into_iter().collect());
         let mut refresh_counter = 0u32;
 
-        // Allocate packet buffer
-        let mut packet = IntermediateBuffer::default();
-        let mut request = EthRequest::new(physical_handle);
+        // Allocate packet buffers
+        let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); PACKET_BUFFER_SIZE];
 
         loop {
             if stop_flag.load(Ordering::SeqCst) {
                 break;
             }
 
-            // Refresh process tracker periodically (every ~50 iterations @ 1ms = 50ms)
+            // Refresh process tracker periodically (every ~50 iterations @ 20ms = 1s)
             refresh_counter += 1;
             if refresh_counter >= 50 {
                 refresh_counter = 0;
@@ -333,100 +345,106 @@ impl PacketInterceptor {
                 }
             }
 
-            // Read packet with timeout
-            request.set_packet(&mut packet);
-            match driver.read_packets(&mut request) {
-                Ok(count) if count > 0 => {
-                    // Process packet
-                    let action = Self::process_packet(
-                        &packet,
-                        &process_tracker,
-                    );
+            // Wait for packets (with timeout)
+            unsafe {
+                WaitForSingleObject(event, 20); // 20ms timeout
+            }
 
-                    match action {
-                        PacketAction::PassThrough => {
-                            // Send packet back to adapter (let it through)
-                            request.set_packet(&mut packet);
-                            if let Err(e) = driver.send_packets_to_adapter(&mut request) {
-                                log::warn!("Failed to send packet to adapter: {}", e);
-                            }
-                        }
-                        PacketAction::RouteToVpn => {
-                            // Forward to VPN adapter
-                            let mut vpn_request = EthRequest::new(vpn_handle);
-                            vpn_request.set_packet(&mut packet);
-                            if let Err(e) = driver.send_packets_to_adapter(&mut vpn_request) {
-                                log::warn!("Failed to send packet to VPN: {}", e);
-                            }
-                        }
-                        PacketAction::Drop => {
-                            // Don't forward (packet is dropped)
-                        }
-                    }
+            // Read packets
+            let mut to_read = EthMRequestMut::from_iter(
+                physical_handle,
+                packets.iter_mut(),
+            );
+
+            let packets_read = driver
+                .read_packets::<PACKET_BUFFER_SIZE>(&mut to_read)
+                .unwrap_or(0);
+
+            if packets_read == 0 {
+                // Reset event and continue
+                unsafe { let _ = ResetEvent(event); }
+                continue;
+            }
+
+            // Create requests for sending packets
+            let mut to_mstcp: EthMRequest<PACKET_BUFFER_SIZE> = EthMRequest::new(physical_handle);
+            let mut to_adapter: EthMRequest<PACKET_BUFFER_SIZE> = EthMRequest::new(physical_handle);
+
+            // Process each packet
+            for i in 0..packets_read {
+                let direction_flags = packets[i].get_device_flags();
+
+                // Determine packet direction
+                let is_outbound = direction_flags == DirectionFlags::PACKET_FLAG_ON_SEND;
+
+                // Get packet data
+                let data = packets[i].get_data();
+
+                // For inbound packets or non-tunnel apps, pass through normally
+                let should_vpn = if is_outbound {
+                    // Parse packet to check if it belongs to tunnel app
+                    Self::should_route_to_vpn(data, &process_tracker)
+                } else {
+                    false
+                };
+
+                if should_vpn {
+                    // TODO: For now, we still pass through but log
+                    // Full VPN routing requires modifying packet destination
+                    log::trace!("Would route to VPN (outbound tunnel app packet)");
                 }
-                Ok(_) => {
-                    // No packets, sleep briefly
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(e) => {
-                    if !stop_flag.load(Ordering::SeqCst) {
-                        log::warn!("Read packet error: {}", e);
+
+                // Route packet based on direction
+                if is_outbound {
+                    // Outbound: send to adapter
+                    if let Err(e) = to_adapter.push(&packets[i]) {
+                        log::warn!("Failed to queue packet for adapter: {}", e);
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                } else {
+                    // Inbound: send to MSTCP (TCP/IP stack)
+                    if let Err(e) = to_mstcp.push(&packets[i]) {
+                        log::warn!("Failed to queue packet for MSTCP: {}", e);
+                    }
                 }
             }
+
+            // Send queued packets
+            if to_adapter.get_packet_number() > 0 {
+                if let Err(e) = driver.send_packets_to_adapter::<PACKET_BUFFER_SIZE>(&to_adapter) {
+                    log::warn!("Failed to send packets to adapter: {}", e);
+                }
+            }
+
+            if to_mstcp.get_packet_number() > 0 {
+                if let Err(e) = driver.send_packets_to_mstcp::<PACKET_BUFFER_SIZE>(&to_mstcp) {
+                    log::warn!("Failed to send packets to MSTCP: {}", e);
+                }
+            }
+
+            // Reset event
+            unsafe { let _ = ResetEvent(event); }
         }
 
-        // Cleanup: reset filter mode
-        let _ = driver.set_packet_filter_table(&[(physical_handle, ndisapi::FilterFlags::empty())]);
+        // Cleanup: reset adapter mode
+        let _ = driver.set_adapter_mode(physical_handle, FilterFlags::default());
+
+        // Close event handle
+        unsafe { let _ = CloseHandle(event); }
 
         log::info!("Packet processing loop stopped");
+        Ok(())
     }
 
-    /// Process a packet and determine action
-    fn process_packet(
-        packet: &ndisapi::IntermediateBuffer,
-        process_tracker: &ProcessTracker,
-    ) -> PacketAction {
-        // Parse packet to get IP info
-        let data = packet.get_data();
-        if data.len() < 14 {
-            return PacketAction::PassThrough;
-        }
-
-        // Determine direction
-        let direction = if packet.get_device_flags().contains(ndisapi::DirectionFlags::PACKET_FLAG_ON_SEND) {
-            PacketDirection::Outbound
-        } else {
-            PacketDirection::Inbound
-        };
-
-        // Only intercept outbound packets for split tunneling
-        if direction != PacketDirection::Outbound {
-            return PacketAction::PassThrough;
-        }
-
+    /// Check if a packet should be routed to VPN based on process tracking
+    fn should_route_to_vpn(data: &[u8], process_tracker: &ProcessTracker) -> bool {
         // Parse packet info
-        let info = match PacketInfo::from_ethernet_frame(data, direction) {
+        let info = match PacketInfo::from_ethernet_frame(data, PacketDirection::Outbound) {
             Some(i) => i,
-            None => return PacketAction::PassThrough,
+            None => return false,
         };
 
         // Check if this packet belongs to a tunnel app
-        if process_tracker.should_tunnel(info.src_ip, info.src_port, info.protocol) {
-            log::trace!(
-                "Routing to VPN: {}:{} -> {}:{} ({})",
-                info.src_ip, info.src_port,
-                info.dst_ip, info.dst_port,
-                match info.protocol {
-                    Protocol::Tcp => "TCP",
-                    Protocol::Udp => "UDP",
-                }
-            );
-            PacketAction::RouteToVpn
-        } else {
-            PacketAction::PassThrough
-        }
+        process_tracker.should_tunnel(info.src_ip, info.src_port, info.protocol)
     }
 
     /// Check if interceptor is active
@@ -439,17 +457,6 @@ impl Drop for PacketInterceptor {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-/// Action to take for a packet
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PacketAction {
-    /// Let packet pass through normally
-    PassThrough,
-    /// Route packet through VPN tunnel
-    RouteToVpn,
-    /// Drop the packet
-    Drop,
 }
 
 #[cfg(test)]
