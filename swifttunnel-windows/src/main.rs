@@ -416,7 +416,8 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    eframe::run_native(
+    // Try to run the GUI - handle failure gracefully in RDP/VM environments
+    let result = eframe::run_native(
         "SwiftTunnel FPS Booster",
         options,
         Box::new(move |cc| {
@@ -448,5 +449,40 @@ fn main() -> eframe::Result<()> {
 
             Ok(Box::new(app))
         }),
-    )
+    );
+
+    // Handle GUI startup failure
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let error_msg = format!("{}", e);
+
+            // Check if this is an RDP/VM graphics issue
+            if error_msg.contains("NoSuitableAdapterFound") || error_msg.contains("adapter") {
+                error!("Graphics adapter error in RDP/VM: {}", e);
+
+                // Show a user-friendly message box
+                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
+                use windows::core::PCWSTR;
+
+                let title: Vec<u16> = "SwiftTunnel - Graphics Error\0".encode_utf16().collect();
+                let message: Vec<u16> = "SwiftTunnel cannot start in this environment.\n\n\
+                    This is usually caused by running in Remote Desktop (RDP) \
+                    or a virtual machine without GPU support.\n\n\
+                    Please run SwiftTunnel directly on your gaming PC, \
+                    not through remote desktop.\0".encode_utf16().collect();
+
+                unsafe {
+                    MessageBoxW(
+                        None,
+                        PCWSTR(message.as_ptr()),
+                        PCWSTR(title.as_ptr()),
+                        MB_OK | MB_ICONERROR,
+                    );
+                }
+            }
+
+            Err(e)
+        }
+    }
 }
