@@ -16,7 +16,7 @@
 //! - Outbound: App → ndisapi intercept → WireGuard encapsulate → UDP to VPN server
 //! - Inbound: VPN server UDP → WireGuard decapsulate → Wintun adapter → App
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::net::Ipv4Addr;
 use super::process_tracker::{ProcessTracker, Protocol};
