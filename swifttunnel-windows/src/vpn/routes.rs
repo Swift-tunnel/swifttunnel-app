@@ -180,16 +180,13 @@ impl RouteManager {
             }
         }
 
-        // Step 3: Add default route through VPN interface
-        // NOTE: Even in split tunnel mode, we need this route because:
+        // Step 3: Add default route through VPN interface (skip in split tunnel mode)
+        // NOTE: In split tunnel mode, we DON'T add the default route because:
         // - ndisapi intercepts packets on the physical adapter
-        // - For tunnel apps, we NAT and inject packets into Wintun
-        // - The OS then needs to route these Wintun packets BACK through Wintun (to WireGuard)
-        // - Without this route, packets injected to Wintun go back out the physical adapter!
-        // - Bypass app traffic is handled by ndisapi passing directly to physical adapter
-        //   (never enters OS routing), so the VPN route doesn't affect them.
-        if false && self.split_tunnel_mode {
-            // DISABLED: We actually need the default route even in split tunnel mode
+        // - For tunnel apps, we NAT and directly encrypt with WireGuard (bypass Wintun)
+        // - For bypass apps, we pass directly to physical adapter
+        // - If we added a VPN route, ALL traffic would go to Wintun and bypass ndisapi!
+        if self.split_tunnel_mode {
             log::info!("Split tunnel mode: skipping default VPN route (only tunnel app traffic will use VPN)");
         } else {
             // We use 10.0.0.1 as gateway (standard VPN internal gateway) with low metric
@@ -244,9 +241,8 @@ impl RouteManager {
 
         log::info!("Removing VPN routes...");
 
-        // Remove default route through VPN
-        // NOTE: We now add the default route even in split tunnel mode (see apply_routes)
-        if true || !self.split_tunnel_mode {
+        // Remove default route through VPN (only if not in split tunnel mode)
+        if !self.split_tunnel_mode {
             let remove_default = hidden_command("route")
                 .args([
                     "delete",
