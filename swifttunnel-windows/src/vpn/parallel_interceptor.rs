@@ -315,9 +315,6 @@ impl ParallelInterceptor {
 
         // Start packet reader/dispatcher thread
         let reader_stop = Arc::clone(&self.stop_flag);
-        let total_packets = &self.total_packets as *const AtomicU64 as usize;
-        let total_tunneled = &self.total_tunneled as *const AtomicU64 as usize;
-        let total_injected = &self.total_injected as *const AtomicU64 as usize;
         let num_workers = self.num_workers;
 
         self.reader_handle = Some(thread::spawn(move || {
@@ -499,7 +496,7 @@ fn run_packet_reader(
                     let work = PacketWork {
                         data: data.to_vec(), // Copy packet data
                         is_outbound: true,
-                        adapter_handle: physical_handle as usize,
+                        adapter_handle: physical_handle.0 as usize,
                     };
 
                     // If worker queue is full, send as passthrough
@@ -564,13 +561,9 @@ fn run_packet_worker(
         }
     };
 
-    let adapters = match driver.get_tcpip_bound_adapters_info() {
-        Ok(a) => a,
-        Err(e) => {
-            log::error!("Worker {} failed to get adapters: {}", worker_id, e);
-            return;
-        }
-    };
+    // Note: Workers don't send packets directly - they make routing decisions
+    // and inject tunnel packets into Wintun. The reader thread handles passthrough.
+    let _ = driver; // Keep driver alive but don't use it directly
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
@@ -614,17 +607,17 @@ fn run_packet_worker(
                             }
                             Err(_) => {
                                 // Wintun allocation failed - pass through as fallback
-                                send_packet_to_adapter(&driver, &adapters, work.adapter_handle, &work.data);
+                                // Note: Reader thread handles passthrough
                             }
                         }
                     }
                 } else {
                     // No Wintun session - pass through
-                    send_packet_to_adapter(&driver, &adapters, work.adapter_handle, &work.data);
+                    // Note: Reader thread handles passthrough
                 }
             } else {
                 stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
-                send_packet_to_adapter(&driver, &adapters, work.adapter_handle, &work.data);
+                // Note: Reader thread handles passthrough
             }
         }
     }
@@ -638,23 +631,11 @@ fn run_packet_worker(
     );
 }
 
-/// Send packet to adapter
-fn send_packet_to_adapter(
-    driver: &ndisapi::Ndisapi,
-    adapters: &[ndisapi::Adapter],
-    adapter_handle: usize,
-    _data: &[u8],
-) {
-    // Note: ndisapi requires IntermediateBuffer for sending
-    // This is a simplified version - full implementation would reconstruct buffer
-    // For now, we rely on the reader thread handling passthrough
-    let _ = (driver, adapters, adapter_handle);
-}
 
 /// Cache refresher thread - single writer
 fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBool>) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+    use windows::Win32::Foundation::NO_ERROR;
     use windows::Win32::NetworkManagement::IpHelper::*;
 
     log::info!("Cache refresher started (30ms refresh interval)");
