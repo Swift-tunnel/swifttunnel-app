@@ -107,14 +107,29 @@ impl ProcessTracker {
     pub fn should_tunnel(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
         let key = ConnectionKey::new(local_ip, local_port, protocol);
 
-        // First check active cache
+        // First check active cache with exact IP match
         if let Some(&pid) = self.connection_cache.get(&key) {
             return self.is_tunnel_pid(pid);
         }
 
-        // Check stale cache (for recently closed connections)
+        // Check stale cache with exact IP match
         if let Some(&(pid, _)) = self.stale_connections.get(&key) {
             return self.is_tunnel_pid(pid);
+        }
+
+        // CRITICAL FIX: Check for 0.0.0.0 (INADDR_ANY) bindings
+        // Apps often bind to 0.0.0.0 which matches any interface, but packets
+        // have the actual interface IP. Check if there's a 0.0.0.0 binding for this port.
+        if local_ip != Ipv4Addr::UNSPECIFIED {
+            let any_key = ConnectionKey::new(Ipv4Addr::UNSPECIFIED, local_port, protocol);
+
+            if let Some(&pid) = self.connection_cache.get(&any_key) {
+                return self.is_tunnel_pid(pid);
+            }
+
+            if let Some(&(pid, _)) = self.stale_connections.get(&any_key) {
+                return self.is_tunnel_pid(pid);
+            }
         }
 
         // Unknown connection - default to NOT tunneling (passthrough)

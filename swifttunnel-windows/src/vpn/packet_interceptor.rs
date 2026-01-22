@@ -499,6 +499,22 @@ impl PacketInterceptor {
         let mut process_tracker = ProcessTracker::new(tunnel_apps.into_iter().collect());
         let mut refresh_counter = 0u32;
         let mut packets_injected = 0u64;
+        let mut total_packets = 0u64;
+        let mut tunneled_packets = 0u64;
+        let mut log_counter = 0u64;
+
+        // CRITICAL: Populate cache immediately before processing any packets
+        // Without this, the first ~1 second of traffic would bypass VPN
+        if let Err(e) = process_tracker.refresh() {
+            log::warn!("Initial process tracker refresh failed: {}", e);
+        } else {
+            let stats = process_tracker.stats();
+            log::info!(
+                "Process tracker initialized: {} TCP, {} UDP connections tracked",
+                stats.tcp_connections,
+                stats.udp_connections
+            );
+        }
 
         // Allocate packet buffers
         let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); PACKET_BUFFER_SIZE];
@@ -554,8 +570,16 @@ impl PacketInterceptor {
 
                 // For inbound packets or non-tunnel apps, pass through normally
                 let should_vpn = if is_outbound {
+                    total_packets += 1;
+                    log_counter += 1;
+                    // Log every 500th packet to avoid spam
+                    let log_decision = log_counter % 500 == 1;
                     // Parse packet to check if it belongs to tunnel app
-                    Self::should_route_to_vpn(data, &process_tracker)
+                    let result = Self::should_route_to_vpn(data, &process_tracker, log_decision);
+                    if result {
+                        tunneled_packets += 1;
+                    }
+                    result
                 } else {
                     false
                 };
@@ -576,7 +600,12 @@ impl PacketInterceptor {
                                     ctx.packets_injected.fetch_add(1, Ordering::Relaxed);
 
                                     if packets_injected % 1000 == 0 {
-                                        log::debug!("Injected {} packets into Wintun for VPN", packets_injected);
+                                        log::info!(
+                                            "Split tunnel stats: {} tunneled, {} total outbound ({:.1}% tunneled), {} injected",
+                                            tunneled_packets, total_packets,
+                                            if total_packets > 0 { (tunneled_packets as f64 / total_packets as f64) * 100.0 } else { 0.0 },
+                                            packets_injected
+                                        );
                                     }
                                     // Don't forward to adapter - packet goes through VPN via Wintun
                                     continue;
@@ -627,12 +656,17 @@ impl PacketInterceptor {
         // Close event handle
         unsafe { let _ = CloseHandle(event); }
 
-        log::info!("Packet processing loop stopped (injected {} packets into VPN)", packets_injected);
+        log::info!(
+            "Packet processing loop stopped - Final stats: {} tunneled / {} total ({:.1}%), {} injected into VPN",
+            tunneled_packets, total_packets,
+            if total_packets > 0 { (tunneled_packets as f64 / total_packets as f64) * 100.0 } else { 0.0 },
+            packets_injected
+        );
         Ok(())
     }
 
     /// Check if a packet should be routed to VPN based on process tracking
-    fn should_route_to_vpn(data: &[u8], process_tracker: &ProcessTracker) -> bool {
+    fn should_route_to_vpn(data: &[u8], process_tracker: &ProcessTracker, log_decisions: bool) -> bool {
         // Parse packet info
         let info = match PacketInfo::from_ethernet_frame(data, PacketDirection::Outbound) {
             Some(i) => i,
@@ -640,7 +674,22 @@ impl PacketInterceptor {
         };
 
         // Check if this packet belongs to a tunnel app
-        process_tracker.should_tunnel(info.src_ip, info.src_port, info.protocol)
+        let should_tunnel = process_tracker.should_tunnel(info.src_ip, info.src_port, info.protocol);
+
+        // Log routing decisions periodically for debugging
+        if log_decisions {
+            if let Some(pid) = process_tracker.get_pid(info.src_ip, info.src_port, info.protocol) {
+                let proc_name = process_tracker.get_process_name(pid).map(|s| s.as_str()).unwrap_or("unknown");
+                log::debug!(
+                    "Packet {}:{} {:?} -> {} (PID {} {}) => {}",
+                    info.src_ip, info.src_port, info.protocol, info.dst_ip,
+                    pid, proc_name,
+                    if should_tunnel { "TUNNEL" } else { "BYPASS" }
+                );
+            }
+        }
+
+        should_tunnel
     }
 
     /// Check if interceptor is active
