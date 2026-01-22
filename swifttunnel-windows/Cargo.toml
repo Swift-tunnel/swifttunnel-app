@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-fps-booster"
-version = "0.5.54"
+version = "0.5.55"
 edition = "2021"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel - Game Booster with PC Optimizations"
@@ -125,6 +125,9 @@ parking_lot = "0.12"
 # Per-CPU parallel packet processing
 crossbeam-channel = "0.5"
 num_cpus = "1.16"
+
+# Stack-allocated buffers for zero-alloc packet processing
+arrayvec = "0.7"
 
 # Test configuration
 [[test]]
