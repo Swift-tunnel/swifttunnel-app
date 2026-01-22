@@ -762,7 +762,7 @@ impl SplitTunnelDriver {
     /// Returns None if split tunnel is not active in parallel mode.
     pub fn create_inbound_handler(&self) -> Option<super::tunnel::InboundHandler> {
         if self.use_parallel {
-            self.parallel_interceptor.as_ref().map(|p| p.create_inbound_handler())
+            self.parallel_interceptor.as_ref().and_then(|p| p.create_inbound_handler())
         } else {
             // Legacy mode doesn't support inbound injection yet
             None
