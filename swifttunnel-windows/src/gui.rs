@@ -1700,7 +1700,7 @@ impl BoosterApp {
                 } else if msg.contains("wintun.dll not found") {
                     "Driver not found. Please reinstall SwiftTunnel.".to_string()
                 } else if msg.contains("401") || msg.contains("Unauthorized") {
-                    "Session expired. Sign out and sign in again.".to_string()
+                    "Connection failed. Try again.".to_string()
                 } else if msg.contains("404") {
                     "Server unavailable. Try a different region.".to_string()
                 } else if msg.contains("timeout") || msg.contains("Timeout") {
@@ -4014,11 +4014,34 @@ impl BoosterApp {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     fn connect_vpn(&mut self) {
-        let access_token = if let AuthState::LoggedIn(session) = &self.auth_state {
-            session.access_token.clone()
-        } else {
-            self.set_status("Please sign in first", STATUS_ERROR);
-            return;
+        // Refresh token silently before connecting (handles expired sessions)
+        let auth_manager = Arc::clone(&self.auth_manager);
+        let rt = Arc::clone(&self.runtime);
+
+        // Try to refresh token if needed
+        let access_token = {
+            let refresh_result = rt.block_on(async {
+                if let Ok(auth) = auth_manager.lock() {
+                    // This will refresh if expired/expiring
+                    auth.get_access_token().await
+                } else {
+                    Err(crate::auth::types::AuthError::ApiError("Lock failed".to_string()))
+                }
+            });
+
+            match refresh_result {
+                Ok(token) => token,
+                Err(e) => {
+                    log::warn!("Token refresh failed: {}, trying with existing token", e);
+                    // Fall back to existing token from session
+                    if let AuthState::LoggedIn(session) = &self.auth_state {
+                        session.access_token.clone()
+                    } else {
+                        self.set_status("Please sign in first", STATUS_ERROR);
+                        return;
+                    }
+                }
+            }
         };
 
         // Check if at least one game preset is selected
