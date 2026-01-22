@@ -961,8 +961,6 @@ fn run_inbound_receiver(
     stop_flag: Arc<AtomicBool>,
     throughput: ThroughputStats,
 ) {
-    use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
-
     log::info!("Inbound receiver started (optimized - single driver handle)");
 
     // Open driver ONCE at thread start (not per-packet!)
@@ -1195,11 +1193,6 @@ fn inject_inbound_packet(
     }
 
     Some(true)
-
-    log::info!(
-        "Inbound receiver stopped: {} received, {} decrypted, {} injected",
-        packets_received, packets_decrypted, packets_injected
-    );
 }
 
 /// Packet reader thread - reads from ndisapi and dispatches to workers
