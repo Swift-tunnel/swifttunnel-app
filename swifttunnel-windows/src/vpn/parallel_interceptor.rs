@@ -562,13 +562,52 @@ impl ParallelInterceptor {
     ///
     /// This creates a handler that injects packets to the physical adapter.
     /// If NAT IPs are configured, it rewrites destination IP from tunnel_ip to internet_ip.
-    pub fn create_inbound_handler(&self) -> std::sync::Arc<dyn Fn(&[u8]) + Send + Sync> {
-        let physical_name = self.physical_adapter_name.clone();
+    pub fn create_inbound_handler(&self) -> Option<std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>> {
+        let physical_name = self.physical_adapter_name.clone()?;
         let throughput_stats = self.throughput_stats.clone();
         let tunnel_ip = self.tunnel_ip;
         let internet_ip = self.internet_ip;
 
-        std::sync::Arc::new(move |ip_packet: &[u8]| {
+        // Pre-open driver and get adapter info for efficiency
+        let driver = match ndisapi::Ndisapi::new("NDISRD") {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("create_inbound_handler: failed to open driver: {}", e);
+                return None;
+            }
+        };
+
+        let adapters = match driver.get_tcpip_bound_adapters_info() {
+            Ok(a) => a,
+            Err(e) => {
+                log::error!("create_inbound_handler: failed to get adapters: {}", e);
+                return None;
+            }
+        };
+
+        let adapter = match adapters.iter().find(|a| a.get_name() == &physical_name) {
+            Some(a) => a,
+            None => {
+                log::error!("create_inbound_handler: physical adapter '{}' not found", physical_name);
+                return None;
+            }
+        };
+
+        // Get adapter handle and MAC address
+        let adapter_handle = adapter.get_handle();
+        let adapter_mac: [u8; 6] = adapter.get_hw_address()[0..6].try_into().unwrap_or([0; 6]);
+
+        log::info!(
+            "create_inbound_handler: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            physical_name,
+            adapter_mac[0], adapter_mac[1], adapter_mac[2],
+            adapter_mac[3], adapter_mac[4], adapter_mac[5]
+        );
+
+        // Track packets for logging (use atomic counter)
+        let packet_count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        Some(std::sync::Arc::new(move |ip_packet: &[u8]| {
             use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
             if ip_packet.len() < 20 {
@@ -585,21 +624,51 @@ impl ParallelInterceptor {
             );
             let protocol = ip_packet[9];
 
+            // Parse ICMP error packets for diagnostics
+            if protocol == 1 && ip_packet.len() >= 28 {
+                let icmp_type = ip_packet[20];
+                let icmp_code = ip_packet[21];
+
+                // ICMP error types that indicate routing problems
+                let error_desc = match (icmp_type, icmp_code) {
+                    (3, 0) => Some("Network Unreachable"),
+                    (3, 1) => Some("Host Unreachable"),
+                    (3, 2) => Some("Protocol Unreachable"),
+                    (3, 3) => Some("Port Unreachable"),
+                    (3, 4) => Some("Fragmentation Needed"),
+                    (3, 5) => Some("Source Route Failed"),
+                    (3, 6) => Some("Destination Network Unknown"),
+                    (3, 7) => Some("Destination Host Unknown"),
+                    (3, 9) => Some("Network Administratively Prohibited"),
+                    (3, 10) => Some("Host Administratively Prohibited"),
+                    (3, 13) => Some("Communication Administratively Prohibited"),
+                    (11, 0) => Some("TTL Expired in Transit"),
+                    (11, 1) => Some("Fragment Reassembly Time Exceeded"),
+                    _ => None,
+                };
+
+                if let Some(desc) = error_desc {
+                    // Extract original destination from embedded IP header (at offset 28)
+                    if ip_packet.len() >= 48 {
+                        let orig_dst = std::net::Ipv4Addr::new(
+                            ip_packet[44], ip_packet[45], ip_packet[46], ip_packet[47]
+                        );
+                        log::warn!(
+                            "inbound_handler: ICMP Error - {} (type={}, code={}) for packet to {}",
+                            desc, icmp_type, icmp_code, orig_dst
+                        );
+                    } else {
+                        log::warn!(
+                            "inbound_handler: ICMP Error - {} (type={}, code={})",
+                            desc, icmp_type, icmp_code
+                        );
+                    }
+                }
+            }
+
             // Check if we need to do NAT (rewrite destination IP)
             let needs_nat = tunnel_ip.is_some() && internet_ip.is_some()
                 && Some(dst_ip) == tunnel_ip;
-
-            if needs_nat {
-                log::debug!(
-                    "inbound_handler: NAT {} -> {} (proto={}, {} -> {})",
-                    dst_ip, internet_ip.unwrap(), protocol, src_ip, internet_ip.unwrap()
-                );
-            } else {
-                log::debug!(
-                    "inbound_handler: {} byte packet, proto={}, {} -> {}",
-                    ip_packet.len(), protocol, src_ip, dst_ip
-                );
-            }
 
             // Make a mutable copy for NAT rewriting
             let mut packet = ip_packet.to_vec();
@@ -647,49 +716,14 @@ impl ParallelInterceptor {
                         );
                     }
                 }
-
-                log::info!("inbound_handler: NAT rewritten dst {} -> {}", dst_ip, new_dst);
             }
 
-            let physical_name = match &physical_name {
-                Some(name) => name,
-                None => {
-                    log::warn!("inbound_handler: no physical adapter configured");
-                    return;
-                }
-            };
-
-            // Open driver
-            let driver = match ndisapi::Ndisapi::new("NDISRD") {
-                Ok(d) => d,
-                Err(e) => {
-                    log::warn!("inbound_handler: failed to open driver: {}", e);
-                    return;
-                }
-            };
-
-            let adapters = match driver.get_tcpip_bound_adapters_info() {
-                Ok(a) => a,
-                Err(e) => {
-                    log::warn!("inbound_handler: failed to get adapters: {}", e);
-                    return;
-                }
-            };
-
-            let adapter = match adapters.iter().find(|a| a.get_name() == physical_name) {
-                Some(a) => a,
-                None => {
-                    log::warn!("inbound_handler: physical adapter '{}' not found", physical_name);
-                    return;
-                }
-            };
-
-            let adapter_handle = adapter.get_handle();
-
-            // Create Ethernet frame with IP packet payload (use NAT-modified packet)
+            // Create Ethernet frame with IP packet payload
+            // Use physical adapter's MAC as destination (packet is being "received" by this adapter)
+            // Use a dummy but valid-looking source MAC (simulating upstream router)
             let mut ethernet_frame = vec![0u8; 14 + packet.len()];
-            ethernet_frame[0..6].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // Broadcast dest
-            ethernet_frame[6..12].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Zero src
+            ethernet_frame[0..6].copy_from_slice(&adapter_mac); // Destination = physical adapter
+            ethernet_frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // Locally administered src MAC
             ethernet_frame[12] = 0x08; // EtherType: IPv4
             ethernet_frame[13] = 0x00;
             ethernet_frame[14..].copy_from_slice(&packet);
@@ -700,16 +734,35 @@ impl ParallelInterceptor {
             buffer.length = ethernet_frame.len() as u32;
             buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(&ethernet_frame);
 
-            // Inject to MSTCP
+            // Inject to MSTCP using cached adapter handle
             let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
             if to_mstcp.push(&buffer).is_ok() {
+                // Need to open driver for the actual injection (handle isn't Send)
+                let driver = match ndisapi::Ndisapi::new("NDISRD") {
+                    Ok(d) => d,
+                    Err(e) => {
+                        log::warn!("inbound_handler: failed to open driver for injection: {}", e);
+                        return;
+                    }
+                };
+
                 if let Err(e) = driver.send_packets_to_mstcp::<1>(&to_mstcp) {
                     log::warn!("inbound_handler: send_packets_to_mstcp failed: {:?}", e);
                 } else {
                     throughput_stats.add_rx(packet.len() as u64);
+
+                    let count = packet_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Log first 5 packets and then every 100th
+                    if count < 5 || count % 100 == 0 {
+                        log::info!(
+                            "inbound_handler: injected {} byte packet #{} (proto={}, {} -> {}{})",
+                            packet.len(), count + 1, protocol, src_ip, dst_ip,
+                            if needs_nat { format!(" [NAT -> {}]", internet_ip.unwrap()) } else { String::new() }
+                        );
+                    }
                 }
             }
-        })
+        }))
     }
 }
 
