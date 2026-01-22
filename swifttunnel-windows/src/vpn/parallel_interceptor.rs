@@ -585,17 +585,15 @@ impl ParallelInterceptor {
             }
         };
 
-        let adapter = match adapters.iter().find(|a| a.get_name() == &physical_name) {
-            Some(a) => a,
+        // Get adapter MAC address (copy, so it's Send + Sync)
+        // Note: adapter_handle is NOT Send/Sync, so we look it up fresh in each call
+        let adapter_mac: [u8; 6] = match adapters.iter().find(|a| a.get_name() == &physical_name) {
+            Some(a) => a.get_hw_address()[0..6].try_into().unwrap_or([0; 6]),
             None => {
                 log::error!("create_inbound_handler: physical adapter '{}' not found", physical_name);
                 return None;
             }
         };
-
-        // Get adapter handle and MAC address
-        let adapter_handle = adapter.get_handle();
-        let adapter_mac: [u8; 6] = adapter.get_hw_address()[0..6].try_into().unwrap_or([0; 6]);
 
         log::info!(
             "create_inbound_handler: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -734,18 +732,36 @@ impl ParallelInterceptor {
             buffer.length = ethernet_frame.len() as u32;
             buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(&ethernet_frame);
 
-            // Inject to MSTCP using cached adapter handle
+            // Open driver and get adapter handle (must be done per-call since HANDLE isn't Send)
+            let driver = match ndisapi::Ndisapi::new("NDISRD") {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("inbound_handler: failed to open driver: {}", e);
+                    return;
+                }
+            };
+
+            let adapters = match driver.get_tcpip_bound_adapters_info() {
+                Ok(a) => a,
+                Err(e) => {
+                    log::warn!("inbound_handler: failed to get adapters: {}", e);
+                    return;
+                }
+            };
+
+            let adapter = match adapters.iter().find(|a| a.get_name() == &physical_name) {
+                Some(a) => a,
+                None => {
+                    log::warn!("inbound_handler: adapter not found");
+                    return;
+                }
+            };
+
+            let adapter_handle = adapter.get_handle();
+
+            // Inject to MSTCP
             let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
             if to_mstcp.push(&buffer).is_ok() {
-                // Need to open driver for the actual injection (handle isn't Send)
-                let driver = match ndisapi::Ndisapi::new("NDISRD") {
-                    Ok(d) => d,
-                    Err(e) => {
-                        log::warn!("inbound_handler: failed to open driver for injection: {}", e);
-                        return;
-                    }
-                };
-
                 if let Err(e) = driver.send_packets_to_mstcp::<1>(&to_mstcp) {
                     log::warn!("inbound_handler: send_packets_to_mstcp failed: {:?}", e);
                 } else {
