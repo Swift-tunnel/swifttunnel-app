@@ -1060,13 +1060,16 @@ fn run_inbound_receiver(
             TunnResult::Done => {
                 // Nothing to do
             }
-            TunnResult::Err(_e) => {
-                // Normal WireGuard protocol messages, don't spam logs
+            TunnResult::Err(e) => {
+                // Log first few errors to help debug
+                if packets_received < 20 {
+                    log::debug!("Inbound receiver: decrypt error on packet {}: {:?}", packets_received, e);
+                }
             }
         }
 
-        // Periodic logging
-        if packets_received > 0 && packets_received % 1000 == 0 {
+        // Periodic logging (every 100 packets for debugging)
+        if packets_received > 0 && packets_received % 100 == 0 {
             log::info!(
                 "Inbound receiver: {} recv, {} decrypt, {} inject, {} errors",
                 packets_received, packets_decrypted, packets_injected, inject_errors
@@ -1074,7 +1077,12 @@ fn run_inbound_receiver(
         }
     }
 
-    log::info!("Inbound receiver stopped");
+    // Final stats
+    log::info!(
+        "Inbound receiver stopped - FINAL: {} recv, {} decrypt, {} inject, {} errors, {} bytes RX",
+        packets_received, packets_decrypted, packets_injected, inject_errors,
+        throughput.bytes_rx.load(Ordering::Relaxed)
+    );
 }
 
 /// Inject a decrypted inbound packet to MSTCP after NAT rewriting

@@ -391,6 +391,32 @@ impl VpnConnection {
 
                 match std::net::UdpSocket::bind("0.0.0.0:0") {
                     Ok(socket) => {
+                        // Increase socket receive buffer for bulk traffic (1MB)
+                        // This helps prevent packet loss when the VPN server sends responses in bursts
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::io::AsRawSocket;
+                            use windows::Win32::Networking::WinSock::{setsockopt, SOL_SOCKET, SO_RCVBUF};
+                            let raw = socket.as_raw_socket() as usize;
+                            let buf_size: i32 = 1024 * 1024; // 1MB
+                            let result = unsafe {
+                                setsockopt(
+                                    windows::Win32::Networking::WinSock::SOCKET(raw),
+                                    SOL_SOCKET as i32,
+                                    SO_RCVBUF as i32,
+                                    Some(std::slice::from_raw_parts(
+                                        &buf_size as *const i32 as *const u8,
+                                        std::mem::size_of::<i32>(),
+                                    )),
+                                )
+                            };
+                            if result == 0 {
+                                log::info!("Socket receive buffer set to 1MB for bulk traffic");
+                            } else {
+                                log::warn!("Failed to set socket receive buffer size");
+                            }
+                        }
+
                         if let Err(e) = socket.connect(endpoint) {
                             log::warn!("Failed to connect encryption socket: {}", e);
                         } else {
