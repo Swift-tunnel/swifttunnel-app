@@ -371,13 +371,20 @@ impl WireguardTunnel {
                     tunn.decapsulate(None, &recv_buf[..n], &mut decrypt_buf)
                 };
 
-                log::debug!("Inbound: decapsulate result: {:?}", match &decrypted {
+                // Log all decryption results at info level to debug inbound flow
+                let result_desc = match &decrypted {
                     TunnResult::WriteToTunnelV4(d, _) => format!("WriteToTunnelV4({} bytes)", d.len()),
                     TunnResult::WriteToTunnelV6(d, _) => format!("WriteToTunnelV6({} bytes)", d.len()),
                     TunnResult::WriteToNetwork(d) => format!("WriteToNetwork({} bytes)", d.len()),
                     TunnResult::Done => "Done".to_string(),
                     TunnResult::Err(e) => format!("Err({:?})", e),
-                });
+                };
+                // Log first 10 results and then every 100th
+                static RESULT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let count = RESULT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count < 10 || count % 100 == 0 {
+                    log::info!("Inbound #{}: decapsulate -> {} (received {} encrypted bytes)", count + 1, result_desc, n);
+                }
 
                 match decrypted {
                     TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
