@@ -18,6 +18,7 @@ use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
 use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
+use super::packet_interceptor::WireguardContext;
 use super::{VpnError, VpnResult};
 
 /// Refresh interval for process exclusion scanning (ms)
@@ -317,7 +318,8 @@ impl VpnConnection {
     /// 1. Check driver availability
     /// 2. Open driver
     /// 3. Initialize driver
-    /// 4. Configure with tunnel apps
+    /// 4. Set Wintun injection context
+    /// 5. Configure with tunnel apps
     async fn setup_split_tunnel(
         &mut self,
         config: &VpnConfig,
@@ -356,6 +358,15 @@ impl VpnConnection {
             VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
         })?;
         log::info!("Split tunnel driver initialized");
+
+        // Create WireGuard context for packet injection into Wintun
+        // Tunnel app packets will be injected here, then tunnel.rs will encrypt and send to VPN
+        let wg_ctx = Arc::new(WireguardContext {
+            session: adapter.session(),
+            packets_injected: std::sync::atomic::AtomicU64::new(0),
+        });
+        driver.set_wireguard_context(wg_ctx);
+        log::info!("Wintun injection context set for split tunnel");
 
         // Configure driver
         let split_config = SplitTunnelConfig::new(

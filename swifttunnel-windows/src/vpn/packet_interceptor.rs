@@ -8,11 +8,15 @@
 //! 1. Intercept outbound packets on physical adapter
 //! 2. Parse IP headers to extract source IP:port
 //! 3. Look up owning process via ProcessTracker
-//! 4. Route tunnel app packets through VPN, others passthrough
+//! 4. Route tunnel app packets through VPN (encapsulate with WireGuard), others passthrough
 //!
 //! This replaces the Mullvad WFP-based driver with a simpler approach.
+//!
+//! Packet Flow for Tunnel Apps:
+//! - Outbound: App → ndisapi intercept → WireGuard encapsulate → UDP to VPN server
+//! - Inbound: VPN server UDP → WireGuard decapsulate → Wintun adapter → App
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::net::Ipv4Addr;
 use super::process_tracker::{ProcessTracker, Protocol};
@@ -167,6 +171,18 @@ impl PacketInfo {
     }
 }
 
+/// Context for injecting packets into the VPN tunnel
+///
+/// Instead of encapsulating packets directly, we inject them into the Wintun adapter.
+/// The existing tunnel.rs outbound loop will then pick them up, encapsulate with
+/// WireGuard, and send to the VPN server. This avoids sharing the Tunn between threads.
+pub struct WireguardContext {
+    /// Wintun adapter session for packet injection
+    pub session: Arc<wintun::Session>,
+    /// Whether injection is working
+    pub packets_injected: std::sync::atomic::AtomicU64,
+}
+
 /// Split tunnel interceptor using ndisapi
 pub struct PacketInterceptor {
     /// ndisapi driver handle (raw handle for now, will be replaced with actual ndisapi types)
@@ -181,6 +197,8 @@ pub struct PacketInterceptor {
     stop_flag: Arc<AtomicBool>,
     /// Whether interception is active
     active: bool,
+    /// Shared WireGuard context (set when starting with VPN)
+    wireguard_ctx: Option<Arc<WireguardContext>>,
 }
 
 impl PacketInterceptor {
@@ -193,7 +211,14 @@ impl PacketInterceptor {
             process_tracker: ProcessTracker::new(tunnel_apps),
             stop_flag: Arc::new(AtomicBool::new(false)),
             active: false,
+            wireguard_ctx: None,
         }
+    }
+
+    /// Set the WireGuard context for packet encapsulation
+    /// This must be called before start() to enable VPN routing for tunnel apps
+    pub fn set_wireguard_context(&mut self, ctx: Arc<WireguardContext>) {
+        self.wireguard_ctx = Some(ctx);
     }
 
     /// Check if WinpkFilter driver is available
@@ -360,6 +385,14 @@ impl PacketInterceptor {
         let vpn_idx = self.vpn_adapter_idx
             .ok_or_else(|| VpnError::SplitTunnel("VPN adapter not configured".to_string()))?;
 
+        // WireGuard context is required for actual VPN routing
+        let wg_ctx = self.wireguard_ctx.clone();
+        if wg_ctx.is_none() {
+            log::warn!("No WireGuard context set - tunnel app packets will be logged but not routed through VPN");
+        } else {
+            log::info!("WireGuard context available - tunnel app packets will be encrypted and sent to VPN");
+        }
+
         log::info!("Starting packet interception (physical: {}, VPN: {})", physical_idx, vpn_idx);
 
         self.stop_flag.store(false, Ordering::SeqCst);
@@ -375,6 +408,7 @@ impl PacketInterceptor {
                 vpn_idx,
                 tunnel_apps,
                 stop_flag,
+                wg_ctx,
             ) {
                 log::error!("Packet processing loop error: {}", e);
             }
@@ -416,17 +450,23 @@ impl PacketInterceptor {
     }
 
     /// Packet processing loop (runs in separate thread)
+    ///
+    /// This loop intercepts packets on the physical adapter and routes them:
+    /// - Tunnel app packets: Injected into Wintun adapter -> tunnel.rs encapsulates -> VPN server
+    /// - Non-tunnel app packets: Passed through to physical adapter (bypass VPN)
     fn packet_processing_loop(
         physical_idx: usize,
-        vpn_idx: usize,
+        _vpn_idx: usize,
         tunnel_apps: std::collections::HashSet<String>,
         stop_flag: Arc<AtomicBool>,
+        wg_ctx: Option<Arc<WireguardContext>>,
     ) -> VpnResult<()> {
         use ndisapi::{DirectionFlags, EthMRequest, EthMRequestMut, FilterFlags, IntermediateBuffer};
 
         const PACKET_BUFFER_SIZE: usize = 64;
 
-        log::info!("Packet processing loop started");
+        log::info!("Packet processing loop started (Wintun injection: {})",
+            if wg_ctx.is_some() { "enabled" } else { "disabled" });
 
         // Initialize driver
         let driver = ndisapi::Ndisapi::new("NDISRD")
@@ -436,12 +476,11 @@ impl PacketInterceptor {
         let adapters = driver.get_tcpip_bound_adapters_info()
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to get adapters: {}", e)))?;
 
-        if physical_idx >= adapters.len() || vpn_idx >= adapters.len() {
-            return Err(VpnError::SplitTunnel("Adapter index out of range".to_string()));
+        if physical_idx >= adapters.len() {
+            return Err(VpnError::SplitTunnel("Physical adapter index out of range".to_string()));
         }
 
         let physical_handle = adapters[physical_idx].get_handle();
-        let _vpn_handle = adapters[vpn_idx].get_handle();
 
         // Create event for packet notification
         let event: HANDLE = unsafe {
@@ -459,6 +498,7 @@ impl PacketInterceptor {
 
         let mut process_tracker = ProcessTracker::new(tunnel_apps.into_iter().collect());
         let mut refresh_counter = 0u32;
+        let mut packets_injected = 0u64;
 
         // Allocate packet buffers
         let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); PACKET_BUFFER_SIZE];
@@ -509,7 +549,7 @@ impl PacketInterceptor {
                 // Determine packet direction
                 let is_outbound = direction_flags == DirectionFlags::PACKET_FLAG_ON_SEND;
 
-                // Get packet data
+                // Get packet data (full Ethernet frame)
                 let data = packets[i].get_data();
 
                 // For inbound packets or non-tunnel apps, pass through normally
@@ -520,15 +560,39 @@ impl PacketInterceptor {
                     false
                 };
 
-                if should_vpn {
-                    // TODO: For now, we still pass through but log
-                    // Full VPN routing requires modifying packet destination
-                    log::trace!("Would route to VPN (outbound tunnel app packet)");
+                if should_vpn && wg_ctx.is_some() {
+                    // Extract IP packet from Ethernet frame (skip 14-byte Ethernet header)
+                    if data.len() > 14 {
+                        let ip_packet = &data[14..];
+
+                        // Inject IP packet into Wintun adapter
+                        // tunnel.rs outbound loop will pick it up, encapsulate, and send to VPN
+                        if let Some(ref ctx) = wg_ctx {
+                            match ctx.session.allocate_send_packet(ip_packet.len() as u16) {
+                                Ok(mut packet) => {
+                                    packet.bytes_mut().copy_from_slice(ip_packet);
+                                    ctx.session.send_packet(packet);
+                                    packets_injected += 1;
+                                    ctx.packets_injected.fetch_add(1, Ordering::Relaxed);
+
+                                    if packets_injected % 1000 == 0 {
+                                        log::debug!("Injected {} packets into Wintun for VPN", packets_injected);
+                                    }
+                                    // Don't forward to adapter - packet goes through VPN via Wintun
+                                    continue;
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to allocate Wintun packet: {:?}", e);
+                                    // Fall through to forward packet normally
+                                }
+                            }
+                        }
+                    }
                 }
 
-                // Route packet based on direction
+                // Route packet based on direction (non-tunnel or injection failed)
                 if is_outbound {
-                    // Outbound: send to adapter
+                    // Outbound: send to adapter (bypass VPN)
                     if let Err(e) = to_adapter.push(&packets[i]) {
                         log::warn!("Failed to queue packet for adapter: {}", e);
                     }
@@ -540,7 +604,7 @@ impl PacketInterceptor {
                 }
             }
 
-            // Send queued packets
+            // Send queued packets (non-tunnel traffic)
             if to_adapter.get_packet_number() > 0 {
                 if let Err(e) = driver.send_packets_to_adapter::<PACKET_BUFFER_SIZE>(&to_adapter) {
                     log::warn!("Failed to send packets to adapter: {}", e);
@@ -563,7 +627,7 @@ impl PacketInterceptor {
         // Close event handle
         unsafe { let _ = CloseHandle(event); }
 
-        log::info!("Packet processing loop stopped");
+        log::info!("Packet processing loop stopped (injected {} packets into VPN)", packets_injected);
         Ok(())
     }
 
