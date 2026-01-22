@@ -32,7 +32,7 @@ pub use adapter::WintunAdapter;
 pub use tunnel::WireguardTunnel;
 pub use packet_interceptor::WireguardContext;
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
-pub use parallel_interceptor::ParallelInterceptor;
+pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats};
 pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
 pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 pub use connection::{VpnConnection, ConnectionState};

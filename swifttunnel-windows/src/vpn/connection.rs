@@ -16,6 +16,7 @@ use crate::auth::types::VpnConfig;
 use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
+use super::parallel_interceptor::ThroughputStats;
 use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::packet_interceptor::WireguardContext;
@@ -126,6 +127,15 @@ impl VpnConnection {
 
     pub fn state_handle(&self) -> Arc<Mutex<ConnectionState>> {
         Arc::clone(&self.state)
+    }
+
+    /// Get throughput stats for GUI display
+    ///
+    /// Returns the ThroughputStats handle if split tunnel is active and using parallel mode.
+    pub fn get_throughput_stats(&self) -> Option<ThroughputStats> {
+        self.split_tunnel.as_ref().and_then(|st| {
+            st.lock().ok().and_then(|driver| driver.get_throughput_stats())
+        })
     }
 
     async fn set_state(&self, state: ConnectionState) {
