@@ -777,7 +777,7 @@ fn send_bypass_packet(
     adapters: &[ndisapi::NetworkAdapterInfo],
     work: &PacketWork,
 ) {
-    use ndisapi::{EthMRequest, IntermediateBuffer};
+    use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
     // Find adapter by internal name (GUID) - this is consistent across driver instances
     let adapter = match adapters.iter().find(|a| a.get_name() == work.physical_adapter_name.as_str()) {
@@ -796,10 +796,10 @@ fn send_bypass_packet(
 
     // Create IntermediateBuffer with packet data
     let mut buffer = IntermediateBuffer::default();
-    let data_len = work.data.len().min(buffer.get_data_mut().len());
-    buffer.get_data_mut()[..data_len].copy_from_slice(&work.data[..data_len]);
-    buffer.set_length(data_len as u32);
-    // Note: Direction flag is implicit - send_packets_to_adapter sends as outbound
+    // CRITICAL: Set direction flag to outbound - required for send_packets_to_adapter
+    buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_SEND;
+    buffer.length = work.data.len() as u32;
+    buffer.buffer.0[..work.data.len()].copy_from_slice(&work.data);
 
     // Send to adapter (bypasses VPN, goes directly to physical network)
     let mut to_adapter: EthMRequest<1> = EthMRequest::new(adapter_handle);
