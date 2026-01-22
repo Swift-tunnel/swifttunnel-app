@@ -1026,19 +1026,38 @@ fn run_inbound_receiver(
             match timer_result {
                 TunnResult::WriteToNetwork(data) => {
                     // Send keepalive from this socket (the correct one!)
-                    if let Err(e) = ctx.socket.send(data) {
-                        log::warn!("Inbound receiver: failed to send keepalive: {}", e);
-                    } else {
-                        keepalives_sent += 1;
-                        if keepalives_sent == 1 || keepalives_sent % 50 == 0 {
-                            log::debug!("Inbound receiver: sent keepalive #{} ({} bytes)", keepalives_sent, data.len());
+                    match ctx.socket.send(data) {
+                        Ok(sent) => {
+                            keepalives_sent += 1;
+                            // Log first 5 and then every 50th
+                            if keepalives_sent <= 5 || keepalives_sent % 50 == 0 {
+                                log::info!(
+                                    "Inbound receiver: sent keepalive #{} ({} bytes, {} sent)",
+                                    keepalives_sent, data.len(), sent
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Inbound receiver: failed to send keepalive: {} (kind={:?})", e, e.kind());
                         }
                     }
                 }
                 TunnResult::Err(e) => {
                     log::warn!("Inbound receiver: timer error: {:?}", e);
                 }
-                _ => {}
+                TunnResult::Done => {
+                    // No keepalive needed this tick - this is normal
+                }
+                other => {
+                    // Unexpected result type
+                    log::warn!("Inbound receiver: unexpected timer result: {:?}",
+                        match other {
+                            TunnResult::WriteToTunnelV4(_, _) => "WriteToTunnelV4",
+                            TunnResult::WriteToTunnelV6(_, _) => "WriteToTunnelV6",
+                            _ => "Unknown",
+                        }
+                    );
+                }
             }
         }
 
@@ -1064,6 +1083,11 @@ fn run_inbound_receiver(
 
         packets_received += 1;
 
+        // Log first 20 received packets to help debug
+        if packets_received <= 20 {
+            log::info!("Inbound receiver: recv #{} - {} bytes from VPN server", packets_received, n);
+        }
+
         // Decrypt the packet
         let result = {
             let mut tunn = ctx.tunn.lock().unwrap();
@@ -1074,6 +1098,17 @@ fn run_inbound_receiver(
             TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
                 packets_decrypted += 1;
                 throughput.add_rx(data.len() as u64);
+
+                // Log decrypted packet details for first 20
+                if packets_decrypted <= 20 && data.len() >= 20 {
+                    let proto = data[9];
+                    let src_ip = std::net::Ipv4Addr::new(data[12], data[13], data[14], data[15]);
+                    let dst_ip = std::net::Ipv4Addr::new(data[16], data[17], data[18], data[19]);
+                    log::info!(
+                        "Inbound receiver: decrypted #{} - {} bytes, proto={}, {} -> {}",
+                        packets_decrypted, data.len(), proto, src_ip, dst_ip
+                    );
+                }
 
                 // Do NAT and inject to MSTCP
                 if let Some(injected) = inject_inbound_packet(
@@ -1091,19 +1126,24 @@ fn run_inbound_receiver(
                 }
             }
             TunnResult::WriteToNetwork(data) => {
-                // Protocol message (keepalive, etc.) - send back to VPN server
+                // Protocol message (handshake, etc.) - send back to VPN server
+                log::info!("Inbound receiver: got WriteToNetwork - {} bytes (handshake/protocol)", data.len());
                 if let Err(e) = ctx.socket.send(data) {
                     log::warn!("Inbound receiver: failed to send protocol message: {}", e);
                 }
             }
             TunnResult::Done => {
-                // Nothing to do
+                // No plaintext output (e.g., keepalive received)
+                if packets_received <= 20 {
+                    log::info!("Inbound receiver: recv #{} -> Done (keepalive?)", packets_received);
+                }
             }
             TunnResult::Err(e) => {
-                // Log first few errors to help debug
-                if packets_received < 20 {
-                    log::debug!("Inbound receiver: decrypt error on packet {}: {:?}", packets_received, e);
-                }
+                // Log ALL decrypt errors (not just first 20) since this is critical for debugging
+                log::warn!(
+                    "Inbound receiver: decrypt ERROR on packet #{} ({} bytes): {:?}",
+                    packets_received, n, e
+                );
             }
         }
 
@@ -1601,20 +1641,22 @@ fn run_packet_worker(
                     match result {
                         TunnResult::WriteToNetwork(data) => {
                             // Send encrypted packet directly via UDP
-                            match ctx.socket.send_to(data, ctx.server_addr) {
-                                Ok(_) => {
+                            // CRITICAL: Use send() not send_to() because socket is connected
+                            // send_to() on connected sockets can fail on Windows
+                            match ctx.socket.send(data) {
+                                Ok(sent) => {
                                     direct_encrypt_success += 1;
-                                    if direct_encrypt_success <= 5 {
+                                    if direct_encrypt_success <= 10 {
                                         log::info!(
-                                            "Worker {}: Direct encrypt OK - {} bytes plaintext -> {} bytes encrypted",
-                                            worker_id, packet_to_send.len(), data.len()
+                                            "Worker {}: Direct encrypt OK - {} bytes plaintext -> {} bytes encrypted, {} sent",
+                                            worker_id, packet_to_send.len(), data.len(), sent
                                         );
                                     }
                                 }
                                 Err(e) => {
                                     direct_encrypt_fail += 1;
-                                    if direct_encrypt_fail <= 10 {
-                                        log::warn!("Worker {}: UDP send failed: {}", worker_id, e);
+                                    if direct_encrypt_fail <= 20 {
+                                        log::warn!("Worker {}: UDP send failed: {} (kind={:?})", worker_id, e, e.kind());
                                     }
                                 }
                             }
