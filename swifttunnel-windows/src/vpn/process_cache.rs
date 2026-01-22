@@ -181,9 +181,43 @@ impl LockFreeProcessCache {
         }
     }
 
-    /// Update tunnel apps list
+    /// Update tunnel apps list and immediately refresh the snapshot
+    ///
+    /// CRITICAL: This must create a new snapshot immediately, otherwise workers
+    /// will continue using the old snapshot with empty tunnel_apps!
     pub fn set_tunnel_apps(&mut self, apps: Vec<String>) {
         self.tunnel_apps = apps.into_iter().map(|s| s.to_lowercase()).collect();
+
+        // Force immediate snapshot update so workers see the new tunnel_apps
+        // Clone the current connections and pid_names from existing snapshot
+        let old_snap = self.get_snapshot();
+
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let new_snapshot = Arc::new(ProcessSnapshot {
+            connections: old_snap.connections.clone(),
+            pid_names: old_snap.pid_names.clone(),
+            tunnel_apps: self.tunnel_apps.clone(),  // Use NEW tunnel_apps
+            version,
+            created_at: std::time::Instant::now(),
+        });
+
+        let new_boxed = Box::new(new_snapshot);
+        let new_ptr = Box::into_raw(new_boxed);
+
+        // Atomically swap in new snapshot
+        let old_ptr = self.current.swap(new_ptr, Ordering::AcqRel);
+
+        // Clean up old snapshot
+        unsafe {
+            let _ = Box::from_raw(old_ptr);
+        }
+
+        log::info!(
+            "set_tunnel_apps: Updated snapshot with {} tunnel apps: {:?}",
+            self.tunnel_apps.len(),
+            self.tunnel_apps.iter().take(5).collect::<Vec<_>>()
+        );
     }
 
     /// Get tunnel apps
