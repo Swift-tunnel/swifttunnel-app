@@ -382,6 +382,11 @@ pub struct BoosterApp {
     current_config_id: Option<String>,
     /// Flag indicating latency update is in progress
     updating_latency: bool,
+    /// Pending latency value and when it was set (for 5s debounce anti-abuse)
+    /// Format: (target_latency_ms, time_when_set)
+    pending_latency: Option<(u32, std::time::Instant)>,
+    /// Last applied latency (to avoid redundant API calls)
+    last_applied_latency: u32,
 }
 
 impl BoosterApp {
@@ -596,6 +601,8 @@ impl BoosterApp {
             artificial_latency_ms: saved_settings.artificial_latency_ms,
             current_config_id: None,
             updating_latency: false,
+            pending_latency: None,
+            last_applied_latency: saved_settings.artificial_latency_ms,
         }
     }
 
@@ -899,12 +906,13 @@ impl eframe::App for BoosterApp {
         let has_animations = self.animations.has_active_animations();
         let is_connected = self.vpn_state.is_connected();  // For pulse animation
         let is_network_testing = self.network_analyzer_state.stability.running || self.network_analyzer_state.speed.running;
+        let has_pending_latency = self.pending_latency.is_some();  // For countdown display
 
         if is_loading || is_vpn_transitioning || is_logging_in || is_awaiting_oauth_here || is_updating || has_animations || is_network_testing {
             // Fast repaint for animations (60 FPS target)
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        } else if is_connected {
-            // Slow repaint for pulse animation (10 FPS is enough for breathing effect)
+        } else if is_connected || has_pending_latency {
+            // Slow repaint for pulse animation and latency countdown (10 FPS is enough)
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         // Otherwise, egui will only repaint on user interaction (clicks, typing, etc.)
@@ -1137,6 +1145,23 @@ impl eframe::App for BoosterApp {
             // Apply latency after releasing the VPN lock
             if should_apply_latency {
                 self.update_server_latency();
+                self.last_applied_latency = self.artificial_latency_ms;
+            }
+
+            // Check if pending latency debounce has elapsed (5 second anti-abuse delay)
+            if let Some((pending_value, pending_time)) = self.pending_latency {
+                const DEBOUNCE_SECS: u64 = 5;
+                if pending_time.elapsed().as_secs() >= DEBOUNCE_SECS {
+                    // Debounce period elapsed - apply the latency
+                    log::info!("Latency debounce complete, applying: {}ms", pending_value);
+                    self.pending_latency = None;
+
+                    // Only apply if still connected and value differs from last applied
+                    if self.vpn_state.is_connected() && pending_value != self.last_applied_latency {
+                        self.update_server_latency();
+                        self.last_applied_latency = pending_value;
+                    }
+                }
             }
 
             // Update throughput history when connected
@@ -2876,6 +2901,13 @@ impl BoosterApp {
     fn render_latency_slider(&mut self, ui: &mut egui::Ui) {
         const LATENCY_MAX_MS: u32 = 100;
         const LATENCY_STEP_MS: u32 = 5;
+        const DEBOUNCE_SECS: u64 = 5; // Anti-abuse: 5 second delay before applying
+
+        // Calculate time remaining for pending change
+        let pending_secs_remaining = self.pending_latency.map(|(_, time)| {
+            let elapsed = time.elapsed().as_secs();
+            if elapsed >= DEBOUNCE_SECS { 0 } else { DEBOUNCE_SECS - elapsed }
+        });
 
         egui::Frame::none()
             .fill(BG_CARD)
@@ -2891,6 +2923,14 @@ impl BoosterApp {
                     ui.label(egui::RichText::new("Practice Mode").size(14.0).color(TEXT_PRIMARY).strong());
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Show pending countdown if waiting
+                        if let Some(secs) = pending_secs_remaining {
+                            if secs > 0 {
+                                ui.label(egui::RichText::new(format!("{}s", secs))
+                                    .size(11.0).color(TEXT_MUTED));
+                            }
+                        }
+
                         let badge_text = if self.artificial_latency_ms == 0 {
                             "Off".to_string()
                         } else {
@@ -2934,9 +2974,13 @@ impl BoosterApp {
                     self.mark_dirty();
                 }
 
-                // Update server when slider is released (committed)
-                if response.drag_stopped() && self.vpn_state.is_connected() && !self.updating_latency {
-                    self.update_server_latency();
+                // Queue latency update when slider is released (5s debounce for anti-abuse)
+                if response.drag_stopped() && self.vpn_state.is_connected() {
+                    if new_latency != self.last_applied_latency {
+                        log::info!("Latency change queued: {}ms -> {}ms (applying in {}s)",
+                            self.last_applied_latency, new_latency, DEBOUNCE_SECS);
+                        self.pending_latency = Some((new_latency, std::time::Instant::now()));
+                    }
                 }
 
                 // Min/max labels
@@ -2949,8 +2993,8 @@ impl BoosterApp {
 
                 ui.add_space(4.0);
 
-                // Description
-                ui.label(egui::RichText::new("Add artificial latency for high-ping practice")
+                // Description with anti-abuse note
+                ui.label(egui::RichText::new("Add artificial latency for high-ping practice (5s delay)")
                     .size(11.0).color(TEXT_MUTED));
             });
     }
