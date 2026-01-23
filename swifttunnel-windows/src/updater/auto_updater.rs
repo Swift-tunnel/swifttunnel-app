@@ -115,7 +115,17 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // Check for updates
-    let checker = UpdateChecker::new();
+    let checker = match UpdateChecker::new() {
+        Some(c) => c,
+        None => {
+            error!("UpdateChecker creation failed - version parsing issue, skipping updates");
+            if let Ok(mut s) = state.lock() {
+                *s = AutoUpdateState::NoUpdate;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+            return Ok(AutoUpdateResult::NoUpdate);
+        }
+    };
     let update_info = match checker.check_for_update().await {
         Ok(Some(info)) => info,
         Ok(None) => {

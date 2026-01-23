@@ -7,6 +7,7 @@
 
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
+use semver::Version;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -151,8 +152,16 @@ pub fn should_skip_update_check(current_version: &str) -> Option<SkipReason> {
         return None;
     }
 
-    // Check if we successfully updated to the target version
-    if current_version == marker.target_version {
+    // Check if we successfully updated to the target version (use semver comparison)
+    let current_parsed = Version::parse(current_version).ok();
+    let target_parsed = Version::parse(&marker.target_version).ok();
+
+    let versions_match = match (current_parsed, target_parsed) {
+        (Some(curr), Some(tgt)) => curr == tgt,
+        _ => current_version == marker.target_version, // Fallback to string comparison
+    };
+
+    if versions_match {
         info!(
             "Successfully updated to v{}, clearing marker",
             marker.target_version
