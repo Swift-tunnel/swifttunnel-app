@@ -56,7 +56,7 @@ const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);       
 const TEXT_DIMMED: egui::Color32 = egui::Color32::from_rgb(71, 85, 105);        // slate-600
 
 // Latency color thresholds
-const LATENCY_EXCELLENT: egui::Color32 = egui::Color32::from_rgb(52, 211, 153);  // < 30ms
+const LATENCY_EXCELLENT: egui::Color32  = egui::Color32::from_rgb(52, 211, 153);  // < 30ms
 const LATENCY_GOOD: egui::Color32 = egui::Color32::from_rgb(163, 230, 53);       // < 60ms (lime)
 const LATENCY_FAIR: egui::Color32 = egui::Color32::from_rgb(251, 191, 36);       // < 100ms (yellow)
 const LATENCY_POOR: egui::Color32 = egui::Color32::from_rgb(251, 146, 60);       // < 150ms (orange)
@@ -216,8 +216,11 @@ impl AnimationManager {
     }
 
     fn cleanup_completed(&mut self) {
-        self.toggle_animations.retain(|_, a| !a.is_complete());
-        self.hover_animations.retain(|_, a| !a.is_complete());
+        // Only clean up toggle animations that have completed AND returned to "off" state
+        self.toggle_animations.retain(|_, a| !a.is_complete() || a.to > 0.5);
+        // Only clean up hover animations that have completed AND returned to "not hovered" state
+        // This prevents flickering when continuously hovering (animation completes at 1.0)
+        self.hover_animations.retain(|_, a| !a.is_complete() || a.to > 0.5);
     }
 }
 
@@ -1104,7 +1107,7 @@ impl eframe::App for BoosterApp {
                             // New process detected - show notification
                             log::info!("New process detected and tunneled: {}", process);
                             self.process_notification = Some((
-                                format!("🎮 Tunneling: {}", process),
+                                format!("> Tunneling: {}", process),
                                 std::time::Instant::now(),
                             ));
                             self.previously_tunneled.insert(process.clone());
@@ -1436,7 +1439,7 @@ impl BoosterApp {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
-                                    ui.label(egui::RichText::new("⚡").size(10.0));
+                                    ui.label(egui::RichText::new(">").size(10.0));
                                     ui.label(egui::RichText::new(format!("{} boosts", active_count))
                                         .size(11.0)
                                         .color(ACCENT_PRIMARY)
@@ -1607,10 +1610,10 @@ impl BoosterApp {
                     ui.spacing_mut().item_spacing.x = 4.0;
 
                     let tabs = [
-                        ("🌐", "Connect", Tab::Connect),
-                        ("⚡", "Boost", Tab::Boost),
-                        ("📶", "Network", Tab::Network),
-                        ("⚙", "Settings", Tab::Settings),
+                        ("o", "Connect", Tab::Connect),
+                        (">", "Boost", Tab::Boost),
+                        ("::", "Network", Tab::Network),
+                        ("*", "Settings", Tab::Settings),
                     ];
 
                     for (icon, label, tab) in tabs {
@@ -1692,7 +1695,7 @@ impl BoosterApp {
 
                 // Section header
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("🎮").size(16.0));
+                    ui.label(egui::RichText::new(">").size(16.0));
                     ui.label(egui::RichText::new("Game Selection").size(14.0).color(TEXT_PRIMARY).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let count = self.selected_game_presets.len();
@@ -1749,7 +1752,7 @@ impl BoosterApp {
                                     // Selection indicator
                                     if is_selected {
                                         ui.add_space(2.0);
-                                        ui.label(egui::RichText::new("✓").size(10.0).color(ACCENT_PRIMARY));
+                                        ui.label(egui::RichText::new("+").size(10.0).color(ACCENT_PRIMARY));
                                     }
                                 });
                             })
@@ -1776,7 +1779,7 @@ impl BoosterApp {
                 if self.selected_game_presets.is_empty() {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("⚠").size(12.0).color(STATUS_WARNING));
+                        ui.label(egui::RichText::new("!").size(12.0).color(STATUS_WARNING));
                         ui.label(egui::RichText::new("Select at least one game to enable split tunneling")
                             .size(11.0).color(STATUS_WARNING));
                     });
@@ -1822,12 +1825,12 @@ impl BoosterApp {
 
     fn render_connection_status(&mut self, ui: &mut egui::Ui) {
         let (status_text, status_icon, status_color, detail_text, show_connected_info) = match &self.vpn_state {
-            ConnectionState::Disconnected => ("Disconnected", "○", STATUS_INACTIVE, "Ready to connect".to_string(), false),
-            ConnectionState::FetchingConfig => ("Connecting", "◐", STATUS_WARNING, "Fetching config...".to_string(), false),
-            ConnectionState::CreatingAdapter => ("Connecting", "◑", STATUS_WARNING, "Creating adapter...".to_string(), false),
-            ConnectionState::Connecting => ("Connecting", "◒", STATUS_WARNING, "Establishing tunnel...".to_string(), false),
-            ConnectionState::ConfiguringSplitTunnel => ("Connecting", "◓", STATUS_WARNING, "Configuring split tunnel...".to_string(), false),
-            ConnectionState::ConfiguringRoutes => ("Connecting", "◓", STATUS_WARNING, "Setting up routes...".to_string(), false),
+            ConnectionState::Disconnected => ("Disconnected", "o", STATUS_INACTIVE, "Ready to connect".to_string(), false),
+            ConnectionState::FetchingConfig => ("Connecting", "o", STATUS_WARNING, "Fetching config...".to_string(), false),
+            ConnectionState::CreatingAdapter => ("Connecting", "o", STATUS_WARNING, "Creating adapter...".to_string(), false),
+            ConnectionState::Connecting => ("Connecting", "o", STATUS_WARNING, "Establishing tunnel...".to_string(), false),
+            ConnectionState::ConfiguringSplitTunnel => ("Connecting", "o", STATUS_WARNING, "Configuring split tunnel...".to_string(), false),
+            ConnectionState::ConfiguringRoutes => ("Connecting", "o", STATUS_WARNING, "Setting up routes...".to_string(), false),
             ConnectionState::Connected { server_region, .. } => {
                 let name = if let Ok(list) = self.dynamic_server_list.lock() {
                     list.get_server(server_region)
@@ -1836,9 +1839,9 @@ impl BoosterApp {
                 } else {
                     server_region.clone()
                 };
-                ("Protected", "●", STATUS_CONNECTED, name, true)
+                ("Protected", "o", STATUS_CONNECTED, name, true)
             }
-            ConnectionState::Disconnecting => ("Disconnecting", "◌", STATUS_WARNING, "Please wait...".to_string(), false),
+            ConnectionState::Disconnecting => ("Disconnecting", "o", STATUS_WARNING, "Please wait...".to_string(), false),
             ConnectionState::Error(msg) => {
                 // Format user-friendly VPN error messages
                 let user_friendly = if msg.contains("Administrator privileges required") {
@@ -1858,7 +1861,7 @@ impl BoosterApp {
                 } else {
                     msg.clone()
                 };
-                ("Error", "✕", STATUS_ERROR, user_friendly, false)
+                ("Error", "x", STATUS_ERROR, user_friendly, false)
             }
         };
 
@@ -1929,7 +1932,7 @@ impl BoosterApp {
                         ui.painter().circle_filled(center, 8.0, STATUS_CONNECTED_GLOW.gamma_multiply(0.5));
                         // Shield icon
                         ui.painter().text(center, egui::Align2::CENTER_CENTER,
-                            "✓", egui::FontId::proportional(14.0), egui::Color32::WHITE);
+                            "+", egui::FontId::proportional(14.0), egui::Color32::WHITE);
                     } else if is_connecting {
                         // Spinning animation for connecting
                         let elapsed = self.app_start_time.elapsed().as_secs_f32();
@@ -1978,11 +1981,11 @@ impl BoosterApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (btn_text, btn_icon, btn_color) = if is_connected {
-                            ("Disconnect", "⏻", STATUS_ERROR)
+                            ("Disconnect", "O", STATUS_ERROR)
                         } else if is_connecting {
-                            ("Cancel", "✕", STATUS_WARNING)
+                            ("Cancel", "x", STATUS_WARNING)
                         } else {
-                            ("Connect", "→", ACCENT_PRIMARY)
+                            ("Connect", "->", ACCENT_PRIMARY)
                         };
 
                         // Button with icon
@@ -2033,7 +2036,7 @@ impl BoosterApp {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(egui::RichText::new("🌐").size(12.0));
+                                    ui.label(egui::RichText::new("o").size(12.0));
                                     ui.vertical(|ui| {
                                         ui.spacing_mut().item_spacing.y = 1.0;
                                         ui.label(egui::RichText::new("IP Address").size(10.0).color(TEXT_MUTED));
@@ -2050,7 +2053,7 @@ impl BoosterApp {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(egui::RichText::new("⏱").size(12.0));
+                                    ui.label(egui::RichText::new("[t]").size(12.0));
                                     ui.vertical(|ui| {
                                         ui.spacing_mut().item_spacing.y = 1.0;
                                         ui.label(egui::RichText::new("Uptime").size(10.0).color(TEXT_MUTED));
@@ -2062,9 +2065,9 @@ impl BoosterApp {
                         // Split tunnel badge (if active)
                         if split_tunnel_active {
                             let (tunnel_icon, tunnel_text, tunnel_color) = if tunneled_processes.is_empty() {
-                                ("⏳", "Waiting...", STATUS_WARNING)
+                                ("...", "Waiting...", STATUS_WARNING)
                             } else {
-                                ("✓", &tunneled_processes.join(", ") as &str, STATUS_CONNECTED)
+                                ("+", &tunneled_processes.join(", ") as &str, STATUS_CONNECTED)
                             };
 
                             egui::Frame::none()
@@ -2142,7 +2145,7 @@ impl BoosterApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(egui::RichText::new("📊").size(12.0));
+                        ui.label(egui::RichText::new("=").size(12.0));
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.label(egui::RichText::new("Throughput").size(10.0).color(TEXT_MUTED));
@@ -2171,15 +2174,15 @@ impl BoosterApp {
                 ui.vertical(|ui| {
                     // Header with current values
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("📊").size(11.0));
+                        ui.label(egui::RichText::new("=").size(11.0));
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new("Tunnel Traffic").size(10.0).color(TEXT_MUTED));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // TX in cyan, RX in green
-                            ui.label(egui::RichText::new(format!("↓{}", format_bytes_per_sec(current_rx)))
+                            ui.label(egui::RichText::new(format!("v{}", format_bytes_per_sec(current_rx)))
                                 .size(10.0).color(STATUS_CONNECTED));
                             ui.label(egui::RichText::new(" / ").size(10.0).color(TEXT_MUTED));
-                            ui.label(egui::RichText::new(format!("↑{}", format_bytes_per_sec(current_tx)))
+                            ui.label(egui::RichText::new(format!("^{}", format_bytes_per_sec(current_tx)))
                                 .size(10.0).color(ACCENT_CYAN));
                         });
                     });
@@ -2298,7 +2301,7 @@ impl BoosterApp {
         // Section header with enhanced styling
         ui.horizontal(|ui| {
             // Globe icon for regions
-            ui.label(egui::RichText::new("🌐").size(14.0));
+            ui.label(egui::RichText::new("o").size(14.0));
             ui.add_space(4.0);
             ui.label(egui::RichText::new("SELECT REGION").size(11.0).color(TEXT_SECONDARY).strong());
 
@@ -2308,14 +2311,14 @@ impl BoosterApp {
                     let elapsed = self.app_start_time.elapsed().as_secs_f32();
                     let pulse = ((elapsed * 3.0).sin() + 1.0) / 2.0;
                     let color = lerp_color(ACCENT_PRIMARY, ACCENT_CYAN, pulse);
-                    ui.label(egui::RichText::new("●").size(8.0).color(color));
+                    ui.label(egui::RichText::new("o").size(8.0).color(color));
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Loading...").size(11.0).color(ACCENT_PRIMARY));
                 } else if is_finding {
                     let elapsed = self.app_start_time.elapsed().as_secs_f32();
                     let pulse = ((elapsed * 3.0).sin() + 1.0) / 2.0;
                     let color = lerp_color(ACCENT_CYAN, STATUS_CONNECTED, pulse);
-                    ui.label(egui::RichText::new("●").size(8.0).color(color));
+                    ui.label(egui::RichText::new("o").size(8.0).color(color));
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Measuring...").size(11.0).color(ACCENT_CYAN));
                 } else {
@@ -2349,7 +2352,7 @@ impl BoosterApp {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new("⚠").size(32.0).color(STATUS_ERROR));
+                            ui.label(egui::RichText::new("!").size(32.0).color(STATUS_ERROR));
                             ui.add_space(12.0);
                             ui.label(egui::RichText::new("Failed to load servers")
                                 .size(15.0)
@@ -2361,7 +2364,7 @@ impl BoosterApp {
                                 .color(TEXT_SECONDARY));
                             ui.add_space(16.0);
                             if ui.add(
-                                egui::Button::new(egui::RichText::new("↻  Retry").size(13.0).color(TEXT_PRIMARY))
+                                egui::Button::new(egui::RichText::new("~  Retry").size(13.0).color(TEXT_PRIMARY))
                                     .fill(ACCENT_PRIMARY)
                                     .rounding(8.0)
                                     .min_size(egui::vec2(100.0, 36.0))
@@ -2439,26 +2442,10 @@ impl BoosterApp {
                                             .rounding(6.0)
                                             .inner_margin(egui::Margin::symmetric(10.0, 5.0))
                                             .show(ui, |ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                                    // Flag emoji based on country code
-                                                    let flag = match region.country_code.as_str() {
-                                                        "SG" => "🇸🇬",
-                                                        "JP" => "🇯🇵",
-                                                        "IN" => "🇮🇳",
-                                                        "AU" => "🇦🇺",
-                                                        "DE" => "🇩🇪",
-                                                        "FR" => "🇫🇷",
-                                                        "US" => "🇺🇸",
-                                                        "BR" => "🇧🇷",
-                                                        _ => "🌍",
-                                                    };
-                                                    ui.label(egui::RichText::new(flag).size(12.0));
-                                                    ui.label(egui::RichText::new(&region.country_code)
-                                                        .size(11.0)
-                                                        .color(if is_selected { egui::Color32::WHITE } else { TEXT_SECONDARY })
-                                                        .strong());
-                                                });
+                                                ui.label(egui::RichText::new(&region.country_code)
+                                                    .size(11.0)
+                                                    .color(if is_selected { egui::Color32::WHITE } else { TEXT_SECONDARY })
+                                                    .strong());
                                             });
 
                                         // "LAST" badge
@@ -2471,7 +2458,7 @@ impl BoosterApp {
                                                 .rounding(6.0)
                                                 .inner_margin(egui::Margin::symmetric(6.0, 3.0))
                                                 .show(ui, |ui| {
-                                                    ui.label(egui::RichText::new("★ LAST")
+                                                    ui.label(egui::RichText::new("* LAST")
                                                         .size(9.0)
                                                         .color(ACCENT_CYAN));
                                                 });
@@ -2531,7 +2518,7 @@ impl BoosterApp {
                                                 .rounding(4.0)
                                                 .inner_margin(egui::Margin::symmetric(4.0, 2.0))
                                                 .show(ui, |ui| {
-                                                    ui.label(egui::RichText::new("⚙")
+                                                    ui.label(egui::RichText::new("*")
                                                         .size(9.0)
                                                         .color(ACCENT_SECONDARY));
                                                 });
@@ -2546,11 +2533,12 @@ impl BoosterApp {
 
                                         // Button now in normal left-to-right flow, properly positioned
                                         let gear_btn = ui.add(
-                                            egui::Button::new(egui::RichText::new("⚙").size(14.0).color(TEXT_MUTED))
-                                                .fill(egui::Color32::TRANSPARENT)
-                                                .stroke(egui::Stroke::NONE)
+                                            egui::Button::new(egui::RichText::new("*").size(14.0).color(if ui.rect_contains_pointer(ui.max_rect()) { TEXT_PRIMARY } else { TEXT_MUTED }))
+                                                .fill(BG_HOVER.gamma_multiply(0.5))
+                                                .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                                                 .rounding(4.0)
-                                                .min_size(egui::vec2(24.0, 24.0))
+                                                .min_size(egui::vec2(28.0, 28.0))
+                                                .sense(egui::Sense::click())
                                         );
                                         if gear_btn.clicked() {
                                             log::info!("Gear clicked for region: {}", region.id);
@@ -2563,6 +2551,7 @@ impl BoosterApp {
                                             gear_clicked.set(true); // Prevent card click from also triggering
                                         }
                                         if gear_btn.hovered() {
+                                            gear_clicked.set(true); // Also prevent card selection when hovering gear
                                             egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("gear_tooltip"), |ui| {
                                                 ui.label("Select specific server");
                                             });
@@ -2660,7 +2649,7 @@ impl BoosterApp {
 
         // Show popup window
         let popup_id = egui::Id::new("server_selection_popup");
-        let close_popup = egui::Window::new(format!("⚙ Select Server - {}", region_name))
+        let close_popup = egui::Window::new(format!("* Select Server - {}", region_name))
             .id(popup_id)
             .collapsible(false)
             .resizable(false)
@@ -2689,7 +2678,7 @@ impl BoosterApp {
                         ui.set_min_width(ui.available_width() - 24.0);
                         ui.horizontal(|ui| {
                             if is_auto {
-                                ui.label(egui::RichText::new("✓").size(14.0).color(ACCENT_PRIMARY).strong());
+                                ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_PRIMARY).strong());
                                 ui.add_space(6.0);
                             }
                             ui.label(egui::RichText::new("Auto (Best Ping)")
@@ -2740,7 +2729,7 @@ impl BoosterApp {
                             ui.set_min_width(ui.available_width() - 24.0);
                             ui.horizontal(|ui| {
                                 if is_selected {
-                                    ui.label(egui::RichText::new("✓").size(14.0).color(ACCENT_SECONDARY).strong());
+                                    ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_SECONDARY).strong());
                                     ui.add_space(6.0);
                                 }
                                 ui.label(egui::RichText::new(&display_name)
@@ -2753,7 +2742,7 @@ impl BoosterApp {
                                         ui.label(egui::RichText::new(format!("{}ms", ms))
                                             .size(11.0)
                                             .color(lat_color));
-                                        ui.label(egui::RichText::new("★")
+                                        ui.label(egui::RichText::new("*")
                                             .size(10.0)
                                             .color(STATUS_CONNECTED));
                                     }
@@ -2933,7 +2922,7 @@ impl BoosterApp {
 
                 // Section header with value badge
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("⏱").size(16.0));
+                    ui.label(egui::RichText::new("[t]").size(16.0));
                     ui.label(egui::RichText::new("Practice Mode").size(14.0).color(TEXT_PRIMARY).strong());
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3169,9 +3158,9 @@ impl BoosterApp {
             ui.spacing_mut().item_spacing.x = gap;
 
             for (title, desc, icon, profile, profile_info) in [
-                ("Performance", "Maximum FPS", "⚡", OptimizationProfile::LowEnd, &profile_info::PERFORMANCE),
-                ("Balanced", "FPS + Quality", "⚖", OptimizationProfile::Balanced, &profile_info::BALANCED),
-                ("Quality", "Best Visuals", "✨", OptimizationProfile::HighEnd, &profile_info::QUALITY),
+                ("Performance", "Maximum FPS", ">", OptimizationProfile::LowEnd, &profile_info::PERFORMANCE),
+                ("Balanced", "FPS + Quality", "=", OptimizationProfile::Balanced, &profile_info::BALANCED),
+                ("Quality", "Best Visuals", "*", OptimizationProfile::HighEnd, &profile_info::QUALITY),
             ] {
                 let is_selected = self.selected_profile == profile;
                 let card_id = format!("profile_{}", title);
@@ -3361,7 +3350,7 @@ impl BoosterApp {
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("💡").size(10.0));
+                    ui.label(egui::RichText::new("-").size(10.0));
                     ui.label(egui::RichText::new("Lower = better FPS, Higher = better visuals").size(10.0).color(TEXT_MUTED));
                 });
             });
@@ -3500,7 +3489,7 @@ impl BoosterApp {
 
                 ui.horizontal(|ui| {
                     if ui.add(
-                        egui::Button::new(egui::RichText::new("📋 Create Restore Point").size(13.0).color(TEXT_PRIMARY))
+                        egui::Button::new(egui::RichText::new("+ Create Restore Point").size(13.0).color(TEXT_PRIMARY))
                             .fill(ACCENT_PRIMARY).rounding(8.0).min_size(egui::vec2(180.0, 38.0))
                     ).clicked() {
                         create_restore_point = true;
@@ -3509,7 +3498,7 @@ impl BoosterApp {
                     ui.add_space(12.0);
 
                     if ui.add(
-                        egui::Button::new(egui::RichText::new("🔄 Open System Restore").size(13.0).color(TEXT_PRIMARY))
+                        egui::Button::new(egui::RichText::new("~ Open System Restore").size(13.0).color(TEXT_PRIMARY))
                             .fill(BG_ELEVATED).rounding(8.0).min_size(egui::vec2(180.0, 38.0))
                     ).clicked() {
                         open_restore = true;
@@ -3526,14 +3515,14 @@ impl BoosterApp {
             match SystemOptimizer::create_restore_point("SwiftTunnel - Before PC Boosts") {
                 Ok(desc) => {
                     self.restore_point_status = Some((
-                        format!("✓ Restore point created: {}", desc),
+                        format!("+ Restore point created: {}", desc),
                         STATUS_CONNECTED,
                         std::time::Instant::now()
                     ));
                 }
                 Err(e) => {
                     self.restore_point_status = Some((
-                        format!("✗ Failed: {}", e),
+                        format!("x Failed: {}", e),
                         STATUS_ERROR,
                         std::time::Instant::now()
                     ));
@@ -3544,7 +3533,7 @@ impl BoosterApp {
         if open_restore {
             if let Err(e) = SystemOptimizer::open_system_restore() {
                 self.restore_point_status = Some((
-                    format!("✗ Failed to open: {}", e),
+                    format!("x Failed to open: {}", e),
                     STATUS_ERROR,
                     std::time::Instant::now()
                 ));
@@ -3646,21 +3635,21 @@ impl BoosterApp {
                 match &update_state {
                     UpdateState::UpToDate => {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("✓").size(12.0).color(STATUS_CONNECTED));
+                            ui.label(egui::RichText::new("+").size(12.0).color(STATUS_CONNECTED));
                             ui.add_space(4.0);
                             ui.label(egui::RichText::new("You're on the latest version").size(12.0).color(STATUS_CONNECTED));
                         });
                     }
                     UpdateState::Available(info) => {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("🔄").size(12.0));
+                            ui.label(egui::RichText::new("~").size(12.0));
                             ui.add_space(4.0);
                             ui.label(egui::RichText::new(format!("Update v{} available", info.version)).size(12.0).color(ACCENT_PRIMARY));
                         });
                     }
                     UpdateState::Failed(msg) => {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("⚠").size(12.0).color(STATUS_ERROR));
+                            ui.label(egui::RichText::new("!").size(12.0).color(STATUS_ERROR));
                             ui.add_space(4.0);
                             ui.label(egui::RichText::new(msg).size(12.0).color(STATUS_ERROR));
                         });
@@ -3738,7 +3727,7 @@ impl BoosterApp {
             .rounding(12.0).inner_margin(20.0)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("⚗ Experimental").size(14.0).color(TEXT_PRIMARY).strong());
+                ui.label(egui::RichText::new("* Experimental").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
 
                 // Experimental mode toggle
@@ -3761,7 +3750,7 @@ impl BoosterApp {
                 });
 
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("⚠ Experimental features may be unstable or change without notice.").size(10.0).color(STATUS_WARNING).italics());
+                ui.label(egui::RichText::new("! Experimental features may be unstable or change without notice.").size(10.0).color(STATUS_WARNING).italics());
             });
 
         // Handle actions after UI rendering
@@ -3833,7 +3822,7 @@ impl BoosterApp {
 
                 let mut go_to_boost = false;
                 if ui.add(
-                    egui::Button::new(egui::RichText::new("⚡ Go to Boost Tab").size(13.0).color(TEXT_PRIMARY))
+                    egui::Button::new(egui::RichText::new("> Go to Boost Tab").size(13.0).color(TEXT_PRIMARY))
                         .fill(ACCENT_PRIMARY).rounding(8.0).min_size(egui::vec2(150.0, 36.0))
                 ).clicked() {
                     go_to_boost = true;
@@ -3986,7 +3975,7 @@ impl BoosterApp {
                                         .rounding(4.0)
                                         .inner_margin(egui::Margin::symmetric(6.0, 3.0))
                                         .show(ui, |ui| {
-                                            ui.label(egui::RichText::new("⚡ Admin").size(10.0).color(STATUS_WARNING));
+                                            ui.label(egui::RichText::new("> Admin").size(10.0).color(STATUS_WARNING));
                                         });
                                 }
                             });
@@ -4137,8 +4126,8 @@ impl BoosterApp {
                     // WELCOME SECTION
                     // ─────────────────────────────────────────────────────────────
                     ui.horizontal(|ui| {
-                        // Sparkle icon (✦)
-                        ui.label(egui::RichText::new("✦")
+                        // Sparkle icon (*)
+                        ui.label(egui::RichText::new("*")
                             .size(14.0)
                             .color(ACCENT_CYAN));
                         ui.add_space(4.0);
@@ -4178,7 +4167,7 @@ impl BoosterApp {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 // Mail icon
-                                ui.label(egui::RichText::new("✉")
+                                ui.label(egui::RichText::new("@")
                                     .size(16.0)
                                     .color(TEXT_MUTED));
                                 ui.add_space(12.0);
@@ -4227,7 +4216,7 @@ impl BoosterApp {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 // Lock icon
-                                ui.label(egui::RichText::new("🔒")
+                                ui.label(egui::RichText::new("*")
                                     .size(16.0)
                                     .color(TEXT_MUTED));
                                 ui.add_space(12.0);
@@ -4253,7 +4242,7 @@ impl BoosterApp {
                     let response = ui.add_sized(
                         egui::vec2(ui.available_width(), 52.0),
                         egui::Button::new(
-                            egui::RichText::new("Sign in   →")
+                            egui::RichText::new("Sign in   ->")
                                 .size(16.0)
                                 .color(egui::Color32::WHITE)
                                 .strong()
@@ -4298,7 +4287,7 @@ impl BoosterApp {
                     let google_response = ui.add_sized(
                         egui::vec2(ui.available_width(), 48.0),
                         egui::Button::new(
-                            egui::RichText::new("🔵  Sign in with Google")
+                            egui::RichText::new("Sign in with Google")
                                 .size(15.0)
                                 .color(TEXT_PRIMARY)
                         )
@@ -4347,7 +4336,7 @@ impl BoosterApp {
                             .show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("⚠")
+                                    ui.label(egui::RichText::new("!")
                                         .size(14.0)
                                         .color(STATUS_ERROR));
                                     ui.add_space(8.0);
@@ -4430,7 +4419,7 @@ impl BoosterApp {
                             ui.set_min_width(ui.available_width());
                             ui.vertical_centered(|ui| {
                                 // Browser icon
-                                ui.label(egui::RichText::new("🌐")
+                                ui.label(egui::RichText::new("o")
                                     .size(48.0));
 
                                 ui.add_space(20.0);
@@ -4917,7 +4906,7 @@ impl BoosterApp {
                     .inner_margin(12.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("⚠").size(14.0).color(STATUS_ERROR));
+                            ui.label(egui::RichText::new("!").size(14.0).color(STATUS_ERROR));
                             ui.add_space(8.0);
                             ui.label(egui::RichText::new(format!("Update failed: {}", msg))
                                 .size(12.0).color(STATUS_ERROR));
@@ -4960,7 +4949,7 @@ impl BoosterApp {
                 match &state {
                     UpdateState::Available(info) => {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("🔄").size(14.0));
+                            ui.label(egui::RichText::new("~").size(14.0));
                             ui.add_space(8.0);
                             ui.label(egui::RichText::new(format!("Update v{} available!", info.version))
                                 .size(13.0).color(TEXT_PRIMARY).strong());
@@ -4982,7 +4971,7 @@ impl BoosterApp {
                     UpdateState::Downloading { progress, downloaded, total, .. } => {
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("⬇").size(14.0));
+                                ui.label(egui::RichText::new("v").size(14.0));
                                 ui.add_space(8.0);
                                 ui.label(egui::RichText::new(format!(
                                     "Downloading v{}... {:.1}%",
@@ -5020,7 +5009,7 @@ impl BoosterApp {
                     }
                     UpdateState::ReadyToInstall { info, .. } => {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("✓").size(14.0).color(STATUS_CONNECTED));
+                            ui.label(egui::RichText::new("+").size(14.0).color(STATUS_CONNECTED));
                             ui.add_space(8.0);
                             ui.label(egui::RichText::new(format!("v{} ready to install", info.version))
                                 .size(13.0).color(TEXT_PRIMARY).strong());
@@ -5257,7 +5246,7 @@ impl BoosterApp {
 
         // Tab header
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("📶 Network Analyzer")
+            ui.label(egui::RichText::new(":: Network Analyzer")
                 .size(20.0)
                 .color(TEXT_PRIMARY)
                 .strong());
@@ -5286,7 +5275,7 @@ impl BoosterApp {
             .show(ui, |ui| {
                 // Section header
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("🎯 Connection Stability")
+                    ui.label(egui::RichText::new("@ Connection Stability")
                         .size(16.0)
                         .color(TEXT_PRIMARY)
                         .strong());
@@ -5349,7 +5338,7 @@ impl BoosterApp {
 
                 // Start/Stop button
                 let is_running = self.network_analyzer_state.stability.running;
-                let button_text = if is_running { "⏹ Stop Test" } else { "▶ Start Stability Test" };
+                let button_text = if is_running { "[] Stop Test" } else { "> Start Stability Test" };
                 let button_color = if is_running { STATUS_ERROR } else { ACCENT_PRIMARY };
 
                 let button = egui::Button::new(
@@ -5446,7 +5435,7 @@ impl BoosterApp {
                         painter.text(
                             egui::pos2(x, y),
                             egui::Align2::CENTER_CENTER,
-                            "×",
+                            "x",
                             egui::FontId::proportional(12.0),
                             STATUS_ERROR
                         );
@@ -5513,7 +5502,7 @@ impl BoosterApp {
             .show(ui, |ui| {
                 // Section header
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("🚀 Speed Test")
+                    ui.label(egui::RichText::new("^ Speed Test")
                         .size(16.0)
                         .color(TEXT_PRIMARY)
                         .strong());
@@ -5553,8 +5542,8 @@ impl BoosterApp {
                 if self.network_analyzer_state.speed.running {
                     let phase = &self.network_analyzer_state.speed.phase;
                     let phase_text = match phase {
-                        crate::network_analyzer::SpeedTestPhase::Download => "⬇ Testing Download...",
-                        crate::network_analyzer::SpeedTestPhase::Upload => "⬆ Testing Upload...",
+                        crate::network_analyzer::SpeedTestPhase::Download => "v Testing Download...",
+                        crate::network_analyzer::SpeedTestPhase::Upload => "^ Testing Upload...",
                         _ => "Starting...",
                     };
 
@@ -5583,7 +5572,7 @@ impl BoosterApp {
 
                 // Start button
                 let is_running = self.network_analyzer_state.speed.running;
-                let button_text = if is_running { "⏹ Stop Test" } else { "▶ Start Speed Test" };
+                let button_text = if is_running { "[] Stop Test" } else { "> Start Speed Test" };
                 let button_color = if is_running { STATUS_ERROR } else { GRADIENT_CYAN_START };
 
                 let button = egui::Button::new(
