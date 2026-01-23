@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-fps-booster"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel - Game Booster with PC Optimizations"
@@ -124,6 +124,9 @@ parking_lot = "0.12"
 
 # Per-CPU parallel packet processing
 crossbeam-channel = "0.5"
+
+# Lock-free Arc swapping for BSOD-safe RCU pattern
+arc-swap = "1.7"
 num_cpus = "1.16"
 
 # Stack-allocated buffers for zero-alloc packet processing
