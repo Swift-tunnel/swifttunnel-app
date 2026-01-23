@@ -272,7 +272,7 @@ impl eframe::App for UpdaterSplash {
         let progress_bg = egui::Color32::from_rgb(50, 50, 55);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(bg_color).inner_margin(30.0))
+            .frame(egui::Frame::NONE.fill(bg_color).inner_margin(30))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     // App title
