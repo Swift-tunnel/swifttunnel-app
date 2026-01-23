@@ -152,6 +152,69 @@ pub fn parse_endpoint(endpoint: &str) -> VpnResult<std::net::SocketAddr> {
         .map_err(|e| VpnError::InvalidConfig(format!("Invalid endpoint '{}': {}", endpoint, e)))
 }
 
+/// Update artificial latency setting for a VPN config
+///
+/// # Arguments
+/// * `access_token` - Bearer token for authentication
+/// * `config_id` - The VPN config UUID
+/// * `latency_ms` - Latency to add (0-100ms)
+///
+/// # Returns
+/// * `Ok(true)` if server applied the latency immediately
+/// * `Ok(false)` if latency was saved but will apply on reconnect
+/// * `Err` on failure
+pub async fn update_latency(
+    access_token: &str,
+    config_id: &str,
+    latency_ms: u32,
+) -> VpnResult<bool> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/vpn/latency", API_BASE_URL);
+
+    log::info!("Updating latency to {}ms for config {}", latency_ms, config_id);
+
+    let response = client
+        .patch(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "configId": config_id,
+            "latencyMs": latency_ms
+        }))
+        .send()
+        .await
+        .map_err(|e| VpnError::ConfigFetch(format!("Failed to update latency: {}", e)))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        log::error!("Latency update API error {}: {}", status, error_text);
+        return Err(VpnError::ConfigFetch(format!(
+            "HTTP {}: {}",
+            status, error_text
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct LatencyResponse {
+        #[serde(default)]
+        server_applied: bool,
+    }
+
+    let resp: LatencyResponse = response
+        .json()
+        .await
+        .map_err(|e| VpnError::ConfigFetch(format!("Failed to parse latency response: {}", e)))?;
+
+    if resp.server_applied {
+        log::info!("Latency {}ms applied to server immediately", latency_ms);
+    } else {
+        log::info!("Latency {}ms saved, will apply on reconnect", latency_ms);
+    }
+
+    Ok(resp.server_applied)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

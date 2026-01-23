@@ -174,6 +174,11 @@ impl VpnConnection {
         })
     }
 
+    /// Get the current config ID (for latency updates)
+    pub fn get_config_id(&self) -> Option<String> {
+        self.config.as_ref().map(|c| c.id.clone())
+    }
+
     async fn set_state(&self, state: ConnectionState) {
         log::info!("Connection state: {:?}", state);
         *self.state.lock().await = state;
