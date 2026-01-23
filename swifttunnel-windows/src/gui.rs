@@ -1067,6 +1067,7 @@ impl eframe::App for BoosterApp {
 
             // Non-blocking VPN state check using try_lock
             let mut should_mark_dirty = false;
+            let mut should_apply_latency = false;
             if let Ok(vpn) = self.vpn_connection.try_lock() {
                 // Get state directly - the state() method is fast
                 let new_state = self.runtime.block_on(vpn.state());
@@ -1120,10 +1121,10 @@ impl eframe::App for BoosterApp {
                     self.current_config_id = vpn.get_config_id();
                     log::info!("Config ID for latency updates: {:?}", self.current_config_id);
 
-                    // Apply artificial latency if configured
+                    // Apply artificial latency if configured (deferred until lock is released)
                     if self.artificial_latency_ms > 0 && self.current_config_id.is_some() {
-                        log::info!("Applying artificial latency: +{}ms", self.artificial_latency_ms);
-                        self.update_server_latency();
+                        log::info!("Will apply artificial latency: +{}ms", self.artificial_latency_ms);
+                        should_apply_latency = true;
                     }
                 }
 
@@ -1132,6 +1133,10 @@ impl eframe::App for BoosterApp {
             // Mark dirty outside the lock scope to avoid borrow conflict
             if should_mark_dirty {
                 self.mark_dirty();
+            }
+            // Apply latency after releasing the VPN lock
+            if should_apply_latency {
+                self.update_server_latency();
             }
 
             // Update throughput history when connected
