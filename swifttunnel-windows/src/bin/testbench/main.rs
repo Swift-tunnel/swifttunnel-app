@@ -74,6 +74,9 @@ fn main() -> Result<()> {
         "bench" => {
             run_vpn_benchmark();
         }
+        "latency" => {
+            run_latency_test();
+        }
         "wgconf" => {
             export_wireguard_config();
         }
@@ -111,6 +114,7 @@ fn print_usage() {
     println!("  ping     Test ping functionality (fetch servers & measure latency)");
     println!("  split    Test split tunnel with two apps (ip_checker=tunnel, testbench=bypass)");
     println!("  bench    Run speed benchmark through VPN tunnel (10MB download)");
+    println!("  latency  Run latency test (ping through VPN tunnel)");
     println!("  wgconf   Export WireGuard config file (for WireSock testing)");
     println!("  help     Show this help message");
 }
@@ -1225,8 +1229,8 @@ fn test_split_tunnel_two_apps() {
         println!("   ⚠ Could not get tunnel context (falling back to Wintun injection)");
     }
 
-    // TUNNEL ONLY ip_checker.exe
-    let tunnel_apps = vec!["ip_checker.exe".to_string()];
+    // TUNNEL ONLY ip_checker.exe and ping.exe
+    let tunnel_apps = vec!["ip_checker.exe".to_string(), "ping.exe".to_string()];
 
     let split_config = SplitTunnelConfig::new(
         tunnel_apps,
@@ -1859,6 +1863,242 @@ PersistentKeepalive = 25
             println!("   ❌ Failed to write config: {}", e);
             println!("\n--- Config Contents (copy manually) ---");
             println!("{}", wg_config);
+        }
+    }
+}
+
+/// Run latency test - ping through VPN tunnel
+fn run_latency_test() {
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║    LATENCY TEST (ping through VPN tunnel)                     ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    let rt = Runtime::new().expect("Failed to create tokio runtime");
+    let target_ip = "54.153.235.165";
+
+    // Step 1: Baseline ping
+    println!("═══ BASELINE (No VPN) ═══\n");
+    println!("Pinging {}...", target_ip);
+    run_ping(target_ip, 20);
+
+    // Step 2: Connect VPN
+    println!("\n═══ CONNECTING VPN ═══\n");
+    println!("Authenticating...");
+    let auth_manager = match AuthManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            return;
+        }
+    };
+
+    let access_token = rt.block_on(async {
+        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+            println!("   ❌ Sign in failed: {}", e);
+            return None;
+        }
+        match auth_manager.get_state() {
+            AuthState::LoggedIn(session) => Some(session.access_token),
+            _ => None,
+        }
+    });
+
+    let access_token = match access_token {
+        Some(t) => {
+            println!("   ✅ Signed in");
+            t
+        }
+        None => return,
+    };
+
+    // Step 3: Fetch VPN config
+    println!("Fetching VPN config...");
+    let vpn_config = rt.block_on(async {
+        match fetch_vpn_config(&access_token, TEST_REGION).await {
+            Ok(config) => {
+                println!("   ✅ Region: {}, Endpoint: {}", TEST_REGION, config.endpoint);
+                Some(config)
+            }
+            Err(e) => {
+                println!("   ❌ Failed: {}", e);
+                None
+            }
+        }
+    });
+
+    let vpn_config = match vpn_config {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Step 4: Create Wintun adapter
+    println!("Creating Wintun adapter...");
+    let (ip, cidr) = match parse_ip_cidr(&vpn_config.assigned_ip) {
+        Ok((ip, cidr)) => (ip, cidr),
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            return;
+        }
+    };
+
+    let adapter = match WintunAdapter::create(std::net::IpAddr::V4(ip), cidr) {
+        Ok(a) => {
+            println!("   ✅ Adapter created");
+            std::sync::Arc::new(a)
+        }
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            return;
+        }
+    };
+
+    adapter.set_dns(&["1.1.1.1".to_string(), "8.8.8.8".to_string()]);
+
+    // Step 5: Create WireGuard tunnel
+    println!("Starting WireGuard tunnel...");
+    let wg_ctx = WireguardContext {
+        private_key: vpn_config.private_key.clone(),
+        peer_public_key: vpn_config.server_public_key.clone(),
+        endpoint: vpn_config.endpoint.parse().expect("Invalid endpoint"),
+        keepalive_interval: Some(25),
+    };
+
+    let mut tunnel = match WireguardTunnel::new(wg_ctx, adapter.clone()) {
+        Ok(t) => {
+            println!("   ✅ Tunnel created");
+            t
+        }
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            adapter.shutdown();
+            return;
+        }
+    };
+
+    println!("   Waiting for handshake...");
+    if let Err(e) = tunnel.start() {
+        println!("   ❌ Tunnel start failed: {}", e);
+        adapter.shutdown();
+        return;
+    }
+
+    // Capture internet IP before routes change
+    let original_internet_ip = get_internet_interface_ip().unwrap_or_else(|| "0.0.0.0".to_string());
+    println!("   ✅ Internet interface IP: {}", original_internet_ip);
+
+    // Step 6: Setup routes (split tunnel mode)
+    println!("Setting up routes...");
+    let server_ip: std::net::IpAddr = vpn_config.endpoint.split(':').next()
+        .and_then(|ip| ip.parse().ok())
+        .expect("Invalid server IP");
+    let interface_index = adapter.get_interface_index();
+    let interface_luid = adapter.get_interface_luid();
+
+    let mut route_manager = RouteManager::new(server_ip, interface_index);
+    route_manager.set_split_tunnel_mode(true);
+    if let Err(e) = route_manager.apply_routes() {
+        println!("   ⚠ Route setup failed: {}", e);
+    } else {
+        println!("   ✅ Split tunnel routes applied");
+    }
+
+    // Step 7: Setup split tunnel driver
+    println!("Setting up split tunnel...");
+    let mut driver = match SplitTunnelDriver::new(true) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("   ❌ Failed to create driver: {}", e);
+            route_manager.remove_routes().ok();
+            tunnel.stop();
+            adapter.shutdown();
+            return;
+        }
+    };
+
+    if let Err(e) = driver.initialize() {
+        println!("   ❌ Failed to initialize driver: {}", e);
+        let _ = driver.close();
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+
+    // Set VPN encrypt context
+    if let Some(tunn) = tunnel.get_tunn() {
+        let endpoint = tunnel.get_endpoint();
+        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect(endpoint).is_ok() {
+                let ctx = VpnEncryptContext {
+                    tunn,
+                    socket: std::sync::Arc::new(socket),
+                    server_addr: endpoint,
+                };
+                driver.set_vpn_encrypt_context(ctx);
+            }
+        }
+    }
+
+    // Configure split tunnel to tunnel ping.exe
+    let tunnel_apps = vec!["ping.exe".to_string()];
+    let split_config = SplitTunnelConfig::new(
+        tunnel_apps,
+        vpn_config.assigned_ip.clone(),
+        original_internet_ip.clone(),
+        interface_luid,
+    );
+
+    if let Err(e) = driver.configure(split_config) {
+        println!("   ❌ Configure failed: {}", e);
+        let _ = driver.close();
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+    println!("   ✅ Split tunnel configured (ping.exe tunneled)");
+
+    // Set up inbound handler
+    if let Some(handler) = driver.create_inbound_handler() {
+        tunnel.set_inbound_handler(handler);
+    }
+
+    // Wait for tunnel to stabilize
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Step 8: Run ping through VPN
+    println!("\n═══ SWIFTTUNNEL (ping through VPN) ═══\n");
+    println!("Pinging {} through VPN tunnel...", target_ip);
+    run_ping(target_ip, 20);
+
+    // Cleanup
+    println!("\nCleaning up...");
+    let _ = driver.close();
+    let _ = route_manager.remove_routes();
+    tunnel.stop();
+    adapter.shutdown();
+    println!("   ✅ Done");
+}
+
+/// Run ping command and display results
+fn run_ping(target: &str, count: u32) {
+    let output = std::process::Command::new("ping")
+        .args(["-n", &count.to_string(), target])
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Print just the summary lines
+            for line in stdout.lines() {
+                if line.contains("Minimum") || line.contains("Average") || line.contains("Maximum")
+                   || line.contains("Packets:") || line.contains("Lost") {
+                    println!("   {}", line.trim());
+                }
+            }
+        }
+        Err(e) => {
+            println!("   ❌ Ping failed: {}", e);
         }
     }
 }
