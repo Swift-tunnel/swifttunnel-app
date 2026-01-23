@@ -1952,21 +1952,17 @@ fn run_latency_test() {
         }
     };
 
-    adapter.set_dns(&["1.1.1.1".to_string(), "8.8.8.8".to_string()]);
+    if !vpn_config.dns.is_empty() {
+        let _ = adapter.set_dns(&vpn_config.dns);
+    }
+    let interface_luid = adapter.get_luid();
 
     // Step 5: Create WireGuard tunnel
     println!("Starting WireGuard tunnel...");
-    let wg_ctx = WireguardContext {
-        private_key: vpn_config.private_key.clone(),
-        peer_public_key: vpn_config.server_public_key.clone(),
-        endpoint: vpn_config.endpoint.parse().expect("Invalid endpoint"),
-        keepalive_interval: Some(25),
-    };
-
-    let mut tunnel = match WireguardTunnel::new(wg_ctx, adapter.clone()) {
+    let tunnel = match WireguardTunnel::new(vpn_config.clone()) {
         Ok(t) => {
             println!("   ✅ Tunnel created");
-            t
+            std::sync::Arc::new(t)
         }
         Err(e) => {
             println!("   ❌ Failed: {}", e);
@@ -1975,45 +1971,69 @@ fn run_latency_test() {
         }
     };
 
+    let tunnel_clone = tunnel.clone();
+    let adapter_clone = adapter.clone();
+    rt.spawn(async move {
+        if let Err(e) = tunnel_clone.start(adapter_clone).await {
+            log::error!("Tunnel error: {}", e);
+        }
+    });
+
     println!("   Waiting for handshake...");
-    if let Err(e) = tunnel.start() {
-        println!("   ❌ Tunnel start failed: {}", e);
-        adapter.shutdown();
-        return;
-    }
+    std::thread::sleep(Duration::from_secs(3));
 
     // Capture internet IP before routes change
-    let original_internet_ip = get_internet_interface_ip().unwrap_or_else(|| "0.0.0.0".to_string());
-    println!("   ✅ Internet interface IP: {}", original_internet_ip);
+    let original_internet_ip = match get_internet_interface_ip() {
+        Ok(ip) => {
+            println!("   ✅ Internet interface IP: {}", ip);
+            ip.to_string()
+        }
+        Err(e) => {
+            println!("   ❌ Failed to get internet IP: {}", e);
+            tunnel.stop();
+            adapter.shutdown();
+            return;
+        }
+    };
 
     // Step 6: Setup routes (split tunnel mode)
     println!("Setting up routes...");
-    let server_ip: std::net::IpAddr = vpn_config.endpoint.split(':').next()
-        .and_then(|ip| ip.parse().ok())
-        .expect("Invalid server IP");
-    let interface_index = adapter.get_interface_index();
-    let interface_luid = adapter.get_interface_luid();
+    let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
+        .split(':')
+        .next()
+        .unwrap_or("0.0.0.0")
+        .parse()
+        .unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
+    let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
 
-    let mut route_manager = RouteManager::new(server_ip, interface_index);
+    let mut route_manager = RouteManager::new(server_ip, if_index);
     route_manager.set_split_tunnel_mode(true);
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Route setup failed: {}", e);
     } else {
         println!("   ✅ Split tunnel routes applied");
     }
+    std::thread::sleep(Duration::from_secs(1));
 
     // Step 7: Setup split tunnel driver
     println!("Setting up split tunnel...");
-    let mut driver = match SplitTunnelDriver::new(true) {
-        Ok(d) => d,
-        Err(e) => {
-            println!("   ❌ Failed to create driver: {}", e);
-            route_manager.remove_routes().ok();
-            tunnel.stop();
-            adapter.shutdown();
-            return;
-        }
-    };
+    let mut driver = SplitTunnelDriver::new();
+
+    if !SplitTunnelDriver::is_available() {
+        println!("   ❌ ndisapi driver not available");
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
+
+    if let Err(e) = driver.open() {
+        println!("   ❌ Open failed: {}", e);
+        route_manager.remove_routes().ok();
+        tunnel.stop();
+        adapter.shutdown();
+        return;
+    }
 
     if let Err(e) = driver.initialize() {
         println!("   ❌ Failed to initialize driver: {}", e);
@@ -2024,17 +2044,32 @@ fn run_latency_test() {
         return;
     }
 
+    // Set Wintun injection context
+    let wg_ctx = std::sync::Arc::new(WireguardContext {
+        session: adapter.session(),
+        packets_injected: std::sync::atomic::AtomicU64::new(0),
+    });
+    driver.set_wireguard_context(wg_ctx.clone());
+
     // Set VPN encrypt context
     if let Some(tunn) = tunnel.get_tunn() {
         let endpoint = tunnel.get_endpoint();
-        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-            if socket.connect(endpoint).is_ok() {
-                let ctx = VpnEncryptContext {
-                    tunn,
-                    socket: std::sync::Arc::new(socket),
-                    server_addr: endpoint,
-                };
-                driver.set_vpn_encrypt_context(ctx);
+        match std::net::UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => {
+                if let Err(e) = socket.connect(endpoint) {
+                    println!("   ⚠ Failed to connect encryption socket: {}", e);
+                } else {
+                    let ctx = VpnEncryptContext {
+                        tunn,
+                        socket: std::sync::Arc::new(socket),
+                        server_addr: endpoint,
+                    };
+                    driver.set_vpn_encrypt_context(ctx);
+                    println!("   ✅ VPN encrypt context set");
+                }
+            }
+            Err(e) => {
+                println!("   ⚠ Failed to create encryption socket: {}", e);
             }
         }
     }
