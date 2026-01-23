@@ -376,6 +376,12 @@ pub struct BoosterApp {
     throughput_history: VecDeque<(std::time::Instant, f64, f64)>,
     /// Last bytes values for calculating rate
     last_throughput_bytes: Option<(u64, u64, std::time::Instant)>,
+    /// Artificial latency to add to VPN connection (0-100ms)
+    artificial_latency_ms: u32,
+    /// Current VPN config ID (from API, used for latency updates)
+    current_config_id: Option<String>,
+    /// Flag indicating latency update is in progress
+    updating_latency: bool,
 }
 
 impl BoosterApp {
@@ -585,6 +591,11 @@ impl BoosterApp {
             throughput_stats: None,
             throughput_history: VecDeque::with_capacity(120), // 2 minutes at 1 sample/sec
             last_throughput_bytes: None,
+
+            // Artificial latency for practice mode
+            artificial_latency_ms: saved_settings.artificial_latency_ms,
+            current_config_id: None,
+            updating_latency: false,
         }
     }
 
@@ -683,6 +694,8 @@ impl BoosterApp {
             },
             // Save forced server selections
             forced_servers: self.forced_servers.clone(),
+            // Save artificial latency setting
+            artificial_latency_ms: self.artificial_latency_ms,
         };
 
         let _ = save_settings(&settings);
@@ -1091,15 +1104,27 @@ impl eframe::App for BoosterApp {
                     self.throughput_stats = None;
                     self.throughput_history.clear();
                     self.last_throughput_bytes = None;
+                    // Clear config ID
+                    self.current_config_id = None;
                 }
 
-                // Get throughput stats when first connecting
+                // Get throughput stats and config ID when first connecting
                 if !self.vpn_state.is_connected() && new_state.is_connected() {
                     // Get throughput stats handle from VPN connection
                     self.throughput_stats = vpn.get_throughput_stats();
                     self.throughput_history.clear();
                     self.last_throughput_bytes = None;
                     log::info!("Throughput stats tracking: {:?}", self.throughput_stats.is_some());
+
+                    // Store config ID for latency updates
+                    self.current_config_id = vpn.get_config_id();
+                    log::info!("Config ID for latency updates: {:?}", self.current_config_id);
+
+                    // Apply artificial latency if configured
+                    if self.artificial_latency_ms > 0 && self.current_config_id.is_some() {
+                        log::info!("Applying artificial latency: +{}ms", self.artificial_latency_ms);
+                        self.update_server_latency();
+                    }
                 }
 
                 self.vpn_state = new_state;
@@ -1610,6 +1635,8 @@ impl BoosterApp {
         self.render_game_preset_selector(ui);
         ui.add_space(16.0);
         self.render_region_selector(ui);
+        ui.add_space(16.0);
+        self.render_latency_slider(ui);
         ui.add_space(16.0);
         self.render_quick_info(ui);
     }
@@ -2838,6 +2865,136 @@ impl BoosterApp {
         }
 
         self.mark_dirty();
+    }
+
+    /// Render the artificial latency slider (practice mode)
+    fn render_latency_slider(&mut self, ui: &mut egui::Ui) {
+        const LATENCY_MAX_MS: u32 = 100;
+        const LATENCY_STEP_MS: u32 = 5;
+
+        egui::Frame::none()
+            .fill(BG_CARD)
+            .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0)
+            .inner_margin(16.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+
+                // Section header with value badge
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("⏱").size(16.0));
+                    ui.label(egui::RichText::new("Practice Mode").size(14.0).color(TEXT_PRIMARY).strong());
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let badge_text = if self.artificial_latency_ms == 0 {
+                            "Off".to_string()
+                        } else {
+                            format!("+{}ms", self.artificial_latency_ms)
+                        };
+                        let badge_color = if self.artificial_latency_ms == 0 {
+                            TEXT_MUTED
+                        } else {
+                            STATUS_WARNING
+                        };
+
+                        egui::Frame::none()
+                            .fill(if self.artificial_latency_ms == 0 { BG_ELEVATED } else { STATUS_WARNING.gamma_multiply(0.15) })
+                            .rounding(4.0)
+                            .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(badge_text).size(11.0).color(badge_color).strong());
+                            });
+
+                        if self.updating_latency {
+                            ui.spinner();
+                        }
+                    });
+                });
+
+                ui.add_space(12.0);
+
+                // Slider
+                let mut latency_f32 = self.artificial_latency_ms as f32;
+                let slider = egui::Slider::new(&mut latency_f32, 0.0..=LATENCY_MAX_MS as f32)
+                    .step_by(LATENCY_STEP_MS as f64)
+                    .show_value(false)
+                    .trailing_fill(true);
+
+                let response = ui.add(slider);
+
+                // Update value if changed
+                let new_latency = latency_f32 as u32;
+                if new_latency != self.artificial_latency_ms {
+                    self.artificial_latency_ms = new_latency;
+                    self.mark_dirty();
+                }
+
+                // Update server when slider is released (committed)
+                if response.drag_stopped() && self.vpn_state.is_connected() && !self.updating_latency {
+                    self.update_server_latency();
+                }
+
+                // Min/max labels
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("0ms").size(10.0).color(TEXT_MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(format!("{}ms", LATENCY_MAX_MS)).size(10.0).color(TEXT_MUTED));
+                    });
+                });
+
+                ui.add_space(4.0);
+
+                // Description
+                ui.label(egui::RichText::new("Add artificial latency for high-ping practice")
+                    .size(11.0).color(TEXT_MUTED));
+            });
+    }
+
+    /// Update server with current latency setting
+    fn update_server_latency(&mut self) {
+        // Need config ID and access token
+        let config_id = match &self.current_config_id {
+            Some(id) => id.clone(),
+            None => {
+                log::warn!("Cannot update latency: no config ID");
+                return;
+            }
+        };
+
+        let access_token = match &self.auth_state {
+            AuthState::LoggedIn(session) => session.access_token.clone(),
+            _ => {
+                log::warn!("Cannot update latency: not logged in");
+                return;
+            }
+        };
+
+        let latency_ms = self.artificial_latency_ms;
+        let rt = Arc::clone(&self.runtime);
+
+        self.updating_latency = true;
+
+        // Spawn async task to update latency
+        std::thread::spawn(move || {
+            rt.block_on(async {
+                match crate::vpn::update_latency(&access_token, &config_id, latency_ms).await {
+                    Ok(server_applied) => {
+                        if server_applied {
+                            log::info!("Latency +{}ms applied to server", latency_ms);
+                        } else {
+                            log::info!("Latency +{}ms saved, will apply on reconnect", latency_ms);
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to update latency: {}", e);
+                    }
+                }
+            });
+        });
+
+        // Note: updating_latency flag will be cleared on next state check
+        // For now, just set it false after a short delay
+        self.updating_latency = false;
     }
 
     fn render_quick_info(&self, ui: &mut egui::Ui) {

@@ -85,6 +85,9 @@ pub struct SupabaseUser {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VpnConfig {
+    /// Config ID (UUID from database)
+    #[serde(default)]
+    pub id: String,
     pub region: String,
     /// Server endpoint (IP:port), API returns as "serverEndpoint"
     #[serde(rename = "serverEndpoint")]

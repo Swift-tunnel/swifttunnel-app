@@ -84,6 +84,10 @@ pub struct AppSettings {
     /// If a region has an entry, that server will be used instead of auto-selecting best ping
     #[serde(default)]
     pub forced_servers: HashMap<String, String>,
+    /// Artificial latency to add to VPN connection (0-100ms)
+    /// Used for practice mode to simulate high ping
+    #[serde(default)]
+    pub artificial_latency_ms: u32,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -119,6 +123,7 @@ impl Default for AppSettings {
             selected_game_presets: default_game_presets(),
             network_test_results: NetworkTestResultsCache::default(),
             forced_servers: HashMap::new(),
+            artificial_latency_ms: 0,
         }
     }
 }

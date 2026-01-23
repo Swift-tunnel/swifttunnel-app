@@ -42,7 +42,7 @@ pub mod routes;
 pub mod connection;
 pub mod servers;
 
-pub use config::{fetch_vpn_config, VpnConfigRequest};
+pub use config::{fetch_vpn_config, update_latency, VpnConfigRequest};
 pub use adapter::WintunAdapter;
 pub use tunnel::{WireguardTunnel, InboundHandler};
 pub use packet_interceptor::WireguardContext;
