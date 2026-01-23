@@ -93,8 +93,19 @@ impl SystemOptimizer {
     }
 
     /// Set CPU affinity for Roblox process
+    ///
+    /// SAFETY: This function validates that the requested cores are available
+    /// before setting affinity. On some systems (NUMA, VMs, hybrid CPUs),
+    /// certain cores may not be available to the process.
     fn set_cpu_affinity(&mut self, process_id: u32, cores: &[usize]) -> Result<()> {
+        use windows::Win32::System::Threading::GetProcessAffinityMask;
+
         info!("Setting CPU affinity for PID: {} to cores: {:?}", process_id, cores);
+
+        if cores.is_empty() {
+            warn!("No cores specified for CPU affinity, skipping");
+            return Ok(());
+        }
 
         unsafe {
             let handle = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, false, process_id)?;
@@ -103,20 +114,54 @@ impl SystemOptimizer {
                 return Err(anyhow::anyhow!("Failed to open process"));
             }
 
-            // Calculate affinity mask
+            // First, get the process affinity mask to see which cores are available
+            let mut process_mask: usize = 0;
+            let mut system_mask: usize = 0;
+
+            if GetProcessAffinityMask(handle, &mut process_mask, &mut system_mask).is_err() {
+                let _ = CloseHandle(handle);
+                warn!("Failed to get process affinity mask, skipping affinity setting");
+                return Ok(()); // Non-critical, continue without setting affinity
+            }
+
+            // Calculate requested affinity mask, filtering out unavailable cores
             let mut affinity_mask: usize = 0;
+            let mut skipped_cores: Vec<usize> = Vec::new();
+
             for &core in cores {
-                affinity_mask |= 1 << core;
+                let core_mask = 1usize << core;
+                if (process_mask & core_mask) != 0 {
+                    // Core is available
+                    affinity_mask |= core_mask;
+                } else {
+                    // Core not available - skip it
+                    skipped_cores.push(core);
+                }
+            }
+
+            if !skipped_cores.is_empty() {
+                warn!(
+                    "Some requested cores are not available: {:?} (process_mask={:#x})",
+                    skipped_cores, process_mask
+                );
+            }
+
+            if affinity_mask == 0 {
+                let _ = CloseHandle(handle);
+                warn!("No requested cores are available, skipping affinity setting");
+                return Ok(());
             }
 
             let result = SetProcessAffinityMask(handle, affinity_mask);
             let _ = CloseHandle(handle);
 
             if result.is_ok() {
-                info!("Successfully set CPU affinity");
+                info!("Successfully set CPU affinity to mask {:#x}", affinity_mask);
                 Ok(())
             } else {
-                Err(anyhow::anyhow!("Failed to set CPU affinity"))
+                // Not critical - game will still run, just without affinity optimization
+                warn!("Failed to set CPU affinity (non-critical)");
+                Ok(())
             }
         }
     }

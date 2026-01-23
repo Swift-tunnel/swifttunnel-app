@@ -96,10 +96,11 @@ thread_local! {
     static ENCRYPT_BUFFER: RefCell<[u8; ENCRYPT_BUFFER_SIZE]> = RefCell::new([0u8; ENCRYPT_BUFFER_SIZE]);
 }
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
 use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersInfo, IP_ADAPTER_INFO};
 use windows::Win32::System::Threading::{
-    CreateEventW, ResetEvent, SetThreadAffinityMask, WaitForSingleObject,
+    CreateEventW, GetCurrentProcess, GetCurrentThread, GetProcessAffinityMask,
+    ResetEvent, SetThreadAffinityMask, WaitForSingleObject,
 };
 
 /// Packet work item sent to workers
@@ -542,28 +543,59 @@ impl ParallelInterceptor {
     }
 
     /// Stop interception
+    ///
+    /// SAFETY: This function ensures clean shutdown by:
+    /// 1. Setting stop flag with sequential consistency (visible to all threads)
+    /// 2. Waiting for reader thread first (it holds the driver handle)
+    /// 3. Then waiting for worker threads (they may still have pending packets)
+    /// 4. Finally waiting for auxiliary threads
+    ///
+    /// This order prevents race conditions during shutdown that could cause BSOD.
     pub fn stop(&mut self) {
         if !self.active {
             return;
         }
 
-        log::info!("Stopping parallel interceptor...");
+        log::info!("Stopping parallel interceptor - beginning shutdown sequence...");
+
+        // Step 1: Signal all threads to stop with SeqCst ordering
+        // This ensures the flag is immediately visible to all threads
         self.stop_flag.store(true, Ordering::SeqCst);
 
-        // Wait for threads
+        // Step 2: Wait for reader thread FIRST - this is critical
+        // The reader thread holds the driver handle and must clean up before workers stop
         if let Some(handle) = self.reader_handle.take() {
-            let _ = handle.join();
+            log::debug!("Waiting for reader thread to stop...");
+            match handle.join() {
+                Ok(_) => log::info!("Reader thread stopped cleanly"),
+                Err(e) => log::error!("Reader thread panicked: {:?}", e),
+            }
         }
 
-        for handle in self.worker_handles.drain(..) {
-            let _ = handle.join();
-        }
+        // Step 3: Small delay to allow worker channels to drain
+        // Workers may have packets in their channel that need to be processed or dropped
+        std::thread::sleep(std::time::Duration::from_millis(20));
 
+        // Step 4: Wait for worker threads
+        // They should exit quickly now that the reader has stopped sending packets
+        let num_workers = self.worker_handles.len();
+        for (i, handle) in self.worker_handles.drain(..).enumerate() {
+            log::debug!("Waiting for worker {} of {} to stop...", i + 1, num_workers);
+            match handle.join() {
+                Ok(_) => log::debug!("Worker {} stopped", i),
+                Err(e) => log::error!("Worker {} panicked: {:?}", i, e),
+            }
+        }
+        log::info!("All {} worker threads stopped", num_workers);
+
+        // Step 5: Wait for auxiliary threads
         if let Some(handle) = self.refresher_handle.take() {
+            log::debug!("Waiting for cache refresher thread to stop...");
             let _ = handle.join();
         }
 
         if let Some(handle) = self.inbound_receiver_handle.take() {
+            log::debug!("Waiting for inbound receiver thread to stop...");
             let _ = handle.join();
         }
 
@@ -972,14 +1004,92 @@ impl Drop for ParallelInterceptor {
 }
 
 /// Set thread affinity to specific CPU core
+///
+/// SAFETY: This function validates that the core is available before setting affinity.
+/// On systems with restricted cores (NUMA, hybrid CPUs, VMs), some cores may not be
+/// available to the process. We check the process affinity mask first and only set
+/// thread affinity to cores that are available.
 fn set_thread_affinity(core_id: usize) {
     #[cfg(target_os = "windows")]
-    unsafe {
-        let mask = 1usize << core_id;
-        let _ = SetThreadAffinityMask(
-            windows::Win32::System::Threading::GetCurrentThread(),
-            mask,
-        );
+    {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentThread, GetProcessAffinityMask,
+        };
+
+        // Safety: We validate the core is available before setting affinity
+        unsafe {
+            // First, get the process affinity mask to see which cores are available
+            let mut process_mask: usize = 0;
+            let mut system_mask: usize = 0;
+
+            if GetProcessAffinityMask(
+                GetCurrentProcess(),
+                &mut process_mask,
+                &mut system_mask,
+            ).is_err() {
+                log::warn!(
+                    "Worker {}: Failed to get process affinity mask, skipping affinity setting",
+                    core_id
+                );
+                return;
+            }
+
+            // Check if the requested core is available to this process
+            let requested_mask = 1usize << core_id;
+            if (process_mask & requested_mask) == 0 {
+                // Core not available - try to find an alternative core
+                // This can happen on NUMA systems, VMs, or hybrid CPUs
+                log::warn!(
+                    "Worker {}: Core {} not available (process_mask={:#x}), finding alternative",
+                    core_id, core_id, process_mask
+                );
+
+                // Find the Nth available core instead (where N = core_id % available_cores)
+                let available_cores: Vec<usize> = (0..64)
+                    .filter(|&i| (process_mask & (1usize << i)) != 0)
+                    .collect();
+
+                if available_cores.is_empty() {
+                    log::warn!("Worker {}: No cores available, running without affinity", core_id);
+                    return;
+                }
+
+                let alt_core = available_cores[core_id % available_cores.len()];
+                let alt_mask = 1usize << alt_core;
+
+                match SetThreadAffinityMask(GetCurrentThread(), alt_mask) {
+                    Ok(prev) if prev != 0 => {
+                        log::info!(
+                            "Worker {}: Set affinity to alternative core {} (mask={:#x})",
+                            core_id, alt_core, alt_mask
+                        );
+                    }
+                    _ => {
+                        log::warn!(
+                            "Worker {}: Failed to set affinity to alternative core {}",
+                            core_id, alt_core
+                        );
+                    }
+                }
+                return;
+            }
+
+            // Core is available, set the affinity
+            match SetThreadAffinityMask(GetCurrentThread(), requested_mask) {
+                Ok(prev) if prev != 0 => {
+                    log::debug!(
+                        "Worker {}: Set affinity to core {} (mask={:#x})",
+                        core_id, core_id, requested_mask
+                    );
+                }
+                _ => {
+                    log::warn!(
+                        "Worker {}: Failed to set affinity to core {} (mask={:#x})",
+                        core_id, core_id, requested_mask
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1382,41 +1492,101 @@ fn run_packet_reader(
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to create event: {}", e)))?
     };
 
-    driver
-        .set_packet_event(physical_handle, event)
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to set packet event: {}", e)))?;
+    // Validate the event handle - critical for system stability
+    // An invalid handle passed to kernel operations can cause BSOD
+    if event.is_invalid() {
+        return Err(VpnError::SplitTunnel(
+            "CreateEventW returned invalid handle - cannot proceed safely".to_string(),
+        ));
+    }
 
-    // Set adapter to tunnel mode
-    driver
-        .set_adapter_mode(
-            physical_handle,
-            FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL,
-        )
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
+    // Set the packet event - this registers the event with the driver
+    if let Err(e) = driver.set_packet_event(physical_handle, event) {
+        // Clean up event handle before returning error
+        unsafe {
+            let _ = CloseHandle(event);
+        }
+        return Err(VpnError::SplitTunnel(format!(
+            "Failed to set packet event: {}",
+            e
+        )));
+    }
+
+    // Set adapter to tunnel mode - this starts packet interception
+    if let Err(e) = driver.set_adapter_mode(
+        physical_handle,
+        FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL,
+    ) {
+        // Clean up event handle before returning error
+        unsafe {
+            let _ = CloseHandle(event);
+        }
+        return Err(VpnError::SplitTunnel(format!(
+            "Failed to set adapter mode: {}",
+            e
+        )));
+    }
+
+    log::info!("Packet reader: Event created and adapter mode set successfully");
 
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
     let mut passthrough_to_adapter: EthMRequest<BATCH_SIZE>;
     let mut passthrough_to_mstcp: EthMRequest<BATCH_SIZE>;
 
     loop {
+        // Check stop flag first - allows clean shutdown
         if stop_flag.load(Ordering::Relaxed) {
+            log::debug!("Packet reader: Stop flag set, exiting loop");
             break;
         }
 
-        // Wait with very short timeout (1ms) for low latency
-        unsafe {
-            WaitForSingleObject(event, 1);
+        // Wait for packet event with short timeout (5ms) for low latency
+        // Using 5ms instead of 1ms to reduce CPU usage while still being responsive
+        // The timeout allows us to check the stop_flag periodically
+        let wait_result = unsafe { WaitForSingleObject(event, 5) };
+
+        // Check stop flag again after wait - might have been set during wait
+        if stop_flag.load(Ordering::Relaxed) {
+            log::debug!("Packet reader: Stop flag set after wait, exiting loop");
+            break;
+        }
+
+        // WAIT_TIMEOUT (258) means no packets ready - that's normal, just continue
+        // WAIT_OBJECT_0 (0) means packets are ready - proceed to read
+        // Any other value indicates an error
+        if wait_result != windows::Win32::Foundation::WAIT_OBJECT_0
+            && wait_result != WAIT_TIMEOUT
+        {
+            // Unexpected wait result - log but don't crash
+            // This could indicate the event handle became invalid
+            log::warn!(
+                "Packet reader: Unexpected WaitForSingleObject result: {:?}",
+                wait_result
+            );
+            // Small sleep to avoid tight loop on repeated errors
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
         }
 
         // Read batch of packets
         let mut to_read =
             EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
 
-        let packets_read = driver
-            .read_packets::<BATCH_SIZE>(&mut to_read)
-            .unwrap_or(0);
+        let packets_read = match driver.read_packets::<BATCH_SIZE>(&mut to_read) {
+            Ok(count) => count,
+            Err(e) => {
+                // Driver read error - might indicate driver issue
+                log::warn!("Packet reader: read_packets failed: {}", e);
+                // Don't break - try to continue, but reset event
+                unsafe {
+                    let _ = ResetEvent(event);
+                }
+                continue;
+            }
+        };
 
         if packets_read == 0 {
+            // No packets read - reset event and continue
             unsafe {
                 let _ = ResetEvent(event);
             }
@@ -1480,13 +1650,33 @@ fn run_packet_reader(
         }
     }
 
-    // Cleanup
-    let _ = driver.set_adapter_mode(physical_handle, FilterFlags::default());
-    unsafe {
-        let _ = CloseHandle(event);
+    // Cleanup - CRITICAL: Must restore adapter mode before closing handles
+    // Failure to do this properly can leave the adapter in an inconsistent state
+    // which can cause network issues or BSOD on some systems
+    log::info!("Packet reader: Beginning cleanup sequence...");
+
+    // Step 1: Restore adapter to default mode (stops packet interception)
+    // This is critical - we must stop interception before closing the event
+    match driver.set_adapter_mode(physical_handle, FilterFlags::default()) {
+        Ok(_) => log::info!("Packet reader: Adapter mode restored to default"),
+        Err(e) => log::error!("Packet reader: Failed to restore adapter mode: {} - may cause issues", e),
     }
 
-    log::info!("Packet reader stopped");
+    // Step 2: Small delay to allow any in-flight packets to complete
+    // This prevents race conditions between packet processing and cleanup
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Step 3: Close the event handle
+    unsafe {
+        if !event.is_invalid() {
+            match CloseHandle(event) {
+                Ok(_) => log::debug!("Packet reader: Event handle closed"),
+                Err(e) => log::warn!("Packet reader: Failed to close event handle: {}", e),
+            }
+        }
+    }
+
+    log::info!("Packet reader: Cleanup complete, stopped gracefully");
     Ok(())
 }
 
