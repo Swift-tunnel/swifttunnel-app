@@ -715,7 +715,7 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
                 let ip = server_ip.clone();
                 move || {
                     hidden_command("ping")
-                        .args(["-n", "1", "-w", "1000", &ip])
+                        .args(["-n", "1", "-w", "2000", &ip])
                         .output()
                 }
             }).await;
@@ -2441,8 +2441,10 @@ impl BoosterApp {
                                                     .fill(egui::Color32::TRANSPARENT)
                                                     .stroke(egui::Stroke::NONE)
                                                     .rounding(4.0)
+                                                    .min_size(egui::vec2(24.0, 24.0))
                                             );
                                             if gear_btn.clicked() {
+                                                log::info!("Gear clicked for region: {}", region.id);
                                                 // Toggle popup for this region
                                                 if self.server_selection_popup.as_ref() == Some(&region.id) {
                                                     self.server_selection_popup = None;
