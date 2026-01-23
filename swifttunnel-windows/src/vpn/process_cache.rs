@@ -65,12 +65,24 @@ impl ProcessSnapshot {
         false
     }
 
-    /// Check if PID belongs to tunnel app
+    /// Check if PID belongs to tunnel app (internal)
     ///
     /// PERFORMANCE: Names are pre-lowercased at insertion time, so this is
     /// allocation-free. Critical for 100K+ packets/second throughput.
     #[inline(always)]
     fn is_tunnel_pid(&self, pid: u32) -> bool {
+        self.is_tunnel_pid_impl(pid)
+    }
+
+    /// Check if PID belongs to tunnel app (public, for inline lookups)
+    #[inline(always)]
+    pub fn is_tunnel_pid_public(&self, pid: u32) -> bool {
+        self.is_tunnel_pid_impl(pid)
+    }
+
+    /// Implementation of PID tunnel check
+    #[inline(always)]
+    fn is_tunnel_pid_impl(&self, pid: u32) -> bool {
         if let Some(name) = self.pid_names.get(&pid) {
             // Names are already lowercase (done at insertion time)
 

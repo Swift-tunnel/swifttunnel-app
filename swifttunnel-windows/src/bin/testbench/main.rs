@@ -1339,8 +1339,10 @@ fn test_split_tunnel_two_apps() {
 /// Run VPN speed benchmark - downloads 10MB through VPN tunnel
 fn run_vpn_benchmark() {
     println!("╔═══════════════════════════════════════════════════════════════╗");
-    println!("║    VPN SPEED BENCHMARK                                         ║");
-    println!("║    Downloads 10MB through VPN tunnel                            ║");
+    println!("║    VPN SPEED BENCHMARK (3-Way Comparison)                      ║");
+    println!("║    1. Baseline (No VPN)                                        ║");
+    println!("║    2. Pure WireGuard (all traffic via VPN)                     ║");
+    println!("║    3. Split Tunnel (only ip_checker via VPN)                   ║");
     println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     let rt = Runtime::new().expect("Failed to create tokio runtime");
@@ -1487,8 +1489,8 @@ fn run_vpn_benchmark() {
         }
     };
 
-    // Step 7: Setup routes (split tunnel mode)
-    println!("Setting up routes...");
+    // Step 7: Setup routes (FULL VPN mode first - for Pure WireGuard test)
+    println!("Setting up routes (Full VPN mode)...");
     let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
         .split(':')
         .next()
@@ -1498,14 +1500,41 @@ fn run_vpn_benchmark() {
 
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
     let mut route_manager = RouteManager::new(server_ip, if_index);
-    route_manager.set_split_tunnel_mode(true);
+    route_manager.set_split_tunnel_mode(false); // FULL VPN mode - all traffic goes through VPN
 
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Failed: {}", e);
     } else {
-        println!("   ✅ Routes applied");
+        println!("   ✅ Full VPN routes applied");
     }
     std::thread::sleep(Duration::from_secs(1));
+
+    // Step 7b: Run PURE WIREGUARD test (no split tunnel, just WireGuard)
+    println!("\n═══ PURE WIREGUARD (No Split Tunnel) ═══\n");
+    println!("Running speed test with pure WireGuard (all traffic via VPN)...");
+    let pure_wg_speed = run_ip_checker_speedtest(&ip_checker_path);
+    let pure_wg_mbps = match &pure_wg_speed {
+        Some((ip, mbps)) => {
+            println!("   IP: {} (should be VPN IP)", ip);
+            println!("   Speed: {:.2} Mbps", mbps);
+            *mbps
+        }
+        None => {
+            println!("   ❌ Pure WireGuard speed test failed");
+            0.0
+        }
+    };
+
+    // Now switch to split tunnel mode
+    println!("\nSwitching to split tunnel mode...");
+    let _ = route_manager.remove_routes();
+    route_manager.set_split_tunnel_mode(true); // Split tunnel mode - only app traffic goes through VPN
+    if let Err(e) = route_manager.apply_routes() {
+        println!("   ⚠ Failed: {}", e);
+    } else {
+        println!("   ✅ Split tunnel routes applied");
+    }
+    std::thread::sleep(Duration::from_millis(500));
 
     // Step 8: Setup split tunnel with ip_checker.exe as TUNNEL app
     println!("Setting up split tunnel...");
@@ -1614,15 +1643,26 @@ fn run_vpn_benchmark() {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║                    BENCHMARK RESULTS                           ║");
     println!("╠═══════════════════════════════════════════════════════════════╣");
-    println!("║  Baseline (No VPN):    {:>8.2} Mbps                          ║", baseline_mbps);
-    println!("║  VPN Tunnel:           {:>8.2} Mbps                          ║", vpn_mbps);
+    println!("║  Baseline (No VPN):     {:>8.2} Mbps                         ║", baseline_mbps);
+    println!("║  Pure WireGuard:        {:>8.2} Mbps                         ║", pure_wg_mbps);
+    println!("║  Split Tunnel:          {:>8.2} Mbps                         ║", vpn_mbps);
+    println!("╠═══════════════════════════════════════════════════════════════╣");
+    if baseline_mbps > 0.0 && pure_wg_mbps > 0.0 {
+        let wg_overhead = ((baseline_mbps - pure_wg_mbps) / baseline_mbps * 100.0).max(0.0);
+        println!("║  WireGuard Overhead:    {:>8.1}%                           ║", wg_overhead);
+    }
     if baseline_mbps > 0.0 && vpn_mbps > 0.0 {
-        let overhead = ((baseline_mbps - vpn_mbps) / baseline_mbps * 100.0).max(0.0);
-        println!("║  VPN Overhead:         {:>8.1}%                            ║", overhead);
+        let total_overhead = ((baseline_mbps - vpn_mbps) / baseline_mbps * 100.0).max(0.0);
+        println!("║  Split Tunnel Overhead: {:>8.1}%                           ║", total_overhead);
+    }
+    if pure_wg_mbps > 0.0 && vpn_mbps > 0.0 {
+        let split_overhead = ((pure_wg_mbps - vpn_mbps) / pure_wg_mbps * 100.0).max(0.0);
+        println!("║  Split vs Pure WG:      {:>8.1}%                           ║", split_overhead);
     }
     if let Some(s) = stats {
-        println!("║  TX (to VPN):          {:>8} bytes                        ║", s.bytes_tx.load(std::sync::atomic::Ordering::Relaxed));
-        println!("║  RX (from VPN):        {:>8} bytes                        ║", s.bytes_rx.load(std::sync::atomic::Ordering::Relaxed));
+        println!("╠═══════════════════════════════════════════════════════════════╣");
+        println!("║  TX (to VPN):           {:>8} bytes                       ║", s.bytes_tx.load(std::sync::atomic::Ordering::Relaxed));
+        println!("║  RX (from VPN):         {:>8} bytes                       ║", s.bytes_rx.load(std::sync::atomic::Ordering::Relaxed));
     }
     println!("╚═══════════════════════════════════════════════════════════════╝");
 
