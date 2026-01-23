@@ -276,6 +276,14 @@ enum Tab { Connect, Boost, Network, Settings }
 #[derive(PartialEq, Clone, Copy)]
 enum SettingsSection { General, Performance, Account }
 
+/// Data for rendering a boost card in the ExitLag-style grid
+struct BoostCardData<'a> {
+    info: &'a BoostInfo,
+    icon: &'static str,
+    value: bool,
+    toggle_fn: fn(&mut BoosterApp),
+}
+
 pub struct BoosterApp {
     pub state: AppState,
     system_info: Option<SystemInfo>,
@@ -1235,6 +1243,23 @@ impl eframe::App for BoosterApp {
         let is_logging_in = matches!(self.auth_state, AuthState::LoggingIn);
         let is_awaiting_oauth = matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_));
 
+        // ═══════════════════════════════════════════════════════════════════════════════
+        //  EXITLAG-STYLE LAYOUT: Left Sidebar + Main Content
+        // ═══════════════════════════════════════════════════════════════════════════════
+
+        // Left sidebar with icon navigation (ExitLag style)
+        if is_logged_in {
+            egui::SidePanel::left("sidebar")
+                .exact_width(64.0)
+                .resizable(false)
+                .frame(egui::Frame::none()
+                    .fill(BG_CARD)
+                    .stroke(egui::Stroke::new(1.0, BG_ELEVATED)))
+                .show(ctx, |ui| {
+                    self.render_sidebar(ui);
+                });
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(BG_DARKEST))
             .show(ctx, |ui| {
@@ -1264,7 +1289,8 @@ impl eframe::App for BoosterApp {
                                 } else if is_awaiting_oauth {
                                     self.render_awaiting_oauth_callback(ui);
                                 } else {
-                                    self.render_nav_tabs(ui);
+                                    // Page title header (ExitLag style)
+                                    self.render_page_title(ui);
                                     ui.add_space(20.0);
 
                                     match self.current_tab {
@@ -1336,6 +1362,204 @@ impl BoosterApp {
             self.process_notification = None;
         }
     }
+
+    /// ExitLag-style left sidebar with icon navigation
+    fn render_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.add_space(16.0);
+
+            // Logo at top (simplified)
+            ui.vertical_centered(|ui| {
+                let logo_size = 36.0;
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
+                let center = rect.center();
+
+                // Animated gradient ring
+                let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                let rotation = elapsed * 0.5;
+
+                // Outer ring with gradient-like effect
+                let ring_color_1 = lerp_color(ACCENT_PRIMARY, ACCENT_CYAN, ((rotation).sin() + 1.0) / 2.0);
+
+                // Background circle
+                ui.painter().circle_filled(center, logo_size * 0.42, BG_ELEVATED);
+
+                // Draw partial arc
+                for i in 0..8 {
+                    let angle = (i as f32 / 8.0) * std::f32::consts::TAU + rotation;
+                    let alpha = 0.4 + (((angle * 2.0).sin() + 1.0) / 2.0) * 0.6;
+                    let x = center.x + angle.cos() * (logo_size * 0.35);
+                    let y = center.y + angle.sin() * (logo_size * 0.35);
+                    ui.painter().circle_filled(egui::pos2(x, y), 2.0, ring_color_1.gamma_multiply(alpha));
+                }
+
+                // Inner "S" wave
+                for i in 0..3 {
+                    let offset = (i as f32 - 1.0) * 3.5;
+                    let start = egui::pos2(center.x - 7.0, center.y + offset);
+                    let end = egui::pos2(center.x + 7.0, center.y + offset);
+                    let control1 = egui::pos2(center.x - 2.0, center.y + offset - 3.5);
+                    let control2 = egui::pos2(center.x + 2.0, center.y + offset + 3.5);
+                    let points = [start, control1, control2, end];
+                    let alpha = 0.5 + (i as f32 * 0.25);
+                    let stroke = egui::Stroke::new(1.8, ACCENT_CYAN.gamma_multiply(alpha));
+                    ui.painter().add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
+                        points, false, egui::Color32::TRANSPARENT, stroke,
+                    )));
+                }
+            });
+
+            ui.add_space(24.0);
+
+            // Sidebar navigation items
+            let nav_items = [
+                ("🌐", "Connect", Tab::Connect),
+                ("⚡", "Boost", Tab::Boost),
+                ("📶", "Network", Tab::Network),
+                ("⚙", "Settings", Tab::Settings),
+            ];
+
+            for (icon, tooltip, tab) in nav_items {
+                let is_active = self.current_tab == tab;
+                let nav_id = format!("sidebar_nav_{:?}", tab);
+                let hover_val = self.animations.get_hover_value(&nav_id);
+
+                // Calculate colors
+                let (bg, icon_color) = if is_active {
+                    (ACCENT_PRIMARY.gamma_multiply(0.2), ACCENT_PRIMARY)
+                } else {
+                    let hover_bg = lerp_color(egui::Color32::TRANSPARENT, BG_HOVER, hover_val);
+                    let hover_icon = lerp_color(TEXT_MUTED, TEXT_PRIMARY, hover_val);
+                    (hover_bg, hover_icon)
+                };
+
+                ui.vertical_centered(|ui| {
+                    let size = egui::vec2(48.0, 48.0);
+                    let response = egui::Frame::none()
+                        .fill(bg)
+                        .rounding(12.0)
+                        .show(ui, |ui| {
+                            ui.set_min_size(size);
+                            ui.centered_and_justified(|ui| {
+                                ui.label(egui::RichText::new(icon).size(20.0).color(icon_color));
+                            });
+                        })
+                        .response;
+
+                    // Active indicator bar
+                    if is_active {
+                        let indicator_rect = egui::Rect::from_min_size(
+                            egui::pos2(response.rect.max.x + 4.0, response.rect.center().y - 12.0),
+                            egui::vec2(3.0, 24.0)
+                        );
+                        ui.painter().rect_filled(indicator_rect, 2.0, ACCENT_PRIMARY);
+                    }
+
+                    // Handle hover for animation
+                    self.animations.animate_hover(&nav_id, response.hovered(), hover_val);
+
+                    // Tooltip on hover
+                    if response.hovered() {
+                        let tooltip_id = ui.id().with(&nav_id);
+                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
+                            ui.label(egui::RichText::new(tooltip).size(12.0).color(TEXT_PRIMARY));
+                        });
+                    }
+
+                    if response.interact(egui::Sense::click()).clicked() {
+                        self.current_tab = tab;
+                        self.mark_dirty();
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
+            // Spacer to push version to bottom
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.add_space(16.0);
+
+                // Version number at bottom (like ExitLag)
+                ui.label(egui::RichText::new(env!("CARGO_PKG_VERSION"))
+                    .size(10.0)
+                    .color(TEXT_DIMMED));
+
+                ui.add_space(8.0);
+
+                // User avatar/account icon
+                if let Some(ref user) = self.user_info {
+                    let first_char = user.email.chars().next().unwrap_or('U').to_uppercase().to_string();
+                    let (avatar_rect, response) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+                    ui.painter().circle_filled(avatar_rect.center(), 16.0, ACCENT_PRIMARY.gamma_multiply(0.3));
+                    ui.painter().text(
+                        avatar_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &first_char,
+                        egui::FontId::proportional(14.0),
+                        TEXT_PRIMARY,
+                    );
+
+                    if response.hovered() {
+                        let tooltip_id = ui.id().with("user_avatar");
+                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
+                            ui.label(egui::RichText::new(&user.email).size(11.0).color(TEXT_PRIMARY));
+                        });
+                    }
+
+                    if response.clicked() {
+                        self.current_tab = Tab::Settings;
+                        self.settings_section = SettingsSection::Account;
+                        self.mark_dirty();
+                    }
+                }
+            });
+        });
+    }
+
+    /// ExitLag-style page title with section header
+    fn render_page_title(&self, ui: &mut egui::Ui) {
+        let (title, subtitle) = match self.current_tab {
+            Tab::Connect => ("Connect", "VPN gaming tunnel with smart routing"),
+            Tab::Boost => ("Performance Boost", "System optimizations for better FPS"),
+            Tab::Network => ("Network Analyzer", "Test your connection quality"),
+            Tab::Settings => ("Settings", "App preferences and account"),
+        };
+
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(title)
+                    .size(24.0)
+                    .color(TEXT_PRIMARY)
+                    .strong());
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(subtitle)
+                    .size(12.0)
+                    .color(TEXT_MUTED));
+            });
+
+            // Show connection status badge on right (when connected)
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.vpn_state.is_connected() {
+                    egui::Frame::none()
+                        .fill(STATUS_CONNECTED.gamma_multiply(0.15))
+                        .stroke(egui::Stroke::new(1.0, STATUS_CONNECTED.gamma_multiply(0.3)))
+                        .rounding(16.0)
+                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                // Pulsing dot
+                                let pulse = ((self.app_start_time.elapsed().as_secs_f32() * 2.0).sin() + 1.0) / 2.0;
+                                let dot_alpha = 0.6 + pulse * 0.4;
+                                let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                                ui.painter().circle_filled(dot_rect.center(), 4.0, STATUS_CONNECTED.gamma_multiply(dot_alpha));
+                                ui.label(egui::RichText::new("PROTECTED").size(11.0).color(STATUS_CONNECTED).strong());
+                            });
+                        });
+                }
+            });
+        });
+    }
+
     fn render_header(&self, ui: &mut egui::Ui) {
         // Header with subtle gradient background
         let header_rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::hover()).0;
@@ -3366,118 +3590,124 @@ impl BoosterApp {
                 });
             });
 
-        // ─────────────────────────────────────────────────────────────
-        // SYSTEM BOOSTS (Tier 1)
-        // ─────────────────────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════════════════
+        //  EXITLAG-STYLE BOOST CARD GRID
+        //  System Performance Enhancements in a 3-column card layout
+        // ═══════════════════════════════════════════════════════════════════════════════
         ui.add_space(16.0);
 
+        // Section header with "System Performance Enhancements" label
         egui::Frame::none()
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .fill(BG_CARD)
+            .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0)
+            .inner_margin(20.0)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("System Boosts").size(14.0).color(TEXT_PRIMARY).strong());
-                    ui.add_space(8.0);
 
-                    // Tier 1 badge with tooltip
-                    let tier_badge = egui::Frame::none()
-                        .fill(STATUS_CONNECTED.gamma_multiply(0.15))
-                        .rounding(4.0)
-                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
-                        });
-                    if tier_badge.response.hovered() {
-                        let tooltip_id = ui.id().with("tier1_tip");
-                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
-                            ui.set_max_width(280.0);
-                            ui.label(egui::RichText::new(tier_info::TIER_1_TITLE).size(12.0).color(TEXT_PRIMARY).strong());
-                            ui.add_space(4.0);
-                            ui.label(egui::RichText::new(tier_info::TIER_1_DESC).size(11.0).color(TEXT_SECONDARY));
-                        });
-                    }
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("System Performance Enhancements")
+                        .size(16.0)
+                        .color(TEXT_PRIMARY)
+                        .strong());
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Tier badge
+                        egui::Frame::none()
+                            .fill(STATUS_CONNECTED.gamma_multiply(0.15))
+                            .rounding(4.0)
+                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("SAFE").size(10.0).color(STATUS_CONNECTED).strong());
+                            });
+                    });
                 });
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Safe optimizations with no side effects").size(11.0).color(TEXT_MUTED));
+
+                ui.add_space(20.0);
+
+                // Calculate card dimensions for 3-column grid
+                let available_width = ui.available_width();
+                let gap = 12.0;
+                let card_width = ((available_width - gap * 2.0) / 3.0).max(140.0);
+
+                // Row 1: System Boosts
+                self.render_boost_card_row(ui, card_width, gap, &[
+                    BoostCardData {
+                        info: &boost_info::HIGH_PRIORITY,
+                        icon: "⚡",
+                        value: self.state.config.system_optimization.set_high_priority,
+                        toggle_fn: |app| {
+                            app.state.config.system_optimization.set_high_priority =
+                                !app.state.config.system_optimization.set_high_priority;
+                        },
+                    },
+                    BoostCardData {
+                        info: &boost_info::TIMER_RESOLUTION,
+                        icon: "⏱",
+                        value: self.state.config.system_optimization.timer_resolution_1ms,
+                        toggle_fn: |app| {
+                            app.state.config.system_optimization.timer_resolution_1ms =
+                                !app.state.config.system_optimization.timer_resolution_1ms;
+                        },
+                    },
+                    BoostCardData {
+                        info: &boost_info::MMCSS,
+                        icon: "🎮",
+                        value: self.state.config.system_optimization.mmcss_gaming_profile,
+                        toggle_fn: |app| {
+                            app.state.config.system_optimization.mmcss_gaming_profile =
+                                !app.state.config.system_optimization.mmcss_gaming_profile;
+                        },
+                    },
+                ]);
+
                 ui.add_space(12.0);
 
-                self.render_toggle_row_with_info(ui, &boost_info::HIGH_PRIORITY,
-                    self.state.config.system_optimization.set_high_priority, |app| {
-                    app.state.config.system_optimization.set_high_priority = !app.state.config.system_optimization.set_high_priority;
-                });
-                ui.add_space(10.0);
+                // Row 2: More System + Network Boosts
+                self.render_boost_card_row(ui, card_width, gap, &[
+                    BoostCardData {
+                        info: &boost_info::GAME_MODE,
+                        icon: "🖥",
+                        value: self.state.config.system_optimization.game_mode_enabled,
+                        toggle_fn: |app| {
+                            app.state.config.system_optimization.game_mode_enabled =
+                                !app.state.config.system_optimization.game_mode_enabled;
+                        },
+                    },
+                    BoostCardData {
+                        info: &boost_info::DISABLE_NAGLE,
+                        icon: "🌐",
+                        value: self.state.config.network_settings.disable_nagle,
+                        toggle_fn: |app| {
+                            app.state.config.network_settings.disable_nagle =
+                                !app.state.config.network_settings.disable_nagle;
+                        },
+                    },
+                    BoostCardData {
+                        info: &boost_info::NETWORK_THROTTLING,
+                        icon: "📶",
+                        value: self.state.config.network_settings.disable_network_throttling,
+                        toggle_fn: |app| {
+                            app.state.config.network_settings.disable_network_throttling =
+                                !app.state.config.network_settings.disable_network_throttling;
+                        },
+                    },
+                ]);
 
-                self.render_toggle_row_with_info(ui, &boost_info::TIMER_RESOLUTION,
-                    self.state.config.system_optimization.timer_resolution_1ms, |app| {
-                    app.state.config.system_optimization.timer_resolution_1ms = !app.state.config.system_optimization.timer_resolution_1ms;
-                });
-                ui.add_space(10.0);
-
-                self.render_toggle_row_with_info(ui, &boost_info::MMCSS,
-                    self.state.config.system_optimization.mmcss_gaming_profile, |app| {
-                    app.state.config.system_optimization.mmcss_gaming_profile = !app.state.config.system_optimization.mmcss_gaming_profile;
-                });
-                ui.add_space(10.0);
-
-                self.render_toggle_row_with_info(ui, &boost_info::GAME_MODE,
-                    self.state.config.system_optimization.game_mode_enabled, |app| {
-                    app.state.config.system_optimization.game_mode_enabled = !app.state.config.system_optimization.game_mode_enabled;
-                });
-            });
-
-        // ─────────────────────────────────────────────────────────────
-        // NETWORK BOOSTS (Tier 1)
-        // ─────────────────────────────────────────────────────────────
-        ui.add_space(16.0);
-
-        egui::Frame::none()
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Network Boosts").size(14.0).color(TEXT_PRIMARY).strong());
-                    ui.add_space(8.0);
-
-                    // Tier 1 badge with tooltip
-                    let tier_badge = egui::Frame::none()
-                        .fill(STATUS_CONNECTED.gamma_multiply(0.15))
-                        .rounding(4.0)
-                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
-                        });
-                    if tier_badge.response.hovered() {
-                        let tooltip_id = ui.id().with("tier1_net_tip");
-                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
-                            ui.set_max_width(280.0);
-                            ui.label(egui::RichText::new(tier_info::TIER_1_TITLE).size(12.0).color(TEXT_PRIMARY).strong());
-                            ui.add_space(4.0);
-                            ui.label(egui::RichText::new(tier_info::TIER_1_DESC).size(11.0).color(TEXT_SECONDARY));
-                        });
-                    }
-                });
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Lower latency for online games").size(11.0).color(TEXT_MUTED));
                 ui.add_space(12.0);
 
-                self.render_toggle_row_with_info(ui, &boost_info::DISABLE_NAGLE,
-                    self.state.config.network_settings.disable_nagle, |app| {
-                    app.state.config.network_settings.disable_nagle = !app.state.config.network_settings.disable_nagle;
-                });
-                ui.add_space(10.0);
-
-                self.render_toggle_row_with_info(ui, &boost_info::NETWORK_THROTTLING,
-                    self.state.config.network_settings.disable_network_throttling, |app| {
-                    app.state.config.network_settings.disable_network_throttling = !app.state.config.network_settings.disable_network_throttling;
-                });
-                ui.add_space(10.0);
-
-                self.render_toggle_row_with_info(ui, &boost_info::OPTIMIZE_MTU,
-                    self.state.config.network_settings.optimize_mtu, |app| {
-                    app.state.config.network_settings.optimize_mtu = !app.state.config.network_settings.optimize_mtu;
-                });
+                // Row 3: Additional Network Boost (centered if single)
+                self.render_boost_card_row(ui, card_width, gap, &[
+                    BoostCardData {
+                        info: &boost_info::OPTIMIZE_MTU,
+                        icon: "📡",
+                        value: self.state.config.network_settings.optimize_mtu,
+                        toggle_fn: |app| {
+                            app.state.config.network_settings.optimize_mtu =
+                                !app.state.config.network_settings.optimize_mtu;
+                        },
+                    },
+                ]);
             });
 
         // ─────────────────────────────────────────────────────────────
@@ -4006,6 +4236,153 @@ impl BoosterApp {
             } else {
                 self.expanded_boost_info.insert(toggle_id.to_string());
             }
+            self.mark_dirty();
+        }
+    }
+
+    /// Render a row of boost cards in ExitLag grid style (up to 3 per row)
+    fn render_boost_card_row(&mut self, ui: &mut egui::Ui, card_width: f32, gap: f32, cards: &[BoostCardData]) {
+        let mut toggles_to_apply: Vec<fn(&mut Self)> = Vec::new();
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+
+            for card in cards {
+                let card_id = card.info.id.to_string();
+                let hover_val = self.animations.get_hover_value(&card_id);
+                let toggle_val = self.animations.get_toggle_value(&card_id, card.value);
+
+                // Card background based on hover state
+                let bg = if card.value {
+                    lerp_color(BG_ELEVATED, ACCENT_PRIMARY.gamma_multiply(0.12), 0.5 + hover_val * 0.5)
+                } else {
+                    lerp_color(BG_ELEVATED, BG_HOVER, hover_val)
+                };
+
+                let response = egui::Frame::none()
+                    .fill(bg)
+                    .stroke(egui::Stroke::new(1.0, if card.value { ACCENT_PRIMARY.gamma_multiply(0.4) } else { BG_HOVER }))
+                    .rounding(12.0)
+                    .inner_margin(egui::Margin::symmetric(16.0, 16.0))
+                    .show(ui, |ui| {
+                        ui.set_width(card_width - 32.0);
+                        ui.set_min_height(140.0);
+
+                        ui.vertical(|ui| {
+                            // Header row: Icon + Toggle
+                            ui.horizontal(|ui| {
+                                // Icon in a circle
+                                let icon_size = 32.0;
+                                let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
+                                ui.painter().circle_filled(icon_rect.center(), icon_size / 2.0, BG_CARD);
+                                ui.painter().text(
+                                    icon_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    card.icon,
+                                    egui::FontId::proportional(16.0),
+                                    if card.value { ACCENT_PRIMARY } else { TEXT_MUTED },
+                                );
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Toggle switch
+                                    let size = egui::vec2(44.0, 24.0);
+                                    let (rect, toggle_response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+                                    // Interpolate background color
+                                    let toggle_bg = lerp_color(BG_CARD, ACCENT_PRIMARY, toggle_val);
+                                    let knob_x = rect.left() + 12.0 + (rect.width() - 24.0) * toggle_val;
+
+                                    ui.painter().rect_filled(rect, 12.0, toggle_bg);
+                                    ui.painter().circle_filled(egui::pos2(knob_x, rect.center().y), 8.0, TEXT_PRIMARY);
+
+                                    if toggle_response.clicked() {
+                                        toggles_to_apply.push(card.toggle_fn);
+                                        let current = self.animations.get_toggle_value(&card_id, card.value);
+                                        self.animations.animate_toggle(&card_id, !card.value, current);
+                                    }
+                                });
+                            });
+
+                            ui.add_space(12.0);
+
+                            // Title
+                            ui.label(egui::RichText::new(card.info.title)
+                                .size(13.0)
+                                .color(TEXT_PRIMARY)
+                                .strong());
+
+                            ui.add_space(4.0);
+
+                            // Description
+                            ui.label(egui::RichText::new(card.info.short_desc)
+                                .size(11.0)
+                                .color(TEXT_SECONDARY));
+
+                            ui.add_space(8.0);
+
+                            // "Not Recommended If..." link (ExitLag style)
+                            let info_text = if card.info.requires_admin {
+                                "Requires Admin..."
+                            } else {
+                                "More info..."
+                            };
+                            let info_response = ui.add(
+                                egui::Label::new(egui::RichText::new(info_text)
+                                    .size(10.0)
+                                    .color(ACCENT_CYAN))
+                                    .sense(egui::Sense::click())
+                            );
+
+                            if info_response.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+
+                            if info_response.clicked() || info_response.hovered() {
+                                let tooltip_id = ui.id().with(format!("{}_tip", card.info.id));
+                                egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
+                                    ui.set_max_width(280.0);
+                                    ui.label(egui::RichText::new(card.info.title).size(12.0).color(TEXT_PRIMARY).strong());
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new(card.info.long_desc).size(11.0).color(TEXT_SECONDARY));
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        // Impact badge
+                                        egui::Frame::none()
+                                            .fill(STATUS_CONNECTED.gamma_multiply(0.15))
+                                            .rounding(4.0)
+                                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                                            .show(ui, |ui| {
+                                                ui.label(egui::RichText::new(card.info.impact).size(10.0).color(STATUS_CONNECTED));
+                                            });
+
+                                        // Risk badge
+                                        let risk_color = match card.info.risk_level {
+                                            RiskLevel::Safe => STATUS_CONNECTED,
+                                            RiskLevel::LowRisk => STATUS_WARNING,
+                                            RiskLevel::MediumRisk => STATUS_ERROR,
+                                        };
+                                        egui::Frame::none()
+                                            .fill(risk_color.gamma_multiply(0.15))
+                                            .rounding(4.0)
+                                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                                            .show(ui, |ui| {
+                                                ui.label(egui::RichText::new(card.info.risk_level.label()).size(10.0).color(risk_color));
+                                            });
+                                    });
+                                });
+                            }
+                        });
+                    })
+                    .response;
+
+                // Handle hover animation
+                self.animations.animate_hover(&card_id, response.hovered(), hover_val);
+            }
+        });
+
+        // Apply toggles outside the closure
+        for toggle_fn in toggles_to_apply {
+            toggle_fn(self);
             self.mark_dirty();
         }
     }
