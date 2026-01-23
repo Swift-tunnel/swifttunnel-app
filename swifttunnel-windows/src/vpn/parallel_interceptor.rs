@@ -46,7 +46,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use arrayvec::ArrayVec;
@@ -55,13 +55,18 @@ use boringtun::noise::{Tunn, TunnResult};
 
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
+use super::tunnel::FastMutex;
 use super::{VpnError, VpnResult};
 
 /// Context for direct WireGuard encryption (bypasses OS routing)
+///
+/// Uses parking_lot::Mutex (FastMutex) for the Tunn instance to minimize
+/// contention when multiple worker threads encrypt packets simultaneously.
+/// This provides ~10x less lock overhead compared to std::sync::Mutex.
 #[derive(Clone)]
 pub struct VpnEncryptContext {
-    /// WireGuard tunnel for encryption
-    pub tunn: Arc<Mutex<Tunn>>,
+    /// WireGuard tunnel for encryption (FastMutex for low-contention locking)
+    pub tunn: Arc<FastMutex<Tunn>>,
     /// UDP socket for sending encrypted packets
     pub socket: Arc<UdpSocket>,
     /// VPN server address
@@ -1053,7 +1058,7 @@ fn run_inbound_receiver(
             last_timer_check = now;
 
             let timer_result = {
-                let mut tunn = ctx.tunn.lock().unwrap();
+                let mut tunn = ctx.tunn.lock();
                 tunn.update_timers(&mut timer_buf)
             };
 
@@ -1124,7 +1129,7 @@ fn run_inbound_receiver(
 
         // Decrypt the packet
         let result = {
-            let mut tunn = ctx.tunn.lock().unwrap();
+            let mut tunn = ctx.tunn.lock();
             tunn.decapsulate(None, &recv_buf[..n], &mut decrypt_buf)
         };
 
@@ -1510,6 +1515,12 @@ fn run_packet_worker(
     let mut wintun_inject_fail = 0u64;
     let mut no_wintun_session = 0u64;
 
+    // Performance timing (v0.5.57 - measure hot path latency)
+    let mut total_lookup_ns = 0u64;
+    let mut total_encrypt_ns = 0u64;
+    let mut lookup_count = 0u64;
+    let mut encrypt_count = 0u64;
+
     // Log initial tunnel apps
     if worker_id == 0 {
         log::info!(
@@ -1583,8 +1594,11 @@ fn run_packet_worker(
         diagnostic_counter += 1;
 
         if work.is_outbound {
-            // Check if should tunnel
+            // Check if should tunnel (timed for performance measurement)
+            let lookup_start = std::time::Instant::now();
             let should_tunnel = should_route_to_vpn(&work.data, &snapshot);
+            total_lookup_ns += lookup_start.elapsed().as_nanos() as u64;
+            lookup_count += 1;
 
             // Periodic diagnostic logging (every 500 packets on worker 0)
             if worker_id == 0 && diagnostic_counter % 500 == 0 {
@@ -1592,12 +1606,18 @@ fn run_packet_worker(
                 let bypassed = stats.packets_bypassed.load(Ordering::Relaxed);
                 let total = tunneled + bypassed;
                 let tunnel_pct = if total > 0 { (tunneled as f64 / total as f64) * 100.0 } else { 0.0 };
+
+                // Calculate average latencies
+                let avg_lookup_ns = if lookup_count > 0 { total_lookup_ns / lookup_count } else { 0 };
+                let avg_encrypt_ns = if encrypt_count > 0 { total_encrypt_ns / encrypt_count } else { 0 };
+
                 log::info!(
-                    "Worker 0 stats: {} tunneled, {} bypassed ({:.1}% tunnel), direct: {} ok/{} fail, Wintun: {} ok/{} fail/{} no-session, conns: {}, pids: {}",
+                    "Worker 0 PERF: lookup={:.1}μs encrypt={:.1}μs | {} tunneled, {} bypassed ({:.1}%), direct: {}/{}, Wintun: {}/{}/{}",
+                    avg_lookup_ns as f64 / 1000.0,
+                    avg_encrypt_ns as f64 / 1000.0,
                     tunneled, bypassed, tunnel_pct,
                     direct_encrypt_success, direct_encrypt_fail,
-                    wintun_inject_success, wintun_inject_fail, no_wintun_session,
-                    snapshot.connections.len(), snapshot.pid_names.len()
+                    wintun_inject_success, wintun_inject_fail, no_wintun_session
                 );
             }
 
@@ -1699,10 +1719,11 @@ fn run_packet_worker(
                 // All work (encrypt + send) must happen inside the thread-local scope
                 if let Some(ref ctx) = vpn_encrypt_ctx {
                     // Encrypt and send within thread-local scope (zero allocation!)
+                    let encrypt_start = std::time::Instant::now();
                     let (success, encrypted_len) = ENCRYPT_BUFFER.with(|buf| {
                         let mut encrypt_buf = buf.borrow_mut();
                         let result = {
-                            let mut tunn = ctx.tunn.lock().unwrap();
+                            let mut tunn = ctx.tunn.lock();
                             tunn.encapsulate(packet_to_send, &mut encrypt_buf[..])
                         };
 
@@ -1724,6 +1745,8 @@ fn run_packet_worker(
                             }
                         }
                     });
+                    total_encrypt_ns += encrypt_start.elapsed().as_nanos() as u64;
+                    encrypt_count += 1;
 
                     if success {
                         direct_encrypt_success += 1;

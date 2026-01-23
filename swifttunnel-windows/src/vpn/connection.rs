@@ -37,17 +37,27 @@ const REFRESH_INTERVAL_MS: u64 = 50;
 
 /// Get split tunnel mode from environment variable
 ///
-/// - SWIFTTUNNEL_SPLIT_MODE=route (DEFAULT) - Zero overhead, uses IP routes for known games
-/// - SWIFTTUNNEL_SPLIT_MODE=process - Uses ndisapi packet interception (more CPU)
+/// - SWIFTTUNNEL_SPLIT_MODE=process (DEFAULT) - Per-process split tunnel like ExitLag
+/// - SWIFTTUNNEL_SPLIT_MODE=route - Uses IP routes for known game server IPs
+///
+/// Process-based is the default because it provides true per-process split tunneling,
+/// ensuring only game traffic from specified processes uses the VPN, regardless of
+/// destination IP. This matches ExitLag's behavior.
 fn get_split_tunnel_mode() -> SplitTunnelMode {
     match std::env::var("SWIFTTUNNEL_SPLIT_MODE").as_deref() {
-        Ok("process") => {
-            log::info!("Split tunnel mode: PROCESS-BASED (ndisapi packet interception)");
-            SplitTunnelMode::ProcessBased
+        Ok("route") => {
+            log::warn!("========================================");
+            log::warn!("SPLIT TUNNEL MODE: ROUTE-BASED");
+            log::warn!("Uses IP routes for known game IPs only");
+            log::warn!("========================================");
+            SplitTunnelMode::RouteBased
         }
         _ => {
-            log::info!("Split tunnel mode: ROUTE-BASED (zero overhead, kernel routing)");
-            SplitTunnelMode::RouteBased
+            log::warn!("========================================");
+            log::warn!("SPLIT TUNNEL MODE: PROCESS-BASED (ExitLag-style)");
+            log::warn!("Only game process traffic uses VPN tunnel");
+            log::warn!("========================================");
+            SplitTunnelMode::ProcessBased
         }
     }
 }

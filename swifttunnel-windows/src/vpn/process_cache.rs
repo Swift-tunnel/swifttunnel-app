@@ -66,18 +66,21 @@ impl ProcessSnapshot {
     }
 
     /// Check if PID belongs to tunnel app
+    ///
+    /// PERFORMANCE: Names are pre-lowercased at insertion time, so this is
+    /// allocation-free. Critical for 100K+ packets/second throughput.
     #[inline(always)]
     fn is_tunnel_pid(&self, pid: u32) -> bool {
         if let Some(name) = self.pid_names.get(&pid) {
-            let name_lower = name.to_lowercase();
+            // Names are already lowercase (done at insertion time)
 
-            // Exact match
-            if self.tunnel_apps.contains(&name_lower) {
+            // Exact match - O(1) HashSet lookup
+            if self.tunnel_apps.contains(name) {
                 return true;
             }
 
-            // Partial match
-            let name_stem = name_lower.trim_end_matches(".exe");
+            // Partial match (for cases like "robloxplayerbeta" matching "roblox")
+            let name_stem = name.trim_end_matches(".exe");
             for app in &self.tunnel_apps {
                 let app_stem = app.trim_end_matches(".exe");
                 if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
@@ -157,12 +160,21 @@ impl LockFreeProcessCache {
     ///
     /// Creates a new snapshot and atomically swaps it in. Old snapshot
     /// is deallocated when all readers release their Arc references.
+    ///
+    /// PERFORMANCE: Pre-lowercases all process names at insertion time,
+    /// eliminating string allocation from the hot path (is_tunnel_pid).
     pub fn update(&self, connections: HashMap<ConnectionKey, u32>, pid_names: HashMap<u32, String>) {
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
+        // Pre-lowercase all names at insertion time (not in hot path!)
+        let pid_names_lower: HashMap<u32, String> = pid_names
+            .into_iter()
+            .map(|(k, v)| (k, v.to_lowercase()))
+            .collect();
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections,
-            pid_names,
+            pid_names: pid_names_lower,
             tunnel_apps: self.tunnel_apps.clone(),
             version,
             created_at: std::time::Instant::now(),
