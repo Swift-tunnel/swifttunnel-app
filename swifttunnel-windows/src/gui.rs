@@ -623,15 +623,15 @@ impl BoosterApp {
 
         style.visuals.widgets.inactive.bg_fill = BG_CARD;
         style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_SECONDARY);
-        style.visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+        style.visuals.widgets.inactive.rounding = egui::CornerRadius::same(8);
 
         style.visuals.widgets.hovered.bg_fill = BG_HOVER;
         style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
-        style.visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+        style.visuals.widgets.hovered.rounding = egui::CornerRadius::same(8);
 
         style.visuals.widgets.active.bg_fill = ACCENT_PRIMARY;
         style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
-        style.visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+        style.visuals.widgets.active.rounding = egui::CornerRadius::same(8);
 
         style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
         style.visuals.selection.bg_fill = ACCENT_PRIMARY.gamma_multiply(0.3);
