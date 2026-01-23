@@ -20,21 +20,25 @@ pub struct UpdateChecker {
 
 impl UpdateChecker {
     /// Create a new update checker with the current app version
-    pub fn new() -> Self {
+    /// Returns None if the version string cannot be parsed (prevents update loops)
+    pub fn new() -> Option<Self> {
         let version_str = env!("CARGO_PKG_VERSION");
-        let current_version = Version::parse(version_str).unwrap_or_else(|_| {
-            error!("Failed to parse current version '{}', defaulting to 0.0.0", version_str);
-            Version::new(0, 0, 0)
-        });
+        let current_version = match Version::parse(version_str) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to parse current version '{}': {}. Disabling update checks to prevent loops.", version_str, e);
+                return None;
+            }
+        };
 
-        Self {
+        Some(Self {
             client: reqwest::Client::builder()
                 .user_agent("SwiftTunnel-Updater")
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to create HTTP client"),
             current_version,
-        }
+        })
     }
 
     /// Check for updates from GitHub releases
@@ -153,7 +157,9 @@ mod tests {
     #[test]
     fn test_version_parsing() {
         let checker = UpdateChecker::new();
-        // Should not panic
+        // Should return Some since CARGO_PKG_VERSION should be valid
+        assert!(checker.is_some());
+        let checker = checker.unwrap();
         let _ = checker.current_version();
     }
 

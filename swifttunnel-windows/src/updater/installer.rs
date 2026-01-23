@@ -50,8 +50,11 @@ pub fn install_update(msi_path: &Path) -> Result<(), String> {
     // PowerShell script that performs the update with proper elevation
     // Key: Uses Start-Process -Verb RunAs to trigger UAC for msiexec
     let ps_content = format!(
-        r#"# SwiftTunnel Update Script v3
+        r#"# SwiftTunnel Update Script v4
 $ErrorActionPreference = 'Continue'
+
+# Load Windows.Forms for MessageBox dialogs
+Add-Type -AssemblyName System.Windows.Forms
 
 $logDir = '{log_dir}'
 $logFile = "$logDir\update_install.log"
