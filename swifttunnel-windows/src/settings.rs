@@ -88,6 +88,9 @@ pub struct AppSettings {
     /// Used for practice mode to simulate high ping
     #[serde(default)]
     pub artificial_latency_ms: u32,
+    /// Enable experimental features (Practice Mode, etc.)
+    #[serde(default)]
+    pub experimental_mode: bool,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -124,6 +127,7 @@ impl Default for AppSettings {
             network_test_results: NetworkTestResultsCache::default(),
             forced_servers: HashMap::new(),
             artificial_latency_ms: 0,
+            experimental_mode: false,
         }
     }
 }
