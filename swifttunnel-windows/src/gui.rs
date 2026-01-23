@@ -755,6 +755,16 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
 
+        // If ICMP failed, try TCP fallback on port 8082 (WebSocket echo port)
+        if count == 0 {
+            log::info!("  ICMP failed for {}, trying TCP fallback on port 8082", server_ip);
+            if let Some(tcp_ms) = tcp_ping(server_ip, 8082).await {
+                log::info!("  TCP ping to {}: {}ms", server_ip, tcp_ms);
+                total = tcp_ms;
+                count = 1;
+            }
+        }
+
         if count > 0 {
             let avg = total / count;
             log::info!("  Server {} latency: {}ms ({} pings)", server_id, avg, count);
@@ -766,7 +776,7 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
                 best_result = Some((server_id.clone(), avg));
             }
         } else {
-            log::warn!("  Server {} all pings failed", server_id);
+            log::warn!("  Server {} all pings failed (ICMP + TCP)", server_id);
         }
     }
 
@@ -789,6 +799,33 @@ fn parse_ping_output(stdout: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// TCP connect timing fallback for when ICMP ping fails.
+/// Uses port 8082 (WebSocket echo port) available on all VPN servers.
+async fn tcp_ping(ip: &str, port: u16) -> Option<u32> {
+    use std::net::SocketAddr;
+    use tokio::net::TcpStream;
+    use tokio::time::{timeout, Duration, Instant};
+
+    let addr: SocketAddr = format!("{}:{}", ip, port).parse().ok()?;
+    let start = Instant::now();
+
+    match timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+        Ok(Ok(_stream)) => {
+            let elapsed = start.elapsed().as_millis() as u32;
+            // Subtract 1ms for TCP overhead (3-way handshake vs ICMP echo), min 1ms
+            Some(elapsed.saturating_sub(1).max(1))
+        }
+        Ok(Err(e)) => {
+            log::debug!("  TCP ping to {}:{} connect error: {}", ip, port, e);
+            None
+        }
+        Err(_) => {
+            log::debug!("  TCP ping to {}:{} timed out", ip, port);
+            None
+        }
+    }
 }
 
 impl eframe::App for BoosterApp {
