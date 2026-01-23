@@ -22,7 +22,7 @@ use std::net::Ipv4Addr;
 /// Roblox IP ranges for route-based split tunneling
 /// These cover all Roblox game servers globally
 pub const ROBLOX_IP_RANGES: &[&str] = &[
-    "128.116.0.0/17",     // Main Roblox range
+    "128.116.0.0/17", // Main Roblox range
     "209.206.40.0/21",
     "23.173.192.0/24",
     "141.193.3.0/24",
@@ -40,6 +40,69 @@ pub const ROBLOX_IP_RANGES: &[&str] = &[
     "23.34.81.0/24",
     "23.214.169.0/24",
 ];
+
+/// Parsed CIDR for fast IP matching
+#[derive(Clone, Copy)]
+pub struct CidrRange {
+    network: u32,
+    mask: u32,
+}
+
+impl CidrRange {
+    /// Parse a CIDR string like "128.116.0.0/17"
+    pub fn parse(cidr: &str) -> Option<Self> {
+        let parts: Vec<&str> = cidr.split('/').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        let ip: Ipv4Addr = parts[0].parse().ok()?;
+        let prefix_len: u8 = parts[1].parse().ok()?;
+
+        let network = u32::from_be_bytes(ip.octets());
+        let mask = if prefix_len == 0 {
+            0
+        } else if prefix_len >= 32 {
+            !0u32
+        } else {
+            !((1u32 << (32 - prefix_len)) - 1)
+        };
+
+        Some(CidrRange { network, mask })
+    }
+
+    /// Check if an IP address is within this CIDR range
+    #[inline(always)]
+    pub fn contains(&self, ip: Ipv4Addr) -> bool {
+        let ip_bits = u32::from_be_bytes(ip.octets());
+        (ip_bits & self.mask) == (self.network & self.mask)
+    }
+}
+
+/// Check if an IP is a Roblox game server (should be tunneled)
+///
+/// Returns true if the destination IP is within ROBLOX_IP_RANGES,
+/// meaning it's a game server that should be tunneled.
+/// Auth/API servers (using CDN IPs) will return false and bypass the tunnel.
+#[inline]
+pub fn is_roblox_game_server(ip: Ipv4Addr) -> bool {
+    // Use lazy_static-style caching via thread_local for parsed CIDRs
+    thread_local! {
+        static ROBLOX_CIDRS: Vec<CidrRange> = ROBLOX_IP_RANGES
+            .iter()
+            .filter_map(|cidr| CidrRange::parse(cidr))
+            .collect();
+    }
+
+    ROBLOX_CIDRS.with(|cidrs| {
+        for cidr in cidrs {
+            if cidr.contains(ip) {
+                return true;
+            }
+        }
+        false
+    })
+}
 
 /// Valorant / Riot Games IP ranges
 pub const VALORANT_IP_RANGES: &[&str] = &[
@@ -145,7 +208,10 @@ impl RouteManager {
     /// In this mode, we don't add the default route - only the VPN server route
     pub fn set_split_tunnel_mode(&mut self, enabled: bool) {
         self.split_tunnel_mode = enabled;
-        log::info!("Split tunnel mode: {}", if enabled { "enabled" } else { "disabled" });
+        log::info!(
+            "Split tunnel mode: {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     /// Add game-specific routes for route-based split tunneling
@@ -160,7 +226,11 @@ impl RouteManager {
             _ => return Err(VpnError::Route(format!("Unknown game: {}", game))),
         };
 
-        log::info!("Adding {} route-based split tunnel routes for {}", ranges.len(), game);
+        log::info!(
+            "Adding {} route-based split tunnel routes for {}",
+            ranges.len(),
+            game
+        );
 
         let mut added = 0;
         for cidr in ranges {
@@ -170,7 +240,12 @@ impl RouteManager {
             }
         }
 
-        log::info!("Added {}/{} routes for {} (route-based split tunnel)", added, ranges.len(), game);
+        log::info!(
+            "Added {}/{} routes for {} (route-based split tunnel)",
+            added,
+            ranges.len(),
+            game
+        );
         Ok(())
     }
 
@@ -183,7 +258,8 @@ impl RouteManager {
         }
 
         let network = parts[0];
-        let prefix_len: u8 = parts[1].parse()
+        let prefix_len: u8 = parts[1]
+            .parse()
             .map_err(|_| VpnError::Route(format!("Invalid prefix length: {}", parts[1])))?;
 
         // Convert prefix length to subnet mask
@@ -207,7 +283,7 @@ impl RouteManager {
                 network,
                 "mask",
                 &mask_str,
-                "10.0.0.1",  // VPN internal gateway
+                "10.0.0.1", // VPN internal gateway
                 "metric",
                 "5",
                 "if",
@@ -247,9 +323,7 @@ impl RouteManager {
             }
             let network = parts[0];
 
-            let _ = hidden_command("route")
-                .args(["delete", network])
-                .output();
+            let _ = hidden_command("route").args(["delete", network]).output();
         }
 
         self.game_routes.clear();
@@ -362,9 +436,9 @@ impl RouteManager {
                     "0.0.0.0",
                     "mask",
                     "0.0.0.0",
-                    "10.0.0.1",  // VPN internal gateway
+                    "10.0.0.1", // VPN internal gateway
                     "metric",
-                    "5",  // Lower metric = higher priority
+                    "5", // Lower metric = higher priority
                     "if",
                     &self.interface_index.to_string(),
                 ])
@@ -408,13 +482,7 @@ impl RouteManager {
         // Remove default route through VPN (only if not in split tunnel mode)
         if !self.split_tunnel_mode {
             let remove_default = hidden_command("route")
-                .args([
-                    "delete",
-                    "0.0.0.0",
-                    "mask",
-                    "0.0.0.0",
-                    "10.0.0.1",
-                ])
+                .args(["delete", "0.0.0.0", "mask", "0.0.0.0", "10.0.0.1"])
                 .output();
 
             match remove_default {
@@ -435,10 +503,7 @@ impl RouteManager {
 
         // Remove VPN server specific route
         let remove_server = hidden_command("route")
-            .args([
-                "delete",
-                &self.vpn_server_ip.to_string(),
-            ])
+            .args(["delete", &self.vpn_server_ip.to_string()])
             .output();
 
         match remove_server {

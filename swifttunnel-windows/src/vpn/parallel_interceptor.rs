@@ -229,8 +229,9 @@ impl ParallelInterceptor {
             num_cpus::get()
         );
 
-        let worker_stats: Vec<Arc<WorkerStats>> =
-            (0..num_workers).map(|_| Arc::new(WorkerStats::default())).collect();
+        let worker_stats: Vec<Arc<WorkerStats>> = (0..num_workers)
+            .map(|_| Arc::new(WorkerStats::default()))
+            .collect();
 
         Self {
             num_workers,
@@ -273,7 +274,12 @@ impl ParallelInterceptor {
     /// the inbound handler rewrites it to internet_ip so the original
     /// app socket can receive the response.
     pub fn set_nat_ips(&mut self, tunnel_ip: &str, internet_ip: &str) {
-        if let Ok(tun_ip) = tunnel_ip.split('/').next().unwrap_or(tunnel_ip).parse::<std::net::Ipv4Addr>() {
+        if let Ok(tun_ip) = tunnel_ip
+            .split('/')
+            .next()
+            .unwrap_or(tunnel_ip)
+            .parse::<std::net::Ipv4Addr>()
+        {
             self.tunnel_ip = Some(tun_ip);
             log::info!("Set NAT tunnel IP: {}", tun_ip);
         }
@@ -289,10 +295,7 @@ impl ParallelInterceptor {
     /// bypassing Wintun for outbound tunnel traffic. This is faster because
     /// it eliminates the Wintun buffer copy and context switch.
     pub fn set_vpn_encrypt_context(&mut self, ctx: VpnEncryptContext) {
-        log::info!(
-            "Set VPN encrypt context: server={}",
-            ctx.server_addr
-        );
+        log::info!("Set VPN encrypt context: server={}", ctx.server_addr);
         self.vpn_encrypt_ctx = Some(ctx);
     }
 
@@ -330,11 +333,7 @@ impl ParallelInterceptor {
     }
 
     /// Configure with VPN adapter
-    pub fn configure(
-        &mut self,
-        vpn_adapter_name: &str,
-        tunnel_apps: Vec<String>,
-    ) -> VpnResult<()> {
+    pub fn configure(&mut self, vpn_adapter_name: &str, tunnel_apps: Vec<String>) -> VpnResult<()> {
         log::info!(
             "Configuring parallel interceptor for VPN adapter: {}",
             vpn_adapter_name
@@ -401,15 +400,27 @@ impl ParallelInterceptor {
                     score += 50;
                 }
                 score += (10 - idx.min(10)) as i32;
-                physical_candidates.push((idx, friendly_name.clone(), internal_name.to_string(), score));
+                physical_candidates.push((
+                    idx,
+                    friendly_name.clone(),
+                    internal_name.to_string(),
+                    score,
+                ));
             }
         }
 
         // Select physical adapter
-        if let Some((idx, friendly_name, internal_name, _)) = physical_candidates.into_iter().max_by_key(|x| x.3) {
+        if let Some((idx, friendly_name, internal_name, _)) =
+            physical_candidates.into_iter().max_by_key(|x| x.3)
+        {
             self.physical_adapter_idx = Some(idx);
             self.physical_adapter_name = Some(internal_name.clone());
-            log::info!("Selected physical adapter: {} (index {}, internal: '{}')", friendly_name, idx, internal_name);
+            log::info!(
+                "Selected physical adapter: {} (index {}, internal: '{}')",
+                friendly_name,
+                idx,
+                internal_name
+            );
         } else {
             return Err(VpnError::SplitTunnel(
                 "No physical adapter found".to_string(),
@@ -498,14 +509,19 @@ impl ParallelInterceptor {
         // Start packet reader/dispatcher thread
         let reader_stop = Arc::clone(&self.stop_flag);
         let num_workers = self.num_workers;
-        let physical_name = Arc::new(
-            self.physical_adapter_name
-                .clone()
-                .ok_or_else(|| VpnError::SplitTunnel("Physical adapter name not set".to_string()))?
-        );
+        let physical_name =
+            Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
+                VpnError::SplitTunnel("Physical adapter name not set".to_string())
+            })?);
 
         self.reader_handle = Some(thread::spawn(move || {
-            if let Err(e) = run_packet_reader(physical_idx, physical_name, senders, reader_stop, num_workers) {
+            if let Err(e) = run_packet_reader(
+                physical_idx,
+                physical_name,
+                senders,
+                reader_stop,
+                num_workers,
+            ) {
                 log::error!("Packet reader error: {}", e);
             }
         }));
@@ -522,7 +538,10 @@ impl ParallelInterceptor {
                 let throughput = self.throughput_stats.clone();
 
                 // Set socket to non-blocking for clean shutdown
-                if let Err(e) = ctx.socket.set_read_timeout(Some(std::time::Duration::from_millis(100))) {
+                if let Err(e) = ctx
+                    .socket
+                    .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                {
                     log::warn!("Failed to set socket read timeout: {}", e);
                 }
 
@@ -631,7 +650,10 @@ impl ParallelInterceptor {
         let adapter = match adapters.iter().find(|a| a.get_name() == physical_name) {
             Some(a) => a,
             None => {
-                log::warn!("inject_inbound: physical adapter '{}' not found", physical_name);
+                log::warn!(
+                    "inject_inbound: physical adapter '{}' not found",
+                    physical_name
+                );
                 return;
             }
         };
@@ -645,7 +667,10 @@ impl ParallelInterceptor {
 
         // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
         if frame_len > MAX_ETHER_FRAME {
-            log::warn!("inject_inbound: packet too large ({} bytes), dropping", frame_len);
+            log::warn!(
+                "inject_inbound: packet too large ({} bytes), dropping",
+                frame_len
+            );
             return;
         }
 
@@ -710,7 +735,10 @@ impl ParallelInterceptor {
         let adapter_mac: [u8; 6] = match adapters.iter().find(|a| a.get_name() == &physical_name) {
             Some(a) => a.get_hw_address()[0..6].try_into().unwrap_or([0; 6]),
             None => {
-                log::error!("create_inbound_config: physical adapter '{}' not found", physical_name);
+                log::error!(
+                    "create_inbound_config: physical adapter '{}' not found",
+                    physical_name
+                );
                 return None;
             }
         };
@@ -764,7 +792,10 @@ impl ParallelInterceptor {
         let adapter_mac: [u8; 6] = match adapters.iter().find(|a| a.get_name() == &physical_name) {
             Some(a) => a.get_hw_address()[0..6].try_into().unwrap_or([0; 6]),
             None => {
-                log::error!("create_inbound_handler: physical adapter '{}' not found", physical_name);
+                log::error!(
+                    "create_inbound_handler: physical adapter '{}' not found",
+                    physical_name
+                );
                 return None;
             }
         };
@@ -772,8 +803,12 @@ impl ParallelInterceptor {
         log::info!(
             "create_inbound_handler: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             physical_name,
-            adapter_mac[0], adapter_mac[1], adapter_mac[2],
-            adapter_mac[3], adapter_mac[4], adapter_mac[5]
+            adapter_mac[0],
+            adapter_mac[1],
+            adapter_mac[2],
+            adapter_mac[3],
+            adapter_mac[4],
+            adapter_mac[5]
         );
 
         // Track packets for logging (use atomic counter)
@@ -783,17 +818,18 @@ impl ParallelInterceptor {
             use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
             if ip_packet.len() < 20 {
-                log::warn!("inbound_handler: packet too short ({} bytes)", ip_packet.len());
+                log::warn!(
+                    "inbound_handler: packet too short ({} bytes)",
+                    ip_packet.len()
+                );
                 return;
             }
 
             // Parse IP header
-            let src_ip = std::net::Ipv4Addr::new(
-                ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
-            );
-            let dst_ip = std::net::Ipv4Addr::new(
-                ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
-            );
+            let src_ip =
+                std::net::Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
+            let dst_ip =
+                std::net::Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
             let protocol = ip_packet[9];
 
             // Parse ICMP error packets for diagnostics
@@ -823,24 +859,32 @@ impl ParallelInterceptor {
                     // Extract original destination from embedded IP header (at offset 28)
                     if ip_packet.len() >= 48 {
                         let orig_dst = std::net::Ipv4Addr::new(
-                            ip_packet[44], ip_packet[45], ip_packet[46], ip_packet[47]
+                            ip_packet[44],
+                            ip_packet[45],
+                            ip_packet[46],
+                            ip_packet[47],
                         );
                         log::warn!(
                             "inbound_handler: ICMP Error - {} (type={}, code={}) for packet to {}",
-                            desc, icmp_type, icmp_code, orig_dst
+                            desc,
+                            icmp_type,
+                            icmp_code,
+                            orig_dst
                         );
                     } else {
                         log::warn!(
                             "inbound_handler: ICMP Error - {} (type={}, code={})",
-                            desc, icmp_type, icmp_code
+                            desc,
+                            icmp_type,
+                            icmp_code
                         );
                     }
                 }
             }
 
             // Check if we need to do NAT (rewrite destination IP)
-            let needs_nat = tunnel_ip.is_some() && internet_ip.is_some()
-                && Some(dst_ip) == tunnel_ip;
+            let needs_nat =
+                tunnel_ip.is_some() && internet_ip.is_some() && Some(dst_ip) == tunnel_ip;
 
             // Make a mutable copy for NAT rewriting
             let mut packet = ip_packet.to_vec();
@@ -898,7 +942,10 @@ impl ParallelInterceptor {
 
             // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
             if frame_len > MAX_ETHER_FRAME {
-                log::warn!("inbound_handler: packet too large ({} bytes), dropping", frame_len);
+                log::warn!(
+                    "inbound_handler: packet too large ({} bytes), dropping",
+                    frame_len
+                );
                 return;
             }
 
@@ -955,8 +1002,16 @@ impl ParallelInterceptor {
                     if count < 5 || count % 100 == 0 {
                         log::info!(
                             "inbound_handler: injected {} byte packet #{} (proto={}, {} -> {}{})",
-                            packet.len(), count + 1, protocol, src_ip, dst_ip,
-                            if needs_nat { format!(" [NAT -> {}]", internet_ip.unwrap()) } else { String::new() }
+                            packet.len(),
+                            count + 1,
+                            protocol,
+                            src_ip,
+                            dst_ip,
+                            if needs_nat {
+                                format!(" [NAT -> {}]", internet_ip.unwrap())
+                            } else {
+                                String::new()
+                            }
                         );
                     }
                 }
@@ -976,10 +1031,7 @@ fn set_thread_affinity(core_id: usize) {
     #[cfg(target_os = "windows")]
     unsafe {
         let mask = 1usize << core_id;
-        let _ = SetThreadAffinityMask(
-            windows::Win32::System::Threading::GetCurrentThread(),
-            mask,
-        );
+        let _ = SetThreadAffinityMask(windows::Win32::System::Threading::GetCurrentThread(), mask);
     }
 }
 
@@ -1019,16 +1071,25 @@ fn run_inbound_receiver(
         }
     };
 
-    let adapter = match adapters.iter().find(|a| a.get_name() == &config.physical_adapter_name) {
+    let adapter = match adapters
+        .iter()
+        .find(|a| a.get_name() == &config.physical_adapter_name)
+    {
         Some(a) => a,
         None => {
-            log::error!("Inbound receiver: physical adapter '{}' not found", config.physical_adapter_name);
+            log::error!(
+                "Inbound receiver: physical adapter '{}' not found",
+                config.physical_adapter_name
+            );
             return;
         }
     };
 
     let adapter_handle = adapter.get_handle();
-    log::info!("Inbound receiver: using adapter '{}' for MSTCP injection", config.physical_adapter_name);
+    log::info!(
+        "Inbound receiver: using adapter '{}' for MSTCP injection",
+        config.physical_adapter_name
+    );
 
     let mut recv_buf = vec![0u8; 2048]; // Max WireGuard packet size
     let mut decrypt_buf = vec![0u8; 2048];
@@ -1072,12 +1133,18 @@ fn run_inbound_receiver(
                             if keepalives_sent <= 5 || keepalives_sent % 50 == 0 {
                                 log::info!(
                                     "Inbound receiver: sent keepalive #{} ({} bytes, {} sent)",
-                                    keepalives_sent, data.len(), sent
+                                    keepalives_sent,
+                                    data.len(),
+                                    sent
                                 );
                             }
                         }
                         Err(e) => {
-                            log::warn!("Inbound receiver: failed to send keepalive: {} (kind={:?})", e, e.kind());
+                            log::warn!(
+                                "Inbound receiver: failed to send keepalive: {} (kind={:?})",
+                                e,
+                                e.kind()
+                            );
                         }
                     }
                 }
@@ -1089,7 +1156,8 @@ fn run_inbound_receiver(
                 }
                 other => {
                     // Unexpected result type
-                    log::warn!("Inbound receiver: unexpected timer result: {:?}",
+                    log::warn!(
+                        "Inbound receiver: unexpected timer result: {:?}",
                         match other {
                             TunnResult::WriteToTunnelV4(_, _) => "WriteToTunnelV4",
                             TunnResult::WriteToTunnelV6(_, _) => "WriteToTunnelV6",
@@ -1124,7 +1192,11 @@ fn run_inbound_receiver(
 
         // Log first 20 received packets to help debug (DEBUG level)
         if packets_received <= 20 {
-            log::debug!("Inbound receiver: recv #{} - {} bytes from VPN server", packets_received, n);
+            log::debug!(
+                "Inbound receiver: recv #{} - {} bytes from VPN server",
+                packets_received,
+                n
+            );
         }
 
         // Decrypt the packet
@@ -1145,18 +1217,18 @@ fn run_inbound_receiver(
                     let dst_ip = std::net::Ipv4Addr::new(data[16], data[17], data[18], data[19]);
                     log::debug!(
                         "Inbound receiver: decrypted #{} - {} bytes, proto={}, {} -> {}",
-                        packets_decrypted, data.len(), proto, src_ip, dst_ip
+                        packets_decrypted,
+                        data.len(),
+                        proto,
+                        src_ip,
+                        dst_ip
                     );
                 }
 
                 // Do NAT and inject to MSTCP
-                if let Some(injected) = inject_inbound_packet(
-                    data,
-                    &config,
-                    adapter_handle,
-                    &driver,
-                    packets_injected,
-                ) {
+                if let Some(injected) =
+                    inject_inbound_packet(data, &config, adapter_handle, &driver, packets_injected)
+                {
                     if injected {
                         packets_injected += 1;
                     } else {
@@ -1166,7 +1238,10 @@ fn run_inbound_receiver(
             }
             TunnResult::WriteToNetwork(data) => {
                 // Protocol message (handshake, etc.) - send back to VPN server
-                log::debug!("Inbound receiver: got WriteToNetwork - {} bytes (handshake/protocol)", data.len());
+                log::debug!(
+                    "Inbound receiver: got WriteToNetwork - {} bytes (handshake/protocol)",
+                    data.len()
+                );
                 if let Err(e) = ctx.socket.send(data) {
                     log::warn!("Inbound receiver: failed to send protocol message: {}", e);
                 }
@@ -1174,14 +1249,19 @@ fn run_inbound_receiver(
             TunnResult::Done => {
                 // No plaintext output (e.g., keepalive received)
                 if packets_received <= 20 {
-                    log::debug!("Inbound receiver: recv #{} -> Done (keepalive?)", packets_received);
+                    log::debug!(
+                        "Inbound receiver: recv #{} -> Done (keepalive?)",
+                        packets_received
+                    );
                 }
             }
             TunnResult::Err(e) => {
                 // Log ALL decrypt errors (not just first 20) since this is critical for debugging
                 log::warn!(
                     "Inbound receiver: decrypt ERROR on packet #{} ({} bytes): {:?}",
-                    packets_received, n, e
+                    packets_received,
+                    n,
+                    e
                 );
             }
         }
@@ -1190,7 +1270,10 @@ fn run_inbound_receiver(
         if packets_received > 0 && packets_received % 100 == 0 {
             log::debug!(
                 "Inbound receiver: {} recv, {} decrypt, {} inject, {} errors",
-                packets_received, packets_decrypted, packets_injected, inject_errors
+                packets_received,
+                packets_decrypted,
+                packets_injected,
+                inject_errors
             );
         }
     }
@@ -1215,17 +1298,18 @@ fn inject_inbound_packet(
     use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
     if ip_packet.len() < 20 {
-        log::warn!("inject_inbound_packet: packet too small ({} bytes)", ip_packet.len());
+        log::warn!(
+            "inject_inbound_packet: packet too small ({} bytes)",
+            ip_packet.len()
+        );
         return None;
     }
 
     // Parse IP header
-    let src_ip = std::net::Ipv4Addr::new(
-        ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
-    );
-    let dst_ip = std::net::Ipv4Addr::new(
-        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
-    );
+    let src_ip =
+        std::net::Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
+    let dst_ip =
+        std::net::Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
     let protocol = ip_packet[9];
 
     // Log every packet for debugging (first 10) - DEBUG level
@@ -1238,14 +1322,18 @@ fn inject_inbound_packet(
     }
 
     // Check if we need to do NAT (rewrite destination IP from tunnel_ip to internet_ip)
-    let needs_nat = config.tunnel_ip.is_some() && config.internet_ip.is_some()
+    let needs_nat = config.tunnel_ip.is_some()
+        && config.internet_ip.is_some()
         && Some(dst_ip) == config.tunnel_ip;
 
     // Log NAT decision for debugging (first 10 packets) - DEBUG level
     if packet_count < 10 {
         log::debug!(
             "inject_inbound_packet #{}: needs_nat={} (dst={}, tunnel_ip={:?})",
-            packet_count, needs_nat, dst_ip, config.tunnel_ip
+            packet_count,
+            needs_nat,
+            dst_ip,
+            config.tunnel_ip
         );
     }
 
@@ -1259,7 +1347,11 @@ fn inject_inbound_packet(
         if packet_count < 10 {
             log::debug!(
                 "Inbound NAT #{}: {} -> {}, proto={}, {} bytes",
-                packet_count, dst_ip, new_dst, protocol, packet.len()
+                packet_count,
+                dst_ip,
+                new_dst,
+                protocol,
+                packet.len()
             );
         }
 
@@ -1289,10 +1381,8 @@ fn inject_inbound_packet(
             );
         } else if protocol == 17 && packet.len() >= transport_offset + 8 {
             // UDP: checksum at offset 6 within UDP header
-            let udp_checksum = u16::from_be_bytes([
-                packet[transport_offset + 6],
-                packet[transport_offset + 7],
-            ]);
+            let udp_checksum =
+                u16::from_be_bytes([packet[transport_offset + 6], packet[transport_offset + 7]]);
             if udp_checksum != 0 {
                 update_transport_checksum(
                     &mut packet,
@@ -1388,10 +1478,7 @@ fn run_packet_reader(
 
     // Set adapter to tunnel mode
     driver
-        .set_adapter_mode(
-            physical_handle,
-            FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL,
-        )
+        .set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
         .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
 
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
@@ -1409,12 +1496,9 @@ fn run_packet_reader(
         }
 
         // Read batch of packets
-        let mut to_read =
-            EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
+        let mut to_read = EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
 
-        let packets_read = driver
-            .read_packets::<BATCH_SIZE>(&mut to_read)
-            .unwrap_or(0);
+        let packets_read = driver.read_packets::<BATCH_SIZE>(&mut to_read).unwrap_or(0);
 
         if packets_read == 0 {
             unsafe {
@@ -1555,11 +1639,20 @@ fn run_packet_worker(
 
     // Log VPN encryption context availability
     if vpn_encrypt_ctx.is_some() {
-        log::info!("Worker {}: VPN encryption context AVAILABLE - direct encryption enabled", worker_id);
+        log::info!(
+            "Worker {}: VPN encryption context AVAILABLE - direct encryption enabled",
+            worker_id
+        );
     } else if wintun_session.is_some() {
-        log::info!("Worker {}: Wintun session AVAILABLE - tunnel routing enabled (fallback mode)", worker_id);
+        log::info!(
+            "Worker {}: Wintun session AVAILABLE - tunnel routing enabled (fallback mode)",
+            worker_id
+        );
     } else {
-        log::warn!("Worker {}: NO VPN context - tunnel packets will be bypassed!", worker_id);
+        log::warn!(
+            "Worker {}: NO VPN context - tunnel packets will be bypassed!",
+            worker_id
+        );
     }
 
     // Track direct encryption stats
@@ -1611,7 +1704,8 @@ fn run_packet_worker(
             // Check if should tunnel (timed for performance measurement)
             // Uses hybrid approach: snapshot cache (fast) + per-worker inline cache (for misses)
             let lookup_start = std::time::Instant::now();
-            let should_tunnel = should_route_to_vpn_with_inline_cache(&work.data, &snapshot, &mut inline_cache);
+            let should_tunnel =
+                should_route_to_vpn_with_inline_cache(&work.data, &snapshot, &mut inline_cache);
             total_lookup_ns += lookup_start.elapsed().as_nanos() as u64;
             lookup_count += 1;
 
@@ -1620,11 +1714,23 @@ fn run_packet_worker(
                 let tunneled = stats.packets_tunneled.load(Ordering::Relaxed);
                 let bypassed = stats.packets_bypassed.load(Ordering::Relaxed);
                 let total = tunneled + bypassed;
-                let tunnel_pct = if total > 0 { (tunneled as f64 / total as f64) * 100.0 } else { 0.0 };
+                let tunnel_pct = if total > 0 {
+                    (tunneled as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
 
                 // Calculate average latencies
-                let avg_lookup_ns = if lookup_count > 0 { total_lookup_ns / lookup_count } else { 0 };
-                let avg_encrypt_ns = if encrypt_count > 0 { total_encrypt_ns / encrypt_count } else { 0 };
+                let avg_lookup_ns = if lookup_count > 0 {
+                    total_lookup_ns / lookup_count
+                } else {
+                    0
+                };
+                let avg_encrypt_ns = if encrypt_count > 0 {
+                    total_encrypt_ns / encrypt_count
+                } else {
+                    0
+                };
 
                 log::info!(
                     "Worker 0 PERF: lookup={:.1}μs encrypt={:.1}μs | {} tunneled, {} bypassed ({:.1}%), direct: {}/{}, Wintun: {}/{}/{}",
@@ -1638,7 +1744,9 @@ fn run_packet_worker(
 
             if should_tunnel {
                 stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
-                stats.bytes_tunneled.fetch_add(packet_len, Ordering::Relaxed);
+                stats
+                    .bytes_tunneled
+                    .fetch_add(packet_len, Ordering::Relaxed);
                 throughput.add_tx(packet_len);
 
                 // Extract IP packet from Ethernet frame
@@ -1650,9 +1758,15 @@ fn run_packet_worker(
                 // === ZERO-ALLOCATION NAT REWRITING ===
                 // Use thread-local buffer instead of heap allocation for NAT
                 // This eliminates ~200-500ns per packet from malloc/free overhead
-                let (packet_to_send_ptr, packet_to_send_len): (*const u8, usize) = if ip_packet.len() >= 20 {
+                let (packet_to_send_ptr, packet_to_send_len): (*const u8, usize) = if ip_packet
+                    .len()
+                    >= 20
+                {
                     let src_ip = std::net::Ipv4Addr::new(
-                        ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+                        ip_packet[12],
+                        ip_packet[13],
+                        ip_packet[14],
+                        ip_packet[15],
                     );
 
                     // Check if we need source NAT
@@ -1711,7 +1825,11 @@ fn run_packet_worker(
                             if direct_encrypt_success + wintun_inject_success < 5 {
                                 log::info!(
                                     "Worker {}: Source NAT {} -> {}, {} bytes, proto={}",
-                                    worker_id, src_ip, new_src, pkt_len, protocol
+                                    worker_id,
+                                    src_ip,
+                                    new_src,
+                                    pkt_len,
+                                    protocol
                                 );
                             }
 
@@ -1727,7 +1845,8 @@ fn run_packet_worker(
 
                 // SAFETY: The pointer is either from ip_packet (still in scope) or
                 // from NAT_BUFFER (thread-local, valid for duration of this function)
-                let packet_to_send = unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
+                let packet_to_send =
+                    unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
 
                 // === ZERO-ALLOCATION ENCRYPTION ===
                 // Use thread-local buffer instead of heap allocation
@@ -1755,9 +1874,7 @@ fn run_packet_worker(
                                 // Packet was queued internally (handshake in progress)
                                 (true, 0)
                             }
-                            TunnResult::Err(_) | _ => {
-                                (false, 0)
-                            }
+                            TunnResult::Err(_) | _ => (false, 0),
                         }
                     });
                     total_encrypt_ns += encrypt_start.elapsed().as_nanos() as u64;
@@ -1768,7 +1885,9 @@ fn run_packet_worker(
                         if direct_encrypt_success <= 5 && encrypted_len > 0 {
                             log::info!(
                                 "Worker {}: Direct encrypt OK - {} bytes -> {} bytes",
-                                worker_id, packet_to_send_len, encrypted_len
+                                worker_id,
+                                packet_to_send_len,
+                                encrypted_len
                             );
                         }
                     } else {
@@ -1799,7 +1918,9 @@ fn run_packet_worker(
                 }
             } else {
                 stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
-                stats.bytes_bypassed.fetch_add(packet_len, Ordering::Relaxed);
+                stats
+                    .bytes_bypassed
+                    .fetch_add(packet_len, Ordering::Relaxed);
 
                 // CRITICAL FIX: Forward bypass packets to adapter
                 // Previously this was missing, causing all non-tunnel traffic to be dropped!
@@ -1828,7 +1949,10 @@ fn send_bypass_packet(
     use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
     // Find adapter by internal name (GUID) - this is consistent across driver instances
-    let adapter = match adapters.iter().find(|a| a.get_name() == work.physical_adapter_name.as_str()) {
+    let adapter = match adapters
+        .iter()
+        .find(|a| a.get_name() == work.physical_adapter_name.as_str())
+    {
         Some(a) => a,
         None => {
             log::warn!(
@@ -1845,7 +1969,10 @@ fn send_bypass_packet(
     // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
     const MAX_ETHER_FRAME: usize = 1522;
     if work.data.len() > MAX_ETHER_FRAME {
-        log::warn!("send_bypass_packet: packet too large ({} bytes), dropping", work.data.len());
+        log::warn!(
+            "send_bypass_packet: packet too large ({} bytes), dropping",
+            work.data.len()
+        );
         return;
     }
 
@@ -1864,7 +1991,6 @@ fn send_bypass_packet(
         }
     }
 }
-
 
 /// Cache refresher thread - single writer
 fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBool>) {
@@ -2029,14 +2155,23 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
 
         // Also log connections owned by tunnel apps
         if refresh_count < 10 && !tunnel_pids_found.is_empty() {
-            for ((key, &pid), (tunnel_pid, _name)) in connections.iter().flat_map(|c| {
-                tunnel_pids_found.iter().filter_map(move |tp| {
-                    if *c.1 == tp.0 { Some((c, tp)) } else { None }
+            for ((key, &pid), (tunnel_pid, _name)) in
+                connections.iter().flat_map(|c| {
+                    tunnel_pids_found.iter().filter_map(move |tp| {
+                        if *c.1 == tp.0 {
+                            Some((c, tp))
+                        } else {
+                            None
+                        }
+                    })
                 })
-            }) {
+            {
                 log::info!(
                     "Cache refresher: Tunnel app connection {}:{} ({:?}) owned by PID {}",
-                    key.local_ip, key.local_port, key.protocol, pid
+                    key.local_ip,
+                    key.local_port,
+                    key.protocol,
+                    pid
                 );
             }
         }
@@ -2060,7 +2195,10 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
                     "Cache #{}: {} tunnel PIDs found: {:?}, {} tunnel connections",
                     refresh_count,
                     tunnel_pids_found.len(),
-                    tunnel_pids_found.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+                    tunnel_pids_found
+                        .iter()
+                        .map(|(_, n)| n.as_str())
+                        .collect::<Vec<_>>(),
                     tunnel_connections.len()
                 );
             }
@@ -2159,6 +2297,13 @@ fn should_route_to_vpn(data: &[u8], snapshot: &ProcessSnapshot) -> bool {
         data[ip_start + 15],
     );
 
+    let dst_ip = Ipv4Addr::new(
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    );
+
     // Parse transport header
     let transport_start = ip_start + ihl;
     if data.len() < transport_start + 4 {
@@ -2171,7 +2316,13 @@ fn should_route_to_vpn(data: &[u8], snapshot: &ProcessSnapshot) -> bool {
     // No expensive inline_connection_lookup (~500μs syscall eliminated!)
     // First few packets of new connections may bypass (max 2ms until cache refresh)
     // This is the same approach WireSock uses for high-performance split tunneling
-    snapshot.should_tunnel(src_ip, src_port, protocol)
+    //
+    // FIX: Also check destination IP - only tunnel traffic to game servers
+    // Auth/API traffic (to CDN IPs) bypasses the tunnel to avoid 403 errors
+    if snapshot.should_tunnel(src_ip, src_port, protocol) {
+        return super::routes::is_roblox_game_server(dst_ip);
+    }
+    false
 }
 
 /// Per-worker inline cache for connection lookups
@@ -2248,6 +2399,13 @@ fn should_route_to_vpn_with_inline_cache(
         data[ip_start + 15],
     );
 
+    let dst_ip = Ipv4Addr::new(
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    );
+
     // Parse transport header
     let transport_start = ip_start + ihl;
     if data.len() < transport_start + 4 {
@@ -2256,27 +2414,87 @@ fn should_route_to_vpn_with_inline_cache(
 
     let src_port = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
 
+    // Helper to check if destination is a game server (should be tunneled)
+    // Non-game-server traffic (auth/API) bypasses the tunnel to avoid 403 errors
+    let is_game_server_dest = || -> bool { super::routes::is_roblox_game_server(dst_ip) };
+
+    // Thread-local counter for bypass logging
+    thread_local! {
+        static BYPASS_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
     // Phase 1: Check snapshot cache (fast path, O(1))
     if snapshot.should_tunnel(src_ip, src_port, protocol) {
+        // Process is a tunnel app - check if destination is a game server
+        if !is_game_server_dest() {
+            let count = BYPASS_COUNT.with(|c| {
+                let n = c.get();
+                c.set(n + 1);
+                n
+            });
+            if count < 20 {
+                log::info!(
+                    "Bypass auth/API: {} -> {} (not a game server IP)",
+                    src_ip,
+                    dst_ip
+                );
+            }
+            return false;
+        }
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         return true;
     }
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
+    // Cache key now includes destination to properly cache per-destination decisions
     let cache_key = (src_ip, src_port, protocol);
     if let Some(&result) = inline_cache.get(&cache_key) {
+        // If cached as "should tunnel", verify destination is still a game server
+        if result && !is_game_server_dest() {
+            let count = BYPASS_COUNT.with(|c| {
+                let n = c.get();
+                c.set(n + 1);
+                n
+            });
+            if count < 20 {
+                log::info!(
+                    "Bypass auth/API (cached): {} -> {} (not a game server IP)",
+                    src_ip,
+                    dst_ip
+                );
+            }
+            return false;
+        }
         INLINE_HITS.with(|c| c.set(c.get() + 1));
         return result;
     }
 
     // Phase 3: Inline lookup (slow path, ~500μs, but only once per connection)
     SYSCALL_LOOKUPS.with(|c| c.set(c.get() + 1));
-    let result = inline_connection_lookup(src_ip, src_port, protocol, snapshot);
+    let process_should_tunnel = inline_connection_lookup(src_ip, src_port, protocol, snapshot);
+
+    // Final result: process should tunnel AND destination is a game server
+    let result = process_should_tunnel && is_game_server_dest();
+
+    if process_should_tunnel && !result {
+        let count = BYPASS_COUNT.with(|c| {
+            let n = c.get();
+            c.set(n + 1);
+            n
+        });
+        if count < 20 {
+            log::info!(
+                "Bypass auth/API (inline): {} -> {} (not a game server IP)",
+                src_ip,
+                dst_ip
+            );
+        }
+    }
 
     // Cache the result for subsequent packets from this connection
     // Limit cache size to prevent unbounded growth
     if inline_cache.len() < 10000 {
-        inline_cache.insert(cache_key, result);
+        inline_cache.insert(cache_key, process_should_tunnel);
     }
 
     // Log stats periodically
@@ -2299,7 +2517,11 @@ fn should_route_to_vpn_with_inline_cache(
     if total < 10 {
         log::debug!(
             "Packet #{}: {}:{} {:?} -> result={} (tunnel_apps={:?})",
-            total, src_ip, src_port, protocol, result,
+            total,
+            src_ip,
+            src_port,
+            protocol,
+            result,
             snapshot.tunnel_apps.iter().take(5).collect::<Vec<_>>()
         );
     }
@@ -2374,15 +2596,16 @@ fn inline_connection_lookup(
                 }
 
                 let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
-                let rows = std::slice::from_raw_parts(
-                    table.table.as_ptr(),
-                    table.dwNumEntries as usize,
-                );
+                let rows =
+                    std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
 
                 if debug_log {
                     log::debug!(
                         "inline_lookup #{}: searching TCP table ({} entries) for {}:{}",
-                        lookup_num, rows.len(), src_ip, src_port
+                        lookup_num,
+                        rows.len(),
+                        src_ip,
+                        src_port
                     );
                 }
 
@@ -2403,7 +2626,11 @@ fn inline_connection_lookup(
                         if debug_log || is_tunnel {
                             log::debug!(
                                 "inline_lookup #{}: MATCH {}:{} -> PID {} tunnel={}",
-                                lookup_num, local_ip, local_port, row.dwOwningPid, is_tunnel
+                                lookup_num,
+                                local_ip,
+                                local_port,
+                                row.dwOwningPid,
+                                is_tunnel
                             );
                         }
                         return is_tunnel;
@@ -2431,7 +2658,9 @@ fn inline_connection_lookup(
                 if debug_log {
                     log::debug!(
                         "inline_lookup #{}: NOT FOUND in TCP table for {}:{}",
-                        lookup_num, src_ip, src_port
+                        lookup_num,
+                        src_ip,
+                        src_port
                     );
                 }
             }
@@ -2467,10 +2696,8 @@ fn inline_connection_lookup(
                 }
 
                 let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
-                let rows = std::slice::from_raw_parts(
-                    table.table.as_ptr(),
-                    table.dwNumEntries as usize,
-                );
+                let rows =
+                    std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize);
 
                 for row in rows {
                     // Match byte order handling with cache refresher
@@ -2496,8 +2723,14 @@ fn inline_connection_lookup(
         let tunneled = TUNNEL_COUNT.with(|c| c.get());
         log::debug!(
             "inline_lookup stats: {} lookups, {} found, {} tunneled ({:.1}% hit rate)",
-            lookup_num, found, tunneled,
-            if lookup_num > 0 { (found as f64 / lookup_num as f64) * 100.0 } else { 0.0 }
+            lookup_num,
+            found,
+            tunneled,
+            if lookup_num > 0 {
+                (found as f64 / lookup_num as f64) * 100.0
+            } else {
+                0.0
+            }
         );
     }
 
@@ -2510,7 +2743,10 @@ fn inline_connection_lookup(
 /// Uses Windows API QueryFullProcessImageNameW for fast process name lookup.
 fn is_pid_tunnel_app(pid: u32, snapshot: &ProcessSnapshot) -> bool {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     // First try snapshot (fast path if PID is already known)
     if snapshot.is_tunnel_pid_public(pid) {
@@ -2528,7 +2764,14 @@ fn is_pid_tunnel_app(pid: u32, snapshot: &ProcessSnapshot) -> bool {
             let mut buffer = [0u16; 260];
             let mut size = buffer.len() as u32;
 
-            if QueryFullProcessImageNameW(h, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(buffer.as_mut_ptr()), &mut size).is_ok() {
+            if QueryFullProcessImageNameW(
+                h,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buffer.as_mut_ptr()),
+                &mut size,
+            )
+            .is_ok()
+            {
                 let _ = CloseHandle(h);
 
                 // Extract filename from full path
@@ -2622,10 +2865,7 @@ fn update_transport_checksum(
     new_ip: &[u8; 4],
 ) {
     // Read old checksum
-    let old_checksum = u16::from_be_bytes([
-        packet[checksum_offset],
-        packet[checksum_offset + 1],
-    ]);
+    let old_checksum = u16::from_be_bytes([packet[checksum_offset], packet[checksum_offset + 1]]);
 
     // RFC 1624 formula: HC' = ~(~HC + ~m + m')
     // ~HC: one's complement of old checksum
@@ -2691,10 +2931,10 @@ mod tests {
         let mut frame = vec![0u8; 54];
         // Ethernet header
         frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4
-        // IP header
+                                                                 // IP header
         frame[14] = 0x45; // IPv4, IHL=5
         frame[23] = 6; // TCP
-        // TCP header
+                       // TCP header
         frame[34..36].copy_from_slice(&1234u16.to_be_bytes()); // src port
         frame[36..38].copy_from_slice(&80u16.to_be_bytes()); // dst port
 
