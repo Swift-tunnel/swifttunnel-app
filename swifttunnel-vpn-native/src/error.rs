@@ -16,6 +16,9 @@ pub enum VpnError {
     #[error("Split tunnel error: {0}")]
     SplitTunnel(String),
 
+    #[error("Route error: {0}")]
+    Route(String),
+
     #[error("Connection error: {0}")]
     Connection(String),
 
