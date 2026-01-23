@@ -32,7 +32,6 @@ use updater::{run_auto_updater, AutoUpdateResult};
 use vpn::split_tunnel::SplitTunnelDriver;
 
 use eframe::NativeOptions;
-use eframe::wgpu; // Re-exported by eframe
 use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,29 +56,6 @@ fn is_rdp_session() -> bool {
     }
 }
 
-/// Detect if we're likely in an environment without OpenGL support
-/// Returns true if we should use wgpu (software rendering) instead of glow (OpenGL)
-fn should_use_software_renderer() -> bool {
-    // Check for RDP session
-    if is_rdp_session() {
-        info!("Detected RDP session - will use wgpu (software) renderer");
-        return true;
-    }
-
-    // Check for --wgpu command line flag (manual override)
-    if std::env::args().any(|arg| arg == "--wgpu" || arg == "--software-render") {
-        info!("Manual wgpu renderer requested via command line");
-        return true;
-    }
-
-    // Check for environment variable override
-    if std::env::var("SWIFTTUNNEL_RENDERER").map(|v| v.to_lowercase()) == Ok("wgpu".to_string()) {
-        info!("wgpu renderer requested via SWIFTTUNNEL_RENDERER environment variable");
-        return true;
-    }
-
-    false
-}
 
 /// RAII wrapper for Windows mutex handle
 struct SingleInstanceGuard {
@@ -384,36 +360,17 @@ fn main() -> eframe::Result<()> {
         .with_transparent(false)        // Solid window background
         .with_maximized(true);          // FORCE maximized on startup
 
-    // Choose renderer based on environment
-    // - glow (OpenGL) for native desktop with GPU - best performance
-    // - wgpu for RDP/VM - fallback to software if available
-    let use_software = should_use_software_renderer();
+    // Check if running in RDP/VM environment
+    if is_rdp_session() {
+        warn!("Running in RDP session - OpenGL may not be available");
+    }
 
-    let options = if use_software {
-        info!("Using wgpu renderer for RDP/VM compatibility");
-
-        // Configure wgpu with low power preference to prefer software adapters
-        use eframe::egui_wgpu::WgpuConfiguration;
-
-        NativeOptions {
-            viewport,
-            renderer: eframe::Renderer::Wgpu,
-            wgpu_options: WgpuConfiguration {
-                // Include all backends - D3D12 has WARP, GL might have llvmpipe
-                supported_backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN | wgpu::Backends::GL,
-                // Low power preference tends to select software/integrated adapters
-                power_preference: wgpu::PowerPreference::LowPower,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    } else {
-        info!("Using glow (OpenGL) renderer for native performance");
-        NativeOptions {
-            viewport,
-            renderer: eframe::Renderer::Glow,
-            ..Default::default()
-        }
+    // Use glow (OpenGL) renderer - best performance for desktop with GPU
+    info!("Using glow (OpenGL) renderer");
+    let options = NativeOptions {
+        viewport,
+        renderer: eframe::Renderer::Glow,
+        ..Default::default()
     };
 
     // Try to run the GUI - handle failure gracefully in RDP/VM environments
