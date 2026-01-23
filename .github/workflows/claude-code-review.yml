@@ -38,20 +38,8 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: |
-            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
-
-            Perform a thorough code review checking for:
-            - Security vulnerabilities (injection, leaks, unsafe ops)
-            - Performance issues (inefficient code, memory leaks)
-            - Bugs and logic errors (edge cases, null handling)
-            - Code quality (readability, DRY, error handling)
-            - Architecture concerns (separation of concerns)
-            - Missing tests or documentation
-
-            Prioritize high-impact issues. Suggest specific fixes with code snippets.
-            Follow CLAUDE.md guidelines if present. Be constructive.
-          # Use Claude Opus 4.5 for highest quality code reviews
-          # Read CLAUDE.md for project context and guidelines
-          claude_args: '--model claude-opus-4-5-20251101 --append-system-prompt "Follow Kiss Dry Code principals"'
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          claude_args: |
+            --model claude-opus-4-5-20251101
+            --append-system-prompt "You are a senior code reviewer. Perform THOROUGH code reviews - never just say 'no issues found'. Always analyze: 1) Security (injection, leaks, unsafe ops) 2) Performance (inefficient code, memory issues) 3) Bugs (logic errors, edge cases, error handling) 4) Code quality (readability, DRY, naming) 5) Architecture (separation of concerns). For each file changed, provide specific observations. Suggest fixes with code snippets. If code is good, explain WHY it's good. Follow KISS/DRY principles. Never give a lazy one-liner review."
 
