@@ -74,6 +74,9 @@ fn main() -> Result<()> {
         "bench" => {
             run_vpn_benchmark();
         }
+        "wgconf" => {
+            export_wireguard_config();
+        }
         "all" => {
             println!("Running all tests...\n");
             check_driver_status();
@@ -108,6 +111,7 @@ fn print_usage() {
     println!("  ping     Test ping functionality (fetch servers & measure latency)");
     println!("  split    Test split tunnel with two apps (ip_checker=tunnel, testbench=bypass)");
     println!("  bench    Run speed benchmark through VPN tunnel (10MB download)");
+    println!("  wgconf   Export WireGuard config file (for WireSock testing)");
     println!("  help     Show this help message");
 }
 
@@ -1762,4 +1766,99 @@ fn run_ip_checker(path: &std::path::Path) -> Option<String> {
     }
 
     None
+}
+
+/// Export WireGuard config file for use with WireSock or other WireGuard clients
+fn export_wireguard_config() {
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║    EXPORT WIREGUARD CONFIG                                    ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
+
+    let rt = Runtime::new().expect("Failed to create tokio runtime");
+
+    // Step 1: Authenticate
+    println!("Authenticating...");
+    let auth_manager = match AuthManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            println!("   ❌ Failed: {}", e);
+            return;
+        }
+    };
+
+    let access_token = rt.block_on(async {
+        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+            println!("   ❌ Sign in failed: {}", e);
+            return None;
+        }
+        match auth_manager.get_state() {
+            AuthState::LoggedIn(session) => Some(session.access_token),
+            _ => None,
+        }
+    });
+
+    let access_token = match access_token {
+        Some(t) => {
+            println!("   ✅ Signed in");
+            t
+        }
+        None => return,
+    };
+
+    // Step 2: Fetch VPN config
+    println!("Fetching VPN config...");
+    let vpn_config = rt.block_on(async {
+        match fetch_vpn_config(&access_token, TEST_REGION).await {
+            Ok(config) => {
+                println!("   ✅ Region: {}, Endpoint: {}", TEST_REGION, config.endpoint);
+                Some(config)
+            }
+            Err(e) => {
+                println!("   ❌ Failed: {}", e);
+                None
+            }
+        }
+    });
+
+    let vpn_config = match vpn_config {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Step 3: Generate WireGuard config file content
+    let wg_config = format!(
+        r#"[Interface]
+PrivateKey = {}
+Address = {}
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = {}
+Endpoint = {}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+"#,
+        vpn_config.private_key,
+        vpn_config.assigned_ip,
+        vpn_config.server_public_key,
+        vpn_config.endpoint
+    );
+
+    // Step 4: Write to file
+    let config_path = std::path::PathBuf::from(r"C:\Users\testbench\wiresock.conf");
+    match std::fs::write(&config_path, &wg_config) {
+        Ok(_) => {
+            println!("\n✅ WireGuard config saved to: {}", config_path.display());
+            println!("\n--- Config Contents ---");
+            println!("{}", wg_config);
+            println!("--- End Config ---\n");
+            println!("To use with WireSock:");
+            println!("  \"C:\\Program Files\\WireSock Secure Connect\\bin\\wiresock-client.exe\" run -config \"{}\" -log-level info", config_path.display());
+        }
+        Err(e) => {
+            println!("   ❌ Failed to write config: {}", e);
+            println!("\n--- Config Contents (copy manually) ---");
+            println!("{}", wg_config);
+        }
+    }
 }
