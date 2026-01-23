@@ -29,7 +29,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          echo "diff<<DIFF_EOF" >> $GITHUB_OUTPUT
+          git diff origin/${{ github.base_ref }}...HEAD >> $GITHUB_OUTPUT
+          echo "DIFF_EOF" >> $GITHUB_OUTPUT
 
       - name: Run Claude Code Review
         id: claude-review
@@ -37,16 +45,20 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            Review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            Review this PR. Here is the diff:
 
-            You are a senior code reviewer. Perform a THOROUGH code review of all changed files.
+            ```diff
+            ${{ steps.diff.outputs.diff }}
+            ```
+
+            You are a senior code reviewer. Perform a THOROUGH code review.
 
             For EACH file changed, analyze:
             1. **Security** - injection risks, leaks, unsafe operations
-            2. **Performance** - inefficient code, memory issues, unnecessary allocations
+            2. **Performance** - inefficient code, memory issues
             3. **Bugs** - logic errors, edge cases, error handling gaps
-            4. **Code Quality** - readability, DRY violations, naming conventions
-            5. **Architecture** - separation of concerns, modularity
+            4. **Code Quality** - readability, DRY violations, naming
+            5. **Architecture** - separation of concerns
 
             Format your review as:
             ## Summary
@@ -58,9 +70,9 @@ jobs:
             - **Suggestion**: Code fix
 
             ## Recommendations
-            Prioritized list of improvements
+            Prioritized improvements
 
-            If code is good, explain WHY it's good with specific examples.
-            Never give a lazy one-liner. Always provide actionable feedback.
-          claude_args: '--model claude-opus-4-5-20251101 --max-turns 10'
+            If code is good, explain WHY with specific examples.
+            Always provide actionable feedback.
+          claude_args: '--model claude-opus-4-5-20251101 --max-turns 5'
 
