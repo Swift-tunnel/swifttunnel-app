@@ -125,6 +125,10 @@ parking_lot = "0.12"
 
 # Per-CPU parallel packet processing
 crossbeam-channel = "0.5"
+
+# Lock-free Arc swapping for BSOD-safe RCU pattern
+arc-swap = "1.7"
+
 num_cpus = "1.16"
 
 # Stack-allocated buffers for zero-alloc packet processing
