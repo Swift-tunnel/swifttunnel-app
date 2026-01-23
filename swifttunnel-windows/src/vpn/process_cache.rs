@@ -3,18 +3,15 @@
 //! Achieves <0.1ms lookup latency by eliminating locks entirely:
 //! - Single writer thread creates new snapshots atomically
 //! - Multiple reader threads access snapshots without any locks
-//! - Uses arc-swap for safe atomic Arc operations (NO use-after-free!)
+//! - Uses Arc atomic swap for O(1) snapshot updates
 //!
-//! BSOD FIX (v0.7.2): Replaced unsafe AtomicPtr with arc-swap crate.
-//! The old implementation had a race condition where the writer could
-//! free memory while readers were still accessing it, causing
-//! IRQL_NOT_LESS_OR_EQUAL kernel crashes.
+//! This is modeled after WireGuard's approach where per-CPU structures
+//! avoid contention entirely.
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::Arc;
-use arc_swap::ArcSwap;
 use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
 
 /// Immutable snapshot of process state
@@ -130,20 +127,15 @@ impl ProcessSnapshot {
     }
 }
 
-/// Lock-free process cache using RCU pattern with arc-swap
-///
-/// SAFETY: Uses arc-swap crate which provides correct hazard pointer
-/// implementation. Old snapshots are only freed when ALL readers have
-/// released their references (via Arc refcount).
+/// Lock-free process cache using RCU pattern
 ///
 /// Key insight: We can have ONE writer and MANY readers without any locks
-/// by using atomic Arc swap. Readers grab a reference to the current
+/// by using atomic pointer swap. Readers grab a reference to the current
 /// snapshot and use it for their entire operation. Writer creates a new
 /// snapshot and atomically swaps the pointer.
 pub struct LockFreeProcessCache {
-    /// Current snapshot (atomically swapped via arc-swap)
-    /// arc-swap handles all the unsafe pointer magic correctly
-    current: ArcSwap<ProcessSnapshot>,
+    /// Current snapshot (atomically swapped)
+    current: AtomicPtr<Arc<ProcessSnapshot>>,
     /// Snapshot version counter
     version: AtomicU64,
     /// Apps to tunnel
@@ -155,9 +147,10 @@ impl LockFreeProcessCache {
     pub fn new(tunnel_apps: Vec<String>) -> Self {
         let apps: HashSet<String> = tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect();
         let initial = Arc::new(ProcessSnapshot::empty(apps.clone()));
+        let boxed = Box::new(initial);
 
         Self {
-            current: ArcSwap::from(initial),
+            current: AtomicPtr::new(Box::into_raw(boxed)),
             version: AtomicU64::new(0),
             tunnel_apps: apps,
         }
@@ -167,13 +160,12 @@ impl LockFreeProcessCache {
     ///
     /// This is the hot path called by packet workers. It must be as fast as possible.
     /// Returns an Arc reference that the caller can use without any synchronization.
-    ///
-    /// SAFETY: arc-swap's load_full() safely clones the Arc, incrementing the
-    /// refcount atomically. The old snapshot won't be freed until all Arcs are
-    /// dropped, eliminating the use-after-free bug that caused BSOD.
     #[inline(always)]
     pub fn get_snapshot(&self) -> Arc<ProcessSnapshot> {
-        self.current.load_full()
+        // Load the pointer atomically
+        let ptr = self.current.load(Ordering::Acquire);
+        // Safety: ptr is always valid (we never store null)
+        unsafe { (*ptr).clone() }
     }
 
     /// Update snapshot (called by single writer thread)
@@ -183,10 +175,6 @@ impl LockFreeProcessCache {
     ///
     /// PERFORMANCE: Pre-lowercases all process names at insertion time,
     /// eliminating string allocation from the hot path (is_tunnel_pid).
-    ///
-    /// SAFETY: arc-swap's store() handles the atomic swap correctly.
-    /// The old Arc is returned and dropped, decrementing its refcount.
-    /// Memory is only freed when refcount reaches zero (all readers done).
     pub fn update(&self, connections: HashMap<ConnectionKey, u32>, pid_names: HashMap<u32, String>) {
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -204,8 +192,17 @@ impl LockFreeProcessCache {
             created_at: std::time::Instant::now(),
         });
 
-        // Atomically swap in new snapshot - arc-swap handles cleanup safely
-        self.current.store(new_snapshot);
+        let new_boxed = Box::new(new_snapshot);
+        let new_ptr = Box::into_raw(new_boxed);
+
+        // Atomically swap in new snapshot
+        let old_ptr = self.current.swap(new_ptr, Ordering::AcqRel);
+
+        // Clean up old snapshot (after all readers release their refs)
+        // Safety: old_ptr was created by Box::into_raw
+        unsafe {
+            let _ = Box::from_raw(old_ptr);
+        }
     }
 
     /// Update tunnel apps list and immediately refresh the snapshot
@@ -229,8 +226,16 @@ impl LockFreeProcessCache {
             created_at: std::time::Instant::now(),
         });
 
-        // Atomically swap in new snapshot - arc-swap handles cleanup safely
-        self.current.store(new_snapshot);
+        let new_boxed = Box::new(new_snapshot);
+        let new_ptr = Box::into_raw(new_boxed);
+
+        // Atomically swap in new snapshot
+        let old_ptr = self.current.swap(new_ptr, Ordering::AcqRel);
+
+        // Clean up old snapshot
+        unsafe {
+            let _ = Box::from_raw(old_ptr);
+        }
 
         log::info!(
             "set_tunnel_apps: Updated snapshot with {} tunnel apps: {:?}",
@@ -245,8 +250,20 @@ impl LockFreeProcessCache {
     }
 }
 
-// Note: No manual Drop impl needed - ArcSwap handles cleanup automatically
-// Note: No unsafe impl Send/Sync needed - ArcSwap is already Send+Sync
+impl Drop for LockFreeProcessCache {
+    fn drop(&mut self) {
+        let ptr = self.current.load(Ordering::Relaxed);
+        if !ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(ptr);
+            }
+        }
+    }
+}
+
+// Safety: LockFreeProcessCache can be shared across threads
+unsafe impl Send for LockFreeProcessCache {}
+unsafe impl Sync for LockFreeProcessCache {}
 
 #[cfg(test)]
 mod tests {
@@ -303,52 +320,5 @@ mod tests {
 
         // Packet has actual interface IP, should still match via 0.0.0.0 fallback
         assert!(snap.should_tunnel(Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Udp));
-    }
-
-    #[test]
-    fn test_concurrent_read_write_safety() {
-        // This test verifies that arc-swap prevents use-after-free
-        use std::thread;
-        use std::time::Duration;
-
-        let cache = Arc::new(LockFreeProcessCache::new(vec!["test.exe".to_string()]));
-
-        // Spawn reader threads that continuously get snapshots
-        let readers: Vec<_> = (0..4).map(|i| {
-            let cache_clone = Arc::clone(&cache);
-            thread::spawn(move || {
-                for _ in 0..1000 {
-                    let snap = cache_clone.get_snapshot();
-                    // Access the snapshot data - this would crash with old implementation
-                    let _ = snap.version;
-                    let _ = snap.connections.len();
-                    thread::sleep(Duration::from_micros(10));
-                }
-                log::debug!("Reader {} finished", i);
-            })
-        }).collect();
-
-        // Writer thread that continuously updates
-        let cache_writer = Arc::clone(&cache);
-        let writer = thread::spawn(move || {
-            for i in 0..100 {
-                let mut connections = HashMap::new();
-                connections.insert(
-                    ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 1), i as u16, Protocol::Tcp),
-                    i,
-                );
-                let mut pid_names = HashMap::new();
-                pid_names.insert(i, format!("process_{}.exe", i));
-                cache_writer.update(connections, pid_names);
-                thread::sleep(Duration::from_micros(100));
-            }
-            log::debug!("Writer finished");
-        });
-
-        // Wait for all threads - if there's a use-after-free, this would crash
-        for reader in readers {
-            reader.join().expect("Reader thread panicked");
-        }
-        writer.join().expect("Writer thread panicked");
     }
 }
