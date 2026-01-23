@@ -2538,30 +2538,35 @@ impl BoosterApp {
                                         }
 
                                         // Gear icon for server selection (right-aligned)
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let gear_btn = ui.add(
-                                                egui::Button::new(egui::RichText::new("⚙").size(14.0).color(TEXT_MUTED))
-                                                    .fill(egui::Color32::TRANSPARENT)
-                                                    .stroke(egui::Stroke::NONE)
-                                                    .rounding(4.0)
-                                                    .min_size(egui::vec2(24.0, 24.0))
-                                            );
-                                            if gear_btn.clicked() {
-                                                log::info!("Gear clicked for region: {}", region.id);
-                                                // Toggle popup for this region
-                                                if self.server_selection_popup.as_ref() == Some(&region.id) {
-                                                    self.server_selection_popup = None;
-                                                } else {
-                                                    self.server_selection_popup = Some(region.id.clone());
-                                                }
-                                                gear_clicked.set(true); // Prevent card click from also triggering
+                                        // Push button to the right by consuming remaining space minus button width
+                                        let remaining = ui.available_width();
+                                        if remaining > 30.0 {
+                                            ui.add_space(remaining - 30.0);
+                                        }
+
+                                        // Button now in normal left-to-right flow, properly positioned
+                                        let gear_btn = ui.add(
+                                            egui::Button::new(egui::RichText::new("⚙").size(14.0).color(TEXT_MUTED))
+                                                .fill(egui::Color32::TRANSPARENT)
+                                                .stroke(egui::Stroke::NONE)
+                                                .rounding(4.0)
+                                                .min_size(egui::vec2(24.0, 24.0))
+                                        );
+                                        if gear_btn.clicked() {
+                                            log::info!("Gear clicked for region: {}", region.id);
+                                            // Toggle popup for this region
+                                            if self.server_selection_popup.as_ref() == Some(&region.id) {
+                                                self.server_selection_popup = None;
+                                            } else {
+                                                self.server_selection_popup = Some(region.id.clone());
                                             }
-                                            if gear_btn.hovered() {
-                                                egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("gear_tooltip"), |ui| {
-                                                    ui.label("Select specific server");
-                                                });
-                                            }
-                                        });
+                                            gear_clicked.set(true); // Prevent card click from also triggering
+                                        }
+                                        if gear_btn.hovered() {
+                                            egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("gear_tooltip"), |ui| {
+                                                ui.label("Select specific server");
+                                            });
+                                        }
                                     });
 
                                     ui.add_space(2.0);
