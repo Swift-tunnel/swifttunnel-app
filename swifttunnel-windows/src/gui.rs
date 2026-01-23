@@ -56,7 +56,7 @@ const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);       
 const TEXT_DIMMED: egui::Color32 = egui::Color32::from_rgb(71, 85, 105);        // slate-600
 
 // Latency color thresholds
-const LATENCY_EXCELLENT: egui::Color32  = egui::Color32::from_rgb(52, 211, 153);  // < 30ms
+const LATENCY_EXCELLENT: egui::Color32 = egui::Color32::from_rgb(52, 211, 153);  // < 30ms
 const LATENCY_GOOD: egui::Color32 = egui::Color32::from_rgb(163, 230, 53);       // < 60ms (lime)
 const LATENCY_FAIR: egui::Color32 = egui::Color32::from_rgb(251, 191, 36);       // < 100ms (yellow)
 const LATENCY_POOR: egui::Color32 = egui::Color32::from_rgb(251, 146, 60);       // < 150ms (orange)
@@ -2533,7 +2533,7 @@ impl BoosterApp {
 
                                         // Button now in normal left-to-right flow, properly positioned
                                         let gear_btn = ui.add(
-                                            egui::Button::new(egui::RichText::new("*").size(14.0).color(if ui.rect_contains_pointer(ui.max_rect()) { TEXT_PRIMARY } else { TEXT_MUTED }))
+                                            egui::Button::new(egui::RichText::new("*").size(14.0).color(TEXT_MUTED))
                                                 .fill(BG_HOVER.gamma_multiply(0.5))
                                                 .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                                                 .rounding(4.0)
