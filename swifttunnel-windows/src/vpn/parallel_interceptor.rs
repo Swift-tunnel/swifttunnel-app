@@ -1111,7 +1111,7 @@ fn run_inbound_receiver(
             }
             Err(e) => {
                 log::warn!("Inbound receiver recv error: {}", e);
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(std::time::Duration::from_millis(2));
                 continue;
             }
         };
@@ -1122,9 +1122,9 @@ fn run_inbound_receiver(
 
         packets_received += 1;
 
-        // Log first 20 received packets to help debug
+        // Log first 20 received packets to help debug (DEBUG level)
         if packets_received <= 20 {
-            log::info!("Inbound receiver: recv #{} - {} bytes from VPN server", packets_received, n);
+            log::debug!("Inbound receiver: recv #{} - {} bytes from VPN server", packets_received, n);
         }
 
         // Decrypt the packet
@@ -1138,12 +1138,12 @@ fn run_inbound_receiver(
                 packets_decrypted += 1;
                 throughput.add_rx(data.len() as u64);
 
-                // Log decrypted packet details for first 20
+                // Log decrypted packet details for first 20 (DEBUG level)
                 if packets_decrypted <= 20 && data.len() >= 20 {
                     let proto = data[9];
                     let src_ip = std::net::Ipv4Addr::new(data[12], data[13], data[14], data[15]);
                     let dst_ip = std::net::Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-                    log::info!(
+                    log::debug!(
                         "Inbound receiver: decrypted #{} - {} bytes, proto={}, {} -> {}",
                         packets_decrypted, data.len(), proto, src_ip, dst_ip
                     );
@@ -1166,7 +1166,7 @@ fn run_inbound_receiver(
             }
             TunnResult::WriteToNetwork(data) => {
                 // Protocol message (handshake, etc.) - send back to VPN server
-                log::info!("Inbound receiver: got WriteToNetwork - {} bytes (handshake/protocol)", data.len());
+                log::debug!("Inbound receiver: got WriteToNetwork - {} bytes (handshake/protocol)", data.len());
                 if let Err(e) = ctx.socket.send(data) {
                     log::warn!("Inbound receiver: failed to send protocol message: {}", e);
                 }
@@ -1174,7 +1174,7 @@ fn run_inbound_receiver(
             TunnResult::Done => {
                 // No plaintext output (e.g., keepalive received)
                 if packets_received <= 20 {
-                    log::info!("Inbound receiver: recv #{} -> Done (keepalive?)", packets_received);
+                    log::debug!("Inbound receiver: recv #{} -> Done (keepalive?)", packets_received);
                 }
             }
             TunnResult::Err(e) => {
@@ -1186,9 +1186,9 @@ fn run_inbound_receiver(
             }
         }
 
-        // Periodic logging (every 100 packets for debugging)
+        // Periodic logging (every 100 packets for debugging) - DEBUG level
         if packets_received > 0 && packets_received % 100 == 0 {
-            log::info!(
+            log::debug!(
                 "Inbound receiver: {} recv, {} decrypt, {} inject, {} errors",
                 packets_received, packets_decrypted, packets_injected, inject_errors
             );
@@ -1228,9 +1228,9 @@ fn inject_inbound_packet(
     );
     let protocol = ip_packet[9];
 
-    // Log every packet for debugging (first 10)
+    // Log every packet for debugging (first 10) - DEBUG level
     if packet_count < 10 {
-        log::info!(
+        log::debug!(
             "inject_inbound_packet #{}: {} -> {}, proto={}, {} bytes, config.tunnel_ip={:?}, config.internet_ip={:?}",
             packet_count, src_ip, dst_ip, protocol, ip_packet.len(),
             config.tunnel_ip, config.internet_ip
@@ -1241,9 +1241,9 @@ fn inject_inbound_packet(
     let needs_nat = config.tunnel_ip.is_some() && config.internet_ip.is_some()
         && Some(dst_ip) == config.tunnel_ip;
 
-    // Log NAT decision for debugging (first 10 packets)
+    // Log NAT decision for debugging (first 10 packets) - DEBUG level
     if packet_count < 10 {
-        log::info!(
+        log::debug!(
             "inject_inbound_packet #{}: needs_nat={} (dst={}, tunnel_ip={:?})",
             packet_count, needs_nat, dst_ip, config.tunnel_ip
         );
@@ -1255,9 +1255,9 @@ fn inject_inbound_packet(
     if needs_nat {
         let new_dst = config.internet_ip.unwrap();
 
-        // Log NAT rewrites (first 10)
+        // Log NAT rewrites (first 10) - DEBUG level
         if packet_count < 10 {
-            log::info!(
+            log::debug!(
                 "Inbound NAT #{}: {} -> {}, proto={}, {} bytes",
                 packet_count, dst_ip, new_dst, protocol, packet.len()
             );
@@ -1507,7 +1507,13 @@ fn run_packet_worker(
 
     // Get initial snapshot
     let mut snapshot = process_cache.get_snapshot();
+    let mut snapshot_version = snapshot.version;
     let mut snapshot_check_counter = 0u32;
+
+    // Per-worker inline cache for connection lookups
+    // This caches inline_connection_lookup results to avoid repeated syscalls
+    // First packet of new connection: ~500μs, subsequent packets: <1μs
+    let mut inline_cache: InlineCache = std::collections::HashMap::with_capacity(1024);
 
     // Diagnostic logging
     let mut diagnostic_counter = 0u64;
@@ -1577,7 +1583,15 @@ fn run_packet_worker(
         if snapshot_check_counter >= 100 {
             snapshot_check_counter = 0;
             let old_apps_count = snapshot.tunnel_apps.len();
-            snapshot = process_cache.get_snapshot();
+            let new_snapshot = process_cache.get_snapshot();
+
+            // Clear inline cache if snapshot version changed (connections may have changed)
+            if new_snapshot.version != snapshot_version {
+                snapshot_version = new_snapshot.version;
+                inline_cache.clear();
+            }
+
+            snapshot = new_snapshot;
 
             // Log if tunnel apps changed (only worker 0)
             if worker_id == 0 && snapshot.tunnel_apps.len() != old_apps_count {
@@ -1595,8 +1609,9 @@ fn run_packet_worker(
 
         if work.is_outbound {
             // Check if should tunnel (timed for performance measurement)
+            // Uses hybrid approach: snapshot cache (fast) + per-worker inline cache (for misses)
             let lookup_start = std::time::Instant::now();
-            let should_tunnel = should_route_to_vpn(&work.data, &snapshot);
+            let should_tunnel = should_route_to_vpn_with_inline_cache(&work.data, &snapshot, &mut inline_cache);
             total_lookup_ns += lookup_start.elapsed().as_nanos() as u64;
             lookup_count += 1;
 
@@ -1854,10 +1869,9 @@ fn send_bypass_packet(
 /// Cache refresher thread - single writer
 fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBool>) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    use windows::Win32::Foundation::NO_ERROR;
     use windows::Win32::NetworkManagement::IpHelper::*;
 
-    log::info!("Cache refresher started (10ms refresh interval, WireSock-style)");
+    log::info!("Cache refresher started (2ms refresh interval, WireSock-style)");
 
     // Log tunnel apps at startup
     let tunnel_apps = cache.tunnel_apps();
@@ -1885,9 +1899,10 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
             first_run = false;
             log::info!("Cache refresher: Performing initial refresh immediately");
         } else {
-            // WireSock-style: Fast 10ms refresh for instant game detection
-            // No inline lookup fallback, so cache must be fresh
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            // WireSock-style: Ultra-fast 2ms refresh for instant game detection
+            // Critical: Without inline lookup fallback, cache must be very fresh
+            // to catch new connections before packets bypass
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
 
         // Collect connections
@@ -1915,7 +1930,7 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
                     2,
                     TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
                     0,
-                ) == NO_ERROR.0
+                ) == 0
                 {
                     let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
                     let entries = std::slice::from_raw_parts(
@@ -1954,7 +1969,7 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
                     2,
                     UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
                     0,
-                ) == NO_ERROR.0
+                ) == 0
                 {
                     let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
                     let entries = std::slice::from_raw_parts(
@@ -1995,10 +2010,34 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
             let name = process.name().to_string_lossy().to_lowercase();
             for app in tunnel_apps {
                 if name.contains(app.trim_end_matches(".exe")) {
-                    pid_names.insert(_pid.as_u32(), process.name().to_string_lossy().to_string());
-                    tunnel_pids_found.push((_pid.as_u32(), process.name().to_string_lossy().to_string()));
+                    let pid_u32 = _pid.as_u32();
+                    pid_names.insert(pid_u32, process.name().to_string_lossy().to_string());
+                    tunnel_pids_found.push((pid_u32, process.name().to_string_lossy().to_string()));
+
+                    // Log the exact PID for debugging
+                    if refresh_count < 10 {
+                        log::info!(
+                            "Cache refresher: Found tunnel app '{}' with PID {} (sysinfo)",
+                            process.name().to_string_lossy(),
+                            pid_u32
+                        );
+                    }
                     break;
                 }
+            }
+        }
+
+        // Also log connections owned by tunnel apps
+        if refresh_count < 10 && !tunnel_pids_found.is_empty() {
+            for ((key, &pid), (tunnel_pid, _name)) in connections.iter().flat_map(|c| {
+                tunnel_pids_found.iter().filter_map(move |tp| {
+                    if *c.1 == tp.0 { Some((c, tp)) } else { None }
+                })
+            }) {
+                log::info!(
+                    "Cache refresher: Tunnel app connection {}:{} ({:?}) owned by PID {}",
+                    key.local_ip, key.local_port, key.protocol, pid
+                );
             }
         }
 
@@ -2017,7 +2056,7 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
                 .collect();
 
             if !tunnel_pids_found.is_empty() || tunnel_connections.len() > 0 {
-                log::info!(
+                log::debug!(
                     "Cache #{}: {} tunnel PIDs found: {:?}, {} tunnel connections",
                     refresh_count,
                     tunnel_pids_found.len(),
@@ -2080,15 +2119,11 @@ fn parse_ports(data: &[u8]) -> Option<(u16, u16)> {
     Some((src_port, dst_port))
 }
 
-/// Check if packet should be routed to VPN
+/// Check if packet should be routed to VPN (legacy, for reference)
 ///
-/// Uses two-phase lookup:
-/// 1. Fast path: Check cached snapshot (lock-free, O(1))
-/// 2. Slow path: Inline GetExtendedTcpTable lookup if cache misses
-///
-/// The slow path is critical for catching new connections before the cache
-/// refreshes. Without it, the first packets of a new connection would bypass
-/// the VPN because the cache hasn't seen them yet.
+/// NOTE: This is now replaced by should_route_to_vpn_with_inline_cache
+/// which adds per-worker caching for inline lookups.
+#[allow(dead_code)]
 fn should_route_to_vpn(data: &[u8], snapshot: &ProcessSnapshot) -> bool {
     // Skip Ethernet header (14 bytes)
     if data.len() < 14 + 20 + 4 {
@@ -2134,14 +2169,391 @@ fn should_route_to_vpn(data: &[u8], snapshot: &ProcessSnapshot) -> bool {
 
     // WireSock-style: Trust the cache completely (O(1) hash lookup, <1μs)
     // No expensive inline_connection_lookup (~500μs syscall eliminated!)
-    // First few packets of new connections may bypass (max 10ms until cache refresh)
+    // First few packets of new connections may bypass (max 2ms until cache refresh)
     // This is the same approach WireSock uses for high-performance split tunneling
     snapshot.should_tunnel(src_ip, src_port, protocol)
 }
 
-// NOTE: inline_connection_lookup, lookup_tcp_pid, lookup_udp_pid REMOVED
-// WireSock-style: Trust the cache, don't do expensive per-packet syscalls
-// The 10ms cache refresh is fast enough for game detection
+/// Per-worker inline cache for connection lookups
+/// This amortizes the expensive GetExtendedTcpTable syscall across multiple packets
+/// from the same connection. First packet: ~500μs, subsequent packets: <1μs
+type InlineCache = std::collections::HashMap<(Ipv4Addr, u16, Protocol), bool>;
+
+/// Debug counters for inline cache diagnostics
+struct InlineCacheStats {
+    snapshot_hits: u64,
+    inline_cache_hits: u64,
+    syscall_lookups: u64,
+    syscall_tunneled: u64,
+    syscall_bypassed: u64,
+    connection_not_found: u64,
+}
+
+/// Inline lookup with per-worker caching
+///
+/// For cache misses from the snapshot, this does a GetExtendedTcpTable lookup
+/// and caches the result. This way, only the FIRST packet of a new connection
+/// incurs the syscall overhead - subsequent packets use the inline cache.
+fn should_route_to_vpn_with_inline_cache(
+    data: &[u8],
+    snapshot: &ProcessSnapshot,
+    inline_cache: &mut InlineCache,
+) -> bool {
+    // Thread-local counters for debugging
+    thread_local! {
+        static TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static SNAPSHOT_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static INLINE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static SYSCALL_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static LAST_LOG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    let total = TOTAL.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        n
+    });
+
+    // Skip Ethernet header (14 bytes)
+    if data.len() < 14 + 20 + 4 {
+        return false;
+    }
+
+    // Check EtherType
+    let ethertype = u16::from_be_bytes([data[12], data[13]]);
+    if ethertype != 0x0800 {
+        return false;
+    }
+
+    // Parse IP header
+    let ip_start = 14;
+    let version = (data[ip_start] >> 4) & 0xF;
+    if version != 4 {
+        return false;
+    }
+
+    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
+    let protocol_num = data[ip_start + 9];
+
+    let protocol = match protocol_num {
+        6 => Protocol::Tcp,
+        17 => Protocol::Udp,
+        _ => return false,
+    };
+
+    let src_ip = Ipv4Addr::new(
+        data[ip_start + 12],
+        data[ip_start + 13],
+        data[ip_start + 14],
+        data[ip_start + 15],
+    );
+
+    // Parse transport header
+    let transport_start = ip_start + ihl;
+    if data.len() < transport_start + 4 {
+        return false;
+    }
+
+    let src_port = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
+
+    // Phase 1: Check snapshot cache (fast path, O(1))
+    if snapshot.should_tunnel(src_ip, src_port, protocol) {
+        SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
+        return true;
+    }
+
+    // Phase 2: Check per-worker inline cache (fast path, O(1))
+    let cache_key = (src_ip, src_port, protocol);
+    if let Some(&result) = inline_cache.get(&cache_key) {
+        INLINE_HITS.with(|c| c.set(c.get() + 1));
+        return result;
+    }
+
+    // Phase 3: Inline lookup (slow path, ~500μs, but only once per connection)
+    SYSCALL_LOOKUPS.with(|c| c.set(c.get() + 1));
+    let result = inline_connection_lookup(src_ip, src_port, protocol, snapshot);
+
+    // Cache the result for subsequent packets from this connection
+    // Limit cache size to prevent unbounded growth
+    if inline_cache.len() < 10000 {
+        inline_cache.insert(cache_key, result);
+    }
+
+    // Log stats periodically
+    if total > 0 && total % 200 == 0 {
+        let last = LAST_LOG.with(|c| c.get());
+        if total > last {
+            LAST_LOG.with(|c| c.set(total));
+            let snapshot_h = SNAPSHOT_HITS.with(|c| c.get());
+            let inline_h = INLINE_HITS.with(|c| c.get());
+            let syscall_l = SYSCALL_LOOKUPS.with(|c| c.get());
+            log::info!(
+                "Cache stats: total={} snapshot_hits={} inline_hits={} syscall={} | snapshot_apps={} connections={}",
+                total, snapshot_h, inline_h, syscall_l,
+                snapshot.tunnel_apps.len(), snapshot.connections.len()
+            );
+        }
+    }
+
+    // Log first 10 packets for debugging - DEBUG level
+    if total < 10 {
+        log::debug!(
+            "Packet #{}: {}:{} {:?} -> result={} (tunnel_apps={:?})",
+            total, src_ip, src_port, protocol, result,
+            snapshot.tunnel_apps.iter().take(5).collect::<Vec<_>>()
+        );
+    }
+
+    result
+}
+
+/// Perform inline GetExtendedTcpTable/UdpTable lookup
+/// This is expensive (~500μs) but only called once per new connection
+///
+/// CRITICAL: This function does NOT rely on snapshot.pid_names (which may be stale).
+/// Instead, it gets the process name directly from the OS and matches against tunnel_apps.
+fn inline_connection_lookup(
+    src_ip: Ipv4Addr,
+    src_port: u16,
+    protocol: Protocol,
+    snapshot: &ProcessSnapshot,
+) -> bool {
+    use windows::Win32::NetworkManagement::IpHelper::*;
+
+    // Track lookups for debugging (thread-local counter)
+    thread_local! {
+        static LOOKUP_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static FOUND_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static TUNNEL_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    let lookup_num = LOOKUP_COUNT.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        n
+    });
+
+    // Log first few lookups for debugging
+    let debug_log = lookup_num < 20;
+
+    match protocol {
+        Protocol::Tcp => {
+            // Get TCP table size
+            let mut size: u32 = 0;
+            unsafe {
+                let _ = GetExtendedTcpTable(
+                    None,
+                    &mut size,
+                    false,
+                    2, // AF_INET
+                    TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+                    0,
+                );
+
+                if size == 0 {
+                    if debug_log {
+                        log::debug!("inline_lookup: TCP table size=0");
+                    }
+                    return false;
+                }
+
+                let mut buffer = vec![0u8; size as usize];
+                if GetExtendedTcpTable(
+                    Some(buffer.as_mut_ptr() as *mut _),
+                    &mut size,
+                    false,
+                    2,
+                    TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+                    0,
+                ) != 0
+                {
+                    if debug_log {
+                        log::debug!("inline_lookup: GetExtendedTcpTable failed");
+                    }
+                    return false;
+                }
+
+                let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+                let rows = std::slice::from_raw_parts(
+                    table.table.as_ptr(),
+                    table.dwNumEntries as usize,
+                );
+
+                if debug_log {
+                    log::debug!(
+                        "inline_lookup #{}: searching TCP table ({} entries) for {}:{}",
+                        lookup_num, rows.len(), src_ip, src_port
+                    );
+                }
+
+                for row in rows {
+                    // Match byte order handling with cache refresher
+                    let local_ip = Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
+                    let local_port = u16::from_be(row.dwLocalPort as u16);
+
+                    if local_ip == src_ip && local_port == src_port {
+                        FOUND_COUNT.with(|c| c.set(c.get() + 1));
+
+                        // CRITICAL FIX: Get process name directly from OS, not from stale snapshot
+                        let is_tunnel = is_pid_tunnel_app(row.dwOwningPid, snapshot);
+                        if is_tunnel {
+                            TUNNEL_COUNT.with(|c| c.set(c.get() + 1));
+                        }
+
+                        if debug_log || is_tunnel {
+                            log::debug!(
+                                "inline_lookup #{}: MATCH {}:{} -> PID {} tunnel={}",
+                                lookup_num, local_ip, local_port, row.dwOwningPid, is_tunnel
+                            );
+                        }
+                        return is_tunnel;
+                    }
+
+                    // Also check 0.0.0.0 binding
+                    if local_ip == Ipv4Addr::UNSPECIFIED && local_port == src_port {
+                        FOUND_COUNT.with(|c| c.set(c.get() + 1));
+
+                        let is_tunnel = is_pid_tunnel_app(row.dwOwningPid, snapshot);
+                        if is_tunnel {
+                            TUNNEL_COUNT.with(|c| c.set(c.get() + 1));
+                        }
+
+                        if debug_log || is_tunnel {
+                            log::debug!(
+                                "inline_lookup #{}: MATCH 0.0.0.0:{} (for {}:{}) -> PID {} tunnel={}",
+                                lookup_num, local_port, src_ip, src_port, row.dwOwningPid, is_tunnel
+                            );
+                        }
+                        return is_tunnel;
+                    }
+                }
+
+                if debug_log {
+                    log::debug!(
+                        "inline_lookup #{}: NOT FOUND in TCP table for {}:{}",
+                        lookup_num, src_ip, src_port
+                    );
+                }
+            }
+        }
+        Protocol::Udp => {
+            // Get UDP table size
+            let mut size: u32 = 0;
+            unsafe {
+                let _ = GetExtendedUdpTable(
+                    None,
+                    &mut size,
+                    false,
+                    2, // AF_INET
+                    UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
+                    0,
+                );
+
+                if size == 0 {
+                    return false;
+                }
+
+                let mut buffer = vec![0u8; size as usize];
+                if GetExtendedUdpTable(
+                    Some(buffer.as_mut_ptr() as *mut _),
+                    &mut size,
+                    false,
+                    2,
+                    UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
+                    0,
+                ) != 0
+                {
+                    return false;
+                }
+
+                let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
+                let rows = std::slice::from_raw_parts(
+                    table.table.as_ptr(),
+                    table.dwNumEntries as usize,
+                );
+
+                for row in rows {
+                    // Match byte order handling with cache refresher
+                    let local_ip = Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
+                    let local_port = u16::from_be(row.dwLocalPort as u16);
+
+                    if local_ip == src_ip && local_port == src_port {
+                        return is_pid_tunnel_app(row.dwOwningPid, snapshot);
+                    }
+
+                    // Also check 0.0.0.0 binding
+                    if local_ip == Ipv4Addr::UNSPECIFIED && local_port == src_port {
+                        return is_pid_tunnel_app(row.dwOwningPid, snapshot);
+                    }
+                }
+            }
+        }
+    }
+
+    // Log periodic stats - DEBUG level
+    if lookup_num > 0 && lookup_num % 100 == 0 {
+        let found = FOUND_COUNT.with(|c| c.get());
+        let tunneled = TUNNEL_COUNT.with(|c| c.get());
+        log::debug!(
+            "inline_lookup stats: {} lookups, {} found, {} tunneled ({:.1}% hit rate)",
+            lookup_num, found, tunneled,
+            if lookup_num > 0 { (found as f64 / lookup_num as f64) * 100.0 } else { 0.0 }
+        );
+    }
+
+    false
+}
+
+/// Check if a PID belongs to a tunnel app by getting process name directly from OS
+///
+/// This avoids relying on potentially stale snapshot.pid_names data.
+/// Uses Windows API QueryFullProcessImageNameW for fast process name lookup.
+fn is_pid_tunnel_app(pid: u32, snapshot: &ProcessSnapshot) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // First try snapshot (fast path if PID is already known)
+    if snapshot.is_tunnel_pid_public(pid) {
+        return true;
+    }
+
+    // Slow path: get process name directly from OS
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if let Ok(h) = handle {
+            if h.is_invalid() || h.0.is_null() {
+                return false;
+            }
+
+            let mut buffer = [0u16; 260];
+            let mut size = buffer.len() as u32;
+
+            if QueryFullProcessImageNameW(h, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(buffer.as_mut_ptr()), &mut size).is_ok() {
+                let _ = CloseHandle(h);
+
+                // Extract filename from full path
+                let path = String::from_utf16_lossy(&buffer[..size as usize]);
+                let name = path.rsplit('\\').next().unwrap_or(&path).to_lowercase();
+
+                // Check against tunnel_apps
+                let name_stem = name.trim_end_matches(".exe");
+                for app in &snapshot.tunnel_apps {
+                    let app_stem = app.trim_end_matches(".exe");
+                    if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
+                        log::debug!("is_pid_tunnel_app: PID {} is '{}' -> TUNNEL", pid, name);
+                        return true;
+                    }
+                }
+
+                log::trace!("is_pid_tunnel_app: PID {} is '{}' -> bypass", pid, name);
+            } else {
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+
+    false
+}
 
 /// Get adapter friendly name
 fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
