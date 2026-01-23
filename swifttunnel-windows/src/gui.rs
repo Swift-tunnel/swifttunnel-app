@@ -1318,9 +1318,9 @@ impl BoosterApp {
                             .rounding(8.0)
                             .inner_margin(egui::Margin::symmetric(16, 10))
                             .shadow(egui::epaint::Shadow {
-                                offset: egui::vec2(0.0, 2.0),
-                                blur: 8.0,
-                                spread: 0.0,
+                                offset: [0, 2],
+                                blur: 8,
+                                spread: 0,
                                 color: egui::Color32::from_black_alpha((40.0 * alpha) as u8),
                             })
                             .show(ui, |ui| {
