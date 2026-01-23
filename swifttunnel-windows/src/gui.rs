@@ -623,22 +623,22 @@ impl BoosterApp {
 
         style.visuals.widgets.inactive.bg_fill = BG_CARD;
         style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_SECONDARY);
-        style.visuals.widgets.inactive.rounding = egui::CornerRadius::same(8);
+        style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
 
         style.visuals.widgets.hovered.bg_fill = BG_HOVER;
         style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
-        style.visuals.widgets.hovered.rounding = egui::CornerRadius::same(8);
+        style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(8);
 
         style.visuals.widgets.active.bg_fill = ACCENT_PRIMARY;
         style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
-        style.visuals.widgets.active.rounding = egui::CornerRadius::same(8);
+        style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(8);
 
         style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
         style.visuals.selection.bg_fill = ACCENT_PRIMARY.gamma_multiply(0.3);
 
         style.spacing.item_spacing = egui::vec2(12.0, 10.0);
         style.spacing.button_padding = egui::vec2(20.0, 10.0);
-        style.spacing.window_margin = egui::Margin::same(20.0);
+        style.spacing.window_margin = egui::Margin::same(20);
 
         ctx.set_style(style);
     }
@@ -1239,7 +1239,7 @@ impl eframe::App for BoosterApp {
         let is_awaiting_oauth = matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(BG_DARKEST))
+            .frame(egui::Frame::NONE.fill(BG_DARKEST))
             .show(ctx, |ui| {
                 let available = ui.available_size();
 
@@ -1313,10 +1313,10 @@ impl BoosterApp {
                     .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
                     .order(egui::Order::Foreground)
                     .show(ctx, |ui| {
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(STATUS_CONNECTED.gamma_multiply(0.9 * alpha))
                             .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                            .inner_margin(egui::Margin::symmetric(16, 10))
                             .shadow(egui::epaint::Shadow {
                                 offset: egui::vec2(0.0, 2.0),
                                 blur: 8.0,
@@ -1431,11 +1431,11 @@ impl BoosterApp {
                     let active_count = self.count_active_boosts();
                     if active_count > 0 {
                         ui.add_space(10.0);
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
                             .stroke(egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.3)))
                             .rounding(12.0)
-                            .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+                            .inner_margin(egui::Margin::symmetric(10, 4))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -1479,11 +1479,11 @@ impl BoosterApp {
                         BG_HOVER
                     };
 
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(badge_bg)
                         .stroke(egui::Stroke::new(1.0, badge_border))
                         .rounding(14.0)
-                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                        .inner_margin(egui::Margin::symmetric(12, 6))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -1601,10 +1601,10 @@ impl BoosterApp {
 
     fn render_nav_tabs(&mut self, ui: &mut egui::Ui) {
         // Tab container with subtle background
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD)
             .rounding(12.0)
-            .inner_margin(egui::Margin::symmetric(4.0, 4.0))
+            .inner_margin(egui::Margin::symmetric(4, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -1685,11 +1685,11 @@ impl BoosterApp {
 
     /// Render game preset selector cards (ExitLag-style)
     fn render_game_preset_selector(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD)
             .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0)
-            .inner_margin(16.0)
+            .inner_margin(16)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
@@ -1730,11 +1730,11 @@ impl BoosterApp {
                             egui::Stroke::new(1.0, BG_HOVER)
                         };
 
-                        let response = egui::Frame::none()
+                        let response = egui::Frame::NONE
                             .fill(card_bg)
                             .stroke(card_border)
                             .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(8.0, 12.0))
+                            .inner_margin(egui::Margin::symmetric(8, 12))
                             .show(ui, |ui| {
                                 ui.set_min_width(card_width);
                                 ui.set_max_width(card_width);
@@ -1790,9 +1790,9 @@ impl BoosterApp {
     fn render_login_prompt(&mut self, ui: &mut egui::Ui) {
         let mut go_settings = false;
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.vertical_centered(|ui| {
@@ -1899,11 +1899,11 @@ impl BoosterApp {
             (BG_CARD, BG_ELEVATED, 1.0)
         };
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(card_bg)
             .stroke(egui::Stroke::new(border_width, card_border))
             .rounding(16.0)
-            .inner_margin(egui::Margin::symmetric(20.0, 18.0))
+            .inner_margin(egui::Margin::symmetric(20, 18))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
@@ -2029,10 +2029,10 @@ impl BoosterApp {
                         ui.spacing_mut().item_spacing.x = 12.0;
 
                         // IP Address badge
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(BG_ELEVATED)
                             .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                            .inner_margin(egui::Margin::symmetric(12, 8))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -2046,10 +2046,10 @@ impl BoosterApp {
                             });
 
                         // Uptime badge
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(BG_ELEVATED)
                             .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                            .inner_margin(egui::Margin::symmetric(12, 8))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -2070,11 +2070,11 @@ impl BoosterApp {
                                 ("+", &tunneled_processes.join(", ") as &str, STATUS_CONNECTED)
                             };
 
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(tunnel_color.gamma_multiply(0.1))
                                 .stroke(egui::Stroke::new(1.0, tunnel_color.gamma_multiply(0.3)))
                                 .rounding(8.0)
-                                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                                .inner_margin(egui::Margin::symmetric(12, 8))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -2138,10 +2138,10 @@ impl BoosterApp {
     fn render_throughput_graph(&self, ui: &mut egui::Ui) {
         if self.throughput_history.is_empty() {
             // Show placeholder when no data yet
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(BG_ELEVATED)
                 .rounding(8.0)
-                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -2166,10 +2166,10 @@ impl BoosterApp {
             .map(|(_, tx, rx)| (*tx, *rx))
             .unwrap_or((0.0, 0.0));
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_ELEVATED)
             .rounding(8.0)
-            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     // Header with current values
@@ -2323,10 +2323,10 @@ impl BoosterApp {
                     ui.label(egui::RichText::new("Measuring...").size(11.0).color(ACCENT_CYAN));
                 } else {
                     // Server count badge
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(BG_ELEVATED)
                         .rounding(8.0)
-                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                        .inner_margin(egui::Margin::symmetric(8, 3))
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new(format!("{} regions", regions.len()))
                                 .size(10.0)
@@ -2344,11 +2344,11 @@ impl BoosterApp {
                 self.render_skeleton_region_cards(ui);
             } else if let Some(err) = &error_msg {
                 // Error state with retry
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(STATUS_ERROR.gamma_multiply(0.08))
                     .stroke(egui::Stroke::new(1.0, STATUS_ERROR.gamma_multiply(0.3)))
                     .rounding(12.0)
-                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                    .inner_margin(egui::Margin::symmetric(24, 20))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.vertical_centered(|ui| {
@@ -2375,10 +2375,10 @@ impl BoosterApp {
                     });
             } else {
                 // Empty state
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(BG_CARD)
                     .rounding(12.0)
-                    .inner_margin(egui::Margin::symmetric(24.0, 30.0))
+                    .inner_margin(egui::Margin::symmetric(24, 30))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.vertical_centered(|ui| {
@@ -2424,11 +2424,11 @@ impl BoosterApp {
                             (hover_bg, hover_border, 1.0 + hover_val * 0.5)
                         };
 
-                        let response = egui::Frame::none()
+                        let response = egui::Frame::NONE
                             .fill(bg)
                             .stroke(egui::Stroke::new(border_width, border_color))
                             .rounding(14.0)
-                            .inner_margin(egui::Margin::symmetric(14.0, 14.0))
+                            .inner_margin(egui::Margin::symmetric(14, 14))
                             .show(ui, |ui| {
                                 ui.set_width(card_width - 28.0);
                                 ui.set_min_height(85.0);
@@ -2437,10 +2437,10 @@ impl BoosterApp {
                                     // Top row: Country code + badges + latency
                                     ui.horizontal(|ui| {
                                         // Country code badge with icon
-                                        egui::Frame::none()
+                                        egui::Frame::NONE
                                             .fill(if is_selected { ACCENT_PRIMARY } else { BG_ELEVATED })
                                             .rounding(6.0)
-                                            .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                                            .inner_margin(egui::Margin::symmetric(10, 5))
                                             .show(ui, |ui| {
                                                 ui.label(egui::RichText::new(&region.country_code)
                                                     .size(11.0)
@@ -2452,11 +2452,11 @@ impl BoosterApp {
                                         let is_last_used = self.last_connected_region.as_ref().map(|r| r == &region.id).unwrap_or(false);
                                         if is_last_used && !is_selected {
                                             ui.add_space(4.0);
-                                            egui::Frame::none()
+                                            egui::Frame::NONE
                                                 .fill(ACCENT_CYAN.gamma_multiply(0.12))
                                                 .stroke(egui::Stroke::new(1.0, ACCENT_CYAN.gamma_multiply(0.3)))
                                                 .rounding(6.0)
-                                                .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                                                .inner_margin(egui::Margin::symmetric(6, 3))
                                                 .show(ui, |ui| {
                                                     ui.label(egui::RichText::new("* LAST")
                                                         .size(9.0)
@@ -2513,10 +2513,10 @@ impl BoosterApp {
                                         let has_forced_server = self.forced_servers.contains_key(&region.id);
                                         if has_forced_server {
                                             ui.add_space(4.0);
-                                            egui::Frame::none()
+                                            egui::Frame::NONE
                                                 .fill(ACCENT_SECONDARY.gamma_multiply(0.15))
                                                 .rounding(4.0)
-                                                .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+                                                .inner_margin(egui::Margin::symmetric(4, 2))
                                                 .show(ui, |ui| {
                                                     ui.label(egui::RichText::new("*")
                                                         .size(9.0)
@@ -2658,7 +2658,7 @@ impl BoosterApp {
                 .fill(BG_CARD)
                 .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                 .rounding(12.0)
-                .inner_margin(16.0))
+                .inner_margin(16))
             .show(ui.ctx(), |ui| {
                 let mut should_close = false;
 
@@ -2666,14 +2666,14 @@ impl BoosterApp {
 
                 // "Auto (Best Ping)" option
                 let is_auto = current_forced.is_none();
-                let auto_response = egui::Frame::none()
+                let auto_response = egui::Frame::NONE
                     .fill(if is_auto { ACCENT_PRIMARY.gamma_multiply(0.15) } else { BG_ELEVATED.gamma_multiply(0.5) })
                     .stroke(egui::Stroke::new(
                         if is_auto { 1.5 } else { 1.0 },
                         if is_auto { ACCENT_PRIMARY } else { BG_ELEVATED }
                     ))
                     .rounding(8.0)
-                    .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                    .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width() - 24.0);
                         ui.horizontal(|ui| {
@@ -2717,14 +2717,14 @@ impl BoosterApp {
                     let is_selected = current_forced.as_ref() == Some(server_id);
                     let display_name = self.format_server_display_name(server_id);
 
-                    let server_response = egui::Frame::none()
+                    let server_response = egui::Frame::NONE
                         .fill(if is_selected { ACCENT_SECONDARY.gamma_multiply(0.15) } else { egui::Color32::TRANSPARENT })
                         .stroke(egui::Stroke::new(
                             if is_selected { 1.5 } else { 1.0 },
                             if is_selected { ACCENT_SECONDARY } else { BG_ELEVATED.gamma_multiply(0.5) }
                         ))
                         .rounding(8.0)
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                        .inner_margin(egui::Margin::symmetric(12, 8))
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width() - 24.0);
                             ui.horizontal(|ui| {
@@ -2820,11 +2820,11 @@ impl BoosterApp {
                     let card_offset = (row * 2 + col) as f32 * 0.1;
                     let local_shimmer = ((shimmer_progress + card_offset) % 1.0);
 
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(BG_CARD)
                         .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                         .rounding(14.0)
-                        .inner_margin(egui::Margin::symmetric(14.0, 14.0))
+                        .inner_margin(egui::Margin::symmetric(14, 14))
                         .show(ui, |ui| {
                             ui.set_width(card_width - 28.0);
                             ui.set_min_height(85.0);
@@ -2912,11 +2912,11 @@ impl BoosterApp {
             if elapsed >= DEBOUNCE_SECS { 0 } else { DEBOUNCE_SECS - elapsed }
         });
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD)
             .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0)
-            .inner_margin(16.0)
+            .inner_margin(16)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
@@ -2945,10 +2945,10 @@ impl BoosterApp {
                             STATUS_WARNING
                         };
 
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(if self.artificial_latency_ms == 0 { BG_ELEVATED } else { STATUS_WARNING.gamma_multiply(0.15) })
                             .rounding(4.0)
-                            .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+                            .inner_margin(egui::Margin::symmetric(8, 2))
                             .show(ui, |ui| {
                                 ui.label(egui::RichText::new(badge_text).size(11.0).color(badge_color).strong());
                             });
@@ -3061,9 +3061,9 @@ impl BoosterApp {
     }
 
     fn render_quick_info(&self, ui: &mut egui::Ui) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("System Info").size(14.0).color(TEXT_PRIMARY).strong());
@@ -3110,9 +3110,9 @@ impl BoosterApp {
         let opt_active = self.state.optimizations_active;
         let mut toggle_opt = false;
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
@@ -3182,11 +3182,11 @@ impl BoosterApp {
                     (bg, BG_ELEVATED, TEXT_PRIMARY)
                 };
 
-                let response = egui::Frame::none()
+                let response = egui::Frame::NONE
                     .fill(bg)
                     .stroke(egui::Stroke::new(if is_selected { 2.0 } else { 1.0 }, border))
                     .rounding(12.0)
-                    .inner_margin(egui::Margin::symmetric(12.0, 16.0))
+                    .inner_margin(egui::Margin::symmetric(12, 16))
                     .show(ui, |ui| {
                         ui.set_width(card_width - 24.0);
                         ui.vertical_centered(|ui| {
@@ -3214,10 +3214,10 @@ impl BoosterApp {
                         ui.label(egui::RichText::new(profile_info.settings_summary).size(10.0).color(TEXT_MUTED));
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
                                 .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                                .inner_margin(egui::Margin::symmetric(6, 2))
                                 .show(ui, |ui| {
                                     ui.label(egui::RichText::new(profile_info.fps_target).size(10.0).color(ACCENT_PRIMARY));
                                 });
@@ -3248,9 +3248,9 @@ impl BoosterApp {
         let is_uncapped = current_fps >= 9999;
         let fps_display = if is_uncapped { "Uncapped".to_string() } else { format!("{}", current_fps) };
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Roblox FPS Settings").size(14.0).color(TEXT_PRIMARY).strong());
@@ -3360,9 +3360,9 @@ impl BoosterApp {
         // ─────────────────────────────────────────────────────────────
         ui.add_space(16.0);
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -3370,10 +3370,10 @@ impl BoosterApp {
                     ui.add_space(8.0);
 
                     // Tier 1 badge with tooltip
-                    let tier_badge = egui::Frame::none()
+                    let tier_badge = egui::Frame::NONE
                         .fill(STATUS_CONNECTED.gamma_multiply(0.15))
                         .rounding(4.0)
-                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                        .inner_margin(egui::Margin::symmetric(6, 2))
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
                         });
@@ -3420,9 +3420,9 @@ impl BoosterApp {
         // ─────────────────────────────────────────────────────────────
         ui.add_space(16.0);
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -3430,10 +3430,10 @@ impl BoosterApp {
                     ui.add_space(8.0);
 
                     // Tier 1 badge with tooltip
-                    let tier_badge = egui::Frame::none()
+                    let tier_badge = egui::Frame::NONE
                         .fill(STATUS_CONNECTED.gamma_multiply(0.15))
                         .rounding(4.0)
-                        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                        .inner_margin(egui::Margin::symmetric(6, 2))
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
                         });
@@ -3477,9 +3477,9 @@ impl BoosterApp {
         let mut create_restore_point = false;
         let mut open_restore = false;
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("System Protection").size(14.0).color(TEXT_PRIMARY).strong());
@@ -3574,9 +3574,9 @@ impl BoosterApp {
 
     fn render_general_settings(&mut self, ui: &mut egui::Ui) {
         // About section
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("About").size(14.0).color(TEXT_PRIMARY).strong());
@@ -3594,9 +3594,9 @@ impl BoosterApp {
         let mut toggle_auto_check = false;
         let current_auto_check = self.update_settings.auto_check;
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Updates").size(14.0).color(TEXT_PRIMARY).strong());
@@ -3685,9 +3685,9 @@ impl BoosterApp {
         let mut toggle_minimize_to_tray = false;
         let current_minimize_to_tray = self.minimize_to_tray;
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("System Tray").size(14.0).color(TEXT_PRIMARY).strong());
@@ -3722,9 +3722,9 @@ impl BoosterApp {
         let mut toggle_experimental_mode = false;
         let current_experimental_mode = self.experimental_mode;
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("* Experimental").size(14.0).color(TEXT_PRIMARY).strong());
@@ -3780,9 +3780,9 @@ impl BoosterApp {
         // Performance settings are now in the Boost tab
         // This section shows a summary and link to Boost tab
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Performance Boosts").size(14.0).color(TEXT_PRIMARY).strong());
@@ -3932,10 +3932,10 @@ impl BoosterApp {
             if is_expanded {
                 if let Some(boost_info) = info {
                     ui.add_space(8.0);
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(BG_ELEVATED.gamma_multiply(0.7))
                         .rounding(8.0)
-                        .inner_margin(12.0)
+                        .inner_margin(12)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
 
@@ -3946,10 +3946,10 @@ impl BoosterApp {
                             // Impact & risk in a row
                             ui.horizontal(|ui| {
                                 // Impact badge
-                                egui::Frame::none()
+                                egui::Frame::NONE
                                     .fill(STATUS_CONNECTED.gamma_multiply(0.15))
                                     .rounding(4.0)
-                                    .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                                    .inner_margin(egui::Margin::symmetric(6, 3))
                                     .show(ui, |ui| {
                                         ui.label(egui::RichText::new(boost_info.impact).size(10.0).color(STATUS_CONNECTED));
                                     });
@@ -3960,20 +3960,20 @@ impl BoosterApp {
                                     RiskLevel::LowRisk => STATUS_WARNING,
                                     RiskLevel::MediumRisk => STATUS_ERROR,
                                 };
-                                egui::Frame::none()
+                                egui::Frame::NONE
                                     .fill(risk_color.gamma_multiply(0.15))
                                     .rounding(4.0)
-                                    .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                                    .inner_margin(egui::Margin::symmetric(6, 3))
                                     .show(ui, |ui| {
                                         ui.label(egui::RichText::new(boost_info.risk_level.label()).size(10.0).color(risk_color));
                                     });
 
                                 // Admin required warning
                                 if boost_info.requires_admin {
-                                    egui::Frame::none()
+                                    egui::Frame::NONE
                                         .fill(STATUS_WARNING.gamma_multiply(0.15))
                                         .rounding(4.0)
-                                        .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+                                        .inner_margin(egui::Margin::symmetric(6, 3))
                                         .show(ui, |ui| {
                                             ui.label(egui::RichText::new("> Admin").size(10.0).color(STATUS_WARNING));
                                         });
@@ -4013,9 +4013,9 @@ impl BoosterApp {
         let mut do_login = false;
         let mut open_signup = false;
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Sign In").size(16.0).color(TEXT_PRIMARY).strong());
@@ -4053,8 +4053,8 @@ impl BoosterApp {
 
         if let Some(error) = &self.auth_error.clone() {
             ui.add_space(12.0);
-            egui::Frame::none()
-                .fill(STATUS_ERROR.gamma_multiply(0.15)).rounding(8.0).inner_margin(12.0)
+            egui::Frame::NONE
+                .fill(STATUS_ERROR.gamma_multiply(0.15)).rounding(8.0).inner_margin(12)
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new(error).size(12.0).color(STATUS_ERROR));
                 });
@@ -4158,11 +4158,11 @@ impl BoosterApp {
                     ui.add_space(8.0);
 
                     // Custom input field with icon
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(BG_INPUT)
                         .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                         .rounding(10.0)
-                        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                        .inner_margin(egui::Margin::symmetric(16, 14))
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
@@ -4207,11 +4207,11 @@ impl BoosterApp {
                     ui.add_space(8.0);
 
                     // Custom password field with icon
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(BG_INPUT)
                         .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                         .rounding(10.0)
-                        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+                        .inner_margin(egui::Margin::symmetric(16, 14))
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
@@ -4328,11 +4328,11 @@ impl BoosterApp {
                     // ─────────────────────────────────────────────────────────────
                     if let Some(error) = &self.auth_error.clone() {
                         ui.add_space(20.0);
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(STATUS_ERROR.gamma_multiply(0.15))
                             .stroke(egui::Stroke::new(1.0, STATUS_ERROR.gamma_multiply(0.3)))
                             .rounding(10.0)
-                            .inner_margin(16.0)
+                            .inner_margin(16)
                             .show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
@@ -4369,11 +4369,11 @@ impl BoosterApp {
                 egui::vec2(card_max_width.min(available.x - 40.0), available.y),
                 egui::Layout::top_down(egui::Align::Center),
                 |ui| {
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(BG_CARD)
                         .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                         .rounding(16.0)
-                        .inner_margin(40.0)
+                        .inner_margin(40)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             ui.vertical_centered(|ui| {
@@ -4410,11 +4410,11 @@ impl BoosterApp {
                 egui::vec2(card_max_width.min(available.x - 40.0), available.y),
                 egui::Layout::top_down(egui::Align::Center),
                 |ui| {
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(BG_CARD)
                         .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                         .rounding(16.0)
-                        .inner_margin(40.0)
+                        .inner_margin(40)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             ui.vertical_centered(|ui| {
@@ -4486,9 +4486,9 @@ impl BoosterApp {
 
         let mut do_logout = false;
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
@@ -4520,9 +4520,9 @@ impl BoosterApp {
 
         ui.add_space(16.0);
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20.0)
+            .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Subscription").size(14.0).color(TEXT_PRIMARY).strong());
@@ -4899,11 +4899,11 @@ impl BoosterApp {
             UpdateState::Idle | UpdateState::UpToDate | UpdateState::Checking => return,
             UpdateState::Failed(msg) => {
                 // Show error banner briefly, then hide
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(STATUS_ERROR.gamma_multiply(0.15))
                     .stroke(egui::Stroke::new(1.0, STATUS_ERROR.gamma_multiply(0.3)))
                     .rounding(8.0)
-                    .inner_margin(12.0)
+                    .inner_margin(12)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("!").size(14.0).color(STATUS_ERROR));
@@ -4938,11 +4938,11 @@ impl BoosterApp {
             }
         }
 
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
             .stroke(egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.3)))
             .rounding(8.0)
-            .inner_margin(12.0)
+            .inner_margin(12)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
@@ -5268,10 +5268,10 @@ impl BoosterApp {
 
     /// Render the Connection Stability Test section
     fn render_stability_section(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD)
             .rounding(12.0)
-            .inner_margin(egui::Margin::same(16.0))
+            .inner_margin(egui::Margin::same(16))
             .show(ui, |ui| {
                 // Section header
                 ui.horizontal(|ui| {
@@ -5290,10 +5290,10 @@ impl BoosterApp {
                                 crate::network_analyzer::ConnectionQuality::Poor => (LATENCY_POOR, "Poor"),
                                 crate::network_analyzer::ConnectionQuality::Bad => (STATUS_ERROR, "Bad"),
                             };
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(badge_color.gamma_multiply(0.2))
                                 .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .inner_margin(egui::Margin::symmetric(8, 4))
                                 .show(ui, |ui| {
                                     ui.label(egui::RichText::new(badge_text)
                                         .size(11.0)
@@ -5456,10 +5456,10 @@ impl BoosterApp {
 
     /// Render a small stat box
     fn render_stat_box(&self, ui: &mut egui::Ui, label: &str, value: &str, value_color: egui::Color32) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_ELEVATED)
             .rounding(6.0)
-            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new(label).size(10.0).color(TEXT_MUTED));
@@ -5495,10 +5495,10 @@ impl BoosterApp {
 
     /// Render the Speed Test section
     fn render_speed_test_section(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(BG_CARD)
             .rounding(12.0)
-            .inner_margin(egui::Margin::same(16.0))
+            .inner_margin(egui::Margin::same(16))
             .show(ui, |ui| {
                 // Section header
                 ui.horizontal(|ui| {
