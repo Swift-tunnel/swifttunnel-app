@@ -196,6 +196,7 @@ pub async fn update_latency(
     }
 
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct LatencyResponse {
         #[serde(default)]
         server_applied: bool,
