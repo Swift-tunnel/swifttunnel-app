@@ -387,6 +387,8 @@ pub struct BoosterApp {
     pending_latency: Option<(u32, std::time::Instant)>,
     /// Last applied latency (to avoid redundant API calls)
     last_applied_latency: u32,
+    /// Enable experimental features (Practice Mode, etc.)
+    experimental_mode: bool,
 }
 
 impl BoosterApp {
@@ -603,6 +605,8 @@ impl BoosterApp {
             updating_latency: false,
             pending_latency: None,
             last_applied_latency: saved_settings.artificial_latency_ms,
+            // Experimental mode
+            experimental_mode: saved_settings.experimental_mode,
         }
     }
 
@@ -703,6 +707,8 @@ impl BoosterApp {
             forced_servers: self.forced_servers.clone(),
             // Save artificial latency setting
             artificial_latency_ms: self.artificial_latency_ms,
+            // Save experimental mode setting
+            experimental_mode: self.experimental_mode,
         };
 
         let _ = save_settings(&settings);
@@ -1665,8 +1671,11 @@ impl BoosterApp {
         self.render_game_preset_selector(ui);
         ui.add_space(16.0);
         self.render_region_selector(ui);
-        ui.add_space(16.0);
-        self.render_latency_slider(ui);
+        // Only show Practice Mode if experimental mode is enabled
+        if self.experimental_mode {
+            ui.add_space(16.0);
+            self.render_latency_slider(ui);
+        }
         ui.add_space(16.0);
         self.render_quick_info(ui);
     }
@@ -3001,9 +3010,18 @@ impl BoosterApp {
 
     /// Update server with current latency setting
     fn update_server_latency(&mut self) {
+        log::info!("update_server_latency() called, latency_ms={}", self.artificial_latency_ms);
+
         // Need config ID and access token
         let config_id = match &self.current_config_id {
-            Some(id) => id.clone(),
+            Some(id) if !id.is_empty() => {
+                log::info!("Using config ID: {}", id);
+                id.clone()
+            }
+            Some(_) => {
+                log::warn!("Cannot update latency: config ID is empty");
+                return;
+            }
             None => {
                 log::warn!("Cannot update latency: no config ID");
                 return;
@@ -3024,12 +3042,14 @@ impl BoosterApp {
         self.updating_latency = true;
 
         // Spawn async task to update latency
+        log::info!("Spawning latency update task: config_id={}, latency_ms={}", config_id, latency_ms);
         std::thread::spawn(move || {
             rt.block_on(async {
+                log::info!("Calling update_latency API...");
                 match crate::vpn::update_latency(&access_token, &config_id, latency_ms).await {
                     Ok(server_applied) => {
                         if server_applied {
-                            log::info!("Latency +{}ms applied to server", latency_ms);
+                            log::info!("Latency +{}ms applied to server successfully", latency_ms);
                         } else {
                             log::info!("Latency +{}ms saved, will apply on reconnect", latency_ms);
                         }
@@ -3702,6 +3722,43 @@ impl BoosterApp {
                 ui.label(egui::RichText::new("Tip: Click the tray icon to show the window. Right-click for more options.").size(10.0).color(TEXT_MUTED).italics());
             });
 
+        ui.add_space(16.0);
+
+        // Experimental Features section
+        let mut toggle_experimental_mode = false;
+        let current_experimental_mode = self.experimental_mode;
+
+        egui::Frame::none()
+            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0).inner_margin(20.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(egui::RichText::new("⚗ Experimental").size(14.0).color(TEXT_PRIMARY).strong());
+                ui.add_space(12.0);
+
+                // Experimental mode toggle
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Enable Experimental Features").size(13.0).color(TEXT_PRIMARY));
+                        ui.label(egui::RichText::new("Unlock Practice Mode and other experimental features").size(11.0).color(TEXT_SECONDARY));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let size = egui::vec2(44.0, 24.0);
+                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                        if response.clicked() {
+                            toggle_experimental_mode = true;
+                        }
+                        let bg = if current_experimental_mode { ACCENT_PRIMARY } else { BG_ELEVATED };
+                        let knob_x = if current_experimental_mode { rect.right() - 12.0 } else { rect.left() + 12.0 };
+                        ui.painter().rect_filled(rect, 12.0, bg);
+                        ui.painter().circle_filled(egui::pos2(knob_x, rect.center().y), 8.0, TEXT_PRIMARY);
+                    });
+                });
+
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("⚠ Experimental features may be unstable or change without notice.").size(10.0).color(STATUS_WARNING).italics());
+            });
+
         // Handle actions after UI rendering
         if check_now {
             self.start_update_check();
@@ -3716,6 +3773,11 @@ impl BoosterApp {
             if let Some(ref tray) = self.system_tray {
                 tray.set_minimize_to_tray(self.minimize_to_tray);
             }
+            self.mark_dirty();
+        }
+        if toggle_experimental_mode {
+            self.experimental_mode = !self.experimental_mode;
+            log::info!("Experimental mode: {}", self.experimental_mode);
             self.mark_dirty();
         }
     }
