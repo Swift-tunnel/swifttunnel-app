@@ -5060,7 +5060,16 @@ impl BoosterApp {
 
         std::thread::spawn(move || {
             rt.block_on(async {
-                let checker = UpdateChecker::new();
+                let checker = match UpdateChecker::new() {
+                    Some(c) => c,
+                    None => {
+                        log::error!("Update checker failed to initialize - version parsing issue");
+                        if let Ok(mut state) = update_state.lock() {
+                            *state = UpdateState::Failed("Version parsing error".to_string());
+                        }
+                        return;
+                    }
+                };
                 match checker.check_for_update().await {
                     Ok(Some(info)) => {
                         log::info!("Update available: v{}", info.version);
