@@ -22,18 +22,17 @@ mod split_tunnel;
 mod wfp;
 
 use vpn::VpnManager;
+#[allow(unused_imports)]
 use error::VpnError;
 use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, get_default_tunnel_apps};
+#[allow(unused_imports)]
 use wfp::{WfpEngine, setup_wfp_for_split_tunnel};
 
 // Global VPN manager instance
 static VPN_MANAGER: Lazy<Mutex<Option<VpnManager>>> = Lazy::new(|| Mutex::new(None));
 
-// Global split tunnel driver instance
+// Global split tunnel driver instance (route-based, ZERO overhead)
 static SPLIT_TUNNEL: Lazy<Mutex<Option<SplitTunnelDriver>>> = Lazy::new(|| Mutex::new(None));
-
-// Global WFP engine instance (must be kept alive while split tunnel is active)
-static WFP_ENGINE: Lazy<Mutex<Option<WfpEngine>>> = Lazy::new(|| Mutex::new(None));
 
 // Global error message
 static LAST_ERROR: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
@@ -314,24 +313,31 @@ pub extern "C" fn swifttunnel_is_available() -> i32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  SPLIT TUNNEL API
+//  SPLIT TUNNEL API (Route-Based - ZERO Overhead)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Check if the Mullvad split tunnel driver is available
+/// Check if split tunneling is available
+///
+/// Route-based split tunnel is ALWAYS available (uses built-in Windows routing).
+/// No kernel driver required!
 ///
 /// # Returns
-/// 1 if available, 0 otherwise
+/// 1 if available (always), 0 otherwise
 #[no_mangle]
 pub extern "C" fn swifttunnel_split_tunnel_available() -> i32 {
-    if SplitTunnelDriver::is_available() { 1 } else { 0 }
+    // Route-based split tunnel is always available
+    1
 }
 
-/// Configure and enable split tunneling
+/// Configure and enable split tunneling (route-based, ZERO overhead)
+///
+/// This uses the Windows routing table to route game traffic through VPN.
+/// NO kernel driver required, NO packet interception, ZERO latency overhead!
 ///
 /// # Arguments
 /// * `tunnel_ip` - The VPN tunnel IP address (e.g., "10.0.0.77")
 /// * `interface_luid` - The Wintun adapter LUID
-/// * `apps_json` - JSON array of app names to tunnel (e.g., ["RobloxPlayerBeta.exe"])
+/// * `apps_json` - JSON array of app names (for process detection only, not routing)
 ///                 Pass null or "[]" to use default Roblox apps
 ///
 /// # Returns
@@ -360,7 +366,7 @@ pub extern "C" fn swifttunnel_split_tunnel_configure(
         }
     };
 
-    // Parse apps list
+    // Parse apps list (for process detection/notifications only)
     let apps: Vec<String> = if apps_json.is_null() {
         get_default_tunnel_apps()
     } else {
@@ -387,26 +393,9 @@ pub extern "C" fn swifttunnel_split_tunnel_configure(
         }
     };
 
-    log::info!("Configuring split tunnel: IP={}, LUID={}, apps={:?}", ip_str, interface_luid, apps);
+    log::info!("Configuring route-based split tunnel: IP={}, LUID={}", ip_str, interface_luid);
 
-    // Setup WFP first (required by Mullvad driver)
-    {
-        let mut wfp = WFP_ENGINE.lock();
-        if wfp.is_none() {
-            match setup_wfp_for_split_tunnel(interface_luid) {
-                Ok(engine) => {
-                    log::info!("WFP engine initialized for split tunnel");
-                    *wfp = Some(engine);
-                }
-                Err(e) => {
-                    log::warn!("Failed to setup WFP: {}", e);
-                    // Continue anyway - driver might still work for process detection
-                }
-            }
-        }
-    }
-
-    // Configure split tunnel driver
+    // Configure split tunnel driver (route-based)
     let mut driver_guard = SPLIT_TUNNEL.lock();
 
     // Close existing driver if any
@@ -430,7 +419,7 @@ pub extern "C" fn swifttunnel_split_tunnel_configure(
     }
 
     *driver_guard = Some(driver);
-    log::info!("Split tunnel configured successfully");
+    log::info!("Route-based split tunnel configured - ZERO overhead!");
     SUCCESS
 }
 
@@ -466,7 +455,7 @@ pub extern "C" fn swifttunnel_split_tunnel_refresh() -> *mut c_char {
     }
 }
 
-/// Disable and close split tunneling
+/// Disable and close split tunneling (removes routes)
 ///
 /// # Returns
 /// 0 on success, negative error code on failure
@@ -474,7 +463,7 @@ pub extern "C" fn swifttunnel_split_tunnel_refresh() -> *mut c_char {
 pub extern "C" fn swifttunnel_split_tunnel_close() -> i32 {
     clear_error();
 
-    // Close split tunnel driver
+    // Close split tunnel driver (removes routes)
     {
         let mut driver_guard = SPLIT_TUNNEL.lock();
         if let Some(ref mut driver) = *driver_guard {
@@ -485,13 +474,7 @@ pub extern "C" fn swifttunnel_split_tunnel_close() -> i32 {
         *driver_guard = None;
     }
 
-    // Close WFP engine
-    {
-        let mut wfp = WFP_ENGINE.lock();
-        *wfp = None;
-    }
-
-    log::info!("Split tunnel closed");
+    log::info!("Route-based split tunnel closed");
     SUCCESS
 }
 

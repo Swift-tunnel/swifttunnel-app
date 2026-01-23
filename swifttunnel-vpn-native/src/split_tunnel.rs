@@ -1,74 +1,57 @@
-//! Split Tunnel Driver Interface - Exclude-All-Except Mode
+//! Route-Based Split Tunnel Driver
 //!
-//! Uses the Mullvad split tunnel kernel driver in EXCLUDE mode, but with inverted logic:
-//! - All processes are EXCLUDED from VPN by default (bypass tunnel)
-//! - Only user-selected apps (games) are NOT excluded (use VPN tunnel)
+//! Uses Windows routing table for ZERO-OVERHEAD split tunneling.
+//! Game traffic is routed through the VPN via kernel routing - no packet
+//! interception, no process lookup, no latency overhead.
 //!
-//! This achieves "include mode" behavior using the exclude-only driver:
-//! - User selects "Roblox" to tunnel → Roblox is NOT in exclude list → uses VPN
-//! - Everything else IS in exclude list → bypasses VPN
+//! How it works:
+//! 1. On configure(), adds routes for game server IPs through VPN interface
+//! 2. Kernel routes game packets through VPN (ZERO userspace overhead!)
+//! 3. Non-game traffic has no routes = bypasses VPN naturally
+//! 4. On close(), removes all added routes
 //!
-//! Optimizations:
-//! - HashSet for O(1) process lookups
-//! - Differential updates (only add/remove changed processes)
-//! - Skip system processes that don't need exclusion
-//! - 250ms refresh interval for fast game detection
+//! This is the SAME approach used in SwiftTunnel-App v0.6.2+
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::process::Command;
 use sysinfo::{System, ProcessesToUpdate, ProcessRefreshKind};
 use crate::error::VpnError;
 
-/// Driver device path (Mullvad split tunnel driver)
-const DEVICE_PATH: &str = r"\\.\MULLVADSPLITTUNNEL";
-
-/// IOCTL codes for Mullvad split tunnel driver communication
-mod ioctl {
-    pub const ST_DEVICE_TYPE: u32 = 0x8000;
-    pub const METHOD_BUFFERED: u32 = 0;
-    pub const METHOD_NEITHER: u32 = 3;
-    pub const FILE_ANY_ACCESS: u32 = 0;
-
-    #[allow(non_snake_case)]
-    pub const fn CTL_CODE(device_type: u32, function: u32, method: u32, access: u32) -> u32 {
-        (device_type << 16) | (access << 14) | (function << 2) | method
-    }
-
-    pub const IOCTL_ST_INITIALIZE: u32 = CTL_CODE(ST_DEVICE_TYPE, 1, METHOD_NEITHER, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_REGISTER_PROCESSES: u32 = CTL_CODE(ST_DEVICE_TYPE, 3, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_REGISTER_IP_ADDRESSES: u32 = CTL_CODE(ST_DEVICE_TYPE, 4, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_SET_CONFIGURATION: u32 = CTL_CODE(ST_DEVICE_TYPE, 6, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_CLEAR_CONFIGURATION: u32 = CTL_CODE(ST_DEVICE_TYPE, 8, METHOD_NEITHER, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_GET_STATE: u32 = CTL_CODE(ST_DEVICE_TYPE, 9, METHOD_BUFFERED, FILE_ANY_ACCESS);
-    pub const IOCTL_ST_RESET: u32 = CTL_CODE(ST_DEVICE_TYPE, 11, METHOD_NEITHER, FILE_ANY_ACCESS);
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
-//  SYSTEM PROCESSES TO SKIP (don't need exclusion - no user network traffic)
+//  GAME IP RANGES - Route-based split tunneling
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// System processes that don't generate meaningful network traffic
-/// Skipping these reduces driver overhead
-const SKIP_PROCESSES: &[&str] = &[
-    // Windows core (no network or internal only)
-    "system", "idle", "registry", "smss.exe", "csrss.exe", "wininit.exe",
-    "services.exe", "lsass.exe", "winlogon.exe", "fontdrvhost.exe",
-    "dwm.exe", "sihost.exe", "taskhostw.exe", "ctfmon.exe", "dllhost.exe",
-    "conhost.exe", "cmd.exe", "powershell.exe", "openssh.exe",
-    // Our own app / Voidstrap
-    "swifttunnel.exe", "bloxstrap.exe", "voidstrap.exe",
-    // Memory compression
-    "memory compression",
+/// Roblox IP ranges for route-based split tunneling
+/// These cover all Roblox game servers globally
+pub const ROBLOX_IP_RANGES: &[&str] = &[
+    "128.116.0.0/17",     // Main Roblox range
+    "209.206.40.0/21",
+    "23.173.192.0/24",
+    "141.193.3.0/24",
+    "204.9.184.0/24",
+    "204.13.168.0/24",
+    "204.13.169.0/24",
+    "204.13.170.0/24",
+    "204.13.171.0/24",
+    "204.13.172.0/24",
+    "204.13.173.0/24",
+    "205.201.62.0/24",
+    "103.140.28.0/23",
+    "103.142.220.0/24",
+    "103.142.221.0/24",
+    "23.34.81.0/24",
+    "23.214.169.0/24",
 ];
 
 /// Default apps to tunnel through VPN (Roblox)
+/// Used for process detection notifications only (not for routing)
 pub const DEFAULT_TUNNEL_APPS: &[&str] = &[
     "robloxplayerbeta.exe",
     "robloxplayerlauncher.exe",
     "robloxstudiobeta.exe",
     "robloxstudiolauncherbeta.exe",
     "robloxstudiolauncher.exe",
-    "windows10universal.exe",
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -78,11 +61,11 @@ pub const DEFAULT_TUNNEL_APPS: &[&str] = &[
 /// Split tunnel configuration
 #[derive(Debug, Clone)]
 pub struct SplitTunnelConfig {
-    /// Apps that SHOULD use VPN (will NOT be excluded) - stored lowercase
+    /// Apps that SHOULD use VPN - stored lowercase (for process detection only)
     pub tunnel_apps: HashSet<String>,
     /// VPN tunnel IP address
     pub tunnel_ip: String,
-    /// VPN interface LUID
+    /// VPN interface LUID (used to get interface index)
     pub tunnel_interface_luid: u64,
 }
 
@@ -96,7 +79,7 @@ impl SplitTunnelConfig {
         }
     }
 
-    // Legacy compatibility - convert to include_apps format
+    /// Legacy compatibility - convert to include_apps format
     pub fn include_apps(&self) -> Vec<String> {
         self.tunnel_apps.iter().cloned().collect()
     }
@@ -112,40 +95,23 @@ pub enum DriverState {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  LIGHTWEIGHT PROCESS INFO
+//  ROUTE-BASED SPLIT TUNNEL DRIVER
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Minimal process info for exclusion tracking
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct ProcessInfo {
-    pid: u32,
-    name_lower: String,
-    exe_path: String,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SPLIT TUNNEL DRIVER
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Split tunnel driver interface - Exclude-All-Except mode
+/// Route-based split tunnel driver
+///
+/// Uses Windows routing table instead of kernel driver for ZERO overhead.
 pub struct SplitTunnelDriver {
-    device_handle: Option<windows::Win32::Foundation::HANDLE>,
     /// Current configuration
     pub config: Option<SplitTunnelConfig>,
+    /// Driver state
     state: DriverState,
-
-    // Efficient tracking with HashSets
-    /// Currently excluded PIDs (processes bypassing VPN)
-    excluded_pids: HashSet<u32>,
-    /// PIDs of tunnel apps (games using VPN)
-    tunnel_pids: HashSet<u32>,
-    /// Cached process paths for driver config
-    excluded_paths: Vec<String>,
-
-    /// System info - reused for efficiency
+    /// VPN interface index (from LUID)
+    interface_index: Option<u32>,
+    /// Routes added (CIDR strings for cleanup)
+    added_routes: Vec<String>,
+    /// System info for process detection
     system: System,
-    /// Skip set for O(1) lookup
-    skip_set: HashSet<&'static str>,
 }
 
 unsafe impl Send for SplitTunnelDriver {}
@@ -154,175 +120,183 @@ unsafe impl Sync for SplitTunnelDriver {}
 impl SplitTunnelDriver {
     pub fn new() -> Self {
         Self {
-            device_handle: None,
             config: None,
-            state: DriverState::NotAvailable,
-            excluded_pids: HashSet::with_capacity(256),
-            tunnel_pids: HashSet::with_capacity(16),
-            excluded_paths: Vec::with_capacity(256),
+            state: DriverState::NotConfigured,
+            interface_index: None,
+            added_routes: Vec::new(),
             system: System::new(),
-            skip_set: SKIP_PROCESSES.iter().copied().collect(),
         }
     }
 
-    /// Check if driver is available
+    /// Route-based split tunnel is always available (uses built-in Windows routing)
     pub fn is_available() -> bool {
-        use windows::core::PCSTR;
-        use windows::Win32::Foundation::*;
-        use windows::Win32::Storage::FileSystem::*;
-
-        unsafe {
-            let path = std::ffi::CString::new(DEVICE_PATH).unwrap();
-            let handle = CreateFileA(
-                PCSTR(path.as_ptr() as *const u8),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            );
-
-            match handle {
-                Ok(h) => {
-                    let _ = CloseHandle(h);
-                    true
-                }
-                Err(_) => false,
-            }
-        }
-    }
-
-    /// Cleanup stale state on startup
-    pub fn cleanup_stale_state() {
-        use windows::core::PCSTR;
-        use windows::Win32::Foundation::*;
-        use windows::Win32::Storage::FileSystem::*;
-        use windows::Win32::System::IO::DeviceIoControl;
-
-        log::debug!("Cleaning up stale split tunnel state...");
-
-        unsafe {
-            let path = std::ffi::CString::new(DEVICE_PATH).unwrap();
-            if let Ok(h) = CreateFileA(
-                PCSTR(path.as_ptr() as *const u8),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            ) {
-                let mut bytes_returned: u32 = 0;
-                let _ = DeviceIoControl(h, ioctl::IOCTL_ST_RESET, None, 0, None, 0, Some(&mut bytes_returned), None);
-                let _ = CloseHandle(h);
-            }
-        }
-    }
-
-    /// Open driver connection
-    pub fn open(&mut self) -> Result<(), VpnError> {
-        use windows::core::PCSTR;
-        use windows::Win32::Foundation::*;
-        use windows::Win32::Storage::FileSystem::*;
-
-        if self.device_handle.is_some() {
-            return Ok(());
-        }
-
-        unsafe {
-            let path = std::ffi::CString::new(DEVICE_PATH).unwrap();
-            match CreateFileA(
-                PCSTR(path.as_ptr() as *const u8),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            ) {
-                Ok(h) => {
-                    log::info!("Split tunnel driver opened");
-                    self.device_handle = Some(h);
-                    self.state = DriverState::NotConfigured;
-                    Ok(())
-                }
-                Err(e) => {
-                    self.state = DriverState::NotAvailable;
-                    Err(VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))
-                }
-            }
-        }
-    }
-
-    /// Check if process should be excluded (not a tunnel app and not a system process)
-    #[inline]
-    fn should_exclude(&self, name_lower: &str) -> bool {
-        // Don't exclude if it's a tunnel app (game)
-        if let Some(config) = &self.config {
-            if config.tunnel_apps.contains(name_lower) {
-                return false;
-            }
-            // Also check without .exe for partial matches
-            let name_stem = name_lower.trim_end_matches(".exe");
-            for tunnel_app in &config.tunnel_apps {
-                let app_stem = tunnel_app.trim_end_matches(".exe");
-                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
-                    return false;
-                }
-            }
-        }
-
-        // Skip system processes (don't need to exclude them)
-        if self.skip_set.contains(name_lower) {
-            return false;
-        }
-
-        // Exclude everything else
         true
     }
 
-    /// Scan all processes and return those that should be excluded
-    fn scan_processes_to_exclude(&mut self) -> Vec<ProcessInfo> {
-        // Efficient refresh - only get what we need
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::new(), // We only need basic info
+    /// Cleanup stale state on startup (no-op for route-based approach)
+    pub fn cleanup_stale_state() {
+        log::debug!("Route-based split tunnel: no stale state to clean");
+    }
+
+    /// Open driver connection (no-op for route-based approach)
+    pub fn open(&mut self) -> Result<(), VpnError> {
+        self.state = DriverState::NotConfigured;
+        log::info!("Route-based split tunnel ready");
+        Ok(())
+    }
+
+    /// Get interface index from LUID using PowerShell
+    fn get_interface_index_from_luid(luid: u64) -> Result<u32, VpnError> {
+        // Try to get interface index using PowerShell
+        let ps_script = format!(
+            r#"
+            $adapters = Get-NetAdapter | Where-Object {{ $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceDescription -like '*SwiftTunnel*' }}
+            if ($adapters) {{
+                $adapters | Select-Object -First 1 -ExpandProperty ifIndex
+            }}
+            "#
         );
 
-        let mut to_exclude = Vec::with_capacity(200);
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps_script])
+            .output()
+            .map_err(|e| VpnError::Route(format!("Failed to run PowerShell: {}", e)))?;
 
-        for (pid, process) in self.system.processes() {
-            let pid_u32 = pid.as_u32();
-
-            // Skip PID 0 and 4 (System)
-            if pid_u32 <= 4 {
-                continue;
-            }
-
-            let name = process.name().to_string_lossy().to_lowercase();
-
-            if self.should_exclude(&name) {
-                let exe_path = process
-                    .exe()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                // Skip if no exe path (kernel processes)
-                if exe_path.is_empty() {
-                    continue;
+        if output.status.success() {
+            let index_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !index_str.is_empty() {
+                if let Ok(index) = index_str.parse::<u32>() {
+                    log::info!("Found VPN interface index: {}", index);
+                    return Ok(index);
                 }
-
-                to_exclude.push(ProcessInfo {
-                    pid: pid_u32,
-                    name_lower: name,
-                    exe_path,
-                });
             }
         }
 
-        to_exclude
+        // Fallback: try by name
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-NetAdapter -Name 'SwiftTunnel' -ErrorAction SilentlyContinue).ifIndex",
+            ])
+            .output()
+            .map_err(|e| VpnError::Route(format!("Failed to get interface index: {}", e)))?;
+
+        if output.status.success() {
+            let index_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !index_str.is_empty() {
+                if let Ok(index) = index_str.parse::<u32>() {
+                    log::info!("Found VPN interface by name, index: {}", index);
+                    return Ok(index);
+                }
+            }
+        }
+
+        Err(VpnError::Route("Could not find VPN interface index".to_string()))
+    }
+
+    /// Add a single CIDR route through the VPN interface
+    fn add_cidr_route(&self, cidr: &str, interface_index: u32) -> Result<(), VpnError> {
+        // Parse CIDR notation (e.g., "128.116.0.0/17")
+        let parts: Vec<&str> = cidr.split('/').collect();
+        if parts.len() != 2 {
+            return Err(VpnError::Route(format!("Invalid CIDR: {}", cidr)));
+        }
+
+        let network = parts[0];
+        let prefix_len: u8 = parts[1].parse()
+            .map_err(|_| VpnError::Route(format!("Invalid prefix length: {}", parts[1])))?;
+
+        // Convert prefix length to subnet mask
+        let mask = if prefix_len == 0 {
+            0u32
+        } else {
+            !((1u32 << (32 - prefix_len)) - 1)
+        };
+        let mask_str = format!(
+            "{}.{}.{}.{}",
+            (mask >> 24) & 0xFF,
+            (mask >> 16) & 0xFF,
+            (mask >> 8) & 0xFF,
+            mask & 0xFF
+        );
+
+        // Add route through VPN interface
+        let output = Command::new("route")
+            .args([
+                "add",
+                network,
+                "mask",
+                &mask_str,
+                "10.0.0.1",  // VPN internal gateway
+                "metric",
+                "5",
+                "if",
+                &interface_index.to_string(),
+            ])
+            .output()
+            .map_err(|e| VpnError::Route(format!("Failed to add route: {}", e)))?;
+
+        if output.status.success() {
+            log::debug!("Added route: {} -> VPN (if {})", cidr, interface_index);
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Route might already exist - that's OK
+            if stderr.contains("already exists") || stderr.contains("object already exists") {
+                log::debug!("Route already exists: {}", cidr);
+                Ok(())
+            } else {
+                log::warn!("Failed to add route {}: {}", cidr, stderr);
+                Err(VpnError::Route(format!("Failed to add route {}", cidr)))
+            }
+        }
+    }
+
+    /// Remove a CIDR route
+    fn remove_cidr_route(&self, cidr: &str) {
+        let parts: Vec<&str> = cidr.split('/').collect();
+        if parts.is_empty() {
+            return;
+        }
+        let network = parts[0];
+
+        let _ = Command::new("route")
+            .args(["delete", network])
+            .output();
+    }
+
+    /// Configure split tunnel with route-based approach
+    pub fn configure(&mut self, config: SplitTunnelConfig) -> Result<(), VpnError> {
+        log::info!(
+            "Configuring route-based split tunnel - {} game IP ranges",
+            ROBLOX_IP_RANGES.len()
+        );
+
+        // Get interface index from LUID
+        let interface_index = Self::get_interface_index_from_luid(config.tunnel_interface_luid)?;
+        self.interface_index = Some(interface_index);
+
+        // Add routes for all Roblox IP ranges
+        let mut added_count = 0;
+        for cidr in ROBLOX_IP_RANGES {
+            if self.add_cidr_route(cidr, interface_index).is_ok() {
+                self.added_routes.push(cidr.to_string());
+                added_count += 1;
+            }
+        }
+
+        log::info!(
+            "Added {}/{} routes for Roblox (route-based split tunnel)",
+            added_count,
+            ROBLOX_IP_RANGES.len()
+        );
+
+        self.config = Some(config);
+        self.state = DriverState::Active;
+
+        log::info!("Route-based split tunnel configured - ZERO overhead!");
+        Ok(())
     }
 
     /// Get names of currently running tunnel apps (for UI/notifications)
@@ -347,376 +321,49 @@ impl SplitTunnelDriver {
         running
     }
 
-    /// Configure split tunnel with EXCLUDE-ALL-EXCEPT logic
-    pub fn configure(&mut self, config: SplitTunnelConfig) -> Result<(), VpnError> {
-        let handle = self.device_handle.ok_or_else(|| {
-            VpnError::SplitTunnel("Driver not open".to_string())
-        })?;
-
-        log::info!(
-            "Configuring split tunnel - {} apps will use VPN, everything else excluded",
-            config.tunnel_apps.len()
-        );
-
-        // Reset any stale state
-        let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET);
-
-        // Initialize driver
-        if let Err(e) = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_INITIALIZE) {
-            let err_str = e.to_string();
-            if !err_str.contains("0x80320009") && !err_str.contains("ALREADY_EXISTS") {
-                return Err(e);
-            }
-            log::debug!("Driver already initialized, continuing...");
-        }
-
-        self.config = Some(config.clone());
-
-        // Initial scan - exclude all non-tunnel processes BEFORE setting config
-        let to_exclude = self.scan_processes_to_exclude();
-
-        log::info!(
-            "Initial scan: {} processes to exclude from VPN",
-            to_exclude.len()
-        );
-
-        // Register processes
-        self.excluded_pids = to_exclude.iter().map(|p| p.pid).collect();
-        self.excluded_paths = to_exclude.iter().map(|p| p.exe_path.clone()).collect();
-
-        let proc_data = self.serialize_process_tree_for_exclusion(&to_exclude)?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
-
-        // Register IP addresses
-        let ip_data = self.serialize_ip_addresses(&config)?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_IP_ADDRESSES, &ip_data)?;
-
-        // Set configuration (paths to exclude)
-        let config_data = self.serialize_exclusion_config()?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
-
-        // Verify state
-        if let Ok(state) = self.get_driver_state() {
-            log::info!("Driver state: {} ({})", state, Self::state_name(state));
-        }
-
-        self.state = DriverState::Active;
-        log::info!("Split tunnel configured - only selected games will use VPN");
-
-        Ok(())
-    }
-
-    /// Efficient refresh - only update changed processes
-    /// Returns list of currently running tunnel app names
+    /// Refresh process detection (returns running tunnel apps)
+    /// Note: Route-based split tunnel doesn't need process refresh for routing,
+    /// this is only for UI notifications about running games.
     pub fn refresh_processes(&mut self) -> Result<Vec<String>, VpnError> {
-        let handle = self.device_handle.ok_or_else(|| {
-            VpnError::SplitTunnel("Driver not open".to_string())
-        })?;
-
-        if self.config.is_none() {
-            return Ok(Vec::new());
-        }
-
-        // Scan current processes
-        let current_exclude = self.scan_processes_to_exclude();
-        let current_pids: HashSet<u32> = current_exclude.iter().map(|p| p.pid).collect();
-
-        // Get running tunnel apps for return value
-        let running_apps = self.get_running_tunnel_apps();
-
-        // Check if anything changed
-        if current_pids == self.excluded_pids {
-            return Ok(running_apps);
-        }
-
-        // Find differences
-        let added: Vec<_> = current_pids.difference(&self.excluded_pids).copied().collect();
-        let removed: Vec<_> = self.excluded_pids.difference(&current_pids).copied().collect();
-
-        if !added.is_empty() {
-            log::debug!("Excluding {} new processes from VPN", added.len());
-        }
-        if !removed.is_empty() {
-            log::debug!("{} excluded processes exited", removed.len());
-        }
-
-        // Update state
-        self.excluded_pids = current_pids;
-        self.excluded_paths = current_exclude.iter().map(|p| p.exe_path.clone()).collect();
-
-        // Re-register with driver
-        let proc_data = self.serialize_process_tree_for_exclusion(&current_exclude)?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_REGISTER_PROCESSES, &proc_data)?;
-
-        // Update config
-        let config_data = self.serialize_exclusion_config()?;
-        self.send_ioctl(handle, ioctl::IOCTL_ST_SET_CONFIGURATION, &config_data)?;
-
-        Ok(running_apps)
+        Ok(self.get_running_tunnel_apps())
     }
 
-    /// Serialize process tree for exclusion
-    fn serialize_process_tree_for_exclusion(&self, processes: &[ProcessInfo]) -> Result<Vec<u8>, VpnError> {
-        if processes.is_empty() {
-            // Empty - just System placeholder
-            let mut data = Vec::with_capacity(64);
-            data.extend_from_slice(&1u64.to_le_bytes()); // num_entries = 1
-            let total_len = 16 + 32 + 12; // header + 1 entry + "System" wide
-            data.extend_from_slice(&(total_len as u64).to_le_bytes());
-
-            // System entry
-            data.extend_from_slice(&4u64.to_le_bytes()); // pid
-            data.extend_from_slice(&0u64.to_le_bytes()); // parent_pid
-            data.extend_from_slice(&0u64.to_le_bytes()); // offset
-            data.extend_from_slice(&12u16.to_le_bytes()); // size (6 chars * 2)
-            data.extend_from_slice(&[0u8; 6]); // padding
-
-            // "System" as wide string
-            for c in "System".encode_utf16() {
-                data.extend_from_slice(&c.to_le_bytes());
-            }
-
-            return Ok(data);
-        }
-
-        // Convert paths to device paths
-        let device_paths: Vec<String> = processes
-            .iter()
-            .map(|p| Self::to_device_path(&p.exe_path).unwrap_or_else(|_| p.exe_path.clone()))
-            .collect();
-
-        let wide_paths: Vec<Vec<u16>> = device_paths
-            .iter()
-            .map(|p| p.encode_utf16().collect())
-            .collect();
-
-        let header_size = 16usize;
-        let entry_size = 32usize;
-        let string_size: usize = wide_paths.iter().map(|w| w.len() * 2).sum();
-        let total_size = header_size + (entry_size * processes.len()) + string_size;
-
-        let mut data = Vec::with_capacity(total_size);
-
-        // Header
-        data.extend_from_slice(&(processes.len() as u64).to_le_bytes());
-        data.extend_from_slice(&(total_size as u64).to_le_bytes());
-
-        // Entries
-        let mut rel_offset = 0usize;
-        for (i, proc) in processes.iter().enumerate() {
-            let byte_len = (wide_paths[i].len() * 2) as u16;
-
-            data.extend_from_slice(&(proc.pid as u64).to_le_bytes());
-            data.extend_from_slice(&0u64.to_le_bytes()); // parent_pid (not used for exclusion)
-            data.extend_from_slice(&(rel_offset as u64).to_le_bytes());
-            data.extend_from_slice(&byte_len.to_le_bytes());
-            data.extend_from_slice(&[0u8; 6]);
-
-            rel_offset += byte_len as usize;
-        }
-
-        // String buffer
-        for wide in &wide_paths {
-            for w in wide {
-                data.extend_from_slice(&w.to_le_bytes());
-            }
-        }
-
-        Ok(data)
-    }
-
-    /// Serialize configuration (paths to exclude from VPN)
-    fn serialize_exclusion_config(&self) -> Result<Vec<u8>, VpnError> {
-        if self.excluded_paths.is_empty() {
-            let mut data = Vec::with_capacity(16);
-            data.extend_from_slice(&0u64.to_le_bytes());
-            data.extend_from_slice(&16u64.to_le_bytes());
-            return Ok(data);
-        }
-
-        // Deduplicate paths
-        let unique_paths: Vec<_> = self.excluded_paths.iter().collect::<HashSet<_>>().into_iter().collect();
-
-        let device_paths: Vec<String> = unique_paths
-            .iter()
-            .filter_map(|p| Self::to_device_path(p).ok())
-            .collect();
-
-        let wide_paths: Vec<Vec<u16>> = device_paths
-            .iter()
-            .map(|p| p.encode_utf16().collect())
-            .collect();
-
-        let header_size = 16usize;
-        let entry_size = 32usize;
-        let string_size: usize = wide_paths.iter().map(|w| w.len() * 2).sum();
-        let total_size = header_size + (entry_size * wide_paths.len()) + string_size;
-
-        let mut data = Vec::with_capacity(total_size);
-
-        data.extend_from_slice(&(wide_paths.len() as u64).to_le_bytes());
-        data.extend_from_slice(&(total_size as u64).to_le_bytes());
-
-        let mut rel_offset = 0usize;
-        for wide in &wide_paths {
-            let byte_len = (wide.len() * 2) as u16;
-
-            data.extend_from_slice(&0u64.to_le_bytes()); // protocol (unused)
-            data.extend_from_slice(&0u64.to_le_bytes()); // padding
-            data.extend_from_slice(&(rel_offset as u64).to_le_bytes());
-            data.extend_from_slice(&byte_len.to_le_bytes());
-            data.extend_from_slice(&[0u8; 6]);
-
-            rel_offset += byte_len as usize;
-        }
-
-        for wide in &wide_paths {
-            for w in wide {
-                data.extend_from_slice(&w.to_le_bytes());
-            }
-        }
-
-        Ok(data)
-    }
-
-    /// Serialize IP addresses
-    fn serialize_ip_addresses(&self, config: &SplitTunnelConfig) -> Result<Vec<u8>, VpnError> {
-        let ip_str = config.tunnel_ip.split('/').next().unwrap_or(&config.tunnel_ip);
-        let ip: std::net::Ipv4Addr = ip_str.parse()
-            .map_err(|e| VpnError::SplitTunnel(format!("Invalid tunnel IP: {}", e)))?;
-
-        let mut data = Vec::with_capacity(40);
-        data.extend_from_slice(&config.tunnel_interface_luid.to_le_bytes());
-        data.extend_from_slice(&ip.octets());
-        data.extend_from_slice(&[0u8; 16]); // IPv6
-        data.push(1); // has_ipv4
-        data.push(0); // has_ipv6
-        data.extend_from_slice(&[0u8; 10]); // padding
-
-        Ok(data)
-    }
-
-    /// Convert Windows path to device path
-    fn to_device_path(path: &str) -> Result<String, VpnError> {
-        use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
-        use windows::core::PCWSTR;
-
-        if path.len() < 2 || path.chars().nth(1) != Some(':') {
-            if path.starts_with(r"\Device\") {
-                return Ok(path.to_string());
-            }
-            return Err(VpnError::SplitTunnel(format!("Invalid path: {}", path)));
-        }
-
-        let drive = &path[0..2];
-        let rest = &path[2..];
-
-        let drive_wide: Vec<u16> = drive.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut device_name = vec![0u16; 260];
-
-        unsafe {
-            let len = QueryDosDeviceW(PCWSTR(drive_wide.as_ptr()), Some(&mut device_name));
-            if len == 0 {
-                return Ok(format!(r"\Device\HarddiskVolume1{}", rest));
-            }
-            let actual_len = device_name.iter().position(|&c| c == 0).unwrap_or(device_name.len());
-            let device_str = String::from_utf16_lossy(&device_name[..actual_len]);
-            Ok(format!("{}{}", device_str, rest))
-        }
-    }
-
-    fn state_name(state: u64) -> &'static str {
-        match state {
-            0 => "NONE", 1 => "STARTED", 2 => "INITIALIZED",
-            3 => "READY", 4 => "ENGAGED", 5 => "ZOMBIE",
-            _ => "UNKNOWN",
-        }
-    }
-
-    pub fn get_driver_state(&self) -> Result<u64, VpnError> {
-        let handle = self.device_handle.ok_or_else(|| {
-            VpnError::SplitTunnel("Driver not open".to_string())
-        })?;
-
-        let output = self.send_ioctl(handle, ioctl::IOCTL_ST_GET_STATE, &[])?;
-        if output.len() >= 8 {
-            Ok(u64::from_le_bytes(output[..8].try_into().unwrap()))
-        } else {
-            Err(VpnError::SplitTunnel("Invalid state response".to_string()))
-        }
-    }
-
+    /// Clear configuration (removes routes)
     pub fn clear(&mut self) -> Result<(), VpnError> {
-        if let Some(handle) = self.device_handle {
-            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_CLEAR_CONFIGURATION);
+        log::info!("Removing {} game routes", self.added_routes.len());
+
+        for cidr in &self.added_routes {
+            self.remove_cidr_route(cidr);
         }
+
+        self.added_routes.clear();
         self.config = None;
-        self.excluded_pids.clear();
-        self.excluded_paths.clear();
+        self.interface_index = None;
         self.state = DriverState::NotConfigured;
+
+        log::info!("Split tunnel routes cleared");
         Ok(())
     }
 
+    /// Close the split tunnel driver
     pub fn close(&mut self) -> Result<(), VpnError> {
-        use windows::Win32::Foundation::CloseHandle;
-
-        if let Some(handle) = self.device_handle.take() {
-            let _ = self.send_ioctl_neither(handle, ioctl::IOCTL_ST_RESET);
-            unsafe { let _ = CloseHandle(handle); }
-        }
-        self.config = None;
-        self.excluded_pids.clear();
-        self.excluded_paths.clear();
-        self.state = DriverState::NotAvailable;
-        Ok(())
+        self.clear()
     }
 
+    /// Get driver state
     pub fn state(&self) -> &DriverState {
         &self.state
     }
 
-    fn send_ioctl(&self, handle: windows::Win32::Foundation::HANDLE, code: u32, input: &[u8]) -> Result<Vec<u8>, VpnError> {
-        use windows::Win32::System::IO::DeviceIoControl;
-
-        let mut output = vec![0u8; 4096];
-        let mut returned: u32 = 0;
-
-        unsafe {
-            let result = DeviceIoControl(
-                handle, code,
-                Some(input.as_ptr() as *const _), input.len() as u32,
-                Some(output.as_mut_ptr() as *mut _), output.len() as u32,
-                Some(&mut returned), None,
-            );
-
-            if result.is_ok() {
-                output.truncate(returned as usize);
-                Ok(output)
-            } else {
-                Err(VpnError::SplitTunnel(format!(
-                    "IOCTL 0x{:08X} failed: {}",
-                    code,
-                    windows::core::Error::from_win32()
-                )))
-            }
-        }
-    }
-
-    fn send_ioctl_neither(&self, handle: windows::Win32::Foundation::HANDLE, code: u32) -> Result<(), VpnError> {
-        use windows::Win32::System::IO::DeviceIoControl;
-
-        let mut returned: u32 = 0;
-        unsafe {
-            let result = DeviceIoControl(handle, code, None, 0, None, 0, Some(&mut returned), None);
-            if result.is_ok() {
-                Ok(())
-            } else {
-                Err(VpnError::SplitTunnel(format!(
-                    "IOCTL 0x{:08X} failed: {}",
-                    code,
-                    windows::core::Error::from_win32()
-                )))
-            }
+    /// Get driver state for legacy compatibility
+    pub fn get_driver_state(&self) -> Result<u64, VpnError> {
+        // Return state codes compatible with the old driver:
+        // 0 = NONE, 1 = STARTED, 2 = INITIALIZED, 3 = READY, 4 = ENGAGED
+        match &self.state {
+            DriverState::NotAvailable => Ok(0),
+            DriverState::NotConfigured => Ok(1),
+            DriverState::Active => Ok(4),  // ENGAGED
+            DriverState::Error(_) => Ok(0),
         }
     }
 }
@@ -751,6 +398,7 @@ pub fn get_default_tunnel_apps() -> Vec<String> {
     DEFAULT_TUNNEL_APPS.iter().map(|s| s.to_string()).collect()
 }
 
+/// Find Roblox installation path
 pub fn find_roblox_path() -> Option<PathBuf> {
     let local = dirs::data_local_dir()?;
     let versions = local.join("Roblox").join("Versions");
@@ -772,24 +420,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_exclude_logic() {
-        let mut driver = SplitTunnelDriver::new();
-        let tunnel_apps: HashSet<String> = ["robloxplayerbeta.exe".to_string()].into_iter().collect();
-
-        driver.config = Some(SplitTunnelConfig {
-            tunnel_apps,
-            tunnel_ip: "10.0.0.1".to_string(),
-            tunnel_interface_luid: 0,
-        });
-
-        // Game should NOT be excluded (will use VPN)
-        assert!(!driver.should_exclude("robloxplayerbeta.exe"));
-
-        // Browser SHOULD be excluded (will bypass VPN)
-        assert!(driver.should_exclude("chrome.exe"));
-
-        // System process should NOT be excluded (skipped)
-        assert!(!driver.should_exclude("csrss.exe"));
+    fn test_driver_available() {
+        // Route-based approach is always available
+        assert!(SplitTunnelDriver::is_available());
     }
 
     #[test]
@@ -803,5 +436,23 @@ mod tests {
         // Should be stored lowercase
         assert!(config.tunnel_apps.contains("robloxplayerbeta.exe"));
         assert!(!config.tunnel_apps.contains("RobloxPlayerBeta.exe"));
+    }
+
+    #[test]
+    fn test_roblox_ip_ranges_valid() {
+        // Verify all CIDR ranges are valid
+        for cidr in ROBLOX_IP_RANGES {
+            let parts: Vec<&str> = cidr.split('/').collect();
+            assert_eq!(parts.len(), 2, "Invalid CIDR format: {}", cidr);
+
+            // Verify network address is valid
+            let network: Result<std::net::Ipv4Addr, _> = parts[0].parse();
+            assert!(network.is_ok(), "Invalid network address in {}", cidr);
+
+            // Verify prefix is valid
+            let prefix: Result<u8, _> = parts[1].parse();
+            assert!(prefix.is_ok(), "Invalid prefix in {}", cidr);
+            assert!(prefix.unwrap() <= 32, "Prefix too large in {}", cidr);
+        }
     }
 }

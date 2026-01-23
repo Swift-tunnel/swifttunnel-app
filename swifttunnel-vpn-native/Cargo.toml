@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 name = "swifttunnel_vpn"
 
 [dependencies]
-# Windows API
+# Windows API (minimal - route-based split tunnel doesn't need WFP)
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
@@ -20,10 +20,6 @@ windows = { version = "0.58", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
-    "Win32_NetworkManagement_WindowsFilteringPlatform",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Ioctl",
-    "Win32_System_Rpc",
 ] }
 
 # Async runtime
