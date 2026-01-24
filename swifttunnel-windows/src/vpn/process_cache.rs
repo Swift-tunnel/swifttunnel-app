@@ -395,6 +395,48 @@ impl LockFreeProcessCache {
     pub fn tunnel_apps(&self) -> &HashSet<String> {
         &self.tunnel_apps
     }
+
+    /// Immediately register a process detected via ETW
+    ///
+    /// Called when ETW detects a watched process starting. This adds the
+    /// PID → name mapping immediately, so when the first packet arrives
+    /// and we query the TCP/UDP tables, we already know this PID belongs
+    /// to a tunnel app.
+    ///
+    /// This solves the race condition where:
+    /// 1. Browser launches RobloxPlayerBeta.exe
+    /// 2. Roblox immediately connects to game server
+    /// 3. Our 50ms polling hasn't detected the process yet
+    /// 4. First packets bypass VPN → Error 279
+    ///
+    /// With ETW + this method:
+    /// 1. ETW notifies us instantly when process starts
+    /// 2. We add PID → name mapping here
+    /// 3. When first packet arrives, is_tunnel_pid() returns true
+    pub fn register_process_immediate(&self, pid: u32, name: String) {
+        let old_snap = self.get_snapshot();
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Clone existing data and add the new process
+        let mut pid_names = old_snap.pid_names.clone();
+        pid_names.insert(pid, name.to_lowercase());
+
+        let new_snapshot = Arc::new(ProcessSnapshot {
+            connections: old_snap.connections.clone(),
+            pid_names,
+            tunnel_apps: self.tunnel_apps.clone(),
+            version,
+            created_at: std::time::Instant::now(),
+            routing_mode: self.routing_mode,
+        });
+
+        self.current.store(new_snapshot);
+
+        log::info!(
+            "ETW: Immediately registered process {} (PID: {}) for tunneling",
+            name, pid
+        );
+    }
 }
 
 // Note: No manual Drop impl needed - ArcSwap handles cleanup automatically
