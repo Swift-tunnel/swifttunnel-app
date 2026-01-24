@@ -117,7 +117,7 @@ if ($LASTEXITCODE -eq 0) {
     if (-not (Test-Path $driverMsi)) {
         Write-Host "`nDownloading Windows Packet Filter driver..." -ForegroundColor Cyan
 
-        $driverUrl = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/WinpkFilter-x64.msi"
+        $driverUrl = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi"
 
         try {
             Invoke-WebRequest -Uri $driverUrl -OutFile $driverMsi -UseBasicParsing
