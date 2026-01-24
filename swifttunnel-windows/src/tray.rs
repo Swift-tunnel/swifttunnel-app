@@ -188,45 +188,20 @@ impl Drop for SystemTray {
     }
 }
 
-/// Create a simple default icon (blue square)
+/// Create the system tray icon from embedded PNG
 fn create_default_icon() -> Result<Icon, String> {
-    // Create a simple 32x32 blue icon
-    let size = 32u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    // Load the embedded logo PNG
+    let logo_bytes = include_bytes!("../assets/logo.png");
 
-    // SwiftTunnel blue: #3b82f6 = RGB(59, 130, 246)
-    for y in 0..size {
-        for x in 0..size {
-            let idx = ((y * size + x) * 4) as usize;
+    let img = image::load_from_memory(logo_bytes)
+        .map_err(|e| format!("Failed to decode logo PNG: {}", e))?;
 
-            // Create a rounded square effect
-            let cx = x as f32 - size as f32 / 2.0;
-            let cy = y as f32 - size as f32 / 2.0;
-            let dist = (cx * cx + cy * cy).sqrt();
+    // Resize to 32x32 for system tray
+    let resized = img.resize_exact(32, 32, image::imageops::FilterType::Lanczos3);
+    let rgba = resized.to_rgba8();
 
-            if dist < (size as f32 / 2.0 - 2.0) {
-                // Inner color: SwiftTunnel blue
-                rgba[idx] = 59;      // R
-                rgba[idx + 1] = 130; // G
-                rgba[idx + 2] = 246; // B
-                rgba[idx + 3] = 255; // A
-            } else if dist < (size as f32 / 2.0) {
-                // Border: slightly darker blue
-                rgba[idx] = 37;      // R
-                rgba[idx + 1] = 99;  // G
-                rgba[idx + 2] = 235; // B
-                rgba[idx + 3] = 255; // A
-            } else {
-                // Transparent
-                rgba[idx] = 0;
-                rgba[idx + 1] = 0;
-                rgba[idx + 2] = 0;
-                rgba[idx + 3] = 0;
-            }
-        }
-    }
-
-    Icon::from_rgba(rgba, size, size).map_err(|e| format!("Failed to create icon: {}", e))
+    Icon::from_rgba(rgba.into_raw(), 32, 32)
+        .map_err(|e| format!("Failed to create tray icon: {}", e))
 }
 
 #[cfg(test)]
