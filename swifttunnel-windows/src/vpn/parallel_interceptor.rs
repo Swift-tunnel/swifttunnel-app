@@ -57,6 +57,7 @@ use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
 use super::tunnel::FastMutex;
 use super::{VpnError, VpnResult};
+use crate::geolocation::is_roblox_game_server_ip;
 
 /// Context for direct WireGuard encryption (bypasses OS routing)
 ///
@@ -215,18 +216,21 @@ pub struct ParallelInterceptor {
     inbound_handler: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
     /// Inbound receiver thread handle (reads from VpnEncryptContext socket)
     inbound_receiver_handle: Option<JoinHandle<()>>,
+    /// Detected game server IPs (for notification purposes)
+    detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
 }
 
 impl ParallelInterceptor {
     /// Create new parallel interceptor
-    pub fn new(tunnel_apps: Vec<String>) -> Self {
+    pub fn new(tunnel_apps: Vec<String>, routing_mode: crate::settings::RoutingMode) -> Self {
         // Use number of logical CPUs, capped at 8 for efficiency
         let num_workers = num_cpus::get().min(8).max(1);
 
         log::info!(
-            "Creating parallel interceptor with {} workers (CPUs: {})",
+            "Creating parallel interceptor with {} workers (CPUs: {}), routing mode: {:?}",
             num_workers,
-            num_cpus::get()
+            num_cpus::get(),
+            routing_mode
         );
 
         let worker_stats: Vec<Arc<WorkerStats>> =
@@ -234,7 +238,7 @@ impl ParallelInterceptor {
 
         Self {
             num_workers,
-            process_cache: Arc::new(LockFreeProcessCache::new(tunnel_apps)),
+            process_cache: Arc::new(LockFreeProcessCache::new(tunnel_apps, routing_mode)),
             stop_flag: Arc::new(AtomicBool::new(false)),
             worker_handles: Vec::new(),
             reader_handle: None,
@@ -254,6 +258,25 @@ impl ParallelInterceptor {
             vpn_encrypt_ctx: None,
             inbound_handler: None,
             inbound_receiver_handle: None,
+            detected_game_servers: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
+        }
+    }
+
+    /// Get list of detected game server IPs (for notifications)
+    pub fn get_detected_game_servers(&self) -> Vec<std::net::Ipv4Addr> {
+        self.detected_game_servers.read().iter().copied().collect()
+    }
+
+    /// Clear detected game servers (call on disconnect)
+    pub fn clear_detected_game_servers(&self) {
+        self.detected_game_servers.write().clear();
+    }
+
+    /// Add a detected game server IP (called from worker threads)
+    fn record_game_server(&self, ip: std::net::Ipv4Addr) {
+        let mut servers = self.detected_game_servers.write();
+        if servers.insert(ip) {
+            log::info!("New game server detected: {}", ip);
         }
     }
 
@@ -473,6 +496,7 @@ impl ParallelInterceptor {
             let tunnel_ip = self.tunnel_ip;
             let internet_ip = self.internet_ip;
             let vpn_encrypt_ctx = self.vpn_encrypt_ctx.clone();
+            let detected_game_servers = Arc::clone(&self.detected_game_servers);
 
             let handle = thread::spawn(move || {
                 // Set CPU affinity for this worker
@@ -489,6 +513,7 @@ impl ParallelInterceptor {
                     tunnel_ip,
                     internet_ip,
                     vpn_encrypt_ctx,
+                    detected_game_servers,
                 );
             });
 
@@ -1502,6 +1527,7 @@ fn run_packet_worker(
     tunnel_ip: Option<std::net::Ipv4Addr>,
     internet_ip: Option<std::net::Ipv4Addr>,
     vpn_encrypt_ctx: Option<VpnEncryptContext>,
+    detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
 ) {
     log::info!("Worker {} started", worker_id);
 
@@ -1646,6 +1672,21 @@ fn run_packet_worker(
                     continue;
                 }
                 let ip_packet = &work.data[14..];
+
+                // === GAME SERVER DETECTION (Bloxstrap-style) ===
+                // Track Roblox game server IPs for notifications
+                if ip_packet.len() >= 20 {
+                    let dst_ip = Ipv4Addr::new(
+                        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+                    );
+                    if is_roblox_game_server_ip(dst_ip) {
+                        // Record game server (lock-free write, deduplicates via HashSet)
+                        let mut servers = detected_game_servers.write();
+                        if servers.insert(dst_ip) {
+                            log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+                        }
+                    }
+                }
 
                 // === ZERO-ALLOCATION NAT REWRITING ===
                 // Use thread-local buffer instead of heap allocation for NAT
@@ -2248,6 +2289,14 @@ fn should_route_to_vpn_with_inline_cache(
         data[ip_start + 15],
     );
 
+    // Parse destination IP (for V2 routing)
+    let dst_ip = Ipv4Addr::new(
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    );
+
     // Parse transport header
     let transport_start = ip_start + ihl;
     if data.len() < transport_start + 4 {
@@ -2255,29 +2304,55 @@ fn should_route_to_vpn_with_inline_cache(
     }
 
     let src_port = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
+    let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
 
     // Phase 1: Check snapshot cache (fast path, O(1))
-    if snapshot.should_tunnel(src_ip, src_port, protocol) {
+    // Use V2 routing if enabled (checks destination IP + protocol)
+    if snapshot.should_tunnel_v2(src_ip, src_port, protocol, dst_ip, dst_port) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         return true;
     }
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
+    // Cache stores: is this source connection from a tunnel app? (process check only)
     let cache_key = (src_ip, src_port, protocol);
-    if let Some(&result) = inline_cache.get(&cache_key) {
+    if let Some(&is_tunnel_app) = inline_cache.get(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        return result;
+        // For V2: also check destination is game server
+        // For V1: is_tunnel_app is the final result
+        if !is_tunnel_app {
+            return false;
+        }
+        return match snapshot.routing_mode {
+            crate::settings::RoutingMode::V1 => true,
+            crate::settings::RoutingMode::V2 => {
+                super::process_cache::is_game_server(dst_ip, dst_port, protocol)
+            }
+        };
     }
 
     // Phase 3: Inline lookup (slow path, ~500μs, but only once per connection)
+    // This checks if the source process is a tunnel app
     SYSCALL_LOOKUPS.with(|c| c.set(c.get() + 1));
-    let result = inline_connection_lookup(src_ip, src_port, protocol, snapshot);
+    let is_tunnel_app = inline_connection_lookup(src_ip, src_port, protocol, snapshot);
 
-    // Cache the result for subsequent packets from this connection
+    // Cache the process check result for subsequent packets from this connection
     // Limit cache size to prevent unbounded growth
     if inline_cache.len() < 10000 {
-        inline_cache.insert(cache_key, result);
+        inline_cache.insert(cache_key, is_tunnel_app);
     }
+
+    // Apply V2 destination filter if needed
+    let result = if !is_tunnel_app {
+        false
+    } else {
+        match snapshot.routing_mode {
+            crate::settings::RoutingMode::V1 => true,
+            crate::settings::RoutingMode::V2 => {
+                super::process_cache::is_game_server(dst_ip, dst_port, protocol)
+            }
+        }
+    };
 
     // Log stats periodically
     if total > 0 && total % 200 == 0 {

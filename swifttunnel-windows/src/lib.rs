@@ -4,6 +4,7 @@
 //! test binaries and the CLI testbench.
 
 pub mod auth;
+pub mod geolocation;
 pub mod network_analyzer;
 pub mod network_booster;
 pub mod performance_monitor;

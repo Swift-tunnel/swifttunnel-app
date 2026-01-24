@@ -1,4 +1,5 @@
 use crate::auth::{AuthManager, AuthState, UserInfo};
+use crate::geolocation::get_ip_location;
 use crate::hidden_command;
 use crate::network_analyzer::{
     NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
@@ -351,6 +352,13 @@ pub struct BoosterApp {
     process_notification: Option<(String, std::time::Instant)>,
     // Previously detected tunneled processes (for notification on new process)
     previously_tunneled: std::collections::HashSet<String>,
+    // Game server notification (Bloxstrap-style: "Connected to server in {location}")
+    game_server_notification: Option<(String, std::time::Instant)>,
+    // Previously detected game server IPs (to avoid duplicate notifications)
+    detected_game_servers: std::collections::HashSet<std::net::Ipv4Addr>,
+    // Channel for game server location lookups (ip, location)
+    game_server_location_rx: std::sync::mpsc::Receiver<(std::net::Ipv4Addr, String)>,
+    game_server_location_tx: std::sync::mpsc::Sender<(std::net::Ipv4Addr, String)>,
     // Flag to force quit (bypass minimize-to-tray)
     force_quit: bool,
     // Forced server selection per region (region_id -> server_id)
@@ -392,6 +400,8 @@ pub struct BoosterApp {
     last_applied_latency: u32,
     /// Enable experimental features (Practice Mode, etc.)
     experimental_mode: bool,
+    /// Routing mode for split tunnel (V1 = process-based, V2 = hybrid/ExitLag-style)
+    routing_mode: crate::settings::RoutingMode,
 }
 
 impl BoosterApp {
@@ -414,6 +424,9 @@ impl BoosterApp {
         // Create channels for network analyzer progress updates
         let (stability_tx, stability_rx) = std::sync::mpsc::channel::<StabilityTestProgress>();
         let (speed_tx, speed_rx) = std::sync::mpsc::channel::<SpeedTestProgress>();
+
+        // Create channel for game server location lookups (Bloxstrap-style notifications)
+        let (game_server_tx, game_server_rx) = std::sync::mpsc::channel::<(std::net::Ipv4Addr, String)>();
 
         // Initialize auth manager - this can only fail if Windows DPAPI is unavailable,
         // which indicates a fundamental system issue. In that case, panic is acceptable.
@@ -575,6 +588,11 @@ impl BoosterApp {
             // Process detection notification
             process_notification: None,
             previously_tunneled: std::collections::HashSet::new(),
+            // Game server notification (Bloxstrap-style)
+            game_server_notification: None,
+            detected_game_servers: std::collections::HashSet::new(),
+            game_server_location_rx: game_server_rx,
+            game_server_location_tx: game_server_tx,
             // Force quit flag (bypass minimize-to-tray)
             force_quit: false,
             // Forced server selection per region (restored from settings)
@@ -610,6 +628,8 @@ impl BoosterApp {
             last_applied_latency: saved_settings.artificial_latency_ms,
             // Experimental mode
             experimental_mode: saved_settings.experimental_mode,
+            // Routing mode for split tunnel
+            routing_mode: saved_settings.routing_mode,
         }
     }
 
@@ -712,6 +732,8 @@ impl BoosterApp {
             artificial_latency_ms: self.artificial_latency_ms,
             // Save experimental mode setting
             experimental_mode: self.experimental_mode,
+            // Save routing mode setting
+            routing_mode: self.routing_mode,
         };
 
         let _ = save_settings(&settings);
@@ -1115,9 +1137,33 @@ impl eframe::App for BoosterApp {
                     }
                 }
 
+                // Game server detection (Bloxstrap-style) - check for new game server IPs
+                if new_state.is_connected() {
+                    let game_servers = vpn.get_detected_game_servers();
+                    for ip in game_servers {
+                        if !self.detected_game_servers.contains(&ip) {
+                            // New game server detected - spawn async task to get location
+                            log::info!("🎮 New game server detected: {}", ip);
+                            self.detected_game_servers.insert(ip);
+
+                            // Spawn async task to get location
+                            let tx = self.game_server_location_tx.clone();
+                            let runtime = Arc::clone(&self.runtime);
+                            std::thread::spawn(move || {
+                                runtime.block_on(async move {
+                                    if let Some(location) = get_ip_location(ip).await {
+                                        let _ = tx.send((ip, location));
+                                    }
+                                });
+                            });
+                        }
+                    }
+                }
+
                 // Clear previously tunneled when disconnecting
                 if new_state == ConnectionState::Disconnected {
                     self.previously_tunneled.clear();
+                    self.detected_game_servers.clear();
                     // Clear throughput tracking
                     self.throughput_stats = None;
                     self.throughput_history.clear();
@@ -1234,6 +1280,15 @@ impl eframe::App for BoosterApp {
             }
         }
 
+        // Receive game server location lookups (Bloxstrap-style notifications)
+        while let Ok((ip, location)) = self.game_server_location_rx.try_recv() {
+            log::info!("🌍 Game server {} located: {}", ip, location);
+            self.game_server_notification = Some((
+                format!("Joined server in {} - tunneled by SwiftTunnel", location),
+                std::time::Instant::now(),
+            ));
+        }
+
         let is_logged_in = matches!(self.auth_state, AuthState::LoggedIn(_));
         let is_logging_in = matches!(self.auth_state, AuthState::LoggingIn);
         let is_awaiting_oauth = matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_));
@@ -1286,6 +1341,8 @@ impl eframe::App for BoosterApp {
 
         // Render process notification toast (overlay at top of screen)
         self.render_process_notification(ctx);
+        // Render game server notification toast (Bloxstrap-style)
+        self.render_game_server_notification(ctx);
     }
 }
 
@@ -1339,6 +1396,70 @@ impl BoosterApp {
             self.process_notification = None;
         }
     }
+
+    /// Render game server notification toast (Bloxstrap-style)
+    fn render_game_server_notification(&mut self, ctx: &egui::Context) {
+        let should_show = if let Some((_, time)) = &self.game_server_notification {
+            time.elapsed() < std::time::Duration::from_secs(5) // Show for 5 seconds
+        } else {
+            false
+        };
+
+        if should_show {
+            if let Some((msg, time)) = &self.game_server_notification {
+                // Calculate fade out animation
+                let elapsed = time.elapsed().as_secs_f32();
+                let alpha = if elapsed > 4.0 {
+                    // Fade out in last 1 second
+                    1.0 - ((elapsed - 4.0) / 1.0)
+                } else {
+                    1.0
+                };
+
+                // Position below process notification if both are showing
+                let y_offset = if self.process_notification.is_some()
+                    && self.process_notification.as_ref().map(|(_, t)| t.elapsed() < std::time::Duration::from_secs(3)).unwrap_or(false)
+                {
+                    110.0 // Below process notification
+                } else {
+                    60.0 // Same position as process notification
+                };
+
+                egui::Area::new(egui::Id::new("game_server_notification"))
+                    .anchor(egui::Align2::CENTER_TOP, [0.0, y_offset])
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::NONE
+                            .fill(ACCENT_PRIMARY.gamma_multiply(0.95 * alpha)) // Blue theme
+                            .rounding(8.0)
+                            .inner_margin(egui::Margin::symmetric(16, 10))
+                            .shadow(egui::epaint::Shadow {
+                                offset: [0, 2],
+                                blur: 8,
+                                spread: 0,
+                                color: egui::Color32::from_black_alpha((40.0 * alpha) as u8),
+                            })
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("🌍")
+                                        .size(16.0));
+                                    ui.label(egui::RichText::new(msg)
+                                        .color(egui::Color32::WHITE.gamma_multiply(alpha))
+                                        .size(14.0)
+                                        .strong());
+                                });
+                            });
+                    });
+
+                // Request repaint for animation
+                ctx.request_repaint();
+            }
+        } else if self.game_server_notification.is_some() {
+            // Clear expired notification
+            self.game_server_notification = None;
+        }
+    }
+
     fn render_header(&self, ui: &mut egui::Ui) {
         // Header with subtle gradient background
         let header_rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::hover()).0;
@@ -2533,12 +2654,11 @@ impl BoosterApp {
 
                                         // Button now in normal left-to-right flow, properly positioned
                                         let gear_btn = ui.add(
-                                            egui::Button::new(egui::RichText::new("*").size(14.0).color(TEXT_MUTED))
+                                            egui::Button::new(egui::RichText::new("⚙").size(14.0).color(TEXT_MUTED))
                                                 .fill(BG_HOVER.gamma_multiply(0.5))
                                                 .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                                                 .rounding(4.0)
                                                 .min_size(egui::vec2(28.0, 28.0))
-                                                .sense(egui::Sense::click())
                                         );
                                         if gear_btn.clicked() {
                                             log::info!("Gear clicked for region: {}", region.id);
@@ -2649,10 +2769,12 @@ impl BoosterApp {
 
         // Show popup window
         let popup_id = egui::Id::new("server_selection_popup");
-        let close_popup = egui::Window::new(format!("* Select Server - {}", region_name))
+        let close_popup = egui::Window::new(format!("⚙ Select Server - {}", region_name))
             .id(popup_id)
             .collapsible(false)
             .resizable(false)
+            .default_open(true)  // Ensure popup never starts collapsed
+            .order(egui::Order::Foreground)  // Ensure popup appears above all content
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(egui::Frame::popup(ui.style())
                 .fill(BG_CARD)
@@ -3753,6 +3875,119 @@ impl BoosterApp {
                 ui.label(egui::RichText::new("! Experimental features may be unstable or change without notice.").size(10.0).color(STATUS_WARNING).italics());
             });
 
+        ui.add_space(16.0);
+
+        // Split Tunnel Routing Mode section
+        let mut new_routing_mode = self.routing_mode;
+
+        egui::Frame::NONE
+            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0).inner_margin(20)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(egui::RichText::new("Split Tunnel Routing").size(14.0).color(TEXT_PRIMARY).strong());
+                ui.add_space(12.0);
+
+                ui.label(egui::RichText::new("Choose how game traffic is routed through the VPN:").size(12.0).color(TEXT_SECONDARY));
+                ui.add_space(12.0);
+
+                // V1 Option
+                let is_v1 = self.routing_mode == crate::settings::RoutingMode::V1;
+                let v1_bg = if is_v1 { BG_ELEVATED } else { BG_CARD };
+                let v1_border = if is_v1 { ACCENT_PRIMARY } else { BG_ELEVATED };
+
+                let v1_response = egui::Frame::NONE
+                    .fill(v1_bg)
+                    .stroke(egui::Stroke::new(if is_v1 { 2.0 } else { 1.0 }, v1_border))
+                    .rounding(8.0)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width() - 24.0);
+                        ui.horizontal(|ui| {
+                            // Radio button
+                            let radio_color = if is_v1 { ACCENT_PRIMARY } else { TEXT_MUTED };
+                            ui.painter().circle_stroke(
+                                ui.cursor().min + egui::vec2(8.0, 10.0),
+                                6.0,
+                                egui::Stroke::new(2.0, radio_color),
+                            );
+                            if is_v1 {
+                                ui.painter().circle_filled(
+                                    ui.cursor().min + egui::vec2(8.0, 10.0),
+                                    3.0,
+                                    ACCENT_PRIMARY,
+                                );
+                            }
+                            ui.add_space(20.0);
+
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(crate::settings::RoutingMode::V1.display_name()).size(13.0).color(TEXT_PRIMARY).strong());
+                                ui.label(egui::RichText::new(crate::settings::RoutingMode::V1.description()).size(11.0).color(TEXT_SECONDARY));
+                            });
+                        });
+                    });
+
+                if v1_response.response.interact(egui::Sense::click()).clicked() {
+                    new_routing_mode = crate::settings::RoutingMode::V1;
+                }
+
+                ui.add_space(8.0);
+
+                // V2 Option
+                let is_v2 = self.routing_mode == crate::settings::RoutingMode::V2;
+                let v2_bg = if is_v2 { BG_ELEVATED } else { BG_CARD };
+                let v2_border = if is_v2 { ACCENT_PRIMARY } else { BG_ELEVATED };
+
+                let v2_response = egui::Frame::NONE
+                    .fill(v2_bg)
+                    .stroke(egui::Stroke::new(if is_v2 { 2.0 } else { 1.0 }, v2_border))
+                    .rounding(8.0)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width() - 24.0);
+                        ui.horizontal(|ui| {
+                            // Radio button
+                            let radio_color = if is_v2 { ACCENT_PRIMARY } else { TEXT_MUTED };
+                            ui.painter().circle_stroke(
+                                ui.cursor().min + egui::vec2(8.0, 10.0),
+                                6.0,
+                                egui::Stroke::new(2.0, radio_color),
+                            );
+                            if is_v2 {
+                                ui.painter().circle_filled(
+                                    ui.cursor().min + egui::vec2(8.0, 10.0),
+                                    3.0,
+                                    ACCENT_PRIMARY,
+                                );
+                            }
+                            ui.add_space(20.0);
+
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(crate::settings::RoutingMode::V2.display_name()).size(13.0).color(TEXT_PRIMARY).strong());
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new("RECOMMENDED").size(9.0).color(STATUS_CONNECTED));
+                                });
+                                ui.label(egui::RichText::new(crate::settings::RoutingMode::V2.description()).size(11.0).color(TEXT_SECONDARY));
+                            });
+                        });
+                    });
+
+                if v2_response.response.interact(egui::Sense::click()).clicked() {
+                    new_routing_mode = crate::settings::RoutingMode::V2;
+                }
+
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("V2 is more efficient - only game server traffic uses bandwidth.").size(10.0).color(TEXT_MUTED).italics());
+            });
+
+        // Handle routing mode change
+        if new_routing_mode != self.routing_mode {
+            self.routing_mode = new_routing_mode;
+            log::info!("Routing mode changed to: {:?}", new_routing_mode);
+            self.mark_dirty();
+        }
+
         // Handle actions after UI rendering
         if check_now {
             self.start_update_check();
@@ -4616,6 +4851,7 @@ impl BoosterApp {
 
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
+        let routing_mode = self.routing_mode;
 
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();
@@ -4623,7 +4859,7 @@ impl BoosterApp {
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps).await {
+                    if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode).await {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }
