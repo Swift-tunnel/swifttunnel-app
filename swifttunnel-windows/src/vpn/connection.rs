@@ -108,6 +108,8 @@ pub struct VpnConnection {
     route_manager: Option<RouteManager>,
     config: Option<VpnConfig>,
     process_monitor_stop: Arc<AtomicBool>,
+    /// ETW process watcher for instant game detection
+    etw_watcher: Option<ProcessWatcher>,
 }
 
 impl VpnConnection {
@@ -120,6 +122,7 @@ impl VpnConnection {
             route_manager: None,
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
+            etw_watcher: None,
         }
     }
 
@@ -507,10 +510,9 @@ impl VpnConnection {
         let etw_receiver: Option<Receiver<ProcessStartEvent>> = match ProcessWatcher::start(watch_list) {
             Ok(watcher) => {
                 log::info!("ETW process watcher started for instant game detection");
-                // Leak the watcher to keep it running (will be cleaned up on disconnect)
-                // We only need the receiver channel
                 let receiver = watcher.receiver().clone();
-                std::mem::forget(watcher); // Keep ETW session alive
+                // Store watcher in self so it gets properly cleaned up on disconnect
+                self.etw_watcher = Some(watcher);
                 Some(receiver)
             }
             Err(e) => {
@@ -602,6 +604,12 @@ impl VpnConnection {
         // Stop process monitor
         self.process_monitor_stop.store(true, Ordering::SeqCst);
 
+        // Stop ETW watcher (cleans up ETW session)
+        if let Some(mut watcher) = self.etw_watcher.take() {
+            log::info!("Stopping ETW process watcher...");
+            watcher.stop();
+        }
+
         // Remove routes first
         if let Some(ref mut route_manager) = self.route_manager {
             if let Err(e) = route_manager.remove_routes() {
@@ -691,6 +699,11 @@ impl Default for VpnConnection {
 impl Drop for VpnConnection {
     fn drop(&mut self) {
         self.process_monitor_stop.store(true, Ordering::SeqCst);
+
+        // Stop ETW watcher
+        if let Some(mut watcher) = self.etw_watcher.take() {
+            watcher.stop();
+        }
 
         // Remove routes synchronously
         if let Some(ref mut route_manager) = self.route_manager {
