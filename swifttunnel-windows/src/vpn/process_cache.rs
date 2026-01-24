@@ -9,6 +9,9 @@
 //! The old implementation had a race condition where the writer could
 //! free memory while readers were still accessing it, causing
 //! IRQL_NOT_LESS_OR_EQUAL kernel crashes.
+//!
+//! V2 ROUTING (v0.7.3): Added ExitLag-style hybrid routing that checks
+//! both process ownership AND destination IP ranges.
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -16,6 +19,69 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use arc_swap::ArcSwap;
 use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
+use crate::settings::RoutingMode;
+
+// ============================================================================
+// GAME SERVER IP RANGES (for V2 hybrid routing)
+// ============================================================================
+
+/// Roblox game server IP ranges
+/// Primary: 128.116.0.0/17 (128.116.0.0 - 128.116.127.255)
+/// Secondary: 209.206.40.0/21 (209.206.40.0 - 209.206.47.255)
+///
+/// Source: Roblox DevForum, ExitLag research
+const ROBLOX_RANGES: &[(u32, u32, u32)] = &[
+    // 128.116.0.0/17 - primary game servers
+    (0x80740000, 0xFFFF8000, 17), // 128.116.0.0, mask 255.255.128.0, /17
+    // 209.206.40.0/21 - secondary
+    (0xD1CE2800, 0xFFFFF800, 21), // 209.206.40.0, mask 255.255.248.0, /21
+];
+
+/// Roblox game server UDP port range
+/// Game traffic uses ephemeral ports in this range
+const ROBLOX_PORT_MIN: u16 = 49152;
+const ROBLOX_PORT_MAX: u16 = 65535;
+
+/// Check if an IP address is within a CIDR range
+#[inline(always)]
+fn ip_in_range(ip: Ipv4Addr, network: u32, mask: u32) -> bool {
+    let ip_u32 = u32::from(ip);
+    (ip_u32 & mask) == (network & mask)
+}
+
+/// Check if destination is a Roblox game server
+/// Returns true if:
+/// - IP is in known Roblox server ranges
+/// - Port is in game server range (49152-65535)
+/// - Protocol is UDP
+#[inline(always)]
+pub fn is_roblox_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bool {
+    // Must be UDP for game traffic
+    if protocol != Protocol::Udp {
+        return false;
+    }
+
+    // Check port range
+    if dst_port < ROBLOX_PORT_MIN || dst_port > ROBLOX_PORT_MAX {
+        return false;
+    }
+
+    // Check IP ranges
+    for &(network, mask, _prefix) in ROBLOX_RANGES {
+        if ip_in_range(dst_ip, network, mask) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Check if destination is any known game server (extensible for future games)
+#[inline(always)]
+pub fn is_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bool {
+    // Currently only Roblox, but can add Valorant, Fortnite, etc.
+    is_roblox_game_server(dst_ip, dst_port, protocol)
+}
 
 /// Immutable snapshot of process state
 ///
@@ -33,23 +99,74 @@ pub struct ProcessSnapshot {
     pub version: u64,
     /// Timestamp when snapshot was created
     pub created_at: std::time::Instant,
+    /// Routing mode (V1 = process-only, V2 = hybrid)
+    pub routing_mode: RoutingMode,
 }
 
 impl ProcessSnapshot {
     /// Create empty snapshot
-    pub fn empty(tunnel_apps: HashSet<String>) -> Self {
+    pub fn empty(tunnel_apps: HashSet<String>, routing_mode: RoutingMode) -> Self {
         Self {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
             tunnel_apps,
             version: 0,
             created_at: std::time::Instant::now(),
+            routing_mode,
         }
     }
 
     /// Check if connection should be tunneled (no locks!)
+    ///
+    /// V1 Mode: Process-based only
+    ///   - Tunnel if source process is a tunnel app
+    ///
+    /// V2 Mode: Hybrid (ExitLag-style)
+    ///   - Tunnel if source process is a tunnel app
+    ///   - AND destination is a known game server IP
+    ///   - AND protocol is UDP
     #[inline(always)]
-    pub fn should_tunnel(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
+    pub fn should_tunnel(
+        &self,
+        local_ip: Ipv4Addr,
+        local_port: u16,
+        protocol: Protocol,
+    ) -> bool {
+        // V1 mode: just check process (original behavior)
+        self.is_tunnel_connection(local_ip, local_port, protocol)
+    }
+
+    /// Check if connection should be tunneled with destination info (V2 support)
+    ///
+    /// This is the new method that supports V2 hybrid routing.
+    #[inline(always)]
+    pub fn should_tunnel_v2(
+        &self,
+        local_ip: Ipv4Addr,
+        local_port: u16,
+        protocol: Protocol,
+        dst_ip: Ipv4Addr,
+        dst_port: u16,
+    ) -> bool {
+        // First check: Is this from a tunnel app?
+        let is_tunnel_app = self.is_tunnel_connection(local_ip, local_port, protocol);
+
+        if !is_tunnel_app {
+            return false;
+        }
+
+        // V1 mode: process check is enough
+        if self.routing_mode == RoutingMode::V1 {
+            return true;
+        }
+
+        // V2 mode: also check destination is a game server
+        is_game_server(dst_ip, dst_port, protocol)
+    }
+
+    /// Check if connection belongs to a tunnel app (internal helper)
+    #[inline(always)]
+    fn is_tunnel_connection(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
         // Direct lookup - O(1) average case
         let key = ConnectionKey::new(local_ip, local_port, protocol);
 
@@ -148,19 +265,52 @@ pub struct LockFreeProcessCache {
     version: AtomicU64,
     /// Apps to tunnel
     tunnel_apps: HashSet<String>,
+    /// Routing mode (V1 = process-only, V2 = hybrid)
+    routing_mode: RoutingMode,
 }
 
 impl LockFreeProcessCache {
     /// Create new lock-free cache
-    pub fn new(tunnel_apps: Vec<String>) -> Self {
+    pub fn new(tunnel_apps: Vec<String>, routing_mode: RoutingMode) -> Self {
         let apps: HashSet<String> = tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect();
-        let initial = Arc::new(ProcessSnapshot::empty(apps.clone()));
+        let initial = Arc::new(ProcessSnapshot::empty(apps.clone(), routing_mode));
 
         Self {
             current: ArcSwap::from(initial),
             version: AtomicU64::new(0),
             tunnel_apps: apps,
+            routing_mode,
         }
+    }
+
+    /// Get current routing mode
+    pub fn routing_mode(&self) -> RoutingMode {
+        self.routing_mode
+    }
+
+    /// Set routing mode and refresh snapshot
+    pub fn set_routing_mode(&mut self, mode: RoutingMode) {
+        self.routing_mode = mode;
+
+        // Force immediate snapshot update so workers see the new routing_mode
+        let old_snap = self.get_snapshot();
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let new_snapshot = Arc::new(ProcessSnapshot {
+            connections: old_snap.connections.clone(),
+            pid_names: old_snap.pid_names.clone(),
+            tunnel_apps: self.tunnel_apps.clone(),
+            version,
+            created_at: std::time::Instant::now(),
+            routing_mode: self.routing_mode,
+        });
+
+        self.current.store(new_snapshot);
+
+        log::info!(
+            "set_routing_mode: Updated to {:?}",
+            self.routing_mode
+        );
     }
 
     /// Get current snapshot (lock-free!)
@@ -202,6 +352,7 @@ impl LockFreeProcessCache {
             tunnel_apps: self.tunnel_apps.clone(),
             version,
             created_at: std::time::Instant::now(),
+            routing_mode: self.routing_mode,
         });
 
         // Atomically swap in new snapshot - arc-swap handles cleanup safely
@@ -227,6 +378,7 @@ impl LockFreeProcessCache {
             tunnel_apps: self.tunnel_apps.clone(),  // Use NEW tunnel_apps
             version,
             created_at: std::time::Instant::now(),
+            routing_mode: self.routing_mode,
         });
 
         // Atomically swap in new snapshot - arc-swap handles cleanup safely
@@ -254,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_lock_free_snapshot() {
-        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()]);
+        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()], RoutingMode::V1);
 
         // Get snapshot
         let snap1 = cache.get_snapshot();
@@ -285,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_should_tunnel_0000_fallback() {
-        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()], RoutingMode::V1);
 
         let mut connections = HashMap::new();
         // App binds to 0.0.0.0:50000
@@ -306,12 +458,48 @@ mod tests {
     }
 
     #[test]
+    fn test_v2_routing_game_server() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()], RoutingMode::V2);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Udp),
+            1234,
+        );
+
+        let mut pid_names = HashMap::new();
+        pid_names.insert(1234, "RobloxPlayerBeta.exe".to_string());
+
+        cache.update(connections, pid_names);
+
+        let snap = cache.get_snapshot();
+
+        // V2: Should tunnel UDP to Roblox game server (128.116.x.x)
+        assert!(snap.should_tunnel_v2(
+            Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Udp,
+            Ipv4Addr::new(128, 116, 50, 100), 55000  // Roblox game server
+        ));
+
+        // V2: Should NOT tunnel TCP to Roblox game server (wrong protocol)
+        assert!(!snap.should_tunnel_v2(
+            Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Tcp,
+            Ipv4Addr::new(128, 116, 50, 100), 55000
+        ));
+
+        // V2: Should NOT tunnel UDP to non-game IP (CDN, API, etc.)
+        assert!(!snap.should_tunnel_v2(
+            Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Udp,
+            Ipv4Addr::new(1, 1, 1, 1), 443  // Not a game server
+        ));
+    }
+
+    #[test]
     fn test_concurrent_read_write_safety() {
         // This test verifies that arc-swap prevents use-after-free
         use std::thread;
         use std::time::Duration;
 
-        let cache = Arc::new(LockFreeProcessCache::new(vec!["test.exe".to_string()]));
+        let cache = Arc::new(LockFreeProcessCache::new(vec!["test.exe".to_string()], RoutingMode::V1));
 
         // Spawn reader threads that continuously get snapshots
         let readers: Vec<_> = (0..4).map(|i| {
