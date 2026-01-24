@@ -528,14 +528,18 @@ impl VpnConnection {
         let state_handle = Arc::clone(&self.state);
 
         tokio::spawn(async move {
-            log::info!("Process monitor started ({}ms interval + ETW instant detection)", REFRESH_INTERVAL_MS);
+            log::info!("Process monitor started ({}ms refresh + 5ms ETW polling)", REFRESH_INTERVAL_MS);
+
+            // Track time since last full refresh to avoid too many syscalls
+            let mut last_refresh = std::time::Instant::now();
+            const ETW_POLL_INTERVAL_MS: u64 = 5; // Poll ETW every 5ms for fast detection
 
             loop {
                 if stop_flag.load(Ordering::SeqCst) {
                     break;
                 }
 
-                // Poll ETW events FIRST (instant detection)
+                // Poll ETW events (instant detection) - runs every 5ms
                 // This handles processes that started since last iteration
                 let mut etw_events_received = false;
                 if let Some(ref receiver) = etw_receiver {
@@ -565,17 +569,27 @@ impl VpnConnection {
                     }
                     drop(driver_guard);
                     // Short sleep to allow process to initialize sockets, then refresh again
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
                     let mut driver_guard = driver.lock().await;
                     let _ = driver_guard.refresh_exclusions();
                     drop(driver_guard);
+                    // Reset refresh timer since we just did a full refresh
+                    last_refresh = std::time::Instant::now();
                 }
 
-                tokio::time::sleep(Duration::from_millis(REFRESH_INTERVAL_MS)).await;
+                // Sleep for ETW polling interval (5ms) - much faster than before (50ms)
+                tokio::time::sleep(Duration::from_millis(ETW_POLL_INTERVAL_MS)).await;
 
                 if stop_flag.load(Ordering::SeqCst) {
                     break;
                 }
+
+                // Only do the expensive full refresh every REFRESH_INTERVAL_MS (50ms)
+                // This balances CPU usage with detection speed
+                if last_refresh.elapsed().as_millis() < REFRESH_INTERVAL_MS as u128 {
+                    continue; // Skip expensive refresh, just do ETW polling
+                }
+                last_refresh = std::time::Instant::now();
 
                 let mut driver_guard = driver.lock().await;
                 match driver_guard.refresh_exclusions() {
