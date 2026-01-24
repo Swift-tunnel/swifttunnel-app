@@ -3825,10 +3825,10 @@ impl BoosterApp {
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("Split Tunnel Routing").size(14.0).color(TEXT_PRIMARY).strong());
+                ui.label(egui::RichText::new("Route Optimization").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
 
-                ui.label(egui::RichText::new("Choose how game traffic is routed through the VPN:").size(12.0).color(TEXT_SECONDARY));
+                ui.label(egui::RichText::new("Choose how game traffic is optimized:").size(12.0).color(TEXT_SECONDARY));
                 ui.add_space(12.0);
 
                 // V1 Option

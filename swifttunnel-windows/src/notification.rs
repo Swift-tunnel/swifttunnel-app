@@ -8,7 +8,7 @@ use winrt_notification::{Duration, IconCrop, Sound, Toast};
 
 /// SwiftTunnel's App User Model ID for Windows notifications
 /// This allows Windows to display "SwiftTunnel" as the notification source
-const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.VPN.Client";
+const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.GameBooster";
 
 /// Get the path to the SwiftTunnel icon
 fn get_icon_path() -> Option<std::path::PathBuf> {
