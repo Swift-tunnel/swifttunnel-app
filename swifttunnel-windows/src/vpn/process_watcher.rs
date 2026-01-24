@@ -65,6 +65,9 @@ pub struct ProcessStartEvent {
     pub pid: u32,
     /// Process name (just the exe name, not full path)
     pub name: String,
+    /// Full image path (NT path format, e.g., \Device\HarddiskVolume3\...\RobloxPlayerBeta.exe)
+    /// Used for WFP filtering. May be empty if we couldn't get it.
+    pub image_path: String,
     /// Parent process ID
     pub parent_pid: u32,
 }
@@ -413,17 +416,22 @@ unsafe fn parse_process_start_event(record: &EVENT_RECORD) -> Option<ProcessStar
         }
     }
 
-    // If we couldn't get the name from event data, try to get it from PID
+    // Try to get the full image path from the OS (more reliable than event data)
+    // This returns an NT path like \Device\HarddiskVolume3\...\RobloxPlayerBeta.exe
+    let image_path = get_process_name_by_pid(event_pid).unwrap_or_default();
+
+    // If we couldn't get the name from event data, extract from full path
     if name.is_empty() {
-        name = get_process_name_by_pid(event_pid).unwrap_or_else(|| format!("pid_{}", event_pid));
+        name = image_path.rsplit('\\').next().unwrap_or("unknown").to_string();
     }
 
-    // Extract just the filename from path if it's a full path
-    let name = name.rsplit('\\').next().unwrap_or(&name).to_string();
+    // Extract just the filename from path if the event data gave us a full path
+    let short_name = name.rsplit('\\').next().unwrap_or(&name).to_string();
 
     Some(ProcessStartEvent {
         pid: event_pid,
-        name,
+        name: short_name,
+        image_path,
         parent_pid,
     })
 }
@@ -463,9 +471,11 @@ mod tests {
         let event = ProcessStartEvent {
             pid: 1234,
             name: "RobloxPlayerBeta.exe".to_string(),
+            image_path: r"\Device\HarddiskVolume3\Users\test\AppData\Local\Roblox\Versions\version-xxx\RobloxPlayerBeta.exe".to_string(),
             parent_pid: 5678,
         };
         assert_eq!(event.pid, 1234);
         assert_eq!(event.name, "RobloxPlayerBeta.exe");
+        assert!(event.image_path.contains("RobloxPlayerBeta.exe"));
     }
 }
