@@ -45,6 +45,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -192,6 +194,10 @@ pub struct ParallelInterceptor {
     physical_adapter_idx: Option<usize>,
     /// Physical adapter internal name (GUID) for cross-thread lookup
     physical_adapter_name: Option<String>,
+    /// Physical adapter friendly name (e.g., "Ethernet") for offload control
+    physical_adapter_friendly_name: Option<String>,
+    /// Whether we disabled TSO on the physical adapter (to restore on cleanup)
+    tso_was_disabled: bool,
     /// VPN adapter index
     vpn_adapter_idx: Option<usize>,
     /// Wintun session for VPN injection
@@ -245,6 +251,8 @@ impl ParallelInterceptor {
             refresher_handle: None,
             physical_adapter_idx: None,
             physical_adapter_name: None,
+            physical_adapter_friendly_name: None,
+            tso_was_disabled: false,
             vpn_adapter_idx: None,
             wintun_session: None,
             active: false,
@@ -432,6 +440,7 @@ impl ParallelInterceptor {
         if let Some((idx, friendly_name, internal_name, _)) = physical_candidates.into_iter().max_by_key(|x| x.3) {
             self.physical_adapter_idx = Some(idx);
             self.physical_adapter_name = Some(internal_name.clone());
+            self.physical_adapter_friendly_name = Some(friendly_name.clone());
             log::info!("Selected physical adapter: {} (index {}, internal: '{}')", friendly_name, idx, internal_name);
         } else {
             return Err(VpnError::SplitTunnel(
@@ -453,6 +462,173 @@ impl ParallelInterceptor {
         Ok(())
     }
 
+    /// Run a PowerShell command with a timeout
+    ///
+    /// Returns true if command succeeded, false otherwise.
+    /// Uses spawn + try_wait loop to implement timeout without extra dependencies.
+    fn run_powershell_with_timeout(script: &str, timeout_secs: u64) -> bool {
+        use std::time::{Duration, Instant};
+
+        let mut child = match std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                log::warn!("Failed to spawn PowerShell: {}", e);
+                return false;
+            }
+        };
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        // Poll for completion with timeout
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Process finished
+                    if status.success() {
+                        return true;
+                    } else {
+                        // Try to get stderr for logging
+                        if let Some(mut stderr) = child.stderr.take() {
+                            use std::io::Read;
+                            let mut err_msg = String::new();
+                            let _ = stderr.read_to_string(&mut err_msg);
+                            if !err_msg.is_empty() {
+                                log::warn!("PowerShell error: {}", err_msg.trim());
+                            }
+                        }
+                        return false;
+                    }
+                }
+                Ok(None) => {
+                    // Still running - check timeout
+                    if start.elapsed() >= timeout {
+                        log::warn!("PowerShell timed out after {}s, killing process", timeout_secs);
+                        let _ = child.kill();
+                        let _ = child.wait(); // Reap the process
+                        return false;
+                    }
+                    // Sleep briefly before next poll (50ms)
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    log::warn!("Error waiting for PowerShell: {}", e);
+                    let _ = child.kill();
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Disable TCP Segmentation Offload (TSO/LSO) on the physical adapter
+    ///
+    /// Modern NICs use TSO to create large "super-packets" (up to 64KB) that get
+    /// segmented by hardware. When we intercept at the NDIS layer, we see these
+    /// un-segmented packets BEFORE the NIC processes them. Our buffers are sized
+    /// for normal MTU packets (1600 bytes), so TSO packets get truncated and corrupt
+    /// the TCP stream.
+    ///
+    /// Disabling TSO forces the OS to segment packets in software before they reach
+    /// the NIC, ensuring all packets are MTU-sized when we intercept them.
+    pub fn disable_adapter_offload(&mut self) -> VpnResult<()> {
+        let friendly_name = match &self.physical_adapter_friendly_name {
+            Some(name) => name.clone(),
+            None => {
+                log::warn!("No physical adapter friendly name available, skipping TSO disable");
+                return Ok(());
+            }
+        };
+
+        log::info!("Disabling TSO/LSO on adapter: {}", friendly_name);
+
+        // Disable Large Send Offload v2 for IPv4 and IPv6
+        // These are the standard registry keywords for TSO/LSO
+        let script = format!(
+            r#"
+            $ErrorActionPreference = 'SilentlyContinue'
+            $adapter = '{}'
+
+            # Disable LSO v2 IPv4
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4' -RegistryValue 0 2>$null
+
+            # Disable LSO v2 IPv6
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 0 2>$null
+
+            # Also disable TCP/UDP checksum offload to ensure we handle all checksums
+            # (Some NICs have separate settings for Tx and Rx)
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv4' -RegistryValue 0 2>$null
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv4' -RegistryValue 0 2>$null
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv6' -RegistryValue 0 2>$null
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv6' -RegistryValue 0 2>$null
+
+            Write-Host 'Offload disabled'
+            "#,
+            friendly_name.replace("'", "''") // Escape single quotes
+        );
+
+        // 5 second timeout to prevent indefinite hangs
+        if Self::run_powershell_with_timeout(&script, 5) {
+            log::info!("TSO/LSO disabled successfully on {}", friendly_name);
+            self.tso_was_disabled = true;
+        } else {
+            log::warn!("Failed to disable TSO (non-fatal) - adapter may not support these settings");
+            // Don't fail - some adapters don't support these settings
+        }
+
+        Ok(())
+    }
+
+    /// Re-enable TCP Segmentation Offload on the physical adapter
+    ///
+    /// Called when the VPN disconnects to restore normal NIC performance.
+    pub fn enable_adapter_offload(&mut self) {
+        if !self.tso_was_disabled {
+            return;
+        }
+
+        let friendly_name = match &self.physical_adapter_friendly_name {
+            Some(name) => name.clone(),
+            None => return,
+        };
+
+        log::info!("Re-enabling TSO/LSO on adapter: {}", friendly_name);
+
+        let script = format!(
+            r#"
+            $ErrorActionPreference = 'SilentlyContinue'
+            $adapter = '{}'
+
+            # Re-enable LSO v2
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4' -RegistryValue 1 2>$null
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 1 2>$null
+
+            # Re-enable checksum offload
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv4' -RegistryValue 3 2>$null
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv4' -RegistryValue 3 2>$null
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv6' -RegistryValue 3 2>$null
+            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv6' -RegistryValue 3 2>$null
+
+            Write-Host 'Offload enabled'
+            "#,
+            friendly_name.replace("'", "''")
+        );
+
+        // 5 second timeout
+        if Self::run_powershell_with_timeout(&script, 5) {
+            log::info!("TSO/LSO re-enabled on {}", friendly_name);
+        } else {
+            log::warn!("Failed to re-enable TSO - manual re-enable may be needed");
+        }
+
+        self.tso_was_disabled = false;
+    }
+
     /// Start parallel interception
     pub fn start(&mut self) -> VpnResult<()> {
         if self.active {
@@ -467,6 +643,10 @@ impl ParallelInterceptor {
             "Starting parallel interceptor with {} workers",
             self.num_workers
         );
+
+        // Disable TSO/LSO on physical adapter BEFORE starting packet capture
+        // This prevents the NIC from creating super-packets that exceed our buffer size
+        self.disable_adapter_offload()?;
 
         self.stop_flag.store(false, Ordering::SeqCst);
         self.active = true;
@@ -609,6 +789,9 @@ impl ParallelInterceptor {
             },
             injected
         );
+
+        // Re-enable TSO/LSO on physical adapter
+        self.enable_adapter_offload();
     }
 
     /// Check if active
