@@ -213,6 +213,11 @@ impl VpnConnection {
         log::info!("VPN config received: endpoint={}", config.endpoint);
         self.config = Some(config.clone());
 
+        // Initialize WFP block filter engine (for instant process blocking)
+        if let Err(e) = super::wfp_block::init() {
+            log::warn!("WFP block filter init failed (will use speculative tunneling): {}", e);
+        }
+
         // Step 2: Create Wintun adapter
         self.set_state(ConnectionState::CreatingAdapter).await;
         let (ip, cidr) = match parse_ip_cidr(&config.assigned_ip) {
@@ -542,14 +547,26 @@ impl VpnConnection {
                 // Poll ETW events (instant detection) - runs every 5ms
                 // This handles processes that started since last iteration
                 let mut etw_events_received = false;
+                let mut blocked_paths: Vec<String> = Vec::new();
+
                 if let Some(ref receiver) = etw_receiver {
                     while let Ok(event) = receiver.try_recv() {
                         log::info!(
-                            "ETW: Instantly detected {} (PID: {}) - registering for tunneling",
+                            "ETW: Instantly detected {} (PID: {}) - blocking and registering",
                             event.name, event.pid
                         );
 
-                        // Immediately register with the driver's process cache
+                        // STEP 1: IMMEDIATELY block the process with WFP filter
+                        // This prevents ANY packets from escaping before we're ready
+                        if !event.image_path.is_empty() {
+                            if let Err(e) = super::wfp_block::block_process_by_path(&event.image_path) {
+                                log::warn!("WFP block failed for {}: {} (using speculative tunneling)", event.name, e);
+                            } else {
+                                blocked_paths.push(event.image_path.clone());
+                            }
+                        }
+
+                        // STEP 2: Register with the driver's process cache
                         let driver_guard = driver.lock().await;
                         driver_guard.register_process_immediate(event.pid, event.name.clone());
                         drop(driver_guard);
@@ -568,11 +585,20 @@ impl VpnConnection {
                         log::info!("ETW: Immediate connection table refresh completed");
                     }
                     drop(driver_guard);
+
                     // Short sleep to allow process to initialize sockets, then refresh again
                     tokio::time::sleep(Duration::from_millis(2)).await;
                     let mut driver_guard = driver.lock().await;
                     let _ = driver_guard.refresh_exclusions();
                     drop(driver_guard);
+
+                    // STEP 3: Now remove the WFP block filters - packets will flow through VPN
+                    for path in blocked_paths {
+                        if let Err(e) = super::wfp_block::unblock_process_by_path(&path) {
+                            log::warn!("WFP unblock failed for {}: {}", path, e);
+                        }
+                    }
+
                     // Reset refresh timer since we just did a full refresh
                     last_refresh = std::time::Instant::now();
                 }
@@ -643,6 +669,9 @@ impl VpnConnection {
             log::info!("Stopping ETW process watcher...");
             watcher.stop();
         }
+
+        // Cleanup WFP block filters
+        super::wfp_block::cleanup();
 
         // Remove routes first
         if let Some(ref mut route_manager) = self.route_manager {

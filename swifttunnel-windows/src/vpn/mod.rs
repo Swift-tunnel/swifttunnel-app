@@ -28,6 +28,7 @@ pub mod tunnel;
 pub mod process_tracker;
 pub mod process_cache;
 pub mod process_watcher;
+pub mod wfp_block;
 pub mod packet_interceptor;
 pub mod parallel_interceptor;
 pub mod split_tunnel;
