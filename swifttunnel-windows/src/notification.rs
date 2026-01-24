@@ -33,6 +33,7 @@ fn get_icon_path() -> Option<std::path::PathBuf> {
         }
     }
 
+    log::debug!("Notification icon not found in any expected location");
     None
 }
 
