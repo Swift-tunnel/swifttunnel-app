@@ -1728,43 +1728,14 @@ fn run_packet_worker(
                             nat_buf[14] = new_src.octets()[2];
                             nat_buf[15] = new_src.octets()[3];
 
-                            // Recalculate IP header checksum
-                            nat_buf[10] = 0;
-                            nat_buf[11] = 0;
-                            let ihl = ((nat_buf[0] & 0x0F) as usize) * 4;
-                            let checksum = calculate_ip_checksum(&nat_buf[..ihl]);
-                            nat_buf[10] = (checksum >> 8) as u8;
-                            nat_buf[11] = (checksum & 0xFF) as u8;
-
-                            // Update TCP/UDP checksum (pseudo-header includes source IP)
-                            let protocol = nat_buf[9];
-                            let transport_offset = ihl;
-
-                            if protocol == 6 && pkt_len >= transport_offset + 18 {
-                                // TCP: checksum at offset 16 within TCP header
-                                update_transport_checksum(
-                                    &mut nat_buf[..pkt_len],
-                                    transport_offset + 16,
-                                    &src_ip.octets(),
-                                    &new_src.octets(),
-                                );
-                            } else if protocol == 17 && pkt_len >= transport_offset + 8 {
-                                // UDP: checksum at offset 6 within UDP header
-                                let udp_checksum = u16::from_be_bytes([
-                                    nat_buf[transport_offset + 6],
-                                    nat_buf[transport_offset + 7],
-                                ]);
-                                if udp_checksum != 0 {
-                                    update_transport_checksum(
-                                        &mut nat_buf[..pkt_len],
-                                        transport_offset + 6,
-                                        &src_ip.octets(),
-                                        &new_src.octets(),
-                                    );
-                                }
-                            }
+                            // CHECKSUM OFFLOAD FIX: Recalculate all checksums from scratch
+                            // This handles both:
+                            // 1. IP checksum update after NAT rewrite
+                            // 2. TCP/UDP checksums that may be placeholders (0x0000) from hardware offload
+                            fix_packet_checksums(&mut nat_buf[..pkt_len]);
 
                             // Log first few NAT operations
+                            let protocol = nat_buf[9];
                             if direct_encrypt_success + wintun_inject_success < 5 {
                                 log::info!(
                                     "Worker {}: Source NAT {} -> {}, {} bytes, proto={}",
