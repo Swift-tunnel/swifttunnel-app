@@ -77,18 +77,34 @@ fn get_roblox_logs_dir() -> Option<PathBuf> {
     Some(PathBuf::from(local_app_data).join("Roblox").join("logs"))
 }
 
+/// Compile regex patterns once at startup (panics if patterns are invalid - programmer error)
+fn get_patterns() -> (&'static Regex, &'static Regex) {
+    use std::sync::OnceLock;
+
+    static JOINING_PATTERN: OnceLock<Regex> = OnceLock::new();
+    static UDMUX_PATTERN: OnceLock<Regex> = OnceLock::new();
+
+    let joining = JOINING_PATTERN.get_or_init(|| {
+        Regex::new(r"! Joining game '[0-9a-f\-]+' place \d+ at (\d+\.\d+\.\d+\.\d+)")
+            .expect("Invalid joining regex pattern")
+    });
+
+    let udmux = UDMUX_PATTERN.get_or_init(|| {
+        Regex::new(r"UDMUX Address = (\d+\.\d+\.\d+\.\d+), Port = \d+")
+            .expect("Invalid UDMUX regex pattern")
+    });
+
+    (joining, udmux)
+}
+
 /// Main log watching loop
 fn watch_logs(
     logs_dir: PathBuf,
     sender: Sender<RobloxEvent>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
-    // Regex patterns for detecting game server IPs
-    // Pattern 1: "! Joining game 'JOBID' place PLACEID at IPADDRESS"
-    let joining_pattern = Regex::new(r"! Joining game '[0-9a-f\-]+' place \d+ at (\d+\.\d+\.\d+\.\d+)").ok();
-
-    // Pattern 2: "UDMUX Address = IPADDRESS, Port = PORT"
-    let udmux_pattern = Regex::new(r"UDMUX Address = (\d+\.\d+\.\d+\.\d+), Port = \d+").ok();
+    // Get compiled regex patterns (compiled once, reused)
+    let (joining_pattern, udmux_pattern) = get_patterns();
 
     let mut seen_ips: HashSet<Ipv4Addr> = HashSet::new();
     let mut current_file: Option<TailedFile> = None;
@@ -108,9 +124,17 @@ fn watch_logs(
                     .unwrap_or(true);
 
                 if should_switch {
-                    log::info!("Watching log file: {:?}", newest);
-                    current_file = TailedFile::new(&newest).ok();
-                    seen_ips.clear(); // Reset seen IPs for new session
+                    log::info!("Switching to log file: {:?}", newest);
+                    match TailedFile::new(&newest) {
+                        Ok(file) => {
+                            current_file = Some(file);
+                            seen_ips.clear(); // Reset seen IPs for new session
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to open log file {:?}: {}", newest, e);
+                            current_file = None;
+                        }
+                    }
                 }
             }
             last_file_check = std::time::Instant::now();
@@ -118,23 +142,30 @@ fn watch_logs(
 
         // Read new lines from current file
         if let Some(ref mut file) = current_file {
-            if let Ok(lines) = file.read_new_lines() {
-                for line in lines {
-                    // Try each pattern
-                    for pattern in [&joining_pattern, &udmux_pattern].iter().flatten() {
-                        if let Some(caps) = pattern.captures(&line) {
-                            if let Some(ip_match) = caps.get(1) {
-                                if let Ok(ip) = ip_match.as_str().parse::<Ipv4Addr>() {
-                                    // Skip private IPs (10.x.x.x, 192.168.x.x, etc.)
-                                    if !is_private_ip(ip) && !seen_ips.contains(&ip) {
-                                        seen_ips.insert(ip);
-                                        log::info!("Detected game server: {}", ip);
-                                        let _ = sender.send(RobloxEvent::GameServerDetected { ip });
+            match file.read_new_lines() {
+                Ok(lines) => {
+                    for line in lines {
+                        // Try each pattern
+                        for pattern in [joining_pattern, udmux_pattern] {
+                            if let Some(caps) = pattern.captures(&line) {
+                                if let Some(ip_match) = caps.get(1) {
+                                    if let Ok(ip) = ip_match.as_str().parse::<Ipv4Addr>() {
+                                        // Skip private IPs (10.x.x.x, 192.168.x.x, etc.)
+                                        if !is_private_ip(ip) && !seen_ips.contains(&ip) {
+                                            seen_ips.insert(ip);
+                                            log::info!("Detected game server: {}", ip);
+                                            let _ = sender.send(RobloxEvent::GameServerDetected { ip });
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                }
+                Err(e) => {
+                    // Log file read error and reset to find a new file
+                    log::warn!("Error reading log file: {}", e);
+                    current_file = None;
                 }
             }
         }
