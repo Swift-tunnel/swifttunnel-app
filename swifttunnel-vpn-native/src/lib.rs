@@ -31,7 +31,7 @@ use wfp::{WfpEngine, setup_wfp_for_split_tunnel};
 // Global VPN manager instance
 static VPN_MANAGER: Lazy<Mutex<Option<VpnManager>>> = Lazy::new(|| Mutex::new(None));
 
-// Global split tunnel driver instance (route-based, ZERO overhead)
+// Global split tunnel driver instance (stub - not implemented)
 static SPLIT_TUNNEL: Lazy<Mutex<Option<SplitTunnelDriver>>> = Lazy::new(|| Mutex::new(None));
 
 // Global error message
@@ -313,114 +313,38 @@ pub extern "C" fn swifttunnel_is_available() -> i32 {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  SPLIT TUNNEL API (Route-Based - ZERO Overhead)
+//  SPLIT TUNNEL API (Stub - Not Implemented)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Check if split tunneling is available
 ///
-/// Route-based split tunnel is ALWAYS available (uses built-in Windows routing).
-/// No kernel driver required!
-///
 /// # Returns
-/// 1 if available (always), 0 otherwise
+/// 1 if available, 0 otherwise
 #[no_mangle]
 pub extern "C" fn swifttunnel_split_tunnel_available() -> i32 {
-    // Route-based split tunnel is always available
-    1
+    // Split tunnel not implemented in native DLL
+    0
 }
 
-/// Configure and enable split tunneling (route-based, ZERO overhead)
-///
-/// This uses the Windows routing table to route game traffic through VPN.
-/// NO kernel driver required, NO packet interception, ZERO latency overhead!
+/// Configure and enable split tunneling (stub - not implemented)
 ///
 /// # Arguments
 /// * `tunnel_ip` - The VPN tunnel IP address (e.g., "10.0.0.77")
 /// * `interface_luid` - The Wintun adapter LUID
-/// * `apps_json` - JSON array of app names (for process detection only, not routing)
-///                 Pass null or "[]" to use default Roblox apps
+/// * `apps_json` - JSON array of app names
 ///
 /// # Returns
 /// 0 on success, negative error code on failure
 #[no_mangle]
 pub extern "C" fn swifttunnel_split_tunnel_configure(
-    tunnel_ip: *const c_char,
-    interface_luid: u64,
-    apps_json: *const c_char,
+    _tunnel_ip: *const c_char,
+    _interface_luid: u64,
+    _apps_json: *const c_char,
 ) -> i32 {
     clear_error();
-
-    // Parse tunnel IP
-    let ip_str = if tunnel_ip.is_null() {
-        set_error("tunnel_ip is null".to_string());
-        return ERROR_INVALID_PARAM;
-    } else {
-        unsafe {
-            match CStr::from_ptr(tunnel_ip).to_str() {
-                Ok(s) => s.to_string(),
-                Err(e) => {
-                    set_error(format!("Invalid UTF-8 in tunnel_ip: {}", e));
-                    return ERROR_INVALID_PARAM;
-                }
-            }
-        }
-    };
-
-    // Parse apps list (for process detection/notifications only)
-    let apps: Vec<String> = if apps_json.is_null() {
-        get_default_tunnel_apps()
-    } else {
-        let apps_str = unsafe {
-            match CStr::from_ptr(apps_json).to_str() {
-                Ok(s) => s,
-                Err(e) => {
-                    set_error(format!("Invalid UTF-8 in apps_json: {}", e));
-                    return ERROR_INVALID_PARAM;
-                }
-            }
-        };
-
-        if apps_str.is_empty() || apps_str == "[]" {
-            get_default_tunnel_apps()
-        } else {
-            match serde_json::from_str::<Vec<String>>(apps_str) {
-                Ok(a) => a,
-                Err(e) => {
-                    set_error(format!("Invalid JSON in apps_json: {}", e));
-                    return ERROR_INVALID_PARAM;
-                }
-            }
-        }
-    };
-
-    log::info!("Configuring route-based split tunnel: IP={}, LUID={}", ip_str, interface_luid);
-
-    // Configure split tunnel driver (route-based)
-    let mut driver_guard = SPLIT_TUNNEL.lock();
-
-    // Close existing driver if any
-    if let Some(ref mut driver) = *driver_guard {
-        let _ = driver.close();
-    }
-
-    let mut driver = SplitTunnelDriver::new();
-
-    if let Err(e) = driver.open() {
-        set_error(e.to_string());
-        return ERROR_INTERNAL;
-    }
-
-    let config = SplitTunnelConfig::new(apps, ip_str, interface_luid);
-
-    if let Err(e) = driver.configure(config) {
-        set_error(e.to_string());
-        let _ = driver.close();
-        return ERROR_INTERNAL;
-    }
-
-    *driver_guard = Some(driver);
-    log::info!("Route-based split tunnel configured - ZERO overhead!");
-    SUCCESS
+    set_error("Split tunnel not implemented in native DLL".to_string());
+    log::warn!("Split tunnel not implemented in native DLL");
+    ERROR_INTERNAL
 }
 
 /// Refresh split tunnel process detection
@@ -455,7 +379,7 @@ pub extern "C" fn swifttunnel_split_tunnel_refresh() -> *mut c_char {
     }
 }
 
-/// Disable and close split tunneling (removes routes)
+/// Disable and close split tunneling
 ///
 /// # Returns
 /// 0 on success, negative error code on failure
@@ -463,7 +387,6 @@ pub extern "C" fn swifttunnel_split_tunnel_refresh() -> *mut c_char {
 pub extern "C" fn swifttunnel_split_tunnel_close() -> i32 {
     clear_error();
 
-    // Close split tunnel driver (removes routes)
     {
         let mut driver_guard = SPLIT_TUNNEL.lock();
         if let Some(ref mut driver) = *driver_guard {
@@ -474,7 +397,7 @@ pub extern "C" fn swifttunnel_split_tunnel_close() -> i32 {
         *driver_guard = None;
     }
 
-    log::info!("Route-based split tunnel closed");
+    log::info!("Split tunnel closed");
     SUCCESS
 }
 
