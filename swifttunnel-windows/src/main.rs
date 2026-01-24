@@ -7,6 +7,7 @@ mod tray;
 
 // Use modules from the library crate
 use swifttunnel_fps_booster::auth;
+use swifttunnel_fps_booster::geolocation;
 use swifttunnel_fps_booster::network_analyzer;
 use swifttunnel_fps_booster::network_booster;
 use swifttunnel_fps_booster::performance_monitor;
