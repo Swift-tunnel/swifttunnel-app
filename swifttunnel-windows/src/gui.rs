@@ -1,8 +1,8 @@
 use crate::auth::{AuthManager, AuthState, UserInfo};
 use crate::geolocation::get_ip_location;
 use crate::hidden_command;
-use crate::notification::show_server_location;
-use crate::roblox_watcher::{RobloxWatcher, RobloxEvent};
+use swifttunnel_fps_booster::notification::show_server_location;
+use swifttunnel_fps_booster::roblox_watcher::{RobloxWatcher, RobloxEvent};
 use crate::network_analyzer::{
     NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
     run_stability_test, run_speed_test, speed_test::format_speed,
