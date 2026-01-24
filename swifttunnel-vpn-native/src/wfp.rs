@@ -1,12 +1,7 @@
 //! Windows Filtering Platform (WFP) Integration - STUB
 //!
 //! This module is a STUB for backward compatibility.
-//!
-//! The route-based split tunnel approach (v0.6.2+) does NOT require WFP.
-//! Game traffic is routed through kernel routing table, not packet filtering.
-//!
-//! This file is kept for API compatibility with existing code that imports
-//! the WfpEngine type and setup_wfp_for_split_tunnel function.
+//! Split tunnel functionality is not implemented in the native DLL.
 
 use crate::error::VpnError;
 
@@ -21,7 +16,7 @@ unsafe impl Sync for WfpEngine {}
 impl WfpEngine {
     /// Open a new WFP engine session - STUB
     pub fn open() -> Result<Self, VpnError> {
-        log::debug!("WFP not needed for route-based split tunnel");
+        log::debug!("WFP not implemented");
         Ok(Self { _private: () })
     }
 
@@ -61,10 +56,7 @@ pub enum FilterLayer {
 }
 
 /// Setup WFP for split tunneling - STUB
-///
-/// Route-based split tunnel doesn't need WFP. This function returns
-/// a stub WfpEngine for backward compatibility.
 pub fn setup_wfp_for_split_tunnel(_interface_luid: u64) -> Result<WfpEngine, VpnError> {
-    log::info!("WFP not needed for route-based split tunnel (ZERO overhead mode)");
+    log::info!("WFP not implemented");
     WfpEngine::open()
 }
