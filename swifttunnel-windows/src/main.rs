@@ -360,17 +360,40 @@ fn main() -> eframe::Result<()> {
         .with_transparent(false)        // Solid window background
         .with_maximized(true);          // FORCE maximized on startup
 
-    // Check if running in RDP/VM environment
-    if is_rdp_session() {
-        warn!("Running in RDP session - OpenGL may not be available");
-    }
+    // Determine which renderer to use based on environment
+    // - glow (OpenGL): Best performance for desktop with GPU
+    // - wgpu (DX12/WARP): Software fallback for RDP/VM environments
+    let force_wgpu = std::env::var("SWIFTTUNNEL_RENDERER")
+        .map(|v| v.to_lowercase() == "wgpu" || v.to_lowercase() == "software")
+        .unwrap_or(false);
 
-    // Use glow (OpenGL) renderer - best performance for desktop with GPU
-    info!("Using glow (OpenGL) renderer");
-    let options = NativeOptions {
-        viewport,
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
+    let in_rdp = is_rdp_session();
+    let use_wgpu = force_wgpu || in_rdp;
+
+    let options = if use_wgpu {
+        if in_rdp {
+            info!("RDP session detected - using wgpu (DX12/WARP) software renderer");
+        } else {
+            info!("SWIFTTUNNEL_RENDERER=wgpu - using wgpu (DX12/WARP) renderer");
+        }
+
+        // Force DX12 backend which supports WARP (Windows Advanced Rasterization Platform)
+        // WARP is Microsoft's high-performance CPU-based DirectX rasterizer
+        std::env::set_var("WGPU_BACKEND", "dx12");
+
+        NativeOptions {
+            viewport: viewport.clone(),
+            renderer: eframe::Renderer::Wgpu,
+            // wgpu_options uses default - WGPU_BACKEND=dx12 env var selects WARP
+            ..Default::default()
+        }
+    } else {
+        info!("Using glow (OpenGL) renderer - best performance for GPU");
+        NativeOptions {
+            viewport,
+            renderer: eframe::Renderer::Glow,
+            ..Default::default()
+        }
     };
 
     // Try to run the GUI - handle failure gracefully in RDP/VM environments
@@ -413,21 +436,34 @@ fn main() -> eframe::Result<()> {
         Ok(()) => Ok(()),
         Err(e) => {
             let error_msg = format!("{}", e);
+            let renderer_used = if use_wgpu { "wgpu (DX12/WARP)" } else { "glow (OpenGL)" };
 
-            // Check if this is an RDP/VM graphics issue
-            if error_msg.contains("NoSuitableAdapterFound") || error_msg.contains("adapter") {
-                error!("Graphics adapter error in RDP/VM: {}", e);
+            error!("GUI startup failed with {} renderer: {}", renderer_used, e);
 
+            // Check if this is a graphics adapter issue
+            if error_msg.contains("NoSuitableAdapterFound") || error_msg.contains("adapter") || error_msg.contains("GraphicsAdapterNotFound") {
                 // Show a user-friendly message box
                 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
                 use windows::core::PCWSTR;
 
                 let title: Vec<u16> = "SwiftTunnel - Graphics Error\0".encode_utf16().collect();
-                let message: Vec<u16> = "SwiftTunnel cannot start in this environment.\n\n\
-                    This is usually caused by running in Remote Desktop (RDP) \
-                    or a virtual machine without GPU support.\n\n\
-                    Please run SwiftTunnel directly on your gaming PC, \
-                    not through remote desktop.\0".encode_utf16().collect();
+
+                let msg = if use_wgpu {
+                    "SwiftTunnel cannot start in this environment.\n\n\
+                    The software renderer (WARP) failed to initialize.\n\n\
+                    This may be a Windows configuration issue. Try:\n\
+                    1. Update Windows to the latest version\n\
+                    2. Run as Administrator\n\
+                    3. Contact support if the issue persists\0"
+                } else {
+                    "SwiftTunnel cannot start in this environment.\n\n\
+                    OpenGL graphics are not available.\n\n\
+                    If you're using Remote Desktop or a VM, try setting:\n\
+                    SWIFTTUNNEL_RENDERER=wgpu\n\n\
+                    Or run SwiftTunnel directly on your gaming PC.\0"
+                };
+
+                let message: Vec<u16> = msg.encode_utf16().collect();
 
                 unsafe {
                     MessageBoxW(
