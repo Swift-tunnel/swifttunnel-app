@@ -849,6 +849,31 @@ impl SplitTunnelDriver {
             None
         }
     }
+
+    /// Immediately register a process detected via ETW for tunneling
+    ///
+    /// Called when ETW detects a watched process starting. This adds the
+    /// PID → name mapping to the process cache INSTANTLY (microseconds),
+    /// so when the first packet arrives, the process is already known.
+    ///
+    /// This fixes Roblox Error 279 when launching from browser:
+    /// - Browser spawns RobloxPlayerBeta.exe via roblox-player:// protocol
+    /// - ETW notifies us within MICROSECONDS (not 50ms polling!)
+    /// - We register the process here
+    /// - First packet arrives → process is already in cache → TUNNELED!
+    pub fn register_process_immediate(&self, pid: u32, name: String) {
+        if self.use_parallel {
+            if let Some(ref interceptor) = self.parallel_interceptor {
+                interceptor.register_process_immediate(pid, name);
+            } else {
+                log::warn!("Cannot register process: parallel interceptor not active");
+            }
+        } else {
+            // Legacy mode doesn't support instant registration
+            // Process will be detected on next 50ms poll
+            log::debug!("Legacy mode: process {} will be detected on next poll", name);
+        }
+    }
 }
 
 impl Default for SplitTunnelDriver {

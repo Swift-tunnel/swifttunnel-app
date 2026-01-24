@@ -17,10 +17,12 @@ use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
 use super::parallel_interceptor::{ThroughputStats, VpnEncryptContext};
+use super::process_watcher::{ProcessWatcher, ProcessStartEvent};
 use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::packet_interceptor::WireguardContext;
 use super::{VpnError, VpnResult};
+use crossbeam_channel::Receiver;
 
 /// Refresh interval for process exclusion scanning (ms)
 /// Lower = faster detection of new processes, slightly higher CPU
@@ -106,6 +108,8 @@ pub struct VpnConnection {
     route_manager: Option<RouteManager>,
     config: Option<VpnConfig>,
     process_monitor_stop: Arc<AtomicBool>,
+    /// ETW process watcher for instant game detection
+    etw_watcher: Option<ProcessWatcher>,
 }
 
 impl VpnConnection {
@@ -118,6 +122,7 @@ impl VpnConnection {
             route_manager: None,
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
+            etw_watcher: None,
         }
     }
 
@@ -492,17 +497,58 @@ impl VpnConnection {
         let driver = Arc::new(Mutex::new(driver));
         self.split_tunnel = Some(Arc::clone(&driver));
 
+        // Start ETW process watcher for INSTANT process detection
+        // This solves Error 279 when launching Roblox from browser:
+        // - Browser spawns RobloxPlayerBeta.exe
+        // - ETW notifies us within MICROSECONDS
+        // - We register the process BEFORE it makes any network calls
+        // - First packet is tunneled correctly!
+        let watch_list: std::collections::HashSet<String> = tunnel_apps.iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+
+        let etw_receiver: Option<Receiver<ProcessStartEvent>> = match ProcessWatcher::start(watch_list) {
+            Ok(watcher) => {
+                log::info!("ETW process watcher started for instant game detection");
+                let receiver = watcher.receiver().clone();
+                // Store watcher in self so it gets properly cleaned up on disconnect
+                self.etw_watcher = Some(watcher);
+                Some(receiver)
+            }
+            Err(e) => {
+                // ETW failure is not fatal - we still have 50ms polling as backup
+                log::warn!("ETW process watcher failed (continuing with polling): {}", e);
+                None
+            }
+        };
+
         // Start fast refresh loop (50ms for instant game detection)
         self.process_monitor_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
 
         tokio::spawn(async move {
-            log::info!("Process monitor started ({}ms interval)", REFRESH_INTERVAL_MS);
+            log::info!("Process monitor started ({}ms interval + ETW instant detection)", REFRESH_INTERVAL_MS);
 
             loop {
                 if stop_flag.load(Ordering::SeqCst) {
                     break;
+                }
+
+                // Poll ETW events FIRST (instant detection)
+                // This handles processes that started since last iteration
+                if let Some(ref receiver) = etw_receiver {
+                    while let Ok(event) = receiver.try_recv() {
+                        log::info!(
+                            "ETW: Instantly detected {} (PID: {}) - registering for tunneling",
+                            event.name, event.pid
+                        );
+
+                        // Immediately register with the driver's process cache
+                        let driver_guard = driver.lock().await;
+                        driver_guard.register_process_immediate(event.pid, event.name.clone());
+                        drop(driver_guard);
+                    }
                 }
 
                 tokio::time::sleep(Duration::from_millis(REFRESH_INTERVAL_MS)).await;
@@ -557,6 +603,12 @@ impl VpnConnection {
     async fn cleanup(&mut self) {
         // Stop process monitor
         self.process_monitor_stop.store(true, Ordering::SeqCst);
+
+        // Stop ETW watcher (cleans up ETW session)
+        if let Some(mut watcher) = self.etw_watcher.take() {
+            log::info!("Stopping ETW process watcher...");
+            watcher.stop();
+        }
 
         // Remove routes first
         if let Some(ref mut route_manager) = self.route_manager {
@@ -647,6 +699,11 @@ impl Default for VpnConnection {
 impl Drop for VpnConnection {
     fn drop(&mut self) {
         self.process_monitor_stop.store(true, Ordering::SeqCst);
+
+        // Stop ETW watcher
+        if let Some(mut watcher) = self.etw_watcher.take() {
+            watcher.stop();
+        }
 
         // Remove routes synchronously
         if let Some(ref mut route_manager) = self.route_manager {
