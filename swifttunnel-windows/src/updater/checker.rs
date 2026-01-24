@@ -1,6 +1,7 @@
 //! Update checker - fetches GitHub releases and compares versions
 
 use super::types::{GithubRelease, UpdateInfo};
+use crate::with_retry;
 use log::{debug, error, info};
 use semver::Version;
 use std::time::Duration;
@@ -65,6 +66,8 @@ impl UpdateChecker {
 
     /// Check for updates from GitHub releases
     /// Returns UpdateInfo if a newer version is available, None if up-to-date
+    ///
+    /// Uses retry logic with exponential backoff (3 attempts: 1s, 2s, 4s delays)
     pub async fn check_for_update(&self) -> Result<Option<UpdateInfo>, String> {
         let url = format!(
             "https://api.github.com/repos/{}/releases/latest",
@@ -73,38 +76,50 @@ impl UpdateChecker {
 
         info!("Checking for updates at {}", url);
 
-        let response = self
-            .client
-            .get(&url)
-            .header("Accept", "application/vnd.github.v3+json")
-            .send()
-            .await
-            .map_err(|e| format!("Network error: {}", e))?;
+        // Use retry logic for the network request
+        let release = with_retry(3, || async {
+            let response = self
+                .client
+                .get(&url)
+                .header("Accept", "application/vnd.github.v3+json")
+                .send()
+                .await
+                .map_err(|e| format!("Network error: {}", e))?;
 
-        // Handle rate limiting
-        if response.status() == reqwest::StatusCode::FORBIDDEN {
-            let remaining = response
-                .headers()
-                .get("x-ratelimit-remaining")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("unknown");
-            return Err(format!("GitHub API rate limited. Remaining: {}", remaining));
-        }
+            // Handle rate limiting (don't retry)
+            if response.status() == reqwest::StatusCode::FORBIDDEN {
+                let remaining = response
+                    .headers()
+                    .get("x-ratelimit-remaining")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("unknown");
+                return Err(format!("GitHub API rate limited. Remaining: {}", remaining));
+            }
 
-        // Handle 404 (no releases yet)
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            debug!("No releases found on GitHub");
-            return Ok(None);
-        }
+            // Handle 404 (no releases yet - don't retry, it's not an error)
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                debug!("No releases found on GitHub");
+                return Ok(None);
+            }
 
-        if !response.status().is_success() {
-            return Err(format!("GitHub API error: {}", response.status()));
-        }
+            if !response.status().is_success() {
+                return Err(format!("GitHub API error: {}", response.status()));
+            }
 
-        let release: GithubRelease = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse release info: {}", e))?;
+            let release: GithubRelease = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse release info: {}", e))?;
+
+            Ok(Some(release))
+        })
+        .await?;
+
+        // If no release found (404), return None
+        let release = match release {
+            Some(r) => r,
+            None => return Ok(None),
+        };
 
         self.process_release(release)
     }

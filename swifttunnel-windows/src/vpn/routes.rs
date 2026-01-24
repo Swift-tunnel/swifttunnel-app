@@ -20,8 +20,6 @@ use super::{VpnError, VpnResult};
 use crate::hidden_command;
 use std::net::Ipv4Addr;
 
-#[cfg(windows)]
-use std::mem::MaybeUninit;
 
 /// Get the local IP address of the internet interface (default gateway interface)
 ///
@@ -110,7 +108,9 @@ fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
 
         match ip_entry {
             Some(entry) => {
-                let ip = Ipv4Addr::from(entry.dwAddr.to_be());
+                // dwAddr is in host byte order (little-endian on Windows)
+                // Ipv4Addr::from(u32) expects host byte order, so no conversion needed
+                let ip = Ipv4Addr::from(entry.dwAddr);
                 Ok(ip)
             }
             None => Err(VpnError::Route(format!(
@@ -246,7 +246,9 @@ impl RouteManager {
 
             match default_route {
                 Some(row) => {
-                    let gateway = Ipv4Addr::from(row.dwForwardNextHop.to_be());
+                    // dwForwardNextHop is in host byte order (little-endian on Windows)
+                    // Ipv4Addr::from(u32) expects host byte order, so no conversion needed
+                    let gateway = Ipv4Addr::from(row.dwForwardNextHop);
                     Ok(gateway)
                 }
                 None => Err(VpnError::Route("No default gateway found".to_string())),
