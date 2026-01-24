@@ -141,7 +141,17 @@ pub async fn download_checksum(url: &str) -> Result<String, String> {
     Ok(checksum)
 }
 
+/// Maximum age for update files before cleanup (24 hours)
+const MAX_UPDATE_FILE_AGE_SECS: u64 = 24 * 60 * 60;
+
+/// Maximum number of MSI files to keep
+const MAX_MSI_FILES: usize = 2;
+
 /// Clean up old update files
+///
+/// Removes MSI files that are:
+/// 1. Older than 24 hours
+/// 2. Beyond the 2 most recent files
 pub async fn cleanup_updates() -> Result<(), String> {
     let updates_dir = dirs::data_local_dir()
         .ok_or("Could not find local data directory")?
@@ -156,6 +166,9 @@ pub async fn cleanup_updates() -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to read updates directory: {}", e))?;
 
+    // Collect all MSI files with their metadata
+    let mut msi_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+
     while let Some(entry) = entries
         .next_entry()
         .await
@@ -163,8 +176,41 @@ pub async fn cleanup_updates() -> Result<(), String> {
     {
         let path = entry.path();
         if path.extension().map(|e| e == "msi").unwrap_or(false) {
+            if let Ok(metadata) = entry.metadata().await {
+                if let Ok(modified) = metadata.modified() {
+                    msi_files.push((path, modified));
+                }
+            }
+        }
+    }
+
+    // Sort by modification time (newest first)
+    msi_files.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let now = std::time::SystemTime::now();
+
+    for (i, (path, modified)) in msi_files.iter().enumerate() {
+        let should_delete = if i >= MAX_MSI_FILES {
+            // Delete files beyond the limit
+            true
+        } else if let Ok(age) = now.duration_since(*modified) {
+            // Delete files older than 24 hours
+            age.as_secs() > MAX_UPDATE_FILE_AGE_SECS
+        } else {
+            false
+        };
+
+        if should_delete {
             info!("Cleaning up old update file: {}", path.display());
-            let _ = tokio::fs::remove_file(&path).await;
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                debug!("Failed to delete {}: {}", path.display(), e);
+            }
+
+            // Also delete associated checksum file
+            let checksum_path = path.with_extension("msi.sha256");
+            if checksum_path.exists() {
+                let _ = tokio::fs::remove_file(&checksum_path).await;
+            }
         }
     }
 
