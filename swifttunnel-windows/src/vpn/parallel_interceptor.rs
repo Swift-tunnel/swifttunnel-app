@@ -1619,9 +1619,10 @@ fn run_packet_worker(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
-        // Periodically refresh snapshot (every 100 packets)
+        // Periodically refresh snapshot (every 10 packets for faster detection)
+        // Reduced from 100 to catch newly registered processes quicker
         snapshot_check_counter += 1;
-        if snapshot_check_counter >= 100 {
+        if snapshot_check_counter >= 10 {
             snapshot_check_counter = 0;
             let old_apps_count = snapshot.tunnel_apps.len();
             let new_snapshot = process_cache.get_snapshot();
@@ -2336,7 +2337,16 @@ fn should_route_to_vpn_with_inline_cache(
         // For V2: also check destination is game server
         // For V1: is_tunnel_app is the final result
         if !is_tunnel_app {
-            return false;
+            // SPECULATIVE TUNNELING: Even if cache says "not tunnel app", still check
+            // if destination is a game server. This handles the race condition where
+            // PID lookup failed due to UDP table latency but destination is known.
+            return match snapshot.routing_mode {
+                crate::settings::RoutingMode::V1 => false, // V1 doesn't use destination filtering
+                crate::settings::RoutingMode::V2 => {
+                    // Speculatively tunnel to known game server IPs
+                    super::process_cache::is_game_server(dst_ip, dst_port, protocol)
+                }
+            };
         }
         return match snapshot.routing_mode {
             crate::settings::RoutingMode::V1 => true,
@@ -2359,7 +2369,36 @@ fn should_route_to_vpn_with_inline_cache(
 
     // Apply V2 destination filter if needed
     let result = if !is_tunnel_app {
-        false
+        // Phase 4: SPECULATIVE TUNNELING for first-packet guarantee
+        // If destination is a known game server IP, tunnel it anyway even if we
+        // couldn't identify the source process. This catches first packets sent
+        // before the UDP table is populated (0.5-2ms race window).
+        //
+        // This is safe because:
+        // 1. Only game traffic goes to these IP ranges
+        // 2. If somehow non-game traffic hits these IPs, tunneling is harmless
+        // 3. Subsequent packets will be correctly identified once cache is populated
+        let is_game_dst = super::process_cache::is_game_server(dst_ip, dst_port, protocol);
+        if is_game_dst {
+            // Log speculative tunneling for debugging (first 20 times only)
+            thread_local! {
+                static SPECULATIVE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+            }
+            let spec_count = SPECULATIVE_COUNT.with(|c| {
+                let n = c.get();
+                c.set(n + 1);
+                n
+            });
+            if spec_count < 20 {
+                log::info!(
+                    "SPECULATIVE TUNNEL: {}:{} -> {}:{} (PID unknown, but destination is game server)",
+                    src_ip, src_port, dst_ip, dst_port
+                );
+            }
+            true // Speculatively tunnel to game server
+        } else {
+            false
+        }
     } else {
         match snapshot.routing_mode {
             crate::settings::RoutingMode::V1 => true,
