@@ -2654,12 +2654,11 @@ impl BoosterApp {
 
                                         // Button now in normal left-to-right flow, properly positioned
                                         let gear_btn = ui.add(
-                                            egui::Button::new(egui::RichText::new("*").size(14.0).color(TEXT_MUTED))
+                                            egui::Button::new(egui::RichText::new("⚙").size(14.0).color(TEXT_MUTED))
                                                 .fill(BG_HOVER.gamma_multiply(0.5))
                                                 .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                                                 .rounding(4.0)
                                                 .min_size(egui::vec2(28.0, 28.0))
-                                                .sense(egui::Sense::click())
                                         );
                                         if gear_btn.clicked() {
                                             log::info!("Gear clicked for region: {}", region.id);
@@ -2770,10 +2769,12 @@ impl BoosterApp {
 
         // Show popup window
         let popup_id = egui::Id::new("server_selection_popup");
-        let close_popup = egui::Window::new(format!("* Select Server - {}", region_name))
+        let close_popup = egui::Window::new(format!("⚙ Select Server - {}", region_name))
             .id(popup_id)
             .collapsible(false)
             .resizable(false)
+            .default_open(true)  // Ensure popup never starts collapsed
+            .order(egui::Order::Foreground)  // Ensure popup appears above all content
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(egui::Frame::popup(ui.style())
                 .fill(BG_CARD)
