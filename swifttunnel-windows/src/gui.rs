@@ -1,6 +1,7 @@
 use crate::auth::{AuthManager, AuthState, UserInfo};
 use crate::geolocation::get_ip_location;
 use crate::hidden_command;
+use crate::notification::show_server_location;
 use crate::roblox_watcher::{RobloxWatcher, RobloxEvent};
 use crate::network_analyzer::{
     NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
@@ -353,8 +354,6 @@ pub struct BoosterApp {
     process_notification: Option<(String, std::time::Instant)>,
     // Previously detected tunneled processes (for notification on new process)
     previously_tunneled: std::collections::HashSet<String>,
-    // Game server notification (Bloxstrap-style: "Connected to server in {location}")
-    game_server_notification: Option<(String, std::time::Instant)>,
     // Previously detected game server IPs (to avoid duplicate notifications)
     detected_game_servers: std::collections::HashSet<std::net::Ipv4Addr>,
     // Channel for game server location lookups (ip, location)
@@ -591,8 +590,6 @@ impl BoosterApp {
             // Process detection notification
             process_notification: None,
             previously_tunneled: std::collections::HashSet::new(),
-            // Game server notification (Bloxstrap-style)
-            game_server_notification: None,
             detected_game_servers: std::collections::HashSet::new(),
             game_server_location_rx: game_server_rx,
             game_server_location_tx: game_server_tx,
@@ -1300,13 +1297,11 @@ impl eframe::App for BoosterApp {
             }
         }
 
-        // Receive game server location lookups (Bloxstrap-style notifications)
+        // Receive game server location lookups - show Windows toast notification (Bloxstrap-style)
         while let Ok((ip, location)) = self.game_server_location_rx.try_recv() {
             log::info!("Game server {} located: {}", ip, location);
-            self.game_server_notification = Some((
-                format!("Joined server in {}", location),
-                std::time::Instant::now(),
-            ));
+            // Show Windows toast notification instead of in-app toast
+            show_server_location(&location);
         }
 
         let is_logged_in = matches!(self.auth_state, AuthState::LoggedIn(_));
@@ -1361,8 +1356,7 @@ impl eframe::App for BoosterApp {
 
         // Render process notification toast (overlay at top of screen)
         self.render_process_notification(ctx);
-        // Render game server notification toast (Bloxstrap-style)
-        self.render_game_server_notification(ctx);
+        // Game server notifications now use Windows toast via notification.rs
     }
 }
 
@@ -1414,69 +1408,6 @@ impl BoosterApp {
         } else if self.process_notification.is_some() {
             // Clear expired notification
             self.process_notification = None;
-        }
-    }
-
-    /// Render game server notification toast (Bloxstrap-style)
-    fn render_game_server_notification(&mut self, ctx: &egui::Context) {
-        let should_show = if let Some((_, time)) = &self.game_server_notification {
-            time.elapsed() < std::time::Duration::from_secs(5) // Show for 5 seconds
-        } else {
-            false
-        };
-
-        if should_show {
-            if let Some((msg, time)) = &self.game_server_notification {
-                // Calculate fade out animation
-                let elapsed = time.elapsed().as_secs_f32();
-                let alpha = if elapsed > 4.0 {
-                    // Fade out in last 1 second
-                    1.0 - ((elapsed - 4.0) / 1.0)
-                } else {
-                    1.0
-                };
-
-                // Position below process notification if both are showing
-                let y_offset = if self.process_notification.is_some()
-                    && self.process_notification.as_ref().map(|(_, t)| t.elapsed() < std::time::Duration::from_secs(3)).unwrap_or(false)
-                {
-                    110.0 // Below process notification
-                } else {
-                    60.0 // Same position as process notification
-                };
-
-                egui::Area::new(egui::Id::new("game_server_notification"))
-                    .anchor(egui::Align2::CENTER_TOP, [0.0, y_offset])
-                    .order(egui::Order::Foreground)
-                    .show(ctx, |ui| {
-                        egui::Frame::NONE
-                            .fill(ACCENT_PRIMARY.gamma_multiply(0.95 * alpha)) // Blue theme
-                            .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(16, 10))
-                            .shadow(egui::epaint::Shadow {
-                                offset: [0, 2],
-                                blur: 8,
-                                spread: 0,
-                                color: egui::Color32::from_black_alpha((40.0 * alpha) as u8),
-                            })
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("🌍")
-                                        .size(16.0));
-                                    ui.label(egui::RichText::new(msg)
-                                        .color(egui::Color32::WHITE.gamma_multiply(alpha))
-                                        .size(14.0)
-                                        .strong());
-                                });
-                            });
-                    });
-
-                // Request repaint for animation
-                ctx.request_repaint();
-            }
-        } else if self.game_server_notification.is_some() {
-            // Clear expired notification
-            self.game_server_notification = None;
         }
     }
 
