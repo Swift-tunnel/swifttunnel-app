@@ -13,9 +13,6 @@ default-run = "swifttunnel-fps-booster"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wgpu"] }
 egui = "0.33"
 
-# wgpu with DX12 backend for WARP software rendering
-# Note: eframe uses wgpu 27, we add it to ensure dx12 backend is enabled
-wgpu = { version = "27", features = ["dx12"] }
 
 # Windows API - version 0.62 to match ndisapi dependency
 windows = { version = "0.62", features = [
