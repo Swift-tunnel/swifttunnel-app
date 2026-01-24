@@ -269,11 +269,11 @@ impl VpnConnection {
         // Step 4: Configure split tunneling (process-based via ndisapi)
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
         // Split tunnel is the ONLY mode (like ExitLag) - no full tunnel option
-        let tunneled_processes = if !tunnel_apps.is_empty() {
+        let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
             match self.setup_split_tunnel(&config, &adapter, tunnel_apps.clone(), routing_mode).await {
                 Ok(processes) => {
                     log::info!("Split tunnel setup succeeded");
-                    processes
+                    (processes, true)
                 }
                 Err(e) => {
                     log::error!("Split tunnel setup FAILED: {}", e);
@@ -289,7 +289,7 @@ impl VpnConnection {
         } else {
             // No apps to tunnel - this should be blocked by GUI, but handle gracefully
             log::warn!("No tunnel apps specified - connection will work but no traffic will use VPN");
-            Vec::new()
+            (Vec::new(), false)
         };
 
         // Step 5: Setup routes AFTER split tunnel exclusions
@@ -299,13 +299,13 @@ impl VpnConnection {
             // Continue anyway - split tunnel might still work partially
         }
 
-        // Step 6: Mark as connected (split tunnel is always active)
+        // Step 6: Mark as connected
         self.set_state(ConnectionState::Connected {
             since: Instant::now(),
             server_region: config.region.clone(),
             server_endpoint: config.endpoint.clone(),
             assigned_ip: config.assigned_ip.clone(),
-            split_tunnel_active: true,  // Always true - only mode available
+            split_tunnel_active,  // True when apps specified, false otherwise
             tunneled_processes,
         }).await;
 
