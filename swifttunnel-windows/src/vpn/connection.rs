@@ -537,6 +537,7 @@ impl VpnConnection {
 
                 // Poll ETW events FIRST (instant detection)
                 // This handles processes that started since last iteration
+                let mut etw_events_received = false;
                 if let Some(ref receiver) = etw_receiver {
                     while let Ok(event) = receiver.try_recv() {
                         log::info!(
@@ -548,7 +549,26 @@ impl VpnConnection {
                         let driver_guard = driver.lock().await;
                         driver_guard.register_process_immediate(event.pid, event.name.clone());
                         drop(driver_guard);
+                        etw_events_received = true;
                     }
+                }
+
+                // CRITICAL: If we received ETW events, IMMEDIATELY refresh connection tables
+                // This ensures first-packet tunneling by populating connection→PID mappings
+                // before the process can make network connections
+                if etw_events_received {
+                    let mut driver_guard = driver.lock().await;
+                    if let Err(e) = driver_guard.refresh_exclusions() {
+                        log::warn!("Immediate refresh after ETW failed: {}", e);
+                    } else {
+                        log::info!("ETW: Immediate connection table refresh completed");
+                    }
+                    drop(driver_guard);
+                    // Short sleep to allow process to initialize sockets, then refresh again
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let mut driver_guard = driver.lock().await;
+                    let _ = driver_guard.refresh_exclusions();
+                    drop(driver_guard);
                 }
 
                 tokio::time::sleep(Duration::from_millis(REFRESH_INTERVAL_MS)).await;

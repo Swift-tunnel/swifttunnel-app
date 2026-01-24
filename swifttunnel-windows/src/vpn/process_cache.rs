@@ -83,6 +83,128 @@ pub fn is_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bo
     is_roblox_game_server(dst_ip, dst_port, protocol)
 }
 
+// ============================================================================
+// ON-DEMAND PID LOOKUP (for first-packet guarantee)
+// ============================================================================
+
+/// Look up PID for a specific connection via IP Helper API
+///
+/// This is an EXPENSIVE synchronous call - only use when cache misses.
+/// Critical for guaranteeing first-packet tunneling when ETW has detected
+/// a process but the connection tables haven't been refreshed yet.
+#[cfg(windows)]
+fn lookup_connection_pid(local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> Option<u32> {
+    use windows::Win32::NetworkManagement::IpHelper::*;
+    use windows::Win32::Foundation::*;
+
+    unsafe {
+        match protocol {
+            Protocol::Tcp => {
+                // Get TCP table size
+                let mut size: u32 = 0;
+                let result = GetExtendedTcpTable(
+                    None,
+                    &mut size,
+                    false,
+                    2, // AF_INET
+                    TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+                    0,
+                );
+                if result != ERROR_INSUFFICIENT_BUFFER.0 && result != NO_ERROR.0 {
+                    return None;
+                }
+                if size == 0 {
+                    return None;
+                }
+
+                // Get TCP table
+                let mut buffer = vec![0u8; size as usize];
+                let result = GetExtendedTcpTable(
+                    Some(buffer.as_mut_ptr() as *mut _),
+                    &mut size,
+                    false,
+                    2, // AF_INET
+                    TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+                    0,
+                );
+                if result != NO_ERROR.0 {
+                    return None;
+                }
+
+                // Search for matching connection
+                let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+                let entries = std::slice::from_raw_parts(
+                    table.table.as_ptr(),
+                    table.dwNumEntries as usize,
+                );
+
+                for entry in entries {
+                    let entry_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
+                    let entry_port = u16::from_be(entry.dwLocalPort as u16);
+
+                    if entry_port == local_port && (entry_ip == local_ip || entry_ip == Ipv4Addr::UNSPECIFIED) {
+                        return Some(entry.dwOwningPid);
+                    }
+                }
+            }
+            Protocol::Udp => {
+                // Get UDP table size
+                let mut size: u32 = 0;
+                let result = GetExtendedUdpTable(
+                    None,
+                    &mut size,
+                    false,
+                    2, // AF_INET
+                    UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
+                    0,
+                );
+                if result != ERROR_INSUFFICIENT_BUFFER.0 && result != NO_ERROR.0 {
+                    return None;
+                }
+                if size == 0 {
+                    return None;
+                }
+
+                // Get UDP table
+                let mut buffer = vec![0u8; size as usize];
+                let result = GetExtendedUdpTable(
+                    Some(buffer.as_mut_ptr() as *mut _),
+                    &mut size,
+                    false,
+                    2, // AF_INET
+                    UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
+                    0,
+                );
+                if result != NO_ERROR.0 {
+                    return None;
+                }
+
+                // Search for matching endpoint
+                let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
+                let entries = std::slice::from_raw_parts(
+                    table.table.as_ptr(),
+                    table.dwNumEntries as usize,
+                );
+
+                for entry in entries {
+                    let entry_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
+                    let entry_port = u16::from_be(entry.dwLocalPort as u16);
+
+                    if entry_port == local_port && (entry_ip == local_ip || entry_ip == Ipv4Addr::UNSPECIFIED) {
+                        return Some(entry.dwOwningPid);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn lookup_connection_pid(_local_ip: Ipv4Addr, _local_port: u16, _protocol: Protocol) -> Option<u32> {
+    None
+}
+
 /// Immutable snapshot of process state
 ///
 /// Once created, this is NEVER modified. Readers can safely access
@@ -165,6 +287,9 @@ impl ProcessSnapshot {
     }
 
     /// Check if connection belongs to a tunnel app (internal helper)
+    ///
+    /// If cache lookup fails, performs ON-DEMAND IP Helper API query.
+    /// This guarantees first-packet tunneling for ETW-detected processes.
     #[inline(always)]
     fn is_tunnel_connection(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
         // Direct lookup - O(1) average case
@@ -179,6 +304,22 @@ impl ProcessSnapshot {
             let any_key = ConnectionKey::new(Ipv4Addr::UNSPECIFIED, local_port, protocol);
             if let Some(&pid) = self.connections.get(&any_key) {
                 return self.is_tunnel_pid(pid);
+            }
+        }
+
+        // FIRST-PACKET GUARANTEE: On-demand lookup via IP Helper API
+        // This is expensive but only happens for packets not yet in cache.
+        // Critical for ETW-detected processes whose connections haven't
+        // been added to the cache yet.
+        if let Some(pid) = lookup_connection_pid(local_ip, local_port, protocol) {
+            if self.is_tunnel_pid(pid) {
+                // Found a tunnel app connection that wasn't in cache
+                log::debug!(
+                    "On-demand lookup found tunnel PID {} for {}:{}/{}",
+                    pid, local_ip, local_port,
+                    if protocol == Protocol::Tcp { "TCP" } else { "UDP" }
+                );
+                return true;
             }
         }
 
