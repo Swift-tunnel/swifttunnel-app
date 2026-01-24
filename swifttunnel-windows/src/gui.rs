@@ -1,6 +1,7 @@
 use crate::auth::{AuthManager, AuthState, UserInfo};
 use crate::geolocation::get_ip_location;
 use crate::hidden_command;
+use crate::roblox_watcher::{RobloxWatcher, RobloxEvent};
 use crate::network_analyzer::{
     NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
     run_stability_test, run_speed_test, speed_test::format_speed,
@@ -359,6 +360,8 @@ pub struct BoosterApp {
     // Channel for game server location lookups (ip, location)
     game_server_location_rx: std::sync::mpsc::Receiver<(std::net::Ipv4Addr, String)>,
     game_server_location_tx: std::sync::mpsc::Sender<(std::net::Ipv4Addr, String)>,
+    // Roblox log watcher for game server detection (Bloxstrap-style)
+    roblox_watcher: Option<RobloxWatcher>,
     // Flag to force quit (bypass minimize-to-tray)
     force_quit: bool,
     // Forced server selection per region (region_id -> server_id)
@@ -593,6 +596,20 @@ impl BoosterApp {
             detected_game_servers: std::collections::HashSet::new(),
             game_server_location_rx: game_server_rx,
             game_server_location_tx: game_server_tx,
+            // Roblox log watcher (always active for server region detection)
+            roblox_watcher: {
+                log::info!("Starting Roblox log watcher for game server detection...");
+                match RobloxWatcher::new() {
+                    Some(watcher) => {
+                        log::info!("Roblox log watcher started successfully");
+                        Some(watcher)
+                    }
+                    None => {
+                        log::info!("Roblox logs directory not found - game server detection disabled");
+                        None
+                    }
+                }
+            },
             // Force quit flag (bypass minimize-to-tray)
             force_quit: false,
             // Forced server selection per region (restored from settings)
@@ -1137,30 +1154,7 @@ impl eframe::App for BoosterApp {
                     }
                 }
 
-                // Game server detection (Bloxstrap-style) - check for new game server IPs
-                if new_state.is_connected() {
-                    let game_servers = vpn.get_detected_game_servers();
-                    for ip in game_servers {
-                        if !self.detected_game_servers.contains(&ip) {
-                            // New game server detected - spawn async task to get location
-                            log::info!("🎮 New game server detected: {}", ip);
-                            self.detected_game_servers.insert(ip);
-
-                            // Spawn async task to get location
-                            let tx = self.game_server_location_tx.clone();
-                            let runtime = Arc::clone(&self.runtime);
-                            std::thread::spawn(move || {
-                                runtime.block_on(async move {
-                                    if let Some(location) = get_ip_location(ip).await {
-                                        let _ = tx.send((ip, location));
-                                    }
-                                });
-                            });
-                        }
-                    }
-                }
-
-                // Clear previously tunneled when disconnecting
+                // Clear state when disconnecting
                 if new_state == ConnectionState::Disconnected {
                     self.previously_tunneled.clear();
                     self.detected_game_servers.clear();
@@ -1170,6 +1164,7 @@ impl eframe::App for BoosterApp {
                     self.last_throughput_bytes = None;
                     // Clear config ID
                     self.current_config_id = None;
+                    // Note: Roblox watcher stays active to detect server region without VPN
                 }
 
                 // Get throughput stats and config ID when first connecting
@@ -1280,11 +1275,36 @@ impl eframe::App for BoosterApp {
             }
         }
 
+        // Poll Roblox watcher for game server detections (Bloxstrap-style)
+        if let Some(ref watcher) = self.roblox_watcher {
+            for event in watcher.poll() {
+                match event {
+                    RobloxEvent::GameServerDetected { ip } => {
+                        if !self.detected_game_servers.contains(&ip) {
+                            log::info!("Roblox game server detected: {}", ip);
+                            self.detected_game_servers.insert(ip);
+
+                            // Spawn async task to get location
+                            let tx = self.game_server_location_tx.clone();
+                            let runtime = Arc::clone(&self.runtime);
+                            std::thread::spawn(move || {
+                                runtime.block_on(async move {
+                                    if let Some(location) = get_ip_location(ip).await {
+                                        let _ = tx.send((ip, location));
+                                    }
+                                });
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         // Receive game server location lookups (Bloxstrap-style notifications)
         while let Ok((ip, location)) = self.game_server_location_rx.try_recv() {
-            log::info!("🌍 Game server {} located: {}", ip, location);
+            log::info!("Game server {} located: {}", ip, location);
             self.game_server_notification = Some((
-                format!("Joined server in {} - tunneled by SwiftTunnel", location),
+                format!("Joined server in {}", location),
                 std::time::Instant::now(),
             ));
         }
