@@ -127,11 +127,11 @@ impl ProcessWatcher {
     /// Stop the watcher
     pub fn stop(&mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
+        // Stop the ETW session to unblock ProcessTrace (it's a blocking call)
+        stop_existing_session();
         if let Some(handle) = self.thread_handle.take() {
-            // Give the thread a moment to notice the stop flag
+            // Give the thread a moment to clean up after session stop
             std::thread::sleep(std::time::Duration::from_millis(100));
-            // We can't really force-stop ProcessTrace, but setting the flag
-            // will cause it to exit on the next event or timeout
             let _ = handle.join();
         }
     }
