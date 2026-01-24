@@ -89,7 +89,7 @@ pub fn is_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bo
 
 /// Get process name by PID using Windows API
 ///
-/// Uses QueryFullProcessImageNameW for fast process name lookup.
+/// Uses K32GetProcessImageFileNameW for fast process name lookup.
 /// This is called when on-demand PID lookup succeeds but the PID isn't
 /// in the cached snapshot (stale snapshot race condition).
 #[cfg(windows)]
