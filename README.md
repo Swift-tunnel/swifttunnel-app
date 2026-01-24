@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  A lightweight game traffic optimizer with split tunneling — route only your game through our low-latency servers while everything else stays on your normal connection.
+  A lightweight game connection optimizer with split tunneling — route only your game through our low-latency servers while everything else stays on your normal connection.
 </p>
 
 <p align="center">
@@ -36,10 +36,10 @@
 
 ## Features
 
-### 🎯 Split Tunneling
-Only game traffic is routed through SwiftTunnel. Discord, Spotify, Chrome — everything else uses your normal internet. No bandwidth wasted.
+### 🎯 Smart Split Tunneling
+Only game traffic is optimized through SwiftTunnel. Discord, Spotify, Chrome — everything else uses your normal internet. No bandwidth wasted.
 
-### ⚡ Low Latency Servers
+### ⚡ Low Latency Gaming Servers
 28 gaming-optimized servers across 8 regions. Each server runs:
 - **BBR** congestion control for faster throughput
 - **fq_codel** queue management to eliminate bufferbloat
@@ -57,12 +57,15 @@ Built-in performance optimizations:
 - Minimal resource usage (~20MB RAM)
 - All optimizations are reversible
 
+### 🌍 Auto Region Detection
+Automatically detects which game server you're connecting to and routes through the optimal SwiftTunnel server (ExitLag-style).
+
 ---
 
 ## Download
 
 <p align="center">
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases/latest/download/SwiftTunnel-0.3.0-x64.msi">
+  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases/latest">
     <img src="https://img.shields.io/badge/Download-Windows%20x64-blue?style=for-the-badge&logo=windows" alt="Download for Windows" />
   </a>
 </p>
@@ -72,10 +75,10 @@ Built-in performance optimizations:
 - Administrator privileges (for network optimization)
 
 **Installation:**
-1. Download the `.msi` installer
-2. Run as Administrator
-3. Follow the setup wizard
-4. Launch SwiftTunnel from Start Menu
+1. Download the `.msi` installer from [Releases](https://github.com/Swift-tunnel/swifttunnel-app/releases/latest)
+2. Run the installer
+3. SwiftTunnel launches automatically after installation
+4. Sign in with your SwiftTunnel account
 
 ---
 
@@ -85,9 +88,9 @@ Built-in performance optimizations:
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Your PC                                  │
 │  ┌─────────────┐    ┌─────────────────────────────────────────┐ │
-│  │   Roblox    │───▶│  SwiftTunnel Split Tunnel               │ │
+│  │   Roblox    │───▶│  SwiftTunnel Route Optimizer            │ │
 │  └─────────────┘    │  ┌─────────────────────────────────────┐│ │
-│                     │  │ WireGuard Tunnel → Gaming Server    ││ │
+│                     │  │ Optimized Route → Gaming Server     ││ │
 │  ┌─────────────┐    │  └─────────────────────────────────────┘│ │
 │  │   Discord   │───▶│           (bypassed)                    │ │
 │  └─────────────┘    └──────────────────────────────────────── ┘ │
@@ -98,7 +101,7 @@ Built-in performance optimizations:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-SwiftTunnel uses Windows Filtering Platform (WFP) to intercept game traffic at the network layer. Only packets from your game are encrypted and routed through our servers — everything else goes directly to the internet.
+SwiftTunnel intercepts game traffic at the network layer. Only packets from your game are optimized and routed through our servers — everything else goes directly to the internet.
 
 
 ## Building
@@ -123,12 +126,12 @@ cargo build --release
 
 ### Create Installer (MSI)
 
-```bash
-# Install WiX toolset first
-cargo install cargo-wix
+Requires [WiX Toolset v3.14](https://github.com/wixtoolset/wix3/releases).
 
-# Build MSI
-cargo wix --nocapture
+```powershell
+cd installer
+& 'C:\Program Files (x86)\WiX Toolset v3.14\bin\candle.exe' -arch x64 -dSourceDir='../dist' -out './output/SwiftTunnel.wixobj' 'SwiftTunnel.wxs'
+& 'C:\Program Files (x86)\WiX Toolset v3.14\bin\light.exe' -ext WixUIExtension -ext WixUtilExtension -out './output/SwiftTunnel.msi' './output/SwiftTunnel.wixobj'
 ```
 
 ---
@@ -140,7 +143,7 @@ cargo wix --nocapture
 | GUI | [egui](https://github.com/emilk/egui) / eframe |
 | Tunnel | [BoringTun](https://github.com/cloudflare/boringtun) (WireGuard) |
 | Network Adapter | [Wintun](https://www.wintun.net/) |
-| Split Tunnel | Windows Filtering Platform (WFP) |
+| Split Tunnel | ndisapi (Windows Packet Filter) |
 | Installer | WiX Toolset |
 
 ---
