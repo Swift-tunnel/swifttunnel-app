@@ -1683,7 +1683,7 @@ fn run_packet_worker(
                         // Record game server (lock-free write, deduplicates via HashSet)
                         let mut servers = detected_game_servers.write();
                         if servers.insert(dst_ip) {
-                            log::info!("🎮 Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+                            log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
                         }
                     }
                 }
