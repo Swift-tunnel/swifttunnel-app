@@ -1776,7 +1776,18 @@ fn run_packet_worker(
                             (nat_buf.as_ptr(), pkt_len)
                         })
                     } else {
-                        (ip_packet.as_ptr(), ip_packet.len())
+                        // CHECKSUM OFFLOAD FIX: Always recalculate checksums for tunneled packets
+                        // Modern NICs use hardware checksum offload - we intercept packets BEFORE
+                        // the NIC computes checksums, so they have placeholder values (0x0000)
+                        NAT_BUFFER.with(|buf| {
+                            let mut fix_buf = buf.borrow_mut();
+                            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
+                            fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
+
+                            fix_packet_checksums(&mut fix_buf[..pkt_len]);
+
+                            (fix_buf.as_ptr(), pkt_len)
+                        })
                     }
                 } else {
                     (ip_packet.as_ptr(), ip_packet.len())
@@ -2808,6 +2819,149 @@ fn calculate_ip_checksum(header: &[u8]) -> u16 {
 
     // One's complement
     !(sum as u16)
+}
+
+/// Calculate TCP checksum with pseudo-header (RFC 793)
+/// packet: Full IP packet (starting at IP header)
+/// ihl: IP header length in bytes
+fn calculate_tcp_checksum(packet: &[u8], ihl: usize) -> u16 {
+    if packet.len() < ihl + 20 {
+        return 0;
+    }
+
+    let src_ip = &packet[12..16];
+    let dst_ip = &packet[16..20];
+    let tcp_len = packet.len() - ihl;
+    let tcp_segment = &packet[ihl..];
+
+    let mut sum: u32 = 0;
+
+    // Pseudo-header: src IP (4) + dst IP (4) + zero + protocol (6) + TCP length
+    sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
+    sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
+    sum += 6u32; // TCP protocol number
+    sum += tcp_len as u32;
+
+    // Sum TCP segment (treating checksum field as 0)
+    let mut i = 0;
+    while i + 1 < tcp_segment.len() {
+        if i == 16 {
+            // Skip checksum field (bytes 16-17)
+            i += 2;
+            continue;
+        }
+        sum += u16::from_be_bytes([tcp_segment[i], tcp_segment[i + 1]]) as u32;
+        i += 2;
+    }
+
+    // Handle odd byte
+    if i < tcp_segment.len() {
+        sum += (tcp_segment[i] as u32) << 8;
+    }
+
+    // Fold 32-bit sum to 16 bits
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    !(sum as u16)
+}
+
+/// Calculate UDP checksum with pseudo-header (RFC 768)
+/// packet: Full IP packet (starting at IP header)
+/// ihl: IP header length in bytes
+fn calculate_udp_checksum(packet: &[u8], ihl: usize) -> u16 {
+    if packet.len() < ihl + 8 {
+        return 0;
+    }
+
+    let src_ip = &packet[12..16];
+    let dst_ip = &packet[16..20];
+    let udp_len = packet.len() - ihl;
+    let udp_datagram = &packet[ihl..];
+
+    let mut sum: u32 = 0;
+
+    // Pseudo-header: src IP (4) + dst IP (4) + zero + protocol (17) + UDP length
+    sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
+    sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
+    sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
+    sum += 17u32; // UDP protocol number
+    sum += udp_len as u32;
+
+    // Sum UDP datagram (treating checksum field as 0)
+    let mut i = 0;
+    while i + 1 < udp_datagram.len() {
+        if i == 6 {
+            // Skip checksum field (bytes 6-7)
+            i += 2;
+            continue;
+        }
+        sum += u16::from_be_bytes([udp_datagram[i], udp_datagram[i + 1]]) as u32;
+        i += 2;
+    }
+
+    // Handle odd byte
+    if i < udp_datagram.len() {
+        sum += (udp_datagram[i] as u32) << 8;
+    }
+
+    // Fold 32-bit sum to 16 bits
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    let checksum = !(sum as u16);
+    // UDP checksum of 0 means "no checksum" - use 0xFFFF instead
+    if checksum == 0 { 0xFFFF } else { checksum }
+}
+
+/// Fix checksums in an IP packet (modifies packet in place)
+/// Returns true if checksums were fixed
+fn fix_packet_checksums(packet: &mut [u8]) -> bool {
+    if packet.len() < 20 {
+        return false;
+    }
+
+    let ihl = ((packet[0] & 0x0F) as usize) * 4;
+    if packet.len() < ihl {
+        return false;
+    }
+
+    // Fix IP header checksum
+    packet[10] = 0;
+    packet[11] = 0;
+    let ip_checksum = calculate_ip_checksum(&packet[..ihl]);
+    packet[10] = (ip_checksum >> 8) as u8;
+    packet[11] = (ip_checksum & 0xFF) as u8;
+
+    let protocol = packet[9];
+    let transport_offset = ihl;
+
+    // Fix TCP checksum
+    if protocol == 6 && packet.len() >= transport_offset + 20 {
+        packet[transport_offset + 16] = 0;
+        packet[transport_offset + 17] = 0;
+        let tcp_checksum = calculate_tcp_checksum(packet, ihl);
+        packet[transport_offset + 16] = (tcp_checksum >> 8) as u8;
+        packet[transport_offset + 17] = (tcp_checksum & 0xFF) as u8;
+        return true;
+    }
+
+    // Fix UDP checksum
+    if protocol == 17 && packet.len() >= transport_offset + 8 {
+        packet[transport_offset + 6] = 0;
+        packet[transport_offset + 7] = 0;
+        let udp_checksum = calculate_udp_checksum(packet, ihl);
+        packet[transport_offset + 6] = (udp_checksum >> 8) as u8;
+        packet[transport_offset + 7] = (udp_checksum & 0xFF) as u8;
+        return true;
+    }
+
+    true
 }
 
 #[cfg(test)]
