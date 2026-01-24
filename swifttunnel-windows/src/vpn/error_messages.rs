@@ -1,6 +1,6 @@
 //! User-Friendly Error Messages
 //!
-//! Converts technical VPN errors into human-readable messages suitable for display
+//! Converts technical errors into human-readable messages suitable for display
 //! in the GUI. These messages guide users toward solutions rather than exposing
 //! raw Windows error codes.
 
@@ -44,9 +44,9 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             } else if msg.contains("wintun.dll") {
                 "Wintun driver not found.\n\nPlease reinstall SwiftTunnel to restore the driver.".to_string()
             } else if msg.contains("Failed to set IP") {
-                "Failed to configure network adapter.\n\nTry disconnecting any other VPNs and restarting your computer.".to_string()
+                "Failed to configure network adapter.\n\nTry disconnecting other network software and restarting your computer.".to_string()
             } else {
-                format!("Failed to create VPN adapter.\n\n{}", simplify_message(msg))
+                format!("Failed to create network adapter.\n\n{}", simplify_message(msg))
             }
         }
 
@@ -57,14 +57,14 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             } else if msg.contains("PowerShell") || msg.contains("powershell") {
                 "Network configuration failed.\n\nPlease ensure PowerShell is available on your system.".to_string()
             } else {
-                format!("Failed to configure VPN routes.\n\n{}", simplify_message(msg))
+                format!("Failed to configure game routes.\n\n{}", simplify_message(msg))
             }
         }
 
         // Connection issues
         VpnError::Connection(msg) => {
             if msg.contains("Already connected") {
-                "Already connected to VPN.".to_string()
+                "Already connected.".to_string()
             } else if msg.contains("in progress") {
                 "Connection in progress. Please wait.".to_string()
             } else {
@@ -88,34 +88,34 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("unauthorized") {
                 "Session expired.\n\nPlease sign out and sign in again.".to_string()
             } else if msg.contains("404") || msg.contains("Not Found") {
-                "VPN server not found.\n\nThe selected region may be temporarily unavailable.".to_string()
+                "Server not found.\n\nThe selected region may be temporarily unavailable.".to_string()
             } else if msg.contains("timeout") {
-                "Failed to reach VPN server.\n\nPlease check your internet connection.".to_string()
+                "Failed to reach server.\n\nPlease check your internet connection.".to_string()
             } else {
-                format!("Failed to get VPN configuration.\n\n{}", simplify_message(msg))
+                format!("Failed to get configuration.\n\n{}", simplify_message(msg))
             }
         }
 
         VpnError::InvalidConfig(msg) => {
-            format!("Invalid VPN configuration.\n\n{}", simplify_message(msg))
+            format!("Invalid configuration.\n\n{}", simplify_message(msg))
         }
 
         // Tunnel issues
         VpnError::TunnelInit(msg) => {
-            format!("Failed to initialize VPN tunnel.\n\n{}", simplify_message(msg))
+            format!("Failed to initialize connection.\n\n{}", simplify_message(msg))
         }
 
         VpnError::HandshakeFailed(msg) => {
             if msg.contains("timeout") {
-                "VPN handshake timed out.\n\nThe VPN server may be overloaded. Try a different server.".to_string()
+                "Connection timed out.\n\nThe server may be overloaded. Try a different server.".to_string()
             } else {
-                "VPN handshake failed.\n\nPlease try connecting to a different server.".to_string()
+                "Connection handshake failed.\n\nPlease try connecting to a different server.".to_string()
             }
         }
 
         // Auth issues
         VpnError::NotAuthenticated => {
-            "Not signed in.\n\nPlease sign in to use the VPN.".to_string()
+            "Not signed in.\n\nPlease sign in to continue.".to_string()
         }
 
         // Split tunnel generic
