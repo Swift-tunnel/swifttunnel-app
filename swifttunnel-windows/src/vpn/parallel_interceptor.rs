@@ -57,6 +57,7 @@ use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
 use super::tunnel::FastMutex;
 use super::{VpnError, VpnResult};
+use crate::geolocation::is_roblox_game_server_ip;
 
 /// Context for direct WireGuard encryption (bypasses OS routing)
 ///
@@ -215,6 +216,8 @@ pub struct ParallelInterceptor {
     inbound_handler: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
     /// Inbound receiver thread handle (reads from VpnEncryptContext socket)
     inbound_receiver_handle: Option<JoinHandle<()>>,
+    /// Detected game server IPs (for notification purposes)
+    detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
 }
 
 impl ParallelInterceptor {
@@ -255,6 +258,25 @@ impl ParallelInterceptor {
             vpn_encrypt_ctx: None,
             inbound_handler: None,
             inbound_receiver_handle: None,
+            detected_game_servers: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
+        }
+    }
+
+    /// Get list of detected game server IPs (for notifications)
+    pub fn get_detected_game_servers(&self) -> Vec<std::net::Ipv4Addr> {
+        self.detected_game_servers.read().iter().copied().collect()
+    }
+
+    /// Clear detected game servers (call on disconnect)
+    pub fn clear_detected_game_servers(&self) {
+        self.detected_game_servers.write().clear();
+    }
+
+    /// Add a detected game server IP (called from worker threads)
+    fn record_game_server(&self, ip: std::net::Ipv4Addr) {
+        let mut servers = self.detected_game_servers.write();
+        if servers.insert(ip) {
+            log::info!("New game server detected: {}", ip);
         }
     }
 
@@ -474,6 +496,7 @@ impl ParallelInterceptor {
             let tunnel_ip = self.tunnel_ip;
             let internet_ip = self.internet_ip;
             let vpn_encrypt_ctx = self.vpn_encrypt_ctx.clone();
+            let detected_game_servers = Arc::clone(&self.detected_game_servers);
 
             let handle = thread::spawn(move || {
                 // Set CPU affinity for this worker
@@ -490,6 +513,7 @@ impl ParallelInterceptor {
                     tunnel_ip,
                     internet_ip,
                     vpn_encrypt_ctx,
+                    detected_game_servers,
                 );
             });
 
@@ -1503,6 +1527,7 @@ fn run_packet_worker(
     tunnel_ip: Option<std::net::Ipv4Addr>,
     internet_ip: Option<std::net::Ipv4Addr>,
     vpn_encrypt_ctx: Option<VpnEncryptContext>,
+    detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
 ) {
     log::info!("Worker {} started", worker_id);
 
@@ -1647,6 +1672,21 @@ fn run_packet_worker(
                     continue;
                 }
                 let ip_packet = &work.data[14..];
+
+                // === GAME SERVER DETECTION (Bloxstrap-style) ===
+                // Track Roblox game server IPs for notifications
+                if ip_packet.len() >= 20 {
+                    let dst_ip = Ipv4Addr::new(
+                        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+                    );
+                    if is_roblox_game_server_ip(dst_ip) {
+                        // Record game server (lock-free write, deduplicates via HashSet)
+                        let mut servers = detected_game_servers.write();
+                        if servers.insert(dst_ip) {
+                            log::info!("🎮 Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+                        }
+                    }
+                }
 
                 // === ZERO-ALLOCATION NAT REWRITING ===
                 // Use thread-local buffer instead of heap allocation for NAT

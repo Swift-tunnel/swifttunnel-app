@@ -801,6 +801,31 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Get detected game server IPs for notifications (Bloxstrap-style)
+    ///
+    /// Returns a list of Roblox game server IPs that were detected during tunneling.
+    /// Used to show "Connected to server in {location}" notifications.
+    pub fn get_detected_game_servers(&self) -> Vec<std::net::Ipv4Addr> {
+        if self.use_parallel {
+            self.parallel_interceptor
+                .as_ref()
+                .map(|p| p.get_detected_game_servers())
+                .unwrap_or_default()
+        } else {
+            // Legacy mode doesn't support game server detection
+            Vec::new()
+        }
+    }
+
+    /// Clear detected game servers (call on disconnect)
+    pub fn clear_detected_game_servers(&self) {
+        if self.use_parallel {
+            if let Some(ref p) = self.parallel_interceptor {
+                p.clear_detected_game_servers();
+            }
+        }
+    }
+
     /// Create an inbound handler for the WireGuard tunnel
     ///
     /// This handler receives decrypted packets from the tunnel and injects them
