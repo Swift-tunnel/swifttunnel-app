@@ -1,30 +1,22 @@
 //! VPN Module for SwiftTunnel
 //!
-//! This module provides WireGuard-based VPN tunneling with split tunneling support.
+//! This module provides WireGuard-based VPN tunneling with process-based split tunneling.
 //!
-//! ## Split Tunnel Modes
+//! ## Split Tunnel
 //!
-//! Two modes are available (set via `SWIFTTUNNEL_SPLIT_MODE` env var):
-//!
-//! 1. **Route-based** (DEFAULT, `SWIFTTUNNEL_SPLIT_MODE=route`):
-//!    - ZERO overhead! Kernel routes game IPs through VPN interface.
-//!    - No packet interception, no process lookup overhead.
-//!    - Works for games with known server IPs (Roblox, Valorant).
-//!
-//! 2. **Process-based** (`SWIFTTUNNEL_SPLIT_MODE=process`):
-//!    - Uses ndisapi for packet interception at NDIS level.
-//!    - Routes by process ownership (any app can be tunneled).
-//!    - Higher CPU usage due to packet inspection.
+//! Uses ndisapi for packet interception at NDIS level. Routes traffic by process
+//! ownership - only specified game processes use the VPN tunnel, everything else
+//! bypasses. This matches ExitLag's behavior.
 //!
 //! ## Architecture
 //!
 //! - config.rs: VPN configuration types and API fetching
 //! - adapter.rs: Wintun virtual network adapter management
 //! - tunnel.rs: WireGuard tunnel using BoringTun
-//! - routes.rs: Route management + game IP ranges for route-based split tunnel
+//! - routes.rs: Route management for VPN server
 //! - process_tracker.rs: Maps network connections to PIDs via IP Helper APIs
 //! - process_cache.rs: Lock-free RCU-style process cache for <0.1ms lookups
-//! - packet_interceptor.rs: ndisapi-based packet interception for process-based split tunnel
+//! - packet_interceptor.rs: ndisapi-based packet interception
 //! - parallel_interceptor.rs: Per-CPU parallel packet processing
 //! - split_tunnel.rs: Per-process routing coordination
 //! - connection.rs: Connection state machine and lifecycle management
@@ -49,7 +41,7 @@ pub use packet_interceptor::WireguardContext;
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
 pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
 pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
-pub use routes::{RouteManager, SplitTunnelMode, get_interface_index, get_internet_interface_ip};
+pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 pub use connection::{VpnConnection, ConnectionState};
 pub use servers::{
     DynamicServerList, DynamicServerInfo, DynamicGamingRegion,

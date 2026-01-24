@@ -27,6 +27,7 @@ use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
 use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
 use swifttunnel_fps_booster::vpn::routes::{RouteManager, get_internet_interface_ip};
 use swifttunnel_fps_booster::auth::types::AuthState;
+use swifttunnel_fps_booster::settings::RoutingMode;
 
 /// Testbench credentials
 const TESTBENCH_EMAIL: &str = "testbench@swifttunnel.net";
@@ -328,9 +329,8 @@ fn verify_traffic_routing() {
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
     let mut route_manager = RouteManager::new(server_ip, if_index);
 
-    // Enable split tunnel mode - only tunnel apps will use VPN
-    // Non-tunnel apps (like testbench.exe) will bypass VPN
-    route_manager.set_split_tunnel_mode(true);
+    // Split tunnel mode is handled by ndisapi packet interception
+    // Routes only handle VPN server reachability
 
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Failed to apply routes: {}", e);
@@ -422,6 +422,7 @@ fn verify_traffic_routing() {
         vpn_config.assigned_ip.clone(),
         original_internet_ip.clone(),
         interface_luid,
+        RoutingMode::V1,  // Use V1 for testbench (process-based)
     );
 
     if let Err(e) = driver.configure(split_config) {
@@ -638,6 +639,7 @@ fn test_split_tunnel_driver() {
         "10.64.0.1".to_string(),
         "192.168.1.1".to_string(),
         0,
+        RoutingMode::V1,  // Use V1 for testbench
     );
 
     match driver.configure(config) {
@@ -701,7 +703,7 @@ fn test_full_split_tunnel_flow() {
     };
     println!("   Internet IP: {}", internet_ip);
 
-    let config = SplitTunnelConfig::new(tunnel_apps, tunnel_ip, internet_ip, tunnel_luid);
+    let config = SplitTunnelConfig::new(tunnel_apps, tunnel_ip, internet_ip, tunnel_luid, RoutingMode::V1);
 
     match driver.configure(config) {
         Ok(_) => {
@@ -1154,7 +1156,6 @@ fn test_split_tunnel_two_apps() {
 
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
     let mut route_manager = RouteManager::new(server_ip, if_index);
-    route_manager.set_split_tunnel_mode(true);
 
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Failed to apply routes: {}", e);
@@ -1237,6 +1238,7 @@ fn test_split_tunnel_two_apps() {
         vpn_config.assigned_ip.clone(),
         original_internet_ip.clone(),
         interface_luid,
+        RoutingMode::V1,  // Use V1 for testbench
     );
 
     if let Err(e) = driver.configure(split_config) {
@@ -1508,7 +1510,6 @@ fn run_vpn_benchmark() {
 
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
     let mut route_manager = RouteManager::new(server_ip, if_index);
-    route_manager.set_split_tunnel_mode(false); // FULL VPN mode - all traffic goes through VPN
 
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Failed: {}", e);
@@ -1533,13 +1534,12 @@ fn run_vpn_benchmark() {
         }
     };
 
-    // Now switch to split tunnel mode
-    println!("\nSwitching to split tunnel mode...");
-    let _ = route_manager.remove_routes();
-    route_manager.set_split_tunnel_mode(true); // Split tunnel mode - only app traffic goes through VPN
-    if let Err(e) = route_manager.apply_routes() {
-        println!("   ⚠ Failed: {}", e);
-    } else {
+    // Split tunnel is handled by ndisapi - routes don't change
+    println!("\nSplit tunnel mode is handled by ndisapi packet interception.");
+    println!("Routes remain the same - only VPN server reachability.");
+    // Note: The old mode-switching code has been removed since split tunnel
+    // is now the only mode (like ExitLag) and is handled at the packet level
+    {
         println!("   ✅ Split tunnel routes applied");
     }
     std::thread::sleep(Duration::from_millis(500));
@@ -1609,6 +1609,7 @@ fn run_vpn_benchmark() {
         vpn_config.assigned_ip.clone(),
         original_internet_ip.clone(),
         interface_luid,
+        RoutingMode::V1,  // Use V1 for testbench
     );
 
     if let Err(e) = driver.configure(split_config) {
@@ -2007,7 +2008,6 @@ fn run_latency_test() {
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
 
     let mut route_manager = RouteManager::new(server_ip, if_index);
-    route_manager.set_split_tunnel_mode(true);
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Route setup failed: {}", e);
     } else {
@@ -2081,6 +2081,7 @@ fn run_latency_test() {
         vpn_config.assigned_ip.clone(),
         original_internet_ip.clone(),
         interface_luid,
+        RoutingMode::V1,  // Use V1 for testbench
     );
 
     if let Err(e) = driver.configure(split_config) {

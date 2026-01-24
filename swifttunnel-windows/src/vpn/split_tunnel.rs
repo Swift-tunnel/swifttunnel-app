@@ -22,6 +22,7 @@ use std::sync::Arc;
 use super::packet_interceptor::{PacketInterceptor, WireguardContext};
 use super::parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
 use super::{VpnError, VpnResult};
+use crate::settings::RoutingMode;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  GAME PRESETS
@@ -130,6 +131,8 @@ pub struct SplitTunnelConfig {
     pub internet_ip: String,
     /// VPN interface LUID (for adapter identification)
     pub tunnel_interface_luid: u64,
+    /// Routing mode (V1 = process-based, V2 = hybrid/ExitLag-style)
+    pub routing_mode: RoutingMode,
 }
 
 impl SplitTunnelConfig {
@@ -138,12 +141,14 @@ impl SplitTunnelConfig {
         tunnel_ip: String,
         internet_ip: String,
         tunnel_interface_luid: u64,
+        routing_mode: RoutingMode,
     ) -> Self {
         Self {
             tunnel_apps: tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect(),
             tunnel_ip,
             internet_ip,
             tunnel_interface_luid,
+            routing_mode,
         }
     }
 
@@ -570,8 +575,14 @@ impl SplitTunnelDriver {
             .map(|c| c.tunnel_apps.iter().cloned().collect())
             .unwrap_or_default();
 
+        let routing_mode = self
+            .config
+            .as_ref()
+            .map(|c| c.routing_mode)
+            .unwrap_or_default();
+
         if self.use_parallel {
-            let interceptor = ParallelInterceptor::new(tunnel_apps);
+            let interceptor = ParallelInterceptor::new(tunnel_apps, routing_mode);
             self.parallel_interceptor = Some(interceptor);
         } else {
             let interceptor = PacketInterceptor::new(tunnel_apps);
@@ -580,7 +591,7 @@ impl SplitTunnelDriver {
 
         self.state = DriverState::NotConfigured;
 
-        log::info!("Split tunnel driver opened");
+        log::info!("Split tunnel driver opened (routing_mode={:?})", routing_mode);
         Ok(())
     }
 
@@ -790,6 +801,31 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Get detected game server IPs for notifications (Bloxstrap-style)
+    ///
+    /// Returns a list of Roblox game server IPs that were detected during tunneling.
+    /// Used to show "Connected to server in {location}" notifications.
+    pub fn get_detected_game_servers(&self) -> Vec<std::net::Ipv4Addr> {
+        if self.use_parallel {
+            self.parallel_interceptor
+                .as_ref()
+                .map(|p| p.get_detected_game_servers())
+                .unwrap_or_default()
+        } else {
+            // Legacy mode doesn't support game server detection
+            Vec::new()
+        }
+    }
+
+    /// Clear detected game servers (call on disconnect)
+    pub fn clear_detected_game_servers(&self) {
+        if self.use_parallel {
+            if let Some(ref p) = self.parallel_interceptor {
+                p.clear_detected_game_servers();
+            }
+        }
+    }
+
     /// Create an inbound handler for the WireGuard tunnel
     ///
     /// This handler receives decrypted packets from the tunnel and injects them
@@ -886,6 +922,7 @@ mod tests {
             "10.0.0.2".to_string(),
             "192.168.1.100".to_string(),
             12345,
+            crate::settings::RoutingMode::V1,
         );
         assert!(config.tunnel_apps.contains("robloxplayerbeta.exe"));
     }

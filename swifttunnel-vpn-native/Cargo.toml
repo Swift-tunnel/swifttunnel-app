@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 name = "swifttunnel_vpn"
 
 [dependencies]
-# Windows API (minimal - route-based split tunnel doesn't need WFP)
+# Windows API
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
@@ -58,9 +58,6 @@ once_cell = "1.19"
 
 # Parking lot for better mutexes
 parking_lot = "0.12"
-
-# System info for process detection (split tunneling)
-sysinfo = "0.32"
 
 # Directory paths for finding Roblox
 dirs = "5.0"

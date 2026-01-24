@@ -1,59 +1,19 @@
 //! Route Management for VPN Tunneling
 //!
 //! Manages Windows routing table entries to direct traffic through the VPN tunnel.
-//! This is CRITICAL for the VPN to actually work - without proper routes, traffic
-//! won't flow through the tunnel even if it's established.
 //!
 //! Key routes needed:
 //! 1. VPN server route through real gateway (prevents routing loop)
-//! 2. Default route (0.0.0.0/0) through VPN interface (captures all traffic)
 //!
-//! For split tunneling, we support TWO modes:
-//! - **Process-based** (ndisapi): Intercepts ALL packets, routes by process ownership
-//!   - Higher latency due to packet interception overhead
-//! - **Route-based** (NEW): Adds game server IP routes, kernel handles routing
-//!   - ZERO overhead - same performance as no split tunnel!
-//!   - Only works for games with known server IPs (Roblox, Valorant, etc.)
+//! Split tunneling (ONLY mode - like ExitLag):
+//! - Uses process-based routing via ndisapi
+//! - Intercepts ALL packets and routes by process ownership
+//! - Only specified game apps use VPN, everything else bypasses
+//! - NO default route is added (no full tunnel mode)
 
 use super::{VpnError, VpnResult};
 use crate::hidden_command;
 use std::net::Ipv4Addr;
-
-/// Roblox IP ranges for route-based split tunneling
-/// These cover all Roblox game servers globally
-pub const ROBLOX_IP_RANGES: &[&str] = &[
-    "128.116.0.0/17",     // Main Roblox range
-    "209.206.40.0/21",
-    "23.173.192.0/24",
-    "141.193.3.0/24",
-    "204.9.184.0/24",
-    "204.13.168.0/24",
-    "204.13.169.0/24",
-    "204.13.170.0/24",
-    "204.13.171.0/24",
-    "204.13.172.0/24",
-    "204.13.173.0/24",
-    "205.201.62.0/24",
-    "103.140.28.0/23",
-    "103.142.220.0/24",
-    "103.142.221.0/24",
-    "23.34.81.0/24",
-    "23.214.169.0/24",
-];
-
-/// Valorant / Riot Games IP ranges
-pub const VALORANT_IP_RANGES: &[&str] = &[
-    "104.160.128.0/19",
-    "151.106.240.0/20",
-    "162.249.72.0/21",
-    "192.64.168.0/21",
-    "45.250.208.0/22",
-    "103.219.128.0/22",
-    "103.240.224.0/22",
-    "43.229.64.0/22",
-    "45.7.36.0/22",
-    "185.40.64.0/22",
-];
 
 /// Get the local IP address of the internet interface (default gateway interface)
 ///
@@ -101,18 +61,10 @@ pub fn get_internet_interface_ip() -> VpnResult<Ipv4Addr> {
     Ok(ip)
 }
 
-/// Split tunnel mode determines how traffic is routed
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitTunnelMode {
-    /// No split tunnel - all traffic through VPN
-    Disabled,
-    /// Process-based: ndisapi intercepts packets, routes by process (higher latency)
-    ProcessBased,
-    /// Route-based: kernel routes game IPs through VPN (ZERO overhead!)
-    RouteBased,
-}
 
 /// Route manager for VPN traffic routing
+///
+/// Only manages VPN server route - split tunneling via ndisapi handles app routing.
 pub struct RouteManager {
     /// VPN server IP (needs route through real gateway)
     vpn_server_ip: Ipv4Addr,
@@ -122,10 +74,6 @@ pub struct RouteManager {
     interface_index: u32,
     /// Whether routes have been applied
     routes_applied: bool,
-    /// Split tunnel mode - don't add default route, only tunnel app traffic uses VPN
-    split_tunnel_mode: bool,
-    /// Game routes added (for cleanup)
-    game_routes: Vec<String>,
 }
 
 impl RouteManager {
@@ -136,124 +84,7 @@ impl RouteManager {
             original_gateway: None,
             interface_index,
             routes_applied: false,
-            split_tunnel_mode: false,
-            game_routes: Vec::new(),
         }
-    }
-
-    /// Enable split tunnel mode (only tunnel app traffic uses VPN)
-    /// In this mode, we don't add the default route - only the VPN server route
-    pub fn set_split_tunnel_mode(&mut self, enabled: bool) {
-        self.split_tunnel_mode = enabled;
-        log::info!("Split tunnel mode: {}", if enabled { "enabled" } else { "disabled" });
-    }
-
-    /// Add game-specific routes for route-based split tunneling
-    ///
-    /// This is the ZERO-OVERHEAD split tunnel mode!
-    /// Routes for game IPs go through Wintun, kernel handles routing.
-    /// No packet interception, no process lookup, no latency overhead.
-    pub fn add_game_routes(&mut self, game: &str) -> VpnResult<()> {
-        let ranges = match game.to_lowercase().as_str() {
-            "roblox" => ROBLOX_IP_RANGES,
-            "valorant" => VALORANT_IP_RANGES,
-            _ => return Err(VpnError::Route(format!("Unknown game: {}", game))),
-        };
-
-        log::info!("Adding {} route-based split tunnel routes for {}", ranges.len(), game);
-
-        let mut added = 0;
-        for cidr in ranges {
-            if self.add_cidr_route(cidr).is_ok() {
-                self.game_routes.push(cidr.to_string());
-                added += 1;
-            }
-        }
-
-        log::info!("Added {}/{} routes for {} (route-based split tunnel)", added, ranges.len(), game);
-        Ok(())
-    }
-
-    /// Add a single CIDR route through the VPN interface
-    fn add_cidr_route(&self, cidr: &str) -> VpnResult<()> {
-        // Parse CIDR notation (e.g., "128.116.0.0/17")
-        let parts: Vec<&str> = cidr.split('/').collect();
-        if parts.len() != 2 {
-            return Err(VpnError::Route(format!("Invalid CIDR: {}", cidr)));
-        }
-
-        let network = parts[0];
-        let prefix_len: u8 = parts[1].parse()
-            .map_err(|_| VpnError::Route(format!("Invalid prefix length: {}", parts[1])))?;
-
-        // Convert prefix length to subnet mask
-        let mask = if prefix_len == 0 {
-            0u32
-        } else {
-            !((1u32 << (32 - prefix_len)) - 1)
-        };
-        let mask_str = format!(
-            "{}.{}.{}.{}",
-            (mask >> 24) & 0xFF,
-            (mask >> 16) & 0xFF,
-            (mask >> 8) & 0xFF,
-            mask & 0xFF
-        );
-
-        // Add route through VPN interface
-        let output = hidden_command("route")
-            .args([
-                "add",
-                network,
-                "mask",
-                &mask_str,
-                "10.0.0.1",  // VPN internal gateway
-                "metric",
-                "5",
-                "if",
-                &self.interface_index.to_string(),
-            ])
-            .output()
-            .map_err(|e| VpnError::Route(format!("Failed to add route: {}", e)))?;
-
-        if output.status.success() {
-            log::debug!("Added route: {} -> VPN", cidr);
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Route might already exist - that's OK
-            if stderr.contains("already exists") || stderr.contains("object already exists") {
-                log::debug!("Route already exists: {}", cidr);
-                Ok(())
-            } else {
-                log::warn!("Failed to add route {}: {}", cidr, stderr);
-                Err(VpnError::Route(format!("Failed to add route {}", cidr)))
-            }
-        }
-    }
-
-    /// Remove all game routes
-    pub fn remove_game_routes(&mut self) {
-        if self.game_routes.is_empty() {
-            return;
-        }
-
-        log::info!("Removing {} game routes", self.game_routes.len());
-
-        for cidr in &self.game_routes {
-            let parts: Vec<&str> = cidr.split('/').collect();
-            if parts.len() != 2 {
-                continue;
-            }
-            let network = parts[0];
-
-            let _ = hidden_command("route")
-                .args(["delete", network])
-                .output();
-        }
-
-        self.game_routes.clear();
-        log::info!("Game routes removed");
     }
 
     /// Get the current default gateway from the system
@@ -291,9 +122,9 @@ impl RouteManager {
 
     /// Apply routes for VPN tunneling
     ///
-    /// This sets up the routing table to:
+    /// Split tunnel mode (only mode - like ExitLag):
     /// 1. Route VPN server IP through the original gateway (prevents loop)
-    /// 2. Route all other traffic (0.0.0.0/0) through VPN interface
+    /// 2. NO default route added - ndisapi handles per-app routing
     pub fn apply_routes(&mut self) -> VpnResult<()> {
         if self.routes_applied {
             log::warn!("Routes already applied, skipping");
@@ -341,52 +172,12 @@ impl RouteManager {
             }
         }
 
-        // Step 3: Add default route through VPN interface (skip in split tunnel mode)
-        // NOTE: In split tunnel mode, we DON'T add the default route because:
+        // Split tunnel mode (only mode - like ExitLag):
+        // - NO default route is added
         // - ndisapi intercepts packets on the physical adapter
-        // - For tunnel apps, we NAT and directly encrypt with WireGuard (bypass Wintun)
+        // - For tunnel apps, we NAT and encrypt with WireGuard
         // - For bypass apps, we pass directly to physical adapter
-        // - If we added a VPN route, ALL traffic would go to Wintun and bypass ndisapi!
-        if self.split_tunnel_mode {
-            log::info!("Split tunnel mode: skipping default VPN route (only tunnel app traffic will use VPN)");
-        } else {
-            // We use 10.0.0.1 as gateway (standard VPN internal gateway) with low metric
-            log::info!(
-                "Adding default route through VPN interface (index: {})",
-                self.interface_index
-            );
-
-            let default_route = hidden_command("route")
-                .args([
-                    "add",
-                    "0.0.0.0",
-                    "mask",
-                    "0.0.0.0",
-                    "10.0.0.1",  // VPN internal gateway
-                    "metric",
-                    "5",  // Lower metric = higher priority
-                    "if",
-                    &self.interface_index.to_string(),
-                ])
-                .output();
-
-            match default_route {
-                Ok(out) if out.status.success() => {
-                    log::info!("Default route through VPN added successfully");
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    log::warn!("Default route warning: {}", stderr);
-                    // Continue - might work anyway
-                }
-                Err(e) => {
-                    return Err(VpnError::Route(format!(
-                        "Failed to add default route: {}",
-                        e
-                    )));
-                }
-            }
-        }
+        log::info!("Split tunnel mode: no default VPN route (only selected apps use VPN)");
 
         self.routes_applied = true;
         log::info!("VPN routes applied successfully");
@@ -395,9 +186,6 @@ impl RouteManager {
 
     /// Remove VPN routes and restore original routing
     pub fn remove_routes(&mut self) -> VpnResult<()> {
-        // Always try to remove game routes
-        self.remove_game_routes();
-
         if !self.routes_applied {
             log::debug!("No base routes to remove");
             return Ok(());
@@ -405,33 +193,7 @@ impl RouteManager {
 
         log::info!("Removing VPN routes...");
 
-        // Remove default route through VPN (only if not in split tunnel mode)
-        if !self.split_tunnel_mode {
-            let remove_default = hidden_command("route")
-                .args([
-                    "delete",
-                    "0.0.0.0",
-                    "mask",
-                    "0.0.0.0",
-                    "10.0.0.1",
-                ])
-                .output();
-
-            match remove_default {
-                Ok(out) if out.status.success() => {
-                    log::info!("Default VPN route removed");
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    log::warn!("Failed to remove default route (may not exist): {}", stderr);
-                }
-                Err(e) => {
-                    log::warn!("Failed to run route delete: {}", e);
-                }
-            }
-        } else {
-            log::info!("Split tunnel mode: no default route to remove");
-        }
+        // Split tunnel mode: no default route was added, only remove server route
 
         // Remove VPN server specific route
         let remove_server = hidden_command("route")
