@@ -144,6 +144,25 @@ impl VpnConnection {
         self.config.as_ref().map(|c| c.id.clone())
     }
 
+    /// Get detected game server IPs for notifications (Bloxstrap-style)
+    ///
+    /// Returns a list of Roblox game server IPs that have been tunneled.
+    /// Uses try_lock() to avoid blocking the GUI thread.
+    pub fn get_detected_game_servers(&self) -> Vec<std::net::Ipv4Addr> {
+        self.split_tunnel.as_ref().and_then(|st| {
+            st.try_lock().ok().map(|driver| driver.get_detected_game_servers())
+        }).unwrap_or_default()
+    }
+
+    /// Clear detected game servers (call on disconnect)
+    pub fn clear_detected_game_servers(&self) {
+        if let Some(st) = self.split_tunnel.as_ref() {
+            if let Ok(driver) = st.try_lock() {
+                driver.clear_detected_game_servers();
+            }
+        }
+    }
+
     async fn set_state(&self, state: ConnectionState) {
         log::info!("Connection state: {:?}", state);
         *self.state.lock().await = state;
