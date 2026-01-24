@@ -139,6 +139,9 @@ num_cpus = "1.16"
 # Stack-allocated buffers for zero-alloc packet processing
 arrayvec = "0.7"
 
+# File system watcher for Roblox log monitoring (auto-region feature)
+notify = "6"
+
 # Test configuration
 [[test]]
 name = "vpn_tests"

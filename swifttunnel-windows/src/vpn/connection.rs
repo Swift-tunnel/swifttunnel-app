@@ -7,12 +7,21 @@
 //! - Split tunneling via ndisapi (process-based per-app routing)
 //! - Route management
 //! - Connection state tracking
+//!
+//! ## Auto-Region Mode
+//!
+//! When enabled, the connection manager monitors Roblox log files for game server
+//! IPs and automatically switches the VPN exit based on detected server location.
+//! This provides ExitLag-style automatic region switching.
 
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use crate::auth::types::VpnConfig;
+use crate::geolocation;
+use crate::roblox_watcher::{RobloxWatcher, RobloxEvent, WatcherConfig, map_ip_to_region};
 use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
@@ -44,9 +53,34 @@ pub enum ConnectionState {
         assigned_ip: String,
         split_tunnel_active: bool,
         tunneled_processes: Vec<String>,
+        /// If true, auto-region mode is active (monitoring for game servers)
+        auto_region_active: bool,
     },
     Disconnecting,
     Error(String),
+}
+
+/// Auto-region event for UI notifications
+#[derive(Debug, Clone)]
+pub enum AutoRegionEvent {
+    /// Game server detected and region determined
+    GameServerDetected {
+        ip: Ipv4Addr,
+        location: String,
+        region: String,
+    },
+    /// Switched to a new region
+    RegionSwitched {
+        from_region: String,
+        to_region: String,
+        reason: String,
+    },
+    /// Auto-region monitoring started
+    MonitoringStarted,
+    /// Roblox process started
+    RobloxStarted,
+    /// Roblox process stopped
+    RobloxStopped,
 }
 
 impl ConnectionState {
@@ -106,6 +140,22 @@ pub struct VpnConnection {
     route_manager: Option<RouteManager>,
     config: Option<VpnConfig>,
     process_monitor_stop: Arc<AtomicBool>,
+    /// Auto-region mode flag
+    auto_region_mode: bool,
+    /// Roblox watcher for auto-region mode
+    roblox_watcher: Option<RobloxWatcher>,
+    /// Auto-region watcher stop signal
+    auto_region_stop: Arc<AtomicBool>,
+    /// Current auto-region (if in auto mode)
+    current_auto_region: Arc<Mutex<Option<String>>>,
+    /// Queue of auto-region events for UI (uses std::sync::Mutex for sync access from GUI)
+    auto_region_events: Arc<std::sync::Mutex<Vec<AutoRegionEvent>>>,
+    /// Access token for fetching configs during region switch
+    access_token: Option<String>,
+    /// Tunnel apps (for reconnection during region switch)
+    tunnel_apps: Vec<String>,
+    /// Routing mode
+    routing_mode: crate::settings::RoutingMode,
 }
 
 impl VpnConnection {
@@ -118,6 +168,14 @@ impl VpnConnection {
             route_manager: None,
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
+            auto_region_mode: false,
+            roblox_watcher: None,
+            auto_region_stop: Arc::new(AtomicBool::new(false)),
+            current_auto_region: Arc::new(Mutex::new(None)),
+            auto_region_events: Arc::new(std::sync::Mutex::new(Vec::new())),
+            access_token: None,
+            tunnel_apps: Vec::new(),
+            routing_mode: crate::settings::RoutingMode::default(),
         }
     }
 
@@ -307,6 +365,7 @@ impl VpnConnection {
             assigned_ip: config.assigned_ip.clone(),
             split_tunnel_active,  // True when apps specified, false otherwise
             tunneled_processes,
+            auto_region_active: self.auto_region_mode,
         }).await;
 
         log::info!("VPN connected successfully");
@@ -548,6 +607,12 @@ impl VpnConnection {
     pub async fn disconnect(&mut self) -> VpnResult<()> {
         log::info!("Disconnecting VPN");
         self.set_state(ConnectionState::Disconnecting).await;
+
+        // Stop auto-region monitoring if active
+        if self.auto_region_mode {
+            self.stop_auto_region();
+        }
+
         self.cleanup().await;
         self.set_state(ConnectionState::Disconnected).await;
         log::info!("VPN disconnected");
@@ -557,6 +622,13 @@ impl VpnConnection {
     async fn cleanup(&mut self) {
         // Stop process monitor
         self.process_monitor_stop.store(true, Ordering::SeqCst);
+
+        // Stop auto-region watcher
+        self.auto_region_stop.store(true, Ordering::SeqCst);
+        if let Some(ref watcher) = self.roblox_watcher {
+            watcher.stop();
+        }
+        self.roblox_watcher = None;
 
         // Remove routes first
         if let Some(ref mut route_manager) = self.route_manager {
@@ -588,6 +660,7 @@ impl VpnConnection {
         self.adapter = None;
 
         self.config = None;
+        *self.current_auto_region.lock().await = None;
     }
 
     pub fn stats(&self) -> Option<TunnelStats> {
@@ -636,6 +709,287 @@ impl VpnConnection {
     pub async fn remove_split_tunnel_app(&mut self, exe_path: &str) -> VpnResult<()> {
         self.remove_tunnel_app(exe_path).await
     }
+
+    // ========== Auto-Region Mode ==========
+
+    /// Check if auto-region mode is active
+    pub fn is_auto_region_active(&self) -> bool {
+        self.auto_region_mode
+    }
+
+    /// Get the current auto-detected region (if any)
+    pub async fn get_current_auto_region(&self) -> Option<String> {
+        self.current_auto_region.lock().await.clone()
+    }
+
+    /// Get pending auto-region events for UI display (sync for GUI access)
+    pub fn take_auto_region_events(&self) -> Vec<AutoRegionEvent> {
+        if let Ok(mut events) = self.auto_region_events.lock() {
+            std::mem::take(&mut *events)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Connect to VPN with auto-region mode enabled
+    ///
+    /// This will:
+    /// 1. Connect to the closest/primary region initially
+    /// 2. Start monitoring Roblox log files for game server IPs
+    /// 3. Automatically switch regions based on detected game server location
+    ///
+    /// # Arguments
+    /// * `access_token` - Bearer token for API authentication
+    /// * `initial_region` - Region to connect to initially (typically user's closest)
+    /// * `tunnel_apps` - Apps that SHOULD use VPN (games)
+    /// * `routing_mode` - V1 (process-based) or V2 (hybrid/ExitLag-style)
+    pub async fn connect_auto(
+        &mut self,
+        access_token: &str,
+        initial_region: &str,
+        tunnel_apps: Vec<String>,
+        routing_mode: crate::settings::RoutingMode,
+    ) -> VpnResult<()> {
+        // Store settings for potential reconnection during region switch
+        self.access_token = Some(access_token.to_string());
+        self.tunnel_apps = tunnel_apps.clone();
+        self.routing_mode = routing_mode;
+        self.auto_region_mode = true;
+        self.auto_region_stop.store(false, Ordering::SeqCst);
+
+        // Clear previous events
+        if let Ok(mut events) = self.auto_region_events.lock() {
+            events.clear();
+        }
+
+        log::info!("Connecting with auto-region mode enabled");
+        log::info!("Initial region: {}", initial_region);
+
+        // Connect to initial region using normal connect
+        self.connect(access_token, initial_region, tunnel_apps.clone(), routing_mode).await?;
+
+        // Set current auto region
+        *self.current_auto_region.lock().await = Some(initial_region.to_string());
+
+        // Start Roblox watcher
+        self.start_auto_region_watcher().await;
+
+        // Push monitoring started event
+        if let Ok(mut events) = self.auto_region_events.lock() {
+            events.push(AutoRegionEvent::MonitoringStarted);
+        }
+
+        log::info!("Auto-region mode activated - monitoring for Roblox game servers");
+        Ok(())
+    }
+
+    /// Start the Roblox log watcher for auto-region detection
+    async fn start_auto_region_watcher(&mut self) {
+        let watcher_config = WatcherConfig {
+            poll_interval_ms: 100,     // 100ms for fast detection
+            max_log_age_secs: 300,     // 5 minute log file age limit
+            emit_duplicates: false,    // Don't spam duplicate IPs
+        };
+
+        match RobloxWatcher::new(watcher_config) {
+            Some(watcher) => {
+                log::info!("Roblox log watcher started for auto-region detection");
+                self.roblox_watcher = Some(watcher);
+
+                // Spawn background task to process watcher events
+                self.spawn_auto_region_task();
+            }
+            None => {
+                log::warn!("Could not start Roblox watcher - Roblox logs directory may not exist");
+                log::warn!("Auto-region will not work until Roblox is installed/run");
+            }
+        }
+    }
+
+    /// Spawn background task to monitor Roblox watcher events
+    fn spawn_auto_region_task(&self) {
+        let stop_signal = Arc::clone(&self.auto_region_stop);
+        let current_region = Arc::clone(&self.current_auto_region);
+        let events_queue = Arc::clone(&self.auto_region_events);
+        let state_handle = Arc::clone(&self.state);
+
+        // Clone values needed for reconnection
+        let access_token = self.access_token.clone();
+        let tunnel_apps = self.tunnel_apps.clone();
+        let routing_mode = self.routing_mode;
+
+        // We need to use a channel to communicate with the watcher
+        // Since we can't move self into the async task
+        let watcher_exists = self.roblox_watcher.is_some();
+
+        if !watcher_exists {
+            log::warn!("No Roblox watcher available for auto-region task");
+            return;
+        }
+
+        tokio::spawn(async move {
+            log::info!("Auto-region background task started");
+
+            // We'll poll the watcher through events passed via the queue
+            // The actual watcher polling happens in a separate loop
+
+            while !stop_signal.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+
+                // Check connection state
+                let state = state_handle.lock().await.clone();
+                if !matches!(state, ConnectionState::Connected { auto_region_active: true, .. }) {
+                    continue;
+                }
+            }
+
+            log::info!("Auto-region background task stopped");
+        });
+    }
+
+    /// Process a detected game server IP
+    ///
+    /// This is called when the Roblox watcher detects a new game server.
+    /// It geolocates the IP and determines if we need to switch regions.
+    pub async fn process_detected_game_server(&mut self, ip: Ipv4Addr) -> Option<String> {
+        log::info!("Processing detected game server: {}", ip);
+
+        // Geolocate the IP
+        let location = match geolocation::get_ip_location(ip).await {
+            Some(loc) => loc,
+            None => {
+                log::warn!("Could not geolocate IP: {}", ip);
+                return None;
+            }
+        };
+
+        log::info!("Game server {} is at: {}", ip, location);
+
+        // Map location to VPN region
+        let target_region = match map_ip_to_region(ip, &location) {
+            Some(r) => r,
+            None => {
+                log::warn!("Could not map location '{}' to VPN region", location);
+                return None;
+            }
+        };
+
+        log::info!("Mapped to VPN region: {}", target_region);
+
+        // Push detection event
+        if let Ok(mut events) = self.auto_region_events.lock() {
+            events.push(AutoRegionEvent::GameServerDetected {
+                ip,
+                location: location.clone(),
+                region: target_region.clone(),
+            });
+        }
+
+        // Check if we need to switch
+        let current = self.current_auto_region.lock().await.clone();
+        if current.as_ref() == Some(&target_region) {
+            log::info!("Already on optimal region: {}", target_region);
+            return None;
+        }
+
+        // Need to switch regions
+        log::info!("Switching from {:?} to {} for game server at {}", current, target_region, location);
+
+        let from_region = current.clone().unwrap_or_else(|| "none".to_string());
+
+        // Push switch event
+        if let Ok(mut events) = self.auto_region_events.lock() {
+            events.push(AutoRegionEvent::RegionSwitched {
+                from_region: from_region.clone(),
+                to_region: target_region.clone(),
+                reason: format!("Game server at {}", location),
+            });
+        }
+
+        // Perform the region switch
+        if let Err(e) = self.switch_region(&target_region).await {
+            log::error!("Failed to switch region: {}", e);
+            return None;
+        }
+
+        Some(target_region)
+    }
+
+    /// Switch to a different VPN region
+    ///
+    /// This disconnects from the current region and reconnects to the new one.
+    /// The switch should be fast since we're just changing the VPN endpoint.
+    async fn switch_region(&mut self, new_region: &str) -> VpnResult<()> {
+        let access_token = self.access_token.clone()
+            .ok_or_else(|| VpnError::NotAuthenticated)?;
+        let tunnel_apps = self.tunnel_apps.clone();
+        let routing_mode = self.routing_mode;
+
+        log::info!("Switching VPN region to: {}", new_region);
+
+        // Disconnect current connection (but keep auto-region mode)
+        self.cleanup().await;
+
+        // Short delay for cleanup
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Reconnect to new region
+        self.connect(&access_token, new_region, tunnel_apps, routing_mode).await?;
+
+        // Update current auto region
+        *self.current_auto_region.lock().await = Some(new_region.to_string());
+
+        log::info!("Region switch complete: now connected to {}", new_region);
+        Ok(())
+    }
+
+    /// Poll the Roblox watcher for events (call from GUI update loop)
+    ///
+    /// Returns any new game server IPs that were detected.
+    pub fn poll_roblox_watcher(&mut self) -> Vec<Ipv4Addr> {
+        let mut detected_ips = Vec::new();
+
+        if let Some(ref watcher) = self.roblox_watcher {
+            // Process all pending events
+            while let Some(event) = watcher.try_recv() {
+                match event {
+                    RobloxEvent::GameServerDetected { ip, .. } => {
+                        log::info!("Roblox watcher detected game server: {}", ip);
+                        detected_ips.push(ip);
+                    }
+                    RobloxEvent::RobloxStarted => {
+                        log::info!("Roblox started (from watcher)");
+                        if let Ok(mut events) = self.auto_region_events.try_lock() {
+                            events.push(AutoRegionEvent::RobloxStarted);
+                        }
+                    }
+                    RobloxEvent::RobloxStopped => {
+                        log::info!("Roblox stopped (from watcher)");
+                        if let Ok(mut events) = self.auto_region_events.try_lock() {
+                            events.push(AutoRegionEvent::RobloxStopped);
+                        }
+                    }
+                    RobloxEvent::WatchError(e) => {
+                        log::warn!("Roblox watcher error: {}", e);
+                    }
+                }
+            }
+        }
+
+        detected_ips
+    }
+
+    /// Stop auto-region monitoring (but keep VPN connected)
+    pub fn stop_auto_region(&mut self) {
+        log::info!("Stopping auto-region monitoring");
+        self.auto_region_stop.store(true, Ordering::SeqCst);
+
+        if let Some(ref watcher) = self.roblox_watcher {
+            watcher.stop();
+        }
+        self.roblox_watcher = None;
+        self.auto_region_mode = false;
+    }
 }
 
 impl Default for VpnConnection {
@@ -647,6 +1001,12 @@ impl Default for VpnConnection {
 impl Drop for VpnConnection {
     fn drop(&mut self) {
         self.process_monitor_stop.store(true, Ordering::SeqCst);
+        self.auto_region_stop.store(true, Ordering::SeqCst);
+
+        // Stop auto-region watcher
+        if let Some(ref watcher) = self.roblox_watcher {
+            watcher.stop();
+        }
 
         // Remove routes synchronously
         if let Some(ref mut route_manager) = self.route_manager {

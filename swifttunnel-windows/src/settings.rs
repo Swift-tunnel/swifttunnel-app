@@ -132,6 +132,10 @@ pub struct AppSettings {
     /// Routing mode for split tunneling (V1 = process-based, V2 = hybrid/ExitLag-style)
     #[serde(default)]
     pub routing_mode: RoutingMode,
+    /// Auto-region mode - automatically switch VPN exit based on detected game server location
+    /// When enabled, monitors Roblox log files and switches to optimal region
+    #[serde(default)]
+    pub auto_region: bool,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -170,6 +174,7 @@ impl Default for AppSettings {
             artificial_latency_ms: 0,
             experimental_mode: false,
             routing_mode: RoutingMode::default(),
+            auto_region: false,
         }
     }
 }

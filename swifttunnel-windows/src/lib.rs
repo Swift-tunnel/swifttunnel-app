@@ -9,6 +9,7 @@ pub mod network_analyzer;
 pub mod network_booster;
 pub mod performance_monitor;
 pub mod roblox_optimizer;
+pub mod roblox_watcher;
 pub mod settings;
 pub mod structs;
 pub mod system_optimizer;

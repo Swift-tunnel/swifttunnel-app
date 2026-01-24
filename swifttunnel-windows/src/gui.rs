@@ -12,7 +12,7 @@ use crate::structs::*;
 use crate::system_optimizer::SystemOptimizer;
 use crate::tray::SystemTray;
 use crate::updater::{UpdateChecker, UpdateInfo, UpdateSettings, UpdateState, download_update, download_checksum, verify_checksum, install_update};
-use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set, ThroughputStats};
+use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set, ThroughputStats, AutoRegionEvent};
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -402,6 +402,12 @@ pub struct BoosterApp {
     experimental_mode: bool,
     /// Routing mode for split tunnel (V1 = process-based, V2 = hybrid/ExitLag-style)
     routing_mode: crate::settings::RoutingMode,
+    /// Auto-region mode - automatically switch VPN exit based on detected game server
+    auto_region: bool,
+    /// Auto-region event notifications for UI display
+    auto_region_events: Vec<AutoRegionEvent>,
+    /// Last auto-region notification timestamp
+    last_auto_region_notification: Option<std::time::Instant>,
 }
 
 impl BoosterApp {
@@ -630,6 +636,10 @@ impl BoosterApp {
             experimental_mode: saved_settings.experimental_mode,
             // Routing mode for split tunnel
             routing_mode: saved_settings.routing_mode,
+            // Auto-region mode (automatically switch VPN exit based on game server)
+            auto_region: saved_settings.auto_region,
+            auto_region_events: Vec::new(),
+            last_auto_region_notification: None,
         }
     }
 
@@ -734,6 +744,8 @@ impl BoosterApp {
             experimental_mode: self.experimental_mode,
             // Save routing mode setting
             routing_mode: self.routing_mode,
+            // Save auto-region setting
+            auto_region: self.auto_region,
         };
 
         let _ = save_settings(&settings);
@@ -1282,11 +1294,72 @@ impl eframe::App for BoosterApp {
 
         // Receive game server location lookups (Bloxstrap-style notifications)
         while let Ok((ip, location)) = self.game_server_location_rx.try_recv() {
-            log::info!("🌍 Game server {} located: {}", ip, location);
+            log::info!("Game server {} located: {}", ip, location);
             self.game_server_notification = Some((
                 format!("Joined server in {} - tunneled by SwiftTunnel", location),
                 std::time::Instant::now(),
             ));
+        }
+
+        // Poll for auto-region events (when connected in auto mode)
+        if self.auto_region && self.vpn_state.is_connected() {
+            // First, poll watcher and get detected IPs (requires mutable borrow)
+            let (detected_ips, events) = {
+                if let Ok(mut vpn) = self.vpn_connection.try_lock() {
+                    // Poll for Roblox watcher events - returns newly detected IPs
+                    let ips = vpn.poll_roblox_watcher();
+                    // Get any auto-region events
+                    let evts = vpn.take_auto_region_events();
+                    (ips, evts)
+                } else {
+                    (Vec::new(), Vec::new())
+                }
+            };
+
+            // Process detected IPs by spawning async tasks
+            // This triggers geolocation and automatic region switching
+            for ip in detected_ips {
+                let vpn_clone = Arc::clone(&self.vpn_connection);
+                let rt = Arc::clone(&self.runtime);
+
+                std::thread::spawn(move || {
+                    rt.block_on(async {
+                        if let Ok(mut connection) = vpn_clone.lock() {
+                            if let Some(region) = connection.process_detected_game_server(ip).await {
+                                log::info!("Auto-region: Processed game server {} -> switched to {}", ip, region);
+                            }
+                        }
+                    });
+                });
+            }
+
+            // Display any events that were generated
+            for event in events {
+                match &event {
+                    AutoRegionEvent::GameServerDetected { ip, location, region } => {
+                        log::info!("Auto-region: Game server {} detected in {} (region: {})", ip, location, region);
+                        self.last_auto_region_notification = Some(std::time::Instant::now());
+                        self.auto_region_events.push(event);
+                    }
+                    AutoRegionEvent::RegionSwitched { from_region, to_region, reason } => {
+                        log::info!("Auto-region: Switched from {} to {} ({})", from_region, to_region, reason);
+                        self.game_server_notification = Some((
+                            format!("Switched to {} - {}", to_region, reason),
+                            std::time::Instant::now(),
+                        ));
+                        self.auto_region_events.push(event);
+                    }
+                    AutoRegionEvent::MonitoringStarted => {
+                        log::info!("Auto-region: Roblox log monitoring started");
+                    }
+                    AutoRegionEvent::RobloxStarted => {
+                        log::info!("Auto-region: Roblox detected as running");
+                    }
+                    AutoRegionEvent::RobloxStopped => {
+                        log::info!("Auto-region: Roblox stopped");
+                    }
+                }
+            }
         }
 
         let is_logged_in = matches!(self.auth_state, AuthState::LoggedIn(_));
@@ -2457,6 +2530,98 @@ impl BoosterApp {
             });
         });
         ui.add_space(14.0);
+
+        // AUTO REGION card - always shown at the top when regions are loaded
+        if !is_loading && !regions.is_empty() {
+            let is_auto_selected = self.auto_region;
+            let auto_card_id = "region_auto";
+            let hover_val = self.animations.get_hover_value(auto_card_id);
+
+            let (bg, border_color, border_width) = if is_auto_selected {
+                (lerp_color(ACCENT_CYAN.gamma_multiply(0.12), ACCENT_CYAN.gamma_multiply(0.18), hover_val),
+                 ACCENT_CYAN,
+                 2.0)
+            } else {
+                let hover_bg = lerp_color(BG_CARD, BG_ELEVATED, hover_val * 0.5);
+                let hover_border = lerp_color(BG_ELEVATED, ACCENT_CYAN.gamma_multiply(0.4), hover_val);
+                (hover_bg, hover_border, 1.0 + hover_val * 0.5)
+            };
+
+            let auto_response = egui::Frame::NONE
+                .fill(bg)
+                .stroke(egui::Stroke::new(border_width, border_color))
+                .rounding(14.0)
+                .inner_margin(egui::Margin::symmetric(14, 14))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width() - 28.0);
+                    ui.set_min_height(60.0);
+
+                    ui.horizontal(|ui| {
+                        // Globe icon with AUTO badge
+                        egui::Frame::NONE
+                            .fill(if is_auto_selected { ACCENT_CYAN } else { BG_ELEVATED })
+                            .rounding(6.0)
+                            .inner_margin(egui::Margin::symmetric(10, 5))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("AUTO")
+                                    .size(11.0)
+                                    .color(if is_auto_selected { egui::Color32::WHITE } else { TEXT_SECONDARY })
+                                    .strong());
+                            });
+
+                        ui.add_space(12.0);
+
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("Auto Region")
+                                .size(15.0)
+                                .color(TEXT_PRIMARY)
+                                .strong());
+                            ui.label(egui::RichText::new("Detects game server & switches region automatically")
+                                .size(11.0)
+                                .color(TEXT_MUTED));
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if is_auto_selected {
+                                // Show "ENABLED" badge
+                                egui::Frame::NONE
+                                    .fill(ACCENT_CYAN.gamma_multiply(0.2))
+                                    .rounding(6.0)
+                                    .inner_margin(egui::Margin::symmetric(8, 4))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new("ENABLED")
+                                            .size(10.0)
+                                            .color(ACCENT_CYAN)
+                                            .strong());
+                                    });
+                            }
+                        });
+                    });
+                });
+
+            // Handle hover for animation
+            let is_hovered = auto_response.response.hovered();
+            self.animations.animate_hover(auto_card_id, is_hovered, hover_val);
+
+            // Toggle auto-region mode on click
+            if auto_response.response.interact(egui::Sense::click()).clicked() {
+                self.auto_region = !self.auto_region;
+                self.mark_dirty();
+                if self.auto_region {
+                    log::info!("Auto-region mode enabled");
+                } else {
+                    log::info!("Auto-region mode disabled");
+                }
+            }
+
+            ui.add_space(16.0);
+
+            // Divider line
+            let divider_rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover()).0;
+            ui.painter().rect_filled(divider_rect, 0.0, BG_ELEVATED);
+
+            ui.add_space(12.0);
+        }
 
         // Show skeleton loading or error state if no regions
         if regions.is_empty() {
@@ -4852,6 +5017,7 @@ impl BoosterApp {
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
         let routing_mode = self.routing_mode;
+        let auto_region_mode = self.auto_region;
 
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();
@@ -4859,8 +5025,17 @@ impl BoosterApp {
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode).await {
-                        log::error!("VPN connection failed: {}", e);
+                    if auto_region_mode {
+                        // Use auto-region mode - connects to best region initially, then watches for game servers
+                        log::info!("Connecting in auto-region mode");
+                        if let Err(e) = connection.connect_auto(&access_token, &region, apps, routing_mode).await {
+                            log::error!("VPN connection failed (auto mode): {}", e);
+                        }
+                    } else {
+                        // Normal connection mode
+                        if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode).await {
+                            log::error!("VPN connection failed: {}", e);
+                        }
                     }
                 }
             });
