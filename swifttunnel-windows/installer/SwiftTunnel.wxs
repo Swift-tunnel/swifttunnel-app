@@ -24,6 +24,16 @@
         <Icon Id="SwiftTunnelIcon" SourceFile="$(var.SourceDir)\swifttunnel.ico" />
         <Property Id="ARPPRODUCTICON" Value="SwiftTunnelIcon" />
 
+        <!-- Launch app after installation (checkbox enabled by default) -->
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch SwiftTunnel" />
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+        <Property Id="WixShellExecTarget" Value="[#SwiftTunnelExe]" />
+
+        <CustomAction Id="LaunchApplication"
+                      BinaryKey="WixCA"
+                      DllEntry="WixShellExec"
+                      Impersonate="yes" />
+
         <!-- Features -->
         <Feature Id="ProductFeature" Title="SwiftTunnel" Level="1">
             <ComponentGroupRef Id="ProductComponents" />
@@ -66,6 +76,11 @@
             <Custom Action="InstallWinPkFilter" After="InstallFiles">NOT REMOVE~="ALL"</Custom>
             <Custom Action="AddFirewallRule" After="InstallWinPkFilter">NOT REMOVE~="ALL"</Custom>
         </InstallExecuteSequence>
+
+        <!-- Launch app after installation completes (runs in UI sequence) -->
+        <InstallUISequence>
+            <Custom Action="LaunchApplication" After="ExecuteAction">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed</Custom>
+        </InstallUISequence>
 
         <!-- Directory Structure -->
         <Directory Id="TARGETDIR" Name="SourceDir">
