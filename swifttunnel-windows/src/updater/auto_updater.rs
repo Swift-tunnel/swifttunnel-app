@@ -8,12 +8,6 @@ use eframe::egui;
 use log::{info, error};
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
-
-/// Check if running in a Remote Desktop (RDP) session
-fn is_rdp_session() -> bool {
-    unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
-}
 
 /// Auto-updater state
 #[derive(Clone, Debug)]
@@ -67,20 +61,7 @@ pub fn run_auto_updater() -> AutoUpdateResult {
         }
     });
 
-    // Create minimal splash window
-    // Use wgpu for RDP/VM environments, glow for normal desktop
-    let force_wgpu = std::env::var("SWIFTTUNNEL_RENDERER")
-        .map(|v| v.to_lowercase() == "wgpu" || v.to_lowercase() == "software")
-        .unwrap_or(false);
-    let use_wgpu = force_wgpu || is_rdp_session();
-
-    let renderer = if use_wgpu {
-        std::env::set_var("WGPU_BACKEND", "dx12");
-        eframe::Renderer::Wgpu
-    } else {
-        eframe::Renderer::Glow
-    };
-
+    // Create minimal splash window with glow (OpenGL) renderer
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SwiftTunnel")
@@ -89,7 +70,7 @@ pub fn run_auto_updater() -> AutoUpdateResult {
             .with_decorations(false)
             .with_transparent(false)
             .with_always_on_top(),
-        renderer,
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
