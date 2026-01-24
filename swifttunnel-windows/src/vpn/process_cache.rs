@@ -87,6 +87,47 @@ pub fn is_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bo
 // ON-DEMAND PID LOOKUP (for first-packet guarantee)
 // ============================================================================
 
+/// Get process name by PID using Windows API
+///
+/// Uses QueryFullProcessImageNameW for fast process name lookup.
+/// This is called when on-demand PID lookup succeeds but the PID isn't
+/// in the cached snapshot (stale snapshot race condition).
+#[cfg(windows)]
+fn get_process_name_by_pid_fast(pid: u32) -> Option<String> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        // Open process with minimal permissions
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+
+        if handle.is_invalid() {
+            return None;
+        }
+
+        // Get process image file name (NT path like \Device\HarddiskVolume3\...\RobloxPlayerBeta.exe)
+        let mut buffer = [0u16; 512];
+        let len = K32GetProcessImageFileNameW(handle, &mut buffer);
+
+        let _ = CloseHandle(handle);
+
+        if len == 0 {
+            return None;
+        }
+
+        let path = String::from_utf16_lossy(&buffer[..len as usize]);
+
+        // Extract just the filename from the full path
+        path.rsplit('\\').next().map(|s| s.to_string())
+    }
+}
+
+#[cfg(not(windows))]
+fn get_process_name_by_pid_fast(_pid: u32) -> Option<String> {
+    None
+}
+
 /// Look up PID for a specific connection via IP Helper API
 ///
 /// This is an EXPENSIVE synchronous call - only use when cache misses.
@@ -312,14 +353,41 @@ impl ProcessSnapshot {
         // Critical for ETW-detected processes whose connections haven't
         // been added to the cache yet.
         if let Some(pid) = lookup_connection_pid(local_ip, local_port, protocol) {
+            // Fast path: check if PID is in our snapshot's pid_names
             if self.is_tunnel_pid(pid) {
-                // Found a tunnel app connection that wasn't in cache
                 log::debug!(
                     "On-demand lookup found tunnel PID {} for {}:{}/{}",
                     pid, local_ip, local_port,
                     if protocol == Protocol::Tcp { "TCP" } else { "UDP" }
                 );
                 return true;
+            }
+
+            // SNAPSHOT STALENESS FIX: PID found but not in snapshot!
+            // This happens when:
+            // 1. ETW detected process and called register_process_immediate()
+            // 2. A new snapshot was created with the PID
+            // 3. BUT this worker thread is still using an OLD snapshot
+            // 4. First packet arrives and on-demand lookup finds the PID
+            // 5. is_tunnel_pid() returns false because OLD snapshot doesn't have this PID
+            //
+            // Solution: Query the OS directly for the process name and check
+            // against tunnel_apps. This is a fallback for stale snapshots.
+            if let Some(name) = get_process_name_by_pid_fast(pid) {
+                let name_lower = name.to_lowercase();
+                let name_stem = name_lower.trim_end_matches(".exe");
+
+                for app in &self.tunnel_apps {
+                    let app_stem = app.trim_end_matches(".exe");
+                    if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
+                        log::info!(
+                            "First-packet: Direct lookup matched tunnel app '{}' (PID: {}) for {}:{}/{}",
+                            name, pid, local_ip, local_port,
+                            if protocol == Protocol::Tcp { "TCP" } else { "UDP" }
+                        );
+                        return true;
+                    }
+                }
             }
         }
 
@@ -721,5 +789,55 @@ mod tests {
             reader.join().expect("Reader thread panicked");
         }
         writer.join().expect("Writer thread panicked");
+    }
+
+    #[test]
+    fn test_stale_snapshot_direct_lookup() {
+        // This test simulates the stale snapshot race condition:
+        // 1. Worker has an old snapshot without a new process
+        // 2. On-demand lookup finds the PID
+        // 3. PID is not in snapshot's pid_names
+        // 4. Direct OS lookup should match against tunnel_apps
+        //
+        // Since we can't actually trigger this in a unit test (requires real
+        // Windows process state), we verify the matching logic works correctly.
+
+        let cache = LockFreeProcessCache::new(
+            vec!["robloxplayerbeta".to_string(), "roblox".to_string()],
+            RoutingMode::V1
+        );
+
+        let snap = cache.get_snapshot();
+
+        // Verify tunnel_apps matching logic (same as in is_tunnel_connection fallback)
+        let test_cases = vec![
+            ("RobloxPlayerBeta.exe", true),
+            ("robloxplayerbeta.exe", true),
+            ("ROBLOXPLAYERBETA.EXE", true),
+            ("RobloxApp.exe", true),
+            ("chrome.exe", false),
+            ("notepad.exe", false),
+            ("System", false),
+        ];
+
+        for (name, expected) in test_cases {
+            let name_lower = name.to_lowercase();
+            let name_stem = name_lower.trim_end_matches(".exe");
+
+            let mut matched = false;
+            for app in &snap.tunnel_apps {
+                let app_stem = app.trim_end_matches(".exe");
+                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
+                    matched = true;
+                    break;
+                }
+            }
+
+            assert_eq!(
+                matched, expected,
+                "Process '{}' match failed: expected {}, got {}",
+                name, expected, matched
+            );
+        }
     }
 }
