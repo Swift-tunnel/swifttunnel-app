@@ -30,14 +30,14 @@ use parking_lot::RwLock;
 
 use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    ERROR_SUCCESS, HANDLE, WIN32_ERROR, ERROR_WMI_INSTANCE_NOT_FOUND,
+    ERROR_SUCCESS, HANDLE,
 };
 use windows::Win32::System::Diagnostics::Etw::{
     StartTraceW, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, CloseTrace,
     EVENT_TRACE_PROPERTIES, EVENT_TRACE_LOGFILEW, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP,
     EVENT_TRACE_REAL_TIME_MODE, TRACE_LEVEL_INFORMATION, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
     PROCESS_TRACE_MODE_REAL_TIME, PROCESS_TRACE_MODE_EVENT_RECORD, WNODE_FLAG_TRACED_GUID,
-    EVENT_TRACE_FLAG_PROCESS,
+    EVENT_TRACE_FLAG_PROCESS, CONTROLTRACE_HANDLE, PROCESSTRACE_HANDLE,
 };
 
 /// Microsoft-Windows-Kernel-Process provider GUID
@@ -174,22 +174,22 @@ fn run_etw_session(
         std::ptr::copy_nonoverlapping(session_name_wide.as_ptr(), name_dest, session_name_wide.len());
 
         // Start the trace session
-        let mut session_handle: u64 = 0;
+        let mut session_handle = CONTROLTRACE_HANDLE::default();
         let result = StartTraceW(
             &mut session_handle,
             PCWSTR(session_name_wide.as_ptr()),
             properties,
         );
 
-        if result != ERROR_SUCCESS.0 {
-            return Err(format!("StartTraceW failed: 0x{:08X}", result));
+        if result != ERROR_SUCCESS {
+            return Err(format!("StartTraceW failed: 0x{:08X}", result.0));
         }
 
-        log::info!("ETW session started, handle: {}", session_handle);
+        log::info!("ETW session started, handle: {:?}", session_handle);
 
         // Enable the kernel process provider
         let result = EnableTraceEx2(
-            HANDLE(session_handle as isize),
+            session_handle,
             &KERNEL_PROCESS_GUID,
             EVENT_CONTROL_CODE_ENABLE_PROVIDER.0,
             TRACE_LEVEL_INFORMATION as u8,
@@ -199,15 +199,15 @@ fn run_etw_session(
             None, // EnableParameters
         );
 
-        if result != ERROR_SUCCESS.0 {
+        if result != ERROR_SUCCESS {
             // Clean up session
             ControlTraceW(
-                HANDLE(session_handle as isize),
+                session_handle,
                 PCWSTR::null(),
                 properties,
                 EVENT_TRACE_CONTROL_STOP,
             );
-            return Err(format!("EnableTraceEx2 failed: 0x{:08X}", result));
+            return Err(format!("EnableTraceEx2 failed: 0x{:08X}", result.0));
         }
 
         log::info!("ETW provider enabled");
@@ -228,11 +228,11 @@ fn run_etw_session(
         logfile.Context = context_ptr as *mut c_void;
 
         let trace_handle = OpenTraceW(&mut logfile);
-        if trace_handle.0 == u64::MAX as isize {
+        if trace_handle.Value == u64::MAX {
             // Clean up
             let _ = Box::from_raw(context_ptr);
             ControlTraceW(
-                HANDLE(session_handle as isize),
+                session_handle,
                 PCWSTR::null(),
                 properties,
                 EVENT_TRACE_CONTROL_STOP,
@@ -252,14 +252,14 @@ fn run_etw_session(
 
         // Stop the session
         ControlTraceW(
-            HANDLE(session_handle as isize),
+            session_handle,
             PCWSTR::null(),
             properties,
             EVENT_TRACE_CONTROL_STOP,
         );
 
-        if result != ERROR_SUCCESS.0 && !stop_flag.load(Ordering::SeqCst) {
-            return Err(format!("ProcessTrace failed: 0x{:08X}", result));
+        if result != ERROR_SUCCESS && !stop_flag.load(Ordering::SeqCst) {
+            return Err(format!("ProcessTrace failed: 0x{:08X}", result.0));
         }
     }
 
@@ -282,13 +282,13 @@ fn stop_existing_session() {
         std::ptr::copy_nonoverlapping(session_name_wide.as_ptr(), name_dest, session_name_wide.len());
 
         let result = ControlTraceW(
-            HANDLE(0),
+            CONTROLTRACE_HANDLE::default(),
             PCWSTR(session_name_wide.as_ptr()),
             properties,
             EVENT_TRACE_CONTROL_STOP,
         );
 
-        if result == ERROR_SUCCESS.0 {
+        if result == ERROR_SUCCESS {
             log::info!("Stopped existing ETW session");
         }
     }
