@@ -885,33 +885,36 @@ impl VpnConnection {
             });
         }
 
-        // Check if we need to switch
+        // Check if we're already on the optimal region
         let current = self.current_auto_region.lock().await.clone();
         if current.as_ref() == Some(&target_region) {
             log::info!("Already on optimal region: {}", target_region);
             return None;
         }
 
-        // Need to switch regions
-        log::info!("Switching from {:?} to {} for game server at {}", current, target_region, location);
+        // We detected a better region, but DON'T auto-switch during gameplay
+        // Auto-switching causes VPN reconnection which interrupts the active game
+        // Instead, just notify the user about the optimal region
+        let from_region = current.clone().unwrap_or_else(|| "unknown".to_string());
 
-        let from_region = current.clone().unwrap_or_else(|| "none".to_string());
+        log::info!(
+            "Game server at {} - optimal region is '{}' (currently on '{}')",
+            location, target_region, from_region
+        );
 
-        // Push switch event
+        // Push event to notify user (UI will show recommendation)
         if let Ok(mut events) = self.auto_region_events.lock() {
             events.push(AutoRegionEvent::RegionSwitched {
                 from_region: from_region.clone(),
                 to_region: target_region.clone(),
-                reason: format!("Game server at {}", location),
+                reason: format!("Recommended for {} (reconnect for better latency)", location),
             });
         }
 
-        // Perform the region switch
-        if let Err(e) = self.switch_region(&target_region).await {
-            log::error!("Failed to switch region: {}", e);
-            return None;
-        }
+        // Update the target region for next connection
+        *self.current_auto_region.lock().await = Some(target_region.clone());
 
+        // Return the recommended region (but we didn't switch)
         Some(target_region)
     }
 

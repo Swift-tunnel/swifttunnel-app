@@ -322,8 +322,12 @@ impl TailedFile {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
 
-        // Seek to end - we only care about new content
-        reader.seek(SeekFrom::End(0))?;
+        // Read last 64KB of file to catch current session's game server
+        // This handles the case where Roblox is already running when monitoring starts
+        const TAIL_BYTES: i64 = 65536;
+        let file_size = reader.seek(SeekFrom::End(0))? as i64;
+        let start_pos = (file_size - TAIL_BYTES).max(0);
+        reader.seek(SeekFrom::Start(start_pos as u64))?;
 
         Ok(Self {
             reader,

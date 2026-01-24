@@ -1,9 +1,9 @@
 //! IP Geolocation module
 //!
-//! Uses ip-api.com to get location information for game server IPs.
+//! Uses ipwho.is to get location information for game server IPs.
 //! Similar to Bloxstrap's server location feature.
 //!
-//! Note: ip-api.com free tier has 45 requests/minute limit and requires HTTP (not HTTPS).
+//! Note: ipwho.is has free HTTPS support with 10,000 requests/month limit.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 /// Cache for server locations to avoid repeated API calls
 static LOCATION_CACHE: std::sync::OnceLock<Arc<Mutex<HashMap<Ipv4Addr, String>>>> = std::sync::OnceLock::new();
 
-/// Semaphore to limit concurrent API requests (ip-api.com: 45 req/min)
+/// Semaphore to limit concurrent API requests
 static API_SEMAPHORE: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
 
 fn get_cache() -> Arc<Mutex<HashMap<Ipv4Addr, String>>> {
@@ -26,16 +26,13 @@ fn get_semaphore() -> &'static Semaphore {
     API_SEMAPHORE.get_or_init(|| Semaphore::new(2))
 }
 
-/// Response from ip-api.com API
-/// Free tier returns city, regionName, country without authentication
+/// Response from ipwho.is API (HTTPS supported on free tier)
 #[derive(Debug, Deserialize)]
 pub struct IpApiResponse {
-    pub status: String,
+    pub success: bool,
     pub city: Option<String>,
-    #[serde(rename = "regionName")]
-    pub region_name: Option<String>,
+    pub region: Option<String>,
     pub country: Option<String>,
-    #[serde(rename = "countryCode")]
     pub country_code: Option<String>,
     pub message: Option<String>,
 }
@@ -57,9 +54,8 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
     // Acquire semaphore to limit concurrent requests
     let _permit = get_semaphore().acquire().await.ok()?;
 
-    // Query ip-api.com (free tier requires HTTP, not HTTPS)
-    // Fields: city, regionName, country, countryCode
-    let url = format!("http://ip-api.com/json/{}?fields=status,message,city,regionName,country,countryCode", ip);
+    // Query ipwho.is (free tier supports HTTPS)
+    let url = format!("https://ipwho.is/{}", ip);
     log::info!("Querying location for IP: {}", ip);
 
     let client = reqwest::Client::builder()
@@ -77,8 +73,8 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
     let info: IpApiResponse = response.json().await.ok()?;
 
     // Check API status
-    if info.status != "success" {
-        log::warn!("ip-api.com query failed: {:?}", info.message);
+    if !info.success {
+        log::warn!("ipwho.is query failed: {:?}", info.message);
         return None;
     }
 
@@ -97,13 +93,13 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
     Some(location)
 }
 
-/// Format location from ip-api.com response
+/// Format location from ipwho.is response
 fn format_location(info: &IpApiResponse) -> Option<String> {
     let city = info.city.as_ref()?;
     let country_code = info.country_code.as_ref().or(info.country.as_ref())?;
 
     // If city equals region (or no region), use shorter format
-    if let Some(region) = &info.region_name {
+    if let Some(region) = &info.region {
         if city == region || region.is_empty() {
             Some(format!("{}, {}", city, country_code))
         } else {
@@ -153,9 +149,9 @@ mod tests {
     fn test_format_location() {
         // City equals region
         let info = IpApiResponse {
-            status: "success".to_string(),
+            success: true,
             city: Some("Singapore".to_string()),
-            region_name: Some("Singapore".to_string()),
+            region: Some("Singapore".to_string()),
             country: Some("Singapore".to_string()),
             country_code: Some("SG".to_string()),
             message: None,
@@ -164,9 +160,9 @@ mod tests {
 
         // City differs from region
         let info = IpApiResponse {
-            status: "success".to_string(),
+            success: true,
             city: Some("Ashburn".to_string()),
-            region_name: Some("Virginia".to_string()),
+            region: Some("Virginia".to_string()),
             country: Some("United States".to_string()),
             country_code: Some("US".to_string()),
             message: None,

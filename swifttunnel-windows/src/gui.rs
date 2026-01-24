@@ -1316,12 +1316,13 @@ impl eframe::App for BoosterApp {
                 }
             };
 
-            // Process detected IPs by spawning async tasks
-            // This triggers geolocation and automatic region switching
-            for ip in detected_ips {
+            // Process only the first detected IP to avoid multiple region switches
+            // This prevents thread bombing and race conditions
+            if let Some(ip) = detected_ips.into_iter().next() {
                 let vpn_clone = Arc::clone(&self.vpn_connection);
                 let rt = Arc::clone(&self.runtime);
 
+                // Single thread for processing - avoids unbounded spawning
                 std::thread::spawn(move || {
                     rt.block_on(async {
                         if let Ok(mut connection) = vpn_clone.lock() {
