@@ -225,6 +225,12 @@ impl TailedFile {
         let start_pos = (file_size - TAIL_BYTES).max(0);
         reader.seek(SeekFrom::Start(start_pos as u64))?;
 
+        // Skip first potentially incomplete line if not at file start
+        if start_pos > 0 {
+            let mut discard = String::new();
+            let _ = reader.read_line(&mut discard);
+        }
+
         Ok(Self {
             reader,
             path: path.to_path_buf(),
