@@ -13,6 +13,10 @@ default-run = "swifttunnel-fps-booster"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wgpu"] }
 egui = "0.33"
 
+# wgpu with default features enabled for DX12 support on Windows
+# eframe disables wgpu defaults which removes DX12, so we re-enable them here
+wgpu = { version = "27", default-features = true }
+
 
 # Windows API - version 0.62 to match ndisapi dependency
 windows = { version = "0.62", features = [
