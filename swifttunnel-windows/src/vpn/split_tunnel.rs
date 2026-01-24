@@ -411,11 +411,21 @@ impl SplitTunnelDriver {
     }
 
     /// Ensure the driver service exists and is started
+    ///
+    /// Requires administrator privileges to create or start the driver service.
     fn ensure_driver_service() -> Result<(), String> {
         use windows::core::PCWSTR;
         use windows::Win32::System::Services::*;
 
         const SERVICE_NAME: &str = "NDISRD";
+
+        // Check for administrator privileges first
+        if !crate::utils::is_administrator() {
+            return Err(
+                "Administrator privileges required to manage driver service. \
+                Please run SwiftTunnel as Administrator.".to_string()
+            );
+        }
 
         // Get driver path
         let driver_path = Self::get_driver_path();

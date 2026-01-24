@@ -18,3 +18,6 @@ pub mod vpn;
 
 // Re-export commonly used items
 pub use utils::hidden_command;
+pub use utils::is_administrator;
+pub use utils::with_retry;
+pub use utils::rotate_log_if_needed;

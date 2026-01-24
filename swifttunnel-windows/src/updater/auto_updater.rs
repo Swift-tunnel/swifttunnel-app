@@ -5,9 +5,14 @@
 
 use super::{UpdateChecker, download_update, download_checksum, verify_checksum, install_update};
 use eframe::egui;
-use log::{info, error};
+use log::{info, error, warn};
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// Timeout for initial update check (5 seconds)
+/// This prevents blocking app launch on slow networks
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Auto-updater state
 #[derive(Clone, Debug)]
@@ -114,7 +119,7 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
     // Small delay to show the "Checking" state
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    // Check for updates
+    // Check for updates with a 5-second timeout to avoid blocking app launch
     let checker = match UpdateChecker::new() {
         Some(c) => c,
         None => {
@@ -126,7 +131,9 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
             return Ok(AutoUpdateResult::NoUpdate);
         }
     };
-    let update_info = match checker.check_for_update().await {
+
+    // Use timeout-based check to prevent blocking app launch on slow networks
+    let update_info = match checker.check_for_update_with_timeout(UPDATE_CHECK_TIMEOUT).await {
         Ok(Some(info)) => info,
         Ok(None) => {
             info!("No updates available");
@@ -137,8 +144,12 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
             return Ok(AutoUpdateResult::NoUpdate);
         }
         Err(e) => {
-            // Don't block app launch on update check failure
-            error!("Update check failed: {}", e);
+            // Don't block app launch on update check failure or timeout
+            if e.contains("timed out") {
+                warn!("Update check timed out after {:?}, launching app", UPDATE_CHECK_TIMEOUT);
+            } else {
+                error!("Update check failed: {}", e);
+            }
             if let Ok(mut s) = state.lock() {
                 *s = AutoUpdateState::NoUpdate;
             }
@@ -178,37 +189,54 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
         .await
         .map_err(|e| format!("Download failed: {}", e))?;
 
-    // Verify checksum if available
+    // Verify checksum - MANDATORY when checksum_url is present (security requirement)
     if let Some(checksum_url) = &update_info.checksum_url {
         if let Ok(mut s) = state.lock() {
             *s = AutoUpdateState::Verifying;
         }
 
-        match download_checksum(checksum_url).await {
-            Ok(expected_hash) => {
-                match verify_checksum(&msi_path, &expected_hash).await {
-                    Ok(true) => {
-                        info!("Checksum verified");
-                    }
-                    Ok(false) => {
-                        // Clean up bad file
-                        let _ = std::fs::remove_file(&msi_path);
-                        if let Ok(mut s) = state.lock() {
-                            *s = AutoUpdateState::Failed("Checksum verification failed".to_string());
-                        }
-                        return Err("Checksum verification failed".to_string());
-                    }
-                    Err(e) => {
-                        // Continue anyway if checksum verification had I/O error
-                        info!("Checksum verification error: {}", e);
-                    }
+        // Download checksum - failure blocks update (security)
+        let expected_hash = match download_checksum(checksum_url).await {
+            Ok(hash) => hash,
+            Err(e) => {
+                error!("Checksum download failed: {}", e);
+                // Clean up downloaded MSI
+                let _ = std::fs::remove_file(&msi_path);
+                if let Ok(mut s) = state.lock() {
+                    *s = AutoUpdateState::Failed(format!("Checksum download failed: {}", e));
                 }
+                return Err(format!("Checksum download failed: {}. Update aborted for security.", e));
+            }
+        };
+
+        // Verify checksum - failure blocks update (security)
+        match verify_checksum(&msi_path, &expected_hash).await {
+            Ok(true) => {
+                info!("Checksum verified successfully");
+            }
+            Ok(false) => {
+                error!("Checksum mismatch - downloaded file may be corrupted or tampered");
+                // Clean up potentially corrupted/tampered file
+                let _ = std::fs::remove_file(&msi_path);
+                if let Ok(mut s) = state.lock() {
+                    *s = AutoUpdateState::Failed("Checksum mismatch - update aborted".to_string());
+                }
+                return Err("Checksum verification failed - file may be corrupted. Update aborted.".to_string());
             }
             Err(e) => {
-                // Continue anyway if checksum download fails
-                info!("Could not verify checksum: {}", e);
+                error!("Checksum verification error: {}", e);
+                // Clean up on verification error
+                let _ = std::fs::remove_file(&msi_path);
+                if let Ok(mut s) = state.lock() {
+                    *s = AutoUpdateState::Failed(format!("Verification error: {}", e));
+                }
+                return Err(format!("Checksum verification error: {}. Update aborted.", e));
             }
         }
+    } else {
+        // No checksum URL provided - log warning but allow update
+        // This supports older releases that don't have checksums
+        warn!("No checksum available for this release - proceeding without verification");
     }
 
     // Install update

@@ -29,7 +29,8 @@ use performance_monitor::PerformanceMonitor;
 use network_booster::NetworkBooster;
 use crate::gui::BoosterApp;  // Local module
 use settings::load_settings;
-use updater::{run_auto_updater, AutoUpdateResult};
+use updater::{run_auto_updater, AutoUpdateResult, cleanup_updates};
+use utils::rotate_log_if_needed;
 use vpn::split_tunnel::SplitTunnelDriver;
 
 use eframe::NativeOptions;
@@ -155,6 +156,15 @@ fn main() -> eframe::Result<()> {
     // Set up file logging for release builds (console is hidden)
     let log_file_path = log_dir.join("swifttunnel.log");
 
+    // Rotate log files if they exceed 1MB
+    if let Err(e) = rotate_log_if_needed(&log_file_path) {
+        eprintln!("Failed to rotate log: {}", e);
+    }
+    let update_log_path = log_dir.join("update_install.log");
+    if let Err(e) = rotate_log_if_needed(&update_log_path) {
+        eprintln!("Failed to rotate update log: {}", e);
+    }
+
     // Initialize logger - write to file so we can debug release builds
     let log_level = std::env::var("RUST_LOG")
         .map(|_| log::LevelFilter::Debug)
@@ -197,6 +207,19 @@ fn main() -> eframe::Result<()> {
             return Ok(());
         }
     };
+
+    // Cleanup old update files from previous sessions
+    // Create a quick runtime just for this async cleanup
+    {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create cleanup runtime");
+        rt.block_on(async {
+            if let Err(e) = cleanup_updates().await {
+                warn!("Failed to cleanup old updates: {}", e);
+            } else {
+                info!("Old update files cleaned up");
+            }
+        });
+    }
 
     // Run Discord-like auto-updater before main app (splash screen)
     info!("Running auto-updater check...");
