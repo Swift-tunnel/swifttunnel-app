@@ -1,6 +1,8 @@
 use crate::auth::{AuthManager, AuthState, UserInfo};
 use crate::geolocation::get_ip_location;
 use crate::hidden_command;
+use crate::notification::show_server_location;
+use crate::roblox_watcher::{RobloxWatcher, RobloxEvent};
 use crate::network_analyzer::{
     NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
     run_stability_test, run_speed_test, speed_test::format_speed,
@@ -352,13 +354,13 @@ pub struct BoosterApp {
     process_notification: Option<(String, std::time::Instant)>,
     // Previously detected tunneled processes (for notification on new process)
     previously_tunneled: std::collections::HashSet<String>,
-    // Game server notification (Bloxstrap-style: "Connected to server in {location}")
-    game_server_notification: Option<(String, std::time::Instant)>,
     // Previously detected game server IPs (to avoid duplicate notifications)
     detected_game_servers: std::collections::HashSet<std::net::Ipv4Addr>,
     // Channel for game server location lookups (ip, location)
     game_server_location_rx: std::sync::mpsc::Receiver<(std::net::Ipv4Addr, String)>,
     game_server_location_tx: std::sync::mpsc::Sender<(std::net::Ipv4Addr, String)>,
+    // Roblox log watcher for game server detection (Bloxstrap-style)
+    roblox_watcher: Option<RobloxWatcher>,
     // Flag to force quit (bypass minimize-to-tray)
     force_quit: bool,
     // Forced server selection per region (region_id -> server_id)
@@ -588,11 +590,23 @@ impl BoosterApp {
             // Process detection notification
             process_notification: None,
             previously_tunneled: std::collections::HashSet::new(),
-            // Game server notification (Bloxstrap-style)
-            game_server_notification: None,
             detected_game_servers: std::collections::HashSet::new(),
             game_server_location_rx: game_server_rx,
             game_server_location_tx: game_server_tx,
+            // Roblox log watcher (always active for server region detection)
+            roblox_watcher: {
+                log::info!("Starting Roblox log watcher for game server detection...");
+                match RobloxWatcher::new() {
+                    Some(watcher) => {
+                        log::info!("Roblox log watcher started successfully");
+                        Some(watcher)
+                    }
+                    None => {
+                        log::info!("Roblox logs directory not found - game server detection disabled");
+                        None
+                    }
+                }
+            },
             // Force quit flag (bypass minimize-to-tray)
             force_quit: false,
             // Forced server selection per region (restored from settings)
@@ -1137,30 +1151,7 @@ impl eframe::App for BoosterApp {
                     }
                 }
 
-                // Game server detection (Bloxstrap-style) - check for new game server IPs
-                if new_state.is_connected() {
-                    let game_servers = vpn.get_detected_game_servers();
-                    for ip in game_servers {
-                        if !self.detected_game_servers.contains(&ip) {
-                            // New game server detected - spawn async task to get location
-                            log::info!("🎮 New game server detected: {}", ip);
-                            self.detected_game_servers.insert(ip);
-
-                            // Spawn async task to get location
-                            let tx = self.game_server_location_tx.clone();
-                            let runtime = Arc::clone(&self.runtime);
-                            std::thread::spawn(move || {
-                                runtime.block_on(async move {
-                                    if let Some(location) = get_ip_location(ip).await {
-                                        let _ = tx.send((ip, location));
-                                    }
-                                });
-                            });
-                        }
-                    }
-                }
-
-                // Clear previously tunneled when disconnecting
+                // Clear state when disconnecting
                 if new_state == ConnectionState::Disconnected {
                     self.previously_tunneled.clear();
                     self.detected_game_servers.clear();
@@ -1170,6 +1161,7 @@ impl eframe::App for BoosterApp {
                     self.last_throughput_bytes = None;
                     // Clear config ID
                     self.current_config_id = None;
+                    // Note: Roblox watcher stays active to detect server region without VPN
                 }
 
                 // Get throughput stats and config ID when first connecting
@@ -1280,13 +1272,36 @@ impl eframe::App for BoosterApp {
             }
         }
 
-        // Receive game server location lookups (Bloxstrap-style notifications)
+        // Poll Roblox watcher for game server detections (Bloxstrap-style)
+        if let Some(ref watcher) = self.roblox_watcher {
+            for event in watcher.poll() {
+                match event {
+                    RobloxEvent::GameServerDetected { ip } => {
+                        if !self.detected_game_servers.contains(&ip) {
+                            log::info!("Roblox game server detected: {}", ip);
+                            self.detected_game_servers.insert(ip);
+
+                            // Spawn async task to get location
+                            let tx = self.game_server_location_tx.clone();
+                            let runtime = Arc::clone(&self.runtime);
+                            std::thread::spawn(move || {
+                                runtime.block_on(async move {
+                                    if let Some(location) = get_ip_location(ip).await {
+                                        let _ = tx.send((ip, location));
+                                    }
+                                });
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Receive game server location lookups - show Windows toast notification (Bloxstrap-style)
         while let Ok((ip, location)) = self.game_server_location_rx.try_recv() {
-            log::info!("🌍 Game server {} located: {}", ip, location);
-            self.game_server_notification = Some((
-                format!("Joined server in {} - tunneled by SwiftTunnel", location),
-                std::time::Instant::now(),
-            ));
+            log::info!("Game server {} located: {}", ip, location);
+            // Show Windows toast notification instead of in-app toast
+            show_server_location(&location);
         }
 
         let is_logged_in = matches!(self.auth_state, AuthState::LoggedIn(_));
@@ -1341,8 +1356,7 @@ impl eframe::App for BoosterApp {
 
         // Render process notification toast (overlay at top of screen)
         self.render_process_notification(ctx);
-        // Render game server notification toast (Bloxstrap-style)
-        self.render_game_server_notification(ctx);
+        // Game server notifications now use Windows toast via notification.rs
     }
 }
 
@@ -1394,69 +1408,6 @@ impl BoosterApp {
         } else if self.process_notification.is_some() {
             // Clear expired notification
             self.process_notification = None;
-        }
-    }
-
-    /// Render game server notification toast (Bloxstrap-style)
-    fn render_game_server_notification(&mut self, ctx: &egui::Context) {
-        let should_show = if let Some((_, time)) = &self.game_server_notification {
-            time.elapsed() < std::time::Duration::from_secs(5) // Show for 5 seconds
-        } else {
-            false
-        };
-
-        if should_show {
-            if let Some((msg, time)) = &self.game_server_notification {
-                // Calculate fade out animation
-                let elapsed = time.elapsed().as_secs_f32();
-                let alpha = if elapsed > 4.0 {
-                    // Fade out in last 1 second
-                    1.0 - ((elapsed - 4.0) / 1.0)
-                } else {
-                    1.0
-                };
-
-                // Position below process notification if both are showing
-                let y_offset = if self.process_notification.is_some()
-                    && self.process_notification.as_ref().map(|(_, t)| t.elapsed() < std::time::Duration::from_secs(3)).unwrap_or(false)
-                {
-                    110.0 // Below process notification
-                } else {
-                    60.0 // Same position as process notification
-                };
-
-                egui::Area::new(egui::Id::new("game_server_notification"))
-                    .anchor(egui::Align2::CENTER_TOP, [0.0, y_offset])
-                    .order(egui::Order::Foreground)
-                    .show(ctx, |ui| {
-                        egui::Frame::NONE
-                            .fill(ACCENT_PRIMARY.gamma_multiply(0.95 * alpha)) // Blue theme
-                            .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(16, 10))
-                            .shadow(egui::epaint::Shadow {
-                                offset: [0, 2],
-                                blur: 8,
-                                spread: 0,
-                                color: egui::Color32::from_black_alpha((40.0 * alpha) as u8),
-                            })
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("🌍")
-                                        .size(16.0));
-                                    ui.label(egui::RichText::new(msg)
-                                        .color(egui::Color32::WHITE.gamma_multiply(alpha))
-                                        .size(14.0)
-                                        .strong());
-                                });
-                            });
-                    });
-
-                // Request repaint for animation
-                ctx.request_repaint();
-            }
-        } else if self.game_server_notification.is_some() {
-            // Clear expired notification
-            self.game_server_notification = None;
         }
     }
 
