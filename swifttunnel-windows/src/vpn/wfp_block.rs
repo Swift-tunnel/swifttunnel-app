@@ -91,28 +91,96 @@ pub fn init() -> Result<(), String> {
     }
 }
 
+/// Build a mapping of volume device paths to drive letters using QueryDosDevice
+///
+/// Returns a HashMap like:
+///   r"\Device\HarddiskVolume3" -> 'C'
+///   r"\Device\HarddiskVolume4" -> 'D'
+fn build_drive_mapping() -> HashMap<String, char> {
+    use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
+
+    let mut mapping = HashMap::new();
+
+    // Check all possible drive letters A-Z
+    for drive_char in 'A'..='Z' {
+        // Create drive string like "C:"
+        let drive_name: Vec<u16> = format!("{}:", drive_char).encode_utf16().chain(std::iter::once(0)).collect();
+
+        // Buffer to receive device path
+        let mut buffer = [0u16; 512];
+
+        unsafe {
+            let len = QueryDosDeviceW(
+                PCWSTR::from_raw(drive_name.as_ptr()),
+                Some(&mut buffer),
+            );
+
+            if len > 0 {
+                // QueryDosDevice returns null-separated strings, take the first one
+                let device_path = String::from_utf16_lossy(&buffer[..len as usize])
+                    .split('\0')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+
+                if !device_path.is_empty() {
+                    mapping.insert(device_path, drive_char);
+                }
+            }
+        }
+    }
+
+    mapping
+}
+
 /// Convert NT path to DOS path for WFP
 /// NT paths look like: \Device\HarddiskVolume3\Users\...
 /// WFP needs DOS paths: C:\Users\...
+///
+/// Uses QueryDosDevice to properly map volume devices to drive letters,
+/// supporting drives other than C: (e.g., Roblox installed on D:)
 fn nt_to_dos_path(nt_path: &str) -> Option<String> {
-    // Common volume mappings - we could query these dynamically but this covers most cases
-    // In production, we'd use QueryDosDevice to build the mapping
+    if nt_path.starts_with(r"\Device\HarddiskVolume") || nt_path.starts_with(r"\Device\Mup") {
+        // Build the volume → drive letter mapping
+        let drive_map = build_drive_mapping();
 
-    // Simple approach: try to find common patterns
-    if nt_path.starts_with(r"\Device\HarddiskVolume") {
-        // Extract the volume number and rest of path
-        let rest = nt_path.strip_prefix(r"\Device\HarddiskVolume")?;
-        let (num_str, path) = rest.split_once('\\')?;
-        let _num: u32 = num_str.parse().ok()?;
+        // Find the matching volume device
+        for (device_path, drive_letter) in &drive_map {
+            if nt_path.starts_with(device_path) {
+                // Extract the path after the device prefix
+                let rest = nt_path.strip_prefix(device_path)?;
+                // rest starts with '\' like \Users\...
+                return Some(format!("{}:{}", drive_letter, rest));
+            }
+        }
 
-        // For now, assume C: drive - this is a simplification
-        // A proper implementation would query drive letter mappings
-        Some(format!("C:\\{}", path))
+        // Fallback: try to parse the volume number directly
+        // This handles cases where QueryDosDevice might not return expected results
+        if let Some(rest) = nt_path.strip_prefix(r"\Device\HarddiskVolume") {
+            if let Some((num_str, path)) = rest.split_once('\\') {
+                if let Ok(vol_num) = num_str.parse::<u32>() {
+                    // Search for this volume number in our mapping
+                    for (device_path, drive_letter) in &drive_map {
+                        if device_path.contains(&format!("HarddiskVolume{}", vol_num)) {
+                            return Some(format!("{}:\\{}", drive_letter, path));
+                        }
+                    }
+                    // Ultimate fallback: assume C: (shouldn't reach here often)
+                    log::warn!(
+                        "nt_to_dos_path: Could not map volume {} to drive letter, falling back to C:",
+                        vol_num
+                    );
+                    return Some(format!("C:\\{}", path));
+                }
+            }
+        }
+
+        None
     } else if nt_path.starts_with(r"\??\") {
-        // Already a DOS-style path
+        // Already a DOS-style path with \??\ prefix
         Some(nt_path.strip_prefix(r"\??\")?.to_string())
     } else if nt_path.chars().nth(1) == Some(':') {
-        // Already a DOS path
+        // Already a DOS path like C:\Users\...
         Some(nt_path.to_string())
     } else {
         None
