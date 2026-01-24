@@ -621,6 +621,21 @@ impl ParallelInterceptor {
         self.process_cache.get_snapshot()
     }
 
+    /// Immediately register a process detected via ETW
+    ///
+    /// Called when ETW detects a watched process starting. This adds the
+    /// PID → name mapping immediately, so when the first packet arrives,
+    /// the process is already in our tunnel list.
+    ///
+    /// This fixes Error 279 when launching Roblox from the website:
+    /// - Browser launches RobloxPlayerBeta.exe
+    /// - ETW notifies us INSTANTLY (microseconds)
+    /// - We register the process here
+    /// - First packet arrives → process is already known → tunneled!
+    pub fn register_process_immediate(&self, pid: u32, name: String) {
+        self.process_cache.register_process_immediate(pid, name);
+    }
+
     /// Inject an inbound IP packet to the physical adapter's MSTCP stack
     ///
     /// This is called by the WireGuard tunnel inbound task when split tunnel is active.
