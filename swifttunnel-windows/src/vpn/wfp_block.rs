@@ -11,10 +11,9 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use windows::core::GUID;
-use windows::Win32::Foundation::{WIN32_ERROR, ERROR_SUCCESS};
+use windows::core::{GUID, PCWSTR, PWSTR};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::*;
-use windows::Win32::System::Memory::{LocalFree, HLOCAL};
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
 
 /// GUID for our sublayer (random, unique to SwiftTunnel)
@@ -24,7 +23,7 @@ const SWIFTTUNNEL_SUBLAYER_GUID: GUID = GUID::from_u128(0x8a9b3c4d_5e6f_7a8b_9c0
 static WFP_STATE: Mutex<Option<WfpBlockState>> = Mutex::new(None);
 
 struct WfpBlockState {
-    engine_handle: FWPM_ENGINE_HANDLE,
+    engine_handle: HANDLE,
     /// Map of image path (lowercase) -> filter ID for active block filters
     active_filters: HashMap<String, u64>,
     /// Counter for generating unique filter GUIDs
@@ -41,7 +40,7 @@ pub fn init() -> Result<(), String> {
 
     unsafe {
         // Open WFP engine
-        let mut engine_handle = FWPM_ENGINE_HANDLE::default();
+        let mut engine_handle = HANDLE::default();
         let result = FwpmEngineOpen0(
             None,              // serverName (local)
             RPC_C_AUTHN_WINNT, // authnService
@@ -50,16 +49,21 @@ pub fn init() -> Result<(), String> {
             &mut engine_handle,
         );
 
-        if result != WIN32_ERROR(0) {
-            return Err(format!("FwpmEngineOpen0 failed: 0x{:08x}", result.0));
+        if result != 0 {
+            return Err(format!("FwpmEngineOpen0 failed: 0x{:08x}", result));
         }
+
+        // Create wide strings for display data
+        // We need to keep these alive for the duration of the call
+        let name: Vec<u16> = "SwiftTunnel Temporary Blocks\0".encode_utf16().collect();
+        let desc: Vec<u16> = "Holds game packets during split tunnel setup\0".encode_utf16().collect();
 
         // Add our sublayer (if it doesn't exist)
         let sublayer = FWPM_SUBLAYER0 {
             subLayerKey: SWIFTTUNNEL_SUBLAYER_GUID,
             displayData: FWPM_DISPLAY_DATA0 {
-                name: windows::core::w!("SwiftTunnel Temporary Blocks"),
-                description: windows::core::w!("Holds game packets during split tunnel setup"),
+                name: PWSTR::from_raw(name.as_ptr() as *mut u16),
+                description: PWSTR::from_raw(desc.as_ptr() as *mut u16),
             },
             weight: 0xFFFF, // High weight so our blocks take priority
             ..Default::default()
@@ -67,9 +71,9 @@ pub fn init() -> Result<(), String> {
 
         let add_result = FwpmSubLayerAdd0(engine_handle, &sublayer, None);
         // Ignore "already exists" error (0x80320009)
-        if add_result != WIN32_ERROR(0) && add_result.0 != 0x80320009 {
+        if add_result != 0 && add_result != 0x80320009 {
             let _ = FwpmEngineClose0(engine_handle);
-            return Err(format!("FwpmSubLayerAdd0 failed: 0x{:08x}", add_result.0));
+            return Err(format!("FwpmSubLayerAdd0 failed: 0x{:08x}", add_result));
         }
 
         *state = Some(WfpBlockState {
@@ -145,14 +149,14 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
         let mut app_id: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
 
         let result = FwpmGetAppIdFromFileName0(
-            windows::core::PCWSTR::from_raw(dos_path_wide.as_ptr()),
+            PCWSTR::from_raw(dos_path_wide.as_ptr()),
             &mut app_id,
         );
 
-        if result != WIN32_ERROR(0) {
+        if result != 0 {
             return Err(format!(
                 "FwpmGetAppIdFromFileName0 failed for '{}': 0x{:08x}",
-                dos_path, result.0
+                dos_path, result
             ));
         }
 
@@ -178,13 +182,17 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
             0x1234_5678_9abc_def0_1234_5678_0000_0000u128 | (state.filter_counter as u128)
         );
 
+        // Create wide strings for display data
+        let filter_name: Vec<u16> = "SwiftTunnel Process Block\0".encode_utf16().collect();
+        let filter_desc: Vec<u16> = "Temporary block during split tunnel setup\0".encode_utf16().collect();
+
         // Create the block filter at ALE_AUTH_CONNECT layer
         // This blocks ALL new outbound connections from this process
         let filter = FWPM_FILTER0 {
             filterKey: filter_guid,
             displayData: FWPM_DISPLAY_DATA0 {
-                name: windows::core::w!("SwiftTunnel Process Block"),
-                description: windows::core::w!("Temporary block during split tunnel setup"),
+                name: PWSTR::from_raw(filter_name.as_ptr() as *mut u16),
+                description: PWSTR::from_raw(filter_desc.as_ptr() as *mut u16),
             },
             layerKey: FWPM_LAYER_ALE_AUTH_CONNECT_V4,
             subLayerKey: SWIFTTUNNEL_SUBLAYER_GUID,
@@ -212,8 +220,8 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
         // Free the app ID blob
         FwpmFreeMemory0(&mut (app_id as *mut std::ffi::c_void));
 
-        if add_result != WIN32_ERROR(0) {
-            return Err(format!("FwpmFilterAdd0 failed: 0x{:08x}", add_result.0));
+        if add_result != 0 {
+            return Err(format!("FwpmFilterAdd0 failed: 0x{:08x}", add_result));
         }
 
         state.active_filters.insert(key, filter_id);
@@ -233,11 +241,11 @@ pub fn unblock_process_by_path(image_path: &str) -> Result<(), String> {
     if let Some(filter_id) = state.active_filters.remove(&key) {
         unsafe {
             let result = FwpmFilterDeleteById0(state.engine_handle, filter_id);
-            if result != WIN32_ERROR(0) {
+            if result != 0 {
                 log::warn!(
                     "Failed to remove block filter for '{}': 0x{:08x}",
                     image_path,
-                    result.0
+                    result
                 );
             } else {
                 log::info!("WFP block filter removed for {} (filter_id={})", image_path, filter_id);
