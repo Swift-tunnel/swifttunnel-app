@@ -42,7 +42,7 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
                 log::debug!("Cache hit for IP {}: {}", ip, location);
                 return Some(location.clone());
             }
-        }
+        };
     }
 
     // Acquire semaphore to limit concurrent requests
@@ -75,7 +75,7 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
         if let Ok(mut cache) = cache.lock() {
             cache.insert(ip, location.clone());
             log::info!("Cached location for {}: {}", ip, location);
-        }
+        };
     }
 
     Some(location)
