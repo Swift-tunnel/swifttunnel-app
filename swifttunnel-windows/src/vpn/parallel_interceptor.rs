@@ -2337,7 +2337,16 @@ fn should_route_to_vpn_with_inline_cache(
         // For V2: also check destination is game server
         // For V1: is_tunnel_app is the final result
         if !is_tunnel_app {
-            return false;
+            // SPECULATIVE TUNNELING: Even if cache says "not tunnel app", still check
+            // if destination is a game server. This handles the race condition where
+            // PID lookup failed due to UDP table latency but destination is known.
+            return match snapshot.routing_mode {
+                crate::settings::RoutingMode::V1 => false, // V1 doesn't use destination filtering
+                crate::settings::RoutingMode::V2 => {
+                    // Speculatively tunnel to known game server IPs
+                    super::process_cache::is_game_server(dst_ip, dst_port, protocol)
+                }
+            };
         }
         return match snapshot.routing_mode {
             crate::settings::RoutingMode::V1 => true,
