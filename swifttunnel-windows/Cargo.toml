@@ -119,6 +119,9 @@ tiny_http = "0.12"
 # System tray support
 tray-icon = "0.19"
 
+# Windows toast notifications (native Windows 10/11 style)
+winrt-notification = "0.5"
+
 # Image loading for tray icon
 image = { version = "0.25", default-features = false, features = ["png"] }
 
