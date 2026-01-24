@@ -33,6 +33,7 @@ pub mod split_tunnel;
 pub mod routes;
 pub mod connection;
 pub mod servers;
+pub mod error_messages;
 
 pub use config::{fetch_vpn_config, update_latency, VpnConfigRequest};
 pub use adapter::WintunAdapter;
@@ -47,6 +48,7 @@ pub use servers::{
     DynamicServerList, DynamicServerInfo, DynamicGamingRegion,
     load_server_list, ServerListSource,
 };
+pub use error_messages::{user_friendly_error, short_error};
 
 /// VPN-related errors
 #[derive(Debug, thiserror::Error)]

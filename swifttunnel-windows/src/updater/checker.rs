@@ -3,6 +3,7 @@
 use super::types::{GithubRelease, UpdateInfo};
 use log::{debug, error, info};
 use semver::Version;
+use std::time::Duration;
 
 /// GitHub repository for SwiftTunnel releases
 const GITHUB_REPO: &str = "Swift-tunnel/swifttunnel-app";
@@ -39,6 +40,27 @@ impl UpdateChecker {
                 .expect("Failed to create HTTP client"),
             current_version,
         })
+    }
+
+    /// Check for updates with a timeout
+    ///
+    /// This is useful for startup checks where we don't want to block the app
+    /// launch for too long. If the timeout expires, returns an error.
+    ///
+    /// # Arguments
+    /// * `timeout` - Maximum time to wait for the update check
+    ///
+    /// # Returns
+    /// * `Ok(Some(UpdateInfo))` - Update is available
+    /// * `Ok(None)` - Already on latest version
+    /// * `Err(String)` - Check failed or timed out
+    pub async fn check_for_update_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<UpdateInfo>, String> {
+        tokio::time::timeout(timeout, self.check_for_update())
+            .await
+            .map_err(|_| format!("Update check timed out after {:?}", timeout))?
     }
 
     /// Check for updates from GitHub releases
