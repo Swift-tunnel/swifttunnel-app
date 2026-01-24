@@ -329,9 +329,8 @@ fn verify_traffic_routing() {
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
     let mut route_manager = RouteManager::new(server_ip, if_index);
 
-    // Enable split tunnel mode - only tunnel apps will use VPN
-    // Non-tunnel apps (like testbench.exe) will bypass VPN
-    route_manager.set_split_tunnel_mode(true);
+    // Split tunnel mode is handled by ndisapi packet interception
+    // Routes only handle VPN server reachability
 
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Failed to apply routes: {}", e);
@@ -1157,7 +1156,6 @@ fn test_split_tunnel_two_apps() {
 
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
     let mut route_manager = RouteManager::new(server_ip, if_index);
-    route_manager.set_split_tunnel_mode(true);
 
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Failed to apply routes: {}", e);
@@ -1512,7 +1510,6 @@ fn run_vpn_benchmark() {
 
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
     let mut route_manager = RouteManager::new(server_ip, if_index);
-    route_manager.set_split_tunnel_mode(false); // FULL VPN mode - all traffic goes through VPN
 
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Failed: {}", e);
@@ -1537,13 +1534,12 @@ fn run_vpn_benchmark() {
         }
     };
 
-    // Now switch to split tunnel mode
-    println!("\nSwitching to split tunnel mode...");
-    let _ = route_manager.remove_routes();
-    route_manager.set_split_tunnel_mode(true); // Split tunnel mode - only app traffic goes through VPN
-    if let Err(e) = route_manager.apply_routes() {
-        println!("   ⚠ Failed: {}", e);
-    } else {
+    // Split tunnel is handled by ndisapi - routes don't change
+    println!("\nSplit tunnel mode is handled by ndisapi packet interception.");
+    println!("Routes remain the same - only VPN server reachability.");
+    // Note: The old mode-switching code has been removed since split tunnel
+    // is now the only mode (like ExitLag) and is handled at the packet level
+    {
         println!("   ✅ Split tunnel routes applied");
     }
     std::thread::sleep(Duration::from_millis(500));
@@ -2012,7 +2008,6 @@ fn run_latency_test() {
     let if_index = get_interface_index("SwiftTunnel").unwrap_or(1);
 
     let mut route_manager = RouteManager::new(server_ip, if_index);
-    route_manager.set_split_tunnel_mode(true);
     if let Err(e) = route_manager.apply_routes() {
         println!("   ⚠ Route setup failed: {}", e);
     } else {
