@@ -334,9 +334,11 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
         let watch_list = ctx.watch_list.read();
 
         let should_notify = watch_list.iter().any(|app| {
+            // Use exact matching to avoid false positives
+            // e.g., "player.exe" should NOT match "playerconfig.exe"
             let app_stem = app.trim_end_matches(".exe");
             let name_stem = name_lower.trim_end_matches(".exe");
-            name_stem.contains(app_stem) || app_stem.contains(name_stem)
+            app_stem == name_stem
         });
 
         if should_notify {
@@ -392,8 +394,9 @@ unsafe fn parse_process_start_event(record: &EVENT_RECORD) -> Option<ProcessStar
 
     // SID structure: first byte is revision, second is sub-authority count
     // Total SID size = 8 + (4 * sub_authority_count)
-    if offset < data.len() {
-        let sub_auth_count = data.get(offset + 1).copied().unwrap_or(0) as usize;
+    // Bounds check: ensure we can read at least offset + 1 for sub_auth_count
+    if offset + 1 < data.len() {
+        let sub_auth_count = data[offset + 1] as usize;
         let sid_size = 8 + (4 * sub_auth_count);
         offset += sid_size;
     }
