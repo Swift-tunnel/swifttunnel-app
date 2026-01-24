@@ -30,6 +30,10 @@ struct WfpBlockState {
     filter_counter: u32,
 }
 
+// Safety: HANDLE is a raw pointer but WFP engine handles are thread-safe.
+// We protect access with a Mutex and only use the handle for WFP operations.
+unsafe impl Send for WfpBlockState {}
+
 /// Initialize WFP engine for temporary block filters
 pub fn init() -> Result<(), String> {
     let mut state = WFP_STATE.lock().map_err(|e| format!("Lock failed: {}", e))?;
