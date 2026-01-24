@@ -219,14 +219,15 @@ pub struct ParallelInterceptor {
 
 impl ParallelInterceptor {
     /// Create new parallel interceptor
-    pub fn new(tunnel_apps: Vec<String>) -> Self {
+    pub fn new(tunnel_apps: Vec<String>, routing_mode: crate::settings::RoutingMode) -> Self {
         // Use number of logical CPUs, capped at 8 for efficiency
         let num_workers = num_cpus::get().min(8).max(1);
 
         log::info!(
-            "Creating parallel interceptor with {} workers (CPUs: {})",
+            "Creating parallel interceptor with {} workers (CPUs: {}), routing mode: {:?}",
             num_workers,
-            num_cpus::get()
+            num_cpus::get(),
+            routing_mode
         );
 
         let worker_stats: Vec<Arc<WorkerStats>> =
@@ -234,7 +235,7 @@ impl ParallelInterceptor {
 
         Self {
             num_workers,
-            process_cache: Arc::new(LockFreeProcessCache::new(tunnel_apps)),
+            process_cache: Arc::new(LockFreeProcessCache::new(tunnel_apps, routing_mode)),
             stop_flag: Arc::new(AtomicBool::new(false)),
             worker_handles: Vec::new(),
             reader_handle: None,
@@ -2248,6 +2249,14 @@ fn should_route_to_vpn_with_inline_cache(
         data[ip_start + 15],
     );
 
+    // Parse destination IP (for V2 routing)
+    let dst_ip = Ipv4Addr::new(
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    );
+
     // Parse transport header
     let transport_start = ip_start + ihl;
     if data.len() < transport_start + 4 {
@@ -2255,29 +2264,55 @@ fn should_route_to_vpn_with_inline_cache(
     }
 
     let src_port = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
+    let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
 
     // Phase 1: Check snapshot cache (fast path, O(1))
-    if snapshot.should_tunnel(src_ip, src_port, protocol) {
+    // Use V2 routing if enabled (checks destination IP + protocol)
+    if snapshot.should_tunnel_v2(src_ip, src_port, protocol, dst_ip, dst_port) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         return true;
     }
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
+    // Cache stores: is this source connection from a tunnel app? (process check only)
     let cache_key = (src_ip, src_port, protocol);
-    if let Some(&result) = inline_cache.get(&cache_key) {
+    if let Some(&is_tunnel_app) = inline_cache.get(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        return result;
+        // For V2: also check destination is game server
+        // For V1: is_tunnel_app is the final result
+        if !is_tunnel_app {
+            return false;
+        }
+        return match snapshot.routing_mode {
+            crate::settings::RoutingMode::V1 => true,
+            crate::settings::RoutingMode::V2 => {
+                super::process_cache::is_game_server(dst_ip, dst_port, protocol)
+            }
+        };
     }
 
     // Phase 3: Inline lookup (slow path, ~500μs, but only once per connection)
+    // This checks if the source process is a tunnel app
     SYSCALL_LOOKUPS.with(|c| c.set(c.get() + 1));
-    let result = inline_connection_lookup(src_ip, src_port, protocol, snapshot);
+    let is_tunnel_app = inline_connection_lookup(src_ip, src_port, protocol, snapshot);
 
-    // Cache the result for subsequent packets from this connection
+    // Cache the process check result for subsequent packets from this connection
     // Limit cache size to prevent unbounded growth
     if inline_cache.len() < 10000 {
-        inline_cache.insert(cache_key, result);
+        inline_cache.insert(cache_key, is_tunnel_app);
     }
+
+    // Apply V2 destination filter if needed
+    let result = if !is_tunnel_app {
+        false
+    } else {
+        match snapshot.routing_mode {
+            crate::settings::RoutingMode::V1 => true,
+            crate::settings::RoutingMode::V2 => {
+                super::process_cache::is_game_server(dst_ip, dst_port, protocol)
+            }
+        }
+    };
 
     // Log stats periodically
     if total > 0 && total % 200 == 0 {

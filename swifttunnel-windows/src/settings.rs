@@ -14,6 +14,44 @@ use std::path::PathBuf;
 const SETTINGS_FILE: &str = "settings.json";
 const APP_NAME: &str = "SwiftTunnel";
 
+/// Routing mode for split tunneling
+///
+/// V1: Process-based only (tunnels ALL traffic from selected game processes)
+/// V2: Hybrid mode (tunnels only game server traffic from selected processes)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RoutingMode {
+    /// V1: Process-based routing (original behavior)
+    /// Tunnels ALL traffic from tunnel app processes (RobloxPlayerBeta.exe, etc.)
+    /// Simple but may tunnel CDN/API traffic unnecessarily
+    V1,
+    /// V2: Hybrid routing (ExitLag-style)
+    /// Tunnels traffic only when:
+    /// - Source process is a tunnel app (same as V1)
+    /// - AND destination IP is in game server ranges
+    /// - AND protocol is UDP (game traffic)
+    /// More efficient - only tunnels actual game server connections
+    #[default]
+    V2,
+}
+
+impl RoutingMode {
+    /// Get display name for UI
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            RoutingMode::V1 => "V1 - Process-Based",
+            RoutingMode::V2 => "V2 - Smart (ExitLag-style)",
+        }
+    }
+
+    /// Get description for UI
+    pub fn description(&self) -> &'static str {
+        match self {
+            RoutingMode::V1 => "Tunnels ALL traffic from game processes",
+            RoutingMode::V2 => "Tunnels only game server traffic (UDP to known IPs)",
+        }
+    }
+}
+
 /// Window state for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowState {
@@ -91,6 +129,9 @@ pub struct AppSettings {
     /// Enable experimental features (Practice Mode, etc.)
     #[serde(default)]
     pub experimental_mode: bool,
+    /// Routing mode for split tunneling (V1 = process-based, V2 = hybrid/ExitLag-style)
+    #[serde(default)]
+    pub routing_mode: RoutingMode,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -128,6 +169,7 @@ impl Default for AppSettings {
             forced_servers: HashMap::new(),
             artificial_latency_ms: 0,
             experimental_mode: false,
+            routing_mode: RoutingMode::default(),
         }
     }
 }

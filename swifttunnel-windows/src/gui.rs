@@ -392,6 +392,8 @@ pub struct BoosterApp {
     last_applied_latency: u32,
     /// Enable experimental features (Practice Mode, etc.)
     experimental_mode: bool,
+    /// Routing mode for split tunnel (V1 = process-based, V2 = hybrid/ExitLag-style)
+    routing_mode: crate::settings::RoutingMode,
 }
 
 impl BoosterApp {
@@ -610,6 +612,8 @@ impl BoosterApp {
             last_applied_latency: saved_settings.artificial_latency_ms,
             // Experimental mode
             experimental_mode: saved_settings.experimental_mode,
+            // Routing mode for split tunnel
+            routing_mode: saved_settings.routing_mode,
         }
     }
 
@@ -712,6 +716,8 @@ impl BoosterApp {
             artificial_latency_ms: self.artificial_latency_ms,
             // Save experimental mode setting
             experimental_mode: self.experimental_mode,
+            // Save routing mode setting
+            routing_mode: self.routing_mode,
         };
 
         let _ = save_settings(&settings);
@@ -3753,6 +3759,119 @@ impl BoosterApp {
                 ui.label(egui::RichText::new("! Experimental features may be unstable or change without notice.").size(10.0).color(STATUS_WARNING).italics());
             });
 
+        ui.add_space(16.0);
+
+        // Split Tunnel Routing Mode section
+        let mut new_routing_mode = self.routing_mode;
+
+        egui::Frame::NONE
+            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0).inner_margin(20)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(egui::RichText::new("Split Tunnel Routing").size(14.0).color(TEXT_PRIMARY).strong());
+                ui.add_space(12.0);
+
+                ui.label(egui::RichText::new("Choose how game traffic is routed through the VPN:").size(12.0).color(TEXT_SECONDARY));
+                ui.add_space(12.0);
+
+                // V1 Option
+                let is_v1 = self.routing_mode == crate::settings::RoutingMode::V1;
+                let v1_bg = if is_v1 { BG_ELEVATED } else { BG_CARD };
+                let v1_border = if is_v1 { ACCENT_PRIMARY } else { BG_ELEVATED };
+
+                let v1_response = egui::Frame::NONE
+                    .fill(v1_bg)
+                    .stroke(egui::Stroke::new(if is_v1 { 2.0 } else { 1.0 }, v1_border))
+                    .rounding(8.0)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width() - 24.0);
+                        ui.horizontal(|ui| {
+                            // Radio button
+                            let radio_color = if is_v1 { ACCENT_PRIMARY } else { TEXT_MUTED };
+                            ui.painter().circle_stroke(
+                                ui.cursor().min + egui::vec2(8.0, 10.0),
+                                6.0,
+                                egui::Stroke::new(2.0, radio_color),
+                            );
+                            if is_v1 {
+                                ui.painter().circle_filled(
+                                    ui.cursor().min + egui::vec2(8.0, 10.0),
+                                    3.0,
+                                    ACCENT_PRIMARY,
+                                );
+                            }
+                            ui.add_space(20.0);
+
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(crate::settings::RoutingMode::V1.display_name()).size(13.0).color(TEXT_PRIMARY).strong());
+                                ui.label(egui::RichText::new(crate::settings::RoutingMode::V1.description()).size(11.0).color(TEXT_SECONDARY));
+                            });
+                        });
+                    });
+
+                if v1_response.response.interact(egui::Sense::click()).clicked() {
+                    new_routing_mode = crate::settings::RoutingMode::V1;
+                }
+
+                ui.add_space(8.0);
+
+                // V2 Option
+                let is_v2 = self.routing_mode == crate::settings::RoutingMode::V2;
+                let v2_bg = if is_v2 { BG_ELEVATED } else { BG_CARD };
+                let v2_border = if is_v2 { ACCENT_PRIMARY } else { BG_ELEVATED };
+
+                let v2_response = egui::Frame::NONE
+                    .fill(v2_bg)
+                    .stroke(egui::Stroke::new(if is_v2 { 2.0 } else { 1.0 }, v2_border))
+                    .rounding(8.0)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width() - 24.0);
+                        ui.horizontal(|ui| {
+                            // Radio button
+                            let radio_color = if is_v2 { ACCENT_PRIMARY } else { TEXT_MUTED };
+                            ui.painter().circle_stroke(
+                                ui.cursor().min + egui::vec2(8.0, 10.0),
+                                6.0,
+                                egui::Stroke::new(2.0, radio_color),
+                            );
+                            if is_v2 {
+                                ui.painter().circle_filled(
+                                    ui.cursor().min + egui::vec2(8.0, 10.0),
+                                    3.0,
+                                    ACCENT_PRIMARY,
+                                );
+                            }
+                            ui.add_space(20.0);
+
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(crate::settings::RoutingMode::V2.display_name()).size(13.0).color(TEXT_PRIMARY).strong());
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new("RECOMMENDED").size(9.0).color(STATUS_CONNECTED));
+                                });
+                                ui.label(egui::RichText::new(crate::settings::RoutingMode::V2.description()).size(11.0).color(TEXT_SECONDARY));
+                            });
+                        });
+                    });
+
+                if v2_response.response.interact(egui::Sense::click()).clicked() {
+                    new_routing_mode = crate::settings::RoutingMode::V2;
+                }
+
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("V2 is more efficient - only game server traffic uses bandwidth.").size(10.0).color(TEXT_MUTED).italics());
+            });
+
+        // Handle routing mode change
+        if new_routing_mode != self.routing_mode {
+            self.routing_mode = new_routing_mode;
+            log::info!("Routing mode changed to: {:?}", new_routing_mode);
+            self.mark_dirty();
+        }
+
         // Handle actions after UI rendering
         if check_now {
             self.start_update_check();
@@ -4616,6 +4735,7 @@ impl BoosterApp {
 
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
+        let routing_mode = self.routing_mode;
 
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();
@@ -4623,7 +4743,7 @@ impl BoosterApp {
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps).await {
+                    if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode).await {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }

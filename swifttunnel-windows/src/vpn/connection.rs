@@ -155,11 +155,13 @@ impl VpnConnection {
     /// * `access_token` - Bearer token for API authentication
     /// * `region` - Server region to connect to
     /// * `tunnel_apps` - Apps that SHOULD use VPN (games). Everything else bypasses.
+    /// * `routing_mode` - V1 (process-based) or V2 (hybrid/ExitLag-style)
     pub async fn connect(
         &mut self,
         access_token: &str,
         region: &str,
         tunnel_apps: Vec<String>,
+        routing_mode: crate::settings::RoutingMode,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -249,7 +251,7 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
         // Split tunnel is the ONLY mode (like ExitLag) - no full tunnel option
         let tunneled_processes = if !tunnel_apps.is_empty() {
-            match self.setup_split_tunnel(&config, &adapter, tunnel_apps.clone()).await {
+            match self.setup_split_tunnel(&config, &adapter, tunnel_apps.clone(), routing_mode).await {
                 Ok(processes) => {
                     log::info!("Split tunnel setup succeeded");
                     processes
@@ -345,6 +347,7 @@ impl VpnConnection {
         config: &VpnConfig,
         adapter: &WintunAdapter,
         tunnel_apps: Vec<String>,
+        routing_mode: crate::settings::RoutingMode,
     ) -> VpnResult<Vec<String>> {
         let interface_luid = adapter.get_luid();
         log::info!("Setting up split tunnel (LUID: {})...", interface_luid);
@@ -454,6 +457,7 @@ impl VpnConnection {
             config.assigned_ip.clone(),
             internet_ip.to_string(),
             interface_luid,
+            routing_mode,
         );
 
         driver.configure(split_config).map_err(|e| {
