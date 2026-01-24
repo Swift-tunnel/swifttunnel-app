@@ -402,6 +402,8 @@ pub struct BoosterApp {
     last_applied_latency: u32,
     /// Enable experimental features (Practice Mode, etc.)
     experimental_mode: bool,
+    /// Logo texture handle (loaded from embedded PNG)
+    logo_texture: Option<egui::TextureHandle>,
     /// Routing mode for split tunnel (V1 = process-based, V2 = hybrid/ExitLag-style)
     routing_mode: crate::settings::RoutingMode,
 }
@@ -644,6 +646,30 @@ impl BoosterApp {
             experimental_mode: saved_settings.experimental_mode,
             // Routing mode for split tunnel
             routing_mode: saved_settings.routing_mode,
+            // Logo texture (loaded from embedded PNG)
+            logo_texture: Self::load_logo_texture(&cc.egui_ctx),
+        }
+    }
+
+    /// Load the SwiftTunnel logo as an egui texture
+    fn load_logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        // Embed the logo PNG at compile time
+        let logo_bytes = include_bytes!("../assets/logo.png");
+
+        // Decode the PNG image
+        match image::load_from_memory(logo_bytes) {
+            Ok(image) => {
+                let rgba = image.to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let pixels = rgba.into_raw();
+
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+                Some(ctx.load_texture("swifttunnel-logo", color_image, egui::TextureOptions::LINEAR))
+            }
+            Err(e) => {
+                log::warn!("Failed to load logo image: {}", e);
+                None
+            }
         }
     }
 
@@ -1432,54 +1458,17 @@ impl BoosterApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
 
-                // Modern logo with gradient effect
+                // SwiftTunnel logo from embedded PNG
                 let logo_size = 36.0;
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
-                let center = rect.center();
-
-                // Animated gradient ring
-                let elapsed = self.app_start_time.elapsed().as_secs_f32();
-                let rotation = elapsed * 0.5;
-
-                // Outer ring with gradient-like effect
-                let ring_color_1 = lerp_color(ACCENT_PRIMARY, ACCENT_CYAN, ((rotation).sin() + 1.0) / 2.0);
-                let ring_color_2 = lerp_color(ACCENT_CYAN, ACCENT_SECONDARY, ((rotation + 1.0).sin() + 1.0) / 2.0);
-
-                // Background circle
-                ui.painter().circle_filled(center, logo_size * 0.42, BG_ELEVATED);
-
-                // Gradient-like arc segments
-                for i in 0..8 {
-                    let angle_start = (i as f32 / 8.0) * std::f32::consts::TAU + rotation;
-                    let color = lerp_color(ring_color_1, ring_color_2, i as f32 / 8.0);
-                    let alpha = 0.6 + (((angle_start * 2.0).sin() + 1.0) / 2.0) * 0.4;
-
-                    for j in 0..3 {
-                        let angle = angle_start + j as f32 * 0.05;
-                        let x = center.x + angle.cos() * (logo_size * 0.35);
-                        let y = center.y + angle.sin() * (logo_size * 0.35);
-                        ui.painter().circle_filled(egui::pos2(x, y), 2.0, color.gamma_multiply(alpha));
-                    }
-                }
-
-                // Inner stylized "S" with wave effect
-                let wave_color = ACCENT_CYAN;
-                for i in 0..3 {
-                    let offset = (i as f32 - 1.0) * 4.0;
-                    let start = egui::pos2(center.x - 8.0, center.y + offset);
-                    let end = egui::pos2(center.x + 8.0, center.y + offset);
-                    let control1 = egui::pos2(center.x - 3.0, center.y + offset - 4.0);
-                    let control2 = egui::pos2(center.x + 3.0, center.y + offset + 4.0);
-
-                    let points = [start, control1, control2, end];
-                    let alpha = 0.6 + (i as f32 * 0.2);
-                    let stroke = egui::Stroke::new(2.0, wave_color.gamma_multiply(alpha));
-                    ui.painter().add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
-                        points,
-                        false,
-                        egui::Color32::TRANSPARENT,
-                        stroke,
-                    )));
+                if let Some(texture) = &self.logo_texture {
+                    let image = egui::Image::new(texture)
+                        .fit_to_exact_size(egui::vec2(logo_size, logo_size))
+                        .rounding(egui::CornerRadius::same(8));
+                    ui.add(image);
+                } else {
+                    // Fallback: simple colored circle if texture failed to load
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), logo_size * 0.45, ACCENT_CYAN);
                 }
 
                 ui.add_space(12.0);
@@ -4272,31 +4261,17 @@ impl BoosterApp {
                     // HEADER: Logo + SwiftTunnel text
                     // ─────────────────────────────────────────────────────────────
                     ui.horizontal(|ui| {
-                        // Draw wave/tunnel logo icon
+                        // SwiftTunnel logo from embedded PNG
                         let logo_size = 32.0;
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
-                        let center = rect.center();
-
-                        // Draw stylized wave/tunnel shape
-                        let wave_color = ACCENT_CYAN;
-                        ui.painter().circle_filled(center, logo_size * 0.45, wave_color.gamma_multiply(0.2));
-
-                        // Draw curved lines for wave effect
-                        for i in 0..3 {
-                            let offset = (i as f32 - 1.0) * 5.0;
-                            let start = egui::pos2(center.x - 8.0, center.y + offset);
-                            let end = egui::pos2(center.x + 8.0, center.y + offset);
-                            let control1 = egui::pos2(center.x - 4.0, center.y + offset - 4.0);
-                            let control2 = egui::pos2(center.x + 4.0, center.y + offset + 4.0);
-
-                            let points = [start, control1, control2, end];
-                            let stroke = egui::Stroke::new(2.0, wave_color);
-                            ui.painter().add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape::from_points_stroke(
-                                points,
-                                false,
-                                egui::Color32::TRANSPARENT,
-                                stroke,
-                            )));
+                        if let Some(texture) = &self.logo_texture {
+                            let image = egui::Image::new(texture)
+                                .fit_to_exact_size(egui::vec2(logo_size, logo_size))
+                                .rounding(egui::CornerRadius::same(6));
+                            ui.add(image);
+                        } else {
+                            // Fallback: simple colored circle if texture failed to load
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), logo_size * 0.45, ACCENT_CYAN);
                         }
 
                         ui.add_space(8.0);

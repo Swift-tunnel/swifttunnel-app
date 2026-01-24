@@ -3,7 +3,39 @@
 //! Uses Windows Runtime (WinRT) for native Windows 10/11 style notifications.
 //! Similar to Bloxstrap's server location notifications.
 
-use winrt_notification::{Duration, Sound, Toast};
+use std::path::Path;
+use winrt_notification::{Duration, IconCrop, Sound, Toast};
+
+/// SwiftTunnel's App User Model ID for Windows notifications
+/// This allows Windows to display "SwiftTunnel" as the notification source
+const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.VPN.Client";
+
+/// Get the path to the SwiftTunnel icon
+fn get_icon_path() -> Option<std::path::PathBuf> {
+    // Try installed location first
+    let installed_path = Path::new(r"C:\Program Files\SwiftTunnel\swifttunnel.ico");
+    if installed_path.exists() {
+        return Some(installed_path.to_path_buf());
+    }
+
+    // Try relative to executable (for development)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let dev_path = exe_dir.join("swifttunnel.ico");
+            if dev_path.exists() {
+                return Some(dev_path);
+            }
+            // Also try assets folder
+            let assets_path = exe_dir.join("assets").join("swifttunnel.ico");
+            if assets_path.exists() {
+                return Some(assets_path);
+            }
+        }
+    }
+
+    log::debug!("Notification icon not found in any expected location");
+    None
+}
 
 /// Show a Windows toast notification
 ///
@@ -11,15 +43,18 @@ use winrt_notification::{Duration, Sound, Toast};
 /// * `title` - The notification title (e.g., "Connected to server")
 /// * `message` - The notification body (e.g., "Location: Singapore, SG")
 pub fn show_notification(title: &str, message: &str) {
-    // Use SwiftTunnel as the app identifier
-    // Note: For proper notifications, the app should be registered with a valid AUMID
-    // For now, we use PowerShell's AUMID as a fallback which works for development
-    let result = Toast::new(Toast::POWERSHELL_APP_ID)
+    let mut toast = Toast::new(SWIFTTUNNEL_AUMID)
         .title(title)
         .text1(message)
         .sound(Some(Sound::Default))
-        .duration(Duration::Short)
-        .show();
+        .duration(Duration::Short);
+
+    // Add icon if available
+    if let Some(icon_path) = get_icon_path() {
+        toast = toast.icon(&icon_path, IconCrop::Square, "SwiftTunnel");
+    }
+
+    let result = toast.show();
 
     match result {
         Ok(_) => log::debug!("Notification shown: {} - {}", title, message),
