@@ -99,14 +99,33 @@ fn format_location(info: &IpInfoResponse) -> Option<String> {
 }
 
 /// Check if an IP is likely a Roblox game server
-/// Based on known Roblox IP ranges
+/// Based on known Roblox IP ranges from AS22697/AS11281
+///
+/// Sources:
+/// - https://devforum.roblox.com/t/all-of-robloxs-ip-ranges-ipv4-ipv6-2023/2527578
+/// - https://devforum.roblox.com/t/roblox-server-region-a-list-of-roblox-ip-ranges/3094401
 pub fn is_roblox_game_server_ip(ip: Ipv4Addr) -> bool {
     let ip_u32 = u32::from(ip);
 
-    // Roblox IP ranges
+    // Roblox IP ranges (network, mask)
+    // Note: 128.116.0.0/17 covers ALL regional game servers
     const ROBLOX_RANGES: &[(u32, u32)] = &[
+        // Primary game servers (all regions)
         (0x80740000, 0xFFFF8000), // 128.116.0.0/17
+        // Secondary (San Jose)
         (0xD1CE2800, 0xFFFFF800), // 209.206.40.0/21
+        // Asia-Pacific
+        (0x678C1C00, 0xFFFFFE00), // 103.140.28.0/23
+        // China (Luobu)
+        (0x678EDC00, 0xFFFFFE00), // 103.142.220.0/23
+        // API/Matchmaking
+        (0x17ADC000, 0xFFFFFF00), // 23.173.192.0/24
+        (0x8DC10300, 0xFFFFFF00), // 141.193.3.0/24
+        (0xCDC93E00, 0xFFFFFF00), // 205.201.62.0/24
+        // Infrastructure
+        (0xCC09B800, 0xFFFFFF00), // 204.9.184.0/24
+        (0xCC0DA800, 0xFFFFFC00), // 204.13.168.0/22
+        (0xCC0DAC00, 0xFFFFFE00), // 204.13.172.0/23
     ];
 
     for &(network, mask) in ROBLOX_RANGES {

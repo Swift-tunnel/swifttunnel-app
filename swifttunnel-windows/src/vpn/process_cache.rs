@@ -25,16 +25,44 @@ use crate::settings::RoutingMode;
 // GAME SERVER IP RANGES (for V2 hybrid routing)
 // ============================================================================
 
-/// Roblox game server IP ranges
-/// Primary: 128.116.0.0/17 (128.116.0.0 - 128.116.127.255)
-/// Secondary: 209.206.40.0/21 (209.206.40.0 - 209.206.47.255)
+/// Roblox game server IP ranges - Complete list from AS22697/AS11281
 ///
-/// Source: Roblox DevForum, ExitLag research
+/// Sources:
+/// - https://devforum.roblox.com/t/all-of-robloxs-ip-ranges-ipv4-ipv6-2023/2527578
+/// - https://devforum.roblox.com/t/roblox-server-region-a-list-of-roblox-ip-ranges/3094401
+/// - BGP data from bgp.he.net for AS22697
+///
+/// Note: 128.116.0.0/17 covers ALL regional game servers worldwide.
+/// The other ranges are for secondary servers and China (Luobu).
 const ROBLOX_RANGES: &[(u32, u32, u32)] = &[
-    // 128.116.0.0/17 - primary game servers
-    (0x80740000, 0xFFFF8000, 17), // 128.116.0.0, mask 255.255.128.0, /17
-    // 209.206.40.0/21 - secondary
-    (0xD1CE2800, 0xFFFFF800, 21), // 209.206.40.0, mask 255.255.248.0, /21
+    // ============ PRIMARY GAME SERVERS ============
+    // This single /17 covers ALL regional game servers:
+    // NA: Seattle, LA, San Jose, Dallas, Chicago, Atlanta, Miami, Ashburn, NYC, Portland
+    // EU: London, Frankfurt, Amsterdam, Paris, Warsaw
+    // APAC: Singapore, Tokyo, Hong Kong, Mumbai, Sydney
+    // SA: São Paulo
+    (0x80740000, 0xFFFF8000, 17), // 128.116.0.0/17
+
+    // ============ SECONDARY GAME SERVERS ============
+    // San Jose/Palo Alto secondary servers
+    (0xD1CE2800, 0xFFFFF800, 21), // 209.206.40.0/21
+
+    // ============ ASIA-PACIFIC ============
+    (0x678C1C00, 0xFFFFFE00, 23), // 103.140.28.0/23 - APAC servers
+
+    // ============ CHINA (LUOBU) ============
+    (0x678EDC00, 0xFFFFFE00, 23), // 103.142.220.0/23 - Luobu China
+
+    // ============ API/MATCHMAKING ============
+    // These handle authentication, matchmaking, and game joining
+    (0x17ADC000, 0xFFFFFF00, 24), // 23.173.192.0/24
+    (0x8DC10300, 0xFFFFFF00, 24), // 141.193.3.0/24
+    (0xCDC93E00, 0xFFFFFF00, 24), // 205.201.62.0/24
+
+    // ============ INFRASTRUCTURE ============
+    (0xCC09B800, 0xFFFFFF00, 24), // 204.9.184.0/24
+    (0xCC0DA800, 0xFFFFFC00, 22), // 204.13.168.0/22 (covers .168-.171)
+    (0xCC0DAC00, 0xFFFFFE00, 23), // 204.13.172.0/23 (covers .172-.173)
 ];
 
 /// Roblox game server UDP port range
