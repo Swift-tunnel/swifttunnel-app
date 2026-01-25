@@ -1,0 +1,26 @@
+{
+    // Rust-analyzer settings for SwiftTunnel Windows client
+    // This configures the IDE to analyze code as if targeting Windows,
+    // which eliminates false positive errors from Windows-only dependencies.
+
+    "rust-analyzer.cargo.target": "x86_64-pc-windows-msvc",
+
+    // Only check the main binary, not test binaries (faster analysis)
+    "rust-analyzer.check.allTargets": false,
+
+    // Use cargo check for faster feedback (don't run clippy in IDE)
+    "rust-analyzer.check.command": "check",
+
+    // Increase proc-macro timeout for complex derives
+    "rust-analyzer.procMacro.attributes.enable": true,
+
+    // Set the root of the Rust project
+    "rust-analyzer.linkedProjects": [
+        "./swifttunnel-windows/Cargo.toml"
+    ],
+
+    // Exclude build artifacts from search
+    "files.exclude": {
+        "**/target": true
+    }
+}
