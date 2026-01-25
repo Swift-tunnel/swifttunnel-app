@@ -2707,10 +2707,12 @@ impl BoosterApp {
         // Check if the current forced server is set for this region
         let current_forced = self.forced_servers.get(&popup_region_id).cloned();
 
-        // Show popup window
+        // Show popup window - use open() to track when X button is clicked
         let popup_id = egui::Id::new("server_selection_popup");
+        let mut window_open = true;
         let close_popup = egui::Window::new(format!("⚙ Select Server - {}", region_name))
             .id(popup_id)
+            .open(&mut window_open)  // Track window close via X button
             .collapsible(false)
             .resizable(false)
             .default_open(true)  // Ensure popup never starts collapsed
@@ -2840,9 +2842,13 @@ impl BoosterApp {
                 should_close
             });
 
-        // Close popup if requested
-        if let Some(inner) = close_popup {
+        // Close popup if requested (via Close button, server selection, or X button)
+        if !window_open {
+            // User clicked X button on window
+            self.server_selection_popup = None;
+        } else if let Some(inner) = close_popup {
             if let Some(true) = inner.inner {
+                // User clicked Close button or selected a server
                 self.server_selection_popup = None;
             }
         }
