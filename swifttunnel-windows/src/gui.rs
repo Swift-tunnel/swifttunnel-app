@@ -2491,7 +2491,9 @@ impl BoosterApp {
                             .rounding(14.0)
                             .inner_margin(egui::Margin::symmetric(14, 14))
                             .show(ui, |ui| {
-                                ui.set_width(card_width - 28.0);
+                                // Use set_max_width to enforce hard constraint and prevent overflow
+                                ui.set_max_width(card_width - 28.0);
+                                ui.set_min_width(card_width - 28.0);
                                 ui.set_min_height(85.0);
 
                                 ui.vertical(|ui| {
@@ -2894,7 +2896,9 @@ impl BoosterApp {
                         .rounding(14.0)
                         .inner_margin(egui::Margin::symmetric(14, 14))
                         .show(ui, |ui| {
-                            ui.set_width(card_width - 28.0);
+                            // Use set_max_width to enforce hard constraint and prevent overflow
+                            ui.set_max_width(card_width - 28.0);
+                            ui.set_min_width(card_width - 28.0);
                             ui.set_min_height(85.0);
 
                             ui.vertical(|ui| {
@@ -3256,7 +3260,9 @@ impl BoosterApp {
                     .rounding(12.0)
                     .inner_margin(egui::Margin::symmetric(12, 16))
                     .show(ui, |ui| {
-                        ui.set_width(card_width - 24.0);
+                        // Use set_max_width to enforce hard constraint and prevent overflow
+                        ui.set_max_width(card_width - 24.0);
+                        ui.set_min_width(card_width - 24.0);
                         ui.vertical_centered(|ui| {
                             ui.label(egui::RichText::new(icon).size(24.0).color(if is_selected { ACCENT_PRIMARY } else { TEXT_MUTED }));
                             ui.add_space(8.0);
@@ -5691,7 +5697,8 @@ impl BoosterApp {
 
                     // Download gauge
                     ui.vertical(|ui| {
-                        ui.set_width(gauge_width);
+                        ui.set_max_width(gauge_width);
+                        ui.set_min_width(gauge_width);
                         self.render_speed_gauge(ui, "Download", self.network_analyzer_state.speed.download_speed, ACCENT_CYAN, true);
                     });
 
@@ -5699,7 +5706,8 @@ impl BoosterApp {
 
                     // Upload gauge
                     ui.vertical(|ui| {
-                        ui.set_width(gauge_width);
+                        ui.set_max_width(gauge_width);
+                        ui.set_min_width(gauge_width);
                         self.render_speed_gauge(ui, "Upload", self.network_analyzer_state.speed.upload_speed, ACCENT_SECONDARY, false);
                     });
                 });
