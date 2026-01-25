@@ -67,6 +67,10 @@ pub struct WireguardTunnel {
     /// If tunnel sends keepalives from its socket, server switches peer endpoint,
     /// causing bulk traffic responses to go to wrong socket.
     skip_keepalives: Arc<AtomicBool>,
+    /// When true, the tunnel's inbound task should stop reading (split tunnel handles inbound)
+    /// CRITICAL FIX for Error 279: When split tunnel takes the socket, the tunnel's inbound
+    /// task must stop reading, otherwise both compete for packets and some get lost.
+    skip_inbound: Arc<AtomicBool>,
     /// Stored std socket clone for split tunnel handoff
     /// CRITICAL FIX for Error 279: VPN server responds to the socket that did the handshake.
     /// We store a clone of that socket here so split tunnel can reuse it instead of
@@ -89,6 +93,7 @@ impl WireguardTunnel {
             inbound_handler: Arc::new(std::sync::Mutex::new(None)),
             tunn: Arc::new(std::sync::Mutex::new(None)),
             skip_keepalives: Arc::new(AtomicBool::new(false)),
+            skip_inbound: Arc::new(AtomicBool::new(false)),
             stored_socket: Arc::new(std::sync::Mutex::new(None)),
         })
     }
@@ -153,6 +158,11 @@ impl WireguardTunnel {
         let socket = self.stored_socket.lock().unwrap().take();
         if socket.is_some() {
             log::info!("Socket handed off to split tunnel (VPN server will respond here)");
+            // CRITICAL: Tell the tunnel's inbound task to stop reading!
+            // Otherwise both the tunnel inbound task and split tunnel inbound receiver
+            // will compete for packets on the shared socket fd, causing random packet loss.
+            self.skip_inbound.store(true, Ordering::SeqCst);
+            log::info!("Tunnel inbound task will stop (split tunnel handles inbound now)");
         }
         socket
     }
@@ -253,6 +263,7 @@ impl WireguardTunnel {
             Arc::clone(&self.running),
             Arc::clone(&self.stats),
             self.get_inbound_handler(),
+            Arc::clone(&self.skip_inbound),
             shutdown_tx.subscribe(),
         );
 
@@ -424,6 +435,11 @@ impl WireguardTunnel {
     ///
     /// When inbound_handler is set (split tunnel mode), decrypted packets are
     /// passed to the handler instead of being written to the Wintun adapter.
+    ///
+    /// IMPORTANT: When skip_inbound becomes true, this task MUST stop reading from
+    /// the socket. This happens when split tunnel takes over inbound handling via
+    /// take_socket_for_split_tunnel(). If both this task AND the split tunnel
+    /// inbound receiver read from the same socket, packets are randomly lost.
     fn spawn_inbound_task(
         &self,
         adapter: Arc<WintunAdapter>,
@@ -432,6 +448,7 @@ impl WireguardTunnel {
         running: Arc<AtomicBool>,
         stats: Arc<std::sync::Mutex<TunnelStats>>,
         inbound_handler: Arc<std::sync::Mutex<Option<InboundHandler>>>,
+        skip_inbound: Arc<AtomicBool>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
@@ -440,6 +457,13 @@ impl WireguardTunnel {
             let mut handler_used = false;
 
             while running.load(Ordering::SeqCst) {
+                // CRITICAL: Check if split tunnel has taken over inbound handling
+                // If so, we MUST stop reading to avoid competing for packets
+                if skip_inbound.load(Ordering::SeqCst) {
+                    log::info!("Inbound task: split tunnel took over - stopping to avoid race condition");
+                    break;
+                }
+
                 // Check for shutdown
                 if shutdown.try_recv().is_ok() {
                     break;

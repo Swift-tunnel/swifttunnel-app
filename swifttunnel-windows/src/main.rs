@@ -375,8 +375,10 @@ fn main() -> eframe::Result<()> {
     let window_state = &saved_settings.window_state;
 
     // Build viewport - ALWAYS start maximized (fullscreen)
+    // Include version in title for easier user support
+    let app_title = format!("SwiftTunnel v{}", env!("CARGO_PKG_VERSION"));
     let viewport = egui::ViewportBuilder::default()
-        .with_title("SwiftTunnel")
+        .with_title(&app_title)
         .with_min_inner_size([480.0, 600.0])  // Smaller minimum for flexibility
         .with_inner_size([window_state.width, window_state.height])
         .with_resizable(true)           // Allow window resizing

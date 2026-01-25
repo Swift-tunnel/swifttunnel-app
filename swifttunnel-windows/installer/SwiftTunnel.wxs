@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="SwiftTunnel"
              Language="1033"
-             Version="0.9.3.0"
+             Version="0.9.4.0"
              Manufacturer="SwiftTunnel"
              UpgradeCode="8B5E7A12-4F3D-4A2B-9C5E-1D2F3A4B5C6D">
 
@@ -43,9 +43,26 @@
         </Feature>
 
         <!-- Custom Actions for Firewall -->
+        <!-- Delete existing rule first to prevent duplicates on upgrade -->
+        <SetProperty Id="DeleteFirewallRule"
+                     Value="&quot;netsh.exe&quot; advfirewall firewall delete rule name=&quot;SwiftTunnel&quot;"
+                     Before="DeleteFirewallRule"
+                     Sequence="execute" />
+        <CustomAction Id="DeleteFirewallRule"
+                      BinaryKey="WixCA"
+                      DllEntry="WixQuietExec64"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore" />
+
+        <!-- Add firewall rule after deleting any existing one -->
+        <SetProperty Id="AddFirewallRule"
+                     Value="&quot;netsh.exe&quot; advfirewall firewall add rule name=&quot;SwiftTunnel&quot; dir=in action=allow program=&quot;[INSTALLFOLDER]swifttunnel-fps-booster.exe&quot; enable=yes"
+                     Before="AddFirewallRule"
+                     Sequence="execute" />
         <CustomAction Id="AddFirewallRule"
-                      Directory="INSTALLFOLDER"
-                      ExeCommand="netsh advfirewall firewall add rule name=&quot;SwiftTunnel&quot; dir=in action=allow program=&quot;[INSTALLFOLDER]swifttunnel-fps-booster.exe&quot; enable=yes"
+                      BinaryKey="WixCA"
+                      DllEntry="WixQuietExec64"
                       Execute="deferred"
                       Impersonate="no"
                       Return="ignore" />
@@ -74,7 +91,10 @@
         <InstallExecuteSequence>
             <!-- Install WinPkFilter driver on fresh install AND upgrades (not on uninstall) -->
             <Custom Action="InstallWinPkFilter" After="InstallFiles">NOT REMOVE~="ALL"</Custom>
-            <Custom Action="AddFirewallRule" After="InstallWinPkFilter">NOT REMOVE~="ALL"</Custom>
+            <!-- Delete firewall rule on install (cleanup duplicates) AND uninstall -->
+            <Custom Action="DeleteFirewallRule" After="InstallWinPkFilter">1</Custom>
+            <!-- Add firewall rule only on install, not uninstall -->
+            <Custom Action="AddFirewallRule" After="DeleteFirewallRule">NOT REMOVE~="ALL"</Custom>
         </InstallExecuteSequence>
 
         <!-- Launch app after installation completes (runs in UI sequence) -->
