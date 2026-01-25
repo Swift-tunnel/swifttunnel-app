@@ -104,6 +104,22 @@ pub fn is_roblox_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol
     false
 }
 
+/// Check if destination is a Roblox game server (PERMISSIVE - port range only)
+///
+/// This is used when we KNOW the packet is from a Roblox process.
+/// We trust the process detection and only filter by port range, not IP.
+/// This handles new Roblox server deployments that aren't in our IP list yet.
+#[inline(always)]
+pub fn is_likely_game_traffic(dst_port: u16, protocol: Protocol) -> bool {
+    // Must be UDP for game traffic
+    if protocol != Protocol::Udp {
+        return false;
+    }
+
+    // Check port range - Roblox game servers use ephemeral ports
+    dst_port >= ROBLOX_PORT_MIN && dst_port <= ROBLOX_PORT_MAX
+}
+
 /// Check if destination is any known game server (extensible for future games)
 #[inline(always)]
 pub fn is_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bool {
@@ -330,6 +346,13 @@ impl ProcessSnapshot {
     /// Check if connection should be tunneled with destination info (V2 support)
     ///
     /// This is the new method that supports V2 hybrid routing.
+    ///
+    /// V2 PERMISSIVE MODE (v0.9.5):
+    /// - If process IS a tunnel app → use permissive check (port range only)
+    /// - If process is NOT detected → use strict check (known IP ranges + port)
+    ///
+    /// This fixes the "zero traffic" bug where Roblox connects to servers
+    /// on new IPs that aren't in our hardcoded list yet.
     #[inline(always)]
     pub fn should_tunnel_v2(
         &self,
@@ -342,16 +365,22 @@ impl ProcessSnapshot {
         // First check: Is this from a tunnel app?
         let is_tunnel_app = self.is_tunnel_connection(local_ip, local_port, protocol);
 
-        if !is_tunnel_app {
-            return false;
-        }
-
         // V1 mode: process check is enough
         if self.routing_mode == RoutingMode::V1 {
-            return true;
+            return is_tunnel_app;
         }
 
-        // V2 mode: also check destination is a game server
+        // V2 mode with PERMISSIVE process trust:
+        // If we KNOW it's a tunnel app, trust it and tunnel its UDP traffic
+        // even if the destination IP isn't in our known list.
+        // This handles new Roblox server deployments gracefully.
+        if is_tunnel_app {
+            // Trust the process - just check if it looks like game traffic (UDP to high port)
+            return is_likely_game_traffic(dst_port, protocol);
+        }
+
+        // Process not detected - use strict IP range check for speculative tunneling
+        // This catches first packets before process cache is populated
         is_game_server(dst_ip, dst_port, protocol)
     }
 
