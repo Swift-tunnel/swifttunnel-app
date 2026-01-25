@@ -108,9 +108,10 @@ fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
 
         match ip_entry {
             Some(entry) => {
-                // dwAddr is in host byte order (little-endian on Windows)
-                // Ipv4Addr::from(u32) expects host byte order, so no conversion needed
-                let ip = Ipv4Addr::from(entry.dwAddr);
+                // dwAddr is stored in network byte order (big-endian) in memory.
+                // On little-endian Windows, reading it as u32 reverses the bytes.
+                // We need to swap back to get the correct value for Ipv4Addr::from().
+                let ip = Ipv4Addr::from(entry.dwAddr.to_be());
                 Ok(ip)
             }
             None => Err(VpnError::Route(format!(
@@ -246,9 +247,10 @@ impl RouteManager {
 
             match default_route {
                 Some(row) => {
-                    // dwForwardNextHop is in host byte order (little-endian on Windows)
-                    // Ipv4Addr::from(u32) expects host byte order, so no conversion needed
-                    let gateway = Ipv4Addr::from(row.dwForwardNextHop);
+                    // dwForwardNextHop is stored in network byte order (big-endian) in memory.
+                    // On little-endian Windows, reading it as u32 reverses the bytes.
+                    // We need to swap back to get the correct value for Ipv4Addr::from().
+                    let gateway = Ipv4Addr::from(row.dwForwardNextHop.to_be());
                     Ok(gateway)
                 }
                 None => Err(VpnError::Route("No default gateway found".to_string())),
