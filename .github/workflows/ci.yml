@@ -58,6 +58,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Add Windows target
+        run: rustup target add x86_64-pc-windows-msvc
+
       - name: Check formatting
         run: cargo fmt --check
         continue-on-error: true

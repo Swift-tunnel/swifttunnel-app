@@ -276,6 +276,20 @@ impl VpnConnection {
         // Give tunnel a moment to establish
         tokio::time::sleep(Duration::from_millis(500)).await;
 
+        // Step 3.5: Stop tunnel tasks before split tunnel setup
+        // This prevents:
+        // 1. Socket invalidation when WinpkFilter MSI installs (NDIS driver install resets adapters)
+        // 2. Dual socket conflict (tunnel socket vs split tunnel VpnEncryptContext socket)
+        // Split tunnel workers will take over all packet handling.
+        // Note: The Tunn instance remains valid - only the tasks are stopped.
+        if let Some(ref tunnel) = self.tunnel {
+            log::info!("Stopping tunnel tasks for split tunnel handoff...");
+            tunnel.stop();
+            // Brief pause to ensure tasks have exited cleanly
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            log::info!("Tunnel tasks stopped, proceeding with split tunnel setup");
+        }
+
         // Step 4: Configure split tunneling (process-based via ndisapi)
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
         // Split tunnel is the ONLY mode (like ExitLag) - no full tunnel option
