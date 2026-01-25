@@ -2499,7 +2499,7 @@ fn should_route_to_vpn_with_inline_cache(
     let cache_key = (src_ip, src_port, protocol);
     if let Some(&is_tunnel_app) = inline_cache.get(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        // For V2: also check destination is game server
+        // For V2: use PERMISSIVE mode if process is identified (v0.9.5 fix)
         // For V1: is_tunnel_app is the final result
         if !is_tunnel_app {
             // SPECULATIVE TUNNELING: Even if cache says "not tunnel app", still check
@@ -2513,10 +2513,13 @@ fn should_route_to_vpn_with_inline_cache(
                 }
             };
         }
+        // Process IS a tunnel app - use permissive check in V2 mode
         return match snapshot.routing_mode {
             crate::settings::RoutingMode::V1 => true,
             crate::settings::RoutingMode::V2 => {
-                super::process_cache::is_game_server(dst_ip, dst_port, protocol)
+                // PERMISSIVE MODE (v0.9.5): Trust the process, just check if it's game-like traffic
+                // This fixes zero traffic when Roblox uses servers not in our IP list
+                super::process_cache::is_likely_game_traffic(dst_port, protocol)
             }
         };
     }
@@ -2565,10 +2568,13 @@ fn should_route_to_vpn_with_inline_cache(
             false
         }
     } else {
+        // Process IS a tunnel app
         match snapshot.routing_mode {
             crate::settings::RoutingMode::V1 => true,
             crate::settings::RoutingMode::V2 => {
-                super::process_cache::is_game_server(dst_ip, dst_port, protocol)
+                // PERMISSIVE MODE (v0.9.5): Trust the process, just check if it's game-like traffic
+                // This fixes zero traffic when Roblox uses servers not in our IP list
+                super::process_cache::is_likely_game_traffic(dst_port, protocol)
             }
         }
     };
@@ -2596,6 +2602,28 @@ fn should_route_to_vpn_with_inline_cache(
             total, src_ip, src_port, protocol, result,
             snapshot.tunnel_apps.iter().take(5).collect::<Vec<_>>()
         );
+    }
+
+    // V2 DIAGNOSTIC: Log first few UDP packets to high ports that are BYPASSED
+    // This helps diagnose if V2 mode is incorrectly rejecting game traffic
+    if !result && protocol == Protocol::Udp && dst_port >= 49152 {
+        thread_local! {
+            static V2_BYPASS_LOG_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        }
+        let log_count = V2_BYPASS_LOG_COUNT.with(|c| {
+            let n = c.get();
+            c.set(n + 1);
+            n
+        });
+        // Log first 20 high-port UDP packets that were bypassed
+        if log_count < 20 {
+            log::info!(
+                "V2 BYPASS: {}:{}/{:?} -> {}:{} | tunnel_app={}, port_ok=true, ip_in_ranges={}",
+                src_ip, src_port, protocol, dst_ip, dst_port,
+                is_tunnel_app,
+                super::process_cache::is_roblox_game_server(dst_ip, dst_port, protocol)
+            );
+        }
     }
 
     result
