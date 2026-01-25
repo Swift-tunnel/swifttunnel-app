@@ -20,11 +20,11 @@ const APP_NAME: &str = "SwiftTunnel";
 /// V2: Hybrid mode (tunnels only game server traffic from selected processes)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RoutingMode {
-    /// V1: Process-based routing (original behavior)
+    /// V1: Process-based routing
     /// Tunnels ALL traffic from tunnel app processes (RobloxPlayerBeta.exe, etc.)
     /// Simple but may tunnel CDN/API traffic unnecessarily
     V1,
-    /// V2: Hybrid routing (ExitLag-style)
+    /// V2: Hybrid routing (ExitLag-style) - RECOMMENDED
     /// Tunnels traffic only when:
     /// - Source process is a tunnel app (same as V1)
     /// - AND destination IP is in game server ranges
