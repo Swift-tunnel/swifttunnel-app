@@ -67,6 +67,11 @@ pub struct WireguardTunnel {
     /// If tunnel sends keepalives from its socket, server switches peer endpoint,
     /// causing bulk traffic responses to go to wrong socket.
     skip_keepalives: Arc<AtomicBool>,
+    /// Stored std socket clone for split tunnel handoff
+    /// CRITICAL FIX for Error 279: VPN server responds to the socket that did the handshake.
+    /// We store a clone of that socket here so split tunnel can reuse it instead of
+    /// creating a new socket on a different port (which would never receive responses).
+    stored_socket: Arc<std::sync::Mutex<Option<std::net::UdpSocket>>>,
 }
 
 impl WireguardTunnel {
@@ -84,6 +89,7 @@ impl WireguardTunnel {
             inbound_handler: Arc::new(std::sync::Mutex::new(None)),
             tunn: Arc::new(std::sync::Mutex::new(None)),
             skip_keepalives: Arc::new(AtomicBool::new(false)),
+            stored_socket: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -131,6 +137,26 @@ impl WireguardTunnel {
         self.tunn.lock().unwrap().clone()
     }
 
+    /// Get the UDP socket for split tunnel reuse
+    ///
+    /// CRITICAL FIX for Error 279 (zero inbound traffic):
+    /// Returns the socket that performed the WireGuard handshake. The VPN server
+    /// will send ALL responses to this socket's port. If split tunnel creates a
+    /// new socket on a different port, responses will never arrive.
+    ///
+    /// This method TAKES the socket (Option::take), so it can only be called once.
+    /// The caller becomes the owner and is responsible for reading from it.
+    ///
+    /// Call this AFTER tunnel.stop() to ensure tunnel tasks have released their
+    /// references to the Tokio socket (which shares the same underlying port).
+    pub fn take_socket_for_split_tunnel(&self) -> Option<std::net::UdpSocket> {
+        let socket = self.stored_socket.lock().unwrap().take();
+        if socket.is_some() {
+            log::info!("Socket handed off to split tunnel (VPN server will respond here)");
+        }
+        socket
+    }
+
     /// Get the VPN server endpoint
     pub fn get_endpoint(&self) -> SocketAddr {
         self.endpoint
@@ -169,14 +195,35 @@ impl WireguardTunnel {
         *self.tunn.lock().unwrap() = Some(Arc::clone(&tunn));
 
         // Create UDP socket for server communication
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .await
+        // CRITICAL FIX for Error 279 (zero inbound traffic):
+        // We create a std::net::UdpSocket first, clone it for split tunnel reuse,
+        // then convert to Tokio socket for async tasks. This ensures:
+        // 1. Handshake is sent from this socket → VPN server knows to respond here
+        // 2. Split tunnel uses the SAME socket → responses arrive correctly
+        // 3. No more dual-socket mismatch causing 0 B/s inbound
+        let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")
             .map_err(|e| VpnError::Network(format!("Failed to bind UDP socket: {}", e)))?;
 
-        socket
+        std_socket
             .connect(self.endpoint)
-            .await
             .map_err(|e| VpnError::Network(format!("Failed to connect to endpoint: {}", e)))?;
+
+        // Clone the socket BEFORE converting to Tokio - this clone will be used by split tunnel
+        // Both sockets share the same underlying file descriptor/port
+        let socket_for_split_tunnel = std_socket.try_clone()
+            .map_err(|e| VpnError::Network(format!("Failed to clone socket for split tunnel: {}", e)))?;
+
+        // Store the clone for split tunnel to use later
+        *self.stored_socket.lock().unwrap() = Some(socket_for_split_tunnel);
+        log::info!("Socket stored for split tunnel handoff (port: {:?})", std_socket.local_addr());
+
+        // Set non-blocking mode for Tokio conversion
+        std_socket.set_nonblocking(true)
+            .map_err(|e| VpnError::Network(format!("Failed to set socket non-blocking: {}", e)))?;
+
+        // Convert to Tokio socket for async tasks
+        let socket = UdpSocket::from_std(std_socket)
+            .map_err(|e| VpnError::Network(format!("Failed to convert socket to Tokio: {}", e)))?;
 
         let socket = Arc::new(socket);
 

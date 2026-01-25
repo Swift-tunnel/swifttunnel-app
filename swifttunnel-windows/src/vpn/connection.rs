@@ -436,13 +436,25 @@ impl VpnConnection {
 
         // Set up direct encryption context BEFORE configure() since threads start during configure()
         // This allows workers to encrypt packets directly and send via UDP (faster than Wintun injection)
+        //
+        // CRITICAL FIX for Error 279 (zero inbound traffic):
+        // We MUST reuse the socket that performed the WireGuard handshake. The VPN server
+        // remembers which port sent the handshake and sends ALL responses there.
+        // Creating a NEW socket on a different port means responses never arrive!
         if let Some(ref tunnel_ref) = self.tunnel {
             if let Some(tunn) = tunnel_ref.get_tunn() {
                 let endpoint = tunnel_ref.get_endpoint();
                 log::info!("Setting up direct encryption to {} (before configure)", endpoint);
 
-                match std::net::UdpSocket::bind("0.0.0.0:0") {
-                    Ok(socket) => {
+                // CRITICAL: Get the SAME socket that did the handshake, not a new one!
+                // This fixes the dual-socket mismatch that caused 0 B/s inbound traffic.
+                match tunnel_ref.take_socket_for_split_tunnel() {
+                    Some(socket) => {
+                        log::info!(
+                            "Reusing tunnel handshake socket for split tunnel (local: {:?})",
+                            socket.local_addr()
+                        );
+
                         // Increase socket receive buffer for bulk traffic (1MB)
                         // This helps prevent packet loss when the VPN server sends responses in bursts
                         #[cfg(windows)]
@@ -474,21 +486,22 @@ impl VpnConnection {
                         socket.set_read_timeout(Some(Duration::from_millis(100)))
                             .unwrap_or_else(|e| log::warn!("Failed to set socket read timeout: {}", e));
 
-                        if let Err(e) = socket.connect(endpoint) {
-                            log::warn!("Failed to connect encryption socket: {}", e);
-                        } else {
-                            let ctx = VpnEncryptContext {
-                                tunn,
-                                socket: Arc::new(socket),
-                                server_addr: endpoint,
-                            };
-                            driver.set_vpn_encrypt_context(ctx);
-                            log::info!("Direct encryption enabled for split tunnel (inbound receiver will start with keepalives)");
-                        }
+                        let ctx = VpnEncryptContext {
+                            tunn,
+                            socket: Arc::new(socket),
+                            server_addr: endpoint,
+                        };
+                        driver.set_vpn_encrypt_context(ctx);
+                        log::info!("Direct encryption enabled (socket reused from handshake - inbound will work!)");
                     }
-                    Err(e) => {
-                        log::warn!("Failed to bind encryption socket: {}", e);
-                        log::warn!("Falling back to Wintun injection (no direct encryption)");
+                    None => {
+                        // This shouldn't happen if tunnel.start() succeeded
+                        log::error!("CRITICAL: Cannot get tunnel socket for split tunnel!");
+                        log::error!("This means inbound traffic will NOT work (Error 279).");
+                        log::error!("VPN server sends responses to handshake socket, but we can't receive them.");
+                        return Err(VpnError::SplitTunnelSetupFailed(
+                            "Failed to get tunnel socket - cannot receive VPN responses".to_string()
+                        ));
                     }
                 }
             }
