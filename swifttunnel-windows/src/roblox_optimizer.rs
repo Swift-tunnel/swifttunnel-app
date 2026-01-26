@@ -257,7 +257,7 @@ impl RobloxOptimizer {
         }
 
         // Apply dynamic render optimization
-        if let Err(e) = self.apply_dynamic_render_optimization(config.dynamic_render_optimization) {
+        if let Err(e) = self.apply_dynamic_render_optimization(&config.dynamic_render_optimization) {
             warn!("Could not apply dynamic render optimization: {}", e);
         }
 
@@ -433,10 +433,12 @@ impl RobloxOptimizer {
     }
 
     /// Apply dynamic render optimization
-    pub fn apply_dynamic_render_optimization(&self, enable: bool) -> Result<()> {
-        if !enable {
-            return self.remove_dynamic_render_optimization();
-        }
+    pub fn apply_dynamic_render_optimization(&self, mode: &crate::structs::DynamicRenderMode) -> Result<()> {
+        // If mode is Off, remove the setting
+        let render_value = match mode.render_value() {
+            Some(v) => v,
+            None => return self.remove_dynamic_render_optimization(),
+        };
 
         let client_settings = Self::get_client_settings_path()
             .ok_or_else(|| anyhow::anyhow!("Could not find Roblox version folder"))?;
@@ -456,16 +458,17 @@ impl RobloxOptimizer {
         }
 
         // Dynamic render optimization - reduces render load for better performance
+        // Low=3, Medium=2, High=1 (lower value = more aggressive optimization)
         settings.insert(
             "DFIntDebugDynamicRenderKiloPixels".to_string(),
-            serde_json::Value::String("2".to_string()),
+            serde_json::Value::String(render_value.to_string()),
         );
 
         // Write settings to file
         let json = serde_json::to_string_pretty(&settings)?;
         fs::write(&settings_path, json)?;
 
-        info!("Dynamic render optimization enabled");
+        info!("Dynamic render optimization enabled ({:?})", mode);
 
         Ok(())
     }
