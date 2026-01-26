@@ -2452,10 +2452,11 @@ impl BoosterApp {
             return;
         }
 
-        // Calculate grid dimensions - 2 columns with better spacing
+        // Calculate grid dimensions - 2 columns with responsive spacing
         let available_width = ui.available_width();
-        let card_spacing = 12.0;
-        let card_width = (available_width - card_spacing) / 2.0;
+        let card_spacing = 10.0;
+        let card_width = ((available_width - card_spacing) / 2.0).floor();
+        let inner_width = (card_width - 24.0).max(100.0); // Account for inner_margin (12 * 2)
 
         // Create 2-column grid with enhanced cards
         let mut region_iter = regions.iter().peekable();
@@ -2474,12 +2475,10 @@ impl BoosterApp {
 
                         // Calculate colors based on state
                         let (bg, border_color, border_width) = if is_selected {
-                            // Selected: gradient-like effect with glow
                             (lerp_color(ACCENT_PRIMARY.gamma_multiply(0.12), ACCENT_PRIMARY.gamma_multiply(0.18), hover_val),
                              ACCENT_PRIMARY,
                              2.0)
                         } else {
-                            // Hover effect: subtle lift
                             let hover_bg = lerp_color(BG_CARD, BG_ELEVATED, hover_val * 0.5);
                             let hover_border = lerp_color(BG_ELEVATED, ACCENT_PRIMARY.gamma_multiply(0.4), hover_val);
                             (hover_bg, hover_border, 1.0 + hover_val * 0.5)
@@ -2488,23 +2487,25 @@ impl BoosterApp {
                         let response = egui::Frame::NONE
                             .fill(bg)
                             .stroke(egui::Stroke::new(border_width, border_color))
-                            .rounding(14.0)
-                            .inner_margin(egui::Margin::symmetric(14, 14))
+                            .rounding(12.0)
+                            .inner_margin(egui::Margin::symmetric(12, 12))
                             .show(ui, |ui| {
-                                ui.set_width(card_width - 28.0);
-                                ui.set_min_height(85.0);
+                                // Constrain the card to exactly the calculated width
+                                ui.set_min_width(inner_width);
+                                ui.set_max_width(inner_width);
+                                ui.set_min_height(80.0);
 
                                 ui.vertical(|ui| {
-                                    // Top row: Country code + badges + latency
+                                    // Top row: Country code + latency (simplified layout)
                                     ui.horizontal(|ui| {
-                                        // Country code badge with icon
+                                        // Country code badge
                                         egui::Frame::NONE
                                             .fill(if is_selected { ACCENT_PRIMARY } else { BG_ELEVATED })
-                                            .rounding(6.0)
-                                            .inner_margin(egui::Margin::symmetric(10, 5))
+                                            .rounding(4.0)
+                                            .inner_margin(egui::Margin::symmetric(6, 3))
                                             .show(ui, |ui| {
                                                 ui.label(egui::RichText::new(&region.country_code)
-                                                    .size(11.0)
+                                                    .size(10.0)
                                                     .color(if is_selected { egui::Color32::WHITE } else { TEXT_SECONDARY })
                                                     .strong());
                                             });
@@ -2512,135 +2513,104 @@ impl BoosterApp {
                                         // "LAST" badge
                                         let is_last_used = self.last_connected_region.as_ref().map(|r| r == &region.id).unwrap_or(false);
                                         if is_last_used && !is_selected {
-                                            ui.add_space(4.0);
+                                            ui.add_space(2.0);
                                             egui::Frame::NONE
                                                 .fill(ACCENT_CYAN.gamma_multiply(0.12))
-                                                .stroke(egui::Stroke::new(1.0, ACCENT_CYAN.gamma_multiply(0.3)))
-                                                .rounding(6.0)
-                                                .inner_margin(egui::Margin::symmetric(6, 3))
+                                                .rounding(4.0)
+                                                .inner_margin(egui::Margin::symmetric(4, 2))
                                                 .show(ui, |ui| {
-                                                    ui.label(egui::RichText::new("* LAST")
-                                                        .size(9.0)
+                                                    ui.label(egui::RichText::new("LAST")
+                                                        .size(8.0)
                                                         .color(ACCENT_CYAN));
                                                 });
                                         }
 
-                                        // Latency display on right
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if let Some(ms) = latency {
-                                                let lat_color = latency_color(ms);
-                                                // Latency with colored indicator
-                                                ui.horizontal(|ui| {
-                                                    ui.spacing_mut().item_spacing.x = 4.0;
-                                                    ui.label(egui::RichText::new(format!("{}ms", ms))
-                                                        .size(12.0)
-                                                        .color(lat_color)
-                                                        .strong());
-                                                    // Small quality indicator dot
-                                                    let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                                                    ui.painter().circle_filled(dot_rect.center(), 3.0, lat_color);
-                                                });
-                                            } else if is_finding {
-                                                // Animated measuring indicator
-                                                let elapsed = self.app_start_time.elapsed().as_secs_f32();
-                                                let dots = match ((elapsed * 2.0) as i32) % 4 {
-                                                    0 => ".",
-                                                    1 => "..",
-                                                    2 => "...",
-                                                    _ => "",
-                                                };
-                                                ui.label(egui::RichText::new(format!("ping{}", dots))
-                                                    .size(11.0)
-                                                    .color(TEXT_DIMMED));
-                                            } else {
-                                                // No latency data and not currently measuring - show "--"
-                                                ui.label(egui::RichText::new("--")
-                                                    .size(12.0)
-                                                    .color(TEXT_DIMMED));
-                                            }
-                                        });
+                                        // Flexible spacer
+                                        ui.add_space(ui.available_width() - 55.0);
+
+                                        // Latency display (compact)
+                                        if let Some(ms) = latency {
+                                            let lat_color = latency_color(ms);
+                                            let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                            ui.painter().circle_filled(dot_rect.center(), 3.0, lat_color);
+                                            ui.add_space(2.0);
+                                            ui.label(egui::RichText::new(format!("{}ms", ms))
+                                                .size(11.0)
+                                                .color(lat_color)
+                                                .strong());
+                                        } else if is_finding {
+                                            let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                                            let dots = match ((elapsed * 2.0) as i32) % 4 {
+                                                0 => ".", 1 => "..", 2 => "...", _ => "",
+                                            };
+                                            ui.label(egui::RichText::new(format!("{}", dots))
+                                                .size(10.0)
+                                                .color(TEXT_DIMMED));
+                                        } else {
+                                            ui.label(egui::RichText::new("--")
+                                                .size(11.0)
+                                                .color(TEXT_DIMMED));
+                                        }
                                     });
 
-                                    ui.add_space(10.0);
+                                    ui.add_space(6.0);
 
-                                    // Region name with gear icon for server selection
+                                    // Region name with gear icon
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(&region.name)
-                                            .size(15.0)
+                                            .size(14.0)
                                             .color(TEXT_PRIMARY)
                                             .strong());
 
-                                        // Show forced server indicator if set
-                                        let has_forced_server = self.forced_servers.contains_key(&region.id);
-                                        if has_forced_server {
-                                            ui.add_space(4.0);
-                                            egui::Frame::NONE
-                                                .fill(ACCENT_SECONDARY.gamma_multiply(0.15))
-                                                .rounding(4.0)
-                                                .inner_margin(egui::Margin::symmetric(4, 2))
-                                                .show(ui, |ui| {
-                                                    ui.label(egui::RichText::new("*")
-                                                        .size(9.0)
-                                                        .color(ACCENT_SECONDARY));
-                                                });
+                                        // Forced server indicator
+                                        if self.forced_servers.contains_key(&region.id) {
+                                            ui.add_space(2.0);
+                                            ui.label(egui::RichText::new("⚙").size(9.0).color(ACCENT_SECONDARY));
                                         }
 
-                                        // Gear icon for server selection (right-aligned)
-                                        // Push button to the right by consuming remaining space minus button width
+                                        // Push gear to right
                                         let remaining = ui.available_width();
-                                        if remaining > 30.0 {
-                                            ui.add_space(remaining - 30.0);
+                                        if remaining > 26.0 {
+                                            ui.add_space(remaining - 26.0);
                                         }
 
-                                        // Button now in normal left-to-right flow, properly positioned
                                         let gear_btn = ui.add(
-                                            egui::Button::new(egui::RichText::new("⚙").size(14.0).color(TEXT_MUTED))
+                                            egui::Button::new(egui::RichText::new("⚙").size(12.0).color(TEXT_MUTED))
                                                 .fill(BG_HOVER.gamma_multiply(0.5))
-                                                .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
                                                 .rounding(4.0)
-                                                .min_size(egui::vec2(28.0, 28.0))
+                                                .min_size(egui::vec2(24.0, 24.0))
                                         );
                                         if gear_btn.clicked() {
-                                            log::info!("Gear clicked for region: {}", region.id);
-                                            // Toggle popup for this region
                                             if self.server_selection_popup.as_ref() == Some(&region.id) {
                                                 self.server_selection_popup = None;
                                             } else {
                                                 self.server_selection_popup = Some(region.id.clone());
                                             }
-                                            gear_clicked.set(true); // Prevent card click from also triggering
+                                            gear_clicked.set(true);
                                         }
                                         if gear_btn.hovered() {
-                                            gear_clicked.set(true); // Also prevent card selection when hovering gear
-                                            egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("gear_tooltip"), |ui| {
-                                                ui.label("Select specific server");
-                                            });
+                                            gear_clicked.set(true);
                                         }
                                     });
 
                                     ui.add_space(2.0);
 
-                                    // Description
+                                    // Description (truncated)
                                     ui.label(egui::RichText::new(&region.description)
-                                        .size(11.0)
+                                        .size(10.0)
                                         .color(TEXT_MUTED));
 
-                                    // Latency bar (visual indicator)
+                                    // Latency bar
                                     if let Some(ms) = latency {
-                                        ui.add_space(8.0);
+                                        ui.add_space(6.0);
                                         let bar_height = 3.0;
-                                        let bar_width = card_width - 56.0;
+                                        let bar_width = (inner_width - 4.0).max(50.0);
                                         let (bar_rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
-
-                                        // Background bar
                                         ui.painter().rect_filled(bar_rect, 2.0, BG_ELEVATED);
-
-                                        // Filled portion based on latency (inverted: lower = more fill)
                                         let fill_percent = latency_fill_percent(ms);
-                                        let fill_width = bar_width * fill_percent;
                                         let fill_rect = egui::Rect::from_min_size(
                                             bar_rect.min,
-                                            egui::vec2(fill_width, bar_height)
+                                            egui::vec2(bar_width * fill_percent, bar_height)
                                         );
                                         ui.painter().rect_filled(fill_rect, 2.0, latency_color(ms));
                                     }
@@ -2658,10 +2628,10 @@ impl BoosterApp {
                     }
                 }
             });
-            ui.add_space(10.0);
+            ui.add_space(8.0);
         }
 
-        // Handle click - just select the region, don't re-ping
+        // Handle click
         if let Some(region_id) = clicked_region {
             self.select_region(&region_id);
         }
@@ -2872,8 +2842,9 @@ impl BoosterApp {
     /// Render skeleton loading cards with shimmer effect
     fn render_skeleton_region_cards(&self, ui: &mut egui::Ui) {
         let available_width = ui.available_width();
-        let card_spacing = 12.0;
-        let card_width = (available_width - card_spacing) / 2.0;
+        let card_spacing = 10.0;
+        let card_width = ((available_width - card_spacing) / 2.0).floor();
+        let inner_width = (card_width - 24.0).max(100.0);
 
         // Shimmer animation progress
         let elapsed = self.app_start_time.elapsed().as_secs_f32();
@@ -2886,44 +2857,45 @@ impl BoosterApp {
 
                 for col in 0..2 {
                     let card_offset = (row * 2 + col) as f32 * 0.1;
-                    let local_shimmer = ((shimmer_progress + card_offset) % 1.0);
+                    let local_shimmer = (shimmer_progress + card_offset) % 1.0;
 
                     egui::Frame::NONE
                         .fill(BG_CARD)
                         .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-                        .rounding(14.0)
-                        .inner_margin(egui::Margin::symmetric(14, 14))
+                        .rounding(12.0)
+                        .inner_margin(egui::Margin::symmetric(12, 12))
                         .show(ui, |ui| {
-                            ui.set_width(card_width - 28.0);
-                            ui.set_min_height(85.0);
+                            ui.set_min_width(inner_width);
+                            ui.set_max_width(inner_width);
+                            ui.set_min_height(80.0);
 
                             ui.vertical(|ui| {
                                 // Skeleton badge
-                                let badge_rect = ui.allocate_exact_size(egui::vec2(60.0, 22.0), egui::Sense::hover()).0;
-                                self.render_skeleton_rect(ui.painter(), badge_rect, 6.0, local_shimmer);
-
-                                ui.add_space(10.0);
-
-                                // Skeleton title
-                                let title_rect = ui.allocate_exact_size(egui::vec2(card_width * 0.6, 16.0), egui::Sense::hover()).0;
-                                self.render_skeleton_rect(ui.painter(), title_rect, 4.0, local_shimmer + 0.05);
+                                let badge_rect = ui.allocate_exact_size(egui::vec2(50.0, 18.0), egui::Sense::hover()).0;
+                                self.render_skeleton_rect(ui.painter(), badge_rect, 4.0, local_shimmer);
 
                                 ui.add_space(6.0);
 
+                                // Skeleton title
+                                let title_rect = ui.allocate_exact_size(egui::vec2(inner_width * 0.6, 14.0), egui::Sense::hover()).0;
+                                self.render_skeleton_rect(ui.painter(), title_rect, 4.0, local_shimmer + 0.05);
+
+                                ui.add_space(4.0);
+
                                 // Skeleton description
-                                let desc_rect = ui.allocate_exact_size(egui::vec2(card_width * 0.8, 12.0), egui::Sense::hover()).0;
+                                let desc_rect = ui.allocate_exact_size(egui::vec2(inner_width * 0.8, 10.0), egui::Sense::hover()).0;
                                 self.render_skeleton_rect(ui.painter(), desc_rect, 4.0, local_shimmer + 0.1);
 
-                                ui.add_space(8.0);
+                                ui.add_space(6.0);
 
                                 // Skeleton latency bar
-                                let bar_rect = ui.allocate_exact_size(egui::vec2(card_width - 56.0, 3.0), egui::Sense::hover()).0;
+                                let bar_rect = ui.allocate_exact_size(egui::vec2((inner_width - 4.0).max(50.0), 3.0), egui::Sense::hover()).0;
                                 self.render_skeleton_rect(ui.painter(), bar_rect, 2.0, local_shimmer + 0.15);
                             });
                         });
                 }
             });
-            ui.add_space(10.0);
+            ui.add_space(8.0);
         }
     }
 
