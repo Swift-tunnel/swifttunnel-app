@@ -455,14 +455,15 @@ impl VpnConnection {
                             socket.local_addr()
                         );
 
-                        // Increase socket receive buffer for bulk traffic (1MB)
-                        // This helps prevent packet loss when the VPN server sends responses in bursts
+                        // Set socket receive buffer for low-latency gaming traffic
+                        // 256KB balances burst handling vs bufferbloat (1MB caused +5-15ms latency)
+                        // Large buffers queue packets in kernel, adding delay before userspace reads them
                         #[cfg(windows)]
                         {
                             use std::os::windows::io::AsRawSocket;
                             use windows::Win32::Networking::WinSock::{setsockopt, SOL_SOCKET, SO_RCVBUF};
                             let raw = socket.as_raw_socket() as usize;
-                            let buf_size: i32 = 1024 * 1024; // 1MB
+                            let buf_size: i32 = 256 * 1024; // 256KB (was 1MB - caused bufferbloat)
                             let result = unsafe {
                                 setsockopt(
                                     windows::Win32::Networking::WinSock::SOCKET(raw),
@@ -475,15 +476,16 @@ impl VpnConnection {
                                 )
                             };
                             if result == 0 {
-                                log::info!("Socket receive buffer set to 1MB for bulk traffic");
+                                log::info!("Socket receive buffer set to 256KB (low-latency mode)");
                             } else {
                                 log::warn!("Failed to set socket receive buffer size");
                             }
                         }
 
-                        // Set socket timeout for inbound receiver loop (100ms to match timer interval)
-                        // This allows periodic keepalive checking without blocking forever
-                        socket.set_read_timeout(Some(Duration::from_millis(100)))
+                        // Set socket timeout for inbound receiver loop (10ms for low latency)
+                        // Shorter timeout = faster response to incoming packets
+                        // Was 100ms which could add significant delay on sporadic traffic
+                        socket.set_read_timeout(Some(Duration::from_millis(10)))
                             .unwrap_or_else(|e| log::warn!("Failed to set socket read timeout: {}", e));
 
                         let ctx = VpnEncryptContext {

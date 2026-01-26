@@ -30,7 +30,8 @@ const KEEPALIVE_INTERVAL: u16 = 25;
 
 /// BoringTun tick interval in milliseconds (for internal timer management)
 /// Must be called frequently to handle handshakes, keepalives, and timeouts
-const TICK_INTERVAL_MS: u64 = 100;
+/// 50ms balances responsiveness with CPU efficiency (was 100ms)
+const TICK_INTERVAL_MS: u64 = 50;
 
 /// Maximum packet size
 const MAX_PACKET_SIZE: usize = 65535;
