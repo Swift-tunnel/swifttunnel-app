@@ -394,11 +394,11 @@ impl ParallelInterceptor {
             let internal_name = adapter.get_name();
             let friendly_name = get_adapter_friendly_name(&internal_name).unwrap_or_default();
 
-            log::debug!(
-                "  Adapter {}: internal='{}' friendly='{}'",
+            log::info!(
+                "  Adapter {}: '{}' (internal: {})",
                 idx,
-                internal_name,
-                friendly_name
+                friendly_name,
+                internal_name
             );
 
             let name_lower = internal_name.to_lowercase();
@@ -411,15 +411,39 @@ impl ParallelInterceptor {
                 || friendly_lower.contains("swifttunnel")
                 || friendly_lower.contains("wintun");
 
+            // Filter out virtual adapters (VPNs, tunnels, etc.)
+            // These should NOT be selected as the physical adapter
             let is_virtual = name_lower.contains("loopback")
                 || friendly_lower.contains("loopback")
                 || friendly_lower.contains("isatap")
                 || friendly_lower.contains("teredo")
-                || friendly_lower.is_empty();
+                || friendly_lower.is_empty()
+                // Third-party VPN adapters
+                || friendly_lower.contains("radmin")      // Radmin VPN
+                || friendly_lower.contains("hamachi")     // LogMeIn Hamachi
+                || friendly_lower.contains("zerotier")    // ZeroTier
+                || friendly_lower.contains("tailscale")   // Tailscale
+                || friendly_lower.contains("wireguard")   // WireGuard
+                || friendly_lower.contains("openvpn")     // OpenVPN
+                || friendly_lower.contains("tap-windows") // OpenVPN TAP
+                || friendly_lower.contains("nordvpn")     // NordVPN
+                || friendly_lower.contains("expressvpn")  // ExpressVPN
+                || friendly_lower.contains("surfshark")   // Surfshark
+                || friendly_lower.contains("proton")      // ProtonVPN
+                || friendly_lower.contains("mullvad")     // Mullvad
+                || friendly_lower.contains("private internet") // PIA
+                || friendly_lower.contains("cyberghost")  // CyberGhost
+                || friendly_lower.contains("virtual")     // Generic virtual
+                || friendly_lower.contains("vpn")         // Generic VPN
+                || friendly_lower.contains("tunnel")      // Generic tunnel
+                || friendly_lower.contains("famatech");   // Famatech (Radmin parent company)
 
             if is_vpn {
+                log::info!("    -> VPN adapter (SwiftTunnel/Wintun)");
                 vpn_adapter = Some((idx, friendly_name.clone()));
-            } else if !is_virtual {
+            } else if is_virtual {
+                log::info!("    -> Skipped (virtual/VPN adapter)");
+            } else {
                 let mut score = 0;
                 if friendly_lower.contains("ethernet")
                     || friendly_lower.contains("intel")
@@ -432,6 +456,7 @@ impl ParallelInterceptor {
                     score += 50;
                 }
                 score += (10 - idx.min(10)) as i32;
+                log::info!("    -> Physical adapter candidate (score: {})", score);
                 physical_candidates.push((idx, friendly_name.clone(), internal_name.to_string(), score));
             }
         }
