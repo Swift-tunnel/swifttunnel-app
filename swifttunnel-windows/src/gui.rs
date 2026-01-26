@@ -3,7 +3,7 @@ use crate::geolocation::get_ip_location;
 use crate::hidden_command;
 use swifttunnel_fps_booster::notification::show_server_location;
 use swifttunnel_fps_booster::roblox_watcher::{RobloxWatcher, RobloxEvent};
-use swifttunnel_fps_booster::utils::{PendingConnection, is_administrator, save_pending_connection, relaunch_elevated};
+use swifttunnel_fps_booster::utils::{PendingConnection, is_administrator, save_pending_connection, relaunch_elevated, pending_connection_path};
 use crate::network_analyzer::{
     NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
     run_stability_test, run_speed_test, speed_test::format_speed,
@@ -4929,11 +4929,7 @@ impl BoosterApp {
                     self.set_status("Admin access required for reliable VPN", STATUS_ERROR);
                     self.connecting_initiated = None;
                     // Delete the pending connection file since we're not elevating
-                    let _ = std::fs::remove_file(
-                        dirs::data_local_dir()
-                            .map(|d| d.join("SwiftTunnel").join("pending_connect.json"))
-                            .unwrap_or_else(|| PathBuf::from("pending_connect.json"))
-                    );
+                    let _ = std::fs::remove_file(pending_connection_path());
                     return;
                 }
             }

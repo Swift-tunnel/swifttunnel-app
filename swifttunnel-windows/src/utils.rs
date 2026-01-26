@@ -75,7 +75,7 @@ pub fn is_administrator() -> bool {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Pending connection state to pass between non-elevated and elevated process
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct PendingConnection {
     pub region: String,
     pub server: String,
@@ -85,7 +85,7 @@ pub struct PendingConnection {
 }
 
 /// Get the path for the pending connection temp file
-fn pending_connection_path() -> PathBuf {
+pub fn pending_connection_path() -> PathBuf {
     dirs::data_local_dir()
         .map(|d| d.join("SwiftTunnel").join("pending_connect.json"))
         .unwrap_or_else(|| PathBuf::from("pending_connect.json"))
