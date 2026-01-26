@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::process::Command;
 use std::time::Duration;
+use std::path::PathBuf;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -67,6 +68,159 @@ pub fn is_administrator() -> bool {
 pub fn is_administrator() -> bool {
     // On non-Windows, check if running as root
     unsafe { libc::geteuid() == 0 }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  ELEVATION UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Pending connection state to pass between non-elevated and elevated process
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct PendingConnection {
+    pub region: String,
+    pub server: String,
+    pub apps: Vec<String>,
+    pub routing_mode: u8, // 0 = V1, 1 = V2
+    pub timestamp: u64,
+}
+
+/// Get the path for the pending connection temp file
+pub fn pending_connection_path() -> PathBuf {
+    dirs::data_local_dir()
+        .map(|d| d.join("SwiftTunnel").join("pending_connect.json"))
+        .unwrap_or_else(|| PathBuf::from("pending_connect.json"))
+}
+
+/// Save pending connection state for elevated process to pick up
+///
+/// Saves region, server, and app list to a temp file that the elevated
+/// process will read and auto-connect with.
+pub fn save_pending_connection(pending: &PendingConnection) -> std::io::Result<()> {
+    let path = pending_connection_path();
+
+    // Ensure directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let json = serde_json::to_string(pending)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    std::fs::write(&path, json)?;
+    log::info!("Saved pending connection to: {}", path.display());
+    Ok(())
+}
+
+/// Load and delete pending connection state
+///
+/// Returns Some(PendingConnection) if a valid pending connection exists,
+/// None if no file or file is too old (>30 seconds).
+pub fn load_pending_connection() -> Option<PendingConnection> {
+    let path = pending_connection_path();
+
+    if !path.exists() {
+        return None;
+    }
+
+    // Read and delete the file
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to read pending connection file: {}", e);
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
+
+    // Delete the file immediately to prevent reuse
+    let _ = std::fs::remove_file(&path);
+
+    // Parse JSON
+    let pending: PendingConnection = match serde_json::from_str(&content) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Failed to parse pending connection: {}", e);
+            return None;
+        }
+    };
+
+    // Check timestamp - reject if older than 30 seconds
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if now - pending.timestamp > 30 {
+        log::warn!("Pending connection expired ({}s old)", now - pending.timestamp);
+        return None;
+    }
+
+    log::info!("Loaded pending connection: region={}, server={}", pending.region, pending.server);
+    Some(pending)
+}
+
+/// Relaunch the current process with administrator privileges
+///
+/// Uses ShellExecuteW with "runas" verb to trigger UAC prompt.
+/// Returns Ok(()) if the elevated process was successfully started.
+/// The current process should exit after calling this.
+#[cfg(windows)]
+pub fn relaunch_elevated() -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+
+    // Get current executable path
+    let exe_path = std::env::current_exe()?;
+    let exe_path_str = exe_path.to_string_lossy();
+
+    // Convert to wide string (UTF-16)
+    let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = OsStr::new(&*exe_path_str).encode_wide().chain(Some(0)).collect();
+    let params: Vec<u16> = OsStr::new("--resume-connect").encode_wide().chain(Some(0)).collect();
+
+    log::info!("Relaunching elevated: {}", exe_path_str);
+
+    unsafe {
+        let result = ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+
+        // ShellExecuteW returns > 32 on success
+        let result_int = result.0 as isize;
+        if result_int > 32 {
+            log::info!("Elevated process launched successfully");
+            Ok(())
+        } else {
+            let error = match result_int {
+                0 => "Out of memory",
+                2 => "File not found",
+                3 => "Path not found",
+                5 => "Access denied (UAC cancelled?)",
+                _ => "Unknown error",
+            };
+            log::error!("ShellExecuteW failed: {} (code {})", error, result_int);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Failed to elevate: {} (code {})", error, result_int),
+            ))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn relaunch_elevated() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Elevation not supported on this platform",
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
