@@ -376,6 +376,40 @@ impl ParallelInterceptor {
             .ok_or_else(|| VpnError::SplitTunnel("Cache in use".to_string()))?
             .set_tunnel_apps(tunnel_apps);
 
+        // Retry adapter detection up to 3 times with delays
+        // The Wintun adapter may not be immediately visible to NDIS after creation
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY_MS: u64 = 500;
+
+        let mut last_error = String::new();
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.find_adapters(vpn_adapter_name) {
+                Ok(()) => {
+                    log::info!("Adapter detection succeeded on attempt {}", attempt);
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    if attempt < MAX_RETRIES {
+                        log::warn!(
+                            "Adapter detection failed (attempt {}/{}): {}. Retrying in {}ms...",
+                            attempt, MAX_RETRIES, e, RETRY_DELAY_MS
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                    }
+                }
+            }
+        }
+
+        Err(VpnError::SplitTunnel(format!(
+            "Failed to find adapters after {} attempts: {}",
+            MAX_RETRIES, last_error
+        )))
+    }
+
+    /// Internal adapter detection logic
+    fn find_adapters(&mut self, vpn_adapter_name: &str) -> VpnResult<()> {
         // Find adapters
         let driver = ndisapi::Ndisapi::new("NDISRD")
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
@@ -392,7 +426,10 @@ impl ParallelInterceptor {
 
         for (idx, adapter) in adapters.iter().enumerate() {
             let internal_name = adapter.get_name();
-            let friendly_name = get_adapter_friendly_name(&internal_name).unwrap_or_default();
+            // Try both GetAdaptersInfo and GetAdaptersAddresses for friendly name
+            let friendly_name = get_adapter_friendly_name(&internal_name)
+                .or_else(|| get_adapter_friendly_name_v2(&internal_name))
+                .unwrap_or_default();
 
             log::info!(
                 "  Adapter {}: '{}' (internal: {})",
@@ -404,6 +441,8 @@ impl ParallelInterceptor {
             let name_lower = internal_name.to_lowercase();
             let friendly_lower = friendly_name.to_lowercase();
 
+            // Check if this is our VPN adapter (SwiftTunnel/Wintun)
+            // Note: is_vpn check must come BEFORE is_virtual to properly detect our adapter
             let is_vpn = name_lower.contains(&vpn_adapter_name.to_lowercase())
                 || name_lower.contains("swifttunnel")
                 || name_lower.contains("wintun")
@@ -413,17 +452,18 @@ impl ParallelInterceptor {
 
             // Filter out virtual adapters (VPNs, tunnels, etc.)
             // These should NOT be selected as the physical adapter
+            // IMPORTANT: Do NOT filter based on empty friendly_name - that would skip
+            // adapters where the name lookup failed (including potentially our VPN adapter)
             let is_virtual = name_lower.contains("loopback")
                 || friendly_lower.contains("loopback")
                 || friendly_lower.contains("isatap")
                 || friendly_lower.contains("teredo")
-                || friendly_lower.is_empty()
                 // Third-party VPN adapters
                 || friendly_lower.contains("radmin")      // Radmin VPN
                 || friendly_lower.contains("hamachi")     // LogMeIn Hamachi
                 || friendly_lower.contains("zerotier")    // ZeroTier
                 || friendly_lower.contains("tailscale")   // Tailscale
-                || friendly_lower.contains("wireguard")   // WireGuard
+                || friendly_lower.contains("wireguard")   // WireGuard (not ours)
                 || friendly_lower.contains("openvpn")     // OpenVPN
                 || friendly_lower.contains("tap-windows") // OpenVPN TAP
                 || friendly_lower.contains("nordvpn")     // NordVPN
@@ -433,16 +473,24 @@ impl ParallelInterceptor {
                 || friendly_lower.contains("mullvad")     // Mullvad
                 || friendly_lower.contains("private internet") // PIA
                 || friendly_lower.contains("cyberghost")  // CyberGhost
-                || friendly_lower.contains("virtual")     // Generic virtual
-                || friendly_lower.contains("vpn")         // Generic VPN
-                || friendly_lower.contains("tunnel")      // Generic tunnel
-                || friendly_lower.contains("famatech");   // Famatech (Radmin parent company)
+                || friendly_lower.contains("famatech")    // Famatech (Radmin parent company)
+                // Generic virtual adapter detection (but NOT if friendly name is empty -
+                // that could be our VPN adapter where name lookup failed)
+                || (!friendly_lower.is_empty() && (
+                    friendly_lower.contains("virtual")
+                    || friendly_lower.contains("vpn")
+                    || friendly_lower.contains("tunnel")
+                ));
 
             if is_vpn {
                 log::info!("    -> VPN adapter (SwiftTunnel/Wintun)");
                 vpn_adapter = Some((idx, friendly_name.clone()));
             } else if is_virtual {
                 log::info!("    -> Skipped (virtual/VPN adapter)");
+            } else if friendly_name.is_empty() {
+                // Unknown adapter with no friendly name - could be anything
+                // Don't use as physical adapter but also don't skip entirely
+                log::info!("    -> Skipped (unknown adapter, no friendly name)");
             } else {
                 let mut score = 0;
                 if friendly_lower.contains("ethernet")
@@ -479,7 +527,7 @@ impl ParallelInterceptor {
             log::info!("Found VPN adapter: {} (index {})", name, idx);
         } else {
             return Err(VpnError::SplitTunnel(format!(
-                "VPN adapter '{}' not found",
+                "VPN adapter '{}' not found. Ensure the Wintun adapter was created successfully.",
                 vpn_adapter_name
             )));
         }
@@ -2949,6 +2997,92 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
                     .map(|&b| b as u8)
                     .collect();
                 return Some(String::from_utf8_lossy(&desc_bytes).to_string());
+            }
+
+            current = adapter.Next;
+        }
+    }
+
+    None
+}
+
+/// Get adapter friendly name using GetAdaptersAddresses (newer, more comprehensive API)
+///
+/// This fallback function uses the modern GetAdaptersAddresses API which can find
+/// all adapters including Wintun TUN adapters that GetAdaptersInfo might miss.
+fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+    let guid = internal_name
+        .rsplit('\\')
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c| c == '{' || c == '}')
+        .to_lowercase();
+
+    if guid.is_empty() {
+        return None;
+    }
+
+    unsafe {
+        let mut buf_len: u32 = 0;
+        // First call to get required buffer size
+        let _ = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            None,
+            &mut buf_len,
+        );
+
+        if buf_len == 0 {
+            return None;
+        }
+
+        let mut buffer: Vec<u8> = vec![0; buf_len as usize];
+        let adapter_addr_ptr = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+
+        // Second call to get actual data
+        let result = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            Some(adapter_addr_ptr),
+            &mut buf_len,
+        );
+
+        if result != 0 {
+            log::debug!("GetAdaptersAddresses failed with error: {}", result);
+            return None;
+        }
+
+        // Iterate through adapters
+        let mut current = adapter_addr_ptr;
+        while !current.is_null() {
+            let adapter = &*current;
+
+            // Get adapter name (GUID) from AdapterName field
+            if !adapter.AdapterName.0.is_null() {
+                let adapter_name = std::ffi::CStr::from_ptr(adapter.AdapterName.0 as *const i8);
+                if let Ok(name_str) = adapter_name.to_str() {
+                    let adapter_guid = name_str
+                        .trim_matches(|c| c == '{' || c == '}')
+                        .to_lowercase();
+
+                    if adapter_guid == guid {
+                        // Found matching adapter - get friendly name
+                        if !adapter.FriendlyName.0.is_null() {
+                            let len = (0..).take_while(|&i| *adapter.FriendlyName.0.add(i) != 0).count();
+                            let friendly_slice = std::slice::from_raw_parts(adapter.FriendlyName.0, len);
+                            let friendly_name = String::from_utf16_lossy(friendly_slice);
+                            log::debug!("get_adapter_friendly_name_v2: Found '{}' for GUID {}", friendly_name, guid);
+                            return Some(friendly_name);
+                        }
+                    }
+                }
             }
 
             current = adapter.Next;
