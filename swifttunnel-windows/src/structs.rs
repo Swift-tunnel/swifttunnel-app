@@ -90,6 +90,9 @@ pub struct RobloxSettingsConfig {
     pub disable_shadows: bool,
     pub reduce_texture_quality: bool,
     pub disable_post_processing: bool,
+    /// Dynamic render optimization: reduces render resolution for improved FPS on low-end hardware
+    #[serde(default)]
+    pub dynamic_render_optimization: bool,
 }
 
 impl Default for RobloxSettingsConfig {
@@ -101,6 +104,7 @@ impl Default for RobloxSettingsConfig {
             disable_shadows: false,
             reduce_texture_quality: false,
             disable_post_processing: false,
+            dynamic_render_optimization: false, // Disabled by default, user opt-in
         }
     }
 }
@@ -349,6 +353,17 @@ pub mod boost_info {
         requires_admin: true,
     };
 
+    // Roblox Boosts
+    pub const DYNAMIC_RENDER: BoostInfo = BoostInfo {
+        id: "dynamic_render",
+        title: "Dynamic Render Optimization",
+        short_desc: "Adaptive render resolution",
+        long_desc: "Dynamically adjusts render resolution based on performance needs. Reduces GPU load during intensive scenes while maintaining visual quality where possible. Recommended for low-end hardware or to maximize FPS.",
+        impact: "+10-30% FPS on GPU-bound scenarios",
+        risk_level: RiskLevel::Safe,
+        requires_admin: false,
+    };
+
     /// Get all system boost infos
     pub fn system_boosts() -> [&'static BoostInfo; 4] {
         [&HIGH_PRIORITY, &TIMER_RESOLUTION, &MMCSS, &GAME_MODE]
@@ -357,6 +372,11 @@ pub mod boost_info {
     /// Get all network boost infos
     pub fn network_boosts() -> [&'static BoostInfo; 3] {
         [&DISABLE_NAGLE, &NETWORK_THROTTLING, &OPTIMIZE_MTU]
+    }
+
+    /// Get all Roblox boost infos
+    pub fn roblox_boosts() -> [&'static BoostInfo; 1] {
+        [&DYNAMIC_RENDER]
     }
 }
 

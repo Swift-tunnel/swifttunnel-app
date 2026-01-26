@@ -2,6 +2,7 @@ use crate::structs::*;
 use log::{info, warn, error};
 use std::path::PathBuf;
 use std::fs;
+use std::collections::HashMap;
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
@@ -255,6 +256,11 @@ impl RobloxOptimizer {
             }
         }
 
+        // Apply dynamic render optimization
+        if let Err(e) = self.apply_dynamic_render_optimization(config.dynamic_render_optimization) {
+            warn!("Could not apply dynamic render optimization: {}", e);
+        }
+
         info!("Roblox optimizations applied successfully");
         Ok(())
     }
@@ -353,6 +359,11 @@ impl RobloxOptimizer {
 
         fs::copy(&self.backup_path, &self.settings_path)?;
 
+        // Also remove dynamic render optimization when restoring
+        if let Err(e) = self.remove_dynamic_render_optimization() {
+            warn!("Could not remove dynamic render optimization during restore: {}", e);
+        }
+
         // Don't set read-only after restore - user is disabling optimizations
         info!("Settings restored successfully");
         Ok(())
@@ -361,6 +372,135 @@ impl RobloxOptimizer {
     /// Check if Roblox is installed (settings file exists)
     pub fn is_roblox_installed(&self) -> bool {
         self.settings_path.exists()
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    //  DYNAMIC RENDER OPTIMIZATION
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Find the current Roblox version folder
+    /// Returns the path to the latest version-* directory
+    fn find_roblox_version_folder() -> Option<PathBuf> {
+        let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
+        let versions_dir = PathBuf::from(&local_app_data).join("Roblox").join("Versions");
+
+        if !versions_dir.exists() {
+            return None;
+        }
+
+        // Find the most recently modified version-* folder
+        let mut latest_version: Option<(PathBuf, std::time::SystemTime)> = None;
+
+        if let Ok(entries) = fs::read_dir(&versions_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name()?.to_string_lossy();
+                    if name.starts_with("version-") {
+                        // Check if RobloxPlayerBeta.exe exists in this folder
+                        if path.join("RobloxPlayerBeta.exe").exists() {
+                            if let Ok(metadata) = entry.metadata() {
+                                if let Ok(modified) = metadata.modified() {
+                                    if latest_version.is_none() || modified > latest_version.as_ref()?.1 {
+                                        latest_version = Some((path, modified));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        latest_version.map(|(path, _)| path)
+    }
+
+    /// Get the ClientSettings folder path (creates it if needed)
+    fn get_client_settings_path() -> Option<PathBuf> {
+        let version_folder = Self::find_roblox_version_folder()?;
+        let client_settings = version_folder.join("ClientSettings");
+
+        // Create ClientSettings folder if it doesn't exist
+        if !client_settings.exists() {
+            if let Err(e) = fs::create_dir_all(&client_settings) {
+                error!("Failed to create ClientSettings folder: {}", e);
+                return None;
+            }
+            info!("Created ClientSettings folder at: {:?}", client_settings);
+        }
+
+        Some(client_settings)
+    }
+
+    /// Apply dynamic render optimization
+    pub fn apply_dynamic_render_optimization(&self, enable: bool) -> Result<()> {
+        if !enable {
+            return self.remove_dynamic_render_optimization();
+        }
+
+        let client_settings = Self::get_client_settings_path()
+            .ok_or_else(|| anyhow::anyhow!("Could not find Roblox version folder"))?;
+
+        let settings_path = client_settings.join("ClientAppSettings.json");
+
+        // Build settings map
+        let mut settings: HashMap<String, serde_json::Value> = HashMap::new();
+
+        // Read existing settings if file exists
+        if settings_path.exists() {
+            if let Ok(content) = fs::read_to_string(&settings_path) {
+                if let Ok(existing) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content) {
+                    settings = existing;
+                }
+            }
+        }
+
+        // Dynamic render optimization - reduces render load for better performance
+        settings.insert(
+            "DFIntDebugDynamicRenderKiloPixels".to_string(),
+            serde_json::Value::String("2".to_string()),
+        );
+
+        // Write settings to file
+        let json = serde_json::to_string_pretty(&settings)?;
+        fs::write(&settings_path, json)?;
+
+        info!("Dynamic render optimization enabled");
+
+        Ok(())
+    }
+
+    /// Remove dynamic render optimization settings
+    fn remove_dynamic_render_optimization(&self) -> Result<()> {
+        let client_settings = match Self::get_client_settings_path() {
+            Some(path) => path,
+            None => {
+                info!("No Roblox version folder found, skipping cleanup");
+                return Ok(());
+            }
+        };
+
+        let settings_path = client_settings.join("ClientAppSettings.json");
+
+        if settings_path.exists() {
+            let content = fs::read_to_string(&settings_path)?;
+            let mut settings: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&content).unwrap_or_default();
+
+            // Remove our setting
+            settings.remove("DFIntDebugDynamicRenderKiloPixels");
+
+            if settings.is_empty() {
+                fs::remove_file(&settings_path)?;
+                info!("Dynamic render optimization disabled");
+            } else {
+                let json = serde_json::to_string_pretty(&settings)?;
+                fs::write(&settings_path, json)?;
+                info!("Dynamic render optimization disabled");
+            }
+        }
+
+        Ok(())
     }
 }
 
