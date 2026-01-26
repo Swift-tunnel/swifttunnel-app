@@ -260,7 +260,10 @@ impl PacketInterceptor {
     }
 
     /// Configure split tunneling with the given VPN adapter
-    pub fn configure(&mut self, vpn_adapter_name: &str, tunnel_apps: Vec<String>) -> VpnResult<()> {
+    ///
+    /// Note: vpn_adapter_luid is accepted for API compatibility with parallel_interceptor
+    /// but not currently used by the legacy interceptor.
+    pub fn configure(&mut self, vpn_adapter_name: &str, tunnel_apps: Vec<String>, _vpn_adapter_luid: u64) -> VpnResult<()> {
         if !self.driver_available {
             return Err(VpnError::SplitTunnelNotAvailable);
         }

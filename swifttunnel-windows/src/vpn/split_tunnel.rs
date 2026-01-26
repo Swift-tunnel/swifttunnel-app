@@ -676,9 +676,12 @@ impl SplitTunnelDriver {
             })?;
 
             // Configure the interceptor
+            // Pass the LUID for reliable adapter identification even when
+            // Windows API friendly name lookup fails (issue after v0.9.11)
             interceptor.configure(
                 "SwiftTunnel", // VPN adapter name
                 config.tunnel_apps.iter().cloned().collect(),
+                config.tunnel_interface_luid, // LUID for reliable detection
             )?;
 
             // Set NAT IPs for inbound packet rewriting
@@ -703,6 +706,7 @@ impl SplitTunnelDriver {
             interceptor.configure(
                 "SwiftTunnel", // VPN adapter name
                 config.tunnel_apps.iter().cloned().collect(),
+                config.tunnel_interface_luid, // LUID for reliable detection
             )?;
 
             // Pass WireGuard context to interceptor if available
