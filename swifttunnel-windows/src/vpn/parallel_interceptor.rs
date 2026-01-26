@@ -1266,7 +1266,7 @@ fn run_inbound_receiver(
     // This is critical because tunnel's keepalive task is disabled when split tunnel is active
     // to avoid endpoint confusion. We must send keepalives from THIS socket.
     let mut last_timer_check = std::time::Instant::now();
-    const TIMER_INTERVAL_MS: u64 = 100;
+    const TIMER_INTERVAL_MS: u64 = 50; // Reduced from 100ms, balances responsiveness with CPU efficiency
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {

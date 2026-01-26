@@ -24,7 +24,8 @@ const TUNNEL_TYPE: &str = "SwiftTunnel";
 pub const DEFAULT_MTU: u32 = 1420;
 
 /// Ring buffer capacity for Wintun session
-const RING_CAPACITY: u32 = 0x400000; // 4MB
+/// 2MB provides good performance while fitting in CPU cache better than 4MB
+const RING_CAPACITY: u32 = 0x200000; // 2MB (was 4MB - better cache locality)
 
 /// Check if the current process has administrator privileges
 ///
