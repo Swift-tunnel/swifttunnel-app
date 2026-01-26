@@ -396,7 +396,7 @@ impl eframe::App for UpdaterSplash {
                 });
             });
 
-        // Request continuous repaints for smooth progress
-        ctx.request_repaint();
+        // Request periodic repaints for progress updates (10 FPS is enough for progress bar)
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
