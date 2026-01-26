@@ -30,8 +30,9 @@ use network_booster::NetworkBooster;
 use crate::gui::BoosterApp;  // Local module
 use settings::load_settings;
 use updater::{run_auto_updater, AutoUpdateResult, cleanup_updates};
-use utils::rotate_log_if_needed;
+use utils::{rotate_log_if_needed, load_pending_connection};
 use vpn::split_tunnel::SplitTunnelDriver;
+use crate::gui::set_auto_connect_pending;
 
 use eframe::NativeOptions;
 use log::{error, info, warn};
@@ -194,17 +195,55 @@ fn main() -> eframe::Result<()> {
     info!("Log file: {}", log_file_path.display());
     info!("Log level: {:?}", log_level);
 
+    // Check for --resume-connect flag (set when relaunching with elevation)
+    // This is used to continue a VPN connection after UAC elevation
+    let args: Vec<String> = std::env::args().collect();
+    let is_resume_connect = args.iter().any(|a| a == "--resume-connect");
+    if is_resume_connect {
+        info!("--resume-connect flag detected, checking for pending connection...");
+        if let Some(pending) = load_pending_connection() {
+            info!("Found pending connection: region={}, server={}", pending.region, pending.server);
+            set_auto_connect_pending(pending);
+        } else {
+            warn!("--resume-connect flag present but no valid pending connection found");
+        }
+    }
+
     // Single-instance check - prevent multiple app instances (and multiple tray icons)
     // Note: OAuth is now handled via localhost HTTP server, so we don't need to handle
     // second instances for OAuth callbacks anymore.
-    let _instance_guard = match try_acquire_single_instance() {
-        Some(guard) => {
-            info!("Single-instance lock acquired");
-            guard
+    //
+    // IMPORTANT: When --resume-connect is used, the old process may still be exiting.
+    // We retry a few times to handle this race condition.
+    let _instance_guard = {
+        let max_attempts = if is_resume_connect { 10 } else { 1 };
+        let mut guard = None;
+
+        for attempt in 1..=max_attempts {
+            match try_acquire_single_instance() {
+                Some(g) => {
+                    info!("Single-instance lock acquired (attempt {})", attempt);
+                    guard = Some(g);
+                    break;
+                }
+                None => {
+                    if attempt < max_attempts {
+                        info!("Waiting for previous instance to exit (attempt {}/{})", attempt, max_attempts);
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                }
+            }
         }
-        None => {
-            info!("Another instance of SwiftTunnel is already running. Exiting.");
-            return Ok(());
+
+        match guard {
+            Some(g) => g,
+            None => {
+                if is_resume_connect {
+                    warn!("Could not acquire lock after {} attempts, previous instance may still be running", max_attempts);
+                }
+                info!("Another instance of SwiftTunnel is already running. Exiting.");
+                return Ok(());
+            }
         }
     };
 
