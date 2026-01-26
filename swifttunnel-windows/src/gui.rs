@@ -634,7 +634,7 @@ impl BoosterApp {
 
             // Network throughput graph
             throughput_stats: None,
-            throughput_history: VecDeque::with_capacity(120), // 2 minutes at 1 sample/sec
+            throughput_history: VecDeque::with_capacity(64), // 1 minute at 1 sample/sec (trimmed to 60)
             last_throughput_bytes: None,
 
             // Artificial latency for practice mode
