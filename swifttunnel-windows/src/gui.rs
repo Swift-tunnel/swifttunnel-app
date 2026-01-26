@@ -44,6 +44,7 @@ const GRADIENT_CYAN_END: egui::Color32 = egui::Color32::from_rgb(52, 211, 153); 
 const ACCENT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);   // Blue accent (#3b82f6)
 const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(139, 92, 246); // Violet (#8b5cf6)
 const ACCENT_CYAN: egui::Color32 = egui::Color32::from_rgb(34, 211, 238);      // Cyan for highlights (#22d3ee)
+const ACCENT_LIME: egui::Color32 = egui::Color32::from_rgb(163, 230, 53);      // Lime for dynamic render (#a3e635)
 
 // Status colors - more vibrant
 const STATUS_CONNECTED: egui::Color32 = egui::Color32::from_rgb(52, 211, 153);   // Emerald
@@ -3392,6 +3393,59 @@ impl BoosterApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("-").size(10.0));
                     ui.label(egui::RichText::new("Lower = better FPS, Higher = better visuals").size(10.0).color(TEXT_MUTED));
+                });
+
+                // ─────────────────────────────────────────────────────────────
+                // DYNAMIC RENDER OPTIMIZATION
+                // ─────────────────────────────────────────────────────────────
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(12.0);
+
+                let current_mode = self.state.config.roblox_settings.dynamic_render_optimization;
+                let mode_display = match current_mode {
+                    DynamicRenderMode::Off => "Off",
+                    DynamicRenderMode::Low => "Low",
+                    DynamicRenderMode::Medium => "Medium",
+                    DynamicRenderMode::High => "High",
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Dynamic Render").size(13.0).color(TEXT_SECONDARY));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let color = if current_mode == DynamicRenderMode::Off { TEXT_MUTED } else { ACCENT_LIME };
+                        ui.label(egui::RichText::new(mode_display).size(14.0).color(color).strong());
+                    });
+                });
+
+                ui.add_space(12.0);
+
+                ui.horizontal(|ui| {
+                    for (label, mode) in [
+                        ("Off", DynamicRenderMode::Off),
+                        ("Low", DynamicRenderMode::Low),
+                        ("Med", DynamicRenderMode::Medium),
+                        ("High", DynamicRenderMode::High),
+                    ] {
+                        let is_sel = current_mode == mode;
+                        let (bg, text) = if is_sel { (ACCENT_LIME, egui::Color32::from_rgb(23, 23, 23)) } else { (BG_ELEVATED, TEXT_SECONDARY) };
+                        if ui.add(
+                            egui::Button::new(egui::RichText::new(label).size(11.0).color(text))
+                                .fill(bg).rounding(4.0).min_size(egui::vec2(44.0, 28.0))
+                        ).clicked() {
+                            self.state.config.roblox_settings.dynamic_render_optimization = mode;
+                            if self.selected_profile != OptimizationProfile::Custom {
+                                self.selected_profile = OptimizationProfile::Custom;
+                            }
+                            self.mark_dirty();
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("⚡").size(10.0).color(ACCENT_LIME));
+                    ui.label(egui::RichText::new("Adaptive resolution for +5-30% FPS boost").size(10.0).color(TEXT_MUTED));
                 });
             });
 
