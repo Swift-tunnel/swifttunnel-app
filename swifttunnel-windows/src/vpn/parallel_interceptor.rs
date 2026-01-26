@@ -2121,10 +2121,10 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
             first_run = false;
             log::info!("Cache refresher: Performing initial refresh immediately");
         } else {
-            // WireSock-style: Ultra-fast 2ms refresh for instant game detection
-            // Critical: Without inline lookup fallback, cache must be very fresh
-            // to catch new connections before packets bypass
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            // 20ms refresh interval - balances CPU usage with cache freshness
+            // Inline lookup fallback in process_cache.rs handles cache misses
+            // for first packets of new connections (rare during gameplay)
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
         // Collect connections

@@ -20,8 +20,10 @@ impl PerformanceMonitor {
 
     /// Update performance metrics
     pub fn update_metrics(&mut self, metrics: &mut PerformanceMetrics) {
-        // Refresh system information
-        self.system.refresh_all();
+        // Refresh only what we need (processes + memory) instead of refresh_all()
+        // which queries CPU, disks, networks, components - all unnecessary here
+        self.system.refresh_processes(ProcessesToUpdate::All, true);
+        self.system.refresh_memory();
 
         // Find Roblox process
         let roblox_process = self.find_roblox_process();
