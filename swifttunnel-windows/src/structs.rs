@@ -92,7 +92,7 @@ pub struct RobloxSettingsConfig {
     pub disable_post_processing: bool,
     /// Dynamic render optimization: reduces render resolution for improved FPS on low-end hardware
     #[serde(default)]
-    pub dynamic_render_optimization: bool,
+    pub dynamic_render_optimization: DynamicRenderMode,
 }
 
 impl Default for RobloxSettingsConfig {
@@ -104,8 +104,35 @@ impl Default for RobloxSettingsConfig {
             disable_shadows: false,
             reduce_texture_quality: false,
             disable_post_processing: false,
-            dynamic_render_optimization: false, // Disabled by default, user opt-in
+            dynamic_render_optimization: DynamicRenderMode::Off, // Disabled by default, user opt-in
         }
+    }
+}
+
+/// Dynamic render optimization modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DynamicRenderMode {
+    #[default]
+    Off,
+    Low,    // Value: 3 - Least aggressive, minimal visual impact
+    Medium, // Value: 2 - Balanced performance/quality
+    High,   // Value: 1 - Most aggressive, maximum FPS gain
+}
+
+impl DynamicRenderMode {
+    /// Get the render value for this mode (lower = more aggressive optimization)
+    pub fn render_value(&self) -> Option<u32> {
+        match self {
+            DynamicRenderMode::Off => None,
+            DynamicRenderMode::Low => Some(3),
+            DynamicRenderMode::Medium => Some(2),
+            DynamicRenderMode::High => Some(1),
+        }
+    }
+
+    /// Check if optimization is enabled
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, DynamicRenderMode::Off)
     }
 }
 
@@ -358,8 +385,8 @@ pub mod boost_info {
         id: "dynamic_render",
         title: "Dynamic Render Optimization",
         short_desc: "Adaptive render resolution",
-        long_desc: "Dynamically adjusts render resolution based on performance needs. Reduces GPU load during intensive scenes while maintaining visual quality where possible. Recommended for low-end hardware or to maximize FPS.",
-        impact: "+10-30% FPS on GPU-bound scenarios",
+        long_desc: "Dynamically adjusts render resolution based on performance needs. Choose Low for minimal impact, Medium for balanced performance, or High for maximum FPS gain. Higher settings reduce visual quality but significantly improve frame rates.",
+        impact: "Low: +5-10% FPS | Medium: +10-20% FPS | High: +20-30% FPS",
         risk_level: RiskLevel::Safe,
         requires_admin: false,
     };
