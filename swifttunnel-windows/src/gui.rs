@@ -3,6 +3,7 @@ use crate::geolocation::get_ip_location;
 use crate::hidden_command;
 use swifttunnel_fps_booster::notification::show_server_location;
 use swifttunnel_fps_booster::roblox_watcher::{RobloxWatcher, RobloxEvent};
+use swifttunnel_fps_booster::utils::{PendingConnection, is_administrator, save_pending_connection, relaunch_elevated};
 use crate::network_analyzer::{
     NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
     run_stability_test, run_speed_test, speed_test::format_speed,
@@ -18,8 +19,30 @@ use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamin
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  AUTO-CONNECT FROM ELEVATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Static storage for pending connection from --resume-connect
+static PENDING_AUTO_CONNECT: OnceLock<PendingConnection> = OnceLock::new();
+
+/// Set pending auto-connect from main.rs after elevation
+/// Call this before creating BoosterApp if --resume-connect was passed
+pub fn set_auto_connect_pending(pending: PendingConnection) {
+    if PENDING_AUTO_CONNECT.set(pending).is_err() {
+        log::warn!("Auto-connect pending was already set (ignored duplicate)");
+    }
+}
+
+/// Take the pending auto-connect (returns None after first call)
+fn take_auto_connect_pending() -> Option<PendingConnection> {
+    // OnceLock doesn't have take(), so we use get() and mark it as consumed
+    // We'll handle this by checking a flag in BoosterApp
+    PENDING_AUTO_CONNECT.get().cloned()
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  SWIFTTUNNEL DESIGN SYSTEM v5
@@ -407,6 +430,14 @@ pub struct BoosterApp {
     logo_texture: Option<egui::TextureHandle>,
     /// Routing mode for split tunnel (V1 = process-based, V2 = hybrid/ExitLag-style)
     routing_mode: crate::settings::RoutingMode,
+    /// Pending auto-connect from elevation (--resume-connect flag)
+    /// Set when app is relaunched with admin privileges to continue connection
+    auto_connect_pending: Option<PendingConnection>,
+    /// Flag indicating auto-connect is consumed (to prevent double-connect)
+    auto_connect_consumed: bool,
+    /// Instant when user clicked Connect (for immediate UI feedback before VPN state updates)
+    /// This provides instant visual feedback while the VPN state machine catches up (500ms poll)
+    connecting_initiated: Option<std::time::Instant>,
 }
 
 impl BoosterApp {
@@ -649,6 +680,11 @@ impl BoosterApp {
             routing_mode: saved_settings.routing_mode,
             // Logo texture (loaded from embedded PNG)
             logo_texture: Self::load_logo_texture(&cc.egui_ctx),
+            // Auto-connect from elevation (take from static if --resume-connect was used)
+            auto_connect_pending: take_auto_connect_pending(),
+            auto_connect_consumed: false,
+            // Instant connect feedback (for immediate UI response)
+            connecting_initiated: None,
         }
     }
 
@@ -969,9 +1005,65 @@ impl eframe::App for BoosterApp {
             self.process_oauth_callback(&callback_data.token, &callback_data.state);
         }
 
+        // Auto-connect from elevation (--resume-connect flag)
+        // Triggers when: pending connection exists, logged in, servers loaded, not already consumed
+        if !self.auto_connect_consumed {
+            if let Some(pending) = &self.auto_connect_pending {
+                let is_logged_in = matches!(self.auth_state, AuthState::LoggedIn(_));
+                let servers_loaded = !self.servers_loading;
+                let is_disconnected = matches!(self.vpn_state, ConnectionState::Disconnected);
+
+                if is_logged_in && servers_loaded && is_disconnected {
+                    log::info!(
+                        "Auto-connecting from elevation: region={}, server={}",
+                        pending.region, pending.server
+                    );
+
+                    // Apply pending connection settings
+                    self.selected_region = pending.region.clone();
+                    self.selected_server = pending.server.clone();
+
+                    // Convert apps back to game presets
+                    self.selected_game_presets.clear();
+                    for app in &pending.apps {
+                        match app.to_lowercase().as_str() {
+                            "robloxplayerbeta.exe" | "robloxplayerlauncher.exe" => {
+                                self.selected_game_presets.insert(crate::vpn::GamePreset::Roblox);
+                            }
+                            "valorant.exe" | "valorant-win64-shipping.exe" => {
+                                self.selected_game_presets.insert(crate::vpn::GamePreset::Valorant);
+                            }
+                            "fortnite.exe" | "fortniteclient-win64-shipping.exe" => {
+                                self.selected_game_presets.insert(crate::vpn::GamePreset::Fortnite);
+                            }
+                            _ => {}
+                        }
+                    }
+                    // If no presets were matched, default to Roblox
+                    if self.selected_game_presets.is_empty() {
+                        self.selected_game_presets.insert(crate::vpn::GamePreset::Roblox);
+                    }
+
+                    // Set routing mode from pending
+                    self.routing_mode = match pending.routing_mode {
+                        1 => crate::settings::RoutingMode::V2,
+                        _ => crate::settings::RoutingMode::V1,
+                    };
+
+                    // Mark as consumed before connecting to prevent loop
+                    self.auto_connect_consumed = true;
+
+                    // Trigger connection
+                    self.connect_vpn();
+                }
+            }
+        }
+
         // PERFORMANCE FIX: Only request continuous repaint when actually needed
         let is_loading = self.servers_loading || self.finding_best_server.load(Ordering::Relaxed);
-        let is_vpn_transitioning = self.vpn_state.is_connecting() || matches!(self.vpn_state, ConnectionState::Disconnecting);
+        let is_vpn_transitioning = self.vpn_state.is_connecting()
+            || matches!(self.vpn_state, ConnectionState::Disconnecting)
+            || self.connecting_initiated.is_some(); // Include instant connect feedback
         let is_logging_in = matches!(self.auth_state, AuthState::LoggingIn);
         let is_awaiting_oauth_here = matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_));
         let is_updating = self.update_state.lock().map(|s| s.is_downloading()).unwrap_or(false);
@@ -1151,6 +1243,24 @@ impl eframe::App for BoosterApp {
             if let Ok(vpn) = self.vpn_connection.try_lock() {
                 // Get state directly - the state() method is fast
                 let new_state = self.runtime.block_on(vpn.state());
+
+                // Clear connecting_initiated when VPN state transitions from disconnected
+                // This ensures the optimistic animation stops once the real state takes over
+                if self.connecting_initiated.is_some() {
+                    let was_disconnected = matches!(self.vpn_state, ConnectionState::Disconnected);
+                    let is_transitioning = new_state.is_connecting() || new_state.is_connected() || matches!(new_state, ConnectionState::Error(_));
+                    if was_disconnected && is_transitioning {
+                        log::debug!("VPN state changed, clearing connecting_initiated");
+                        self.connecting_initiated = None;
+                    }
+                    // Also clear if it's been more than 5 seconds (timeout fallback)
+                    if let Some(initiated) = self.connecting_initiated {
+                        if initiated.elapsed() > std::time::Duration::from_secs(5) {
+                            log::warn!("connecting_initiated timeout (5s), clearing");
+                            self.connecting_initiated = None;
+                        }
+                    }
+                }
 
                 // Track when we first connect to save the last connected region
                 if !self.vpn_state.is_connected() && new_state.is_connected() {
@@ -1886,49 +1996,60 @@ impl BoosterApp {
     }
 
     fn render_connection_status(&mut self, ui: &mut egui::Ui) {
-        let (status_text, status_icon, status_color, detail_text, show_connected_info) = match &self.vpn_state {
-            ConnectionState::Disconnected => ("Disconnected", "o", STATUS_INACTIVE, "Ready to connect".to_string(), false),
-            ConnectionState::FetchingConfig => ("Connecting", "o", STATUS_WARNING, "Fetching config...".to_string(), false),
-            ConnectionState::CreatingAdapter => ("Connecting", "o", STATUS_WARNING, "Creating adapter...".to_string(), false),
-            ConnectionState::Connecting => ("Connecting", "o", STATUS_WARNING, "Establishing tunnel...".to_string(), false),
-            ConnectionState::ConfiguringSplitTunnel => ("Connecting", "o", STATUS_WARNING, "Configuring split tunnel...".to_string(), false),
-            ConnectionState::ConfiguringRoutes => ("Connecting", "o", STATUS_WARNING, "Setting up routes...".to_string(), false),
-            ConnectionState::Connected { server_region, .. } => {
-                let name = if let Ok(list) = self.dynamic_server_list.lock() {
-                    list.get_server(server_region)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_else(|| server_region.clone())
-                } else {
-                    server_region.clone()
-                };
-                ("Protected", "o", STATUS_CONNECTED, name, true)
-            }
-            ConnectionState::Disconnecting => ("Disconnecting", "o", STATUS_WARNING, "Please wait...".to_string(), false),
-            ConnectionState::Error(msg) => {
-                // Format user-friendly VPN error messages
-                let user_friendly = if msg.contains("Administrator privileges required") {
-                    "Admin access required. Restart as Administrator.".to_string()
-                } else if msg.contains("wintun.dll not found") {
-                    "Driver not found. Please reinstall SwiftTunnel.".to_string()
-                } else if msg.contains("401") || msg.contains("Unauthorized") {
-                    "Connection failed. Try again.".to_string()
-                } else if msg.contains("404") {
-                    "Server unavailable. Try a different region.".to_string()
-                } else if msg.contains("timeout") || msg.contains("Timeout") {
-                    "Connection timed out. Check your internet.".to_string()
-                } else if msg.contains("Network error") || msg.contains("network") {
-                    "Network error. Check your connection.".to_string()
-                } else if msg.contains("handshake") || msg.contains("Handshake") {
-                    "Secure connection failed. Try again.".to_string()
-                } else {
-                    msg.clone()
-                };
-                ("Error", "x", STATUS_ERROR, user_friendly, false)
+        // Check if we should show instant connecting feedback
+        // This gives immediate visual response when user clicks Connect
+        let instant_connecting = self.connecting_initiated.is_some()
+            && matches!(self.vpn_state, ConnectionState::Disconnected);
+
+        let (status_text, status_icon, status_color, detail_text, show_connected_info) = if instant_connecting {
+            // Show connecting state immediately while VPN state catches up
+            ("Connecting", "o", STATUS_WARNING, "Initiating...".to_string(), false)
+        } else {
+            match &self.vpn_state {
+                ConnectionState::Disconnected => ("Disconnected", "o", STATUS_INACTIVE, "Ready to connect".to_string(), false),
+                ConnectionState::FetchingConfig => ("Connecting", "o", STATUS_WARNING, "Fetching config...".to_string(), false),
+                ConnectionState::CreatingAdapter => ("Connecting", "o", STATUS_WARNING, "Creating adapter...".to_string(), false),
+                ConnectionState::Connecting => ("Connecting", "o", STATUS_WARNING, "Establishing tunnel...".to_string(), false),
+                ConnectionState::ConfiguringSplitTunnel => ("Connecting", "o", STATUS_WARNING, "Configuring split tunnel...".to_string(), false),
+                ConnectionState::ConfiguringRoutes => ("Connecting", "o", STATUS_WARNING, "Setting up routes...".to_string(), false),
+                ConnectionState::Connected { server_region, .. } => {
+                    let name = if let Ok(list) = self.dynamic_server_list.lock() {
+                        list.get_server(server_region)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_else(|| server_region.clone())
+                    } else {
+                        server_region.clone()
+                    };
+                    ("Protected", "o", STATUS_CONNECTED, name, true)
+                }
+                ConnectionState::Disconnecting => ("Disconnecting", "o", STATUS_WARNING, "Please wait...".to_string(), false),
+                ConnectionState::Error(msg) => {
+                    // Format user-friendly VPN error messages
+                    let user_friendly = if msg.contains("Administrator privileges required") {
+                        "Admin access required. Restart as Administrator.".to_string()
+                    } else if msg.contains("wintun.dll not found") {
+                        "Driver not found. Please reinstall SwiftTunnel.".to_string()
+                    } else if msg.contains("401") || msg.contains("Unauthorized") {
+                        "Connection failed. Try again.".to_string()
+                    } else if msg.contains("404") {
+                        "Server unavailable. Try a different region.".to_string()
+                    } else if msg.contains("timeout") || msg.contains("Timeout") {
+                        "Connection timed out. Check your internet.".to_string()
+                    } else if msg.contains("Network error") || msg.contains("network") {
+                        "Network error. Check your connection.".to_string()
+                    } else if msg.contains("handshake") || msg.contains("Handshake") {
+                        "Secure connection failed. Try again.".to_string()
+                    } else {
+                        msg.clone()
+                    };
+                    ("Error", "x", STATUS_ERROR, user_friendly, false)
+                }
             }
         };
 
         let is_connected = self.vpn_state.is_connected();
-        let is_connecting = self.vpn_state.is_connecting();
+        // Include instant_connecting for animation purposes
+        let is_connecting = self.vpn_state.is_connecting() || instant_connecting;
         let is_error = matches!(&self.vpn_state, ConnectionState::Error(_));
 
         let (assigned_ip, uptime_str, split_tunnel_active, tunneled_processes) = if let ConnectionState::Connected {
@@ -4738,6 +4859,89 @@ impl BoosterApp {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     fn connect_vpn(&mut self) {
+        // Set instant feedback - show connecting animation immediately
+        // This avoids the 500ms delay before VPN state polling catches up
+        self.connecting_initiated = Some(std::time::Instant::now());
+
+        // Check if running as administrator - required for ETW and WFP
+        // If not admin, we need to relaunch elevated to avoid split tunnel bypass
+        if !is_administrator() {
+            log::info!("Not running as administrator, need to elevate for reliable split tunnel");
+            self.set_status("Requesting admin access...", STATUS_WARNING);
+
+            // Check if at least one game preset is selected before elevating
+            if self.selected_game_presets.is_empty() {
+                self.set_status("Please select at least one game", STATUS_WARNING);
+                self.connecting_initiated = None;
+                return;
+            }
+
+            // Get apps from selected game presets for pending connection
+            let apps: Vec<String> = get_apps_for_preset_set(&self.selected_game_presets)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+
+            // Determine which server to use
+            let server = if let Some(forced_server) = self.forced_servers.get(&self.selected_region) {
+                forced_server.clone()
+            } else if let Ok(latencies) = self.region_latencies.try_lock() {
+                latencies.get(&self.selected_region)
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(|| self.selected_server.clone())
+            } else {
+                self.selected_server.clone()
+            };
+
+            // Save pending connection for elevated process
+            let pending = PendingConnection {
+                region: self.selected_region.clone(),
+                server,
+                apps,
+                routing_mode: match self.routing_mode {
+                    crate::settings::RoutingMode::V1 => 0,
+                    crate::settings::RoutingMode::V2 => 1,
+                },
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            };
+
+            if let Err(e) = save_pending_connection(&pending) {
+                log::error!("Failed to save pending connection: {}", e);
+                self.set_status("Failed to prepare for elevation", STATUS_ERROR);
+                self.connecting_initiated = None;
+                return;
+            }
+
+            // Attempt to relaunch elevated
+            match relaunch_elevated() {
+                Ok(()) => {
+                    log::info!("Elevated process launched, exiting current instance");
+                    // Exit the current non-elevated process
+                    // The elevated process will auto-connect using pending connection
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    log::error!("Failed to elevate: {}", e);
+                    // UAC was probably cancelled - show message and continue as non-admin
+                    self.set_status("Admin access required for reliable VPN", STATUS_ERROR);
+                    self.connecting_initiated = None;
+                    // Delete the pending connection file since we're not elevating
+                    let _ = std::fs::remove_file(
+                        dirs::data_local_dir()
+                            .map(|d| d.join("SwiftTunnel").join("pending_connect.json"))
+                            .unwrap_or_else(|| PathBuf::from("pending_connect.json"))
+                    );
+                    return;
+                }
+            }
+        }
+
+        // We're running as administrator - proceed with connection
+        log::info!("Running as administrator, proceeding with VPN connection");
+
         // Refresh token silently before connecting (handles expired sessions)
         let auth_manager = Arc::clone(&self.auth_manager);
         let rt = Arc::clone(&self.runtime);
@@ -4762,6 +4966,7 @@ impl BoosterApp {
                         session.access_token.clone()
                     } else {
                         self.set_status("Please sign in first", STATUS_ERROR);
+                        self.connecting_initiated = None;
                         return;
                     }
                 }
@@ -4771,6 +4976,7 @@ impl BoosterApp {
         // Check if at least one game preset is selected
         if self.selected_game_presets.is_empty() {
             self.set_status("Please select at least one game", STATUS_WARNING);
+            self.connecting_initiated = None;
             return;
         }
 

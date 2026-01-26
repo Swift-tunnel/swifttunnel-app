@@ -30,8 +30,9 @@ use network_booster::NetworkBooster;
 use crate::gui::BoosterApp;  // Local module
 use settings::load_settings;
 use updater::{run_auto_updater, AutoUpdateResult, cleanup_updates};
-use utils::rotate_log_if_needed;
+use utils::{rotate_log_if_needed, load_pending_connection};
 use vpn::split_tunnel::SplitTunnelDriver;
+use crate::gui::set_auto_connect_pending;
 
 use eframe::NativeOptions;
 use log::{error, info, warn};
@@ -193,6 +194,19 @@ fn main() -> eframe::Result<()> {
     info!("Starting SwiftTunnel v{}", env!("CARGO_PKG_VERSION"));
     info!("Log file: {}", log_file_path.display());
     info!("Log level: {:?}", log_level);
+
+    // Check for --resume-connect flag (set when relaunching with elevation)
+    // This is used to continue a VPN connection after UAC elevation
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--resume-connect") {
+        info!("--resume-connect flag detected, checking for pending connection...");
+        if let Some(pending) = load_pending_connection() {
+            info!("Found pending connection: region={}, server={}", pending.region, pending.server);
+            set_auto_connect_pending(pending);
+        } else {
+            warn!("--resume-connect flag present but no valid pending connection found");
+        }
+    }
 
     // Single-instance check - prevent multiple app instances (and multiple tray icons)
     // Note: OAuth is now handled via localhost HTTP server, so we don't need to handle

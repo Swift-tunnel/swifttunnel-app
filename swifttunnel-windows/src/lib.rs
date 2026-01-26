@@ -23,3 +23,7 @@ pub use utils::hidden_command;
 pub use utils::is_administrator;
 pub use utils::with_retry;
 pub use utils::rotate_log_if_needed;
+pub use utils::relaunch_elevated;
+pub use utils::save_pending_connection;
+pub use utils::load_pending_connection;
+pub use utils::PendingConnection;
