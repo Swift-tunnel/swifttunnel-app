@@ -365,10 +365,11 @@ impl ParallelInterceptor {
         &mut self,
         vpn_adapter_name: &str,
         tunnel_apps: Vec<String>,
+        vpn_adapter_luid: u64,
     ) -> VpnResult<()> {
         log::info!(
-            "Configuring parallel interceptor for VPN adapter: {}",
-            vpn_adapter_name
+            "Configuring parallel interceptor for VPN adapter: {} (LUID: {})",
+            vpn_adapter_name, vpn_adapter_luid
         );
 
         // Update tunnel apps in cache
@@ -376,40 +377,61 @@ impl ParallelInterceptor {
             .ok_or_else(|| VpnError::SplitTunnel("Cache in use".to_string()))?
             .set_tunnel_apps(tunnel_apps);
 
-        // Retry adapter detection up to 3 times with delays
-        // The Wintun adapter may not be immediately visible to NDIS after creation
-        const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY_MS: u64 = 500;
+        // Retry adapter detection with progressive backoff
+        // The Wintun adapter may not be immediately visible to NDIS after creation,
+        // especially when the app is launched via UAC elevation (v0.9.11+)
+        // On some systems, Windows networking APIs need time to recognize new adapters
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAYS_MS: [u64; 5] = [500, 750, 1000, 1500, 2000]; // Progressive backoff
 
         let mut last_error = String::new();
 
         for attempt in 1..=MAX_RETRIES {
-            match self.find_adapters(vpn_adapter_name) {
+            match self.find_adapters(vpn_adapter_name, vpn_adapter_luid) {
                 Ok(()) => {
-                    log::info!("Adapter detection succeeded on attempt {}", attempt);
+                    if attempt > 1 {
+                        log::info!("Adapter detection succeeded on attempt {} (after {}ms total delay)",
+                            attempt, RETRY_DELAYS_MS[..attempt as usize - 1].iter().sum::<u64>());
+                    } else {
+                        log::info!("Adapter detection succeeded on first attempt");
+                    }
                     return Ok(());
                 }
                 Err(e) => {
                     last_error = e.to_string();
                     if attempt < MAX_RETRIES {
+                        let delay = RETRY_DELAYS_MS[attempt as usize - 1];
                         log::warn!(
                             "Adapter detection failed (attempt {}/{}): {}. Retrying in {}ms...",
-                            attempt, MAX_RETRIES, e, RETRY_DELAY_MS
+                            attempt, MAX_RETRIES, e, delay
                         );
-                        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
                     }
                 }
             }
         }
 
+        // Final error with diagnostic info
+        log::error!(
+            "Adapter detection failed after {} attempts (total wait: {}ms). Last error: {}",
+            MAX_RETRIES,
+            RETRY_DELAYS_MS.iter().sum::<u64>(),
+            last_error
+        );
+        log::error!("This may indicate the Wintun adapter was not created successfully, or Windows networking APIs are slow to update.");
+
         Err(VpnError::SplitTunnel(format!(
-            "Failed to find adapters after {} attempts: {}",
+            "Failed to find VPN adapter after {} attempts: {}",
             MAX_RETRIES, last_error
         )))
     }
 
     /// Internal adapter detection logic
-    fn find_adapters(&mut self, vpn_adapter_name: &str) -> VpnResult<()> {
+    ///
+    /// Identifies adapters by:
+    /// 1. LUID matching (most reliable - directly identifies our Wintun adapter)
+    /// 2. Name matching (friendly name or internal name contains "swifttunnel" or "wintun")
+    fn find_adapters(&mut self, vpn_adapter_name: &str, vpn_adapter_luid: u64) -> VpnResult<()> {
         // Find adapters
         let driver = ndisapi::Ndisapi::new("NDISRD")
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
@@ -442,13 +464,28 @@ impl ParallelInterceptor {
             let friendly_lower = friendly_name.to_lowercase();
 
             // Check if this is our VPN adapter (SwiftTunnel/Wintun)
-            // Note: is_vpn check must come BEFORE is_virtual to properly detect our adapter
-            let is_vpn = name_lower.contains(&vpn_adapter_name.to_lowercase())
+            // Priority order:
+            // 1. LUID matching (most reliable - directly identifies our Wintun adapter)
+            // 2. Name matching (friendly name or internal name contains keywords)
+            //
+            // CRITICAL FIX (v0.9.15): LUID matching resolves adapter detection failures
+            // that occurred after v0.9.11 for some users. The issue was that:
+            // - GetAdaptersInfo sometimes fails to find newly created Wintun adapters
+            // - This caused friendly_name to be empty
+            // - Name-based matching failed because internal_name is just a GUID
+            // - The LUID is always available and uniquely identifies our adapter
+            let is_vpn_by_luid = vpn_adapter_luid != 0 && check_adapter_matches_luid(&internal_name, vpn_adapter_luid);
+            let is_vpn_by_name = name_lower.contains(&vpn_adapter_name.to_lowercase())
                 || name_lower.contains("swifttunnel")
                 || name_lower.contains("wintun")
                 || friendly_lower.contains(&vpn_adapter_name.to_lowercase())
                 || friendly_lower.contains("swifttunnel")
                 || friendly_lower.contains("wintun");
+            let is_vpn = is_vpn_by_luid || is_vpn_by_name;
+
+            if is_vpn_by_luid && !is_vpn_by_name {
+                log::info!("    -> VPN adapter identified by LUID (friendly name unavailable)");
+            }
 
             // Filter out virtual adapters (VPNs, tunnels, etc.)
             // These should NOT be selected as the physical adapter
@@ -3090,6 +3127,97 @@ fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Check if an adapter's internal name matches a given LUID
+///
+/// Uses GetAdaptersAddresses to map the LUID to an adapter GUID, then checks
+/// if the internal_name contains that GUID. This provides reliable adapter
+/// identification even when friendly name lookup fails.
+fn check_adapter_matches_luid(internal_name: &str, target_luid: u64) -> bool {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+    if target_luid == 0 {
+        return false;
+    }
+
+    // Extract GUID from internal_name (format: \DEVICE\{GUID})
+    let internal_guid = internal_name
+        .rsplit('\\')
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c| c == '{' || c == '}')
+        .to_lowercase();
+
+    if internal_guid.is_empty() {
+        return false;
+    }
+
+    unsafe {
+        let mut buf_len: u32 = 0;
+        let _ = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            None,
+            &mut buf_len,
+        );
+
+        if buf_len == 0 {
+            return false;
+        }
+
+        let mut buffer: Vec<u8> = vec![0; buf_len as usize];
+        let adapter_addr_ptr = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+
+        let result = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            Some(adapter_addr_ptr),
+            &mut buf_len,
+        );
+
+        if result != 0 {
+            return false;
+        }
+
+        let mut current = adapter_addr_ptr;
+        while !current.is_null() {
+            let adapter = &*current;
+
+            // Check if LUID matches
+            // The Luid field is a NET_LUID_LH which contains Value as u64
+            let adapter_luid = adapter.Luid.Value;
+
+            if adapter_luid == target_luid {
+                // Found adapter with matching LUID - check if GUID matches
+                if !adapter.AdapterName.0.is_null() {
+                    let adapter_name = std::ffi::CStr::from_ptr(adapter.AdapterName.0 as *const i8);
+                    if let Ok(name_str) = adapter_name.to_str() {
+                        let adapter_guid = name_str
+                            .trim_matches(|c| c == '{' || c == '}')
+                            .to_lowercase();
+
+                        if adapter_guid == internal_guid {
+                            log::debug!(
+                                "check_adapter_matches_luid: LUID {} matches adapter GUID {}",
+                                target_luid, adapter_guid
+                            );
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            current = adapter.Next;
+        }
+    }
+
+    false
 }
 
 /// Update transport (TCP/UDP) checksum after NAT IP change
