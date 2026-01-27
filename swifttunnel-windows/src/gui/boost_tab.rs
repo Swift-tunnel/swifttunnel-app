@@ -521,22 +521,13 @@ impl BoosterApp {
         });
         ui.add_space(SPACING_SM);
 
-        // Calculate grid dimensions (2 columns) using stored content width
+        // Calculate card width (full width, single column layout)
         let available_width = self.content_area_width.min(ui.available_width());
-        let card_width = ((available_width - CARD_GAP) / 2.0).floor().max(150.0);
+        let card_width = available_width;
 
-        // Render boosts in 2-column grid
-        let mut boost_iter = boosts.iter().peekable();
-        while boost_iter.peek().is_some() {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = CARD_GAP;
-
-                for _ in 0..2 {
-                    if let Some(boost) = boost_iter.next() {
-                        self.render_boost_card(ui, boost, card_width);
-                    }
-                }
-            });
+        // Render boosts in single column (vertical stack)
+        for boost in boosts {
+            self.render_boost_card(ui, boost, card_width);
             ui.add_space(SPACING_SM);
         }
     }
@@ -560,8 +551,7 @@ impl BoosterApp {
             .rounding(10.0)
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
-                ui.set_min_width(width - 24.0);
-                ui.set_max_width(width - 24.0);
+                // Use full available width for single column layout
 
                 ui.horizontal(|ui| {
                     // Icon
