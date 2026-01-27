@@ -11,7 +11,7 @@ use eframe::egui;
 /// Left sidebar width (icon-only navigation)
 pub const SIDEBAR_WIDTH: f32 = 56.0;
 /// Top bar height with status and toggle
-pub const TOP_BAR_HEIGHT: f32 = 56.0;
+pub const TOP_BAR_HEIGHT: f32 = 68.0;
 /// Decorative header banner height
 pub const HEADER_BANNER_HEIGHT: f32 = 120.0;
 /// Content padding from edges
