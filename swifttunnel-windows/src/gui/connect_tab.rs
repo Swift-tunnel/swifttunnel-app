@@ -802,7 +802,7 @@ impl BoosterApp {
         }
 
         // Calculate grid dimensions - 2 columns with responsive spacing
-        let available_width = ui.available_width();
+        let available_width = self.content_area_width.min(ui.available_width());
         let card_spacing = 10.0;
         let card_width = ((available_width - card_spacing) / 2.0).floor();
         let inner_width = (card_width - 24.0).max(100.0); // Account for inner_margin (12 * 2)
@@ -1190,7 +1190,7 @@ impl BoosterApp {
 
     /// Render skeleton loading cards with shimmer effect
     pub(crate) fn render_skeleton_region_cards(&self, ui: &mut egui::Ui) {
-        let available_width = ui.available_width();
+        let available_width = self.content_area_width.min(ui.available_width());
         let card_spacing = 10.0;
         let card_width = ((available_width - card_spacing) / 2.0).floor();
         let inner_width = (card_width - 24.0).max(100.0);
