@@ -372,42 +372,48 @@ impl BoosterApp {
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Quick FPS buttons
-                        for fps in [60, 120, 144, 240] {
-                            let is_sel = current_fps == fps;
-                            let bg = if is_sel { ACCENT_PRIMARY } else { BG_ELEVATED };
-                            let text = if is_sel { TEXT_PRIMARY } else { TEXT_SECONDARY };
-
-                            if ui.add(
-                                egui::Button::new(egui::RichText::new(format!("{}", fps)).size(11.0).color(text))
-                                    .fill(bg)
-                                    .rounding(6.0)
-                                    .min_size(egui::vec2(40.0, 28.0))
-                            ).clicked() {
-                                self.state.config.roblox_settings.target_fps = fps;
-                                self.mark_dirty();
+                        // Uncapped toggle
+                        let mut uncapped = is_uncapped;
+                        if ui.add(
+                            egui::Button::new(egui::RichText::new(if uncapped { "~ Uncapped" } else { "Uncapped" }).size(11.0).color(if uncapped { TEXT_PRIMARY } else { TEXT_SECONDARY }))
+                                .fill(if uncapped { ACCENT_PRIMARY } else { BG_ELEVATED })
+                                .rounding(6.0)
+                                .min_size(egui::vec2(80.0, 28.0))
+                        ).clicked() {
+                            uncapped = !uncapped;
+                            if uncapped {
+                                self.state.config.roblox_settings.target_fps = 9999;
+                            } else {
+                                self.state.config.roblox_settings.target_fps = 144; // Default to 144 when uncapping
                             }
+                            self.mark_dirty();
                         }
 
-                        // Uncapped button
-                        let bg = if is_uncapped { ACCENT_PRIMARY } else { BG_ELEVATED };
-                        let text = if is_uncapped { TEXT_PRIMARY } else { TEXT_SECONDARY };
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new("Max").size(11.0).color(text))
-                                .fill(bg)
-                                .rounding(6.0)
-                                .min_size(egui::vec2(40.0, 28.0))
-                        ).clicked() {
-                            self.state.config.roblox_settings.target_fps = 9999;
-                            self.mark_dirty();
+                        // Number input (only if not uncapped)
+                        if !uncapped {
+                            ui.add_space(8.0);
+                            let mut fps_value = self.state.config.roblox_settings.target_fps as i32;
+                            let response = ui.add(
+                                egui::DragValue::new(&mut fps_value)
+                                    .range(1..=9998)
+                                    .speed(1.0)
+                                    .suffix(" FPS")
+                            );
+                            if response.changed() {
+                                self.state.config.roblox_settings.target_fps = fps_value.clamp(1, 9998) as u32;
+                                self.mark_dirty();
+                            }
                         }
                     });
                 });
 
-                // FPS Slider (only if not uncapped)
-                if !is_uncapped {
+                // FPS Slider (only if not uncapped - re-read config to handle same-frame toggle)
+                let show_slider = self.state.config.roblox_settings.target_fps < 9999;
+                if show_slider {
                     ui.add_space(SPACING_SM);
-                    if ui.add(egui::Slider::new(&mut self.state.config.roblox_settings.target_fps, 30..=360).show_value(false)).changed() {
+                    let mut slider_fps = self.state.config.roblox_settings.target_fps.min(500) as i32;
+                    if ui.add(egui::Slider::new(&mut slider_fps, 30..=500).show_value(false)).changed() {
+                        self.state.config.roblox_settings.target_fps = slider_fps as u32;
                         self.mark_dirty();
                     }
                 }
@@ -460,27 +466,51 @@ impl BoosterApp {
 
                 ui.add_space(SPACING_MD);
 
-                // Dynamic Render Section
+                // Dynamic Render Section - Enhanced UI
                 let current_mode = self.state.config.roblox_settings.dynamic_render_optimization;
 
+                // Header with description
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Dynamic Render").size(12.0).color(TEXT_SECONDARY));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        for (label, mode) in [
-                            ("Off", DynamicRenderMode::Off),
-                            ("Low", DynamicRenderMode::Low),
-                            ("Med", DynamicRenderMode::Medium),
-                            ("High", DynamicRenderMode::High),
-                        ] {
-                            let is_sel = current_mode == mode;
-                            let bg = if is_sel { ACCENT_LIME } else { BG_ELEVATED };
-                            let text = if is_sel { egui::Color32::from_rgb(23, 23, 23) } else { TEXT_SECONDARY };
+                    ui.add_space(8.0);
+                    // "Hidden feature" badge to draw attention
+                    egui::Frame::NONE
+                        .fill(ACCENT_LIME.gamma_multiply(0.15))
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Hidden Roblox Setting")
+                                .size(9.0)
+                                .color(ACCENT_LIME));
+                        });
+                });
 
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Lowers internal render resolution for massive FPS gains. Most players can't notice the difference.")
+                    .size(10.0)
+                    .color(TEXT_MUTED));
+
+                ui.add_space(SPACING_SM);
+
+                // Buttons with impact labels
+                ui.horizontal(|ui| {
+                    for (label, mode, impact) in [
+                        ("Off", DynamicRenderMode::Off, ""),
+                        ("Low", DynamicRenderMode::Low, "+5%"),
+                        ("Med", DynamicRenderMode::Medium, "+15%"),
+                        ("High", DynamicRenderMode::High, "+30%"),
+                    ] {
+                        let is_sel = current_mode == mode;
+                        let bg = if is_sel { ACCENT_LIME } else { BG_ELEVATED };
+                        let text_color = if is_sel { egui::Color32::from_rgb(23, 23, 23) } else { TEXT_SECONDARY };
+
+                        ui.vertical(|ui| {
+                            // Button
                             if ui.add(
-                                egui::Button::new(egui::RichText::new(label).size(10.0).color(text))
+                                egui::Button::new(egui::RichText::new(label).size(11.0).color(text_color))
                                     .fill(bg)
                                     .rounding(6.0)
-                                    .min_size(egui::vec2(36.0, 26.0))
+                                    .min_size(egui::vec2(52.0, 28.0))
                             ).clicked() {
                                 self.state.config.roblox_settings.dynamic_render_optimization = mode;
                                 if self.selected_profile != OptimizationProfile::Custom {
@@ -488,14 +518,19 @@ impl BoosterApp {
                                 }
                                 self.mark_dirty();
                             }
-                        }
-                    });
-                });
-
-                ui.add_space(SPACING_SM);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(">").size(10.0).color(ACCENT_LIME));
-                    ui.label(egui::RichText::new("Adaptive resolution for +5-30% FPS boost").size(10.0).color(TEXT_MUTED));
+                            // Impact label below button
+                            if !impact.is_empty() {
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new(impact)
+                                    .size(9.0)
+                                    .color(if is_sel { ACCENT_LIME } else { TEXT_MUTED }));
+                            } else {
+                                ui.add_space(2.0);
+                                ui.label(egui::RichText::new("—").size(9.0).color(TEXT_MUTED));
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
                 });
             });
     }
