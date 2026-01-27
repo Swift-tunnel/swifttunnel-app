@@ -215,6 +215,8 @@ pub struct BoosterApp {
     /// Instant when user clicked Connect (for immediate UI feedback before VPN state updates)
     /// This provides instant visual feedback while the VPN state machine catches up (500ms poll)
     connecting_initiated: Option<std::time::Instant>,
+    /// Content area width (set by layout, used by tabs for proper sizing)
+    content_area_width: f32,
 }
 
 impl BoosterApp {
@@ -462,6 +464,7 @@ impl BoosterApp {
             auto_connect_consumed: false,
             // Instant connect feedback (for immediate UI response)
             connecting_initiated: None,
+            content_area_width: 600.0, // Default, will be set by layout
         }
     }
 

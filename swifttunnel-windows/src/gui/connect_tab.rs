@@ -41,7 +41,6 @@ impl BoosterApp {
             .rounding(12.0)
             .inner_margin(16)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
 
                 // Section header
                 ui.horizontal(|ui| {
@@ -144,7 +143,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.vertical_centered(|ui| {
                     ui.add_space(32.0);
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 64.0), egui::Sense::hover());
@@ -266,7 +264,6 @@ impl BoosterApp {
             .rounding(16.0)
             .inner_margin(egui::Margin::symmetric(20, 18))
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
 
                 ui.horizontal(|ui| {
                     // Status indicator with animation
@@ -765,8 +762,7 @@ impl BoosterApp {
                     .rounding(12.0)
                     .inner_margin(egui::Margin::symmetric(24, 20))
                     .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.vertical_centered(|ui| {
+                                ui.vertical_centered(|ui| {
                             ui.label(egui::RichText::new("!").size(32.0).color(STATUS_ERROR));
                             ui.add_space(12.0);
                             ui.label(egui::RichText::new("Failed to load servers")
@@ -795,8 +791,7 @@ impl BoosterApp {
                     .rounding(12.0)
                     .inner_margin(egui::Margin::symmetric(24, 30))
                     .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.vertical_centered(|ui| {
+                                ui.vertical_centered(|ui| {
                             ui.label(egui::RichText::new("No servers available")
                                 .size(14.0)
                                 .color(TEXT_MUTED));
@@ -1312,7 +1307,6 @@ impl BoosterApp {
             .rounding(12.0)
             .inner_margin(16)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
 
                 // Section header with value badge
                 ui.horizontal(|ui| {
@@ -1401,7 +1395,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("?").size(12.0).color(ACCENT_PRIMARY));
                     ui.add_space(8.0);

@@ -78,8 +78,11 @@ impl BoosterApp {
                     }
 
                     // Main content area
+                    let content_width = total_size.x - if is_logged_in { SIDEBAR_WIDTH } else { 0.0 };
+
                     ui.vertical(|ui| {
-                        ui.set_min_width(total_size.x - if is_logged_in { SIDEBAR_WIDTH } else { 0.0 });
+                        ui.set_min_width(content_width);
+                        ui.set_max_width(content_width);
 
                         // Top bar (always visible when logged in)
                         if is_logged_in {
@@ -88,12 +91,14 @@ impl BoosterApp {
 
                         // Content area with scroll
                         let content_height = total_size.y - if is_logged_in { TOP_BAR_HEIGHT } else { 0.0 };
+                        let inner_content_width = content_width - CONTENT_PADDING * 2.0;
 
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .max_height(content_height)
                             .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
+                                // Constrain width to prevent overflow
+                                ui.set_max_width(content_width);
 
                                 if !is_logged_in && !is_logging_in && !is_awaiting_oauth {
                                     self.render_full_login_screen(ui);
@@ -102,13 +107,27 @@ impl BoosterApp {
                                 } else if is_awaiting_oauth {
                                     self.render_awaiting_oauth_callback(ui);
                                 } else {
-                                    // Render decorative banner
-                                    self.render_header_banner(ui);
-
-                                    // Content with padding
+                                    // Content wrapper with consistent padding
                                     egui::Frame::NONE
-                                        .inner_margin(egui::Margin::symmetric(CONTENT_PADDING as i8, SPACING_MD as i8))
+                                        .inner_margin(egui::Margin {
+                                            left: CONTENT_PADDING,
+                                            right: CONTENT_PADDING,
+                                            top: 0.0,
+                                            bottom: SPACING_MD,
+                                        })
                                         .show(ui, |ui| {
+                                            // Constrain content width to prevent overflow
+                                            ui.set_min_width(inner_content_width);
+                                            ui.set_max_width(inner_content_width);
+
+                                            // Store content width for tabs to use
+                                            self.content_area_width = inner_content_width;
+
+                                            // Render decorative banner (inside padded area for alignment)
+                                            self.render_header_banner(ui);
+
+                                            ui.add_space(SPACING_MD);
+
                                             match self.current_tab {
                                                 Tab::Connect => self.render_connect_tab(ui),
                                                 Tab::Boost => self.render_boost_tab(ui),
@@ -577,8 +596,9 @@ impl BoosterApp {
             Tab::Settings => "Settings",
         };
 
+        // Title - no extra padding since banner is inside padded frame
         painter.text(
-            egui::pos2(banner_rect.min.x + CONTENT_PADDING, banner_rect.max.y - 30.0),
+            egui::pos2(banner_rect.min.x + 4.0, banner_rect.max.y - 30.0),
             egui::Align2::LEFT_CENTER,
             title,
             egui::FontId::proportional(28.0),

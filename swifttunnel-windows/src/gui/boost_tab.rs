@@ -172,8 +172,6 @@ impl BoosterApp {
 
         card_frame()
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-
                 ui.horizontal(|ui| {
                     // Status indicator with pulse when active
                     let indicator_size = 40.0;
@@ -344,8 +342,6 @@ impl BoosterApp {
 
         card_frame()
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-
                 // Header
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("*").size(16.0).color(ACCENT_CYAN));
@@ -667,8 +663,6 @@ impl BoosterApp {
 
         card_frame()
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_SECONDARY));
                     ui.add_space(4.0);
