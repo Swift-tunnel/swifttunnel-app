@@ -52,20 +52,20 @@ pub const BG_GLASS: egui::Color32 = egui::Color32::from_rgb(13, 15, 23);
 //  PRIMARY ACCENTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Main accent - vibrant cyan/teal (ExitLag-inspired)
-pub const ACCENT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(0, 212, 170);
-/// Secondary accent - blue
+/// Main accent - vibrant blue (SwiftTunnel brand)
+pub const ACCENT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(56, 152, 255);
+/// Secondary accent - lighter blue
 pub const ACCENT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);
-/// Tertiary accent - cyan for highlights
-pub const ACCENT_CYAN: egui::Color32 = egui::Color32::from_rgb(34, 211, 238);
+/// Tertiary accent - cyan/sky blue for highlights
+pub const ACCENT_CYAN: egui::Color32 = egui::Color32::from_rgb(96, 180, 255);
 /// Purple accent for special elements
 pub const ACCENT_PURPLE: egui::Color32 = egui::Color32::from_rgb(139, 92, 246);
 /// Lime accent for performance indicators
 pub const ACCENT_LIME: egui::Color32 = egui::Color32::from_rgb(163, 230, 53);
 
 /// Glow versions of accents (for effects)
-pub const ACCENT_PRIMARY_GLOW: egui::Color32 = egui::Color32::from_rgb(80, 255, 220);
-pub const ACCENT_SECONDARY_GLOW: egui::Color32 = egui::Color32::from_rgb(100, 160, 255);
+pub const ACCENT_PRIMARY_GLOW: egui::Color32 = egui::Color32::from_rgb(100, 180, 255);
+pub const ACCENT_SECONDARY_GLOW: egui::Color32 = egui::Color32::from_rgb(120, 190, 255);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  STATUS COLORS
@@ -143,14 +143,14 @@ pub fn latency_fill_percent(ms: u32) -> f32 {
 //  GRADIENT DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Header banner gradient start (dark teal)
-pub const GRADIENT_BANNER_START: egui::Color32 = egui::Color32::from_rgb(8, 30, 35);
+/// Header banner gradient start (dark blue)
+pub const GRADIENT_BANNER_START: egui::Color32 = egui::Color32::from_rgb(12, 25, 45);
 /// Header banner gradient end (darker)
 pub const GRADIENT_BANNER_END: egui::Color32 = egui::Color32::from_rgb(8, 10, 16);
 
-/// Accent gradient start (cyan)
-pub const GRADIENT_ACCENT_START: egui::Color32 = egui::Color32::from_rgb(0, 212, 170);
-/// Accent gradient end (blue)
+/// Accent gradient start (blue)
+pub const GRADIENT_ACCENT_START: egui::Color32 = egui::Color32::from_rgb(56, 152, 255);
+/// Accent gradient end (darker blue)
 pub const GRADIENT_ACCENT_END: egui::Color32 = egui::Color32::from_rgb(59, 130, 246);
 
 // ═══════════════════════════════════════════════════════════════════════════════
