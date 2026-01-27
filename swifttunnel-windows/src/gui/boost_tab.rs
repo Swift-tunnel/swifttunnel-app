@@ -479,7 +479,7 @@ impl BoosterApp {
                         .rounding(4.0)
                         .inner_margin(egui::Margin::symmetric(6, 2))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Hidden Roblox Setting")
+                            ui.label(egui::RichText::new("Recommended")
                                 .size(9.0)
                                 .color(ACCENT_LIME));
                         });
