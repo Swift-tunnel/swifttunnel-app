@@ -37,7 +37,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("About").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new(format!("SwiftTunnel v{}", env!("CARGO_PKG_VERSION"))).size(13.0).color(TEXT_PRIMARY));
@@ -57,7 +56,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Updates").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
 
@@ -148,7 +146,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("System Tray").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
 
@@ -185,7 +182,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("* Experimental").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
 
@@ -221,7 +217,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Route Optimization").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
 
@@ -356,7 +351,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Performance Boosts").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("All boost settings are now on the Boost tab for easier access.").size(12.0).color(TEXT_SECONDARY));
@@ -424,7 +418,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Sign In").size(16.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(16.0);
 
@@ -481,7 +474,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
 
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
@@ -515,7 +507,6 @@ impl BoosterApp {
             .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
                 ui.label(egui::RichText::new("Subscription").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(12.0);
 

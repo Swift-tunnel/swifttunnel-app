@@ -62,7 +62,8 @@ impl BoosterApp {
                     ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
 
                     // Calculate card width based on available space (3 cards per row)
-                    let card_width = (ui.available_width() - 20.0) / 3.0;
+                    let available = self.content_area_width.min(ui.available_width());
+                    let card_width = (available - 20.0) / 3.0;
 
                     for preset in GamePreset::all() {
                         let is_selected = self.selected_game_presets.contains(preset);
@@ -1058,7 +1059,6 @@ impl BoosterApp {
                     .rounding(8.0)
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width() - 24.0);
                         ui.horizontal(|ui| {
                             if is_auto {
                                 ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_PRIMARY).strong());
@@ -1109,8 +1109,7 @@ impl BoosterApp {
                         .rounding(8.0)
                         .inner_margin(egui::Margin::symmetric(12, 8))
                         .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width() - 24.0);
-                            ui.horizontal(|ui| {
+                                ui.horizontal(|ui| {
                                 if is_selected {
                                     ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_SECONDARY).strong());
                                     ui.add_space(6.0);

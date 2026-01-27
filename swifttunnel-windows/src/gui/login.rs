@@ -94,7 +94,6 @@ impl BoosterApp {
                         .rounding(10.0)
                         .inner_margin(egui::Margin::symmetric(16, 14))
                         .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 // Mail icon
                                 ui.label(egui::RichText::new("@")
@@ -143,7 +142,6 @@ impl BoosterApp {
                         .rounding(10.0)
                         .inner_margin(egui::Margin::symmetric(16, 14))
                         .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 // Lock icon
                                 ui.label(egui::RichText::new("*")
@@ -264,8 +262,7 @@ impl BoosterApp {
                             .rounding(10.0)
                             .inner_margin(16)
                             .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.horizontal(|ui| {
+                                    ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("!")
                                         .size(14.0)
                                         .color(STATUS_ERROR));
@@ -306,7 +303,6 @@ impl BoosterApp {
                         .rounding(16.0)
                         .inner_margin(40)
                         .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
                             ui.vertical_centered(|ui| {
                                 ui.add_space(20.0);
                                 ui.spinner();
@@ -348,7 +344,6 @@ impl BoosterApp {
                         .rounding(16.0)
                         .inner_margin(40)
                         .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
                             ui.vertical_centered(|ui| {
                                 // Browser icon
                                 ui.label(egui::RichText::new("o")
