@@ -38,6 +38,7 @@ use crate::roblox_optimizer::RobloxOptimizer;
 use crate::settings::{load_settings, save_settings, AppSettings, WindowState};
 use crate::structs::*;
 use crate::system_optimizer::SystemOptimizer;
+use crate::network_booster::NetworkBooster;
 use crate::tray::SystemTray;
 use crate::updater::{UpdateChecker, UpdateInfo, UpdateSettings, UpdateState, download_update, download_checksum, verify_checksum, install_update};
 use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set, ThroughputStats};
@@ -89,6 +90,8 @@ pub struct BoosterApp {
     selected_profile: OptimizationProfile,
     current_tab: Tab,
     roblox_optimizer: RobloxOptimizer,
+    system_optimizer: SystemOptimizer,
+    network_booster: NetworkBooster,
     status_message: Option<(String, egui::Color32, std::time::Instant)>,
 
     auth_manager: Arc<Mutex<AuthManager>>,
@@ -338,6 +341,8 @@ impl BoosterApp {
             selected_profile: saved_settings.config.profile,
             current_tab,
             roblox_optimizer: RobloxOptimizer::new(),
+            system_optimizer: SystemOptimizer::new(),
+            network_booster: NetworkBooster::new(),
             status_message: None,
             auth_manager: Arc::new(Mutex::new(auth_manager)),
             auth_state,
@@ -1898,33 +1903,117 @@ impl BoosterApp {
 impl BoosterApp {
     pub(crate) fn toggle_optimizations(&mut self) {
         if self.state.optimizations_active {
-            // Disabling optimizations - restore original Roblox settings
-            match self.roblox_optimizer.restore_settings() {
-                Ok(_) => {
-                    self.state.optimizations_active = false;
-                    self.set_status("Optimizations disabled - Roblox settings restored", STATUS_WARNING);
-                    log::info!("Optimizations disabled, Roblox settings restored from backup");
-                }
-                Err(e) => {
-                    // Still disable even if restore fails (file might be missing)
-                    self.state.optimizations_active = false;
-                    log::warn!("Could not restore Roblox settings: {}", e);
-                    self.set_status("Optimizations disabled (backup not found)", STATUS_WARNING);
-                }
+            // Disabling optimizations - restore everything
+            log::info!("Disabling all optimizations...");
+
+            // Restore Roblox settings
+            if let Err(e) = self.roblox_optimizer.restore_settings() {
+                log::warn!("Could not restore Roblox settings: {}", e);
             }
+
+            // Restore system optimizer (timer resolution, process priority)
+            // Use process ID 0 since we don't have a specific process to restore
+            if let Err(e) = self.system_optimizer.restore(0) {
+                log::warn!("Could not restore system settings: {}", e);
+            }
+
+            // Restore network settings
+            if let Err(e) = self.network_booster.restore() {
+                log::warn!("Could not restore network settings: {}", e);
+            }
+
+            // Turn off all individual boost toggles
+            self.state.config.system_optimization.set_high_priority = false;
+            self.state.config.system_optimization.timer_resolution_1ms = false;
+            self.state.config.system_optimization.mmcss_gaming_profile = false;
+            self.state.config.system_optimization.game_mode_enabled = false;
+            self.state.config.network_settings.disable_nagle = false;
+            self.state.config.network_settings.disable_network_throttling = false;
+            self.state.config.network_settings.optimize_mtu = false;
+
+            self.state.optimizations_active = false;
+            self.set_status("All optimizations disabled", STATUS_WARNING);
+            log::info!("All optimizations disabled and toggles reset");
         } else {
-            // Enabling optimizations - apply Roblox settings
-            match self.roblox_optimizer.apply_optimizations(&self.state.config.roblox_settings) {
-                Ok(_) => {
-                    self.state.optimizations_active = true;
-                    self.set_status("Optimizations enabled!", STATUS_CONNECTED);
-                }
-                Err(e) => {
-                    self.set_status(&format!("Error: {}", e), STATUS_ERROR);
-                }
+            // Enabling optimizations - apply all enabled boosts
+            log::info!("Enabling optimizations...");
+            let mut errors: Vec<String> = Vec::new();
+
+            // Apply Roblox settings
+            if let Err(e) = self.roblox_optimizer.apply_optimizations(&self.state.config.roblox_settings) {
+                errors.push(format!("Roblox: {}", e));
+            }
+
+            // Apply system optimizations (use process ID 0 for global settings)
+            if let Err(e) = self.system_optimizer.apply_optimizations(&self.state.config.system_optimization, 0) {
+                errors.push(format!("System: {}", e));
+            }
+
+            // Apply network optimizations
+            if let Err(e) = self.network_booster.apply_optimizations(&self.state.config.network_settings) {
+                errors.push(format!("Network: {}", e));
+            }
+
+            if errors.is_empty() {
+                self.state.optimizations_active = true;
+                let active_count = self.count_active_boosts();
+                self.set_status(&format!("{} boosts enabled!", active_count), STATUS_CONNECTED);
+                log::info!("All optimizations enabled successfully ({} boosts)", active_count);
+            } else {
+                // Still mark as active even with some errors (partial success)
+                self.state.optimizations_active = true;
+                let error_msg = errors.join(", ");
+                self.set_status(&format!("Enabled with warnings: {}", error_msg), STATUS_WARNING);
+                log::warn!("Optimizations enabled with errors: {}", error_msg);
             }
         }
         self.mark_dirty();
+    }
+
+    /// Apply a single boost immediately (called when individual toggle is changed while main is active)
+    pub(crate) fn apply_single_boost(&mut self, boost_id: &str, enabled: bool) {
+        if !self.state.optimizations_active {
+            return; // Main toggle is off, don't apply anything
+        }
+
+        log::info!("Applying single boost '{}' = {}", boost_id, enabled);
+
+        match boost_id {
+            "high_priority" => {
+                // High priority needs a process ID, skip for now (applied on Roblox launch)
+                log::info!("High priority setting updated (will apply on next game launch)");
+            }
+            "timer_resolution" => {
+                if let Err(e) = self.system_optimizer.set_timer_resolution(enabled) {
+                    log::warn!("Failed to set timer resolution: {}", e);
+                }
+            }
+            "mmcss" => {
+                if enabled {
+                    if let Err(e) = self.system_optimizer.apply_mmcss_profile() {
+                        log::warn!("Failed to apply MMCSS profile: {}", e);
+                    }
+                }
+                // Note: MMCSS profile doesn't have a "restore" - it's registry-based
+            }
+            "game_mode" => {
+                if enabled {
+                    if let Err(e) = self.system_optimizer.enable_game_mode() {
+                        log::warn!("Failed to enable game mode: {}", e);
+                    }
+                }
+                // Note: Game mode toggle is registry-based, no instant restore
+            }
+            "disable_nagle" | "network_throttling" | "optimize_mtu" => {
+                // Network boosts need to reapply the whole config
+                if let Err(e) = self.network_booster.apply_optimizations(&self.state.config.network_settings) {
+                    log::warn!("Failed to apply network boost '{}': {}", boost_id, e);
+                }
+            }
+            _ => {
+                log::warn!("Unknown boost ID: {}", boost_id);
+            }
+        }
     }
 
     pub(crate) fn apply_profile_preset(&mut self) {
