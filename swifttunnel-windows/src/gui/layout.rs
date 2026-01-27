@@ -91,7 +91,8 @@ impl BoosterApp {
 
                         // Content area with scroll
                         let content_height = total_size.y - if is_logged_in { TOP_BAR_HEIGHT } else { 0.0 };
-                        let inner_content_width = content_width - CONTENT_PADDING * 2.0;
+                        // Account for scrollbar width (12px) and extra safety margin
+                        let inner_content_width = content_width - CONTENT_PADDING * 2.0 - 16.0;
 
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])

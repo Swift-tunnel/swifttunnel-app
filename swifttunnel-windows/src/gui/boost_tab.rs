@@ -540,7 +540,7 @@ impl BoosterApp {
 
         let bg = lerp_color(BG_CARD, BG_HOVER, hover_val * 0.3);
         let border = if is_enabled {
-            STATUS_CONNECTED.gamma_multiply(0.4)
+            ACCENT_PRIMARY.gamma_multiply(0.5)
         } else {
             lerp_color(BORDER_SUBTLE, BORDER_HOVER, hover_val)
         };
@@ -554,9 +554,9 @@ impl BoosterApp {
                 // Use full available width for single column layout
 
                 ui.horizontal(|ui| {
-                    // Icon
-                    let icon_bg = if is_enabled { STATUS_CONNECTED.gamma_multiply(0.15) } else { BG_ELEVATED };
-                    let icon_color = if is_enabled { STATUS_CONNECTED } else { TEXT_MUTED };
+                    // Icon - use blue accent when enabled
+                    let icon_bg = if is_enabled { ACCENT_PRIMARY.gamma_multiply(0.15) } else { BG_ELEVATED };
+                    let icon_color = if is_enabled { ACCENT_PRIMARY } else { TEXT_MUTED };
 
                     egui::Frame::NONE
                         .fill(icon_bg)
@@ -588,8 +588,8 @@ impl BoosterApp {
                             egui::Sense::click()
                         );
 
-                        // Track color
-                        let track_color = lerp_color(BG_ELEVATED, STATUS_CONNECTED, current_anim);
+                        // Track color - blue accent when enabled
+                        let track_color = lerp_color(BG_ELEVATED, ACCENT_PRIMARY, current_anim);
                         ui.painter().rect_filled(toggle_rect, toggle_height / 2.0, track_color);
 
                         // Knob
@@ -605,10 +605,10 @@ impl BoosterApp {
                     });
                 });
 
-                // Impact badge
+                // Impact badge - blue accent when enabled
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let impact_color = if is_enabled { STATUS_CONNECTED } else { TEXT_DIMMED };
+                    let impact_color = if is_enabled { ACCENT_PRIMARY } else { TEXT_DIMMED };
                     ui.label(egui::RichText::new("+").size(9.0).color(impact_color));
                     ui.label(egui::RichText::new(boost.impact).size(9.0).color(impact_color));
                 });
@@ -753,7 +753,7 @@ impl BoosterApp {
                     egui::Sense::click()
                 );
 
-                let bg_color = lerp_color(BG_ELEVATED, STATUS_CONNECTED, current_anim);
+                let bg_color = lerp_color(BG_ELEVATED, ACCENT_PRIMARY, current_anim);
                 ui.painter().rect_filled(toggle_rect, toggle_height / 2.0, bg_color);
 
                 let knob_radius = (toggle_height - 6.0) / 2.0;
