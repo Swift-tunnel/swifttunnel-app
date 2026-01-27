@@ -110,10 +110,10 @@ impl BoosterApp {
                                     // Content wrapper with consistent padding
                                     egui::Frame::NONE
                                         .inner_margin(egui::Margin {
-                                            left: CONTENT_PADDING,
-                                            right: CONTENT_PADDING,
-                                            top: 0.0,
-                                            bottom: SPACING_MD,
+                                            left: CONTENT_PADDING as i8,
+                                            right: CONTENT_PADDING as i8,
+                                            top: 0,
+                                            bottom: SPACING_MD as i8,
                                         })
                                         .show(ui, |ui| {
                                             // Constrain content width to prevent overflow
