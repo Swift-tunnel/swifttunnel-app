@@ -153,6 +153,11 @@ arrayvec = "0.7"
 name = "vpn_tests"
 path = "Tests/vpn_tests.rs"
 
+# Main application binary
+[[bin]]
+name = "swifttunnel-fps-booster"
+path = "src/main.rs"
+
 # VPN test binary
 [[bin]]
 name = "vpn_test"
