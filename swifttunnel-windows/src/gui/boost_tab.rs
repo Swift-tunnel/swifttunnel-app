@@ -269,7 +269,7 @@ impl BoosterApp {
         ui.add_space(SPACING_SM);
 
         let mut new_profile = None;
-        let available_width = ui.available_width();
+        let available_width = self.content_area_width.min(ui.available_width());
         let btn_width = ((available_width - CARD_GAP * 2.0) / 3.0).max(80.0);
 
         ui.horizontal(|ui| {
@@ -521,8 +521,8 @@ impl BoosterApp {
         });
         ui.add_space(SPACING_SM);
 
-        // Calculate grid dimensions (2 columns)
-        let available_width = ui.available_width();
+        // Calculate grid dimensions (2 columns) using stored content width
+        let available_width = self.content_area_width.min(ui.available_width());
         let card_width = ((available_width - CARD_GAP) / 2.0).floor().max(150.0);
 
         // Render boosts in 2-column grid
