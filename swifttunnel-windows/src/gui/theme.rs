@@ -157,16 +157,7 @@ pub const GRADIENT_ACCENT_END: egui::Color32 = egui::Color32::from_rgb(59, 130, 
 //  UTILITY FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Linearly interpolate between two colors
-pub fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
-    let t = t.clamp(0.0, 1.0);
-    egui::Color32::from_rgba_unmultiplied(
-        (from.r() as f32 + (to.r() as f32 - from.r() as f32) * t) as u8,
-        (from.g() as f32 + (to.g() as f32 - from.g() as f32) * t) as u8,
-        (from.b() as f32 + (to.b() as f32 - from.b() as f32) * t) as u8,
-        (from.a() as f32 + (to.a() as f32 - from.a() as f32) * t) as u8,
-    )
-}
+// Note: lerp_color is defined in animations.rs and re-exported from mod.rs
 
 /// Apply alpha to a color
 pub fn with_alpha(color: egui::Color32, alpha: f32) -> egui::Color32 {
