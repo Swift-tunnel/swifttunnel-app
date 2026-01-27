@@ -12,6 +12,7 @@
 
 mod theme;
 mod animations;
+mod layout;
 mod connect_tab;
 mod boost_tab;
 mod network_tab;
@@ -1225,59 +1226,8 @@ impl eframe::App for BoosterApp {
             show_server_location(&location);
         }
 
-        let is_logged_in = matches!(self.auth_state, AuthState::LoggedIn(_));
-        let is_logging_in = matches!(self.auth_state, AuthState::LoggingIn);
-        let is_awaiting_oauth = matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_));
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(BG_DARKEST))
-            .show(ctx, |ui| {
-                let available = ui.available_size();
-
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_min_width(available.x);
-                        ui.add_space(16.0);
-
-                        let side_margin = (available.x * 0.04).max(16.0).min(40.0);
-                        let content_width = (available.x - side_margin * 2.0).max(480.0);
-
-                        ui.horizontal(|ui| {
-                            ui.add_space(side_margin);
-                            ui.vertical(|ui| {
-                                ui.set_max_width(content_width);
-
-                                self.render_header(ui);
-                                ui.add_space(24.0);
-
-                                if !is_logged_in && !is_logging_in && !is_awaiting_oauth {
-                                    self.render_full_login_screen(ui);
-                                } else if is_logging_in {
-                                    self.render_login_pending(ui);
-                                } else if is_awaiting_oauth {
-                                    self.render_awaiting_oauth_callback(ui);
-                                } else {
-                                    self.render_nav_tabs(ui);
-                                    ui.add_space(20.0);
-
-                                    match self.current_tab {
-                                        Tab::Connect => self.render_connect_tab(ui),
-                                        Tab::Boost => self.render_boost_tab(ui),
-                                        Tab::Network => self.render_network_tab(ui),
-                                        Tab::Settings => self.render_settings_tab(ui),
-                                    }
-                                }
-                                ui.add_space(32.0);
-                            });
-                            ui.add_space(side_margin);
-                        });
-                    });
-            });
-
-        // Render process notification toast (overlay at top of screen)
-        self.render_process_notification(ctx);
-        // Game server notifications now use Windows toast via notification.rs
+        // Render the main app layout with sidebar
+        self.render_app_layout(ctx);
     }
 }
 

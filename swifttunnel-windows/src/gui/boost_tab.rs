@@ -1,4 +1,5 @@
 //! Boost tab rendering - PC optimizations, FPS settings, system boosts
+//! ExitLag-inspired design with clean boost cards and preset selector
 
 use super::*;
 use super::theme::*;
@@ -6,105 +7,113 @@ use super::animations::*;
 use crate::structs::{OptimizationProfile, GraphicsQuality, DynamicRenderMode};
 use crate::system_optimizer::SystemOptimizer;
 
-/// Profile preset info for tooltips
-mod profile_info {
-    pub struct ProfileInfo {
-        pub name: &'static str,
-        pub description: &'static str,
-        pub settings_summary: &'static str,
-        pub fps_target: &'static str,
-        pub best_for: &'static str,
+/// Boost categories for organizing the UI
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BoostCategory {
+    System,
+    Network,
+    Roblox,
+}
+
+impl BoostCategory {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            BoostCategory::System => ">",
+            BoostCategory::Network => "o",
+            BoostCategory::Roblox => "*",
+        }
     }
 
-    pub const PERFORMANCE: ProfileInfo = ProfileInfo {
-        name: "Performance Mode",
-        description: "Maximum FPS with minimal visual quality. Aggressive optimizations for competitive play.",
-        settings_summary: "FPS: Uncapped | Quality: 1 | Dynamic Render: High | All boosts ON",
-        fps_target: "Target: 240+ FPS",
-        best_for: "Competitive/PvP",
-    };
-
-    pub const BALANCED: ProfileInfo = ProfileInfo {
-        name: "Balanced Mode",
-        description: "Good balance between performance and visuals. Suitable for most players.",
-        settings_summary: "FPS: 144 | Quality: 5 | Dynamic Render: Medium | Core boosts ON",
-        fps_target: "Target: 100-144 FPS",
-        best_for: "Casual gameplay",
-    };
-
-    pub const QUALITY: ProfileInfo = ProfileInfo {
-        name: "Quality Mode",
-        description: "Best visual experience with moderate performance. For high-end systems.",
-        settings_summary: "FPS: 60 | Quality: 10 | Dynamic Render: Off | Minimal boosts",
-        fps_target: "Target: 60 FPS",
-        best_for: "Exploration/Screenshots",
-    };
-}
-
-/// Tier info for boost categories
-mod tier_info {
-    pub const TIER_1_TITLE: &str = "Tier 1 - Safe Optimizations";
-    pub const TIER_1_DESC: &str = "These settings are safe to enable with no risk of system instability. They can be reverted at any time and don't modify critical system files.";
-}
-
-/// Boost info for individual toggles
-mod boost_info {
-    pub struct BoostInfo {
-        pub name: &'static str,
-        pub description: &'static str,
-        pub technical: &'static str,
-        pub impact: &'static str,
+    pub fn title(&self) -> &'static str {
+        match self {
+            BoostCategory::System => "System Performance",
+            BoostCategory::Network => "Network Optimization",
+            BoostCategory::Roblox => "Roblox Settings",
+        }
     }
 
-    pub const HIGH_PRIORITY: BoostInfo = BoostInfo {
-        name: "High Priority",
-        description: "Sets Roblox process to high priority for better CPU scheduling",
-        technical: "SetPriorityClass(HIGH_PRIORITY_CLASS)",
-        impact: "+5-15% FPS in CPU-bound scenarios",
-    };
-
-    pub const TIMER_RESOLUTION: BoostInfo = BoostInfo {
-        name: "1ms Timer Resolution",
-        description: "Reduces system timer interval for smoother frame pacing",
-        technical: "NtSetTimerResolution(1ms)",
-        impact: "Smoother frametimes, reduced input lag",
-    };
-
-    pub const MMCSS: BoostInfo = BoostInfo {
-        name: "MMCSS Gaming Profile",
-        description: "Applies Windows multimedia scheduling for games",
-        technical: "AvSetMmThreadCharacteristics(\"Games\")",
-        impact: "Prioritizes game threads over background tasks",
-    };
-
-    pub const GAME_MODE: BoostInfo = BoostInfo {
-        name: "Windows Game Mode",
-        description: "Enables Windows Game Mode for reduced background activity",
-        technical: "Registry: GameDVR_FSEBehaviorMode",
-        impact: "Fewer interruptions during gameplay",
-    };
-
-    pub const DISABLE_NAGLE: BoostInfo = BoostInfo {
-        name: "Disable Nagle's Algorithm",
-        description: "Sends packets immediately without buffering",
-        technical: "TCP_NODELAY socket option",
-        impact: "-5-20ms network latency",
-    };
-
-    pub const NETWORK_THROTTLING: BoostInfo = BoostInfo {
-        name: "Disable Network Throttling",
-        description: "Removes Windows network throttling for games",
-        technical: "Registry: NetworkThrottlingIndex",
-        impact: "More consistent packet delivery",
-    };
-
-    pub const OPTIMIZE_MTU: BoostInfo = BoostInfo {
-        name: "Optimize MTU",
-        description: "Sets optimal MTU size to reduce packet fragmentation",
-        technical: "netsh interface ipv4 set subinterface mtu=1500",
-        impact: "Fewer retransmissions, lower latency",
-    };
+    pub fn description(&self) -> &'static str {
+        match self {
+            BoostCategory::System => "Optimize CPU and memory for gaming",
+            BoostCategory::Network => "Reduce latency and improve connection",
+            BoostCategory::Roblox => "FPS and graphics configuration",
+        }
+    }
 }
+
+/// Individual boost info
+pub struct BoostConfig {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub icon: &'static str,
+    pub impact: &'static str,
+    pub category: BoostCategory,
+}
+
+// Boost definitions
+const BOOST_HIGH_PRIORITY: BoostConfig = BoostConfig {
+    id: "high_priority",
+    name: "High Priority",
+    description: "Sets game to high CPU priority",
+    icon: "^",
+    impact: "+5-15% FPS",
+    category: BoostCategory::System,
+};
+
+const BOOST_TIMER_RESOLUTION: BoostConfig = BoostConfig {
+    id: "timer_resolution",
+    name: "1ms Timer",
+    description: "Smoother frame pacing",
+    icon: "[t]",
+    impact: "Lower input lag",
+    category: BoostCategory::System,
+};
+
+const BOOST_MMCSS: BoostConfig = BoostConfig {
+    id: "mmcss",
+    name: "MMCSS Profile",
+    description: "Gaming thread priority",
+    icon: ":::",
+    impact: "Better scheduling",
+    category: BoostCategory::System,
+};
+
+const BOOST_GAME_MODE: BoostConfig = BoostConfig {
+    id: "game_mode",
+    name: "Game Mode",
+    description: "Windows gaming optimizations",
+    icon: ">",
+    impact: "Fewer interrupts",
+    category: BoostCategory::System,
+};
+
+const BOOST_DISABLE_NAGLE: BoostConfig = BoostConfig {
+    id: "disable_nagle",
+    name: "Disable Nagle",
+    description: "Send packets immediately",
+    icon: "->",
+    impact: "-5-20ms latency",
+    category: BoostCategory::Network,
+};
+
+const BOOST_NETWORK_THROTTLING: BoostConfig = BoostConfig {
+    id: "network_throttling",
+    name: "No Throttling",
+    description: "Remove network limits",
+    icon: "=",
+    impact: "Consistent speed",
+    category: BoostCategory::Network,
+};
+
+const BOOST_OPTIMIZE_MTU: BoostConfig = BoostConfig {
+    id: "optimize_mtu",
+    name: "Optimize MTU",
+    description: "Reduce packet fragmentation",
+    icon: "#",
+    impact: "Fewer retries",
+    category: BoostCategory::Network,
+};
 
 impl BoosterApp {
     pub(crate) fn render_boost_tab(&mut self, ui: &mut egui::Ui) {
@@ -115,131 +124,204 @@ impl BoosterApp {
             }
         }
 
-        // STATUS HEADER WITH ENABLE/DISABLE
-        let (status_text, status_color) = if self.state.optimizations_active {
-            ("Optimizations Active", STATUS_CONNECTED)
+        // Master toggle and status
+        self.render_boost_master_toggle(ui);
+        ui.add_space(SPACING_MD);
+
+        // Preset selector
+        self.render_preset_selector(ui);
+        ui.add_space(SPACING_MD);
+
+        // Roblox FPS Settings (collapsible card)
+        self.render_roblox_fps_card(ui);
+        ui.add_space(SPACING_MD);
+
+        // System Boosts Grid
+        self.render_boost_category_grid(ui, BoostCategory::System, &[
+            &BOOST_HIGH_PRIORITY,
+            &BOOST_TIMER_RESOLUTION,
+            &BOOST_MMCSS,
+            &BOOST_GAME_MODE,
+        ]);
+        ui.add_space(SPACING_MD);
+
+        // Network Boosts Grid
+        self.render_boost_category_grid(ui, BoostCategory::Network, &[
+            &BOOST_DISABLE_NAGLE,
+            &BOOST_NETWORK_THROTTLING,
+            &BOOST_OPTIMIZE_MTU,
+        ]);
+        ui.add_space(SPACING_MD);
+
+        // System Protection
+        self.render_system_protection_card(ui);
+    }
+
+    /// Render master boost toggle with status
+    fn render_boost_master_toggle(&mut self, ui: &mut egui::Ui) {
+        let is_active = self.state.optimizations_active;
+        let active_count = self.count_active_boosts();
+
+        let (status_color, status_text) = if is_active {
+            (STATUS_CONNECTED, "Active")
         } else {
-            ("Optimizations Inactive", STATUS_INACTIVE)
+            (STATUS_INACTIVE, "Inactive")
         };
 
-        let profile_str = format!("{:?}", self.selected_profile);
-        let opt_active = self.state.optimizations_active;
-        let mut toggle_opt = false;
+        let mut toggle_requested = false;
 
-        egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20)
+        card_frame()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 6.0, status_color);
-                    ui.add_space(8.0);
+                    // Status indicator with pulse when active
+                    let indicator_size = 40.0;
+                    let (indicator_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(indicator_size, indicator_size),
+                        egui::Sense::hover()
+                    );
+                    let center = indicator_rect.center();
+
+                    if is_active {
+                        // Animated glow
+                        let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                        let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
+                        ui.painter().circle_filled(center, 16.0 + pulse * 3.0, status_color.gamma_multiply(0.2));
+                        ui.painter().circle_filled(center, 14.0, status_color);
+                        ui.painter().text(center, egui::Align2::CENTER_CENTER, ">", egui::FontId::proportional(14.0), TEXT_PRIMARY);
+                    } else {
+                        ui.painter().circle_filled(center, 14.0, BG_ELEVATED);
+                        ui.painter().circle_stroke(center, 14.0, egui::Stroke::new(1.5, status_color));
+                    }
+
+                    ui.add_space(SPACING_SM);
 
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(status_text).size(16.0).color(status_color).strong());
-                        ui.label(egui::RichText::new(format!("Profile: {}", profile_str)).size(12.0).color(TEXT_SECONDARY));
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("PC Boosts")
+                                .size(18.0)
+                                .color(TEXT_PRIMARY)
+                                .strong());
+                            ui.add_space(SPACING_SM);
+
+                            // Status badge
+                            egui::Frame::NONE
+                                .fill(status_color.gamma_multiply(0.12))
+                                .rounding(10.0)
+                                .inner_margin(egui::Margin::symmetric(8, 3))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new(status_text)
+                                        .size(10.0)
+                                        .color(status_color)
+                                        .strong());
+                                });
+                        });
+
+                        ui.add_space(2.0);
+
+                        let profile_name = format!("{:?}", self.selected_profile);
+                        let desc = if is_active {
+                            format!("{} boosts enabled - {} profile", active_count, profile_name)
+                        } else {
+                            "Enable boosts to optimize your PC".to_string()
+                        };
+                        ui.label(egui::RichText::new(desc)
+                            .size(12.0)
+                            .color(TEXT_SECONDARY));
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (btn_text, btn_color) = if opt_active { ("Disable", STATUS_ERROR) } else { ("Enable", ACCENT_PRIMARY) };
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new(btn_text).size(14.0).color(TEXT_PRIMARY))
-                                .fill(btn_color).rounding(8.0).min_size(egui::vec2(100.0, 40.0))
-                        ).clicked() {
-                            toggle_opt = true;
+                        // Large toggle button
+                        let btn_size = egui::vec2(100.0, 40.0);
+                        let (btn_rect, btn_response) = ui.allocate_exact_size(btn_size, egui::Sense::click());
+
+                        let is_hovered = btn_response.hovered();
+                        let btn_color = if is_active { STATUS_ERROR } else { ACCENT_PRIMARY };
+                        let btn_bg = if is_hovered { lighten(btn_color, 0.1) } else { btn_color };
+
+                        ui.painter().rect_filled(btn_rect, 10.0, btn_bg);
+
+                        let btn_text = if is_active { "Disable" } else { "Enable" };
+                        ui.painter().text(
+                            btn_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            btn_text,
+                            egui::FontId::proportional(14.0),
+                            TEXT_PRIMARY
+                        );
+
+                        if btn_response.clicked() {
+                            toggle_requested = true;
                         }
                     });
                 });
             });
 
-        if toggle_opt {
+        if toggle_requested {
             self.toggle_optimizations();
         }
+    }
 
-        // PROFILE SELECTION
-        ui.add_space(16.0);
-        ui.label(egui::RichText::new("QUICK PRESET").size(12.0).color(TEXT_MUTED).strong());
-        ui.add_space(12.0);
+    /// Render preset selector (Performance / Balanced / Quality)
+    fn render_preset_selector(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("PRESET").size(11.0).color(TEXT_MUTED).strong());
+        });
+        ui.add_space(SPACING_SM);
 
         let mut new_profile = None;
         let available_width = ui.available_width();
-        let gap = 12.0;
-        let card_width = ((available_width - gap * 2.0) / 3.0).max(100.0);
+        let btn_width = ((available_width - CARD_GAP * 2.0) / 3.0).max(80.0);
 
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
+            ui.spacing_mut().item_spacing.x = CARD_GAP;
 
-            for (title, desc, icon, profile, profile_info) in [
-                ("Performance", "Maximum FPS", ">", OptimizationProfile::LowEnd, &profile_info::PERFORMANCE),
-                ("Balanced", "FPS + Quality", "=", OptimizationProfile::Balanced, &profile_info::BALANCED),
-                ("Quality", "Best Visuals", "*", OptimizationProfile::HighEnd, &profile_info::QUALITY),
+            for (profile, label, icon, desc) in [
+                (OptimizationProfile::LowEnd, "Performance", ">", "Max FPS"),
+                (OptimizationProfile::Balanced, "Balanced", "=", "FPS + Quality"),
+                (OptimizationProfile::HighEnd, "Quality", "*", "Best Visuals"),
             ] {
                 let is_selected = self.selected_profile == profile;
-                let card_id = format!("profile_{}", title);
-
-                // Get hover animation value
+                let card_id = format!("preset_{:?}", profile);
                 let hover_val = self.animations.get_hover_value(&card_id);
 
-                // Calculate colors with hover effect
-                let (bg, border, text_color) = if is_selected {
-                    (ACCENT_PRIMARY.gamma_multiply(0.15), ACCENT_PRIMARY, ACCENT_PRIMARY)
+                let bg = if is_selected {
+                    ACCENT_PRIMARY
                 } else {
-                    // Blend towards hover state
-                    let hover_brightness = 1.0 + hover_val * 0.15;
-                    let bg = egui::Color32::from_rgb(
-                        (BG_CARD.r() as f32 * hover_brightness).min(255.0) as u8,
-                        (BG_CARD.g() as f32 * hover_brightness).min(255.0) as u8,
-                        (BG_CARD.b() as f32 * hover_brightness).min(255.0) as u8,
-                    );
-                    (bg, BG_ELEVATED, TEXT_PRIMARY)
+                    lerp_color(BG_CARD, BG_HOVER, hover_val)
+                };
+
+                let border = if is_selected {
+                    ACCENT_PRIMARY
+                } else {
+                    lerp_color(BORDER_SUBTLE, BORDER_HOVER, hover_val)
                 };
 
                 let response = egui::Frame::NONE
                     .fill(bg)
-                    .stroke(egui::Stroke::new(if is_selected { 2.0 } else { 1.0 }, border))
-                    .rounding(12.0)
-                    .inner_margin(egui::Margin::symmetric(12, 16))
+                    .stroke(egui::Stroke::new(if is_selected { 0.0 } else { 1.0 }, border))
+                    .rounding(10.0)
+                    .inner_margin(egui::Margin::symmetric(8, 12))
                     .show(ui, |ui| {
-                        ui.set_width(card_width - 24.0);
+                        ui.set_min_width(btn_width - 16.0);
+                        ui.set_max_width(btn_width - 16.0);
+
                         ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new(icon).size(24.0).color(if is_selected { ACCENT_PRIMARY } else { TEXT_MUTED }));
-                            ui.add_space(8.0);
-                            ui.label(egui::RichText::new(title).size(14.0).color(text_color).strong());
+                            let icon_color = if is_selected { TEXT_PRIMARY } else { ACCENT_PRIMARY };
+                            ui.label(egui::RichText::new(icon).size(18.0).color(icon_color));
                             ui.add_space(4.0);
-                            ui.label(egui::RichText::new(desc).size(11.0).color(TEXT_SECONDARY));
+
+                            let text_color = if is_selected { TEXT_PRIMARY } else { TEXT_SECONDARY };
+                            ui.label(egui::RichText::new(label).size(13.0).color(text_color).strong());
+
+                            let desc_color = if is_selected { TEXT_PRIMARY.gamma_multiply(0.8) } else { TEXT_MUTED };
+                            ui.label(egui::RichText::new(desc).size(10.0).color(desc_color));
                         });
                     });
 
-                // Handle hover for animation
                 let is_hovered = response.response.hovered();
                 self.animations.animate_hover(&card_id, is_hovered, hover_val);
-
-                // Show tooltip on hover
-                if is_hovered {
-                    let tooltip_id = ui.id().with(&card_id);
-                    egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
-                        ui.set_max_width(250.0);
-                        ui.label(egui::RichText::new(profile_info.name).size(13.0).color(TEXT_PRIMARY).strong());
-                        ui.add_space(4.0);
-                        ui.label(egui::RichText::new(profile_info.description).size(11.0).color(TEXT_SECONDARY));
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new(profile_info.settings_summary).size(10.0).color(TEXT_MUTED));
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            egui::Frame::NONE
-                                .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(6, 2))
-                                .show(ui, |ui| {
-                                    ui.label(egui::RichText::new(profile_info.fps_target).size(10.0).color(ACCENT_PRIMARY));
-                                });
-                            ui.add_space(4.0);
-                            ui.label(egui::RichText::new(format!("Best for: {}", profile_info.best_for)).size(10.0).color(TEXT_MUTED));
-                        });
-                    });
-                }
 
                 if response.response.interact(egui::Sense::click()).clicked() {
                     new_profile = Some(profile);
@@ -252,317 +334,376 @@ impl BoosterApp {
             self.apply_profile_preset();
             self.mark_dirty();
         }
+    }
 
-        // ROBLOX FPS SETTINGS
-        ui.add_space(16.0);
-
+    /// Render Roblox FPS settings card
+    fn render_roblox_fps_card(&mut self, ui: &mut egui::Ui) {
         let current_fps = self.state.config.roblox_settings.target_fps;
         let is_uncapped = current_fps >= 9999;
         let fps_display = if is_uncapped { "Uncapped".to_string() } else { format!("{}", current_fps) };
 
-        egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20)
+        card_frame()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("Roblox FPS Settings").size(14.0).color(TEXT_PRIMARY).strong());
-                ui.add_space(12.0);
 
+                // Header
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Target FPS").size(13.0).color(TEXT_SECONDARY));
+                    ui.label(egui::RichText::new("*").size(16.0).color(ACCENT_CYAN));
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Roblox Settings").size(14.0).color(TEXT_PRIMARY).strong());
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(&fps_display).size(14.0).color(ACCENT_PRIMARY).strong());
+                        // Protected badge
+                        egui::Frame::NONE
+                            .fill(STATUS_CONNECTED.gamma_multiply(0.1))
+                            .rounding(8.0)
+                            .inner_margin(egui::Margin::symmetric(8, 3))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("+ Protected")
+                                    .size(10.0)
+                                    .color(STATUS_CONNECTED));
+                            });
                     });
                 });
 
-                ui.add_space(8.0);
+                ui.add_space(SPACING_MD);
+
+                // FPS Section
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Target FPS").size(12.0).color(TEXT_SECONDARY));
+                        ui.label(egui::RichText::new(&fps_display).size(24.0).color(ACCENT_PRIMARY).strong());
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Quick FPS buttons
+                        for fps in [60, 120, 144, 240] {
+                            let is_sel = current_fps == fps;
+                            let bg = if is_sel { ACCENT_PRIMARY } else { BG_ELEVATED };
+                            let text = if is_sel { TEXT_PRIMARY } else { TEXT_SECONDARY };
+
+                            if ui.add(
+                                egui::Button::new(egui::RichText::new(format!("{}", fps)).size(11.0).color(text))
+                                    .fill(bg)
+                                    .rounding(6.0)
+                                    .min_size(egui::vec2(40.0, 28.0))
+                            ).clicked() {
+                                self.state.config.roblox_settings.target_fps = fps;
+                                self.mark_dirty();
+                            }
+                        }
+
+                        // Uncapped button
+                        let bg = if is_uncapped { ACCENT_PRIMARY } else { BG_ELEVATED };
+                        let text = if is_uncapped { TEXT_PRIMARY } else { TEXT_SECONDARY };
+                        if ui.add(
+                            egui::Button::new(egui::RichText::new("Max").size(11.0).color(text))
+                                .fill(bg)
+                                .rounding(6.0)
+                                .min_size(egui::vec2(40.0, 28.0))
+                        ).clicked() {
+                            self.state.config.roblox_settings.target_fps = 9999;
+                            self.mark_dirty();
+                        }
+                    });
+                });
+
+                // FPS Slider (only if not uncapped)
                 if !is_uncapped {
+                    ui.add_space(SPACING_SM);
                     if ui.add(egui::Slider::new(&mut self.state.config.roblox_settings.target_fps, 30..=360).show_value(false)).changed() {
                         self.mark_dirty();
                     }
-                } else {
-                    ui.add_enabled(false, egui::Slider::new(&mut 360u32.clone(), 30..=360).show_value(false));
                 }
 
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    for fps in [60, 120, 144, 240] {
-                        let is_sel = current_fps == fps;
-                        let (bg, text) = if is_sel { (ACCENT_PRIMARY, TEXT_PRIMARY) } else { (BG_ELEVATED, TEXT_SECONDARY) };
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new(format!("{}", fps)).size(11.0).color(text))
-                                .fill(bg).rounding(4.0).min_size(egui::vec2(44.0, 28.0))
-                        ).clicked() {
-                            self.state.config.roblox_settings.target_fps = fps;
-                            self.mark_dirty();
-                        }
-                    }
-                    let (bg, text) = if is_uncapped { (ACCENT_PRIMARY, TEXT_PRIMARY) } else { (BG_ELEVATED, TEXT_SECONDARY) };
-                    if ui.add(
-                        egui::Button::new(egui::RichText::new("Max").size(11.0).color(text))
-                            .fill(bg).rounding(4.0).min_size(egui::vec2(44.0, 28.0))
-                    ).clicked() {
-                        self.state.config.roblox_settings.target_fps = 9999;
-                        self.mark_dirty();
-                    }
-                });
+                ui.add_space(SPACING_MD);
 
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("FPS settings are protected from Roblox overwriting them").size(10.0).color(STATUS_CONNECTED));
-
-                // GRAPHICS QUALITY SLIDER
-                ui.add_space(16.0);
-                ui.separator();
-                ui.add_space(12.0);
-
+                // Graphics Quality Section
                 let current_quality = self.state.config.roblox_settings.graphics_quality.to_level();
-                let quality_display = if current_quality == 0 { "Auto".to_string() } else { format!("Level {}", current_quality) };
 
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Graphics Quality").size(13.0).color(TEXT_SECONDARY));
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Graphics Quality").size(12.0).color(TEXT_SECONDARY));
+                        let quality_text = if current_quality == 0 { "Auto".to_string() } else { format!("Level {}", current_quality) };
+                        ui.label(egui::RichText::new(quality_text).size(18.0).color(ACCENT_CYAN).strong());
+                    });
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(&quality_display).size(14.0).color(ACCENT_CYAN).strong());
+                        // Quick quality buttons
+                        for level in [1, 5, 10] {
+                            let is_sel = current_quality == level;
+                            let bg = if is_sel { ACCENT_CYAN } else { BG_ELEVATED };
+                            let text = if is_sel { egui::Color32::from_rgb(23, 23, 23) } else { TEXT_SECONDARY };
+
+                            if ui.add(
+                                egui::Button::new(egui::RichText::new(format!("{}", level)).size(11.0).color(text))
+                                    .fill(bg)
+                                    .rounding(6.0)
+                                    .min_size(egui::vec2(36.0, 28.0))
+                            ).clicked() {
+                                self.state.config.roblox_settings.graphics_quality = GraphicsQuality::from_level(level);
+                                if self.selected_profile != OptimizationProfile::Custom {
+                                    self.selected_profile = OptimizationProfile::Custom;
+                                }
+                                self.mark_dirty();
+                            }
+                        }
                     });
                 });
 
-                ui.add_space(8.0);
-
-                // Slider for graphics quality (1-10)
-                let mut quality_level = current_quality.max(1) as i32; // Ensure min of 1 for slider
+                // Quality Slider
+                ui.add_space(SPACING_SM);
+                let mut quality_level = current_quality.max(1) as i32;
                 if ui.add(egui::Slider::new(&mut quality_level, 1..=10).show_value(false)).changed() {
                     self.state.config.roblox_settings.graphics_quality = GraphicsQuality::from_level(quality_level);
-                    // Switch to Custom profile when manually changing graphics
                     if self.selected_profile != OptimizationProfile::Custom {
                         self.selected_profile = OptimizationProfile::Custom;
                     }
                     self.mark_dirty();
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(SPACING_MD);
 
-                // Quick preset buttons for common quality levels
-                ui.horizontal(|ui| {
-                    for (label, level) in [("1", 1), ("3", 3), ("5", 5), ("7", 7), ("10", 10)] {
-                        let is_sel = current_quality == level;
-                        let (bg, text) = if is_sel { (ACCENT_CYAN, TEXT_PRIMARY) } else { (BG_ELEVATED, TEXT_SECONDARY) };
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new(label).size(11.0).color(text))
-                                .fill(bg).rounding(4.0).min_size(egui::vec2(36.0, 28.0))
-                        ).clicked() {
-                            self.state.config.roblox_settings.graphics_quality = GraphicsQuality::from_level(level);
-                            if self.selected_profile != OptimizationProfile::Custom {
-                                self.selected_profile = OptimizationProfile::Custom;
-                            }
-                            self.mark_dirty();
-                        }
-                    }
-                });
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("-").size(10.0));
-                    ui.label(egui::RichText::new("Lower = better FPS, Higher = better visuals").size(10.0).color(TEXT_MUTED));
-                });
-
-                // DYNAMIC RENDER OPTIMIZATION
-                ui.add_space(16.0);
-                ui.separator();
-                ui.add_space(12.0);
-
+                // Dynamic Render Section
                 let current_mode = self.state.config.roblox_settings.dynamic_render_optimization;
-                let mode_display = match current_mode {
-                    DynamicRenderMode::Off => "Off",
-                    DynamicRenderMode::Low => "Low",
-                    DynamicRenderMode::Medium => "Medium",
-                    DynamicRenderMode::High => "High",
-                };
 
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Dynamic Render").size(13.0).color(TEXT_SECONDARY));
+                    ui.label(egui::RichText::new("Dynamic Render").size(12.0).color(TEXT_SECONDARY));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let color = if current_mode == DynamicRenderMode::Off { TEXT_MUTED } else { ACCENT_LIME };
-                        ui.label(egui::RichText::new(mode_display).size(14.0).color(color).strong());
+                        for (label, mode) in [
+                            ("Off", DynamicRenderMode::Off),
+                            ("Low", DynamicRenderMode::Low),
+                            ("Med", DynamicRenderMode::Medium),
+                            ("High", DynamicRenderMode::High),
+                        ] {
+                            let is_sel = current_mode == mode;
+                            let bg = if is_sel { ACCENT_LIME } else { BG_ELEVATED };
+                            let text = if is_sel { egui::Color32::from_rgb(23, 23, 23) } else { TEXT_SECONDARY };
+
+                            if ui.add(
+                                egui::Button::new(egui::RichText::new(label).size(10.0).color(text))
+                                    .fill(bg)
+                                    .rounding(6.0)
+                                    .min_size(egui::vec2(36.0, 26.0))
+                            ).clicked() {
+                                self.state.config.roblox_settings.dynamic_render_optimization = mode;
+                                if self.selected_profile != OptimizationProfile::Custom {
+                                    self.selected_profile = OptimizationProfile::Custom;
+                                }
+                                self.mark_dirty();
+                            }
+                        }
                     });
                 });
 
-                ui.add_space(12.0);
-
+                ui.add_space(SPACING_SM);
                 ui.horizontal(|ui| {
-                    for (label, mode) in [
-                        ("Off", DynamicRenderMode::Off),
-                        ("Low", DynamicRenderMode::Low),
-                        ("Med", DynamicRenderMode::Medium),
-                        ("High", DynamicRenderMode::High),
-                    ] {
-                        let is_sel = current_mode == mode;
-                        let (bg, text) = if is_sel { (ACCENT_LIME, egui::Color32::from_rgb(23, 23, 23)) } else { (BG_ELEVATED, TEXT_SECONDARY) };
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new(label).size(11.0).color(text))
-                                .fill(bg).rounding(4.0).min_size(egui::vec2(44.0, 28.0))
-                        ).clicked() {
-                            self.state.config.roblox_settings.dynamic_render_optimization = mode;
-                            if self.selected_profile != OptimizationProfile::Custom {
-                                self.selected_profile = OptimizationProfile::Custom;
-                            }
-                            self.mark_dirty();
-                        }
-                    }
-                });
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("\u{26A1}").size(10.0).color(ACCENT_LIME));
+                    ui.label(egui::RichText::new(">").size(10.0).color(ACCENT_LIME));
                     ui.label(egui::RichText::new("Adaptive resolution for +5-30% FPS boost").size(10.0).color(TEXT_MUTED));
                 });
             });
+    }
 
-        // SYSTEM BOOSTS (Tier 1)
-        ui.add_space(16.0);
+    /// Render a category of boosts in a grid
+    fn render_boost_category_grid(&mut self, ui: &mut egui::Ui, category: BoostCategory, boosts: &[&BoostConfig]) {
+        // Section header
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(category.icon()).size(14.0).color(ACCENT_PRIMARY));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(category.title()).size(12.0).color(TEXT_PRIMARY).strong());
 
-        egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20)
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("System Boosts").size(14.0).color(TEXT_PRIMARY).strong());
-                    ui.add_space(8.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Safe badge
+                egui::Frame::NONE
+                    .fill(STATUS_CONNECTED.gamma_multiply(0.1))
+                    .rounding(8.0)
+                    .inner_margin(egui::Margin::symmetric(8, 2))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("SAFE").size(9.0).color(STATUS_CONNECTED));
+                    });
+            });
+        });
+        ui.add_space(SPACING_SM);
 
-                    // Tier 1 badge with tooltip
-                    let tier_badge = egui::Frame::NONE
-                        .fill(STATUS_CONNECTED.gamma_multiply(0.15))
-                        .rounding(4.0)
-                        .inner_margin(egui::Margin::symmetric(6, 2))
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
-                        });
-                    if tier_badge.response.hovered() {
-                        let tooltip_id = ui.id().with("tier1_tip");
-                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
-                            ui.set_max_width(280.0);
-                            ui.label(egui::RichText::new(tier_info::TIER_1_TITLE).size(12.0).color(TEXT_PRIMARY).strong());
-                            ui.add_space(4.0);
-                            ui.label(egui::RichText::new(tier_info::TIER_1_DESC).size(11.0).color(TEXT_SECONDARY));
-                        });
+        // Calculate grid dimensions (2 columns)
+        let available_width = ui.available_width();
+        let card_width = ((available_width - CARD_GAP) / 2.0).floor().max(150.0);
+
+        // Render boosts in 2-column grid
+        let mut boost_iter = boosts.iter().peekable();
+        while boost_iter.peek().is_some() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = CARD_GAP;
+
+                for _ in 0..2 {
+                    if let Some(boost) = boost_iter.next() {
+                        self.render_boost_card(ui, boost, card_width);
                     }
-                });
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Safe optimizations with no side effects").size(11.0).color(TEXT_MUTED));
-                ui.add_space(12.0);
+                }
+            });
+            ui.add_space(SPACING_SM);
+        }
+    }
 
-                self.render_toggle_row_with_info(ui, &boost_info::HIGH_PRIORITY,
-                    self.state.config.system_optimization.set_high_priority, |app| {
-                    app.state.config.system_optimization.set_high_priority = !app.state.config.system_optimization.set_high_priority;
-                });
-                ui.add_space(10.0);
+    /// Render a single boost card with toggle
+    fn render_boost_card(&mut self, ui: &mut egui::Ui, boost: &BoostConfig, width: f32) {
+        let is_enabled = self.get_boost_value(boost.id);
+        let card_id = format!("boost_{}", boost.id);
+        let hover_val = self.animations.get_hover_value(&card_id);
 
-                self.render_toggle_row_with_info(ui, &boost_info::TIMER_RESOLUTION,
-                    self.state.config.system_optimization.timer_resolution_1ms, |app| {
-                    app.state.config.system_optimization.timer_resolution_1ms = !app.state.config.system_optimization.timer_resolution_1ms;
-                });
-                ui.add_space(10.0);
+        let bg = lerp_color(BG_CARD, BG_HOVER, hover_val * 0.3);
+        let border = if is_enabled {
+            STATUS_CONNECTED.gamma_multiply(0.4)
+        } else {
+            lerp_color(BORDER_SUBTLE, BORDER_HOVER, hover_val)
+        };
 
-                self.render_toggle_row_with_info(ui, &boost_info::MMCSS,
-                    self.state.config.system_optimization.mmcss_gaming_profile, |app| {
-                    app.state.config.system_optimization.mmcss_gaming_profile = !app.state.config.system_optimization.mmcss_gaming_profile;
-                });
-                ui.add_space(10.0);
+        let response = egui::Frame::NONE
+            .fill(bg)
+            .stroke(egui::Stroke::new(1.0, border))
+            .rounding(10.0)
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_min_width(width - 24.0);
+                ui.set_max_width(width - 24.0);
 
-                self.render_toggle_row_with_info(ui, &boost_info::GAME_MODE,
-                    self.state.config.system_optimization.game_mode_enabled, |app| {
-                    app.state.config.system_optimization.game_mode_enabled = !app.state.config.system_optimization.game_mode_enabled;
+                ui.horizontal(|ui| {
+                    // Icon
+                    let icon_bg = if is_enabled { STATUS_CONNECTED.gamma_multiply(0.15) } else { BG_ELEVATED };
+                    let icon_color = if is_enabled { STATUS_CONNECTED } else { TEXT_MUTED };
+
+                    egui::Frame::NONE
+                        .fill(icon_bg)
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(boost.icon).size(14.0).color(icon_color));
+                        });
+
+                    ui.add_space(SPACING_SM);
+
+                    // Text content
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(boost.name).size(12.0).color(TEXT_PRIMARY).strong());
+                        ui.label(egui::RichText::new(boost.description).size(10.0).color(TEXT_MUTED));
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Toggle switch
+                        let toggle_id = format!("toggle_{}", boost.id);
+                        let anim_val = self.animations.get_toggle_value(&toggle_id, is_enabled);
+                        self.animations.animate_toggle(&toggle_id, is_enabled, anim_val);
+                        let current_anim = self.animations.get_toggle_value(&toggle_id, is_enabled);
+
+                        let toggle_width = TOGGLE_WIDTH;
+                        let toggle_height = TOGGLE_HEIGHT;
+                        let (toggle_rect, toggle_response) = ui.allocate_exact_size(
+                            egui::vec2(toggle_width, toggle_height),
+                            egui::Sense::click()
+                        );
+
+                        // Track color
+                        let track_color = lerp_color(BG_ELEVATED, STATUS_CONNECTED, current_anim);
+                        ui.painter().rect_filled(toggle_rect, toggle_height / 2.0, track_color);
+
+                        // Knob
+                        let knob_radius = (toggle_height - 6.0) / 2.0;
+                        let knob_x = toggle_rect.left() + toggle_height / 2.0 + current_anim * (toggle_width - toggle_height);
+                        let knob_center = egui::pos2(knob_x, toggle_rect.center().y);
+                        ui.painter().circle_filled(knob_center, knob_radius, TEXT_PRIMARY);
+
+                        if toggle_response.clicked() {
+                            self.set_boost_value(boost.id, !is_enabled);
+                            self.mark_dirty();
+                        }
+                    });
+                });
+
+                // Impact badge
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let impact_color = if is_enabled { STATUS_CONNECTED } else { TEXT_DIMMED };
+                    ui.label(egui::RichText::new("+").size(9.0).color(impact_color));
+                    ui.label(egui::RichText::new(boost.impact).size(9.0).color(impact_color));
                 });
             });
 
-        // NETWORK BOOSTS (Tier 1)
-        ui.add_space(16.0);
+        let is_hovered = response.response.hovered();
+        self.animations.animate_hover(&card_id, is_hovered, hover_val);
+    }
 
-        egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20)
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Network Boosts").size(14.0).color(TEXT_PRIMARY).strong());
-                    ui.add_space(8.0);
+    /// Get boost value by ID
+    fn get_boost_value(&self, id: &str) -> bool {
+        match id {
+            "high_priority" => self.state.config.system_optimization.set_high_priority,
+            "timer_resolution" => self.state.config.system_optimization.timer_resolution_1ms,
+            "mmcss" => self.state.config.system_optimization.mmcss_gaming_profile,
+            "game_mode" => self.state.config.system_optimization.game_mode_enabled,
+            "disable_nagle" => self.state.config.network_settings.disable_nagle,
+            "network_throttling" => self.state.config.network_settings.disable_network_throttling,
+            "optimize_mtu" => self.state.config.network_settings.optimize_mtu,
+            _ => false,
+        }
+    }
 
-                    // Tier 1 badge with tooltip
-                    let tier_badge = egui::Frame::NONE
-                        .fill(STATUS_CONNECTED.gamma_multiply(0.15))
-                        .rounding(4.0)
-                        .inner_margin(egui::Margin::symmetric(6, 2))
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("TIER 1 - SAFE").size(10.0).color(STATUS_CONNECTED));
-                        });
-                    if tier_badge.response.hovered() {
-                        let tooltip_id = ui.id().with("tier1_net_tip");
-                        egui::show_tooltip_at_pointer(ui.ctx(), egui::LayerId::new(egui::Order::Tooltip, tooltip_id), tooltip_id, |ui| {
-                            ui.set_max_width(280.0);
-                            ui.label(egui::RichText::new(tier_info::TIER_1_TITLE).size(12.0).color(TEXT_PRIMARY).strong());
-                            ui.add_space(4.0);
-                            ui.label(egui::RichText::new(tier_info::TIER_1_DESC).size(11.0).color(TEXT_SECONDARY));
-                        });
-                    }
-                });
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Lower latency for online games").size(11.0).color(TEXT_MUTED));
-                ui.add_space(12.0);
+    /// Set boost value by ID
+    fn set_boost_value(&mut self, id: &str, value: bool) {
+        match id {
+            "high_priority" => self.state.config.system_optimization.set_high_priority = value,
+            "timer_resolution" => self.state.config.system_optimization.timer_resolution_1ms = value,
+            "mmcss" => self.state.config.system_optimization.mmcss_gaming_profile = value,
+            "game_mode" => self.state.config.system_optimization.game_mode_enabled = value,
+            "disable_nagle" => self.state.config.network_settings.disable_nagle = value,
+            "network_throttling" => self.state.config.network_settings.disable_network_throttling = value,
+            "optimize_mtu" => self.state.config.network_settings.optimize_mtu = value,
+            _ => {}
+        }
+    }
 
-                self.render_toggle_row_with_info(ui, &boost_info::DISABLE_NAGLE,
-                    self.state.config.network_settings.disable_nagle, |app| {
-                    app.state.config.network_settings.disable_nagle = !app.state.config.network_settings.disable_nagle;
-                });
-                ui.add_space(10.0);
-
-                self.render_toggle_row_with_info(ui, &boost_info::NETWORK_THROTTLING,
-                    self.state.config.network_settings.disable_network_throttling, |app| {
-                    app.state.config.network_settings.disable_network_throttling = !app.state.config.network_settings.disable_network_throttling;
-                });
-                ui.add_space(10.0);
-
-                self.render_toggle_row_with_info(ui, &boost_info::OPTIMIZE_MTU,
-                    self.state.config.network_settings.optimize_mtu, |app| {
-                    app.state.config.network_settings.optimize_mtu = !app.state.config.network_settings.optimize_mtu;
-                });
-            });
-
-        // SYSTEM PROTECTION
-        ui.add_space(16.0);
-
+    /// Render system protection card
+    fn render_system_protection_card(&mut self, ui: &mut egui::Ui) {
         let mut create_restore_point = false;
         let mut open_restore = false;
 
-        egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20)
+        card_frame()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("System Protection").size(14.0).color(TEXT_PRIMARY).strong());
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_SECONDARY));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("System Protection").size(13.0).color(TEXT_PRIMARY).strong());
+                });
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Create restore points before making changes").size(11.0).color(TEXT_MUTED));
-                ui.add_space(16.0);
+
+                ui.add_space(SPACING_MD);
 
                 ui.horizontal(|ui| {
                     if ui.add(
-                        egui::Button::new(egui::RichText::new("+ Create Restore Point").size(13.0).color(TEXT_PRIMARY))
-                            .fill(ACCENT_PRIMARY).rounding(8.0).min_size(egui::vec2(180.0, 38.0))
+                        egui::Button::new(egui::RichText::new("+ Create Restore Point").size(12.0).color(TEXT_PRIMARY))
+                            .fill(ACCENT_PRIMARY)
+                            .rounding(8.0)
+                            .min_size(egui::vec2(160.0, 36.0))
                     ).clicked() {
                         create_restore_point = true;
                     }
 
-                    ui.add_space(12.0);
+                    ui.add_space(SPACING_SM);
 
                     if ui.add(
-                        egui::Button::new(egui::RichText::new("~ Open System Restore").size(13.0).color(TEXT_PRIMARY))
-                            .fill(BG_ELEVATED).rounding(8.0).min_size(egui::vec2(180.0, 38.0))
+                        egui::Button::new(egui::RichText::new("Open System Restore").size(12.0).color(TEXT_SECONDARY))
+                            .fill(BG_ELEVATED)
+                            .rounding(8.0)
+                            .min_size(egui::vec2(150.0, 36.0))
                     ).clicked() {
                         open_restore = true;
                     }
                 });
 
                 if let Some((msg, color, _)) = &self.restore_point_status {
-                    ui.add_space(12.0);
-                    ui.label(egui::RichText::new(msg).size(12.0).color(*color));
+                    ui.add_space(SPACING_SM);
+                    ui.label(egui::RichText::new(msg).size(11.0).color(*color));
                 }
             });
 
@@ -594,20 +735,11 @@ impl BoosterApp {
                 ));
             }
         }
-
-        // Show status message if any
-        if let Some((msg, color, _)) = &self.status_message {
-            ui.add_space(16.0);
-            ui.label(egui::RichText::new(msg).size(13.0).color(*color));
-        }
     }
 
+    /// Legacy helper methods for backwards compatibility
     pub(crate) fn render_toggle_row(&mut self, ui: &mut egui::Ui, label: &str, description: &str, value: bool, on_toggle: fn(&mut Self)) {
-        self.render_animated_toggle_row(ui, label, description, None, value, on_toggle);
-    }
-
-    pub(crate) fn render_toggle_row_with_info(&mut self, ui: &mut egui::Ui, info: &boost_info::BoostInfo, value: bool, on_toggle: fn(&mut Self)) {
-        self.render_animated_toggle_row(ui, info.name, info.description, Some(info), value, on_toggle);
+        self.render_animated_toggle_row(ui, label, description, value, on_toggle);
     }
 
     pub(crate) fn render_animated_toggle_row(
@@ -615,95 +747,34 @@ impl BoosterApp {
         ui: &mut egui::Ui,
         label: &str,
         description: &str,
-        info: Option<&boost_info::BoostInfo>,
         value: bool,
         on_toggle: fn(&mut Self),
     ) {
         let toggle_id = format!("toggle_{}", label);
-
-        // Get current animation value and trigger animation if needed
-        let current_anim_val = self.animations.get_toggle_value(&toggle_id, value);
-        self.animations.animate_toggle(&toggle_id, value, current_anim_val);
         let anim_val = self.animations.get_toggle_value(&toggle_id, value);
-
-        // Check if this toggle's info panel is expanded
-        let is_expanded = self.expanded_boost_info.contains(&toggle_id);
+        self.animations.animate_toggle(&toggle_id, value, anim_val);
+        let current_anim = self.animations.get_toggle_value(&toggle_id, value);
 
         let response = ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                // Name + description row
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(label).size(13.0).color(TEXT_PRIMARY));
-
-                    // Info expand button (if we have detailed info)
-                    if info.is_some() {
-                        let expand_char = if is_expanded { "-" } else { "?" };
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new(expand_char).size(10.0).color(TEXT_MUTED))
-                                .fill(egui::Color32::TRANSPARENT)
-                                .frame(false)
-                        ).clicked() {
-                            if is_expanded {
-                                self.expanded_boost_info.remove(&toggle_id);
-                            } else {
-                                self.expanded_boost_info.insert(toggle_id.clone());
-                            }
-                            self.mark_dirty();
-                        }
-                    }
-                });
-
+                ui.label(egui::RichText::new(label).size(13.0).color(TEXT_PRIMARY));
                 ui.label(egui::RichText::new(description).size(11.0).color(TEXT_MUTED));
-
-                // Expanded info panel (technical details + impact)
-                if is_expanded {
-                    if let Some(boost_info) = info {
-                        ui.add_space(6.0);
-                        egui::Frame::NONE
-                            .fill(BG_ELEVATED.gamma_multiply(0.5))
-                            .rounding(6.0)
-                            .inner_margin(egui::Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.set_max_width(ui.available_width() - 60.0); // Leave room for toggle
-
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(">").size(10.0).color(ACCENT_PRIMARY));
-                                    ui.add_space(4.0);
-                                    ui.label(egui::RichText::new("Technical:").size(10.0).color(TEXT_SECONDARY));
-                                    ui.label(egui::RichText::new(boost_info.technical).size(10.0).color(TEXT_MUTED));
-                                });
-                                ui.add_space(4.0);
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("+").size(10.0).color(STATUS_CONNECTED));
-                                    ui.add_space(4.0);
-                                    ui.label(egui::RichText::new("Impact:").size(10.0).color(TEXT_SECONDARY));
-                                    ui.label(egui::RichText::new(boost_info.impact).size(10.0).color(STATUS_CONNECTED));
-                                });
-                            });
-                    }
-                }
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Custom toggle switch with animation
-                let toggle_width = 44.0;
-                let toggle_height = 24.0;
+                let toggle_width = TOGGLE_WIDTH;
+                let toggle_height = TOGGLE_HEIGHT;
                 let (toggle_rect, toggle_response) = ui.allocate_exact_size(
                     egui::vec2(toggle_width, toggle_height),
                     egui::Sense::click()
                 );
 
-                // Background track - animate color
-                let bg_color = lerp_color(BG_ELEVATED, STATUS_CONNECTED, anim_val);
+                let bg_color = lerp_color(BG_ELEVATED, STATUS_CONNECTED, current_anim);
                 ui.painter().rect_filled(toggle_rect, toggle_height / 2.0, bg_color);
 
-                // Knob - animate position
                 let knob_radius = (toggle_height - 6.0) / 2.0;
-                let knob_x_off = anim_val * (toggle_width - toggle_height);
-                let knob_center = egui::pos2(
-                    toggle_rect.left() + toggle_height / 2.0 + knob_x_off,
-                    toggle_rect.center().y
-                );
+                let knob_x = toggle_rect.left() + toggle_height / 2.0 + current_anim * (toggle_width - toggle_height);
+                let knob_center = egui::pos2(knob_x, toggle_rect.center().y);
                 ui.painter().circle_filled(knob_center, knob_radius, TEXT_PRIMARY);
 
                 toggle_response.clicked()
