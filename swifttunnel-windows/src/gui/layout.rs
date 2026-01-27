@@ -89,25 +89,46 @@ impl BoosterApp {
                             self.render_top_bar(ui);
                         }
 
-                        // Content area with scroll
+                        // Content area height
                         let content_height = total_size.y - if is_logged_in { TOP_BAR_HEIGHT } else { 0.0 };
                         // Account for scrollbar width (12px) and extra safety margin
                         let inner_content_width = content_width - CONTENT_PADDING * 2.0 - 16.0;
 
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .max_height(content_height)
-                            .show(ui, |ui| {
-                                // Constrain width to prevent overflow
-                                ui.set_max_width(content_width);
-
-                                if !is_logged_in && !is_logging_in && !is_awaiting_oauth {
+                        // Auth screens are rendered WITHOUT ScrollArea for proper centering
+                        if !is_logged_in && !is_logging_in && !is_awaiting_oauth {
+                            // Allocate fixed size area for login screen centering
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(content_width, content_height),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
                                     self.render_full_login_screen(ui);
-                                } else if is_logging_in {
+                                }
+                            );
+                        } else if is_logging_in {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(content_width, content_height),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
                                     self.render_login_pending(ui);
-                                } else if is_awaiting_oauth {
+                                }
+                            );
+                        } else if is_awaiting_oauth {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(content_width, content_height),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
                                     self.render_awaiting_oauth_callback(ui);
-                                } else {
+                                }
+                            );
+                        } else {
+                            // Logged in content with scroll
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .max_height(content_height)
+                                .show(ui, |ui| {
+                                    // Constrain width to prevent overflow
+                                    ui.set_max_width(content_width);
+
                                     // Content wrapper with consistent padding
                                     egui::Frame::NONE
                                         .inner_margin(egui::Margin {
@@ -136,10 +157,10 @@ impl BoosterApp {
                                                 Tab::Settings => self.render_settings_tab(ui),
                                             }
                                         });
-                                }
 
-                                ui.add_space(SPACING_XL);
-                            });
+                                    ui.add_space(SPACING_XL);
+                                });
+                        }
                     });
                 });
             });
