@@ -45,8 +45,8 @@ pub const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(28, 33, 48);
 pub const BG_ACTIVE: egui::Color32 = egui::Color32::from_rgb(35, 42, 60);
 /// Input field background
 pub const BG_INPUT: egui::Color32 = egui::Color32::from_rgb(10, 12, 20);
-/// Subtle overlay for glass effect
-pub const BG_GLASS: egui::Color32 = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 5);
+/// Subtle overlay for glass effect (5/255 = ~2% white)
+pub const BG_GLASS: egui::Color32 = egui::Color32::from_rgb(13, 15, 23);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  PRIMARY ACCENTS
