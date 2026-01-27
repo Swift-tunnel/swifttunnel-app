@@ -139,8 +139,7 @@ impl BoosterApp {
 
                 if ui.add(button).clicked() {
                     if is_running {
-                        // TODO: Implement stop functionality
-                        self.network_analyzer_state.stability.running = false;
+                        self.stop_stability_test();
                     } else {
                         self.start_stability_test();
                     }
@@ -280,6 +279,24 @@ impl BoosterApp {
         });
     }
 
+    /// Stop the stability test
+    pub(crate) fn stop_stability_test(&mut self) {
+        if !self.network_analyzer_state.stability.running {
+            return;
+        }
+
+        log::info!("Stopping stability test");
+
+        // Mark as stopped
+        self.network_analyzer_state.stability.running = false;
+
+        // Create new channel to discard any pending messages from old test
+        let (tx, rx) = std::sync::mpsc::channel::<StabilityTestProgress>();
+        self.stability_progress_rx = rx;
+        // tx is dropped, old background thread will error when sending (harmless)
+        drop(tx);
+    }
+
     /// Render the Speed Test section
     pub(crate) fn render_speed_test_section(&mut self, ui: &mut egui::Ui) {
         egui::Frame::NONE
@@ -373,9 +390,7 @@ impl BoosterApp {
 
                 if ui.add(button).clicked() {
                     if is_running {
-                        // TODO: Implement stop functionality
-                        self.network_analyzer_state.speed.running = false;
-                        self.network_analyzer_state.speed.phase = crate::network_analyzer::SpeedTestPhase::Idle;
+                        self.stop_speed_test();
                     } else {
                         self.start_speed_test();
                     }
@@ -493,5 +508,24 @@ impl BoosterApp {
                 run_speed_test(tx).await
             });
         });
+    }
+
+    /// Stop the speed test
+    pub(crate) fn stop_speed_test(&mut self) {
+        if !self.network_analyzer_state.speed.running {
+            return;
+        }
+
+        log::info!("Stopping speed test");
+
+        // Mark as stopped
+        self.network_analyzer_state.speed.running = false;
+        self.network_analyzer_state.speed.phase = crate::network_analyzer::SpeedTestPhase::Idle;
+
+        // Create new channel to discard any pending messages from old test
+        let (tx, rx) = std::sync::mpsc::channel::<SpeedTestProgress>();
+        self.speed_progress_rx = rx;
+        // tx is dropped, old background thread will error when sending (harmless)
+        drop(tx);
     }
 }

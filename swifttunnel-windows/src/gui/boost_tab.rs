@@ -632,8 +632,9 @@ impl BoosterApp {
         }
     }
 
-    /// Set boost value by ID
+    /// Set boost value by ID and apply immediately if main toggle is active
     fn set_boost_value(&mut self, id: &str, value: bool) {
+        // Update the config value
         match id {
             "high_priority" => self.state.config.system_optimization.set_high_priority = value,
             "timer_resolution" => self.state.config.system_optimization.timer_resolution_1ms = value,
@@ -644,6 +645,9 @@ impl BoosterApp {
             "optimize_mtu" => self.state.config.network_settings.optimize_mtu = value,
             _ => {}
         }
+
+        // Apply immediately if main optimizations toggle is active
+        self.apply_single_boost(id, value);
     }
 
     /// Render system protection card

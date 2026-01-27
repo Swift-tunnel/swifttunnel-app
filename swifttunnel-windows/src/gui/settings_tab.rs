@@ -8,7 +8,7 @@ use crate::updater::UpdateState;
 impl BoosterApp {
     pub(crate) fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            for (label, section) in [("General", SettingsSection::General), ("Performance", SettingsSection::Performance), ("Account", SettingsSection::Account)] {
+            for (label, section) in [("General", SettingsSection::General), ("Account", SettingsSection::Account)] {
                 let is_active = self.settings_section == section;
                 let (bg, text) = if is_active { (BG_ELEVATED, TEXT_PRIMARY) } else { (egui::Color32::TRANSPARENT, TEXT_SECONDARY) };
 
@@ -26,7 +26,7 @@ impl BoosterApp {
 
         match self.settings_section {
             SettingsSection::General => self.render_general_settings(ui),
-            SettingsSection::Performance => self.render_performance_settings(ui),
+            SettingsSection::Performance => self.render_general_settings(ui), // Redirect to General
             SettingsSection::Account => self.render_account_settings(ui),
         }
     }
@@ -188,8 +188,8 @@ impl BoosterApp {
                 // Experimental mode toggle
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("Enable Experimental Features").size(13.0).color(TEXT_PRIMARY));
-                        ui.label(egui::RichText::new("Unlock Practice Mode and other experimental features").size(11.0).color(TEXT_SECONDARY));
+                        ui.label(egui::RichText::new("Enable Practice Mode").size(13.0).color(TEXT_PRIMARY));
+                        ui.label(egui::RichText::new("Add artificial latency to simulate high-ping conditions").size(11.0).color(TEXT_SECONDARY));
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let size = egui::vec2(44.0, 24.0);
@@ -343,63 +343,6 @@ impl BoosterApp {
         }
     }
 
-    pub(crate) fn render_performance_settings(&mut self, ui: &mut egui::Ui) {
-        // Performance settings are now in the Boost tab
-        // This section shows a summary and link to Boost tab
-
-        egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20)
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Performance Boosts").size(14.0).color(TEXT_PRIMARY).strong());
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("All boost settings are now on the Boost tab for easier access.").size(12.0).color(TEXT_SECONDARY));
-                ui.add_space(16.0);
-
-                // Current status summary
-                let fps_val = self.state.config.roblox_settings.target_fps;
-                let fps = if fps_val >= 9999 { "Uncapped".to_string() } else { fps_val.to_string() };
-                let system_boosts = [
-                    self.state.config.system_optimization.set_high_priority,
-                    self.state.config.system_optimization.timer_resolution_1ms,
-                    self.state.config.system_optimization.mmcss_gaming_profile,
-                    self.state.config.system_optimization.game_mode_enabled,
-                ].iter().filter(|&&x| x).count();
-                let network_boosts = [
-                    self.state.config.network_settings.disable_nagle,
-                    self.state.config.network_settings.disable_network_throttling,
-                    self.state.config.network_settings.optimize_mtu,
-                ].iter().filter(|&&x| x).count();
-
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("FPS Target:").size(12.0).color(TEXT_SECONDARY));
-                    ui.label(egui::RichText::new(&fps).size(12.0).color(ACCENT_PRIMARY));
-                });
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("System Boosts:").size(12.0).color(TEXT_SECONDARY));
-                    ui.label(egui::RichText::new(format!("{}/4 enabled", system_boosts)).size(12.0).color(ACCENT_PRIMARY));
-                });
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Network Boosts:").size(12.0).color(TEXT_SECONDARY));
-                    ui.label(egui::RichText::new(format!("{}/3 enabled", network_boosts)).size(12.0).color(ACCENT_PRIMARY));
-                });
-
-                ui.add_space(16.0);
-
-                let mut go_to_boost = false;
-                if ui.add(
-                    egui::Button::new(egui::RichText::new("> Go to Boost Tab").size(13.0).color(TEXT_PRIMARY))
-                        .fill(ACCENT_PRIMARY).rounding(8.0).min_size(egui::vec2(150.0, 36.0))
-                ).clicked() {
-                    go_to_boost = true;
-                }
-
-                if go_to_boost {
-                    self.current_tab = Tab::Boost;
-                }
-            });
-    }
-
     pub(crate) fn render_account_settings(&mut self, ui: &mut egui::Ui) {
         match &self.auth_state {
             AuthState::LoggedOut | AuthState::Error(_) => self.render_login_form(ui),
@@ -500,25 +443,5 @@ impl BoosterApp {
             });
 
         if do_logout { self.logout(); }
-
-        ui.add_space(16.0);
-
-        egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20)
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Subscription").size(14.0).color(TEXT_PRIMARY).strong());
-                ui.add_space(12.0);
-
-                for (label, value) in [("Plan", "Free"), ("Status", "Active")] {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(label).size(13.0).color(TEXT_SECONDARY));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(value).size(13.0).color(TEXT_PRIMARY));
-                        });
-                    });
-                    ui.add_space(6.0);
-                }
-            });
     }
 }
