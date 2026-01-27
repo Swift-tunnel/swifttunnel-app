@@ -327,6 +327,68 @@ impl SystemOptimizer {
         Ok(())
     }
 
+    /// Restore MMCSS profile to Windows defaults
+    pub fn restore_mmcss_profile(&self) -> Result<()> {
+        info!("Restoring MMCSS profile to defaults");
+
+        // Restore default MMCSS string values
+        let mmcss_keys = [
+            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Scheduling Category", "Medium"),
+            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "SFIO Priority", "Normal"),
+            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Background Only", "True"),
+        ];
+
+        for (key_path, value_name, value_data) in mmcss_keys.iter() {
+            let output = hidden_command("reg")
+                .args([
+                    "add",
+                    key_path,
+                    "/v",
+                    value_name,
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    value_data,
+                    "/f"
+                ])
+                .output();
+
+            if let Err(e) = output {
+                warn!("Failed to restore MMCSS key {}: {}", value_name, e);
+            }
+        }
+
+        // Restore default DWORD values
+        let dword_keys = [
+            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Priority", "2"),
+            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Clock Rate", "10000"),
+            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile", "SystemResponsiveness", "20"),
+        ];
+
+        for (key_path, value_name, value_data) in dword_keys.iter() {
+            let output = hidden_command("reg")
+                .args([
+                    "add",
+                    key_path,
+                    "/v",
+                    value_name,
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    value_data,
+                    "/f"
+                ])
+                .output();
+
+            if let Err(e) = output {
+                warn!("Failed to restore MMCSS DWORD {}: {}", value_name, e);
+            }
+        }
+
+        info!("MMCSS profile restored to defaults");
+        Ok(())
+    }
+
     /// Enable Windows Game Mode for resource prioritization
     pub fn enable_game_mode(&self) -> Result<()> {
         info!("Enabling Windows Game Mode");
@@ -360,6 +422,42 @@ impl SystemOptimizer {
         }
 
         info!("Windows Game Mode enabled");
+        Ok(())
+    }
+
+    /// Disable Windows Game Mode
+    pub fn disable_game_mode(&self) -> Result<()> {
+        info!("Disabling Windows Game Mode");
+
+        let game_mode_keys = [
+            (r"HKCU\Software\Microsoft\GameBar", "AllowAutoGameMode", "0"),
+            (r"HKCU\Software\Microsoft\GameBar", "AutoGameModeEnabled", "0"),
+        ];
+
+        for (key_path, value_name, value_data) in game_mode_keys.iter() {
+            let output = hidden_command("reg")
+                .args([
+                    "add",
+                    key_path,
+                    "/v",
+                    value_name,
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    value_data,
+                    "/f"
+                ])
+                .output();
+
+            match output {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Failed to disable Game Mode key {}: {}", value_name, e);
+                }
+            }
+        }
+
+        info!("Windows Game Mode disabled");
         Ok(())
     }
 

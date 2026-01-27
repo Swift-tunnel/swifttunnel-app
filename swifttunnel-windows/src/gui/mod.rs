@@ -1993,16 +1993,22 @@ impl BoosterApp {
                     if let Err(e) = self.system_optimizer.apply_mmcss_profile() {
                         log::warn!("Failed to apply MMCSS profile: {}", e);
                     }
+                } else {
+                    if let Err(e) = self.system_optimizer.restore_mmcss_profile() {
+                        log::warn!("Failed to restore MMCSS profile: {}", e);
+                    }
                 }
-                // Note: MMCSS profile doesn't have a "restore" - it's registry-based
             }
             "game_mode" => {
                 if enabled {
                     if let Err(e) = self.system_optimizer.enable_game_mode() {
                         log::warn!("Failed to enable game mode: {}", e);
                     }
+                } else {
+                    if let Err(e) = self.system_optimizer.disable_game_mode() {
+                        log::warn!("Failed to disable game mode: {}", e);
+                    }
                 }
-                // Note: Game mode toggle is registry-based, no instant restore
             }
             "disable_nagle" | "network_throttling" | "optimize_mtu" => {
                 // Network boosts need to reapply the whole config
