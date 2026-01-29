@@ -14,7 +14,7 @@
 //! - ArrayVec for stack-allocated packet work items
 //! - Reduced channel timeout from 10ms to 1ms
 //!
-//! ```
+//! ```text
 //!                    ┌─────────────────────────────────────┐
 //!                    │          ndisapi driver             │
 //!                    └───────────────┬─────────────────────┘
