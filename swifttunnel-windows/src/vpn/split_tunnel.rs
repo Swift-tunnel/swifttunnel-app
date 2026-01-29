@@ -815,6 +815,22 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Get diagnostic info for UI display
+    ///
+    /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
+    /// - adapter_name: The physical network adapter being intercepted
+    /// - has_default_route: Whether this adapter has the default internet route
+    /// - packets_tunneled: Total packets sent through VPN
+    /// - packets_bypassed: Total packets that bypassed VPN (non-game apps)
+    pub fn get_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
+        if self.use_parallel {
+            self.parallel_interceptor.as_ref().map(|p| p.get_diagnostics())
+        } else {
+            // Legacy mode - return minimal info
+            Some((None, false, 0, 0))
+        }
+    }
+
     /// Get detected game server IPs for notifications (Bloxstrap-style)
     ///
     /// Returns a list of Roblox game server IPs that were detected during tunneling.
