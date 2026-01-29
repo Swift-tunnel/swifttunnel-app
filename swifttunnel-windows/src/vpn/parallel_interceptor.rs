@@ -474,7 +474,7 @@ impl ParallelInterceptor {
             let mut buffer = vec![0u8; size as usize];
             let table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
 
-            if GetIpForwardTable(Some(table), &mut size, false) != NO_ERROR {
+            if GetIpForwardTable(Some(table), &mut size, false) != NO_ERROR.0 {
                 return None;
             }
 

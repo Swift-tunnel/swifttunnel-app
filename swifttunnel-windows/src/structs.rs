@@ -222,6 +222,7 @@ impl Default for NetworkConfig {
             disable_nagle: true,
             disable_network_throttling: true,
             optimize_mtu: false, // Off by default as it requires admin and takes a few seconds
+            gaming_qos: true, // Enabled by default
         }
     }
 }
