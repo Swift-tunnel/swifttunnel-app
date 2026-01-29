@@ -581,14 +581,15 @@ mod network_analyzer_tests {
 
     #[test]
     fn test_bandwidth_calculation() {
-        // 10MB downloaded in 2 seconds = 5 MB/s = 40 Mbps
+        // 10 MiB downloaded in 2 seconds = 5 MiB/s = ~41.94 Mbps
+        // (10 * 1024 * 1024 / 2) * 8 / 1_000_000 = 41.943...
         let bytes_downloaded: u64 = 10 * 1024 * 1024;
         let duration_secs: f64 = 2.0;
 
         let bytes_per_sec = bytes_downloaded as f64 / duration_secs;
         let mbps = (bytes_per_sec * 8.0) / 1_000_000.0;
 
-        assert!((mbps - 40.0).abs() < 0.5);
+        assert!((mbps - 41.94).abs() < 0.1);
     }
 }
 
