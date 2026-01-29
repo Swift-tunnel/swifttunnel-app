@@ -144,6 +144,16 @@ impl VpnConnection {
         })
     }
 
+    /// Get split tunnel diagnostic info for UI display
+    ///
+    /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
+    /// Uses try_lock() to avoid blocking the GUI thread.
+    pub fn get_split_tunnel_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
+        self.split_tunnel.as_ref().and_then(|st| {
+            st.try_lock().ok().and_then(|driver| driver.get_diagnostics())
+        })
+    }
+
     /// Get the current config ID (for latency updates)
     pub fn get_config_id(&self) -> Option<String> {
         self.config.as_ref().map(|c| c.id.clone())

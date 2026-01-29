@@ -198,6 +198,10 @@ pub struct ParallelInterceptor {
     physical_adapter_friendly_name: Option<String>,
     /// Whether we disabled TSO on the physical adapter (to restore on cleanup)
     tso_was_disabled: bool,
+    /// Whether we disabled IPv6 on the physical adapter (to restore on cleanup)
+    ipv6_was_disabled: bool,
+    /// Interface index of the adapter with the default route (for validation)
+    default_route_if_index: Option<u32>,
     /// VPN adapter index
     vpn_adapter_idx: Option<usize>,
     /// Wintun session for VPN injection
@@ -253,6 +257,8 @@ impl ParallelInterceptor {
             physical_adapter_name: None,
             physical_adapter_friendly_name: None,
             tso_was_disabled: false,
+            ipv6_was_disabled: false,
+            default_route_if_index: None,
             vpn_adapter_idx: None,
             wintun_session: None,
             active: false,
@@ -291,6 +297,29 @@ impl ParallelInterceptor {
     /// Get throughput stats (cloneable, for GUI access)
     pub fn get_throughput_stats(&self) -> ThroughputStats {
         self.throughput_stats.clone()
+    }
+
+    /// Get physical adapter name (for UI diagnostics)
+    pub fn get_physical_adapter_name(&self) -> Option<String> {
+        self.physical_adapter_friendly_name.clone()
+    }
+
+    /// Get diagnostic info for UI display
+    ///
+    /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
+    pub fn get_diagnostics(&self) -> (Option<String>, bool, u64, u64) {
+        let adapter_name = self.physical_adapter_friendly_name.clone();
+        let has_default_route = self.default_route_if_index.is_some();
+
+        // Sum up stats from all workers
+        let mut tunneled = 0u64;
+        let mut bypassed = 0u64;
+        for stats in &self.worker_stats {
+            tunneled += stats.packets_tunneled.load(Ordering::Relaxed);
+            bypassed += stats.packets_bypassed.load(Ordering::Relaxed);
+        }
+
+        (adapter_name, has_default_route, tunneled, bypassed)
     }
 
     /// Set Wintun session for VPN packet injection
@@ -426,12 +455,110 @@ impl ParallelInterceptor {
         )))
     }
 
+    /// Get the interface index that has the default route (0.0.0.0/0)
+    /// This ensures we intercept the correct adapter even on multi-NIC systems
+    fn get_default_route_interface_index() -> Option<u32> {
+        use windows::Win32::NetworkManagement::IpHelper::*;
+        use windows::Win32::Foundation::*;
+
+        unsafe {
+            // Get routing table size
+            let mut size: u32 = 0;
+            let _ = GetIpForwardTable(None, &mut size, false);
+
+            if size == 0 {
+                return None;
+            }
+
+            // Allocate buffer
+            let mut buffer = vec![0u8; size as usize];
+            let table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
+
+            if GetIpForwardTable(Some(table), &mut size, false) != NO_ERROR {
+                return None;
+            }
+
+            let num_entries = (*table).dwNumEntries as usize;
+            let entries = std::slice::from_raw_parts((*table).table.as_ptr(), num_entries);
+
+            // Find the default route (destination 0.0.0.0 with lowest metric)
+            let mut best_metric = u32::MAX;
+            let mut best_if_index = None;
+
+            for row in entries {
+                // Default route: destination 0.0.0.0, mask 0.0.0.0, non-zero next hop
+                if row.dwForwardDest == 0 && row.dwForwardMask == 0 && row.dwForwardNextHop != 0 {
+                    if row.dwForwardMetric1 < best_metric {
+                        best_metric = row.dwForwardMetric1;
+                        best_if_index = Some(row.dwForwardIfIndex);
+                    }
+                }
+            }
+
+            if let Some(idx) = best_if_index {
+                log::info!("Default route is on interface index {} (metric: {})", idx, best_metric);
+            }
+
+            best_if_index
+        }
+    }
+
+    /// Get interface index from adapter GUID/name using GetAdaptersAddresses
+    fn get_adapter_interface_index(adapter_guid: &str) -> Option<u32> {
+        use windows::Win32::NetworkManagement::IpHelper::*;
+        use windows::Win32::Networking::WinSock::AF_INET;
+
+        unsafe {
+            let mut size: u32 = 0;
+            let _ = GetAdaptersAddresses(AF_INET.0 as u32, GAA_FLAG_INCLUDE_PREFIX, None, None, &mut size);
+
+            if size == 0 {
+                return None;
+            }
+
+            let mut buffer = vec![0u8; size as usize];
+            let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+
+            if GetAdaptersAddresses(AF_INET.0 as u32, GAA_FLAG_INCLUDE_PREFIX, None, Some(adapter_addresses), &mut size) != 0 {
+                return None;
+            }
+
+            let mut current = adapter_addresses;
+            while !current.is_null() {
+                let adapter = &*current;
+
+                // Get adapter name (GUID format like {GUID})
+                let name = adapter.AdapterName.to_string().unwrap_or_default();
+
+                // Match by exact GUID comparison (strip \DEVICE\ prefix and compare)
+                let guid_from_adapter = adapter_guid.trim_start_matches("\\DEVICE\\");
+                if guid_from_adapter == name || guid_from_adapter.trim_matches('{').trim_matches('}') == name.trim_matches('{').trim_matches('}') {
+                    return Some(adapter.Anonymous1.Anonymous.IfIndex);
+                }
+
+                current = adapter.Next;
+            }
+        }
+
+        None
+    }
+
     /// Internal adapter detection logic
     ///
     /// Identifies adapters by:
     /// 1. LUID matching (most reliable - directly identifies our Wintun adapter)
     /// 2. Name matching (friendly name or internal name contains "swifttunnel" or "wintun")
+    /// 3. Default route matching (prioritize adapter with default route)
     fn find_adapters(&mut self, vpn_adapter_name: &str, vpn_adapter_luid: u64) -> VpnResult<()> {
+        // Get default route interface first - this is the adapter we MUST intercept
+        let default_route_if_index = Self::get_default_route_interface_index();
+        self.default_route_if_index = default_route_if_index;
+
+        if let Some(idx) = default_route_if_index {
+            log::info!("Will prioritize adapter with interface index {} (has default route)", idx);
+        } else {
+            log::warn!("Could not determine default route interface - will use name-based scoring");
+        }
         // Find adapters
         let driver = ndisapi::Ndisapi::new("NDISRD")
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
@@ -530,6 +657,20 @@ impl ParallelInterceptor {
                 log::info!("    -> Skipped (unknown adapter, no friendly name)");
             } else {
                 let mut score = 0;
+
+                // CRITICAL FIX (v0.9.25): Prioritize adapter with default route
+                // This fixes the bug where users with multiple NICs (e.g., disconnected Ethernet + WiFi)
+                // had traffic going through the wrong adapter
+                let adapter_if_index = Self::get_adapter_interface_index(&internal_name);
+                let has_default_route = adapter_if_index.is_some() &&
+                    default_route_if_index.is_some() &&
+                    adapter_if_index == default_route_if_index;
+
+                if has_default_route {
+                    score += 1000; // Massive bonus - this is THE adapter internet traffic uses
+                    log::info!("    -> Has DEFAULT ROUTE (priority +1000)");
+                }
+
                 if friendly_lower.contains("ethernet")
                     || friendly_lower.contains("intel")
                     || friendly_lower.contains("realtek")
@@ -537,21 +678,33 @@ impl ParallelInterceptor {
                 {
                     score += 100;
                 }
+                if friendly_lower.contains("wi-fi") || friendly_lower.contains("wifi") || friendly_lower.contains("wireless") {
+                    score += 80; // WiFi is common for laptops
+                }
                 if !friendly_name.is_empty() {
                     score += 50;
                 }
                 score += (10 - idx.min(10)) as i32;
-                log::info!("    -> Physical adapter candidate (score: {})", score);
+                log::info!("    -> Physical adapter candidate (score: {}, has_default_route: {})", score, has_default_route);
                 physical_candidates.push((idx, friendly_name.clone(), internal_name.to_string(), score));
             }
         }
 
-        // Select physical adapter
-        if let Some((idx, friendly_name, internal_name, _)) = physical_candidates.into_iter().max_by_key(|x| x.3) {
-            self.physical_adapter_idx = Some(idx);
+        // Select physical adapter - MUST have default route if available
+        let selected = physical_candidates.iter().max_by_key(|x| x.3);
+
+        if let Some((idx, friendly_name, internal_name, score)) = selected {
+            // Warn if selected adapter doesn't have default route but others exist
+            let has_default = *score >= 1000;
+            if !has_default && default_route_if_index.is_some() {
+                log::warn!("Selected adapter '{}' does NOT have the default route - traffic may not be intercepted!", friendly_name);
+                log::warn!("This could cause split tunnel to fail. Check if the correct network adapter is being used.");
+            }
+
+            self.physical_adapter_idx = Some(*idx);
             self.physical_adapter_name = Some(internal_name.clone());
             self.physical_adapter_friendly_name = Some(friendly_name.clone());
-            log::info!("Selected physical adapter: {} (index {}, internal: '{}')", friendly_name, idx, internal_name);
+            log::info!("Selected physical adapter: {} (index {}, internal: '{}', score: {})", friendly_name, idx, internal_name, score);
         } else {
             return Err(VpnError::SplitTunnel(
                 "No physical adapter found".to_string(),
@@ -739,6 +892,95 @@ impl ParallelInterceptor {
         self.tso_was_disabled = false;
     }
 
+    /// Disable IPv6 on the physical adapter
+    ///
+    /// SwiftTunnel is IPv4-only. If IPv6 is enabled, Roblox or Windows may prefer IPv6,
+    /// causing traffic to bypass our IPv4 tunnel entirely. Disabling IPv6 on the physical
+    /// adapter ensures all traffic goes through our interceptor.
+    ///
+    /// This is a common cause of "detection works but tunneling fails" - the process is
+    /// detected, but its IPv6 traffic bypasses the VPN.
+    pub fn disable_ipv6(&mut self) -> VpnResult<()> {
+        let friendly_name = match &self.physical_adapter_friendly_name {
+            Some(name) => name.clone(),
+            None => {
+                log::warn!("No physical adapter friendly name available, skipping IPv6 disable");
+                return Ok(());
+            }
+        };
+
+        log::info!("Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)", friendly_name);
+
+        // Disable IPv6 binding on the adapter using netsh
+        // This is safer than registry changes and takes effect immediately
+        let script = format!(
+            r#"
+            $ErrorActionPreference = 'SilentlyContinue'
+            $adapter = '{}'
+
+            # Disable IPv6 binding on the adapter
+            # This uses the Disable-NetAdapterBinding cmdlet which is the cleanest approach
+            Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null
+
+            # Verify it was disabled
+            $binding = Get-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null
+            if ($binding -and -not $binding.Enabled) {{
+                Write-Host 'IPv6 disabled'
+            }} else {{
+                Write-Host 'IPv6 disable may have failed'
+            }}
+            "#,
+            friendly_name.replace("'", "''")
+        );
+
+        if Self::run_powershell_with_timeout(&script, 5) {
+            log::info!("IPv6 disabled successfully on {} - all traffic will use IPv4", friendly_name);
+            self.ipv6_was_disabled = true;
+        } else {
+            log::warn!("Failed to disable IPv6 (non-fatal) - IPv6 traffic may bypass VPN");
+            // Don't fail - the VPN can still work, just with potential IPv6 leakage
+        }
+
+        Ok(())
+    }
+
+    /// Re-enable IPv6 on the physical adapter
+    ///
+    /// Called when the VPN disconnects to restore normal IPv6 connectivity.
+    pub fn enable_ipv6(&mut self) {
+        if !self.ipv6_was_disabled {
+            return;
+        }
+
+        let friendly_name = match &self.physical_adapter_friendly_name {
+            Some(name) => name.clone(),
+            None => return,
+        };
+
+        log::info!("Re-enabling IPv6 on adapter: {}", friendly_name);
+
+        let script = format!(
+            r#"
+            $ErrorActionPreference = 'SilentlyContinue'
+            $adapter = '{}'
+
+            # Re-enable IPv6 binding on the adapter
+            Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null
+
+            Write-Host 'IPv6 enabled'
+            "#,
+            friendly_name.replace("'", "''")
+        );
+
+        if Self::run_powershell_with_timeout(&script, 5) {
+            log::info!("IPv6 re-enabled on {}", friendly_name);
+        } else {
+            log::warn!("Failed to re-enable IPv6 - manual re-enable may be needed via Network Settings");
+        }
+
+        self.ipv6_was_disabled = false;
+    }
+
     /// Start parallel interception
     pub fn start(&mut self) -> VpnResult<()> {
         if self.active {
@@ -757,6 +999,10 @@ impl ParallelInterceptor {
         // Disable TSO/LSO on physical adapter BEFORE starting packet capture
         // This prevents the NIC from creating super-packets that exceed our buffer size
         self.disable_adapter_offload()?;
+
+        // Disable IPv6 on physical adapter - SwiftTunnel is IPv4-only
+        // This prevents Roblox/Windows from preferring IPv6 and bypassing our tunnel
+        self.disable_ipv6()?;
 
         self.stop_flag.store(false, Ordering::SeqCst);
         self.active = true;
@@ -902,6 +1148,9 @@ impl ParallelInterceptor {
 
         // Re-enable TSO/LSO on physical adapter
         self.enable_adapter_offload();
+
+        // Re-enable IPv6 on physical adapter
+        self.enable_ipv6();
     }
 
     /// Check if active
@@ -2605,24 +2854,10 @@ fn should_route_to_vpn_with_inline_cache(
     }
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
-    // Cache stores: is this source connection from a tunnel app? (process check only)
+    // Cache ONLY stores TRUE results (v0.9.25) - finding key means it's a tunnel app
     let cache_key = (src_ip, src_port, protocol);
-    if let Some(&is_tunnel_app) = inline_cache.get(&cache_key) {
+    if inline_cache.contains_key(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        // For V2: use PERMISSIVE mode if process is identified (v0.9.5 fix)
-        // For V1: is_tunnel_app is the final result
-        if !is_tunnel_app {
-            // SPECULATIVE TUNNELING: Even if cache says "not tunnel app", still check
-            // if destination is a game server. This handles the race condition where
-            // PID lookup failed due to UDP table latency but destination is known.
-            return match snapshot.routing_mode {
-                crate::settings::RoutingMode::V1 => false, // V1 doesn't use destination filtering
-                crate::settings::RoutingMode::V2 => {
-                    // Speculatively tunnel to known game server IPs
-                    super::process_cache::is_game_server(dst_ip, dst_port, protocol)
-                }
-            };
-        }
         // Process IS a tunnel app - use permissive check in V2 mode
         return match snapshot.routing_mode {
             crate::settings::RoutingMode::V1 => true,
@@ -2641,8 +2876,19 @@ fn should_route_to_vpn_with_inline_cache(
 
     // Cache the process check result for subsequent packets from this connection
     // Limit cache size to prevent unbounded growth
-    if inline_cache.len() < 10000 {
-        inline_cache.insert(cache_key, is_tunnel_app);
+    //
+    // CRITICAL FIX (v0.9.25): Only cache TRUE results, not FALSE results
+    // This fixes the "inline cache poisoning" bug where:
+    //   1. First UDP packet arrives before PID is in Windows UDP table
+    //   2. lookup returns false (can't find PID)
+    //   3. false gets cached
+    //   4. All subsequent packets bypass VPN (cache hit returns false)
+    //   5. User sees "Roblox detected" but traffic graph shows 0
+    //
+    // By only caching true results, we ensure that if a process wasn't found,
+    // we keep trying on subsequent packets until it IS found.
+    if is_tunnel_app && inline_cache.len() < 10000 {
+        inline_cache.insert(cache_key, true);
     }
 
     // Apply V2 destination filter if needed

@@ -2010,7 +2010,7 @@ impl BoosterApp {
                     }
                 }
             }
-            "disable_nagle" | "network_throttling" | "optimize_mtu" => {
+            "disable_nagle" | "network_throttling" | "optimize_mtu" | "gaming_qos" => {
                 // Network boosts need to reapply the whole config
                 if let Err(e) = self.network_booster.apply_optimizations(&self.state.config.network_settings) {
                     log::warn!("Failed to apply network boost '{}': {}", boost_id, e);

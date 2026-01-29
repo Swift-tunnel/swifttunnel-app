@@ -1390,20 +1390,108 @@ impl BoosterApp {
     }
 
     pub(crate) fn render_quick_info(&self, ui: &mut egui::Ui) {
-        egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
-            .rounding(12.0).inner_margin(20)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("?").size(12.0).color(ACCENT_PRIMARY));
-                    ui.add_space(8.0);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.label(egui::RichText::new("How Split Tunneling Works").size(13.0).color(TEXT_PRIMARY).strong());
-                        ui.label(egui::RichText::new("Only selected games use the VPN. Other apps connect normally, reducing overhead and lag.")
-                            .size(11.0).color(TEXT_SECONDARY));
+        // Show diagnostics when connected, otherwise show info
+        if self.vpn_state.is_connected() {
+            self.render_tunnel_diagnostics(ui);
+        } else {
+            egui::Frame::NONE
+                .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+                .rounding(12.0).inner_margin(20)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("?").size(12.0).color(ACCENT_PRIMARY));
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.label(egui::RichText::new("How Split Tunneling Works").size(13.0).color(TEXT_PRIMARY).strong());
+                            ui.label(egui::RichText::new("Only selected games use the VPN. Other apps connect normally, reducing overhead and lag.")
+                                .size(11.0).color(TEXT_SECONDARY));
+                        });
                     });
                 });
+        }
+    }
+
+    /// Render tunnel diagnostics panel (shown when connected)
+    fn render_tunnel_diagnostics(&self, ui: &mut egui::Ui) {
+        // Try to get diagnostics from VPN connection
+        let diagnostics = self.vpn_handle.as_ref().and_then(|vpn| {
+            vpn.try_lock().ok().and_then(|v| v.get_split_tunnel_diagnostics())
+        });
+
+        egui::Frame::NONE
+            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0).inner_margin(16)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("📊").size(14.0));
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Tunnel Status").size(13.0).color(TEXT_PRIMARY).strong());
+                });
+
+                ui.add_space(12.0);
+
+                if let Some((adapter_name, has_default_route, tunneled, bypassed)) = diagnostics {
+                    // Network adapter row
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Network:").size(11.0).color(TEXT_MUTED));
+                        ui.add_space(4.0);
+                        let adapter = adapter_name.as_deref().unwrap_or("Unknown");
+                        ui.label(egui::RichText::new(adapter).size(11.0).color(TEXT_SECONDARY));
+
+                        // Default route indicator
+                        if has_default_route {
+                            ui.label(egui::RichText::new("✓").size(10.0).color(STATUS_CONNECTED));
+                        } else {
+                            ui.label(egui::RichText::new("⚠").size(10.0).color(STATUS_WARNING))
+                                .on_hover_text("Adapter may not have default route - check network settings");
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Traffic stats row
+                    ui.horizontal(|ui| {
+                        // Tunneled packets
+                        ui.label(egui::RichText::new("Tunneled:").size(11.0).color(TEXT_MUTED));
+                        ui.add_space(4.0);
+                        let tunneled_color = if tunneled > 0 { STATUS_CONNECTED } else { TEXT_MUTED };
+                        ui.label(egui::RichText::new(format_packet_count(tunneled)).size(11.0).color(tunneled_color));
+
+                        ui.add_space(16.0);
+
+                        // Bypassed packets
+                        ui.label(egui::RichText::new("Bypassed:").size(11.0).color(TEXT_MUTED));
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(format_packet_count(bypassed)).size(11.0).color(TEXT_SECONDARY));
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Status indicator
+                    let (status_text, status_color) = if tunneled > 0 {
+                        ("Active - Game traffic is being tunneled", STATUS_CONNECTED)
+                    } else if bypassed > 0 {
+                        ("Waiting - No game traffic detected yet", STATUS_WARNING)
+                    } else {
+                        ("Initializing...", TEXT_MUTED)
+                    };
+                    ui.label(egui::RichText::new(status_text).size(10.0).color(status_color));
+
+                } else {
+                    ui.label(egui::RichText::new("Connecting...").size(11.0).color(TEXT_MUTED));
+                }
             });
+    }
+}
+
+/// Format packet count for display (e.g., 1234 → "1.2K", 1234567 → "1.2M")
+fn format_packet_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}K", count as f64 / 1_000.0)
+    } else {
+        count.to_string()
     }
 }

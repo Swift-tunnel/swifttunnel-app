@@ -205,6 +205,9 @@ pub struct NetworkConfig {
     pub disable_network_throttling: bool,
     #[serde(default)]
     pub optimize_mtu: bool,
+    /// Gaming QoS - Marks game packets with DSCP EF (46) for router prioritization
+    #[serde(default = "default_true")]
+    pub gaming_qos: bool,
 }
 
 impl Default for NetworkConfig {
@@ -380,6 +383,16 @@ pub mod boost_info {
         requires_admin: true,
     };
 
+    pub const GAMING_QOS: BoostInfo = BoostInfo {
+        id: "gaming_qos",
+        title: "Gaming QoS",
+        short_desc: "Router traffic prioritization",
+        long_desc: "Marks Roblox packets with DSCP EF (Expedited Forwarding) priority. If your router supports QoS, game traffic will be prioritized over downloads, streaming, and other network activity. Safe, no side effects.",
+        impact: "-5-20ms if router honors QoS",
+        risk_level: RiskLevel::Safe,
+        requires_admin: true,
+    };
+
     // Roblox Boosts
     pub const DYNAMIC_RENDER: BoostInfo = BoostInfo {
         id: "dynamic_render",
@@ -397,8 +410,8 @@ pub mod boost_info {
     }
 
     /// Get all network boost infos
-    pub fn network_boosts() -> [&'static BoostInfo; 3] {
-        [&DISABLE_NAGLE, &NETWORK_THROTTLING, &OPTIMIZE_MTU]
+    pub fn network_boosts() -> [&'static BoostInfo; 4] {
+        [&DISABLE_NAGLE, &NETWORK_THROTTLING, &OPTIMIZE_MTU, &GAMING_QOS]
     }
 
     /// Get all Roblox boost infos
