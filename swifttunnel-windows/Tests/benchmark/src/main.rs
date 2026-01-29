@@ -1,12 +1,14 @@
 //! VPN Benchmark - Real CPU Usage & Network Performance
 //!
-//! Compares SwiftTunnel vs WireGuard vs WireSock with:
+//! Compares SwiftTunnel vs WireSock with:
 //! - Actual CPU % usage during network tests
 //! - Real network speed via Cloudflare
 //! - Memory usage
 //!
+//! NOTE: WireGuard is excluded because it tunnels ALL traffic (including SSH),
+//! which breaks remote testing. WireSock and SwiftTunnel support split tunneling.
+//!
 //! Prerequisites:
-//! - WireGuard installed: C:\Program Files\WireGuard\wireguard.exe
 //! - WireSock installed: C:\Program Files\WireSock Secure Connect\bin\wiresock-client.exe
 //! - SwiftTunnel installed (optional)
 //! - Config file: C:\Users\testbench\benchmark-configs\mumbai.conf
@@ -26,7 +28,6 @@ use sysinfo::{ProcessesToUpdate, System};
 // ============================================================================
 
 const CONFIG_PATH: &str = r"C:\Users\testbench\benchmark-configs\mumbai.conf";
-const WIREGUARD_EXE: &str = r"C:\Program Files\WireGuard\wireguard.exe";
 const WIRESOCK_EXE: &str = r"C:\Program Files\WireSock Secure Connect\bin\wiresock-client.exe";
 
 const LATENCY_SAMPLES: u32 = 10;
@@ -117,37 +118,6 @@ impl CpuMonitor {
 // ============================================================================
 // VPN CONTROL
 // ============================================================================
-
-fn start_wireguard(config: &str) -> Result<(), String> {
-    println!("    Starting WireGuard...");
-
-    let output = Command::new(WIREGUARD_EXE)
-        .args(["/installtunnelservice", config])
-        .output()
-        .map_err(|e| format!("Failed to start WireGuard: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.contains("already exists") {
-            return Err(format!("WireGuard failed: {}", stderr));
-        }
-    }
-
-    thread::sleep(Duration::from_secs(3));
-    println!("    WireGuard connected");
-    Ok(())
-}
-
-fn stop_wireguard(tunnel_name: &str) -> Result<(), String> {
-    println!("    Stopping WireGuard...");
-
-    let _ = Command::new(WIREGUARD_EXE)
-        .args(["/uninstalltunnelservice", tunnel_name])
-        .output();
-
-    thread::sleep(Duration::from_secs(2));
-    Ok(())
-}
 
 fn start_wiresock(config: &str) -> Result<Child, String> {
     println!("    Starting WireSock...");
@@ -288,7 +258,7 @@ fn print_header() {
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║     VPN Benchmark - Real CPU Usage                               ║");
     println!("║                                                                  ║");
-    println!("║     SwiftTunnel vs WireGuard vs WireSock                         ║");
+    println!("║     SwiftTunnel vs WireSock (Split Tunnel VPNs)                  ║");
     println!("╚══════════════════════════════════════════════════════════════════╝");
     println!();
 }
@@ -375,42 +345,11 @@ fn main() {
     results.push(baseline);
 
     // ========================================================================
-    // WIREGUARD
-    // ========================================================================
-    if ask_yes_no("Test WireGuard?") {
-        println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("TEST 2: WireGuard (Official Client)");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-        match start_wireguard(CONFIG_PATH) {
-            Ok(()) => {
-                println!("\n  Running WireGuard test...");
-                // Monitor wireguard.exe process
-                let mut wg_result = run_network_test(&["wireguard"]);
-                wg_result.name = "WireGuard".to_string();
-                println!("\n    Result: {:.1}ms | {:.1} Mbps | CPU: {:.1}% avg / {:.1}% peak | Mem: {:.1} MB",
-                         wg_result.latency_ms, wg_result.download_mbps,
-                         wg_result.avg_cpu_percent, wg_result.peak_cpu_percent, wg_result.avg_memory_mb);
-                results.push(wg_result);
-
-                let tunnel_name = std::path::Path::new(CONFIG_PATH)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("mumbai");
-                let _ = stop_wireguard(tunnel_name);
-            }
-            Err(e) => {
-                eprintln!("    Failed to start WireGuard: {}", e);
-            }
-        }
-    }
-
-    // ========================================================================
     // WIRESOCK
     // ========================================================================
     if ask_yes_no("Test WireSock?") {
         println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("TEST 3: WireSock");
+        println!("TEST 2: WireSock");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         match start_wiresock(CONFIG_PATH) {
@@ -437,7 +376,7 @@ fn main() {
     // ========================================================================
     if ask_yes_no("Test SwiftTunnel?") {
         println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("TEST 4: SwiftTunnel");
+        println!("TEST 3: SwiftTunnel");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         wait_for_enter("Connect SwiftTunnel manually and wait for 'Connected'");
