@@ -530,8 +530,9 @@ impl ParallelInterceptor {
                 // Get adapter name (GUID format like {GUID})
                 let name = adapter.AdapterName.to_string().unwrap_or_default();
 
-                // Match by GUID (internal_name contains the GUID)
-                if adapter_guid.contains(&name) || name.contains(adapter_guid.trim_start_matches("\\DEVICE\\")) {
+                // Match by exact GUID comparison (strip \DEVICE\ prefix and compare)
+                let guid_from_adapter = adapter_guid.trim_start_matches("\\DEVICE\\");
+                if guid_from_adapter == name || guid_from_adapter.trim_matches('{').trim_matches('}') == name.trim_matches('{').trim_matches('}') {
                     return Some(adapter.Anonymous1.Anonymous.IfIndex);
                 }
 
