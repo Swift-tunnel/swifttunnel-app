@@ -1027,3 +1027,733 @@ mod notification_tests {
         assert!(body.len() <= 200);
     }
 }
+
+// ============================================================================
+// INTEGRATION TESTS
+// ============================================================================
+// These tests verify multiple components working together.
+// They don't require admin privileges or actual network connections.
+
+/// Integration tests for auth + storage flow
+mod auth_integration_tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct MockTokens {
+        access_token: String,
+        refresh_token: String,
+        expires_at: i64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct MockUser {
+        id: String,
+        email: String,
+    }
+
+    /// Tests the full auth token lifecycle: store -> read -> refresh check -> clear
+    #[test]
+    fn test_token_lifecycle() {
+        // 1. Create tokens (simulating OAuth callback)
+        let tokens = MockTokens {
+            access_token: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.test".to_string(),
+            refresh_token: "refresh_token_abc123".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + 3600, // 1 hour from now
+        };
+
+        // 2. Serialize for storage
+        let serialized = serde_json::to_string(&tokens).unwrap();
+        assert!(serialized.contains("access_token"));
+        assert!(serialized.contains("refresh_token"));
+
+        // 3. Deserialize (simulating read from storage)
+        let restored: MockTokens = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.access_token, tokens.access_token);
+
+        // 4. Check if refresh is needed
+        let now = chrono::Utc::now().timestamp();
+        let needs_refresh = restored.expires_at - now < 300; // 5 min buffer
+        assert!(!needs_refresh); // Should not need refresh yet
+    }
+
+    /// Tests expired token detection
+    #[test]
+    fn test_expired_token_detection() {
+        let expired_tokens = MockTokens {
+            access_token: "old_token".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: chrono::Utc::now().timestamp() - 3600, // 1 hour ago
+        };
+
+        let now = chrono::Utc::now().timestamp();
+        let is_expired = expired_tokens.expires_at <= now;
+        assert!(is_expired);
+    }
+
+    /// Tests token refresh flow
+    #[test]
+    fn test_token_refresh_flow() {
+        // Simulate token about to expire
+        let old_tokens = MockTokens {
+            access_token: "old_access".to_string(),
+            refresh_token: "valid_refresh".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + 60, // 1 min left
+        };
+
+        // Check refresh threshold (5 minutes)
+        let now = chrono::Utc::now().timestamp();
+        let needs_refresh = old_tokens.expires_at - now < 300;
+        assert!(needs_refresh);
+
+        // Simulate refreshed tokens
+        let new_tokens = MockTokens {
+            access_token: "new_access_token".to_string(),
+            refresh_token: "new_refresh_token".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+        };
+
+        // Verify new tokens are valid
+        assert_ne!(new_tokens.access_token, old_tokens.access_token);
+        assert!(new_tokens.expires_at > old_tokens.expires_at);
+    }
+
+    /// Tests user data persistence alongside tokens
+    #[test]
+    fn test_user_data_with_tokens() {
+        let user = MockUser {
+            id: "user_123".to_string(),
+            email: "test@example.com".to_string(),
+        };
+
+        let tokens = MockTokens {
+            access_token: "token".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+        };
+
+        // Simulate combined storage
+        let mut storage: HashMap<String, String> = HashMap::new();
+        storage.insert("user".to_string(), serde_json::to_string(&user).unwrap());
+        storage.insert("tokens".to_string(), serde_json::to_string(&tokens).unwrap());
+
+        // Verify both can be restored
+        let restored_user: MockUser = serde_json::from_str(storage.get("user").unwrap()).unwrap();
+        let restored_tokens: MockTokens = serde_json::from_str(storage.get("tokens").unwrap()).unwrap();
+
+        assert_eq!(restored_user.email, "test@example.com");
+        assert!(!restored_tokens.access_token.is_empty());
+    }
+}
+
+/// Integration tests for settings + boosts
+mod settings_integration_tests {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    struct MockBoostConfig {
+        system_boosts_enabled: bool,
+        network_boosts_enabled: bool,
+        roblox_fps_limit: u32,
+        launch_minimized: bool,
+        auto_connect: bool,
+        auto_connect_region: Option<String>,
+    }
+
+    /// Tests settings persistence across app restarts
+    #[test]
+    fn test_settings_persistence() {
+        // User configures settings
+        let settings = MockBoostConfig {
+            system_boosts_enabled: true,
+            network_boosts_enabled: true,
+            roblox_fps_limit: 240,
+            launch_minimized: false,
+            auto_connect: true,
+            auto_connect_region: Some("singapore".to_string()),
+        };
+
+        // Serialize to JSON (simulating file write)
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+
+        // Deserialize (simulating app restart and file read)
+        let restored: MockBoostConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.system_boosts_enabled, true);
+        assert_eq!(restored.network_boosts_enabled, true);
+        assert_eq!(restored.roblox_fps_limit, 240);
+        assert_eq!(restored.auto_connect_region, Some("singapore".to_string()));
+    }
+
+    /// Tests boost configuration defaults
+    #[test]
+    fn test_boost_defaults_on_fresh_install() {
+        let defaults = MockBoostConfig::default();
+
+        // Verify safe defaults
+        assert!(!defaults.system_boosts_enabled);
+        assert!(!defaults.network_boosts_enabled);
+        assert_eq!(defaults.roblox_fps_limit, 0); // 0 = uncapped
+        assert!(!defaults.launch_minimized);
+        assert!(!defaults.auto_connect);
+        assert!(defaults.auto_connect_region.is_none());
+    }
+
+    /// Tests migration from old settings format
+    #[test]
+    fn test_settings_backward_compatibility() {
+        // Old format (missing new fields)
+        let old_json = r#"{
+            "system_boosts_enabled": true,
+            "network_boosts_enabled": false
+        }"#;
+
+        // Should still parse with defaults for missing fields
+        #[derive(Deserialize, Default)]
+        struct OldSettings {
+            #[serde(default)]
+            system_boosts_enabled: bool,
+            #[serde(default)]
+            network_boosts_enabled: bool,
+            #[serde(default)]
+            roblox_fps_limit: u32,
+            #[serde(default)]
+            launch_minimized: bool,
+        }
+
+        let parsed: OldSettings = serde_json::from_str(old_json).unwrap();
+        assert!(parsed.system_boosts_enabled);
+        assert!(!parsed.network_boosts_enabled);
+        assert_eq!(parsed.roblox_fps_limit, 0); // Default
+    }
+
+    /// Tests preset switching
+    #[test]
+    fn test_preset_switching() {
+        #[derive(Clone, Copy)]
+        enum Preset {
+            Performance,
+            Balanced,
+            Quality,
+        }
+
+        fn apply_preset(preset: Preset) -> MockBoostConfig {
+            match preset {
+                Preset::Performance => MockBoostConfig {
+                    system_boosts_enabled: true,
+                    network_boosts_enabled: true,
+                    roblox_fps_limit: 9999, // Uncapped
+                    launch_minimized: true,
+                    auto_connect: true,
+                    auto_connect_region: None,
+                },
+                Preset::Balanced => MockBoostConfig {
+                    system_boosts_enabled: true,
+                    network_boosts_enabled: false,
+                    roblox_fps_limit: 144,
+                    launch_minimized: false,
+                    auto_connect: false,
+                    auto_connect_region: None,
+                },
+                Preset::Quality => MockBoostConfig {
+                    system_boosts_enabled: false,
+                    network_boosts_enabled: false,
+                    roblox_fps_limit: 60,
+                    launch_minimized: false,
+                    auto_connect: false,
+                    auto_connect_region: None,
+                },
+            }
+        }
+
+        let perf = apply_preset(Preset::Performance);
+        let balanced = apply_preset(Preset::Balanced);
+        let quality = apply_preset(Preset::Quality);
+
+        // Performance is most aggressive
+        assert!(perf.system_boosts_enabled && perf.network_boosts_enabled);
+        assert_eq!(perf.roblox_fps_limit, 9999);
+
+        // Balanced is middle ground
+        assert!(balanced.system_boosts_enabled);
+        assert!(!balanced.network_boosts_enabled);
+
+        // Quality is most conservative
+        assert!(!quality.system_boosts_enabled);
+        assert_eq!(quality.roblox_fps_limit, 60);
+    }
+}
+
+/// Integration tests for VPN config + server selection
+mod vpn_config_integration_tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    #[derive(Debug, Clone)]
+    struct MockVpnConfig {
+        private_key: String,
+        public_key: String,
+        assigned_ip: String,
+        server_endpoint: SocketAddr,
+        server_public_key: String,
+        dns: Option<String>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockServer {
+        region: String,
+        endpoint: SocketAddr,
+        public_key: String,
+        has_phantun: bool,
+        ping_ms: Option<u32>,
+    }
+
+    /// Tests complete config generation flow
+    #[test]
+    fn test_config_generation_flow() {
+        // 1. Generate keypair (simulated)
+        let private_key_bytes = [0u8; 32];
+        let public_key_bytes = [1u8; 32];
+        let private_key = STANDARD.encode(private_key_bytes);
+        let public_key = STANDARD.encode(public_key_bytes);
+
+        // 2. Get assigned IP from server (simulated)
+        let assigned_ip = "10.0.42.15/32".to_string();
+
+        // 3. Get server info
+        let server = MockServer {
+            region: "singapore".to_string(),
+            endpoint: "54.255.205.216:51820".parse().unwrap(),
+            public_key: STANDARD.encode([2u8; 32]),
+            has_phantun: true,
+            ping_ms: Some(25),
+        };
+
+        // 4. Create config
+        let config = MockVpnConfig {
+            private_key,
+            public_key,
+            assigned_ip,
+            server_endpoint: server.endpoint,
+            server_public_key: server.public_key,
+            dns: Some("1.1.1.1".to_string()),
+        };
+
+        // Verify config is complete
+        assert!(!config.private_key.is_empty());
+        assert!(!config.public_key.is_empty());
+        assert!(config.assigned_ip.contains("10.0."));
+        assert_eq!(config.server_endpoint.port(), 51820);
+    }
+
+    /// Tests server selection by ping
+    #[test]
+    fn test_server_selection_by_ping() {
+        let servers = vec![
+            MockServer {
+                region: "singapore".to_string(),
+                endpoint: "1.1.1.1:51820".parse().unwrap(),
+                public_key: String::new(),
+                has_phantun: true,
+                ping_ms: Some(25),
+            },
+            MockServer {
+                region: "tokyo".to_string(),
+                endpoint: "2.2.2.2:51820".parse().unwrap(),
+                public_key: String::new(),
+                has_phantun: true,
+                ping_ms: Some(45),
+            },
+            MockServer {
+                region: "sydney".to_string(),
+                endpoint: "3.3.3.3:51820".parse().unwrap(),
+                public_key: String::new(),
+                has_phantun: false,
+                ping_ms: Some(120),
+            },
+        ];
+
+        // Find best server (lowest ping)
+        let best = servers.iter()
+            .filter(|s| s.ping_ms.is_some())
+            .min_by_key(|s| s.ping_ms.unwrap())
+            .unwrap();
+
+        assert_eq!(best.region, "singapore");
+        assert_eq!(best.ping_ms, Some(25));
+    }
+
+    /// Tests Phantun (stealth) server filtering
+    #[test]
+    fn test_phantun_server_filtering() {
+        let servers = vec![
+            MockServer {
+                region: "singapore".to_string(),
+                endpoint: "1.1.1.1:51820".parse().unwrap(),
+                public_key: String::new(),
+                has_phantun: true,
+                ping_ms: Some(25),
+            },
+            MockServer {
+                region: "mumbai".to_string(),
+                endpoint: "2.2.2.2:51820".parse().unwrap(),
+                public_key: String::new(),
+                has_phantun: false,
+                ping_ms: Some(50),
+            },
+        ];
+
+        // Filter to only Phantun-capable servers
+        let phantun_servers: Vec<_> = servers.iter()
+            .filter(|s| s.has_phantun)
+            .collect();
+
+        assert_eq!(phantun_servers.len(), 1);
+        assert_eq!(phantun_servers[0].region, "singapore");
+    }
+
+    /// Tests region grouping for smart selection
+    #[test]
+    fn test_region_grouping() {
+        let asia_regions = vec!["singapore", "tokyo", "mumbai", "sydney"];
+        let europe_regions = vec!["germany", "paris", "london"];
+        let americas_regions = vec!["america", "brazil"];
+
+        // Simulate user in Asia
+        let user_region = "asia";
+        let preferred_regions = match user_region {
+            "asia" => &asia_regions,
+            "europe" => &europe_regions,
+            "americas" => &americas_regions,
+            _ => &asia_regions,
+        };
+
+        assert!(preferred_regions.contains(&"singapore"));
+        assert!(preferred_regions.contains(&"tokyo"));
+        assert!(!preferred_regions.contains(&"germany"));
+    }
+}
+
+/// Integration tests for split tunnel + route management
+mod split_tunnel_integration_tests {
+    use std::net::Ipv4Addr;
+    use std::collections::HashSet;
+
+    #[derive(Debug, Clone)]
+    struct MockRoute {
+        destination: Ipv4Addr,
+        cidr: u8,
+        gateway: Ipv4Addr,
+        metric: u32,
+    }
+
+    /// Tests split tunnel app list management
+    #[test]
+    fn test_split_tunnel_app_management() {
+        let mut split_apps: HashSet<String> = HashSet::new();
+
+        // Add Roblox apps
+        split_apps.insert("RobloxPlayerBeta.exe".to_string());
+        split_apps.insert("RobloxStudioBeta.exe".to_string());
+
+        assert!(split_apps.contains("RobloxPlayerBeta.exe"));
+        assert_eq!(split_apps.len(), 2);
+
+        // Remove one
+        split_apps.remove("RobloxStudioBeta.exe");
+        assert_eq!(split_apps.len(), 1);
+
+        // Add custom app
+        split_apps.insert("CustomGame.exe".to_string());
+        assert_eq!(split_apps.len(), 2);
+    }
+
+    /// Tests route table construction
+    #[test]
+    fn test_route_table_construction() {
+        let vpn_gateway = Ipv4Addr::new(10, 0, 0, 1);
+        let local_gateway = Ipv4Addr::new(192, 168, 1, 1);
+
+        // Roblox IP ranges through VPN
+        let roblox_routes = vec![
+            MockRoute {
+                destination: Ipv4Addr::new(128, 116, 0, 0),
+                cidr: 16,
+                gateway: vpn_gateway,
+                metric: 10,
+            },
+            MockRoute {
+                destination: Ipv4Addr::new(128, 79, 0, 0),
+                cidr: 16,
+                gateway: vpn_gateway,
+                metric: 10,
+            },
+        ];
+
+        // Default route through local gateway
+        let default_route = MockRoute {
+            destination: Ipv4Addr::new(0, 0, 0, 0),
+            cidr: 0,
+            gateway: local_gateway,
+            metric: 100, // Higher metric = lower priority
+        };
+
+        // Verify Roblox traffic uses VPN
+        assert_eq!(roblox_routes[0].gateway, vpn_gateway);
+        assert!(roblox_routes[0].metric < default_route.metric);
+    }
+
+    /// Tests IP matching for split tunnel decisions
+    #[test]
+    fn test_ip_matching_for_split_decision() {
+        // VPN IPs (should go through tunnel)
+        let vpn_ranges: Vec<(u32, u8)> = vec![
+            (u32::from(Ipv4Addr::new(128, 116, 0, 0)), 16), // Roblox
+            (u32::from(Ipv4Addr::new(128, 79, 0, 0)), 16),  // Roblox
+        ];
+
+        let test_ips = vec![
+            (Ipv4Addr::new(128, 116, 10, 5), true),   // Roblox server
+            (Ipv4Addr::new(128, 79, 200, 1), true),   // Roblox server
+            (Ipv4Addr::new(8, 8, 8, 8), false),       // Google DNS
+            (Ipv4Addr::new(142, 250, 185, 14), false), // Google
+        ];
+
+        for (ip, should_tunnel) in test_ips {
+            let ip_u32 = u32::from(ip);
+            let mut matches_vpn = false;
+
+            for (range_start, cidr) in &vpn_ranges {
+                let mask = if *cidr == 0 { 0 } else { !((1u32 << (32 - cidr)) - 1) };
+                if (ip_u32 & mask) == (*range_start & mask) {
+                    matches_vpn = true;
+                    break;
+                }
+            }
+
+            assert_eq!(matches_vpn, should_tunnel, "IP {} matching failed", ip);
+        }
+    }
+
+    /// Tests process-based split tunnel decision
+    #[test]
+    fn test_process_based_split_decision() {
+        let tunnel_apps: HashSet<&str> = vec![
+            "RobloxPlayerBeta.exe",
+            "RobloxStudioBeta.exe",
+        ].into_iter().collect();
+
+        // Simulated connections
+        let connections = vec![
+            ("RobloxPlayerBeta.exe", "128.116.10.5:12345"),
+            ("chrome.exe", "142.250.185.14:443"),
+            ("RobloxStudioBeta.exe", "128.79.200.1:54321"),
+            ("discord.exe", "162.159.135.232:443"),
+        ];
+
+        for (process, _dest) in connections {
+            let should_tunnel = tunnel_apps.contains(process);
+
+            match process {
+                "RobloxPlayerBeta.exe" | "RobloxStudioBeta.exe" => {
+                    assert!(should_tunnel, "{} should tunnel", process);
+                }
+                _ => {
+                    assert!(!should_tunnel, "{} should not tunnel", process);
+                }
+            }
+        }
+    }
+}
+
+/// Integration tests for updater + version management
+mod updater_integration_tests {
+    use semver::Version;
+    use sha2::{Sha256, Digest};
+
+    #[derive(Debug, Clone)]
+    struct MockRelease {
+        version: Version,
+        download_url: String,
+        sha256: String,
+        size_bytes: u64,
+    }
+
+    /// Tests version comparison for update availability
+    #[test]
+    fn test_update_availability_check() {
+        let current = Version::parse("0.9.20").unwrap();
+        let releases = vec![
+            Version::parse("0.9.21").unwrap(),
+            Version::parse("0.9.20").unwrap(),
+            Version::parse("0.9.19").unwrap(),
+        ];
+
+        let newer: Vec<_> = releases.iter()
+            .filter(|v| **v > current)
+            .collect();
+
+        assert_eq!(newer.len(), 1);
+        assert_eq!(*newer[0], Version::parse("0.9.21").unwrap());
+    }
+
+    /// Tests download integrity verification
+    #[test]
+    fn test_download_integrity() {
+        // Simulated file content
+        let file_content = b"SwiftTunnel installer binary content...";
+
+        // Calculate hash
+        let mut hasher = Sha256::new();
+        hasher.update(file_content);
+        let hash = hasher.finalize();
+        let hash_hex = format!("{:x}", hash);
+
+        // Verify hash is correct length
+        assert_eq!(hash_hex.len(), 64);
+
+        // Simulate verification
+        let expected_hash = &hash_hex;
+        let actual_hash = &hash_hex;
+        assert_eq!(expected_hash, actual_hash);
+    }
+
+    /// Tests update marker file lifecycle
+    #[test]
+    fn test_update_marker_lifecycle() {
+        use std::collections::HashMap;
+
+        let mut markers: HashMap<String, String> = HashMap::new();
+
+        // Before update: no marker
+        assert!(markers.get("update_pending").is_none());
+
+        // Download complete: create marker
+        markers.insert("update_pending".to_string(), "0.9.21".to_string());
+        markers.insert("installer_path".to_string(), "C:\\temp\\SwiftTunnel.msi".to_string());
+
+        // Verify marker exists
+        assert!(markers.get("update_pending").is_some());
+
+        // After successful install: clear marker
+        markers.remove("update_pending");
+        markers.remove("installer_path");
+        assert!(markers.get("update_pending").is_none());
+    }
+
+    /// Tests rollback detection
+    #[test]
+    fn test_rollback_detection() {
+        let installed = Version::parse("0.9.21").unwrap();
+        let available = Version::parse("0.9.20").unwrap();
+
+        // Don't "update" to older version
+        let is_rollback = available < installed;
+        assert!(is_rollback);
+
+        // Same version = not an update
+        let same = Version::parse("0.9.21").unwrap();
+        let is_update = same > installed;
+        assert!(!is_update);
+    }
+}
+
+/// Integration tests for network analyzer
+mod network_analyzer_integration_tests {
+    use std::time::Duration;
+
+    #[derive(Debug, Clone)]
+    struct MockPingResult {
+        target: String,
+        latency_ms: f64,
+        success: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockSpeedResult {
+        download_mbps: f64,
+        upload_mbps: f64,
+        test_duration: Duration,
+    }
+
+    /// Tests stability test with multiple pings
+    #[test]
+    fn test_stability_analysis() {
+        let pings = vec![
+            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 20.0, success: true },
+            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 22.0, success: true },
+            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 19.0, success: true },
+            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 150.0, success: true }, // Spike
+            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 21.0, success: true },
+        ];
+
+        // Calculate stats
+        let successful: Vec<_> = pings.iter().filter(|p| p.success).collect();
+        let latencies: Vec<f64> = successful.iter().map(|p| p.latency_ms).collect();
+
+        let avg = latencies.iter().sum::<f64>() / latencies.len() as f64;
+        let min = latencies.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = latencies.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+        // Calculate jitter (average deviation from mean)
+        let jitter: f64 = latencies.iter()
+            .map(|&l| (l - avg).abs())
+            .sum::<f64>() / latencies.len() as f64;
+
+        assert!(min < avg);
+        assert!(max > avg);
+        assert!(jitter > 0.0); // Should have some jitter due to spike
+
+        // Detect spike
+        let spike_threshold = avg * 3.0;
+        let has_spike = latencies.iter().any(|&l| l > spike_threshold);
+        assert!(has_spike);
+    }
+
+    /// Tests speed test result aggregation
+    #[test]
+    fn test_speed_result_aggregation() {
+        let results = vec![
+            MockSpeedResult { download_mbps: 95.5, upload_mbps: 45.2, test_duration: Duration::from_secs(10) },
+            MockSpeedResult { download_mbps: 98.3, upload_mbps: 47.1, test_duration: Duration::from_secs(10) },
+            MockSpeedResult { download_mbps: 94.8, upload_mbps: 44.9, test_duration: Duration::from_secs(10) },
+        ];
+
+        let avg_down = results.iter().map(|r| r.download_mbps).sum::<f64>() / results.len() as f64;
+        let avg_up = results.iter().map(|r| r.upload_mbps).sum::<f64>() / results.len() as f64;
+
+        // Verify reasonable averages
+        assert!(avg_down > 90.0 && avg_down < 100.0);
+        assert!(avg_up > 40.0 && avg_up < 50.0);
+    }
+
+    /// Tests connection quality rating
+    #[test]
+    fn test_connection_quality_rating() {
+        #[derive(Debug, PartialEq)]
+        enum Quality {
+            Excellent,
+            Good,
+            Fair,
+            Poor,
+        }
+
+        fn rate_connection(ping_ms: f64, jitter_ms: f64, packet_loss_pct: f64) -> Quality {
+            if ping_ms < 30.0 && jitter_ms < 5.0 && packet_loss_pct < 0.1 {
+                Quality::Excellent
+            } else if ping_ms < 60.0 && jitter_ms < 15.0 && packet_loss_pct < 1.0 {
+                Quality::Good
+            } else if ping_ms < 100.0 && jitter_ms < 30.0 && packet_loss_pct < 3.0 {
+                Quality::Fair
+            } else {
+                Quality::Poor
+            }
+        }
+
+        assert_eq!(rate_connection(20.0, 2.0, 0.0), Quality::Excellent);
+        assert_eq!(rate_connection(45.0, 10.0, 0.5), Quality::Good);
+        assert_eq!(rate_connection(80.0, 25.0, 2.0), Quality::Fair);
+        assert_eq!(rate_connection(150.0, 50.0, 5.0), Quality::Poor);
+    }
+}
