@@ -1415,8 +1415,8 @@ impl BoosterApp {
     /// Render tunnel diagnostics panel (shown when connected)
     fn render_tunnel_diagnostics(&self, ui: &mut egui::Ui) {
         // Try to get diagnostics from VPN connection
-        let diagnostics = self.vpn_handle.as_ref().and_then(|vpn| {
-            vpn.try_lock().ok().and_then(|v| v.get_split_tunnel_diagnostics())
+        let diagnostics = self.vpn_connection.try_lock().ok().and_then(|v| {
+            v.get_split_tunnel_diagnostics()
         });
 
         egui::Frame::NONE
