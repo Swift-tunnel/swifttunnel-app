@@ -1,26 +1,12 @@
 [package]
 name = "vpn-benchmark"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
-description = "Standalone benchmark: SwiftTunnel vs WireGuard vs WireSock"
+description = "VPN Benchmark: Real CPU usage comparison - SwiftTunnel vs WireGuard vs WireSock"
 
 [dependencies]
 # System info for CPU/RAM monitoring
 sysinfo = "0.32"
 
-# Timing
-chrono = "0.4"
-
-# For simulating our split tunnel logic
-arc-swap = "1.7"
+# Fast mutex for CPU monitoring thread
 parking_lot = "0.12"
-
-# Windows APIs for network testing
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    "Win32_System_Threading",
-    "Win32_System_ProcessStatus",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_Networking_WinSock",
-] }
