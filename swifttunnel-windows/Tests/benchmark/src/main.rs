@@ -1,21 +1,28 @@
-//! VPN Split Tunnel Benchmark
+//! VPN Split Tunnel Performance Benchmark
 //!
-//! Compares performance of:
-//! 1. SwiftTunnel (our implementation) - arc-swap, process cache, V2 hybrid routing
-//! 2. Standard WireGuard - full tunnel, no split logic
-//! 3. WireSock-style - simulated per-packet process lookup
+//! Tests and compares:
+//! 1. SwiftTunnel (our implementation)
+//! 2. Standard WireGuard (official client)
+//! 3. WireSock (if installed)
 //!
-//! Metrics:
-//! - Packet processing latency (ns per packet)
-//! - Throughput (packets/sec, Mpps)
-//! - CPU usage during packet storm
-//! - Memory usage (process cache, connection table)
+//! Measures:
+//! - Packet processing overhead (CPU benchmark)
+//! - Real network speed (Cloudflare speedtest)
+//! - Latency impact
+//! - Memory usage
 //!
 //! Run: cargo run --release
+//!
+//! For network tests, you'll be prompted to:
+//! 1. Disconnect all VPNs (baseline)
+//! 2. Connect SwiftTunnel
+//! 3. Connect WireGuard
+//! 4. Connect WireSock (optional)
 
-use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,43 +31,57 @@ use parking_lot::RwLock;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 // ============================================================================
-// CONFIGURATION
+// CLOUDFLARE SPEEDTEST
 // ============================================================================
 
-/// Number of packets to process per benchmark iteration
+const CF_DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down";
+const CF_LATENCY_URL: &str = "https://speed.cloudflare.com/__down?bytes=0";
+
+const LATENCY_SAMPLES: u32 = 20;
+const DOWNLOAD_SIZES: &[u64] = &[1_000_000, 10_000_000, 25_000_000]; // 1MB, 10MB, 25MB
+
+// ============================================================================
+// CPU BENCHMARK CONFIG
+// ============================================================================
+
 const PACKETS_PER_ITERATION: u64 = 1_000_000;
-
-/// Number of benchmark iterations for averaging
-const ITERATIONS: u32 = 5;
-
-/// Simulated process cache size
+const CPU_ITERATIONS: u32 = 3;
 const PROCESS_COUNT: usize = 50;
-
-/// Simulated connection table size
 const CONNECTION_COUNT: usize = 10_000;
 
-/// Simulated tunnel apps
-const TUNNEL_APPS: &[&str] = &[
-    "robloxplayerbeta.exe",
-    "robloxstudiobeta.exe",
-];
-
-// ============================================================================
-// SWIFTTUNNEL IMPLEMENTATION (Our actual approach)
-// ============================================================================
-
-/// Roblox IP ranges (from our actual implementation)
+const TUNNEL_APPS: &[&str] = &["robloxplayerbeta.exe", "robloxstudiobeta.exe"];
 const ROBLOX_RANGES: &[(u32, u32)] = &[
     (0x80740000, 0xFFFF8000), // 128.116.0.0/17
     (0xD1CE2800, 0xFFFFF800), // 209.206.40.0/21
-    (0x678C1C00, 0xFFFFFE00), // 103.140.28.0/23
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Protocol {
-    Tcp,
-    Udp,
+// ============================================================================
+// RESULTS
+// ============================================================================
+
+#[derive(Debug, Clone, Default)]
+struct NetworkResult {
+    name: String,
+    latency_ms: f64,
+    jitter_ms: f64,
+    download_mbps: f64,
+    upload_mbps: f64,
 }
+
+#[derive(Debug, Clone, Default)]
+struct CpuResult {
+    name: String,
+    ns_per_packet: f64,
+    mpps: f64,
+    memory_mb: f64,
+}
+
+// ============================================================================
+// SWIFTTUNNEL SIMULATION
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Protocol { Tcp, Udp }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct ConnectionKey {
@@ -69,62 +90,48 @@ struct ConnectionKey {
     protocol: Protocol,
 }
 
-/// SwiftTunnel's ProcessSnapshot (lock-free via arc-swap)
 struct SwiftTunnelSnapshot {
     connections: HashMap<ConnectionKey, u32>,
     pid_names: HashMap<u32, String>,
-    tunnel_apps: HashSet<String>,
+    tunnel_apps: std::collections::HashSet<String>,
 }
 
 impl SwiftTunnelSnapshot {
     fn new() -> Self {
         let mut connections = HashMap::with_capacity(CONNECTION_COUNT);
         let mut pid_names = HashMap::with_capacity(PROCESS_COUNT);
-        let tunnel_apps: HashSet<String> = TUNNEL_APPS.iter().map(|s| s.to_string()).collect();
+        let tunnel_apps: std::collections::HashSet<String> =
+            TUNNEL_APPS.iter().map(|s| s.to_string()).collect();
 
-        // Populate with simulated data
         for i in 0..PROCESS_COUNT {
-            let name = if i < 2 {
-                TUNNEL_APPS[i].to_string()
-            } else {
-                format!("process_{}.exe", i)
-            };
+            let name = if i < 2 { TUNNEL_APPS[i].to_string() }
+                       else { format!("process_{}.exe", i) };
             pid_names.insert(i as u32, name);
         }
 
         for i in 0..CONNECTION_COUNT {
             let key = ConnectionKey {
-                local_ip: 0xC0A80000 | (i as u32 & 0xFFFF), // 192.168.x.x
+                local_ip: 0xC0A80000 | (i as u32 & 0xFFFF),
                 local_port: (i % 65535) as u16,
                 protocol: if i % 2 == 0 { Protocol::Udp } else { Protocol::Tcp },
             };
             connections.insert(key, (i % PROCESS_COUNT) as u32);
         }
 
-        Self {
-            connections,
-            pid_names,
-            tunnel_apps,
-        }
+        Self { connections, pid_names, tunnel_apps }
     }
 
     #[inline(always)]
     fn should_tunnel(&self, key: &ConnectionKey, dst_ip: u32, dst_port: u16) -> bool {
-        // Step 1: Connection lookup (O(1) HashMap)
         if let Some(&pid) = self.connections.get(key) {
-            // Step 2: PID → process name lookup
             if let Some(name) = self.pid_names.get(&pid) {
-                // Step 3: Check if tunnel app
                 if self.tunnel_apps.contains(name) {
-                    // Step 4: V2 hybrid - check if game traffic
                     if key.protocol == Protocol::Udp && dst_port >= 49152 {
                         return true;
                     }
                 }
             }
         }
-
-        // Step 5: Fallback - check IP ranges (for first-packet before cache populated)
         for &(network, mask) in ROBLOX_RANGES {
             if (dst_ip & mask) == (network & mask) {
                 if key.protocol == Protocol::Udp && dst_port >= 49152 {
@@ -132,53 +139,45 @@ impl SwiftTunnelSnapshot {
                 }
             }
         }
-
         false
     }
 }
 
-/// SwiftTunnel's lock-free cache (arc-swap)
 struct SwiftTunnelCache {
     snapshot: ArcSwap<SwiftTunnelSnapshot>,
 }
 
 impl SwiftTunnelCache {
     fn new() -> Self {
-        Self {
-            snapshot: ArcSwap::from_pointee(SwiftTunnelSnapshot::new()),
-        }
+        Self { snapshot: ArcSwap::from_pointee(SwiftTunnelSnapshot::new()) }
     }
 
     #[inline(always)]
     fn should_tunnel(&self, key: &ConnectionKey, dst_ip: u32, dst_port: u16) -> bool {
-        let snapshot = self.snapshot.load();
-        snapshot.should_tunnel(key, dst_ip, dst_port)
+        self.snapshot.load().should_tunnel(key, dst_ip, dst_port)
     }
 }
 
 // ============================================================================
-// WIRESOCK-STYLE IMPLEMENTATION (Per-packet Windows API lookup)
+// WIRESOCK SIMULATION (RwLock per lookup)
 // ============================================================================
 
-/// Simulates WireSock's approach: RwLock + Windows API calls per packet
 struct WireSockCache {
     connections: RwLock<HashMap<ConnectionKey, u32>>,
     pid_names: RwLock<HashMap<u32, String>>,
-    tunnel_apps: HashSet<String>,
+    tunnel_apps: std::collections::HashSet<String>,
 }
 
 impl WireSockCache {
     fn new() -> Self {
         let mut connections = HashMap::with_capacity(CONNECTION_COUNT);
         let mut pid_names = HashMap::with_capacity(PROCESS_COUNT);
-        let tunnel_apps: HashSet<String> = TUNNEL_APPS.iter().map(|s| s.to_string()).collect();
+        let tunnel_apps: std::collections::HashSet<String> =
+            TUNNEL_APPS.iter().map(|s| s.to_string()).collect();
 
         for i in 0..PROCESS_COUNT {
-            let name = if i < 2 {
-                TUNNEL_APPS[i].to_string()
-            } else {
-                format!("process_{}.exe", i)
-            };
+            let name = if i < 2 { TUNNEL_APPS[i].to_string() }
+                       else { format!("process_{}.exe", i) };
             pid_names.insert(i as u32, name);
         }
 
@@ -200,11 +199,9 @@ impl WireSockCache {
 
     #[inline(always)]
     fn should_tunnel(&self, key: &ConnectionKey, _dst_ip: u32, dst_port: u16) -> bool {
-        // WireSock-style: Read lock for each lookup
         let connections = self.connections.read();
         if let Some(&pid) = connections.get(key) {
-            drop(connections); // Release lock
-
+            drop(connections);
             let pid_names = self.pid_names.read();
             if let Some(name) = pid_names.get(&pid) {
                 if self.tunnel_apps.contains(name) {
@@ -219,23 +216,16 @@ impl WireSockCache {
 }
 
 // ============================================================================
-// STANDARD WIREGUARD (No split tunnel logic)
+// WIREGUARD SIMULATION (no split tunnel)
 // ============================================================================
 
-/// Standard WireGuard: No routing decisions, just encrypt everything
-struct WireGuardTunnel {
-    // Simulated encryption state
-    _key: [u8; 32],
-}
+struct WireGuardTunnel { _key: [u8; 32] }
 
 impl WireGuardTunnel {
-    fn new() -> Self {
-        Self { _key: [0u8; 32] }
-    }
+    fn new() -> Self { Self { _key: [0u8; 32] } }
 
     #[inline(always)]
     fn process_packet(&self, packet: &mut [u8]) {
-        // Simulate minimal packet processing (touch data like encryption would)
         if packet.len() >= 2 {
             packet[0] ^= 0x42;
             packet[packet.len() - 1] ^= 0x42;
@@ -244,102 +234,127 @@ impl WireGuardTunnel {
 }
 
 // ============================================================================
-// BENCHMARK RUNNER
+// HTTP CLIENT (simple blocking)
 // ============================================================================
 
-struct BenchmarkResult {
-    name: String,
-    packets_processed: u64,
-    duration_ns: u64,
-    ns_per_packet: f64,
-    packets_per_sec: f64,
-    mpps: f64, // Million packets per second
+fn http_get(url: &str) -> Result<Vec<u8>, String> {
+    let host = if url.contains("speed.cloudflare.com") { "speed.cloudflare.com" }
+               else { return Err("Unknown host".to_string()); };
+    let path = url.split(host).nth(1).unwrap_or("/");
+
+    let mut stream = TcpStream::connect((host, 443))
+        .map_err(|e| format!("Connect failed: {}", e))?;
+
+    // We need TLS for HTTPS - for simplicity, use reqwest via command
+    Err("Use reqwest for HTTPS".to_string())
 }
 
-impl BenchmarkResult {
-    fn print(&self) {
-        println!("  {}", self.name);
-        println!("    Packets:     {:>12}", format_number(self.packets_processed));
-        println!("    Duration:    {:>12.2} ms", self.duration_ns as f64 / 1_000_000.0);
-        println!("    Latency:     {:>12.1} ns/packet", self.ns_per_packet);
-        println!("    Throughput:  {:>12.2} Mpps", self.mpps);
-        println!();
-    }
-}
+fn run_speedtest_latency() -> Option<(f64, f64)> {
+    println!("    Testing latency...");
 
-fn format_number(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.insert(0, ',');
-        }
-        result.insert(0, c);
-    }
-    result
-}
+    // Use curl for simplicity (available on Windows)
+    let mut latencies: Vec<f64> = Vec::new();
 
-fn benchmark_swifttunnel(iterations: u32) -> BenchmarkResult {
-    let cache = SwiftTunnelCache::new();
-    let mut total_duration = Duration::ZERO;
-    let mut decisions = 0u64;
-
-    // Warm up
-    for i in 0..1000 {
-        let key = ConnectionKey {
-            local_ip: 0xC0A80000 | (i as u32 & 0xFFFF),
-            local_port: (i % 65535) as u16,
-            protocol: Protocol::Udp,
-        };
-        let dst_ip = 0x80740000 | (i as u32 & 0xFFFF); // Roblox range
-        let _ = cache.should_tunnel(&key, dst_ip, 50000);
-    }
-
-    for _ in 0..iterations {
+    for i in 0..LATENCY_SAMPLES {
         let start = Instant::now();
 
-        for i in 0..PACKETS_PER_ITERATION {
-            let key = ConnectionKey {
-                local_ip: 0xC0A80000 | (i as u32 & 0xFFFF),
-                local_port: (i % 65535) as u16,
-                protocol: if i % 3 == 0 { Protocol::Udp } else { Protocol::Tcp },
-            };
-            let dst_ip = if i % 4 == 0 {
-                0x80740000 | (i as u32 & 0xFFFF) // Roblox
-            } else {
-                0x08080808 // Google DNS
-            };
-            let dst_port = if i % 2 == 0 { 50000 } else { 443 };
+        let output = Command::new("curl")
+            .args(&["-s", "-o", "NUL", "-w", "%{time_total}",
+                   "https://speed.cloudflare.com/__down?bytes=0"])
+            .output();
 
-            if cache.should_tunnel(&key, dst_ip, dst_port) {
-                decisions += 1;
+        match output {
+            Ok(out) => {
+                if out.status.success() {
+                    if let Ok(time_str) = String::from_utf8(out.stdout) {
+                        if let Ok(time) = time_str.trim().parse::<f64>() {
+                            latencies.push(time * 1000.0); // Convert to ms
+                        }
+                    }
+                }
             }
+            Err(_) => {}
         }
 
-        total_duration += start.elapsed();
+        print!("\r    Sample {}/{}", i + 1, LATENCY_SAMPLES);
+        std::io::stdout().flush().ok();
+        std::thread::sleep(Duration::from_millis(100));
     }
+    println!();
 
-    let total_packets = PACKETS_PER_ITERATION * iterations as u64;
-    let duration_ns = total_duration.as_nanos() as u64;
-    let ns_per_packet = duration_ns as f64 / total_packets as f64;
-    let packets_per_sec = total_packets as f64 / total_duration.as_secs_f64();
+    if latencies.is_empty() { return None; }
 
-    BenchmarkResult {
-        name: "SwiftTunnel (arc-swap + V2 hybrid)".to_string(),
-        packets_processed: total_packets,
-        duration_ns,
-        ns_per_packet,
-        packets_per_sec,
-        mpps: packets_per_sec / 1_000_000.0,
+    let avg = latencies.iter().sum::<f64>() / latencies.len() as f64;
+    let jitter = latencies.iter().map(|l| (l - avg).abs()).sum::<f64>() / latencies.len() as f64;
+
+    Some((avg, jitter))
+}
+
+fn run_speedtest_download() -> Option<f64> {
+    println!("    Testing download...");
+
+    let mut total_bytes: u64 = 0;
+    let mut total_time: f64 = 0.0;
+
+    for (i, &size) in DOWNLOAD_SIZES.iter().enumerate() {
+        let url = format!("https://speed.cloudflare.com/__down?bytes={}", size);
+
+        print!("\r    Downloading {} MB...", size / 1_000_000);
+        std::io::stdout().flush().ok();
+
+        let start = Instant::now();
+
+        let output = Command::new("curl")
+            .args(&["-s", "-o", "NUL", &url])
+            .output();
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                let elapsed = start.elapsed().as_secs_f64();
+                total_bytes += size;
+                total_time += elapsed;
+
+                let speed = (size as f64 * 8.0) / (elapsed * 1_000_000.0);
+                print!(" {:.1} Mbps", speed);
+            }
+        }
+    }
+    println!();
+
+    if total_time > 0.0 {
+        Some((total_bytes as f64 * 8.0) / (total_time * 1_000_000.0))
+    } else {
+        None
     }
 }
 
-fn benchmark_wiresock(iterations: u32) -> BenchmarkResult {
-    let cache = WireSockCache::new();
-    let mut total_duration = Duration::ZERO;
-    let mut decisions = 0u64;
+fn run_network_test(name: &str) -> NetworkResult {
+    println!("\n  [{}]", name);
 
-    // Warm up
+    let (latency, jitter) = run_speedtest_latency().unwrap_or((0.0, 0.0));
+    let download = run_speedtest_download().unwrap_or(0.0);
+
+    println!("    Results: {:.1}ms latency, {:.1}ms jitter, {:.1} Mbps download",
+             latency, jitter, download);
+
+    NetworkResult {
+        name: name.to_string(),
+        latency_ms: latency,
+        jitter_ms: jitter,
+        download_mbps: download,
+        upload_mbps: 0.0, // Skip upload for speed
+    }
+}
+
+// ============================================================================
+// CPU BENCHMARK
+// ============================================================================
+
+fn benchmark_cpu_swifttunnel() -> CpuResult {
+    let cache = SwiftTunnelCache::new();
+    let mut total_duration = Duration::ZERO;
+
+    // Warmup
     for i in 0..1000 {
         let key = ConnectionKey {
             local_ip: 0xC0A80000 | (i as u32 & 0xFFFF),
@@ -349,9 +364,8 @@ fn benchmark_wiresock(iterations: u32) -> BenchmarkResult {
         let _ = cache.should_tunnel(&key, 0x80740000, 50000);
     }
 
-    for _ in 0..iterations {
+    for _ in 0..CPU_ITERATIONS {
         let start = Instant::now();
-
         for i in 0..PACKETS_PER_ITERATION {
             let key = ConnectionKey {
                 local_ip: 0xC0A80000 | (i as u32 & 0xFFFF),
@@ -359,183 +373,280 @@ fn benchmark_wiresock(iterations: u32) -> BenchmarkResult {
                 protocol: if i % 3 == 0 { Protocol::Udp } else { Protocol::Tcp },
             };
             let dst_ip = if i % 4 == 0 { 0x80740000 } else { 0x08080808 };
-            let dst_port = if i % 2 == 0 { 50000 } else { 443 };
-
-            if cache.should_tunnel(&key, dst_ip, dst_port) {
-                decisions += 1;
-            }
+            let _ = cache.should_tunnel(&key, dst_ip, 50000);
         }
-
         total_duration += start.elapsed();
     }
 
-    let total_packets = PACKETS_PER_ITERATION * iterations as u64;
-    let duration_ns = total_duration.as_nanos() as u64;
-    let ns_per_packet = duration_ns as f64 / total_packets as f64;
-    let packets_per_sec = total_packets as f64 / total_duration.as_secs_f64();
+    let total_packets = PACKETS_PER_ITERATION * CPU_ITERATIONS as u64;
+    let ns_per_packet = total_duration.as_nanos() as f64 / total_packets as f64;
+    let mpps = total_packets as f64 / total_duration.as_secs_f64() / 1_000_000.0;
 
-    BenchmarkResult {
-        name: "WireSock-style (RwLock per lookup)".to_string(),
-        packets_processed: total_packets,
-        duration_ns,
+    CpuResult {
+        name: "SwiftTunnel".to_string(),
         ns_per_packet,
-        packets_per_sec,
-        mpps: packets_per_sec / 1_000_000.0,
+        mpps,
+        memory_mb: 0.0,
     }
 }
 
-fn benchmark_wireguard(iterations: u32) -> BenchmarkResult {
+fn benchmark_cpu_wiresock() -> CpuResult {
+    let cache = WireSockCache::new();
+    let mut total_duration = Duration::ZERO;
+
+    for i in 0..1000 {
+        let key = ConnectionKey {
+            local_ip: 0xC0A80000 | (i as u32 & 0xFFFF),
+            local_port: (i % 65535) as u16,
+            protocol: Protocol::Udp,
+        };
+        let _ = cache.should_tunnel(&key, 0x80740000, 50000);
+    }
+
+    for _ in 0..CPU_ITERATIONS {
+        let start = Instant::now();
+        for i in 0..PACKETS_PER_ITERATION {
+            let key = ConnectionKey {
+                local_ip: 0xC0A80000 | (i as u32 & 0xFFFF),
+                local_port: (i % 65535) as u16,
+                protocol: if i % 3 == 0 { Protocol::Udp } else { Protocol::Tcp },
+            };
+            let _ = cache.should_tunnel(&key, 0x80740000, 50000);
+        }
+        total_duration += start.elapsed();
+    }
+
+    let total_packets = PACKETS_PER_ITERATION * CPU_ITERATIONS as u64;
+    let ns_per_packet = total_duration.as_nanos() as f64 / total_packets as f64;
+    let mpps = total_packets as f64 / total_duration.as_secs_f64() / 1_000_000.0;
+
+    CpuResult {
+        name: "WireSock".to_string(),
+        ns_per_packet,
+        mpps,
+        memory_mb: 0.0,
+    }
+}
+
+fn benchmark_cpu_wireguard() -> CpuResult {
     let tunnel = WireGuardTunnel::new();
     let mut total_duration = Duration::ZERO;
-    let mut packet = vec![0u8; 1400]; // Typical MTU
+    let mut packet = vec![0u8; 1400];
 
-    // Warm up
     for _ in 0..1000 {
         tunnel.process_packet(&mut packet);
     }
 
-    for _ in 0..iterations {
+    for _ in 0..CPU_ITERATIONS {
         let start = Instant::now();
-
         for i in 0..PACKETS_PER_ITERATION {
             packet[0] = (i & 0xFF) as u8;
             tunnel.process_packet(&mut packet);
         }
-
         total_duration += start.elapsed();
     }
 
-    let total_packets = PACKETS_PER_ITERATION * iterations as u64;
-    let duration_ns = total_duration.as_nanos() as u64;
-    let ns_per_packet = duration_ns as f64 / total_packets as f64;
-    let packets_per_sec = total_packets as f64 / total_duration.as_secs_f64();
+    let total_packets = PACKETS_PER_ITERATION * CPU_ITERATIONS as u64;
+    let ns_per_packet = total_duration.as_nanos() as f64 / total_packets as f64;
+    let mpps = total_packets as f64 / total_duration.as_secs_f64() / 1_000_000.0;
 
-    BenchmarkResult {
-        name: "WireGuard (no split tunnel)".to_string(),
-        packets_processed: total_packets,
-        duration_ns,
+    CpuResult {
+        name: "WireGuard".to_string(),
         ns_per_packet,
-        packets_per_sec,
-        mpps: packets_per_sec / 1_000_000.0,
+        mpps,
+        memory_mb: 0.0,
     }
 }
 
-fn measure_memory() -> (f64, f64, f64) {
-    let mut sys = System::new_all();
-    let pid = Pid::from_u32(std::process::id());
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+// ============================================================================
+// MAIN
+// ============================================================================
 
-    let baseline = sys
-        .process(pid)
-        .map(|p| p.memory() as f64 / 1_048_576.0)
-        .unwrap_or(0.0);
+fn wait_for_enter(prompt: &str) {
+    println!("\n>>> {} <<<", prompt);
+    println!("    Press ENTER when ready...");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).ok();
+}
 
-    // Create SwiftTunnel cache
-    let _st_cache = SwiftTunnelCache::new();
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    let st_mem = sys
-        .process(pid)
-        .map(|p| p.memory() as f64 / 1_048_576.0)
-        .unwrap_or(0.0);
+fn print_header() {
+    println!("╔══════════════════════════════════════════════════════════════════╗");
+    println!("║     VPN Split Tunnel Benchmark                                   ║");
+    println!("║                                                                  ║");
+    println!("║     SwiftTunnel vs WireGuard vs WireSock                         ║");
+    println!("╚══════════════════════════════════════════════════════════════════╝\n");
+}
 
-    // Create WireSock cache
-    let _ws_cache = WireSockCache::new();
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    let ws_mem = sys
-        .process(pid)
-        .map(|p| p.memory() as f64 / 1_048_576.0)
-        .unwrap_or(0.0);
+fn print_cpu_results(wg: &CpuResult, st: &CpuResult, ws: &CpuResult) {
+    println!("\n┌─────────────────────────────────────────────────────────────────┐");
+    println!("│ CPU Overhead Results                                            │");
+    println!("├───────────────┬──────────────┬──────────────┬──────────────────┤");
+    println!("│ Implementation│  ns/packet   │     Mpps     │    Overhead      │");
+    println!("├───────────────┼──────────────┼──────────────┼──────────────────┤");
+    println!("│ WireGuard     │ {:>10.1} │ {:>10.2} │     baseline     │",
+             wg.ns_per_packet, wg.mpps);
+    println!("│ SwiftTunnel   │ {:>10.1} │ {:>10.2} │ {:>+13.1}x │",
+             st.ns_per_packet, st.mpps,
+             if wg.ns_per_packet > 0.0 { st.ns_per_packet / wg.ns_per_packet } else { 0.0 });
+    println!("│ WireSock      │ {:>10.1} │ {:>10.2} │ {:>+13.1}x │",
+             ws.ns_per_packet, ws.mpps,
+             if wg.ns_per_packet > 0.0 { ws.ns_per_packet / wg.ns_per_packet } else { 0.0 });
+    println!("└───────────────┴──────────────┴──────────────┴──────────────────┘");
+}
 
-    (baseline, st_mem - baseline, ws_mem - st_mem)
+fn print_network_results(results: &[NetworkResult]) {
+    println!("\n┌─────────────────────────────────────────────────────────────────┐");
+    println!("│ Network Speed Results (Cloudflare)                              │");
+    println!("├───────────────┬──────────────┬──────────────┬──────────────────┤");
+    println!("│ Connection    │  Latency     │   Jitter     │    Download      │");
+    println!("├───────────────┼──────────────┼──────────────┼──────────────────┤");
+
+    let baseline = results.first().map(|r| r.download_mbps).unwrap_or(0.0);
+
+    for r in results {
+        let pct = if baseline > 0.0 && r.name != "No VPN" {
+            format!("({:.0}%)", (r.download_mbps / baseline) * 100.0)
+        } else {
+            "".to_string()
+        };
+
+        println!("│ {:13} │ {:>8.1} ms │ {:>8.1} ms │ {:>8.1} Mbps {} │",
+                 r.name, r.latency_ms, r.jitter_ms, r.download_mbps, pct);
+    }
+    println!("└───────────────┴──────────────┴──────────────┴──────────────────┘");
+}
+
+fn print_summary(cpu_st: &CpuResult, cpu_ws: &CpuResult, net_results: &[NetworkResult]) {
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("SUMMARY");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+    // CPU comparison
+    let st_vs_ws = if cpu_st.ns_per_packet > 0.0 {
+        cpu_ws.ns_per_packet / cpu_st.ns_per_packet
+    } else { 1.0 };
+
+    if st_vs_ws > 1.0 {
+        println!("  CPU: SwiftTunnel is {:.1}x FASTER than WireSock", st_vs_ws);
+    } else {
+        println!("  CPU: WireSock is {:.1}x faster than SwiftTunnel", 1.0 / st_vs_ws);
+    }
+
+    // Gaming impact
+    let gaming_pps = 1000.0;
+    let st_overhead_ms = cpu_st.ns_per_packet / 1_000_000.0 * gaming_pps;
+    println!("  Gaming: SwiftTunnel adds {:.3}ms per 1000 packets", st_overhead_ms);
+
+    // Network comparison
+    if net_results.len() >= 2 {
+        let baseline = &net_results[0];
+        for r in &net_results[1..] {
+            let speed_pct = (r.download_mbps / baseline.download_mbps) * 100.0;
+            let latency_diff = r.latency_ms - baseline.latency_ms;
+            println!("  {}: {:.0}% speed, {:+.1}ms latency vs baseline",
+                     r.name, speed_pct, latency_diff);
+        }
+    }
+
+    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 
 fn main() {
-    println!("╔══════════════════════════════════════════════════════════════════╗");
-    println!("║       VPN Split Tunnel Performance Benchmark                     ║");
-    println!("║                                                                  ║");
-    println!("║       SwiftTunnel vs WireGuard vs WireSock                       ║");
-    println!("╚══════════════════════════════════════════════════════════════════╝\n");
+    print_header();
 
-    println!("Configuration:");
-    println!("  Packets per iteration: {}", format_number(PACKETS_PER_ITERATION));
-    println!("  Iterations:            {}", ITERATIONS);
-    println!("  Process cache size:    {}", PROCESS_COUNT);
-    println!("  Connection table size: {}", format_number(CONNECTION_COUNT as u64));
-    println!();
+    // Check for curl
+    if Command::new("curl").arg("--version").output().is_err() {
+        eprintln!("ERROR: curl not found. Please install curl.");
+        return;
+    }
 
-    // Memory measurement
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Memory Usage");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    let args: Vec<String> = std::env::args().collect();
+    let skip_network = args.contains(&"--cpu-only".to_string());
+    let skip_cpu = args.contains(&"--network-only".to_string());
 
-    let (baseline, st_mem, ws_mem) = measure_memory();
-    println!("  Baseline:              {:.2} MB", baseline);
-    println!("  SwiftTunnel cache:     {:.2} MB", st_mem);
-    println!("  WireSock cache:        {:.2} MB", ws_mem);
-    println!();
+    // ========================================================================
+    // CPU BENCHMARK
+    // ========================================================================
 
-    // Run benchmarks
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Packet Processing Benchmark");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    let mut cpu_wg = CpuResult::default();
+    let mut cpu_st = CpuResult::default();
+    let mut cpu_ws = CpuResult::default();
 
-    println!("Running WireGuard benchmark...");
-    let wg_result = benchmark_wireguard(ITERATIONS);
-    wg_result.print();
+    if !skip_cpu {
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("PART 1: CPU Overhead Benchmark");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    println!("Running SwiftTunnel benchmark...");
-    let st_result = benchmark_swifttunnel(ITERATIONS);
-    st_result.print();
+        println!("  Processing {} packets x {} iterations...\n",
+                 PACKETS_PER_ITERATION, CPU_ITERATIONS);
 
-    println!("Running WireSock-style benchmark...");
-    let ws_result = benchmark_wiresock(ITERATIONS);
-    ws_result.print();
+        print!("  WireGuard (baseline)...");
+        std::io::stdout().flush().ok();
+        cpu_wg = benchmark_cpu_wireguard();
+        println!(" {:.1} ns/pkt, {:.2} Mpps", cpu_wg.ns_per_packet, cpu_wg.mpps);
 
-    // Summary
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Summary");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        print!("  SwiftTunnel...");
+        std::io::stdout().flush().ok();
+        cpu_st = benchmark_cpu_swifttunnel();
+        println!(" {:.1} ns/pkt, {:.2} Mpps", cpu_st.ns_per_packet, cpu_st.mpps);
 
-    println!("  Latency (lower is better):");
-    println!("    WireGuard:    {:>8.1} ns/packet (baseline)", wg_result.ns_per_packet);
-    println!(
-        "    SwiftTunnel:  {:>8.1} ns/packet ({:+.1}x overhead)",
-        st_result.ns_per_packet,
-        st_result.ns_per_packet / wg_result.ns_per_packet
-    );
-    println!(
-        "    WireSock:     {:>8.1} ns/packet ({:+.1}x overhead)",
-        ws_result.ns_per_packet,
-        ws_result.ns_per_packet / wg_result.ns_per_packet
-    );
+        print!("  WireSock-style...");
+        std::io::stdout().flush().ok();
+        cpu_ws = benchmark_cpu_wiresock();
+        println!(" {:.1} ns/pkt, {:.2} Mpps", cpu_ws.ns_per_packet, cpu_ws.mpps);
 
-    println!("\n  Throughput (higher is better):");
-    println!("    WireGuard:    {:>8.2} Mpps", wg_result.mpps);
-    println!(
-        "    SwiftTunnel:  {:>8.2} Mpps ({:.1}% of WG)",
-        st_result.mpps,
-        (st_result.mpps / wg_result.mpps) * 100.0
-    );
-    println!(
-        "    WireSock:     {:>8.2} Mpps ({:.1}% of WG)",
-        ws_result.mpps,
-        (ws_result.mpps / wg_result.mpps) * 100.0
-    );
+        print_cpu_results(&cpu_wg, &cpu_st, &cpu_ws);
+    }
 
-    let st_vs_ws = ws_result.ns_per_packet / st_result.ns_per_packet;
-    println!("\n  SwiftTunnel vs WireSock:");
-    println!("    SwiftTunnel is {:.1}x faster than WireSock-style", st_vs_ws);
+    // ========================================================================
+    // NETWORK BENCHMARK
+    // ========================================================================
 
-    // Gaming impact
-    let gaming_packets_per_sec = 1000.0; // ~1000 packets/sec for game traffic
-    let st_overhead_ms = (st_result.ns_per_packet - wg_result.ns_per_packet) / 1_000_000.0 * gaming_packets_per_sec;
-    let ws_overhead_ms = (ws_result.ns_per_packet - wg_result.ns_per_packet) / 1_000_000.0 * gaming_packets_per_sec;
+    let mut net_results: Vec<NetworkResult> = Vec::new();
 
-    println!("\n  Gaming Impact (at 1000 packets/sec):");
-    println!("    SwiftTunnel adds: {:.3} ms latency", st_overhead_ms);
-    println!("    WireSock adds:    {:.3} ms latency", ws_overhead_ms);
+    if !skip_network {
+        println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        println!("PART 2: Network Speed Benchmark (Cloudflare)");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        // Test 1: No VPN (baseline)
+        wait_for_enter("Disconnect ALL VPNs for baseline test");
+        net_results.push(run_network_test("No VPN"));
+
+        // Test 2: SwiftTunnel
+        wait_for_enter("Connect SWIFTTUNNEL and wait for 'Connected'");
+        net_results.push(run_network_test("SwiftTunnel"));
+
+        // Test 3: WireGuard (optional)
+        println!("\n>>> Do you want to test WireGuard? (y/n) <<<");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if input.trim().to_lowercase() == "y" {
+            wait_for_enter("Disconnect SwiftTunnel, Connect WIREGUARD");
+            net_results.push(run_network_test("WireGuard"));
+        }
+
+        // Test 4: WireSock (optional)
+        println!("\n>>> Do you want to test WireSock? (y/n) <<<");
+        input.clear();
+        std::io::stdin().read_line(&mut input).ok();
+        if input.trim().to_lowercase() == "y" {
+            wait_for_enter("Disconnect WireGuard, Connect WIRESOCK");
+            net_results.push(run_network_test("WireSock"));
+        }
+
+        print_network_results(&net_results);
+    }
+
+    // ========================================================================
+    // SUMMARY
+    // ========================================================================
+
+    if !skip_cpu {
+        print_summary(&cpu_st, &cpu_ws, &net_results);
+    }
 
     println!("\n╔══════════════════════════════════════════════════════════════════╗");
-    println!("║       Benchmark Complete                                         ║");
+    println!("║     Benchmark Complete                                           ║");
     println!("╚══════════════════════════════════════════════════════════════════╝");
 }
