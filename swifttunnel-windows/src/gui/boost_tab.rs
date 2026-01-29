@@ -663,6 +663,7 @@ impl BoosterApp {
             "disable_nagle" => self.state.config.network_settings.disable_nagle,
             "network_throttling" => self.state.config.network_settings.disable_network_throttling,
             "optimize_mtu" => self.state.config.network_settings.optimize_mtu,
+            "gaming_qos" => self.state.config.network_settings.gaming_qos,
             _ => false,
         }
     }
@@ -678,6 +679,7 @@ impl BoosterApp {
             "disable_nagle" => self.state.config.network_settings.disable_nagle = value,
             "network_throttling" => self.state.config.network_settings.disable_network_throttling = value,
             "optimize_mtu" => self.state.config.network_settings.optimize_mtu = value,
+            "gaming_qos" => self.state.config.network_settings.gaming_qos = value,
             _ => {}
         }
 

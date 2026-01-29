@@ -6,6 +6,7 @@ use std::process::Command;
 pub struct NetworkBooster {
     original_dns: Option<(String, String)>,
     original_mtu: Option<u32>,
+    qos_enabled: bool,
 }
 
 impl NetworkBooster {
@@ -13,6 +14,7 @@ impl NetworkBooster {
         Self {
             original_dns: None,
             original_mtu: None,
+            qos_enabled: false,
         }
     }
 
@@ -44,6 +46,10 @@ impl NetworkBooster {
 
         if config.optimize_mtu {
             self.optimize_mtu()?;
+        }
+
+        if config.gaming_qos {
+            self.enable_gaming_qos()?;
         }
 
         Ok(())
@@ -473,8 +479,165 @@ impl NetworkBooster {
         Ok(())
     }
 
+    // ===== GAMING QOS =====
+
+    /// Enable Gaming QoS - marks Roblox packets with DSCP EF (46) for router prioritization
+    /// This uses Windows QoS Policy via registry to mark packets without needing socket ownership
+    pub fn enable_gaming_qos(&mut self) -> Result<()> {
+        info!("Enabling Gaming QoS with DSCP EF (46) priority");
+
+        // Step 1: Enable DSCP tagging in Windows (required for QoS policies to work)
+        // Create QoS key under Tcpip if it doesn't exist, then set "Do not use NLA" = 1
+        let output = hidden_command("reg")
+            .args([
+                "add",
+                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
+                "/v",
+                "Do not use NLA",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "1",
+                "/f"
+            ])
+            .output();
+
+        match &output {
+            Ok(result) => {
+                if result.status.success() {
+                    info!("DSCP tagging enabled in registry");
+                } else {
+                    warn!("Failed to enable DSCP tagging (may need admin)");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to set DSCP registry key: {}", e);
+            }
+        }
+
+        // Step 2: Also disable the UserTOSSetting override
+        let _ = hidden_command("reg")
+            .args([
+                "add",
+                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+                "/v",
+                "DisableUserTOSSetting",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
+                "/f"
+            ])
+            .output();
+
+        // Step 3: Create QoS policies for Roblox executables with DSCP 46 (EF - Expedited Forwarding)
+        // DSCP 46 = 101110 binary = highest priority for low-latency traffic
+        let roblox_executables = [
+            "RobloxPlayerBeta.exe",
+            "RobloxStudioBeta.exe",
+            "RobloxCrashHandler.exe",
+            "Windows10Universal.exe",
+        ];
+
+        for exe in roblox_executables {
+            let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
+
+            // Create QoS policy via registry
+            // Path: HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\<PolicyName>
+            let policy_path = format!(
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+                policy_name
+            );
+
+            // Set Version
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Version", "/t", "REG_SZ", "/d", "1.0", "/f"])
+                .output();
+
+            // Set Application Name
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Application Name", "/t", "REG_SZ", "/d", exe, "/f"])
+                .output();
+
+            // Set Protocol (UDP for game traffic, but * for all)
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Protocol", "/t", "REG_SZ", "/d", "*", "/f"])
+                .output();
+
+            // Set DSCP Value = 46 (EF - Expedited Forwarding)
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "DSCP Value", "/t", "REG_SZ", "/d", "46", "/f"])
+                .output();
+
+            // Set Throttle Rate = -1 (no throttling)
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Throttle Rate", "/t", "REG_SZ", "/d", "-1", "/f"])
+                .output();
+
+            // Set wildcards for ports and IPs
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Local Port", "/t", "REG_SZ", "/d", "*", "/f"])
+                .output();
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Local IP", "/t", "REG_SZ", "/d", "*", "/f"])
+                .output();
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Local IP Prefix Length", "/t", "REG_SZ", "/d", "*", "/f"])
+                .output();
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Remote Port", "/t", "REG_SZ", "/d", "*", "/f"])
+                .output();
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Remote IP", "/t", "REG_SZ", "/d", "*", "/f"])
+                .output();
+            let _ = hidden_command("reg")
+                .args(["add", &policy_path, "/v", "Remote IP Prefix Length", "/t", "REG_SZ", "/d", "*", "/f"])
+                .output();
+
+            info!("Created QoS policy for {}", exe);
+        }
+
+        self.qos_enabled = true;
+        info!("Gaming QoS enabled - Roblox traffic will be marked with DSCP 46 (EF)");
+        Ok(())
+    }
+
+    /// Disable Gaming QoS - removes the QoS policies
+    pub fn disable_gaming_qos(&mut self) -> Result<()> {
+        info!("Disabling Gaming QoS");
+
+        let roblox_executables = [
+            "RobloxPlayerBeta.exe",
+            "RobloxStudioBeta.exe",
+            "RobloxCrashHandler.exe",
+            "Windows10Universal.exe",
+        ];
+
+        for exe in roblox_executables {
+            let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
+            let policy_path = format!(
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+                policy_name
+            );
+
+            // Delete the policy key
+            let _ = hidden_command("reg")
+                .args(["delete", &policy_path, "/f"])
+                .output();
+        }
+
+        self.qos_enabled = false;
+        info!("Gaming QoS disabled");
+        Ok(())
+    }
+
+    /// Check if Gaming QoS is currently enabled
+    pub fn is_qos_enabled(&self) -> bool {
+        self.qos_enabled
+    }
+
     /// Restore original DNS settings
-    pub fn restore(&self) -> Result<()> {
+    pub fn restore(&mut self) -> Result<()> {
         info!("Restoring original network settings");
 
         if let Some((primary, secondary)) = &self.original_dns {
@@ -485,13 +648,18 @@ impl NetworkBooster {
         // Restore original MTU
         let _ = self.restore_mtu();
 
-        // Remove QoS policy
+        // Remove old QoS policy (legacy)
         let _ = hidden_command("powershell")
             .args(&[
                 "-Command",
                 "Remove-NetQosPolicy -Name 'RobloxPriority' -Confirm:$false -ErrorAction SilentlyContinue"
             ])
             .output();
+
+        // Disable Gaming QoS if enabled
+        if self.qos_enabled {
+            let _ = self.disable_gaming_qos();
+        }
 
         Ok(())
     }
