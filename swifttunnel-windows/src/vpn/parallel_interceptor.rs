@@ -1582,13 +1582,26 @@ fn run_inbound_receiver(
     stop_flag: Arc<AtomicBool>,
     throughput: ThroughputStats,
 ) {
-    log::info!("Inbound receiver started (optimized - single driver handle, with keepalives)");
+    log::info!("========================================");
+    log::info!("INBOUND RECEIVER STARTING");
+    log::info!("========================================");
+    log::info!("  Socket: {:?}", ctx.socket.local_addr());
+    log::info!("  Server: {}", ctx.server_addr);
+    log::info!("  Adapter: {}", config.physical_adapter_name);
+    log::info!("  NAT: {:?} -> {:?}", config.tunnel_ip, config.internet_ip);
 
     // Open driver ONCE at thread start (not per-packet!)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
-        Ok(d) => d,
+        Ok(d) => {
+            log::info!("Inbound receiver: ndisapi driver opened successfully");
+            d
+        }
         Err(e) => {
-            log::error!("Inbound receiver: failed to open driver: {}", e);
+            log::error!("========================================");
+            log::error!("INBOUND RECEIVER FATAL ERROR");
+            log::error!("Failed to open ndisapi driver: {}", e);
+            log::error!("Inbound traffic will NOT work!");
+            log::error!("========================================");
             return;
         }
     };
@@ -1596,7 +1609,11 @@ fn run_inbound_receiver(
     let adapters = match driver.get_tcpip_bound_adapters_info() {
         Ok(a) => a,
         Err(e) => {
-            log::error!("Inbound receiver: failed to get adapters: {}", e);
+            log::error!("========================================");
+            log::error!("INBOUND RECEIVER FATAL ERROR");
+            log::error!("Failed to get adapters: {}", e);
+            log::error!("Inbound traffic will NOT work!");
+            log::error!("========================================");
             return;
         }
     };
@@ -1604,13 +1621,21 @@ fn run_inbound_receiver(
     let adapter = match adapters.iter().find(|a| a.get_name() == &config.physical_adapter_name) {
         Some(a) => a,
         None => {
-            log::error!("Inbound receiver: physical adapter '{}' not found", config.physical_adapter_name);
+            log::error!("========================================");
+            log::error!("INBOUND RECEIVER FATAL ERROR");
+            log::error!("Physical adapter '{}' not found!", config.physical_adapter_name);
+            log::error!("Available adapters:");
+            for a in adapters.iter() {
+                log::error!("  - {}", a.get_name());
+            }
+            log::error!("Inbound traffic will NOT work!");
+            log::error!("========================================");
             return;
         }
     };
 
     let adapter_handle = adapter.get_handle();
-    log::info!("Inbound receiver: using adapter '{}' for MSTCP injection", config.physical_adapter_name);
+    log::info!("Inbound receiver: adapter handle acquired, ready to inject packets");
 
     let mut recv_buf = vec![0u8; 2048]; // Max WireGuard packet size
     let mut decrypt_buf = vec![0u8; 2048];
@@ -1620,22 +1645,87 @@ fn run_inbound_receiver(
     let mut packets_injected = 0u64;
     let mut inject_errors = 0u64;
     let mut keepalives_sent = 0u64;
+    let mut decrypt_errors = 0u64;
 
-    // For keepalive timer - call update_timers() every 100ms
+    // Health monitoring timestamps
+    let start_time = std::time::Instant::now();
+    let mut last_packet_time: Option<std::time::Instant> = None;
+    let mut last_health_check = std::time::Instant::now();
+    let mut no_traffic_warning_logged = false;
+    let mut traffic_stopped_warning_logged = false;
+
+    // Health check constants
+    const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
+    const NO_TRAFFIC_WARNING_SECS: u64 = 10; // Warn if no traffic after 10s from start
+    const TRAFFIC_STOPPED_WARNING_SECS: u64 = 30; // Warn if traffic stops for 30s
+
+    // For keepalive timer - call update_timers() every 50ms
     // This is critical because tunnel's keepalive task is disabled when split tunnel is active
     // to avoid endpoint confusion. We must send keepalives from THIS socket.
     let mut last_timer_check = std::time::Instant::now();
-    const TIMER_INTERVAL_MS: u64 = 50; // Reduced from 100ms, balances responsiveness with CPU efficiency
+    const TIMER_INTERVAL_MS: u64 = 50;
+
+    log::info!("Inbound receiver: entering main loop, waiting for VPN traffic...");
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
+            log::info!("Inbound receiver: stop flag set, exiting loop");
             break;
         }
 
-        // Check if we need to call update_timers() for keepalives
-        // CRITICAL: This keeps the WireGuard session alive and sends keepalives
-        // from the correct socket (VpnEncryptContext.socket, not tunnel.socket)
         let now = std::time::Instant::now();
+
+        // === HEALTH CHECK (every 5 seconds) ===
+        if now.duration_since(last_health_check).as_secs() >= HEALTH_CHECK_INTERVAL_SECS {
+            last_health_check = now;
+            let uptime_secs = now.duration_since(start_time).as_secs();
+
+            // Check for "no traffic ever received" condition
+            if packets_decrypted == 0 && uptime_secs >= NO_TRAFFIC_WARNING_SECS && !no_traffic_warning_logged {
+                no_traffic_warning_logged = true;
+                log::error!("========================================");
+                log::error!("WARNING: NO INBOUND TRAFFIC DETECTED!");
+                log::error!("========================================");
+                log::error!("  Uptime: {}s", uptime_secs);
+                log::error!("  Packets received (encrypted): {}", packets_received);
+                log::error!("  Packets decrypted: 0");
+                log::error!("  Keepalives sent: {}", keepalives_sent);
+                log::error!("");
+                log::error!("This may indicate:");
+                log::error!("  1. VPN server not sending responses");
+                log::error!("  2. Socket handoff race condition");
+                log::error!("  3. Firewall blocking UDP traffic");
+                log::error!("  4. Wrong socket being used");
+                log::error!("");
+                log::error!("Socket local addr: {:?}", ctx.socket.local_addr());
+                log::error!("========================================");
+            }
+
+            // Check for "traffic stopped" condition
+            if let Some(last_pkt) = last_packet_time {
+                let secs_since_packet = now.duration_since(last_pkt).as_secs();
+                if secs_since_packet >= TRAFFIC_STOPPED_WARNING_SECS && !traffic_stopped_warning_logged {
+                    traffic_stopped_warning_logged = true;
+                    log::warn!("========================================");
+                    log::warn!("WARNING: INBOUND TRAFFIC STOPPED!");
+                    log::warn!("========================================");
+                    log::warn!("  Last packet: {}s ago", secs_since_packet);
+                    log::warn!("  Total decrypted: {}", packets_decrypted);
+                    log::warn!("  Connection may have dropped");
+                    log::warn!("========================================");
+                }
+            }
+
+            // Periodic health log (every 5 seconds at INFO level)
+            let rx_bytes = throughput.bytes_rx.load(Ordering::Relaxed);
+            let rx_rate = if uptime_secs > 0 { rx_bytes / uptime_secs } else { 0 };
+            log::info!(
+                "Inbound health: {}s uptime, {} recv, {} decrypted, {} injected, {} B/s avg, {} errors",
+                uptime_secs, packets_received, packets_decrypted, packets_injected, rx_rate, inject_errors + decrypt_errors
+            );
+        }
+
+        // === KEEPALIVE TIMER (every 50ms) ===
         if now.duration_since(last_timer_check).as_millis() >= TIMER_INTERVAL_MS as u128 {
             last_timer_check = now;
 
@@ -1653,13 +1743,14 @@ fn run_inbound_receiver(
                             // Log first 5 and then every 50th
                             if keepalives_sent <= 5 || keepalives_sent % 50 == 0 {
                                 log::info!(
-                                    "Inbound receiver: sent keepalive #{} ({} bytes, {} sent)",
-                                    keepalives_sent, data.len(), sent
+                                    "Inbound receiver: sent keepalive #{} ({} bytes)",
+                                    keepalives_sent, sent
                                 );
                             }
                         }
                         Err(e) => {
-                            log::warn!("Inbound receiver: failed to send keepalive: {} (kind={:?})", e, e.kind());
+                            log::error!("Inbound receiver: FAILED to send keepalive: {} (kind={:?})", e, e.kind());
+                            log::error!("  This may cause VPN connection to drop!");
                         }
                     }
                 }
@@ -1670,7 +1761,6 @@ fn run_inbound_receiver(
                     // No keepalive needed this tick - this is normal
                 }
                 other => {
-                    // Unexpected result type
                     log::warn!("Inbound receiver: unexpected timer result: {:?}",
                         match other {
                             TunnResult::WriteToTunnelV4(_, _) => "WriteToTunnelV4",
@@ -1682,7 +1772,7 @@ fn run_inbound_receiver(
             }
         }
 
-        // Read encrypted packet from socket (with timeout for clean shutdown)
+        // === RECEIVE PACKET ===
         let n = match ctx.socket.recv(&mut recv_buf) {
             Ok(n) => n,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1692,7 +1782,7 @@ fn run_inbound_receiver(
                 continue;
             }
             Err(e) => {
-                log::warn!("Inbound receiver recv error: {}", e);
+                log::warn!("Inbound receiver: socket recv error: {} (kind={:?})", e, e.kind());
                 std::thread::sleep(std::time::Duration::from_millis(2));
                 continue;
             }
@@ -1704,12 +1794,12 @@ fn run_inbound_receiver(
 
         packets_received += 1;
 
-        // Log first 20 received packets to help debug (DEBUG level)
-        if packets_received <= 20 {
-            log::debug!("Inbound receiver: recv #{} - {} bytes from VPN server", packets_received, n);
+        // Log first 10 received packets at INFO level to confirm traffic is flowing
+        if packets_received <= 10 {
+            log::info!("Inbound: received packet #{} ({} bytes encrypted)", packets_received, n);
         }
 
-        // Decrypt the packet
+        // === DECRYPT PACKET ===
         let result = {
             let mut tunn = ctx.tunn.lock();
             tunn.decapsulate(None, &recv_buf[..n], &mut decrypt_buf)
@@ -1718,16 +1808,24 @@ fn run_inbound_receiver(
         match result {
             TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
                 packets_decrypted += 1;
+                last_packet_time = Some(now);
+                traffic_stopped_warning_logged = false; // Reset warning if we get traffic
                 throughput.add_rx(data.len() as u64);
 
-                // Log decrypted packet details for first 20 (DEBUG level)
-                if packets_decrypted <= 20 && data.len() >= 20 {
+                // Log first 10 decrypted packets with details
+                if packets_decrypted <= 10 && data.len() >= 20 {
                     let proto = data[9];
+                    let proto_name = match proto {
+                        1 => "ICMP",
+                        6 => "TCP",
+                        17 => "UDP",
+                        _ => "Other",
+                    };
                     let src_ip = std::net::Ipv4Addr::new(data[12], data[13], data[14], data[15]);
                     let dst_ip = std::net::Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-                    log::debug!(
-                        "Inbound receiver: decrypted #{} - {} bytes, proto={}, {} -> {}",
-                        packets_decrypted, data.len(), proto, src_ip, dst_ip
+                    log::info!(
+                        "Inbound: decrypted #{} - {} bytes {} {} -> {}",
+                        packets_decrypted, data.len(), proto_name, src_ip, dst_ip
                     );
                 }
 
@@ -1741,48 +1839,72 @@ fn run_inbound_receiver(
                 ) {
                     if injected {
                         packets_injected += 1;
+                        // Log first 5 successful injections
+                        if packets_injected <= 5 {
+                            log::info!("Inbound: injected packet #{} to MSTCP", packets_injected);
+                        }
                     } else {
                         inject_errors += 1;
+                        if inject_errors <= 10 {
+                            log::error!("Inbound: FAILED to inject packet #{}", packets_decrypted);
+                        }
                     }
                 }
             }
             TunnResult::WriteToNetwork(data) => {
                 // Protocol message (handshake, etc.) - send back to VPN server
-                log::debug!("Inbound receiver: got WriteToNetwork - {} bytes (handshake/protocol)", data.len());
+                log::info!("Inbound: protocol message ({} bytes) - sending to server", data.len());
                 if let Err(e) = ctx.socket.send(data) {
-                    log::warn!("Inbound receiver: failed to send protocol message: {}", e);
+                    log::error!("Inbound: FAILED to send protocol message: {}", e);
                 }
             }
             TunnResult::Done => {
                 // No plaintext output (e.g., keepalive received)
-                if packets_received <= 20 {
-                    log::debug!("Inbound receiver: recv #{} -> Done (keepalive?)", packets_received);
+                if packets_received <= 10 {
+                    log::debug!("Inbound: packet #{} -> Done (keepalive response)", packets_received);
                 }
             }
             TunnResult::Err(e) => {
-                // Log ALL decrypt errors (not just first 20) since this is critical for debugging
-                log::warn!(
-                    "Inbound receiver: decrypt ERROR on packet #{} ({} bytes): {:?}",
+                decrypt_errors += 1;
+                // Log ALL decrypt errors since this is critical
+                log::error!(
+                    "Inbound: DECRYPT ERROR on packet #{} ({} bytes): {:?}",
                     packets_received, n, e
                 );
+                if decrypt_errors == 1 {
+                    log::error!("  First decrypt error - may indicate wrong encryption key or corrupted data");
+                }
             }
-        }
-
-        // Periodic logging (every 100 packets for debugging) - DEBUG level
-        if packets_received > 0 && packets_received % 100 == 0 {
-            log::debug!(
-                "Inbound receiver: {} recv, {} decrypt, {} inject, {} errors",
-                packets_received, packets_decrypted, packets_injected, inject_errors
-            );
         }
     }
 
-    // Final stats
-    log::info!(
-        "Inbound receiver stopped - FINAL: {} recv, {} decrypt, {} inject, {} errors, {} keepalives, {} bytes RX",
-        packets_received, packets_decrypted, packets_injected, inject_errors, keepalives_sent,
-        throughput.bytes_rx.load(Ordering::Relaxed)
-    );
+    // === FINAL STATS ===
+    let total_uptime = start_time.elapsed().as_secs();
+    log::info!("========================================");
+    log::info!("INBOUND RECEIVER STOPPED");
+    log::info!("========================================");
+    log::info!("  Uptime: {}s", total_uptime);
+    log::info!("  Packets received (encrypted): {}", packets_received);
+    log::info!("  Packets decrypted: {}", packets_decrypted);
+    log::info!("  Packets injected: {}", packets_injected);
+    log::info!("  Inject errors: {}", inject_errors);
+    log::info!("  Decrypt errors: {}", decrypt_errors);
+    log::info!("  Keepalives sent: {}", keepalives_sent);
+    log::info!("  Total RX bytes: {}", throughput.bytes_rx.load(Ordering::Relaxed));
+
+    // Final health assessment
+    if packets_decrypted == 0 && total_uptime > NO_TRAFFIC_WARNING_SECS {
+        log::error!("========================================");
+        log::error!("CRITICAL: Session ended with ZERO inbound traffic!");
+        log::error!("This indicates a socket handoff or routing issue.");
+        log::error!("========================================");
+    } else if inject_errors > packets_injected / 10 && packets_injected > 0 {
+        log::warn!("High injection error rate: {}/{} ({:.1}%)",
+            inject_errors, packets_decrypted,
+            (inject_errors as f64 / packets_decrypted as f64) * 100.0
+        );
+    }
+    log::info!("========================================");
 }
 
 /// Inject a decrypted inbound packet to MSTCP after NAT rewriting

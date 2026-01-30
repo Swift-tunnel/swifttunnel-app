@@ -72,6 +72,18 @@ pub struct WireguardTunnel {
     /// CRITICAL FIX for Error 279: When split tunnel takes the socket, the tunnel's inbound
     /// task must stop reading, otherwise both compete for packets and some get lost.
     skip_inbound: Arc<AtomicBool>,
+    /// Synchronization flag for socket handoff to split tunnel.
+    ///
+    /// **Protocol:**
+    /// 1. Initialized to `true` (no task running)
+    /// 2. Set to `false` immediately before spawning inbound task
+    /// 3. Set to `true` by inbound task just before it exits
+    /// 4. `take_socket_for_split_tunnel()` waits up to 300ms for this to become `true`
+    ///
+    /// This ensures the Tokio inbound task has fully stopped reading from the socket
+    /// before split tunnel takes ownership, preventing packet loss from two tasks
+    /// competing on the same socket file descriptor.
+    inbound_task_stopped: Arc<AtomicBool>,
     /// Stored std socket clone for split tunnel handoff
     /// CRITICAL FIX for Error 279: VPN server responds to the socket that did the handshake.
     /// We store a clone of that socket here so split tunnel can reuse it instead of
@@ -95,6 +107,7 @@ impl WireguardTunnel {
             tunn: Arc::new(std::sync::Mutex::new(None)),
             skip_keepalives: Arc::new(AtomicBool::new(false)),
             skip_inbound: Arc::new(AtomicBool::new(false)),
+            inbound_task_stopped: Arc::new(AtomicBool::new(true)), // Starts as true (no task running)
             stored_socket: Arc::new(std::sync::Mutex::new(None)),
         })
     }
@@ -156,14 +169,52 @@ impl WireguardTunnel {
     /// Call this AFTER tunnel.stop() to ensure tunnel tasks have released their
     /// references to the Tokio socket (which shares the same underlying port).
     pub fn take_socket_for_split_tunnel(&self) -> Option<std::net::UdpSocket> {
+        log::info!("========================================");
+        log::info!("SOCKET HANDOFF TO SPLIT TUNNEL");
+        log::info!("========================================");
+
         let socket = self.stored_socket.lock().unwrap().take();
-        if socket.is_some() {
-            log::info!("Socket handed off to split tunnel (VPN server will respond here)");
+        if let Some(ref sock) = socket {
+            log::info!("  Socket: {:?}", sock.local_addr());
+            log::info!("  Step 1: Signaling Tokio inbound task to stop...");
+
             // CRITICAL: Tell the tunnel's inbound task to stop reading!
             // Otherwise both the tunnel inbound task and split tunnel inbound receiver
             // will compete for packets on the shared socket fd, causing random packet loss.
             self.skip_inbound.store(true, Ordering::SeqCst);
-            log::info!("Tunnel inbound task will stop (split tunnel handles inbound now)");
+
+            // CRITICAL FIX: Wait for the inbound task to actually stop reading from the socket.
+            // The task checks skip_inbound every 100ms (recv timeout), so we wait up to 300ms.
+            // Without this wait, there's a race condition where both the Tokio inbound task
+            // and the split tunnel inbound receiver compete for packets on the same socket FD,
+            // causing intermittent 0 B/s inbound (Error 279).
+            log::info!("  Step 2: Waiting for inbound task to confirm exit...");
+            let start = std::time::Instant::now();
+            let max_wait = std::time::Duration::from_millis(300);
+            while !self.inbound_task_stopped.load(Ordering::SeqCst) {
+                if start.elapsed() > max_wait {
+                    log::error!("========================================");
+                    log::error!("TIMEOUT: Inbound task did not stop in {}ms!", max_wait.as_millis());
+                    log::error!("This may cause packet loss / 0 B/s inbound!");
+                    log::error!("Proceeding anyway, but connection may fail.");
+                    log::error!("========================================");
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            let elapsed = start.elapsed();
+            if self.inbound_task_stopped.load(Ordering::SeqCst) {
+                log::info!("  Step 3: Inbound task CONFIRMED stopped ({}ms)", elapsed.as_millis());
+                log::info!("  Socket handoff SUCCESSFUL - no race condition");
+            }
+            log::info!("========================================");
+        } else {
+            log::error!("========================================");
+            log::error!("SOCKET HANDOFF FAILED!");
+            log::error!("No socket available - was it already taken?");
+            log::error!("Inbound traffic will NOT work!");
+            log::error!("========================================");
         }
         socket
     }
@@ -226,7 +277,13 @@ impl WireguardTunnel {
 
         // Store the clone for split tunnel to use later
         *self.stored_socket.lock().unwrap() = Some(socket_for_split_tunnel);
-        log::info!("Socket stored for split tunnel handoff (port: {:?})", std_socket.local_addr());
+        let local_addr = std_socket.local_addr().ok();
+        log::info!("========================================");
+        log::info!("VPN SOCKET CREATED");
+        log::info!("  Local: {:?}", local_addr);
+        log::info!("  Remote: {}", self.endpoint);
+        log::info!("  Socket cloned for split tunnel handoff");
+        log::info!("========================================");
 
         // Set non-blocking mode for Tokio conversion
         std_socket.set_nonblocking(true)
@@ -257,6 +314,8 @@ impl WireguardTunnel {
         );
 
         // Spawn inbound task (server -> adapter)
+        // Reset the stopped flag before spawning (task will set it to true when exiting)
+        self.inbound_task_stopped.store(false, Ordering::SeqCst);
         let inbound_handle = self.spawn_inbound_task(
             Arc::clone(&adapter),
             Arc::clone(&tunn),
@@ -265,6 +324,7 @@ impl WireguardTunnel {
             Arc::clone(&self.stats),
             self.get_inbound_handler(),
             Arc::clone(&self.skip_inbound),
+            Arc::clone(&self.inbound_task_stopped),
             shutdown_tx.subscribe(),
         );
 
@@ -450,12 +510,14 @@ impl WireguardTunnel {
         stats: Arc<std::sync::Mutex<TunnelStats>>,
         inbound_handler: Arc<std::sync::Mutex<Option<InboundHandler>>>,
         skip_inbound: Arc<AtomicBool>,
+        inbound_task_stopped: Arc<AtomicBool>,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut recv_buf = vec![0u8; MAX_PACKET_SIZE];
             let mut decrypt_buf = vec![0u8; MAX_PACKET_SIZE];
             let mut handler_used = false;
+            let mut packet_count: u64 = 0; // Per-session counter (not static)
 
             while running.load(Ordering::SeqCst) {
                 // CRITICAL: Check if split tunnel has taken over inbound handling
@@ -506,11 +568,10 @@ impl WireguardTunnel {
                     TunnResult::Done => "Done".to_string(),
                     TunnResult::Err(e) => format!("Err({:?})", e),
                 };
-                // Log first 10 results and then every 100th
-                static RESULT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let count = RESULT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if count < 10 || count % 100 == 0 {
-                    log::info!("Inbound #{}: decapsulate -> {} (received {} encrypted bytes)", count + 1, result_desc, n);
+                // Log first 10 results and then every 100th (per-session counter)
+                packet_count += 1;
+                if packet_count <= 10 || packet_count % 100 == 0 {
+                    log::info!("Tunnel inbound #{}: {} (received {} encrypted bytes)", packet_count, result_desc, n);
                 }
 
                 match decrypted {
@@ -562,7 +623,10 @@ impl WireguardTunnel {
                 }
             }
 
-            log::info!("Inbound task stopped");
+            // Signal that we've stopped reading from the socket
+            // CRITICAL: This must be set BEFORE returning so take_socket_for_split_tunnel() can wait for it
+            inbound_task_stopped.store(true, Ordering::SeqCst);
+            log::info!("Inbound task stopped (signaled via inbound_task_stopped flag)");
         })
     }
 
