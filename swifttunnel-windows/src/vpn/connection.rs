@@ -246,12 +246,17 @@ impl VpnConnection {
                     phantun_port
                 );
 
-                // Parse server IP from endpoint
-                let server_ip: std::net::Ipv4Addr = config.endpoint
-                    .split(':')
-                    .next()
-                    .and_then(|ip| ip.parse().ok())
-                    .ok_or_else(|| VpnError::InvalidConfig("Invalid server IP in endpoint".to_string()))?;
+                // Parse server IP from endpoint (supports IPv4 and IPv6)
+                let server_addr: std::net::SocketAddr = config.endpoint
+                    .parse()
+                    .map_err(|_| VpnError::InvalidConfig("Invalid server endpoint".to_string()))?;
+
+                let server_ip = match server_addr.ip() {
+                    std::net::IpAddr::V4(ip) => ip,
+                    std::net::IpAddr::V6(_) => {
+                        return Err(VpnError::InvalidConfig("Stealth mode only supports IPv4 endpoints".to_string()));
+                    }
+                };
 
                 // Create and start TCP tunnel
                 let tcp_tunnel = TcpTunnel::new(server_ip, phantun_port);

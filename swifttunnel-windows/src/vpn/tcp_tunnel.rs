@@ -139,6 +139,11 @@ impl TcpTunnel {
                 }
 
                 // Frame the packet: [u16 len][payload]
+                // Validate packet size fits in u16 (theoretical max, WireGuard MTU is ~1420)
+                if len > u16::MAX as usize {
+                    log::error!("TCP tunnel outbound: Packet too large: {} bytes", len);
+                    continue;
+                }
                 let mut frame = Vec::with_capacity(2 + len);
                 frame.extend_from_slice(&(len as u16).to_be_bytes());
                 frame.extend_from_slice(&buf[..len]);
@@ -192,9 +197,11 @@ impl TcpTunnel {
                 };
 
                 let payload_len = u16::from_be_bytes(len_buf) as usize;
-                if payload_len > payload_buf.len() {
-                    log::error!("TCP tunnel inbound: Payload too large: {}", payload_len);
-                    continue;
+                // Validate payload length - zero or oversized packets corrupt the stream
+                if payload_len == 0 || payload_len > payload_buf.len() {
+                    log::error!("TCP tunnel inbound: Invalid payload length: {} (must be 1-{})", payload_len, payload_buf.len());
+                    stop_2.store(true, Ordering::SeqCst);
+                    break;
                 }
 
                 // Read payload
