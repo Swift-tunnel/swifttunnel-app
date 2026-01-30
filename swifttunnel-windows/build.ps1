@@ -71,9 +71,9 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "========================================" -ForegroundColor Green
 
     # Download and copy wintun.dll if not present
-    $wintunDll = "target\release\wintun.dll"
-    $wintunZip = "target\release\wintun.zip"
-    $wintunDir = "target\release\wintun"
+    $wintunDll = "target\x86_64-pc-windows-msvc\release\wintun.dll"
+    $wintunZip = "target\x86_64-pc-windows-msvc\release\wintun.zip"
+    $wintunDir = "target\x86_64-pc-windows-msvc\release\wintun"
 
     if (-not (Test-Path $wintunDll)) {
         Write-Host "`nDownloading Wintun..." -ForegroundColor Cyan
@@ -83,7 +83,7 @@ if ($LASTEXITCODE -eq 0) {
 
         try {
             Invoke-WebRequest -Uri $wintunUrl -OutFile $wintunZip
-            Expand-Archive -Path $wintunZip -DestinationPath "target\release" -Force
+            Expand-Archive -Path $wintunZip -DestinationPath "target\x86_64-pc-windows-msvc\release" -Force
 
             # Copy correct architecture DLL
             $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "x86" }
@@ -109,8 +109,8 @@ if ($LASTEXITCODE -eq 0) {
     New-Item -ItemType Directory -Path "$distDir\drivers" | Out-Null
 
     # Copy required files
-    Copy-Item "target\release\swifttunnel-fps-booster.exe" "$distDir\" -Force
-    Copy-Item "target\release\wintun.dll" "$distDir\" -Force
+    Copy-Item "target\x86_64-pc-windows-msvc\release\swifttunnel-fps-booster.exe" "$distDir\" -Force
+    Copy-Item "target\x86_64-pc-windows-msvc\release\wintun.dll" "$distDir\" -Force
 
     # Download Windows Packet Filter driver MSI
     $driverMsi = "$distDir\drivers\WinpkFilter-x64.msi"
