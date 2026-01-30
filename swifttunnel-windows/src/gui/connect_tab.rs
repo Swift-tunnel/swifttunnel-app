@@ -931,18 +931,11 @@ impl BoosterApp {
                                                 .min_size(egui::vec2(24.0, 24.0))
                                                 .sense(egui::Sense::click())
                                         );
-                                        // DEBUG: Log gear button state
-                                        if gear_btn.hovered() {
-                                            println!("[GEAR DEBUG] Gear hovered for region: {}", region.id);
-                                        }
                                         if gear_btn.clicked() {
-                                            println!("[GEAR DEBUG] Gear CLICKED for region: {}", region.id);
                                             if self.server_selection_popup.as_ref() == Some(&region.id) {
                                                 self.server_selection_popup = None;
-                                                println!("[GEAR DEBUG] Closing popup");
                                             } else {
                                                 self.server_selection_popup = Some(region.id.clone());
-                                                println!("[GEAR DEBUG] Opening popup for: {}", region.id);
                                             }
                                             gear_clicked.set(true);
                                         }
