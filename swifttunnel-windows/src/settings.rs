@@ -132,6 +132,10 @@ pub struct AppSettings {
     /// Routing mode for split tunneling (V1 = process-based, V2 = hybrid/ExitLag-style)
     #[serde(default)]
     pub routing_mode: RoutingMode,
+    /// Enable stealth mode (TCP 443 tunneling via Phantun)
+    /// Bypasses DPI and UDP blocks on restrictive networks
+    #[serde(default)]
+    pub enable_stealth_mode: bool,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -170,6 +174,7 @@ impl Default for AppSettings {
             artificial_latency_ms: 0,
             experimental_mode: false,
             routing_mode: RoutingMode::default(),
+            enable_stealth_mode: false,
         }
     }
 }

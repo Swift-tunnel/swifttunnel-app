@@ -82,6 +82,9 @@ pub struct PendingConnection {
     pub apps: Vec<String>,
     pub routing_mode: u8, // 0 = V1, 1 = V2
     pub timestamp: u64,
+    /// Enable stealth mode (TCP 443 via Phantun)
+    #[serde(default)]
+    pub enable_stealth_mode: bool,
 }
 
 /// Get the path for the pending connection temp file

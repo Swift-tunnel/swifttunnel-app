@@ -21,6 +21,7 @@ use super::process_watcher::{ProcessWatcher, ProcessStartEvent};
 use super::routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::packet_interceptor::WireguardContext;
+use super::tcp_tunnel::TcpTunnel;
 use super::{VpnError, VpnResult};
 use crossbeam_channel::Receiver;
 
@@ -46,6 +47,8 @@ pub enum ConnectionState {
         assigned_ip: String,
         split_tunnel_active: bool,
         tunneled_processes: Vec<String>,
+        /// Whether stealth mode (TCP 443 via Phantun) is active
+        stealth_mode_active: bool,
     },
     Disconnecting,
     Error(String),
@@ -110,6 +113,10 @@ pub struct VpnConnection {
     process_monitor_stop: Arc<AtomicBool>,
     /// ETW process watcher for instant game detection
     etw_watcher: Option<ProcessWatcher>,
+    /// TCP tunnel for stealth mode (Phantun)
+    tcp_tunnel: Option<Arc<TcpTunnel>>,
+    /// Whether stealth mode is currently active
+    stealth_mode_active: bool,
 }
 
 impl VpnConnection {
@@ -123,6 +130,8 @@ impl VpnConnection {
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
             etw_watcher: None,
+            tcp_tunnel: None,
+            stealth_mode_active: false,
         }
     }
 
@@ -190,12 +199,14 @@ impl VpnConnection {
     /// * `region` - Server region to connect to
     /// * `tunnel_apps` - Apps that SHOULD use VPN (games). Everything else bypasses.
     /// * `routing_mode` - V1 (process-based) or V2 (hybrid/ExitLag-style)
+    /// * `enable_stealth_mode` - Whether to use TCP 443 tunneling (Phantun) to bypass DPI
     pub async fn connect(
         &mut self,
         access_token: &str,
         region: &str,
         tunnel_apps: Vec<String>,
         routing_mode: crate::settings::RoutingMode,
+        enable_stealth_mode: bool,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -222,6 +233,53 @@ impl VpnConnection {
 
         log::info!("VPN config received: endpoint={}", config.endpoint);
         self.config = Some(config.clone());
+
+        // Step 1.5: Setup stealth mode (TCP tunnel) if enabled and supported
+        let mut effective_config = config.clone();
+        self.stealth_mode_active = false;
+
+        if enable_stealth_mode {
+            if config.phantun_enabled {
+                let phantun_port = config.phantun_port.unwrap_or(443);
+                log::info!(
+                    "Stealth mode: Server supports Phantun on port {}, setting up TCP tunnel",
+                    phantun_port
+                );
+
+                // Parse server IP from endpoint
+                let server_ip: std::net::Ipv4Addr = config.endpoint
+                    .split(':')
+                    .next()
+                    .and_then(|ip| ip.parse().ok())
+                    .ok_or_else(|| VpnError::InvalidConfig("Invalid server IP in endpoint".to_string()))?;
+
+                // Create and start TCP tunnel
+                let tcp_tunnel = TcpTunnel::new(server_ip, phantun_port);
+                match tcp_tunnel.start().await {
+                    Ok(local_addr) => {
+                        log::info!("TCP tunnel started, WireGuard will connect to {}", local_addr);
+
+                        // Modify the effective config to point WireGuard at localhost
+                        // The original WireGuard port is typically 51820, but we use 51821 for the tunnel
+                        effective_config.endpoint = local_addr.to_string();
+                        self.tcp_tunnel = Some(Arc::new(tcp_tunnel));
+                        self.stealth_mode_active = true;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Stealth mode: TCP tunnel failed to start: {}. Falling back to regular UDP.",
+                            e
+                        );
+                        // Continue with normal UDP connection - don't fail entirely
+                    }
+                }
+            } else {
+                log::info!(
+                    "Stealth mode: Requested but server '{}' doesn't support Phantun. Using regular UDP.",
+                    region
+                );
+            }
+        }
 
         // Initialize WFP block filter engine (for instant process blocking)
         if let Err(e) = super::wfp_block::init() {
@@ -259,8 +317,9 @@ impl VpnConnection {
         self.adapter = Some(Arc::clone(&adapter));
 
         // Step 3: Create and start WireGuard tunnel
+        // Use effective_config which may have modified endpoint for stealth mode
         self.set_state(ConnectionState::Connecting).await;
-        let tunnel = match WireguardTunnel::new(config.clone()) {
+        let tunnel = match WireguardTunnel::new(effective_config.clone()) {
             Ok(t) => Arc::new(t),
             Err(e) => {
                 self.cleanup().await;
@@ -341,6 +400,7 @@ impl VpnConnection {
             assigned_ip: config.assigned_ip.clone(),
             split_tunnel_active,  // True when apps specified, false otherwise
             tunneled_processes,
+            stealth_mode_active: self.stealth_mode_active,
         }).await;
 
         log::info!("VPN connected successfully");
@@ -725,6 +785,14 @@ impl VpnConnection {
             tunnel.stop();
         }
         self.tunnel = None;
+
+        // Stop TCP tunnel (stealth mode)
+        if let Some(ref tcp_tunnel) = self.tcp_tunnel {
+            log::info!("Stopping TCP tunnel...");
+            tcp_tunnel.stop().await;
+        }
+        self.tcp_tunnel = None;
+        self.stealth_mode_active = false;
 
         // Clear split tunnel
         if let Some(ref driver) = self.split_tunnel {

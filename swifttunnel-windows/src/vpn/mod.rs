@@ -25,6 +25,7 @@
 pub mod config;
 pub mod adapter;
 pub mod tunnel;
+pub mod tcp_tunnel;
 pub mod process_tracker;
 pub mod process_cache;
 pub mod process_watcher;
@@ -40,6 +41,7 @@ pub mod error_messages;
 pub use config::{fetch_vpn_config, update_latency, VpnConfigRequest};
 pub use adapter::WintunAdapter;
 pub use tunnel::{WireguardTunnel, InboundHandler};
+pub use tcp_tunnel::{TcpTunnel, TcpTunnelError};
 pub use packet_interceptor::WireguardContext;
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
 pub use process_watcher::{ProcessWatcher, ProcessStartEvent};

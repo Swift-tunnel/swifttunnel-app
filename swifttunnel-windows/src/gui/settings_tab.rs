@@ -320,6 +320,64 @@ impl BoosterApp {
             self.mark_dirty();
         }
 
+        ui.add_space(16.0);
+
+        // Stealth Mode section
+        let mut toggle_stealth_mode = false;
+        let current_stealth_mode = self.enable_stealth_mode;
+
+        egui::Frame::NONE
+            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0).inner_margin(20)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Stealth icon (shield with lock)
+                    ui.label(egui::RichText::new("~").size(16.0).color(egui::Color32::from_rgb(0, 200, 200)));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Stealth Mode").size(14.0).color(TEXT_PRIMARY).strong());
+                });
+                ui.add_space(12.0);
+
+                // Stealth mode toggle
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Bypass network restrictions").size(12.0).color(TEXT_PRIMARY));
+                        ui.label(egui::RichText::new("Tunnels VPN through TCP port 443 to evade DPI/blocks").size(10.0).color(TEXT_MUTED));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let size = egui::vec2(44.0, 24.0);
+                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                        if response.clicked() {
+                            toggle_stealth_mode = true;
+                        }
+                        // Cyan accent for stealth mode
+                        let stealth_color = egui::Color32::from_rgb(0, 200, 200);
+                        let bg = if current_stealth_mode { stealth_color } else { BG_ELEVATED };
+                        let knob_x = if current_stealth_mode { rect.right() - 12.0 } else { rect.left() + 12.0 };
+                        ui.painter().rect_filled(rect, 12.0, bg);
+                        ui.painter().circle_filled(egui::pos2(knob_x, rect.center().y), 8.0, TEXT_PRIMARY);
+                    });
+                });
+
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Use when on restrictive networks (China, Iran, IndiHome, schools, etc.)").size(10.0).color(TEXT_MUTED).italics());
+
+                // Show which servers support stealth mode
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("i").size(11.0).color(TEXT_MUTED));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Supported on: Singapore, Mumbai, Sydney, Germany, Tokyo, America").size(10.0).color(TEXT_MUTED));
+                });
+            });
+
+        // Handle stealth mode toggle
+        if toggle_stealth_mode {
+            self.enable_stealth_mode = !self.enable_stealth_mode;
+            log::info!("Stealth mode: {}", self.enable_stealth_mode);
+            self.mark_dirty();
+        }
+
         // Handle actions after UI rendering
         if check_now {
             self.start_update_check();

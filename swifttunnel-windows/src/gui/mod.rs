@@ -210,6 +210,8 @@ pub struct BoosterApp {
     logo_texture: Option<egui::TextureHandle>,
     /// Routing mode for split tunnel (V1 = process-based, V2 = hybrid/ExitLag-style)
     routing_mode: crate::settings::RoutingMode,
+    /// Enable stealth mode (TCP 443 tunneling via Phantun) to bypass DPI
+    enable_stealth_mode: bool,
     /// Pending auto-connect from elevation (--resume-connect flag)
     /// Set when app is relaunched with admin privileges to continue connection
     auto_connect_pending: Option<PendingConnection>,
@@ -462,6 +464,8 @@ impl BoosterApp {
             experimental_mode: saved_settings.experimental_mode,
             // Routing mode for split tunnel
             routing_mode: saved_settings.routing_mode,
+            // Stealth mode (TCP 443 via Phantun)
+            enable_stealth_mode: saved_settings.enable_stealth_mode,
             // Logo texture (loaded from embedded PNG)
             logo_texture: Self::load_logo_texture(&cc.egui_ctx),
             // Auto-connect from elevation (take from static if --resume-connect was used)
@@ -596,6 +600,8 @@ impl BoosterApp {
             experimental_mode: self.experimental_mode,
             // Save routing mode setting
             routing_mode: self.routing_mode,
+            // Save stealth mode setting
+            enable_stealth_mode: self.enable_stealth_mode,
         };
 
         let _ = save_settings(&settings);
@@ -842,6 +848,9 @@ impl eframe::App for BoosterApp {
                         1 => crate::settings::RoutingMode::V2,
                         _ => crate::settings::RoutingMode::V1,
                     };
+
+                    // Set stealth mode from pending
+                    self.enable_stealth_mode = pending.enable_stealth_mode;
 
                     // Mark as consumed before connecting to prevent loop
                     self.auto_connect_consumed = true;
@@ -1667,6 +1676,7 @@ impl BoosterApp {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
+                enable_stealth_mode: self.enable_stealth_mode,
             };
 
             if let Err(e) = save_pending_connection(&pending) {
@@ -1773,6 +1783,11 @@ impl BoosterApp {
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
         let routing_mode = self.routing_mode;
+        let enable_stealth_mode = self.enable_stealth_mode;
+
+        if enable_stealth_mode {
+            log::info!("Stealth mode enabled - will attempt TCP 443 tunneling if server supports Phantun");
+        }
 
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();
@@ -1780,7 +1795,7 @@ impl BoosterApp {
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode).await {
+                    if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode, enable_stealth_mode).await {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }
