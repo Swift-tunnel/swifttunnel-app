@@ -220,6 +220,11 @@ pub struct BoosterApp {
     connecting_initiated: Option<std::time::Instant>,
     /// Content area width (set by layout, used by tabs for proper sizing)
     content_area_width: f32,
+    /// Flag indicating network boost operation is in progress (to show loading state)
+    network_boost_in_progress: Arc<AtomicBool>,
+    /// Channel to receive network boost operation results
+    network_boost_result_rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    network_boost_result_tx: std::sync::mpsc::Sender<Result<(), String>>,
 }
 
 impl BoosterApp {
@@ -245,6 +250,9 @@ impl BoosterApp {
 
         // Create channel for game server location lookups (Bloxstrap-style notifications)
         let (game_server_tx, game_server_rx) = std::sync::mpsc::channel::<(std::net::Ipv4Addr, String)>();
+
+        // Create channel for network boost operation results
+        let (network_boost_result_tx, network_boost_result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
         // Initialize auth manager - this can only fail if Windows DPAPI is unavailable,
         // which indicates a fundamental system issue. In that case, panic is acceptable.
@@ -470,6 +478,10 @@ impl BoosterApp {
             // Instant connect feedback (for immediate UI response)
             connecting_initiated: None,
             content_area_width: 600.0, // Default, will be set by layout
+            // Network boost background processing
+            network_boost_in_progress: Arc::new(AtomicBool::new(false)),
+            network_boost_result_rx,
+            network_boost_result_tx,
         }
     }
 
@@ -1021,6 +1033,19 @@ impl eframe::App for BoosterApp {
                     log::error!("Speed test error: {}", msg);
                     self.network_analyzer_state.speed.running = false;
                     self.network_analyzer_state.speed.phase = crate::network_analyzer::SpeedTestPhase::Idle;
+                }
+            }
+        }
+
+        // Poll network boost operation results (background thread for registry/ping operations)
+        while let Ok(result) = self.network_boost_result_rx.try_recv() {
+            match result {
+                Ok(()) => {
+                    log::info!("Network boost operation completed successfully");
+                }
+                Err(msg) => {
+                    log::warn!("Network boost operation failed: {}", msg);
+                    // Optionally could show a status message to the user here
                 }
             }
         }
@@ -2011,10 +2036,35 @@ impl BoosterApp {
                 }
             }
             "disable_nagle" | "network_throttling" | "optimize_mtu" | "gaming_qos" => {
-                // Network boosts need to reapply the whole config
-                if let Err(e) = self.network_booster.apply_optimizations(&self.state.config.network_settings) {
-                    log::warn!("Failed to apply network boost '{}': {}", boost_id, e);
+                // Network boosts run on background thread to avoid UI freeze
+                // (they involve multiple registry writes and ping tests)
+                if self.network_boost_in_progress.load(Ordering::Relaxed) {
+                    log::info!("Network boost already in progress, skipping");
+                    return;
                 }
+
+                self.network_boost_in_progress.store(true, Ordering::Relaxed);
+                let config = self.state.config.network_settings.clone();
+                let tx = self.network_boost_result_tx.clone();
+                let in_progress = self.network_boost_in_progress.clone();
+
+                std::thread::spawn(move || {
+                    log::info!("Starting network boost operation in background thread");
+                    let mut booster = NetworkBooster::new();
+                    let result = booster.apply_optimizations(&config);
+                    in_progress.store(false, Ordering::Relaxed);
+
+                    match result {
+                        Ok(()) => {
+                            log::info!("Network boost operation completed successfully");
+                            let _ = tx.send(Ok(()));
+                        }
+                        Err(e) => {
+                            log::warn!("Network boost operation failed: {}", e);
+                            let _ = tx.send(Err(e.to_string()));
+                        }
+                    }
+                });
             }
             _ => {
                 log::warn!("Unknown boost ID: {}", boost_id);
