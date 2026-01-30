@@ -929,12 +929,20 @@ impl BoosterApp {
                                                 .fill(BG_HOVER.gamma_multiply(0.5))
                                                 .rounding(4.0)
                                                 .min_size(egui::vec2(24.0, 24.0))
+                                                .sense(egui::Sense::click())
                                         );
+                                        // DEBUG: Log gear button state
+                                        if gear_btn.hovered() {
+                                            println!("[GEAR DEBUG] Gear hovered for region: {}", region.id);
+                                        }
                                         if gear_btn.clicked() {
+                                            println!("[GEAR DEBUG] Gear CLICKED for region: {}", region.id);
                                             if self.server_selection_popup.as_ref() == Some(&region.id) {
                                                 self.server_selection_popup = None;
+                                                println!("[GEAR DEBUG] Closing popup");
                                             } else {
                                                 self.server_selection_popup = Some(region.id.clone());
+                                                println!("[GEAR DEBUG] Opening popup for: {}", region.id);
                                             }
                                             gear_clicked.set(true);
                                         }
@@ -972,8 +980,19 @@ impl BoosterApp {
                         self.animations.animate_hover(&card_id, is_hovered, hover_val);
 
                         // Only select region if gear button wasn't clicked
-                        if !gear_clicked.get() && response.response.interact(egui::Sense::click()).clicked() {
-                            clicked_region = Some(region.id.clone());
+                        // NOTE: Do NOT use response.response.interact(Sense::click()) here!
+                        // In egui 0.26+, calling interact() on a Frame response makes it
+                        // steal clicks from nested widgets (like our gear button).
+                        // Instead, use manual click detection.
+                        let frame_rect = response.response.rect;
+                        if !gear_clicked.get() && response.response.hovered() {
+                            if ui.input(|i| i.pointer.any_click()) {
+                                if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                                    if frame_rect.contains(pos) {
+                                        clicked_region = Some(region.id.clone());
+                                    }
+                                }
+                            }
                         }
                     }
                 }
