@@ -827,7 +827,7 @@ impl VpnConnection {
 
         // Create UDP relay to relay server (port 51821 on same IP as VPN server)
         let relay_port = 51821u16;
-        let relay_server = config.server_endpoint.split(':').next().unwrap_or(&config.server_endpoint);
+        let relay_server = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
 
         log::info!("V3: Creating UDP relay to {}:{}", relay_server, relay_port);
 
