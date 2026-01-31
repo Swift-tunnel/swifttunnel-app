@@ -229,16 +229,16 @@ impl BoosterApp {
         let is_connecting = self.vpn_state.is_connecting() || instant_connecting;
         let is_error = matches!(&self.vpn_state, ConnectionState::Error(_));
 
-        let (assigned_ip, uptime_str, split_tunnel_active, tunneled_processes) = if let ConnectionState::Connected {
-            assigned_ip, since, split_tunnel_active, tunneled_processes, ..
+        let (uptime_str, split_tunnel_active, tunneled_processes) = if let ConnectionState::Connected {
+            since, split_tunnel_active, tunneled_processes, ..
         } = &self.vpn_state {
             let uptime = since.elapsed();
             let h = uptime.as_secs() / 3600;
             let m = (uptime.as_secs() % 3600) / 60;
             let s = uptime.as_secs() % 60;
-            (assigned_ip.clone(), format!("{:02}:{:02}:{:02}", h, m, s), *split_tunnel_active, tunneled_processes.clone())
+            (format!("{:02}:{:02}:{:02}", h, m, s), *split_tunnel_active, tunneled_processes.clone())
         } else {
-            (String::new(), String::new(), false, Vec::new())
+            (String::new(), false, Vec::new())
         };
 
         let mut do_connect = false;
@@ -386,23 +386,6 @@ impl BoosterApp {
                     // Info badges in a row
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
-
-                        // IP Address badge
-                        egui::Frame::NONE
-                            .fill(BG_ELEVATED)
-                            .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(12, 8))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(egui::RichText::new("o").size(12.0));
-                                    ui.vertical(|ui| {
-                                        ui.spacing_mut().item_spacing.y = 1.0;
-                                        ui.label(egui::RichText::new("IP Address").size(10.0).color(TEXT_MUTED));
-                                        ui.label(egui::RichText::new(&assigned_ip).size(12.0).color(TEXT_PRIMARY).strong());
-                                    });
-                                });
-                            });
 
                         // Uptime badge
                         egui::Frame::NONE

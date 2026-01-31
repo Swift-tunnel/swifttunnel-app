@@ -25,20 +25,20 @@ pub enum RoutingMode {
     /// Tunnels ALL traffic from tunnel app processes (RobloxPlayerBeta.exe, etc.)
     /// Simple but may tunnel CDN/API traffic unnecessarily
     V1,
-    /// V2: Hybrid routing - RECOMMENDED
+    /// V2: Hybrid routing (encrypted)
     /// Tunnels traffic only when:
     /// - Source process is a tunnel app (same as V1)
     /// - AND destination IP is in game server ranges
     /// - AND protocol is UDP (game traffic)
     /// More efficient - only tunnels actual game server connections
-    #[default]
     V2,
-    /// V3: UDP Relay (unencrypted) - LOWEST LATENCY
+    /// V3: UDP Relay (unencrypted) - LOWEST LATENCY - DEFAULT
     /// Routes traffic through relay servers WITHOUT encryption
     /// - Same routing logic as V2 (game server traffic only)
     /// - No WireGuard encryption overhead
     /// - ~1-2ms lower latency, ~50% less CPU
     /// - Traffic is NOT encrypted (like ExitLag/WTFast)
+    #[default]
     V3,
 }
 
