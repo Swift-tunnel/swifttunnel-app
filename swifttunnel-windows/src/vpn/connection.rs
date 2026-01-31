@@ -444,14 +444,36 @@ impl VpnConnection {
         driver.set_wireguard_context(wg_ctx);
         log::info!("Wintun injection context set for split tunnel");
 
-        // Set up direct encryption context BEFORE configure() since threads start during configure()
-        // This allows workers to encrypt packets directly and send via UDP (faster than Wintun injection)
-        //
-        // CRITICAL FIX for Error 279 (zero inbound traffic):
-        // We MUST reuse the socket that performed the WireGuard handshake. The VPN server
-        // remembers which port sent the handshake and sends ALL responses there.
-        // Creating a NEW socket on a different port means responses never arrive!
-        if let Some(ref tunnel_ref) = self.tunnel {
+        // Set up forwarding context BEFORE configure() since threads start during configure()
+        // V1/V2: Use WireGuard encryption via VpnEncryptContext
+        // V3: Use unencrypted UDP relay via UdpRelay (like ExitLag)
+        if routing_mode == crate::settings::RoutingMode::V3 {
+            // V3: Create UDP relay to relay server (no encryption)
+            // Relay server runs on same IP as VPN server, port 51821
+            let relay_port = 51821u16;
+            let relay_server = config.server_endpoint.split(':').next().unwrap_or(&config.server_endpoint);
+
+            log::info!("V3 mode: Setting up UDP relay to {}:{}", relay_server, relay_port);
+
+            match super::udp_relay::UdpRelay::new(relay_server, relay_port) {
+                Ok(relay) => {
+                    let relay = std::sync::Arc::new(relay);
+                    driver.set_relay_context(relay);
+                    log::info!("V3 UDP relay context set");
+                }
+                Err(e) => {
+                    log::error!("Failed to create V3 UDP relay: {}", e);
+                    return Err(VpnError::SplitTunnelSetupFailed(
+                        format!("Failed to create V3 relay: {}", e)
+                    ));
+                }
+            }
+        } else if let Some(ref tunnel_ref) = self.tunnel {
+            // V1/V2: Use WireGuard encryption
+            // CRITICAL FIX for Error 279 (zero inbound traffic):
+            // We MUST reuse the socket that performed the WireGuard handshake. The VPN server
+            // remembers which port sent the handshake and sends ALL responses there.
+            // Creating a NEW socket on a different port means responses never arrive!
             if let Some(tunn) = tunnel_ref.get_tunn() {
                 let endpoint = tunnel_ref.get_endpoint();
                 log::info!("Setting up direct encryption to {} (before configure)", endpoint);

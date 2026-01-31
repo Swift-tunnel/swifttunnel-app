@@ -1109,10 +1109,11 @@ impl ParallelInterceptor {
             }
         }));
 
-        // Start inbound receiver thread (reads encrypted responses from VpnEncryptContext socket)
-        // Optimized: opens driver ONCE at thread start, not per-packet
+        // Start inbound receiver thread
+        // V1/V2: reads encrypted responses from VpnEncryptContext socket, decrypts with boringtun
+        // V3: reads unencrypted responses from UdpRelay, no decryption needed
         if let Some(ref vpn_ctx) = self.vpn_encrypt_ctx {
-            // Create InboundConfig with all necessary parameters
+            // V1/V2: WireGuard encryption - create InboundConfig with all necessary parameters
             let inbound_config = self.create_inbound_config();
 
             if let Some(config) = inbound_config {
@@ -1128,12 +1129,28 @@ impl ParallelInterceptor {
                 self.inbound_receiver_handle = Some(thread::spawn(move || {
                     run_inbound_receiver(ctx, config, inbound_stop, throughput);
                 }));
-                log::info!("Inbound receiver thread started (optimized)");
+                log::info!("V1/V2 inbound receiver thread started (WireGuard decryption)");
             } else {
                 log::warn!("Inbound receiver NOT started (failed to create config - physical_adapter_name not set?)");
             }
+        } else if let Some(ref relay_ctx) = self.relay_ctx {
+            // V3: Unencrypted UDP relay - no decryption needed, just NAT rewrite and inject
+            let inbound_config = self.create_inbound_config();
+
+            if let Some(config) = inbound_config {
+                let relay = Arc::clone(relay_ctx);
+                let inbound_stop = Arc::clone(&self.stop_flag);
+                let throughput = self.throughput_stats.clone();
+
+                self.inbound_receiver_handle = Some(thread::spawn(move || {
+                    run_v3_inbound_receiver(relay, config, inbound_stop, throughput);
+                }));
+                log::info!("V3 inbound receiver thread started (UDP relay, no decryption)");
+            } else {
+                log::warn!("V3 inbound receiver NOT started (failed to create config)");
+            }
         } else {
-            log::info!("Inbound receiver NOT started (no vpn_encrypt_ctx)");
+            log::info!("Inbound receiver NOT started (no vpn_encrypt_ctx or relay_ctx)");
         }
 
         log::info!("Parallel interceptor started");
@@ -3934,6 +3951,216 @@ fn fix_packet_checksums(packet: &mut [u8]) -> bool {
     }
 
     true
+}
+
+/// V3 Inbound receiver thread - reads unencrypted packets from UDP relay,
+/// does NAT rewriting, and injects to MSTCP (no decryption needed)
+///
+/// This is the V3 equivalent of run_inbound_receiver but much simpler:
+/// - Receives packets from UdpRelay (already stripped of session ID)
+/// - Does NAT rewriting (tunnel_ip -> internet_ip)
+/// - Injects to MSTCP
+///
+/// No WireGuard keepalives needed since we don't use WireGuard in V3 mode.
+fn run_v3_inbound_receiver(
+    relay: Arc<super::udp_relay::UdpRelay>,
+    config: InboundConfig,
+    stop_flag: Arc<AtomicBool>,
+    throughput: ThroughputStats,
+) {
+    log::info!("========================================");
+    log::info!("V3 INBOUND RECEIVER STARTING");
+    log::info!("========================================");
+    log::info!("  Relay: {}", relay.relay_addr());
+    log::info!("  Session ID: {:016x}", relay.session_id_u64());
+    log::info!("  Adapter: {}", config.physical_adapter_name);
+    log::info!("  NAT: {:?} -> {:?}", config.tunnel_ip, config.internet_ip);
+
+    // Open driver ONCE at thread start (not per-packet!)
+    let driver = match ndisapi::Ndisapi::new("NDISRD") {
+        Ok(d) => {
+            log::info!("V3 inbound receiver: ndisapi driver opened successfully");
+            d
+        }
+        Err(e) => {
+            log::error!("========================================");
+            log::error!("V3 INBOUND RECEIVER FATAL ERROR");
+            log::error!("Failed to open ndisapi driver: {}", e);
+            log::error!("Inbound traffic will NOT work!");
+            log::error!("========================================");
+            return;
+        }
+    };
+
+    let adapters = match driver.get_tcpip_bound_adapters_info() {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!("========================================");
+            log::error!("V3 INBOUND RECEIVER FATAL ERROR");
+            log::error!("Failed to get adapters: {}", e);
+            log::error!("Inbound traffic will NOT work!");
+            log::error!("========================================");
+            return;
+        }
+    };
+
+    let adapter = match adapters.iter().find(|a| a.get_name() == &config.physical_adapter_name) {
+        Some(a) => a,
+        None => {
+            log::error!("========================================");
+            log::error!("V3 INBOUND RECEIVER FATAL ERROR");
+            log::error!("Physical adapter '{}' not found!", config.physical_adapter_name);
+            log::error!("Available adapters:");
+            for a in adapters.iter() {
+                log::error!("  - {}", a.get_name());
+            }
+            log::error!("Inbound traffic will NOT work!");
+            log::error!("========================================");
+            return;
+        }
+    };
+
+    let adapter_handle = adapter.get_handle();
+    log::info!("V3 inbound receiver: adapter handle acquired, ready to inject packets");
+
+    let mut recv_buf = vec![0u8; 2048];
+    let mut packets_received = 0u64;
+    let mut packets_injected = 0u64;
+    let mut inject_errors = 0u64;
+
+    // Health monitoring timestamps
+    let start_time = std::time::Instant::now();
+    let mut last_packet_time: Option<std::time::Instant> = None;
+    let mut last_health_check = std::time::Instant::now();
+    let mut no_traffic_warning_logged = false;
+
+    // Health check constants
+    const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
+    const NO_TRAFFIC_WARNING_SECS: u64 = 10;
+
+    // Keepalive interval for relay (every 20 seconds is plenty)
+    let mut last_keepalive = std::time::Instant::now();
+    const KEEPALIVE_INTERVAL_SECS: u64 = 20;
+
+    log::info!("V3 inbound receiver: entering main loop, waiting for relay traffic...");
+
+    loop {
+        if stop_flag.load(Ordering::Relaxed) {
+            log::info!("V3 inbound receiver: stop flag set, exiting loop");
+            break;
+        }
+
+        let now = std::time::Instant::now();
+
+        // === HEALTH CHECK (every 5 seconds) ===
+        if now.duration_since(last_health_check).as_secs() >= HEALTH_CHECK_INTERVAL_SECS {
+            last_health_check = now;
+            let uptime_secs = now.duration_since(start_time).as_secs();
+
+            // Check for "no traffic ever received" condition
+            if packets_received == 0 && uptime_secs >= NO_TRAFFIC_WARNING_SECS && !no_traffic_warning_logged {
+                no_traffic_warning_logged = true;
+                log::error!("========================================");
+                log::error!("V3 WARNING: NO INBOUND TRAFFIC DETECTED!");
+                log::error!("========================================");
+                log::error!("  Uptime: {}s", uptime_secs);
+                log::error!("  Packets received: 0");
+                log::error!("");
+                log::error!("This may indicate:");
+                log::error!("  1. Relay server not running on port 51821");
+                log::error!("  2. Firewall blocking UDP traffic");
+                log::error!("  3. Session ID mismatch");
+                log::error!("========================================");
+            }
+
+            // Periodic health log
+            let rx_bytes = throughput.bytes_rx.load(Ordering::Relaxed);
+            let rx_rate = if uptime_secs > 0 { rx_bytes / uptime_secs } else { 0 };
+            log::info!(
+                "V3 inbound health: {}s uptime, {} recv, {} injected, {} B/s avg, {} errors",
+                uptime_secs, packets_received, packets_injected, rx_rate, inject_errors
+            );
+        }
+
+        // === KEEPALIVE (every 20 seconds) ===
+        if now.duration_since(last_keepalive).as_secs() >= KEEPALIVE_INTERVAL_SECS {
+            last_keepalive = now;
+            if let Err(e) = relay.send_keepalive() {
+                log::warn!("V3 inbound receiver: keepalive failed: {}", e);
+            }
+        }
+
+        // === RECEIVE PACKET FROM RELAY ===
+        match relay.receive_inbound(&mut recv_buf) {
+            Ok(Some(len)) => {
+                packets_received += 1;
+                last_packet_time = Some(now);
+
+                // Track throughput
+                throughput.bytes_rx.fetch_add(len as u64, Ordering::Relaxed);
+
+                // Log first 10 received packets at INFO level
+                if packets_received <= 10 {
+                    log::info!("V3 inbound: received packet #{} ({} bytes)", packets_received, len);
+                }
+
+                // The payload is already plain IP packet (relay strips session ID)
+                let ip_packet = &recv_buf[..len];
+
+                // Inject to MSTCP with NAT rewriting
+                match inject_inbound_packet(ip_packet, &config, adapter_handle, &driver, packets_received) {
+                    Some(true) => {
+                        packets_injected += 1;
+                        if packets_injected <= 10 || packets_injected % 1000 == 0 {
+                            log::info!(
+                                "V3 inbound: injected packet #{} ({} bytes)",
+                                packets_injected, len
+                            );
+                        }
+                    }
+                    Some(false) => {
+                        inject_errors += 1;
+                        if inject_errors <= 10 {
+                            log::error!("V3 inbound: FAILED to inject packet #{}", packets_received);
+                        }
+                    }
+                    None => {
+                        // Packet skipped (e.g., too small)
+                    }
+                }
+            }
+            Ok(None) => {
+                // No packet available (non-blocking)
+                // Small sleep to avoid busy-spinning
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+            Err(e) => {
+                log::warn!("V3 inbound receiver: receive error: {}", e);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+
+    // === FINAL STATS ===
+    let total_uptime = start_time.elapsed().as_secs();
+    let (sent, recv) = relay.stats();
+    log::info!("========================================");
+    log::info!("V3 INBOUND RECEIVER STOPPED");
+    log::info!("========================================");
+    log::info!("  Uptime: {}s", total_uptime);
+    log::info!("  Packets received: {}", packets_received);
+    log::info!("  Packets injected: {}", packets_injected);
+    log::info!("  Inject errors: {}", inject_errors);
+    log::info!("  Relay stats: sent={}, recv={}", sent, recv);
+    log::info!("  Total RX bytes: {}", throughput.bytes_rx.load(Ordering::Relaxed));
+
+    if packets_received == 0 && total_uptime > NO_TRAFFIC_WARNING_SECS {
+        log::error!("========================================");
+        log::error!("CRITICAL: V3 session ended with ZERO inbound traffic!");
+        log::error!("Relay server may not be running.");
+        log::error!("========================================");
+    }
+    log::info!("========================================");
 }
 
 #[cfg(test)]

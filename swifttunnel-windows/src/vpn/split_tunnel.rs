@@ -262,6 +262,32 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Set the V3 UDP relay context for unencrypted game traffic relay
+    ///
+    /// This enables lowest-latency mode: workers forward packets directly to relay
+    /// server without WireGuard encryption. Only applies to parallel mode.
+    pub fn set_relay_context(&mut self, relay: std::sync::Arc<super::udp_relay::UdpRelay>) {
+        if self.use_parallel {
+            if let Some(ref mut interceptor) = self.parallel_interceptor {
+                interceptor.set_relay_context(relay);
+                log::info!("V3 relay context set for unencrypted UDP forwarding");
+            } else {
+                log::warn!("Cannot set relay context: parallel interceptor not created yet");
+            }
+        } else {
+            log::info!("V3 relay context not used in legacy mode");
+        }
+    }
+
+    /// Get the V3 UDP relay context if set
+    pub fn get_relay_context(&self) -> Option<std::sync::Arc<super::udp_relay::UdpRelay>> {
+        if self.use_parallel {
+            self.parallel_interceptor.as_ref().and_then(|p| p.get_relay_context())
+        } else {
+            None
+        }
+    }
+
     /// Set inbound handler for decrypted VPN responses
     ///
     /// This handler is called for each decrypted packet received on the
