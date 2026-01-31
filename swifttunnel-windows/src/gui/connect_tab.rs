@@ -173,6 +173,12 @@ impl BoosterApp {
     }
 
     pub(crate) fn render_connection_status(&mut self, ui: &mut egui::Ui) {
+        // Check if smart server selection is in progress
+        if let Some(ref selection) = self.smart_selection {
+            self.render_smart_selection_overlay(ui, selection.clone());
+            return;
+        }
+
         // Check if we should show instant connecting feedback
         // This gives immediate visual response when user clicks Connect
         let instant_connecting = self.connecting_initiated.is_some()
@@ -861,11 +867,15 @@ impl BoosterApp {
                                         // Flexible spacer
                                         ui.add_space(ui.available_width() - 55.0);
 
-                                        // Latency display (compact)
+                                        // Latency display (compact) with pulsing dot for real-time indicator
                                         if let Some(ms) = latency {
                                             let lat_color = latency_color(ms);
+                                            // Pulsing dot shows latencies are live
+                                            let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                                            let pulse = ((elapsed * 1.5).sin() + 1.0) / 2.0;
+                                            let dot_alpha = 0.6 + pulse * 0.4;
                                             let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                                            ui.painter().circle_filled(dot_rect.center(), 3.0, lat_color);
+                                            ui.painter().circle_filled(dot_rect.center(), 3.0, lat_color.gamma_multiply(dot_alpha));
                                             ui.add_space(2.0);
                                             ui.label(egui::RichText::new(format!("{}ms", ms))
                                                 .size(11.0)
@@ -1476,6 +1486,158 @@ impl BoosterApp {
                 } else {
                     ui.label(egui::RichText::new("Connecting...").size(11.0).color(TEXT_MUTED));
                 }
+            });
+    }
+
+    /// Render the smart server selection overlay
+    /// Shows an animated card while testing servers to find the best one
+    pub(crate) fn render_smart_selection_overlay(&mut self, ui: &mut egui::Ui, selection: super::SmartServerSelection) {
+        let elapsed = selection.started_at.elapsed();
+        let progress = (selection.current_index as f32 / selection.servers.len().max(1) as f32).min(1.0);
+        let elapsed_secs = elapsed.as_secs_f32();
+
+        // Get region name
+        let region_name = if let Ok(list) = self.dynamic_server_list.try_lock() {
+            list.get_region(&selection.region_id)
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| selection.region_id.clone())
+        } else {
+            selection.region_id.clone()
+        };
+
+        egui::Frame::NONE
+            .fill(lerp_color(BG_CARD, ACCENT_PRIMARY, 0.03))
+            .stroke(egui::Stroke::new(1.5, ACCENT_PRIMARY.gamma_multiply(0.4)))
+            .rounding(16.0)
+            .inner_margin(egui::Margin::symmetric(24, 24))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    // Animated radar/scanner visualization
+                    let indicator_size = 80.0;
+                    let (indicator_rect, _) = ui.allocate_exact_size(egui::vec2(indicator_size, indicator_size), egui::Sense::hover());
+                    let center = indicator_rect.center();
+
+                    // Outer ring
+                    ui.painter().circle_stroke(center, 36.0, egui::Stroke::new(2.0, ACCENT_PRIMARY.gamma_multiply(0.2)));
+                    ui.painter().circle_stroke(center, 28.0, egui::Stroke::new(1.5, ACCENT_PRIMARY.gamma_multiply(0.15)));
+                    ui.painter().circle_stroke(center, 20.0, egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.1)));
+
+                    // Rotating sweep effect (like a radar)
+                    let sweep_angle = elapsed_secs * 3.0;
+                    let sweep_length = 35.0;
+                    for i in 0..8 {
+                        let angle = sweep_angle + (i as f32 * 0.1);
+                        let alpha = 0.6 - (i as f32 * 0.07);
+                        let end = egui::pos2(
+                            center.x + angle.cos() * sweep_length,
+                            center.y + angle.sin() * sweep_length
+                        );
+                        ui.painter().line_segment(
+                            [center, end],
+                            egui::Stroke::new(2.0, ACCENT_PRIMARY.gamma_multiply(alpha.max(0.0)))
+                        );
+                    }
+
+                    // Server dots around the circle (one per server)
+                    let num_servers = selection.servers.len();
+                    for (i, server_id) in selection.servers.iter().enumerate() {
+                        let angle = (i as f32 / num_servers.max(1) as f32) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                        let dot_pos = egui::pos2(
+                            center.x + angle.cos() * 30.0,
+                            center.y + angle.sin() * 30.0
+                        );
+
+                        let dot_color = if let Some(Some(ms)) = selection.results.get(server_id) {
+                            // Tested - show latency color
+                            latency_color(*ms)
+                        } else if i < selection.current_index {
+                            // Testing failed
+                            STATUS_ERROR.gamma_multiply(0.5)
+                        } else if i == selection.current_index {
+                            // Currently testing - pulse
+                            let pulse = ((elapsed_secs * 4.0).sin() + 1.0) / 2.0;
+                            ACCENT_PRIMARY.gamma_multiply(0.5 + pulse * 0.5)
+                        } else {
+                            // Not yet tested
+                            TEXT_DIMMED.gamma_multiply(0.5)
+                        };
+
+                        let dot_size = if i == selection.current_index { 5.0 } else { 4.0 };
+                        ui.painter().circle_filled(dot_pos, dot_size, dot_color);
+                    }
+
+                    // Center dot with pulse
+                    let pulse = ((elapsed_secs * 2.0).sin() + 1.0) / 2.0;
+                    ui.painter().circle_filled(center, 8.0 + pulse * 2.0, ACCENT_PRIMARY.gamma_multiply(0.3));
+                    ui.painter().circle_filled(center, 6.0, ACCENT_PRIMARY);
+
+                    ui.add_space(16.0);
+
+                    // Title
+                    ui.label(egui::RichText::new("Finding Best Server")
+                        .size(16.0)
+                        .color(TEXT_PRIMARY)
+                        .strong());
+
+                    ui.add_space(4.0);
+
+                    // Region name
+                    ui.label(egui::RichText::new(format!("Testing servers in {}", region_name))
+                        .size(12.0)
+                        .color(TEXT_SECONDARY));
+
+                    ui.add_space(12.0);
+
+                    // Progress bar
+                    let bar_width = 200.0;
+                    let bar_height = 4.0;
+                    let (bar_rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
+
+                    // Background
+                    ui.painter().rect_filled(bar_rect, 2.0, BG_ELEVATED);
+
+                    // Progress fill with animated shimmer
+                    let fill_width = bar_width * progress;
+                    if fill_width > 0.0 {
+                        let fill_rect = egui::Rect::from_min_size(
+                            bar_rect.left_top(),
+                            egui::vec2(fill_width, bar_height)
+                        );
+                        ui.painter().rect_filled(fill_rect, 2.0, ACCENT_PRIMARY);
+
+                        // Shimmer effect
+                        let shimmer_x = bar_rect.left() + (elapsed_secs * 50.0) % (bar_width + 30.0) - 15.0;
+                        let shimmer_rect = egui::Rect::from_min_size(
+                            egui::pos2(shimmer_x.max(bar_rect.left()).min(fill_rect.right() - 10.0), bar_rect.top()),
+                            egui::vec2(15.0, bar_height)
+                        );
+                        if shimmer_rect.left() < fill_rect.right() {
+                            ui.painter().rect_filled(shimmer_rect, 2.0, ACCENT_PRIMARY.gamma_multiply(1.3));
+                        }
+                    }
+
+                    ui.add_space(8.0);
+
+                    // Server count
+                    ui.label(egui::RichText::new(format!("{} / {} servers tested", selection.current_index, selection.servers.len()))
+                        .size(11.0)
+                        .color(TEXT_MUTED));
+
+                    // Show best so far if found
+                    if let Some((best_id, best_ms)) = &selection.best_server {
+                        ui.add_space(8.0);
+                        let best_name = self.format_server_display_name(best_id);
+                        ui.horizontal(|ui| {
+                            ui.add_space((ui.available_width() - 150.0) / 2.0);
+                            ui.label(egui::RichText::new("Best so far:")
+                                .size(10.0)
+                                .color(TEXT_MUTED));
+                            ui.label(egui::RichText::new(format!("{} ({}ms)", best_name, best_ms))
+                                .size(10.0)
+                                .color(STATUS_CONNECTED));
+                        });
+                    }
+                });
             });
     }
 }

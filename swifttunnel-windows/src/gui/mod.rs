@@ -80,6 +80,25 @@ enum Tab { Connect, Boost, Network, Settings }
 #[derive(PartialEq, Clone, Copy)]
 enum SettingsSection { General, Performance, Account }
 
+/// Smart server selection state - shows animation while testing servers
+#[derive(Clone)]
+pub struct SmartServerSelection {
+    /// When the selection started
+    pub started_at: std::time::Instant,
+    /// Region being tested
+    pub region_id: String,
+    /// Server IDs being tested
+    pub servers: Vec<String>,
+    /// Server results: (server_id, latency_ms or None if pending/failed)
+    pub results: HashMap<String, Option<u32>>,
+    /// Currently testing server index
+    pub current_index: usize,
+    /// Best server found so far (server_id, latency_ms)
+    pub best_server: Option<(String, u32)>,
+    /// Whether selection is complete (all servers tested or timeout)
+    pub completed: bool,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  BOOSTER APP
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -225,6 +244,12 @@ pub struct BoosterApp {
     /// Channel to receive network boost operation results
     network_boost_result_rx: std::sync::mpsc::Receiver<std::result::Result<(), String>>,
     network_boost_result_tx: std::sync::mpsc::Sender<std::result::Result<(), String>>,
+    /// Smart server selection state (shown when user clicks Connect)
+    /// Tests all servers in region and picks best one before connecting
+    smart_selection: Option<SmartServerSelection>,
+    /// Channel to receive smart selection ping results
+    smart_selection_rx: std::sync::mpsc::Receiver<(String, Option<u32>)>,
+    smart_selection_tx: std::sync::mpsc::Sender<(String, Option<u32>)>,
 }
 
 impl BoosterApp {
@@ -254,6 +279,9 @@ impl BoosterApp {
         // Create channel for network boost operation results
         let (network_boost_result_tx, network_boost_result_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
 
+        // Create channel for smart server selection ping results
+        let (smart_selection_tx, smart_selection_rx) = std::sync::mpsc::channel::<(String, Option<u32>)>();
+
         // Initialize auth manager - this can only fail if Windows DPAPI is unavailable,
         // which indicates a fundamental system issue. In that case, panic is acceptable.
         let auth_manager = AuthManager::new().unwrap_or_else(|e| {
@@ -280,7 +308,8 @@ impl BoosterApp {
         let region_latencies = Arc::new(Mutex::new(HashMap::new()));
         let finding_best_server = Arc::new(AtomicBool::new(false));
 
-        // Spawn async task to fetch server list AND ping all regions at startup
+        // Spawn async task to fetch server list AND continuously ping all regions
+        // Real-time ping updates every 10 seconds for live latency display
         let server_list_clone = Arc::clone(&dynamic_server_list);
         let latencies_clone = Arc::clone(&region_latencies);
         let finding_clone = Arc::clone(&finding_best_server);
@@ -288,57 +317,71 @@ impl BoosterApp {
 
         std::thread::spawn(move || {
             rt_clone.block_on(async {
-                match load_server_list().await {
+                // First, load the server list
+                let (servers, regions) = match load_server_list().await {
                     Ok((servers, regions, source)) => {
                         log::info!("Server list loaded from {}", source);
-
-                        // Store the list
                         if let Ok(mut list) = server_list_clone.lock() {
                             list.update(servers.clone(), regions.clone(), source);
                         }
-
-                        // Now ping all regions in the background
-                        finding_clone.store(true, Ordering::SeqCst);
-                        log::info!("Starting background latency measurement for {} regions...", regions.len());
-
-                        for region in &regions {
-                            let server_ips: Vec<(String, String)> = region.servers.iter()
-                                .filter_map(|server_id| {
-                                    servers.iter()
-                                        .find(|s| &s.region == server_id)
-                                        .map(|s| (server_id.clone(), s.ip.clone()))
-                                })
-                                .collect();
-
-                            log::info!("Pinging region '{}' with {} servers: {:?}", region.id, server_ips.len(),
-                                server_ips.iter().map(|(id, ip)| format!("{}={}", id, ip)).collect::<Vec<_>>());
-
-                            if server_ips.is_empty() {
-                                log::warn!("Region '{}' has no pingable servers! region.servers={:?}", region.id, region.servers);
-                                continue;
-                            }
-
-                            if let Some((best_server_id, latency)) = ping_region_async(&server_ips).await {
-                                if let Ok(mut lat) = latencies_clone.lock() {
-                                    lat.insert(region.id.clone(), (best_server_id.clone(), latency));
-                                    log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
-                                } else {
-                                    log::error!("Region '{}' failed to store latency - mutex poisoned", region.id);
-                                }
-                            } else {
-                                log::warn!("Region '{}' ping failed - no servers responded", region.id);
-                            }
-                        }
-
-                        finding_clone.store(false, Ordering::SeqCst);
-                        log::info!("Background latency measurement complete");
+                        (servers, regions)
                     }
                     Err(e) => {
                         log::error!("Failed to load server list: {}", e);
                         if let Ok(mut list) = server_list_clone.lock() {
                             *list = DynamicServerList::new_error(e);
                         }
+                        return; // Exit thread on failure
                     }
+                };
+
+                // Continuous ping loop - updates latencies every 10 seconds
+                let mut is_first_round = true;
+                loop {
+                    // Show "Measuring..." indicator only on first round
+                    if is_first_round {
+                        finding_clone.store(true, Ordering::SeqCst);
+                        log::info!("Starting initial latency measurement for {} regions...", regions.len());
+                    } else {
+                        log::debug!("Refreshing latencies for {} regions...", regions.len());
+                    }
+
+                    for region in &regions {
+                        let server_ips: Vec<(String, String)> = region.servers.iter()
+                            .filter_map(|server_id| {
+                                servers.iter()
+                                    .find(|s| &s.region == server_id)
+                                    .map(|s| (server_id.clone(), s.ip.clone()))
+                            })
+                            .collect();
+
+                        if is_first_round {
+                            log::info!("Pinging region '{}' with {} servers", region.id, server_ips.len());
+                        }
+
+                        if server_ips.is_empty() {
+                            continue;
+                        }
+
+                        // Use fast ping for real-time updates (1 ping instead of 2)
+                        if let Some((best_server_id, latency)) = ping_region_fast(&server_ips).await {
+                            if let Ok(mut lat) = latencies_clone.lock() {
+                                lat.insert(region.id.clone(), (best_server_id.clone(), latency));
+                                if is_first_round {
+                                    log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
+                                }
+                            }
+                        }
+                    }
+
+                    if is_first_round {
+                        finding_clone.store(false, Ordering::SeqCst);
+                        log::info!("Initial latency measurement complete");
+                        is_first_round = false;
+                    }
+
+                    // Wait 10 seconds before next refresh
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                 }
             });
         });
@@ -482,6 +525,10 @@ impl BoosterApp {
             network_boost_in_progress: Arc::new(AtomicBool::new(false)),
             network_boost_result_rx,
             network_boost_result_tx,
+            // Smart server selection
+            smart_selection: None,
+            smart_selection_rx,
+            smart_selection_tx,
         }
     }
 
@@ -623,6 +670,68 @@ impl BoosterApp {
 // ═══════════════════════════════════════════════════════════════════════════════
 //  ASYNC PING HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fast single-ping function for real-time latency updates
+/// Does 1 ICMP ping per server for quick refresh cycles
+async fn ping_region_fast(servers: &[(String, String)]) -> Option<(String, u32)> {
+    let mut best_result: Option<(String, u32)> = None;
+
+    for (server_id, server_ip) in servers {
+        // Single ping with shorter timeout for faster updates
+        let ping_result = tokio::task::spawn_blocking({
+            let ip = server_ip.clone();
+            move || {
+                hidden_command("ping")
+                    .args(["-n", "1", "-w", "1500", &ip])
+                    .output()
+            }
+        }).await;
+
+        let latency = match ping_result {
+            Ok(Ok(output)) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                parse_ping_output(&stdout)
+            }
+            _ => None,
+        };
+
+        // TCP fallback if ICMP fails
+        let latency = match latency {
+            Some(ms) => Some(ms),
+            None => tcp_ping_fast(server_ip, 8082).await,
+        };
+
+        if let Some(ms) = latency {
+            let is_better = match &best_result {
+                None => true,
+                Some((_, best_latency)) => ms < *best_latency,
+            };
+            if is_better {
+                best_result = Some((server_id.clone(), ms));
+            }
+        }
+    }
+
+    best_result
+}
+
+/// Fast TCP ping with shorter timeout for real-time updates
+async fn tcp_ping_fast(ip: &str, port: u16) -> Option<u32> {
+    use std::net::SocketAddr;
+    use tokio::net::TcpStream;
+    use tokio::time::{timeout, Duration, Instant};
+
+    let addr: SocketAddr = format!("{}:{}", ip, port).parse().ok()?;
+    let start = Instant::now();
+
+    match timeout(Duration::from_millis(1500), TcpStream::connect(addr)).await {
+        Ok(Ok(_stream)) => {
+            let elapsed = start.elapsed().as_millis() as u32;
+            Some(elapsed.saturating_sub(1).max(1))
+        }
+        _ => None,
+    }
+}
 
 /// Async ping function that doesn't block the main thread
 /// Returns (best_server_id, latency_ms) for the server with lowest latency
@@ -877,8 +986,9 @@ impl eframe::App for BoosterApp {
         let is_connected = self.vpn_state.is_connected();  // For pulse animation
         let is_network_testing = self.network_analyzer_state.stability.running || self.network_analyzer_state.speed.running;
         let has_pending_latency = self.pending_latency.is_some();  // For countdown display
+        let is_smart_selecting = self.smart_selection.is_some();  // For smart server selection animation
 
-        if is_loading || is_vpn_transitioning || is_logging_in || is_awaiting_oauth_here || is_updating || has_animations || is_network_testing {
+        if is_loading || is_vpn_transitioning || is_logging_in || is_awaiting_oauth_here || is_updating || has_animations || is_network_testing || is_smart_selecting {
             // Fast repaint for animations (60 FPS target)
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         } else if is_connected || has_pending_latency {
@@ -1047,6 +1157,65 @@ impl eframe::App for BoosterApp {
                 Err(msg) => {
                     log::warn!("Network boost operation failed: {}", msg);
                     // Optionally could show a status message to the user here
+                }
+            }
+        }
+
+        // Poll smart server selection ping results
+        if self.smart_selection.is_some() {
+            while let Ok((server_id, latency)) = self.smart_selection_rx.try_recv() {
+                if let Some(ref mut selection) = self.smart_selection {
+                    // Update result for this server
+                    selection.results.insert(server_id.clone(), latency);
+                    selection.current_index += 1;
+
+                    // Track best server
+                    if let Some(ms) = latency {
+                        let is_better = match &selection.best_server {
+                            None => true,
+                            Some((_, best_ms)) => ms < *best_ms,
+                        };
+                        if is_better {
+                            selection.best_server = Some((server_id.clone(), ms));
+                            log::info!("Smart selection: new best server {} ({}ms)", server_id, ms);
+                        }
+                    }
+
+                    // Check if all servers tested
+                    if selection.current_index >= selection.servers.len() {
+                        selection.completed = true;
+                        log::info!("Smart selection complete: {:?}", selection.best_server);
+                    }
+                }
+            }
+
+            // Check for timeout (10 seconds max) or completion
+            let should_connect = if let Some(ref selection) = self.smart_selection {
+                selection.completed || selection.started_at.elapsed() > std::time::Duration::from_secs(10)
+            } else {
+                false
+            };
+
+            if should_connect {
+                // Take the selection and connect to best server
+                if let Some(selection) = self.smart_selection.take() {
+                    if let Some((best_server_id, best_latency)) = selection.best_server {
+                        log::info!(
+                            "Smart selection finished: connecting to {} ({}ms)",
+                            best_server_id, best_latency
+                        );
+                        // Override selected server with the best one found
+                        self.selected_server = best_server_id.clone();
+                        // Update region latencies cache with our result
+                        if let Ok(mut lat) = self.region_latencies.try_lock() {
+                            lat.insert(selection.region_id.clone(), (best_server_id.clone(), best_latency));
+                        }
+                        // Now actually connect
+                        self.connect_vpn_immediate();
+                    } else {
+                        log::warn!("Smart selection: no servers responded, using default");
+                        self.connect_vpn_immediate();
+                    }
                 }
             }
         }
@@ -1646,6 +1815,12 @@ impl BoosterApp {
 
 impl BoosterApp {
     pub(crate) fn connect_vpn(&mut self) {
+        // Guard against re-entry - prevent spawning duplicate ping threads
+        if self.smart_selection.is_some() {
+            log::debug!("Smart selection already in progress, ignoring connect request");
+            return;
+        }
+
         // Set instant feedback - show connecting animation immediately
         // This avoids the 500ms delay before VPN state polling catches up
         self.connecting_initiated = Some(std::time::Instant::now());
@@ -1726,6 +1901,112 @@ impl BoosterApp {
         // We're running as administrator - proceed with connection
         log::info!("Running as administrator, proceeding with VPN connection");
 
+        // Check if at least one game preset is selected
+        if self.selected_game_presets.is_empty() {
+            self.set_status("Please select at least one game", STATUS_WARNING);
+            self.connecting_initiated = None;
+            return;
+        }
+
+        // If user has forced a specific server, skip smart selection and connect immediately
+        if self.forced_servers.contains_key(&self.selected_region) {
+            log::info!("Forced server set, skipping smart selection");
+            self.connect_vpn_immediate();
+            return;
+        }
+
+        // Start smart server selection - test all servers in the region
+        // and pick the one with lowest latency before connecting
+        let server_list = if let Ok(list) = self.dynamic_server_list.try_lock() {
+            list.clone()
+        } else {
+            log::warn!("Could not acquire server list lock, connecting immediately");
+            self.connect_vpn_immediate();
+            return;
+        };
+
+        // Get servers for the selected region
+        let region_info = server_list.gaming_regions.iter()
+            .find(|r| r.id == self.selected_region);
+
+        let servers: Vec<String> = match region_info {
+            Some(region) => region.servers.clone(),
+            None => {
+                log::warn!("Region '{}' not found, connecting immediately", self.selected_region);
+                self.connect_vpn_immediate();
+                return;
+            }
+        };
+
+        if servers.is_empty() {
+            log::warn!("No servers in region '{}', connecting immediately", self.selected_region);
+            self.connect_vpn_immediate();
+            return;
+        }
+
+        // Initialize smart selection state
+        log::info!("Starting smart server selection for region '{}' with {} servers", self.selected_region, servers.len());
+        self.smart_selection = Some(SmartServerSelection {
+            started_at: std::time::Instant::now(),
+            region_id: self.selected_region.clone(),
+            servers: servers.clone(),
+            results: HashMap::new(),
+            current_index: 0,
+            best_server: None,
+            completed: false,
+        });
+
+        // Spawn async tasks to ping each server (runs in parallel for speed)
+        let tx = self.smart_selection_tx.clone();
+        let rt = Arc::clone(&self.runtime);
+        let all_servers = server_list.servers.clone();
+
+        for server_id in servers {
+            let tx = tx.clone();
+            let servers_ref = all_servers.clone();
+            let rt = Arc::clone(&rt);
+
+            std::thread::spawn(move || {
+                rt.block_on(async {
+                    // Find server IP
+                    let server_ip = servers_ref.iter()
+                        .find(|s| s.region == server_id)
+                        .map(|s| s.ip.clone());
+
+                    let latency = if let Some(ip) = server_ip {
+                        // Single fast ping
+                        let ping_result = tokio::task::spawn_blocking({
+                            let ip = ip.clone();
+                            move || {
+                                crate::hidden_command("ping")
+                                    .args(["-n", "1", "-w", "1500", &ip])
+                                    .output()
+                            }
+                        }).await;
+
+                        match ping_result {
+                            Ok(Ok(output)) if output.status.success() => {
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                parse_ping_output(&stdout)
+                            }
+                            _ => {
+                                // TCP fallback
+                                tcp_ping_fast(&ip, 8082).await
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Send result back to main thread
+                    let _ = tx.send((server_id, latency));
+                });
+            });
+        }
+    }
+
+    /// Internal method to actually connect to VPN (called after smart selection completes)
+    fn connect_vpn_immediate(&mut self) {
         // Refresh token silently before connecting (handles expired sessions)
         let auth_manager = Arc::clone(&self.auth_manager);
         let rt = Arc::clone(&self.runtime);
@@ -1756,13 +2037,6 @@ impl BoosterApp {
                 }
             }
         };
-
-        // Check if at least one game preset is selected
-        if self.selected_game_presets.is_empty() {
-            self.set_status("Please select at least one game", STATUS_WARNING);
-            self.connecting_initiated = None;
-            return;
-        }
 
         // Determine which server to use:
         // 1. If user has forced a specific server for this region, use that
