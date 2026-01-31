@@ -21,8 +21,8 @@ const SESSION_ID_LEN: usize = 8;
 /// Maximum packet size (MTU - IP header - UDP header - session ID)
 const MAX_PAYLOAD_SIZE: usize = 1500 - 20 - 8 - SESSION_ID_LEN;
 
-/// Keepalive interval to maintain NAT bindings
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
+/// Keepalive interval to maintain NAT bindings (must match parallel_interceptor.rs)
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 
 /// UDP Relay client for Game Booster mode
 pub struct UdpRelay {
@@ -106,7 +106,9 @@ impl UdpRelay {
             .context("Failed to send to relay")?;
 
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
-        *self.last_activity.lock().unwrap() = Instant::now();
+        if let Ok(mut guard) = self.last_activity.lock() {
+            *guard = Instant::now();
+        }
 
         Ok(sent)
     }
@@ -147,7 +149,9 @@ impl UdpRelay {
 
                 buffer[..payload_len].copy_from_slice(&recv_buf[SESSION_ID_LEN..len]);
                 self.packets_received.fetch_add(1, Ordering::Relaxed);
-                *self.last_activity.lock().unwrap() = Instant::now();
+                if let Ok(mut guard) = self.last_activity.lock() {
+                    *guard = Instant::now();
+                }
 
                 Ok(Some(payload_len))
             }
@@ -159,12 +163,18 @@ impl UdpRelay {
 
     /// Send keepalive to maintain NAT binding
     pub fn send_keepalive(&self) -> Result<()> {
-        let last = *self.last_activity.lock().unwrap();
-        if last.elapsed() >= KEEPALIVE_INTERVAL {
+        let should_send = self.last_activity
+            .lock()
+            .map(|guard| guard.elapsed() >= KEEPALIVE_INTERVAL)
+            .unwrap_or(true); // If poisoned, send keepalive anyway
+
+        if should_send {
             // Send empty payload with just session ID
             self.socket.send_to(&self.session_id, self.relay_addr)
                 .context("Failed to send keepalive")?;
-            *self.last_activity.lock().unwrap() = Instant::now();
+            if let Ok(mut guard) = self.last_activity.lock() {
+                *guard = Instant::now();
+            }
             log::trace!("UDP Relay: Sent keepalive");
         }
         Ok(())
