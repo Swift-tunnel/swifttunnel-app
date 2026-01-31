@@ -228,13 +228,19 @@ pub struct ParallelInterceptor {
     inbound_receiver_handle: Option<JoinHandle<()>>,
     /// Detected game server IPs (for notification purposes)
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
+    /// Flag to trigger immediate cache refresh (set by ETW when game process detected)
+    /// This enables instant detection without polling - ExitLag-style efficiency
+    refresh_now_flag: Arc<AtomicBool>,
 }
 
 impl ParallelInterceptor {
     /// Create new parallel interceptor
     pub fn new(tunnel_apps: Vec<String>, routing_mode: crate::settings::RoutingMode) -> Self {
-        // Use number of logical CPUs, capped at 8 for efficiency
-        let num_workers = num_cpus::get().min(8).max(1);
+        // Use physical cores only (hyperthreading doesn't help packet processing)
+        // Cap at 4 workers - more threads = more overhead with diminishing returns
+        // ExitLag-style efficiency: fewer threads, smarter scheduling
+        let physical_cores = num_cpus::get_physical();
+        let num_workers = physical_cores.min(4).max(1);
 
         log::info!(
             "Creating parallel interceptor with {} workers (CPUs: {}), routing mode: {:?}",
@@ -273,7 +279,14 @@ impl ParallelInterceptor {
             inbound_handler: None,
             inbound_receiver_handle: None,
             detected_game_servers: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
+            refresh_now_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Trigger immediate cache refresh (call when ETW detects game process)
+    /// This is the key to instant detection without polling
+    pub fn trigger_refresh(&self) {
+        self.refresh_now_flag.store(true, Ordering::Release);
     }
 
     /// Get list of detected game server IPs (for notifications)
@@ -1015,8 +1028,9 @@ impl ParallelInterceptor {
         // Start cache refresher thread (single writer)
         let refresher_stop = Arc::clone(&self.stop_flag);
         let refresher_cache = Arc::clone(&self.process_cache);
+        let refresh_now = Arc::clone(&self.refresh_now_flag);
         self.refresher_handle = Some(thread::spawn(move || {
-            run_cache_refresher(refresher_cache, refresher_stop);
+            run_cache_refresher(refresher_cache, refresher_stop, refresh_now);
         }));
 
         // Reset throughput stats on start
@@ -2107,9 +2121,13 @@ fn run_packet_reader(
             break;
         }
 
-        // Wait with very short timeout (1ms) for low latency
+        // Wait for packet event with reasonable timeout
+        // The event is signaled by ndisapi driver when packets are available
+        // Using 100ms timeout allows responsive stop_flag checking while
+        // avoiding 1000Hz polling that wastes CPU when idle
+        // (When packets arrive, event signals immediately - no added latency)
         unsafe {
-            WaitForSingleObject(event, 1);
+            WaitForSingleObject(event, 100);
         }
 
         // Read batch of packets
@@ -2271,15 +2289,31 @@ fn run_packet_worker(
     let mut direct_encrypt_success = 0u64;
     let mut direct_encrypt_fail = 0u64;
 
+    // Adaptive timeout: short when active, longer when idle to save CPU
+    // This is the key optimization - avoid 1000Hz polling when no packets
+    let mut consecutive_timeouts = 0u32;
+
     loop {
         if stop_flag.load(Ordering::Relaxed) {
             break;
         }
 
-        // Receive packet with timeout (1ms for low latency)
-        let work = match receiver.recv_timeout(std::time::Duration::from_millis(1)) {
-            Ok(w) => w,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+        // Adaptive timeout based on recent activity:
+        // - 5ms when recently active (gaming latency acceptable)
+        // - 50ms after 10 consecutive timeouts (idle, save CPU)
+        // The reader thread has the event-driven wakeup, workers just need
+        // to process what the reader dispatches to them
+        let timeout_ms = if consecutive_timeouts > 10 { 50 } else { 5 };
+
+        let work = match receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+            Ok(w) => {
+                consecutive_timeouts = 0; // Reset on successful receive
+                w
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                continue;
+            }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
@@ -2570,11 +2604,20 @@ fn send_bypass_packet(
 
 
 /// Cache refresher thread - single writer
-fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBool>) {
+///
+/// OPTIMIZATION: Event-driven refresh instead of polling
+/// - Sleeps for 2 seconds normally (was 20ms = 50x reduction)
+/// - Wakes immediately when ETW detects game process (via refresh_now flag)
+/// - Full process scan only every 10th iteration (was every iteration)
+fn run_cache_refresher(
+    cache: Arc<LockFreeProcessCache>,
+    stop_flag: Arc<AtomicBool>,
+    refresh_now: Arc<AtomicBool>,
+) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
 
-    log::info!("Cache refresher started (2ms refresh interval, WireSock-style)");
+    log::info!("Cache refresher started (event-driven + 2s fallback, ExitLag-style efficiency)");
 
     // Log tunnel apps at startup
     let tunnel_apps = cache.tunnel_apps();
@@ -2592,6 +2635,10 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
     let mut refresh_count = 0u64;
     let mut first_run = true;
 
+    // OPTIMIZATION: Reuse HashMaps instead of recreating every iteration
+    let mut connections: HashMap<ConnectionKey, u32> = HashMap::with_capacity(2048);
+    let mut pid_names: HashMap<u32, String> = HashMap::with_capacity(512);
+
     loop {
         if stop_flag.load(Ordering::Relaxed) {
             break;
@@ -2602,15 +2649,36 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
             first_run = false;
             log::info!("Cache refresher: Performing initial refresh immediately");
         } else {
-            // 20ms refresh interval - balances CPU usage with cache freshness
-            // Inline lookup fallback in process_cache.rs handles cache misses
-            // for first packets of new connections (rare during gameplay)
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            // EVENT-DRIVEN REFRESH: Sleep in short bursts, wake on ETW trigger
+            // This is the key optimization - instead of polling at 50Hz (20ms),
+            // we sleep for 2 seconds total but check every 50ms if ETW triggered
+            //
+            // Result: 0.5 Hz idle polling vs 50 Hz before = 100x reduction
+            // But instant response when game launches (ETW sets refresh_now flag)
+            let mut slept_ms = 0u32;
+            const SLEEP_CHUNK_MS: u32 = 50;
+            const MAX_SLEEP_MS: u32 = 2000; // 2 second fallback
+
+            while slept_ms < MAX_SLEEP_MS {
+                // Check if ETW triggered immediate refresh
+                if refresh_now.swap(false, Ordering::AcqRel) {
+                    log::info!("Cache refresher: ETW triggered immediate refresh");
+                    break;
+                }
+
+                // Check stop flag
+                if stop_flag.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(SLEEP_CHUNK_MS as u64));
+                slept_ms += SLEEP_CHUNK_MS;
+            }
         }
 
-        // Collect connections
-        let mut connections: HashMap<ConnectionKey, u32> = HashMap::with_capacity(1024);
-        let mut pid_names: HashMap<u32, String> = HashMap::with_capacity(256);
+        // OPTIMIZATION: Clear and reuse instead of reallocating
+        connections.clear();
+        pid_names.clear();
 
         // Get TCP table
         unsafe {
@@ -2690,42 +2758,60 @@ fn run_cache_refresher(cache: Arc<LockFreeProcessCache>, stop_flag: Arc<AtomicBo
             }
         }
 
-        // Refresh process names
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet),
-        );
+        // OPTIMIZATION: Only do expensive full process scan every 10th iteration (~20 seconds)
+        // - refresh_count starts at 0, so first iteration gets a full scan (0 % 10 == 0)
+        // - ETW handles instant detection of new game launches
+        // - Full scan is just a fallback for edge cases (process started before VPN connected)
+        let do_full_process_scan = refresh_count % 10 == 0;
 
-        for pid in connections.values() {
-            if !pid_names.contains_key(pid) {
-                if let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) {
-                    pid_names.insert(*pid, process.name().to_string_lossy().to_string());
-                }
-            }
-        }
-
-        // Also scan for tunnel apps
         let tunnel_apps = cache.tunnel_apps();
         let mut tunnel_pids_found: Vec<(u32, String)> = Vec::new();
 
-        for (_pid, process) in system.processes() {
-            let name = process.name().to_string_lossy().to_lowercase();
-            for app in tunnel_apps {
-                if name.contains(app.trim_end_matches(".exe")) {
-                    let pid_u32 = _pid.as_u32();
-                    pid_names.insert(pid_u32, process.name().to_string_lossy().to_string());
-                    tunnel_pids_found.push((pid_u32, process.name().to_string_lossy().to_string()));
+        if do_full_process_scan {
+            // Full process scan - expensive but only ~every 20 seconds
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet),
+            );
 
-                    // Log the exact PID for debugging
-                    if refresh_count < 10 {
-                        log::info!(
-                            "Cache refresher: Found tunnel app '{}' with PID {} (sysinfo)",
-                            process.name().to_string_lossy(),
-                            pid_u32
-                        );
+            for pid in connections.values() {
+                if !pid_names.contains_key(pid) {
+                    if let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) {
+                        pid_names.insert(*pid, process.name().to_string_lossy().to_string());
                     }
-                    break;
+                }
+            }
+
+            // Scan for tunnel apps
+            for (_pid, process) in system.processes() {
+                let name = process.name().to_string_lossy().to_lowercase();
+                for app in tunnel_apps {
+                    if name.contains(app.trim_end_matches(".exe")) {
+                        let pid_u32 = _pid.as_u32();
+                        pid_names.insert(pid_u32, process.name().to_string_lossy().to_string());
+                        tunnel_pids_found.push((pid_u32, process.name().to_string_lossy().to_string()));
+
+                        if refresh_count < 10 {
+                            log::info!(
+                                "Cache refresher: Found tunnel app '{}' with PID {} (sysinfo)",
+                                process.name().to_string_lossy(),
+                                pid_u32
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Fast path: Only look up PIDs from connection table (no full scan)
+            // Uses cached process info from last full scan
+            for pid in connections.values() {
+                if !pid_names.contains_key(pid) {
+                    // Try to get from existing system cache (no syscall if already cached)
+                    if let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) {
+                        pid_names.insert(*pid, process.name().to_string_lossy().to_string());
+                    }
                 }
             }
         }

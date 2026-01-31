@@ -885,6 +885,8 @@ impl SplitTunnelDriver {
         if self.use_parallel {
             if let Some(ref interceptor) = self.parallel_interceptor {
                 interceptor.register_process_immediate(pid, name);
+                // Also trigger immediate cache refresh for connection table
+                interceptor.trigger_refresh();
             } else {
                 log::warn!("Cannot register process: parallel interceptor not active");
             }
@@ -892,6 +894,16 @@ impl SplitTunnelDriver {
             // Legacy mode doesn't support instant registration
             // Process will be detected on next 50ms poll
             log::debug!("Legacy mode: process {} will be detected on next poll", name);
+        }
+    }
+
+    /// Trigger immediate cache refresh (called by ETW when game process detected)
+    /// This wakes up the cache refresher from its 2-second sleep
+    pub fn trigger_cache_refresh(&self) {
+        if self.use_parallel {
+            if let Some(ref interceptor) = self.parallel_interceptor {
+                interceptor.trigger_refresh();
+            }
         }
     }
 }
