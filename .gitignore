@@ -25,6 +25,10 @@ CLAUDE.md
 PC-BOOSTS.md
 *.md
 !README.md
+!V3-ROUTING.md
+!ARCHITECTURE.md
+!DATAFLOW.md
+!ROADMAP.md
 
 # Allow Windows-testbench folder contents
 !Windows-testbench/
