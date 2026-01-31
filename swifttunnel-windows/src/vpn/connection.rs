@@ -189,7 +189,7 @@ impl VpnConnection {
     /// * `access_token` - Bearer token for API authentication
     /// * `region` - Server region to connect to
     /// * `tunnel_apps` - Apps that SHOULD use VPN (games). Everything else bypasses.
-    /// * `routing_mode` - V1 (process-based) or V2 (hybrid/ExitLag-style)
+    /// * `routing_mode` - V1 (process-based), V2 (hybrid/ExitLag-style), or V3 (unencrypted relay)
     pub async fn connect(
         &mut self,
         access_token: &str,
@@ -207,8 +207,15 @@ impl VpnConnection {
             }
         }
 
-        log::info!("Starting VPN connection to region: {}", region);
-        log::info!("Apps to tunnel through VPN: {:?}", tunnel_apps);
+        log::info!("Starting VPN connection to region: {} (mode: {:?})", region, routing_mode);
+        log::info!("Apps to tunnel: {:?}", tunnel_apps);
+
+        // V3 mode: Skip Wintun/WireGuard entirely - just use UDP relay
+        if routing_mode == crate::settings::RoutingMode::V3 {
+            return self.connect_v3(access_token, region, tunnel_apps).await;
+        }
+
+        // V1/V2: Full WireGuard tunnel with encryption
 
         // Step 1: Fetch configuration
         self.set_state(ConnectionState::FetchingConfig).await;
@@ -347,6 +354,89 @@ impl VpnConnection {
         Ok(())
     }
 
+    /// V3 connection - lightweight UDP relay without Wintun/WireGuard
+    ///
+    /// This is ~500ms faster than V1/V2 because it skips:
+    /// - Wintun adapter creation
+    /// - WireGuard tunnel initialization
+    /// - Route configuration
+    ///
+    /// Just sets up ndisapi packet interception with UDP relay forwarding.
+    async fn connect_v3(
+        &mut self,
+        access_token: &str,
+        region: &str,
+        tunnel_apps: Vec<String>,
+    ) -> VpnResult<()> {
+        log::info!("========================================");
+        log::info!("V3 MODE: Lightweight UDP Relay");
+        log::info!("========================================");
+        log::info!("  - No Wintun adapter");
+        log::info!("  - No WireGuard encryption");
+        log::info!("  - No route configuration");
+        log::info!("  - Direct UDP relay to game servers");
+        log::info!("========================================");
+
+        // Step 1: Fetch configuration (we still need server endpoint)
+        self.set_state(ConnectionState::FetchingConfig).await;
+        let config = match fetch_vpn_config(access_token, region).await {
+            Ok(c) => c,
+            Err(e) => {
+                self.set_state(ConnectionState::Error(e.to_string())).await;
+                return Err(e);
+            }
+        };
+
+        log::info!("V3: Server endpoint: {}", config.endpoint);
+        self.config = Some(config.clone());
+
+        // Initialize WFP block filter engine (for instant process blocking)
+        if let Err(e) = super::wfp_block::init() {
+            log::warn!("WFP block filter init failed (will use speculative tunneling): {}", e);
+        }
+
+        // Step 2: Skip Wintun - go directly to split tunnel
+        // V3 doesn't need a virtual adapter
+        self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
+
+        let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
+            match self.setup_v3_split_tunnel(&config, tunnel_apps.clone()).await {
+                Ok(processes) => {
+                    log::info!("V3 split tunnel setup succeeded");
+                    (processes, true)
+                }
+                Err(e) => {
+                    log::error!("V3 split tunnel setup FAILED: {}", e);
+                    self.cleanup().await;
+                    self.set_state(ConnectionState::Error(format!(
+                        "V3 split tunnel failed: {}",
+                        e
+                    ))).await;
+                    return Err(e);
+                }
+            }
+        } else {
+            log::warn!("No tunnel apps specified");
+            (Vec::new(), false)
+        };
+
+        // Step 3: Skip routes - V3 doesn't need them
+        // Traffic is intercepted at NDIS layer and forwarded via relay
+
+        // Step 4: Mark as connected
+        self.set_state(ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: config.region.clone(),
+            server_endpoint: config.endpoint.clone(),
+            assigned_ip: "V3-Relay".to_string(), // No VPN IP in V3 mode
+            split_tunnel_active,
+            tunneled_processes,
+        }).await;
+
+        log::info!("V3 connected successfully (no encryption, lowest latency)");
+        Ok(())
+    }
+
     /// Setup routes through VPN interface
     ///
     /// Only adds VPN server route - split tunnel (via ndisapi) handles app routing.
@@ -444,31 +534,9 @@ impl VpnConnection {
         driver.set_wireguard_context(wg_ctx);
         log::info!("Wintun injection context set for split tunnel");
 
-        // Set up forwarding context BEFORE configure() since threads start during configure()
-        // V1/V2: Use WireGuard encryption via VpnEncryptContext
-        // V3: Use unencrypted UDP relay via UdpRelay (like ExitLag)
-        if routing_mode == crate::settings::RoutingMode::V3 {
-            // V3: Create UDP relay to relay server (no encryption)
-            // Relay server runs on same IP as VPN server, port 51821
-            let relay_port = 51821u16;
-            let relay_server = config.server_endpoint.split(':').next().unwrap_or(&config.server_endpoint);
-
-            log::info!("V3 mode: Setting up UDP relay to {}:{}", relay_server, relay_port);
-
-            match super::udp_relay::UdpRelay::new(relay_server, relay_port) {
-                Ok(relay) => {
-                    let relay = std::sync::Arc::new(relay);
-                    driver.set_relay_context(relay);
-                    log::info!("V3 UDP relay context set");
-                }
-                Err(e) => {
-                    log::error!("Failed to create V3 UDP relay: {}", e);
-                    return Err(VpnError::SplitTunnelSetupFailed(
-                        format!("Failed to create V3 relay: {}", e)
-                    ));
-                }
-            }
-        } else if let Some(ref tunnel_ref) = self.tunnel {
+        // Set up WireGuard encryption context BEFORE configure() since threads start during configure()
+        // Note: V3 mode uses setup_v3_split_tunnel() instead - this function is only for V1/V2
+        if let Some(ref tunnel_ref) = self.tunnel {
             // V1/V2: Use WireGuard encryption
             // CRITICAL FIX for Error 279 (zero inbound traffic):
             // We MUST reuse the socket that performed the WireGuard handshake. The VPN server
@@ -709,6 +777,187 @@ impl VpnConnection {
         });
 
         log::info!("Split tunnel configured successfully - only selected games use VPN");
+        Ok(running)
+    }
+
+    /// V3 split tunnel setup - no Wintun, just ndisapi + UDP relay
+    ///
+    /// Simplified flow:
+    /// 1. Check driver availability
+    /// 2. Open/initialize driver
+    /// 3. Create UDP relay to server
+    /// 4. Configure with relay context (no WireGuard)
+    /// 5. Start process monitor
+    async fn setup_v3_split_tunnel(
+        &mut self,
+        config: &VpnConfig,
+        tunnel_apps: Vec<String>,
+    ) -> VpnResult<Vec<String>> {
+        log::info!("Setting up V3 split tunnel (no Wintun)...");
+
+        // Get internet interface IP for NAT rewriting on inbound packets
+        let internet_ip = get_internet_interface_ip().map_err(|e| {
+            VpnError::SplitTunnelSetupFailed(format!(
+                "Failed to get internet interface IP: {}",
+                e
+            ))
+        })?;
+        log::info!("V3: Internet interface IP: {}", internet_ip);
+
+        // Check if driver is available
+        if !SplitTunnelDriver::check_driver_available() {
+            return Err(VpnError::SplitTunnelNotAvailable);
+        }
+
+        // Create and configure driver
+        let mut driver = SplitTunnelDriver::new();
+
+        // Open driver
+        driver.open().map_err(|e| {
+            VpnError::SplitTunnelSetupFailed(format!("Failed to open driver: {}", e))
+        })?;
+        log::info!("V3: Split tunnel driver opened");
+
+        // Initialize driver
+        driver.initialize().map_err(|e| {
+            let _ = driver.close();
+            VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
+        })?;
+        log::info!("V3: Split tunnel driver initialized");
+
+        // Create UDP relay to relay server (port 51821 on same IP as VPN server)
+        let relay_port = 51821u16;
+        let relay_server = config.server_endpoint.split(':').next().unwrap_or(&config.server_endpoint);
+
+        log::info!("V3: Creating UDP relay to {}:{}", relay_server, relay_port);
+
+        let relay = match super::udp_relay::UdpRelay::new(relay_server, relay_port) {
+            Ok(r) => std::sync::Arc::new(r),
+            Err(e) => {
+                let _ = driver.close();
+                return Err(VpnError::SplitTunnelSetupFailed(
+                    format!("Failed to create V3 relay: {}", e)
+                ));
+            }
+        };
+
+        driver.set_relay_context(relay);
+        log::info!("V3: UDP relay context set");
+
+        // Configure driver with V3 routing mode
+        // For V3: tunnel_interface_luid = 0 (no Wintun), tunnel_ip = internet_ip (no NAT needed)
+        let split_config = SplitTunnelConfig::new(
+            tunnel_apps.clone(),
+            internet_ip.to_string(), // Use internet IP as "tunnel IP" (no NAT rewriting for V3)
+            internet_ip.to_string(),
+            0, // No Wintun LUID in V3 mode
+            crate::settings::RoutingMode::V3,
+        );
+
+        driver.configure(split_config).map_err(|e| {
+            let _ = driver.close();
+            VpnError::SplitTunnelSetupFailed(format!("Failed to configure V3 split tunnel: {}", e))
+        })?;
+
+        let running = driver.get_running_tunnel_apps();
+        if !running.is_empty() {
+            log::info!("V3: Currently tunneling: {:?}", running);
+        }
+
+        let driver = Arc::new(Mutex::new(driver));
+        self.split_tunnel = Some(Arc::clone(&driver));
+
+        // Start ETW process watcher for instant game detection
+        let watch_list: std::collections::HashSet<String> = tunnel_apps.iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+
+        let etw_receiver: Option<Receiver<ProcessStartEvent>> = match ProcessWatcher::start(watch_list) {
+            Ok(watcher) => {
+                log::info!("V3: ETW process watcher started");
+                let receiver = watcher.receiver().clone();
+                self.etw_watcher = Some(watcher);
+                Some(receiver)
+            }
+            Err(e) => {
+                log::warn!("V3: ETW process watcher failed (continuing with polling): {}", e);
+                None
+            }
+        };
+
+        // Start process monitor (same as V1/V2)
+        self.process_monitor_stop.store(false, Ordering::SeqCst);
+        let stop_flag = Arc::clone(&self.process_monitor_stop);
+        let state_handle = Arc::clone(&self.state);
+
+        tokio::spawn(async move {
+            log::info!("V3: Process monitor started");
+
+            let mut last_refresh = std::time::Instant::now();
+            const ETW_POLL_INTERVAL_MS: u64 = 5;
+
+            loop {
+                if stop_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // Poll ETW events
+                if let Some(ref receiver) = etw_receiver {
+                    while let Ok(event) = receiver.try_recv() {
+                        log::info!(
+                            "V3 ETW: Detected {} (PID: {})",
+                            event.name, event.pid
+                        );
+
+                        let driver_guard = driver.lock().await;
+                        driver_guard.register_process_immediate(event.pid, event.name.clone());
+                        drop(driver_guard);
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(ETW_POLL_INTERVAL_MS)).await;
+
+                if stop_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // Periodic refresh
+                if last_refresh.elapsed().as_millis() < REFRESH_INTERVAL_MS as u128 {
+                    continue;
+                }
+                last_refresh = std::time::Instant::now();
+
+                let mut driver_guard = driver.lock().await;
+                match driver_guard.refresh_exclusions() {
+                    Ok(_) => {
+                        let running_names = driver_guard.get_running_tunnel_apps();
+                        drop(driver_guard);
+
+                        let mut state = state_handle.lock().await;
+                        if let ConnectionState::Connected {
+                            ref mut tunneled_processes,
+                            ..
+                        } = *state {
+                            if *tunneled_processes != running_names {
+                                if !running_names.is_empty() && tunneled_processes.is_empty() {
+                                    log::info!("V3: Game detected, relaying: {:?}", running_names);
+                                } else if running_names.is_empty() && !tunneled_processes.is_empty() {
+                                    log::info!("V3: All games exited");
+                                }
+                                *tunneled_processes = running_names;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("V3: Exclusion refresh error: {}", e);
+                    }
+                }
+            }
+
+            log::info!("V3: Process monitor stopped");
+        });
+
+        log::info!("V3 split tunnel configured - game traffic relayed via UDP");
         Ok(running)
     }
 

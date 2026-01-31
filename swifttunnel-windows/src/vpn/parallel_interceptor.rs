@@ -746,10 +746,14 @@ impl ParallelInterceptor {
             ));
         }
 
-        // Set VPN adapter
+        // Set VPN adapter (not required for V3 mode where LUID=0)
         if let Some((idx, name)) = vpn_adapter {
             self.vpn_adapter_idx = Some(idx);
             log::info!("Found VPN adapter: {} (index {})", name, idx);
+        } else if vpn_adapter_luid == 0 {
+            // V3 mode: No Wintun adapter needed - we use UDP relay instead
+            log::info!("V3 mode: No VPN adapter required (LUID=0)");
+            self.vpn_adapter_idx = None;
         } else {
             return Err(VpnError::SplitTunnel(format!(
                 "VPN adapter '{}' not found. Ensure the Wintun adapter was created successfully.",
