@@ -1917,32 +1917,50 @@ impl BoosterApp {
 
         // Start smart server selection - test all servers in the region
         // and pick the one with lowest latency before connecting
-        let server_list = if let Ok(list) = self.dynamic_server_list.try_lock() {
-            (*list).clone()
-        } else {
-            log::warn!("Could not acquire server list lock, connecting immediately");
-            self.connect_vpn_immediate();
-            return;
-        };
+        // Extract needed data while holding the lock, then release it
+        let (servers, server_ips): (Vec<String>, Vec<(String, String)>) = {
+            let list = match self.dynamic_server_list.try_lock() {
+                Ok(l) => l,
+                Err(_) => {
+                    log::warn!("Could not acquire server list lock, connecting immediately");
+                    self.connect_vpn_immediate();
+                    return;
+                }
+            };
 
-        // Get servers for the selected region
-        let region_info = server_list.gaming_regions.iter()
-            .find(|r| r.id == self.selected_region);
+            // Get servers for the selected region
+            let region_info = list.gaming_regions.iter()
+                .find(|r| r.id == self.selected_region);
 
-        let servers: Vec<String> = match region_info {
-            Some(region) => region.servers.clone(),
-            None => {
-                log::warn!("Region '{}' not found, connecting immediately", self.selected_region);
+            let server_ids: Vec<String> = match region_info {
+                Some(region) => region.servers.clone(),
+                None => {
+                    log::warn!("Region '{}' not found, connecting immediately", self.selected_region);
+                    drop(list); // Release lock before calling connect
+                    self.connect_vpn_immediate();
+                    return;
+                }
+            };
+
+            if server_ids.is_empty() {
+                log::warn!("No servers in region '{}', connecting immediately", self.selected_region);
+                drop(list);
                 self.connect_vpn_immediate();
                 return;
             }
-        };
 
-        if servers.is_empty() {
-            log::warn!("No servers in region '{}', connecting immediately", self.selected_region);
-            self.connect_vpn_immediate();
-            return;
-        }
+            // Build (server_id, ip) pairs for ping threads
+            let ips: Vec<(String, String)> = server_ids.iter()
+                .filter_map(|id| {
+                    list.servers.iter()
+                        .find(|s| &s.region == id)
+                        .map(|s| (id.clone(), s.ip.clone()))
+                })
+                .collect();
+
+            (server_ids, ips)
+        };
+        // Lock is now released
 
         // Initialize smart selection state
         log::info!("Starting smart server selection for region '{}' with {} servers", self.selected_region, servers.len());
@@ -1959,43 +1977,32 @@ impl BoosterApp {
         // Spawn async tasks to ping each server (runs in parallel for speed)
         let tx = self.smart_selection_tx.clone();
         let rt = Arc::clone(&self.runtime);
-        let all_servers = server_list.servers.clone();
 
-        for server_id in servers {
+        for (server_id, ip) in server_ips {
             let tx = tx.clone();
-            let servers_ref = all_servers.clone();
             let rt = Arc::clone(&rt);
 
             std::thread::spawn(move || {
                 rt.block_on(async {
-                    // Find server IP
-                    let server_ip = servers_ref.iter()
-                        .find(|s| s.region == server_id)
-                        .map(|s| s.ip.clone());
-
-                    let latency = if let Some(ip) = server_ip {
-                        // Single fast ping
-                        let ping_result = tokio::task::spawn_blocking({
-                            let ip: String = ip.clone();
-                            move || {
-                                crate::hidden_command("ping")
-                                    .args(["-n", "1", "-w", "1500", &ip])
-                                    .output()
-                            }
-                        }).await;
-
-                        match ping_result {
-                            Ok(Ok(output)) if output.status.success() => {
-                                let stdout = String::from_utf8_lossy(&output.stdout);
-                                parse_ping_output(&stdout)
-                            }
-                            _ => {
-                                // TCP fallback
-                                tcp_ping_fast(&ip, 8082).await
-                            }
+                    // Single fast ping
+                    let ping_result = tokio::task::spawn_blocking({
+                        let ping_ip = ip.clone();
+                        move || {
+                            crate::hidden_command("ping")
+                                .args(["-n", "1", "-w", "1500", &ping_ip])
+                                .output()
                         }
-                    } else {
-                        None
+                    }).await;
+
+                    let latency = match ping_result {
+                        Ok(Ok(output)) if output.status.success() => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            parse_ping_output(&stdout)
+                        }
+                        _ => {
+                            // TCP fallback
+                            tcp_ping_fast(&ip, 8082).await
+                        }
                     };
 
                     // Send result back to main thread
