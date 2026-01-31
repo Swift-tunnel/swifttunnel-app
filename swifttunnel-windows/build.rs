@@ -19,12 +19,15 @@ fn main() {
         )
         .expect("Failed to embed manifest");
 
-        // Embed icon into executable (shows in Task Manager, Explorer, etc.)
+        // Embed icon and version info into executable (shows in Task Manager, Explorer, etc.)
         let mut res = winres::WindowsResource::new();
         res.set_icon("installer/swifttunnel.ico");
         res.set("ProductName", "SwiftTunnel");
         res.set("FileDescription", "SwiftTunnel Game Booster");
         res.set("LegalCopyright", "Copyright © 2024-2026 SwiftTunnel");
+        // Set version from Cargo.toml - CRITICAL: ensures Windows Properties shows correct version
+        res.set("FileVersion", env!("CARGO_PKG_VERSION"));
+        res.set("ProductVersion", env!("CARGO_PKG_VERSION"));
         if let Err(e) = res.compile() {
             eprintln!("Warning: Failed to embed icon: {}", e);
         }
