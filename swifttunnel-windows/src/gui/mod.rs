@@ -1918,7 +1918,7 @@ impl BoosterApp {
         // Start smart server selection - test all servers in the region
         // and pick the one with lowest latency before connecting
         let server_list = if let Ok(list) = self.dynamic_server_list.try_lock() {
-            list.clone()
+            (*list).clone()
         } else {
             log::warn!("Could not acquire server list lock, connecting immediately");
             self.connect_vpn_immediate();
@@ -1976,7 +1976,7 @@ impl BoosterApp {
                     let latency = if let Some(ip) = server_ip {
                         // Single fast ping
                         let ping_result = tokio::task::spawn_blocking({
-                            let ip = ip.clone();
+                            let ip: String = ip.clone();
                             move || {
                                 crate::hidden_command("ping")
                                     .args(["-n", "1", "-w", "1500", &ip])
