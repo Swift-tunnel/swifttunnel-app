@@ -284,7 +284,7 @@ impl BoosterApp {
             ui.painter().text(
                 button_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                nav_item.icon_simple(),
+                nav_item.icon(),
                 egui::FontId::proportional(if is_active { 18.0 } else { 16.0 }),
                 icon_color
             );
