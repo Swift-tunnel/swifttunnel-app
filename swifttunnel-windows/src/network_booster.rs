@@ -159,18 +159,8 @@ impl NetworkBooster {
     /// Enable external network boost (integration point for SwiftTunnel)
     fn enable_external_network_boost(&self) -> Result<()> {
         info!("Enabling external network boost integration");
-
-        // This is a placeholder for integrating with your existing network booster
-        // You would call your SwiftTunnel API or executable here
-
-        // Example: Start your network booster process
-        // let output = Command::new("SwiftTunnel.exe")
-        //     .args(&["--enable", "--game", "roblox"])
-        //     .spawn()?;
-
-        // For now, just log that we would enable it
+        // Integration point - connect your network booster here
         info!("Network boost integration point - connect your SwiftTunnel here");
-
         Ok(())
     }
 

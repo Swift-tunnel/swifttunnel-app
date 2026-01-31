@@ -946,57 +946,6 @@ impl Drop for SplitTunnelDriver {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  HELPER FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Get default tunnel apps (Roblox by default)
-pub fn get_default_tunnel_apps() -> Vec<String> {
-    GamePreset::Roblox.process_names().iter().map(|s| s.to_string()).collect()
-}
-
-/// Find Roblox player path
-pub fn find_roblox_path() -> Option<PathBuf> {
-    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-    let roblox_dir = PathBuf::from(local_app_data).join("Roblox").join("Versions");
-
-    if !roblox_dir.exists() {
-        return None;
-    }
-
-    // Find the version folder with RobloxPlayerBeta.exe
-    for entry in std::fs::read_dir(&roblox_dir).ok()? {
-        let entry = entry.ok()?;
-        let player_exe = entry.path().join("RobloxPlayerBeta.exe");
-        if player_exe.exists() {
-            return Some(player_exe);
-        }
-    }
-
-    None
-}
-
-/// Find Roblox Studio path
-pub fn find_roblox_studio_path() -> Option<PathBuf> {
-    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-    let roblox_dir = PathBuf::from(local_app_data).join("Roblox").join("Versions");
-
-    if !roblox_dir.exists() {
-        return None;
-    }
-
-    // Find the version folder with RobloxStudioBeta.exe
-    for entry in std::fs::read_dir(&roblox_dir).ok()? {
-        let entry = entry.ok()?;
-        let studio_exe = entry.path().join("RobloxStudioBeta.exe");
-        if studio_exe.exists() {
-            return Some(studio_exe);
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

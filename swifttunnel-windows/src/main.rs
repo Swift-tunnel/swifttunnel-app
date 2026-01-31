@@ -32,6 +32,7 @@ use settings::load_settings;
 use updater::{run_auto_updater, AutoUpdateResult, cleanup_updates};
 use utils::{rotate_log_if_needed, load_pending_connection};
 use vpn::split_tunnel::SplitTunnelDriver;
+use vpn::{recover_tso_on_startup, emergency_tso_restore};
 use crate::gui::set_auto_connect_pending;
 
 use eframe::NativeOptions;
@@ -106,6 +107,10 @@ fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
 /// Set up crash logging to capture panics
 fn setup_panic_hook() {
     panic::set_hook(Box::new(|info| {
+        // CRITICAL: Restore TSO settings before anything else
+        // This prevents users from being stuck with degraded network performance
+        emergency_tso_restore();
+
         // Get location info
         let location = info.location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
@@ -194,6 +199,10 @@ fn main() -> eframe::Result<()> {
     info!("Starting SwiftTunnel v{}", env!("CARGO_PKG_VERSION"));
     info!("Log file: {}", log_file_path.display());
     info!("Log level: {:?}", log_level);
+
+    // Recover TSO settings if app previously crashed while TSO was disabled
+    // This prevents users from being stuck with degraded network performance
+    recover_tso_on_startup();
 
     // Check for --resume-connect flag (set when relaunching with elevation)
     // This is used to continue a VPN connection after UAC elevation

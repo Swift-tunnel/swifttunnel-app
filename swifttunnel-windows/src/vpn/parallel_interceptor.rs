@@ -50,6 +50,7 @@ use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
 
@@ -58,6 +59,7 @@ use boringtun::noise::{Tunn, TunnResult};
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
 use super::tunnel::FastMutex;
+use super::tso_recovery::{write_tso_marker, delete_tso_marker};
 use super::{VpnError, VpnResult};
 use crate::geolocation::is_roblox_game_server_ip;
 
@@ -174,6 +176,51 @@ impl ThroughputStats {
     pub fn add_rx(&self, bytes: u64) {
         self.bytes_rx.fetch_add(bytes, Ordering::Relaxed);
     }
+}
+
+// ============================================================================
+// THREAD JOIN WITH TIMEOUT
+// ============================================================================
+
+/// Timeout for thread join operations during stop()
+const THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Join a thread with a timeout using a polling approach
+///
+/// Since Rust's JoinHandle doesn't have a native timeout, we use a polling strategy:
+/// - Check if the thread is finished every 100ms
+/// - If timeout is reached, log a warning and return false (thread still running)
+/// - This prevents stop() from hanging indefinitely if a thread is stuck
+fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(100);
+
+    // First, try to join immediately in case thread already finished
+    if handle.is_finished() {
+        let _ = handle.join();
+        return true;
+    }
+
+    // Poll until timeout
+    while start.elapsed() < THREAD_JOIN_TIMEOUT {
+        if handle.is_finished() {
+            let _ = handle.join();
+            log::debug!("{} thread joined successfully", name);
+            return true;
+        }
+        thread::sleep(poll_interval);
+    }
+
+    // Timeout reached - thread is stuck
+    log::warn!(
+        "{} thread did not finish within {:?} - continuing without join (thread may leak)",
+        name,
+        THREAD_JOIN_TIMEOUT
+    );
+    // Note: We intentionally don't call join() here as it would block forever.
+    // The thread will be terminated when the process exits.
+    // This is a tradeoff: we leak the thread but don't hang the app.
+    false
 }
 
 /// Parallel packet interceptor
@@ -877,6 +924,9 @@ impl ParallelInterceptor {
         // 5 second timeout to prevent indefinite hangs
         if Self::run_powershell_with_timeout(&script, 5) {
             log::info!("TSO/LSO disabled successfully on {}", friendly_name);
+            // Write marker file BEFORE setting flag - ensures recovery works if we crash
+            // between these two operations (marker exists = TSO was disabled)
+            write_tso_marker(&friendly_name);
             self.tso_was_disabled = true;
         } else {
             log::warn!("Failed to disable TSO (non-fatal) - adapter may not support these settings");
@@ -924,8 +974,12 @@ impl ParallelInterceptor {
         // 5 second timeout
         if Self::run_powershell_with_timeout(&script, 5) {
             log::info!("TSO/LSO re-enabled on {}", friendly_name);
+            // Delete marker file - TSO successfully restored
+            delete_tso_marker();
         } else {
             log::warn!("Failed to re-enable TSO - manual re-enable may be needed");
+            // Still delete marker to avoid repeated restore attempts on next startup
+            delete_tso_marker();
         }
 
         self.tso_was_disabled = false;
@@ -1170,21 +1224,21 @@ impl ParallelInterceptor {
         log::info!("Stopping parallel interceptor...");
         self.stop_flag.store(true, Ordering::SeqCst);
 
-        // Wait for threads
+        // Wait for threads with timeout to prevent hanging on stuck threads
         if let Some(handle) = self.reader_handle.take() {
-            let _ = handle.join();
+            join_with_timeout(handle, "Reader");
         }
 
-        for handle in self.worker_handles.drain(..) {
-            let _ = handle.join();
+        for (i, handle) in self.worker_handles.drain(..).enumerate() {
+            join_with_timeout(handle, &format!("Worker-{}", i));
         }
 
         if let Some(handle) = self.refresher_handle.take() {
-            let _ = handle.join();
+            join_with_timeout(handle, "Refresher");
         }
 
         if let Some(handle) = self.inbound_receiver_handle.take() {
-            let _ = handle.join();
+            join_with_timeout(handle, "Inbound");
         }
 
         self.active = false;
@@ -2974,61 +3028,6 @@ fn parse_ports(data: &[u8]) -> Option<(u16, u16)> {
     let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
 
     Some((src_port, dst_port))
-}
-
-/// Check if packet should be routed to VPN (legacy, for reference)
-///
-/// NOTE: This is now replaced by should_route_to_vpn_with_inline_cache
-/// which adds per-worker caching for inline lookups.
-#[allow(dead_code)]
-fn should_route_to_vpn(data: &[u8], snapshot: &ProcessSnapshot) -> bool {
-    // Skip Ethernet header (14 bytes)
-    if data.len() < 14 + 20 + 4 {
-        return false;
-    }
-
-    // Check EtherType
-    let ethertype = u16::from_be_bytes([data[12], data[13]]);
-    if ethertype != 0x0800 {
-        return false;
-    }
-
-    // Parse IP header
-    let ip_start = 14;
-    let version = (data[ip_start] >> 4) & 0xF;
-    if version != 4 {
-        return false;
-    }
-
-    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
-    let protocol_num = data[ip_start + 9];
-
-    let protocol = match protocol_num {
-        6 => Protocol::Tcp,
-        17 => Protocol::Udp,
-        _ => return false,
-    };
-
-    let src_ip = Ipv4Addr::new(
-        data[ip_start + 12],
-        data[ip_start + 13],
-        data[ip_start + 14],
-        data[ip_start + 15],
-    );
-
-    // Parse transport header
-    let transport_start = ip_start + ihl;
-    if data.len() < transport_start + 4 {
-        return false;
-    }
-
-    let src_port = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
-
-    // WireSock-style: Trust the cache completely (O(1) hash lookup, <1μs)
-    // No expensive inline_connection_lookup (~500μs syscall eliminated!)
-    // First few packets of new connections may bypass (max 2ms until cache refresh)
-    // This is the same approach WireSock uses for high-performance split tunneling
-    snapshot.should_tunnel(src_ip, src_port, protocol)
 }
 
 /// Per-worker inline cache for connection lookups
