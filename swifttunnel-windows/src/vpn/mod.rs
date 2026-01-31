@@ -37,8 +37,10 @@ pub mod connection;
 pub mod servers;
 pub mod error_messages;
 pub mod udp_relay;
+pub mod tso_recovery;
 
 pub use config::{fetch_vpn_config, update_latency, VpnConfigRequest};
+pub use tso_recovery::{recover_tso_on_startup, emergency_tso_restore};
 pub use adapter::WintunAdapter;
 pub use tunnel::{WireguardTunnel, InboundHandler};
 pub use packet_interceptor::WireguardContext;

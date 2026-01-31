@@ -24,16 +24,6 @@ impl NavItem {
         }
     }
 
-    /// Simple ASCII icon fallback (uses Unicode symbols that render well in most fonts)
-    pub fn icon_simple(&self) -> &'static str {
-        match self {
-            NavItem::Connect => "\u{1F310}", // 🌐 Globe (WiFi/connection)
-            NavItem::Boost => "\u{26A1}",    // ⚡ Lightning (FPS boost)
-            NavItem::Network => "\u{1F4CA}", // 📊 Chart (network analyzer)
-            NavItem::Settings => "\u{2699}", // ⚙ Gear (settings)
-        }
-    }
-
     /// Tooltip text
     pub fn tooltip(&self) -> &'static str {
         match self {
