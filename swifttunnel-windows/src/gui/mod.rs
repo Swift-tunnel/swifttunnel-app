@@ -1918,13 +1918,12 @@ impl BoosterApp {
         // Start smart server selection - test all servers in the region
         // and pick the one with lowest latency before connecting
         // Extract needed data while holding the lock, then release it
-        let (servers, server_ips): (Vec<String>, Vec<(String, String)>) = {
+        let extraction_result: Option<(Vec<String>, Vec<(String, String)>)> = {
             let list = match self.dynamic_server_list.try_lock() {
                 Ok(l) => l,
                 Err(_) => {
                     log::warn!("Could not acquire server list lock, connecting immediately");
-                    self.connect_vpn_immediate();
-                    return;
+                    None?
                 }
             };
 
@@ -1936,17 +1935,13 @@ impl BoosterApp {
                 Some(region) => region.servers.clone(),
                 None => {
                     log::warn!("Region '{}' not found, connecting immediately", self.selected_region);
-                    drop(list); // Release lock before calling connect
-                    self.connect_vpn_immediate();
-                    return;
+                    None?
                 }
             };
 
             if server_ids.is_empty() {
                 log::warn!("No servers in region '{}', connecting immediately", self.selected_region);
-                drop(list);
-                self.connect_vpn_immediate();
-                return;
+                None?
             }
 
             // Build (server_id, ip) pairs for ping threads
@@ -1958,9 +1953,18 @@ impl BoosterApp {
                 })
                 .collect();
 
-            (server_ids, ips)
+            Some((server_ids, ips))
         };
         // Lock is now released
+
+        // Handle fallback case (couldn't get server list data)
+        let (servers, server_ips) = match extraction_result {
+            Some(data) => data,
+            None => {
+                self.connect_vpn_immediate();
+                return;
+            }
+        };
 
         // Initialize smart selection state
         log::info!("Starting smart server selection for region '{}' with {} servers", self.selected_region, servers.len());
