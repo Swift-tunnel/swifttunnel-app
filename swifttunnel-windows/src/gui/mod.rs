@@ -223,8 +223,8 @@ pub struct BoosterApp {
     /// Flag indicating network boost operation is in progress (to show loading state)
     network_boost_in_progress: Arc<AtomicBool>,
     /// Channel to receive network boost operation results
-    network_boost_result_rx: std::sync::mpsc::Receiver<Result<(), String>>,
-    network_boost_result_tx: std::sync::mpsc::Sender<Result<(), String>>,
+    network_boost_result_rx: std::sync::mpsc::Receiver<std::result::Result<(), String>>,
+    network_boost_result_tx: std::sync::mpsc::Sender<std::result::Result<(), String>>,
 }
 
 impl BoosterApp {
@@ -252,7 +252,7 @@ impl BoosterApp {
         let (game_server_tx, game_server_rx) = std::sync::mpsc::channel::<(std::net::Ipv4Addr, String)>();
 
         // Create channel for network boost operation results
-        let (network_boost_result_tx, network_boost_result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (network_boost_result_tx, network_boost_result_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
 
         // Initialize auth manager - this can only fail if Windows DPAPI is unavailable,
         // which indicates a fundamental system issue. In that case, panic is acceptable.
