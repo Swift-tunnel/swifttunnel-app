@@ -221,7 +221,10 @@ pub struct ParallelInterceptor {
     /// Physical adapter IP (for NAT rewriting on inbound packets)
     internet_ip: Option<std::net::Ipv4Addr>,
     /// Context for direct WireGuard encryption (bypasses Wintun for outbound)
+    /// Used for V1 and V2 routing modes
     vpn_encrypt_ctx: Option<VpnEncryptContext>,
+    /// Context for V3 UDP relay (unencrypted, lowest latency)
+    relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
     /// Inbound handler for decrypted packets (does NAT and injects to MSTCP)
     inbound_handler: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
     /// Inbound receiver thread handle (reads from VpnEncryptContext socket)
@@ -276,6 +279,7 @@ impl ParallelInterceptor {
             tunnel_ip: None,
             internet_ip: None,
             vpn_encrypt_ctx: None,
+            relay_ctx: None,
             inbound_handler: None,
             inbound_receiver_handle: None,
             detected_game_servers: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
@@ -367,6 +371,24 @@ impl ParallelInterceptor {
             ctx.server_addr
         );
         self.vpn_encrypt_ctx = Some(ctx);
+    }
+
+    /// Set UDP relay context for V3 mode (unencrypted relay)
+    ///
+    /// This allows workers to forward packets directly via UDP relay
+    /// without encryption. Used for V3 routing mode (lowest latency).
+    pub fn set_relay_context(&mut self, relay: Arc<super::udp_relay::UdpRelay>) {
+        log::info!(
+            "Set relay context: server={}, session={:016x}",
+            relay.relay_addr(),
+            relay.session_id_u64()
+        );
+        self.relay_ctx = Some(relay);
+    }
+
+    /// Get the relay context for external use (e.g., inbound receiver)
+    pub fn get_relay_context(&self) -> Option<Arc<super::udp_relay::UdpRelay>> {
+        self.relay_ctx.clone()
     }
 
     /// Set inbound handler for decrypted packets
@@ -1046,6 +1068,7 @@ impl ParallelInterceptor {
             let tunnel_ip = self.tunnel_ip;
             let internet_ip = self.internet_ip;
             let vpn_encrypt_ctx = self.vpn_encrypt_ctx.clone();
+            let relay_ctx = self.relay_ctx.clone();
             let detected_game_servers = Arc::clone(&self.detected_game_servers);
 
             let handle = thread::spawn(move || {
@@ -1063,6 +1086,7 @@ impl ParallelInterceptor {
                     tunnel_ip,
                     internet_ip,
                     vpn_encrypt_ctx,
+                    relay_ctx,
                     detected_game_servers,
                 );
             });
@@ -2224,6 +2248,7 @@ fn run_packet_worker(
     tunnel_ip: Option<std::net::Ipv4Addr>,
     internet_ip: Option<std::net::Ipv4Addr>,
     vpn_encrypt_ctx: Option<VpnEncryptContext>,
+    relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
 ) {
     log::info!("Worker {} started", worker_id);
@@ -2466,10 +2491,32 @@ fn run_packet_worker(
                 // from NAT_BUFFER (thread-local, valid for duration of this function)
                 let packet_to_send = unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
 
-                // === ZERO-ALLOCATION ENCRYPTION ===
+                // === V3: UDP RELAY (NO ENCRYPTION) ===
+                // Forward packets directly to relay server without encryption
+                // This provides lowest latency and CPU usage (like ExitLag)
+                if let Some(ref relay) = relay_ctx {
+                    match relay.forward_outbound(packet_to_send) {
+                        Ok(sent) => {
+                            direct_encrypt_success += 1;  // Reuse counter for relay
+                            if direct_encrypt_success <= 5 && sent > 0 {
+                                log::info!(
+                                    "Worker {}: V3 relay forward OK - {} bytes",
+                                    worker_id, sent
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            direct_encrypt_fail += 1;
+                            if direct_encrypt_fail <= 10 {
+                                log::warn!("Worker {}: V3 relay forward failed: {}", worker_id, e);
+                            }
+                        }
+                    }
+                }
+                // === V1/V2: WIREGUARD ENCRYPTION ===
                 // Use thread-local buffer instead of heap allocation
                 // All work (encrypt + send) must happen inside the thread-local scope
-                if let Some(ref ctx) = vpn_encrypt_ctx {
+                else if let Some(ref ctx) = vpn_encrypt_ctx {
                     // Encrypt and send within thread-local scope (zero allocation!)
                     let encrypt_start = std::time::Instant::now();
                     let (success, encrypted_len) = ENCRYPT_BUFFER.with(|buf| {
