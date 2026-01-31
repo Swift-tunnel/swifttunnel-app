@@ -1929,7 +1929,7 @@ impl BoosterApp {
             };
 
             // Get servers for the selected region
-            let region_info = list.gaming_regions.iter()
+            let region_info = list.regions.iter()
                 .find(|r| r.id == self.selected_region);
 
             let server_ids: Vec<String> = match region_info {
@@ -1951,7 +1951,7 @@ impl BoosterApp {
 
             // Build (server_id, ip) pairs for ping threads
             let ips: Vec<(String, String)> = server_ids.iter()
-                .filter_map(|id| {
+                .filter_map(|id: &String| {
                     list.servers.iter()
                         .find(|s| &s.region == id)
                         .map(|s| (id.clone(), s.ip.clone()))
