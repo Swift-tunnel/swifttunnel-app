@@ -1024,19 +1024,21 @@ impl eframe::App for BoosterApp {
                 // Find our window by class name (egui uses "eframe" class)
                 let class_name: Vec<u16> = "eframe\0".encode_utf16().collect();
                 unsafe {
-                    let hwnd = FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR::null());
-                    if !hwnd.is_invalid() {
-                        // SW_RESTORE brings back minimized windows, SW_SHOW makes hidden visible
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
-                        let _ = ShowWindow(hwnd, SW_SHOW);
-                        let _ = SetForegroundWindow(hwnd);
-                        log::info!("Window restored via Windows API");
-                    } else {
-                        log::warn!("Could not find window handle");
-                        // Fallback to egui commands
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    match FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR::null()) {
+                        Ok(hwnd) if !hwnd.is_invalid() => {
+                            // SW_RESTORE brings back minimized windows, SW_SHOW makes hidden visible
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = ShowWindow(hwnd, SW_SHOW);
+                            let _ = SetForegroundWindow(hwnd);
+                            log::info!("Window restored via Windows API");
+                        }
+                        _ => {
+                            log::warn!("Could not find window handle");
+                            // Fallback to egui commands
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
                     }
                 }
             }
