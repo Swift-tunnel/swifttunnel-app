@@ -1011,9 +1011,41 @@ impl eframe::App for BoosterApp {
 
         // Show window when tray icon clicked or "Show" menu item clicked
         if show_window {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            log::info!("Restoring window from tray...");
+            // Use Windows APIs directly for reliable window restoration
+            // egui ViewportCommands don't work reliably when window is hidden
+            #[cfg(target_os = "windows")]
+            {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    ShowWindow, SetForegroundWindow, FindWindowW, SW_RESTORE, SW_SHOW,
+                };
+                use windows::core::PCWSTR;
+
+                // Find our window by class name (egui uses "eframe" class)
+                let class_name: Vec<u16> = "eframe\0".encode_utf16().collect();
+                unsafe {
+                    let hwnd = FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR::null());
+                    if !hwnd.is_invalid() {
+                        // SW_RESTORE brings back minimized windows, SW_SHOW makes hidden visible
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = ShowWindow(hwnd, SW_SHOW);
+                        let _ = SetForegroundWindow(hwnd);
+                        log::info!("Window restored via Windows API");
+                    } else {
+                        log::warn!("Could not find window handle");
+                        // Fallback to egui commands
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
         }
 
         // Only actually quit when tray "Quit" is clicked
