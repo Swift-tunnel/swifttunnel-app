@@ -309,8 +309,54 @@ impl BoosterApp {
                     new_routing_mode = crate::settings::RoutingMode::V2;
                 }
 
+                ui.add_space(8.0);
+
+                // V3 Option
+                let is_v3 = self.routing_mode == crate::settings::RoutingMode::V3;
+                let v3_bg = if is_v3 { BG_ELEVATED } else { BG_CARD };
+                let v3_border = if is_v3 { ACCENT_PRIMARY } else { BG_ELEVATED };
+
+                let v3_response = egui::Frame::NONE
+                    .fill(v3_bg)
+                    .stroke(egui::Stroke::new(if is_v3 { 2.0 } else { 1.0 }, v3_border))
+                    .rounding(8.0)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width() - 24.0);
+                        ui.horizontal(|ui| {
+                            // Radio button
+                            let radio_color = if is_v3 { ACCENT_PRIMARY } else { TEXT_MUTED };
+                            ui.painter().circle_stroke(
+                                ui.cursor().min + egui::vec2(8.0, 10.0),
+                                6.0,
+                                egui::Stroke::new(2.0, radio_color),
+                            );
+                            if is_v3 {
+                                ui.painter().circle_filled(
+                                    ui.cursor().min + egui::vec2(8.0, 10.0),
+                                    3.0,
+                                    ACCENT_PRIMARY,
+                                );
+                            }
+                            ui.add_space(20.0);
+
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(crate::settings::RoutingMode::V3.display_name()).size(13.0).color(TEXT_PRIMARY).strong());
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new("FASTEST").size(9.0).color(egui::Color32::from_rgb(255, 180, 0)));
+                                });
+                                ui.label(egui::RichText::new(crate::settings::RoutingMode::V3.description()).size(11.0).color(TEXT_SECONDARY));
+                            });
+                        });
+                    });
+
+                if v3_response.response.interact(egui::Sense::click()).clicked() {
+                    new_routing_mode = crate::settings::RoutingMode::V3;
+                }
+
                 ui.add_space(12.0);
-                ui.label(egui::RichText::new("V2 is more efficient - only game server traffic uses bandwidth.").size(10.0).color(TEXT_MUTED).italics());
+                ui.label(egui::RichText::new("V2/V3 only tunnel game server traffic. V3 skips encryption for lowest latency.").size(10.0).color(TEXT_MUTED).italics());
             });
 
         // Handle routing mode change

@@ -3066,12 +3066,13 @@ fn should_route_to_vpn_with_inline_cache(
     let cache_key = (src_ip, src_port, protocol);
     if inline_cache.contains_key(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        // Process IS a tunnel app - use permissive check in V2 mode
+        // Process IS a tunnel app - use permissive check in V2/V3 mode
         return match snapshot.routing_mode {
             crate::settings::RoutingMode::V1 => true,
-            crate::settings::RoutingMode::V2 => {
+            crate::settings::RoutingMode::V2 | crate::settings::RoutingMode::V3 => {
                 // PERMISSIVE MODE (v0.9.5): Trust the process, just check if it's game-like traffic
                 // This fixes zero traffic when Roblox uses servers not in our IP list
+                // V3 uses same routing logic as V2, just different transport (UDP relay vs WireGuard)
                 super::process_cache::is_likely_game_traffic(dst_port, protocol)
             }
         };
@@ -3135,9 +3136,10 @@ fn should_route_to_vpn_with_inline_cache(
         // Process IS a tunnel app
         match snapshot.routing_mode {
             crate::settings::RoutingMode::V1 => true,
-            crate::settings::RoutingMode::V2 => {
+            crate::settings::RoutingMode::V2 | crate::settings::RoutingMode::V3 => {
                 // PERMISSIVE MODE (v0.9.5): Trust the process, just check if it's game-like traffic
                 // This fixes zero traffic when Roblox uses servers not in our IP list
+                // V3 uses same routing logic as V2, just different transport (UDP relay vs WireGuard)
                 super::process_cache::is_likely_game_traffic(dst_port, protocol)
             }
         }

@@ -36,6 +36,7 @@ pub mod routes;
 pub mod connection;
 pub mod servers;
 pub mod error_messages;
+pub mod udp_relay;
 
 pub use config::{fetch_vpn_config, update_latency, VpnConfigRequest};
 pub use adapter::WintunAdapter;
@@ -44,6 +45,7 @@ pub use packet_interceptor::WireguardContext;
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
 pub use process_watcher::{ProcessWatcher, ProcessStartEvent};
 pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
+pub use udp_relay::{UdpRelay, RelayContext};
 pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
 pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 pub use connection::{VpnConnection, ConnectionState};

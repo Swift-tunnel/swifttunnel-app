@@ -852,6 +852,7 @@ impl eframe::App for BoosterApp {
                     // Set routing mode from pending
                     self.routing_mode = match pending.routing_mode {
                         1 => crate::settings::RoutingMode::V2,
+                        2 => crate::settings::RoutingMode::V3,
                         _ => crate::settings::RoutingMode::V1,
                     };
 
@@ -1687,6 +1688,7 @@ impl BoosterApp {
                 routing_mode: match self.routing_mode {
                     crate::settings::RoutingMode::V1 => 0,
                     crate::settings::RoutingMode::V2 => 1,
+                    crate::settings::RoutingMode::V3 => 2,
                 },
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
