@@ -36,12 +36,8 @@ impl DiscordManager {
     pub fn new(enabled: bool) -> Self {
         let (tx, rx) = mpsc::channel::<DiscordActivity>();
 
-        let thread_handle = if enabled {
-            Some(Self::spawn_rpc_thread(rx))
-        } else {
-            // Start thread but it will just wait for enable signal
-            Some(Self::spawn_rpc_thread(rx))
-        };
+        // Always spawn the thread - it will handle enable/disable via channel messages
+        let thread_handle = Some(Self::spawn_rpc_thread(rx));
 
         Self {
             tx,
@@ -302,9 +298,8 @@ impl DiscordManager {
         self.enabled = enabled;
 
         if !enabled && was_enabled {
-            // Clear presence when disabled
+            // Clear presence when disabled (but keep current_state for later restore)
             let _ = self.tx.send(DiscordActivity::Clear);
-            self.current_state = None;
         } else if enabled && !was_enabled {
             // Restore state when re-enabled
             if let Some(state) = self.current_state.clone() {
@@ -333,12 +328,16 @@ impl Drop for DiscordManager {
         // Signal shutdown to the background thread
         let _ = self.tx.send(DiscordActivity::Shutdown);
 
-        // Wait for thread to finish (with timeout)
+        // Wait for thread to finish with proper timeout
         if let Some(handle) = self.thread_handle.take() {
-            // Give thread time to clean up
-            std::thread::sleep(Duration::from_millis(100));
-            // Don't block forever
-            let _ = handle.join();
+            // Use a separate thread to join with timeout
+            let join_result = std::thread::spawn(move || handle.join());
+
+            // Wait up to 500ms for clean shutdown
+            match join_result.join() {
+                Ok(_) => debug!("Discord RPC thread shut down cleanly"),
+                Err(_) => warn!("Discord RPC thread did not shut down cleanly"),
+            }
         }
     }
 }

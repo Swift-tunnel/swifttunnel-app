@@ -1370,20 +1370,17 @@ impl eframe::App for BoosterApp {
                         self.discord_manager.set_connecting(&self.selected_region);
                     }
                     ConnectionState::Connected { server_region, tunneled_processes, .. } => {
-                        // Check if any games are running
-                        let has_game = tunneled_processes.iter().any(|p| {
+                        // Check if any games are running (single pass with find_map)
+                        let detected_game = tunneled_processes.iter().find_map(|p| {
                             let lower = p.to_lowercase();
-                            lower.contains("roblox") || lower.contains("valorant") || lower.contains("fortnite")
+                            if lower.contains("roblox") || lower.contains("valorant") || lower.contains("fortnite") {
+                                Some(p.as_str())
+                            } else {
+                                None
+                            }
                         });
-                        if has_game {
-                            // Find which game is running
-                            let game = tunneled_processes.iter()
-                                .find(|p| {
-                                    let lower = p.to_lowercase();
-                                    lower.contains("roblox") || lower.contains("valorant") || lower.contains("fortnite")
-                                })
-                                .map(|s| s.as_str())
-                                .unwrap_or("Game");
+
+                        if let Some(game) = detected_game {
                             self.discord_manager.set_playing_game(game, server_region);
                         } else {
                             self.discord_manager.set_connected(server_region);
