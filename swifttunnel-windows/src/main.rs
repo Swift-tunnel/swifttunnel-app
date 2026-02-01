@@ -7,6 +7,7 @@ mod tray;
 
 // Use modules from the library crate
 use swifttunnel_fps_booster::auth;
+use swifttunnel_fps_booster::discord_rpc;
 use swifttunnel_fps_booster::geolocation;
 use swifttunnel_fps_booster::network_analyzer;
 use swifttunnel_fps_booster::network_booster;
