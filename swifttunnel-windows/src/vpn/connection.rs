@@ -8,6 +8,7 @@
 //! - Route management
 //! - Connection state tracking
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -196,6 +197,7 @@ impl VpnConnection {
         region: &str,
         tunnel_apps: Vec<String>,
         routing_mode: crate::settings::RoutingMode,
+        custom_relay_server: Option<String>,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -212,7 +214,7 @@ impl VpnConnection {
 
         // V3 mode: Skip Wintun/WireGuard entirely - just use UDP relay
         if routing_mode == crate::settings::RoutingMode::V3 {
-            return self.connect_v3(access_token, region, tunnel_apps).await;
+            return self.connect_v3(access_token, region, tunnel_apps, custom_relay_server).await;
         }
 
         // V1/V2: Full WireGuard tunnel with encryption
@@ -367,6 +369,7 @@ impl VpnConnection {
         access_token: &str,
         region: &str,
         tunnel_apps: Vec<String>,
+        custom_relay_server: Option<String>,
     ) -> VpnResult<()> {
         log::info!("========================================");
         log::info!("V3 MODE: Lightweight UDP Relay");
@@ -400,7 +403,7 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
 
         let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
-            match self.setup_v3_split_tunnel(&config, tunnel_apps.clone()).await {
+            match self.setup_v3_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server).await {
                 Ok(processes) => {
                     log::info!("V3 split tunnel setup succeeded");
                     (processes, true)
@@ -792,6 +795,7 @@ impl VpnConnection {
         &mut self,
         config: &VpnConfig,
         tunnel_apps: Vec<String>,
+        custom_relay_server: Option<String>,
     ) -> VpnResult<Vec<String>> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -825,13 +829,48 @@ impl VpnConnection {
         })?;
         log::info!("V3: Split tunnel driver initialized");
 
-        // Create UDP relay to relay server (port 51821 on same IP as VPN server)
-        let relay_port = 51821u16;
-        let relay_server = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
+        // Create UDP relay to relay server
+        // Use custom relay if configured (experimental feature), otherwise auto-detect from VPN server
+        let relay_addr: SocketAddr = if let Some(ref custom) = custom_relay_server {
+            // Custom relay configured - resolve with DNS support
+            log::info!("V3: Using CUSTOM relay server: {}", custom);
 
-        log::info!("V3: Creating UDP relay to {}:{}", relay_server, relay_port);
+            // Use tokio's async DNS resolution (supports both IPs and hostnames)
+            match tokio::net::lookup_host(custom).await {
+                Ok(mut addrs) => {
+                    match addrs.next() {
+                        Some(addr) => {
+                            log::info!("V3: Resolved custom relay to {}", addr);
+                            addr
+                        }
+                        None => {
+                            let _ = driver.close();
+                            return Err(VpnError::SplitTunnelSetupFailed(
+                                format!("DNS resolution returned no addresses for '{}'", custom)
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = driver.close();
+                    return Err(VpnError::SplitTunnelSetupFailed(
+                        format!("Failed to resolve custom relay '{}': {}", custom, e)
+                    ));
+                }
+            }
+        } else {
+            // No custom relay = auto mode (use VPN server IP with default port 51821)
+            let vpn_ip = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
+            format!("{}:51821", vpn_ip)
+                .parse()
+                .map_err(|e| VpnError::SplitTunnelSetupFailed(
+                    format!("Invalid VPN server IP for relay: {}", e)
+                ))?
+        };
 
-        let relay = match super::udp_relay::UdpRelay::new(relay_server, relay_port) {
+        log::info!("V3: Creating UDP relay to {}", relay_addr);
+
+        let relay = match super::udp_relay::UdpRelay::new(relay_addr) {
             Ok(r) => std::sync::Arc::new(r),
             Err(e) => {
                 let _ = driver.close();

@@ -206,6 +206,102 @@ impl BoosterApp {
 
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("! Experimental features may be unstable or change without notice.").size(10.0).color(STATUS_WARNING).italics());
+
+                // Custom Relay section (only visible when experimental mode is enabled)
+                if current_experimental_mode {
+                    ui.add_space(16.0);
+                    ui.add(egui::Separator::default().spacing(0.0));
+                    ui.add_space(16.0);
+
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Custom Relay Server").size(13.0).color(TEXT_PRIMARY));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("V3 ONLY").size(9.0).color(egui::Color32::from_rgb(255, 180, 0)));
+                            });
+                            ui.label(egui::RichText::new("Override the relay server for V3 mode. Format: host:port").size(11.0).color(TEXT_SECONDARY));
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Text input for custom relay
+                    let mut custom_relay = self.custom_relay_server.clone();
+                    let available_width = ui.available_width();
+
+                    let (changed, clear_clicked) = ui.horizontal(|ui| {
+                        let text_edit = egui::TextEdit::singleline(&mut custom_relay)
+                            .hint_text("e.g., relay.example.com:51821 (leave empty for auto)")
+                            .desired_width(available_width - 80.0);
+                        let changed = ui.add(text_edit).changed();
+
+                        // Clear button
+                        let clear_clicked = if !custom_relay.is_empty() {
+                            ui.add(
+                                egui::Button::new(egui::RichText::new("Clear").size(11.0).color(TEXT_PRIMARY))
+                                    .fill(BG_ELEVATED).rounding(4.0)
+                            ).clicked()
+                        } else {
+                            false
+                        };
+                        (changed, clear_clicked)
+                    }).inner;
+
+                    if changed {
+                        self.custom_relay_server = custom_relay;
+                        self.mark_dirty();
+                    }
+                    if clear_clicked {
+                        self.custom_relay_server.clear();
+                        self.mark_dirty();
+                        log::info!("Custom relay server cleared");
+                    }
+
+                    // Validation and status
+                    ui.add_space(8.0);
+                    if !self.custom_relay_server.is_empty() {
+                        // Validate format: host:port where host can be IPv4, IPv6 with brackets, or hostname
+                        // Examples: 1.2.3.4:51821, [::1]:51821, relay.example.com:51821
+                        let is_valid = {
+                            let s = &self.custom_relay_server;
+                            if s.starts_with('[') {
+                                // IPv6 format: [address]:port
+                                if let Some(bracket_end) = s.find(']') {
+                                    let after_bracket = &s[bracket_end + 1..];
+                                    after_bracket.starts_with(':') && after_bracket[1..].parse::<u16>().is_ok()
+                                } else {
+                                    false
+                                }
+                            } else {
+                                // IPv4 or hostname format: host:port (split on last colon)
+                                if let Some(last_colon) = s.rfind(':') {
+                                    let port_str = &s[last_colon + 1..];
+                                    let host = &s[..last_colon];
+                                    !host.is_empty() && port_str.parse::<u16>().is_ok()
+                                } else {
+                                    false
+                                }
+                            }
+                        };
+
+                        if is_valid {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("+").size(11.0).color(STATUS_CONNECTED));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new(format!("Using custom relay: {}", self.custom_relay_server)).size(11.0).color(STATUS_CONNECTED));
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("!").size(11.0).color(STATUS_ERROR));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Invalid format. Use host:port (e.g., relay.example.com:51821 or [::1]:51821)").size(11.0).color(STATUS_ERROR));
+                            });
+                        }
+                    } else {
+                        ui.label(egui::RichText::new("Auto mode: Uses VPN server IP with port 51821").size(10.0).color(TEXT_MUTED));
+                    }
+                }
             });
 
         ui.add_space(16.0);

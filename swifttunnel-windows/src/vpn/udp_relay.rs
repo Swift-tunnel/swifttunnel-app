@@ -21,8 +21,11 @@ const SESSION_ID_LEN: usize = 8;
 /// Maximum packet size (MTU - IP header - UDP header - session ID)
 const MAX_PAYLOAD_SIZE: usize = 1500 - 20 - 8 - SESSION_ID_LEN;
 
-/// Keepalive interval to maintain NAT bindings (must match parallel_interceptor.rs)
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+/// Keepalive interval to maintain NAT bindings - 15s is safer for strict NATs
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Read timeout - shorter for tighter packet pickup loop
+const READ_TIMEOUT: Duration = Duration::from_micros(100);
 
 /// UDP Relay client for Game Booster mode
 pub struct UdpRelay {
@@ -44,18 +47,40 @@ pub struct UdpRelay {
 
 impl UdpRelay {
     /// Create a new UDP relay connection to the specified server
-    pub fn new(relay_server: &str, relay_port: u16) -> Result<Self> {
-        let relay_addr: SocketAddr = format!("{}:{}", relay_server, relay_port)
-            .parse()
-            .context("Invalid relay server address")?;
+    ///
+    /// relay_addr should already be resolved (use tokio::net::lookup_host for DNS)
+    pub fn new(relay_addr: SocketAddr) -> Result<Self> {
 
         // Bind to any available port
         let socket = UdpSocket::bind("0.0.0.0:0")
             .context("Failed to bind UDP socket")?;
 
         // Set socket options for low latency
-        socket.set_read_timeout(Some(Duration::from_millis(1)))
+        socket.set_read_timeout(Some(READ_TIMEOUT))
             .context("Failed to set read timeout")?;
+
+        // Increase receive buffer to 256KB to handle burst traffic
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawSocket;
+            let raw = socket.as_raw_socket();
+            let buf_size: i32 = 256 * 1024;
+            let result = unsafe {
+                // SO_RCVBUF = 0x1002
+                windows::Win32::Networking::WinSock::setsockopt(
+                    windows::Win32::Networking::WinSock::SOCKET(raw as usize),
+                    windows::Win32::Networking::WinSock::SOL_SOCKET,
+                    windows::Win32::Networking::WinSock::SO_RCVBUF,
+                    Some(std::slice::from_raw_parts(
+                        &buf_size as *const i32 as *const u8,
+                        4
+                    ))
+                )
+            };
+            if result != 0 {
+                log::warn!("UDP Relay: Failed to set SO_RCVBUF to 256KB, using default");
+            }
+        }
 
         // Generate random session ID
         let mut session_id = [0u8; SESSION_ID_LEN];
@@ -91,6 +116,7 @@ impl UdpRelay {
     /// Forward a packet through the relay (outbound: game client -> relay -> game server)
     ///
     /// Takes the original UDP payload and prepends session ID before sending to relay
+    /// Includes retry logic for transient send failures
     pub fn forward_outbound(&self, payload: &[u8]) -> Result<usize> {
         if payload.len() > MAX_PAYLOAD_SIZE {
             log::warn!("UDP Relay: Packet too large ({} > {}), dropping", payload.len(), MAX_PAYLOAD_SIZE);
@@ -102,8 +128,17 @@ impl UdpRelay {
         packet.extend_from_slice(&self.session_id);
         packet.extend_from_slice(payload);
 
-        let sent = self.socket.send_to(&packet, self.relay_addr)
-            .context("Failed to send to relay")?;
+        // Try to send, retry once on WouldBlock
+        let sent = match self.socket.send_to(&packet, self.relay_addr) {
+            Ok(sent) => sent,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Retry once after tiny delay
+                std::thread::sleep(Duration::from_micros(50));
+                self.socket.send_to(&packet, self.relay_addr)
+                    .context("Retry send failed")?
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = self.last_activity.lock() {

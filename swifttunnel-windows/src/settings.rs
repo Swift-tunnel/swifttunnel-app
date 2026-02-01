@@ -150,6 +150,10 @@ pub struct AppSettings {
     /// Routing mode for split tunneling (V1 = process-based, V2 = hybrid/ExitLag-style)
     #[serde(default)]
     pub routing_mode: RoutingMode,
+    /// Custom relay server override (experimental feature)
+    /// Format: "host:port" - leave empty for auto (uses VPN server IP:51821)
+    #[serde(default)]
+    pub custom_relay_server: String,
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -188,6 +192,7 @@ impl Default for AppSettings {
             artificial_latency_ms: 0,
             experimental_mode: false,
             routing_mode: RoutingMode::default(),
+            custom_relay_server: String::new(),
         }
     }
 }
