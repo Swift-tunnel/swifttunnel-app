@@ -228,28 +228,35 @@ impl BoosterApp {
 
                     // Text input for custom relay
                     let mut custom_relay = self.custom_relay_server.clone();
-                    let text_edit = egui::TextEdit::singleline(&mut custom_relay)
-                        .hint_text("e.g., relay.example.com:51821 (leave empty for auto)")
-                        .desired_width(ui.available_width() - 80.0);
+                    let available_width = ui.available_width();
 
-                    ui.horizontal(|ui| {
-                        if ui.add(text_edit).changed() {
-                            self.custom_relay_server = custom_relay.clone();
-                            self.mark_dirty();
-                        }
+                    let (changed, clear_clicked) = ui.horizontal(|ui| {
+                        let text_edit = egui::TextEdit::singleline(&mut custom_relay)
+                            .hint_text("e.g., relay.example.com:51821 (leave empty for auto)")
+                            .desired_width(available_width - 80.0);
+                        let changed = ui.add(text_edit).changed();
 
                         // Clear button
-                        if !self.custom_relay_server.is_empty() {
-                            if ui.add(
+                        let clear_clicked = if !custom_relay.is_empty() {
+                            ui.add(
                                 egui::Button::new(egui::RichText::new("Clear").size(11.0).color(TEXT_PRIMARY))
                                     .fill(BG_ELEVATED).rounding(4.0)
-                            ).clicked() {
-                                self.custom_relay_server.clear();
-                                self.mark_dirty();
-                                log::info!("Custom relay server cleared");
-                            }
-                        }
-                    });
+                            ).clicked()
+                        } else {
+                            false
+                        };
+                        (changed, clear_clicked)
+                    }).inner;
+
+                    if changed {
+                        self.custom_relay_server = custom_relay;
+                        self.mark_dirty();
+                    }
+                    if clear_clicked {
+                        self.custom_relay_server.clear();
+                        self.mark_dirty();
+                        log::info!("Custom relay server cleared");
+                    }
 
                     // Validation and status
                     ui.add_space(8.0);
