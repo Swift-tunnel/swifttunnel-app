@@ -142,11 +142,11 @@ impl DiscordManager {
     }
 
     /// Create Discord activity buttons (Get SwiftTunnel + Join Discord)
-    fn create_buttons() -> activity::Buttons<'static> {
-        activity::Buttons::new(vec![
+    fn create_buttons() -> Vec<activity::Button<'static>> {
+        vec![
             activity::Button::new("Get SwiftTunnel", "https://swifttunnel.net"),
             activity::Button::new("Join our Discord!", "https://swifttunnel.net/discord"),
-        ])
+        ]
     }
 
     /// Set Discord activity based on state
