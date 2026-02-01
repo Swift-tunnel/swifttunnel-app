@@ -12,7 +12,7 @@ use log::{debug, error, info, warn};
 
 /// Discord Application ID (create at https://discord.com/developers)
 /// This should be replaced with the actual SwiftTunnel application ID
-const DISCORD_APP_ID: &str = "1336440050925322240";
+const DISCORD_APP_ID: &str = "1467394500476538920";
 
 /// Interval to retry Discord connection if not connected
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
@@ -162,7 +162,7 @@ impl DiscordManager {
                     .details("VPN Disconnected")
                     .assets(
                         activity::Assets::new()
-                            .large_image("swifttunnel_logo")
+                            .large_image("swifttunnel")
                             .large_text("SwiftTunnel")
                     )
                     .buttons(Self::create_buttons())
@@ -174,7 +174,7 @@ impl DiscordManager {
                     .details("Establishing VPN")
                     .assets(
                         activity::Assets::new()
-                            .large_image("swifttunnel_logo")
+                            .large_image("swifttunnel")
                             .large_text("SwiftTunnel")
                             .small_image(region_flag_key(region))
                             .small_text(region_name)
@@ -195,7 +195,7 @@ impl DiscordManager {
                     .details("VPN Active")
                     .assets(
                         activity::Assets::new()
-                            .large_image("swifttunnel_logo")
+                            .large_image("swifttunnel")
                             .large_text("SwiftTunnel")
                             .small_image(region_flag_key(region))
                             .small_text(region_name)
@@ -222,7 +222,7 @@ impl DiscordManager {
                         activity::Assets::new()
                             .large_image(game_icon_key(game_name))
                             .large_text(display_name)
-                            .small_image("swifttunnel_logo")
+                            .small_image("swifttunnel")
                             .small_text("SwiftTunnel VPN")
                     )
                     .timestamps(
