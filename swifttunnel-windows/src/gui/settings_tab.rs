@@ -254,9 +254,29 @@ impl BoosterApp {
                     // Validation and status
                     ui.add_space(8.0);
                     if !self.custom_relay_server.is_empty() {
-                        // Validate format
-                        let parts: Vec<&str> = self.custom_relay_server.split(':').collect();
-                        let is_valid = parts.len() == 2 && parts[1].parse::<u16>().is_ok();
+                        // Validate format: host:port where host can be IPv4, IPv6 with brackets, or hostname
+                        // Examples: 1.2.3.4:51821, [::1]:51821, relay.example.com:51821
+                        let is_valid = {
+                            let s = &self.custom_relay_server;
+                            if s.starts_with('[') {
+                                // IPv6 format: [address]:port
+                                if let Some(bracket_end) = s.find(']') {
+                                    let after_bracket = &s[bracket_end + 1..];
+                                    after_bracket.starts_with(':') && after_bracket[1..].parse::<u16>().is_ok()
+                                } else {
+                                    false
+                                }
+                            } else {
+                                // IPv4 or hostname format: host:port (split on last colon)
+                                if let Some(last_colon) = s.rfind(':') {
+                                    let port_str = &s[last_colon + 1..];
+                                    let host = &s[..last_colon];
+                                    !host.is_empty() && port_str.parse::<u16>().is_ok()
+                                } else {
+                                    false
+                                }
+                            }
+                        };
 
                         if is_valid {
                             ui.horizontal(|ui| {
@@ -268,7 +288,7 @@ impl BoosterApp {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("!").size(11.0).color(STATUS_ERROR));
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Invalid format. Use host:port (e.g., relay.example.com:51821)").size(11.0).color(STATUS_ERROR));
+                                ui.label(egui::RichText::new("Invalid format. Use host:port (e.g., relay.example.com:51821 or [::1]:51821)").size(11.0).color(STATUS_ERROR));
                             });
                         }
                     } else {

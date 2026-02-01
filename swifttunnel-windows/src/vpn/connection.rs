@@ -8,6 +8,7 @@
 //! - Route management
 //! - Connection state tracking
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -829,34 +830,46 @@ impl VpnConnection {
 
         // Create UDP relay to relay server
         // Use custom relay if configured (experimental feature), otherwise auto-detect from VPN server
-        let (relay_server, relay_port): (String, u16) = if let Some(ref custom) = custom_relay_server {
-            if !custom.is_empty() {
-                // Parse custom relay format: "host:port"
-                let parts: Vec<&str> = custom.split(':').collect();
-                if parts.len() == 2 {
-                    if let Ok(port) = parts[1].parse::<u16>() {
-                        log::info!("V3: Using CUSTOM relay server: {}", custom);
-                        (parts[0].to_string(), port)
-                    } else {
-                        log::warn!("V3: Invalid custom relay port '{}', using default", parts[1]);
-                        (config.endpoint.split(':').next().unwrap_or(&config.endpoint).to_string(), 51821)
+        let relay_addr: SocketAddr = if let Some(ref custom) = custom_relay_server {
+            // Custom relay configured - resolve with DNS support
+            log::info!("V3: Using CUSTOM relay server: {}", custom);
+
+            // Use tokio's async DNS resolution (supports both IPs and hostnames)
+            match tokio::net::lookup_host(custom).await {
+                Ok(mut addrs) => {
+                    match addrs.next() {
+                        Some(addr) => {
+                            log::info!("V3: Resolved custom relay to {}", addr);
+                            addr
+                        }
+                        None => {
+                            let _ = driver.close();
+                            return Err(VpnError::SplitTunnelSetupFailed(
+                                format!("DNS resolution returned no addresses for '{}'", custom)
+                            ));
+                        }
                     }
-                } else {
-                    log::warn!("V3: Invalid custom relay format '{}', expected host:port", custom);
-                    (config.endpoint.split(':').next().unwrap_or(&config.endpoint).to_string(), 51821)
                 }
-            } else {
-                // Empty custom relay = auto mode
-                (config.endpoint.split(':').next().unwrap_or(&config.endpoint).to_string(), 51821)
+                Err(e) => {
+                    let _ = driver.close();
+                    return Err(VpnError::SplitTunnelSetupFailed(
+                        format!("Failed to resolve custom relay '{}': {}", custom, e)
+                    ));
+                }
             }
         } else {
             // No custom relay = auto mode (use VPN server IP with default port 51821)
-            (config.endpoint.split(':').next().unwrap_or(&config.endpoint).to_string(), 51821)
+            let vpn_ip = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
+            format!("{}:51821", vpn_ip)
+                .parse()
+                .map_err(|e| VpnError::SplitTunnelSetupFailed(
+                    format!("Invalid VPN server IP for relay: {}", e)
+                ))?
         };
 
-        log::info!("V3: Creating UDP relay to {}:{}", relay_server, relay_port);
+        log::info!("V3: Creating UDP relay to {}", relay_addr);
 
-        let relay = match super::udp_relay::UdpRelay::new(relay_server, relay_port) {
+        let relay = match super::udp_relay::UdpRelay::new(relay_addr) {
             Ok(r) => std::sync::Arc::new(r),
             Err(e) => {
                 let _ = driver.close();
