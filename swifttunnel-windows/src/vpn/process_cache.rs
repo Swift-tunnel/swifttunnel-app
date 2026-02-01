@@ -104,20 +104,25 @@ pub fn is_roblox_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol
     false
 }
 
-/// Check if destination is a Roblox game server (PERMISSIVE - port range only)
+/// Check if traffic is likely game traffic (FULLY PERMISSIVE for trusted processes)
 ///
 /// This is used when we KNOW the packet is from a Roblox process.
-/// We trust the process detection and only filter by port range, not IP.
-/// This handles new Roblox server deployments that aren't in our IP list yet.
+/// We trust the process detection and tunnel ALL UDP traffic from it.
+///
+/// This fixes Error 277/279 issues where initial STUN traffic (port 3478)
+/// or other UDP traffic to non-standard ports was being bypassed, causing
+/// the game connection to fail.
+///
+/// UDP from Roblox includes:
+/// - Game server traffic (ports 49152-65535)
+/// - STUN for NAT traversal (port 3478)
+/// - Voice chat
+/// - Any other UDP the game needs
 #[inline(always)]
-pub fn is_likely_game_traffic(dst_port: u16, protocol: Protocol) -> bool {
-    // Must be UDP for game traffic
-    if protocol != Protocol::Udp {
-        return false;
-    }
-
-    // Check port range - Roblox game servers use ephemeral ports
-    dst_port >= ROBLOX_PORT_MIN && dst_port <= ROBLOX_PORT_MAX
+pub fn is_likely_game_traffic(_dst_port: u16, protocol: Protocol) -> bool {
+    // Trust the process - if it's Roblox, tunnel ALL its UDP traffic
+    // TCP is intentionally not tunneled (web API calls don't need VPN routing)
+    protocol == Protocol::Udp
 }
 
 /// Check if destination is any known game server (extensible for future games)
