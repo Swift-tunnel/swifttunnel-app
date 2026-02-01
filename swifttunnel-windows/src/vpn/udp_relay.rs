@@ -69,8 +69,8 @@ impl UdpRelay {
                 // SO_RCVBUF = 0x1002
                 windows::Win32::Networking::WinSock::setsockopt(
                     windows::Win32::Networking::WinSock::SOCKET(raw as usize),
-                    windows::Win32::Networking::WinSock::SOL_SOCKET.0 as i32,
-                    windows::Win32::Networking::WinSock::SO_RCVBUF.0 as i32,
+                    windows::Win32::Networking::WinSock::SOL_SOCKET,
+                    windows::Win32::Networking::WinSock::SO_RCVBUF,
                     Some(std::slice::from_raw_parts(
                         &buf_size as *const i32 as *const u8,
                         4
