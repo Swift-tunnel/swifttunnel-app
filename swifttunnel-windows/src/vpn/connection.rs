@@ -403,7 +403,7 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
 
         let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
-            match self.setup_v3_split_tunnel(&config, tunnel_apps.clone()).await {
+            match self.setup_v3_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server).await {
                 Ok(processes) => {
                     log::info!("V3 split tunnel setup succeeded");
                     (processes, true)
@@ -795,6 +795,7 @@ impl VpnConnection {
         &mut self,
         config: &VpnConfig,
         tunnel_apps: Vec<String>,
+        custom_relay_server: Option<String>,
     ) -> VpnResult<Vec<String>> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
