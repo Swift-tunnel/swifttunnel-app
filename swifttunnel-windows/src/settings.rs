@@ -154,6 +154,13 @@ pub struct AppSettings {
     /// Format: "host:port" - leave empty for auto (uses VPN server IP:51821)
     #[serde(default)]
     pub custom_relay_server: String,
+    /// Enable Discord Rich Presence (show VPN status in Discord)
+    #[serde(default = "default_discord_rpc")]
+    pub enable_discord_rpc: bool,
+}
+
+fn default_discord_rpc() -> bool {
+    true // Enabled by default
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -193,6 +200,7 @@ impl Default for AppSettings {
             experimental_mode: false,
             routing_mode: RoutingMode::default(),
             custom_relay_server: String::new(),
+            enable_discord_rpc: default_discord_rpc(),
         }
     }
 }

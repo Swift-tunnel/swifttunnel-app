@@ -24,6 +24,7 @@ pub use theme::*;
 pub use animations::*;
 
 use crate::auth::{AuthManager, AuthState, UserInfo};
+use crate::discord_rpc::DiscordManager;
 use crate::geolocation::get_ip_location;
 use crate::hidden_command;
 use swifttunnel_fps_booster::notification::show_server_location;
@@ -253,6 +254,10 @@ pub struct BoosterApp {
     /// Channel to receive smart selection ping results
     smart_selection_rx: std::sync::mpsc::Receiver<(String, Option<u32>)>,
     smart_selection_tx: std::sync::mpsc::Sender<(String, Option<u32>)>,
+    /// Discord Rich Presence manager (background thread)
+    discord_manager: DiscordManager,
+    /// Enable Discord Rich Presence (user setting)
+    enable_discord_rpc: bool,
 }
 
 impl BoosterApp {
@@ -534,6 +539,9 @@ impl BoosterApp {
             smart_selection: None,
             smart_selection_rx,
             smart_selection_tx,
+            // Discord Rich Presence
+            discord_manager: DiscordManager::new(saved_settings.enable_discord_rpc),
+            enable_discord_rpc: saved_settings.enable_discord_rpc,
         }
     }
 
@@ -662,6 +670,8 @@ impl BoosterApp {
             routing_mode: self.routing_mode,
             // Save custom relay server (experimental)
             custom_relay_server: self.custom_relay_server.clone(),
+            // Save Discord RPC setting
+            enable_discord_rpc: self.enable_discord_rpc,
         };
 
         let _ = save_settings(&settings);
@@ -1349,7 +1359,43 @@ impl eframe::App for BoosterApp {
                     }
                 }
 
-                self.vpn_state = new_state;
+                self.vpn_state = new_state.clone();
+
+                // Update Discord Rich Presence based on VPN state
+                match &new_state {
+                    ConnectionState::Disconnected => {
+                        self.discord_manager.set_idle();
+                    }
+                    ConnectionState::Connecting { .. } => {
+                        self.discord_manager.set_connecting(&self.selected_region);
+                    }
+                    ConnectionState::Connected { server_region, tunneled_processes, .. } => {
+                        // Check if any games are running
+                        let has_game = tunneled_processes.iter().any(|p| {
+                            let lower = p.to_lowercase();
+                            lower.contains("roblox") || lower.contains("valorant") || lower.contains("fortnite")
+                        });
+                        if has_game {
+                            // Find which game is running
+                            let game = tunneled_processes.iter()
+                                .find(|p| {
+                                    let lower = p.to_lowercase();
+                                    lower.contains("roblox") || lower.contains("valorant") || lower.contains("fortnite")
+                                })
+                                .map(|s| s.as_str())
+                                .unwrap_or("Game");
+                            self.discord_manager.set_playing_game(game, server_region);
+                        } else {
+                            self.discord_manager.set_connected(server_region);
+                        }
+                    }
+                    ConnectionState::Error(_) => {
+                        self.discord_manager.set_idle();
+                    }
+                    _ => {
+                        // Transitional states - keep current Discord state
+                    }
+                }
             }
             // Mark dirty outside the lock scope to avoid borrow conflict
             if should_mark_dirty {

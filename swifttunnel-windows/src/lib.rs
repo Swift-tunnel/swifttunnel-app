@@ -4,6 +4,7 @@
 //! test binaries and the CLI testbench.
 
 pub mod auth;
+pub mod discord_rpc;
 pub mod geolocation;
 pub mod network_analyzer;
 pub mod notification;
