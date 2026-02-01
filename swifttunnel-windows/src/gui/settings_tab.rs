@@ -174,6 +174,46 @@ impl BoosterApp {
 
         ui.add_space(16.0);
 
+        // Discord Rich Presence section
+        let mut toggle_discord_rpc = false;
+        let current_discord_rpc = self.enable_discord_rpc;
+
+        egui::Frame::NONE
+            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .rounding(12.0).inner_margin(20)
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Discord").size(14.0).color(TEXT_PRIMARY).strong());
+                ui.add_space(12.0);
+
+                // Discord RPC toggle
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Show status in Discord").size(12.0).color(TEXT_PRIMARY));
+                        ui.label(egui::RichText::new("Display your VPN connection and game activity on your Discord profile").size(10.0).color(TEXT_MUTED));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let size = egui::vec2(44.0, 24.0);
+                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                        if response.clicked() {
+                            toggle_discord_rpc = true;
+                        }
+                        let bg = if current_discord_rpc { ACCENT_PRIMARY } else { BG_ELEVATED };
+                        let knob_x = if current_discord_rpc { rect.right() - 12.0 } else { rect.left() + 12.0 };
+                        ui.painter().rect_filled(rect, 12.0, bg);
+                        ui.painter().circle_filled(egui::pos2(knob_x, rect.center().y), 8.0, TEXT_PRIMARY);
+                    });
+                });
+
+                ui.add_space(8.0);
+                if current_discord_rpc {
+                    ui.label(egui::RichText::new("Your Discord friends can see your SwiftTunnel activity").size(10.0).color(TEXT_MUTED).italics());
+                } else {
+                    ui.label(egui::RichText::new("Discord Rich Presence is disabled").size(10.0).color(TEXT_MUTED).italics());
+                }
+            });
+
+        ui.add_space(16.0);
+
         // Experimental Features section
         let mut toggle_experimental_mode = false;
         let current_experimental_mode = self.experimental_mode;
@@ -481,6 +521,12 @@ impl BoosterApp {
         if toggle_experimental_mode {
             self.experimental_mode = !self.experimental_mode;
             log::info!("Experimental mode: {}", self.experimental_mode);
+            self.mark_dirty();
+        }
+        if toggle_discord_rpc {
+            self.enable_discord_rpc = !self.enable_discord_rpc;
+            self.discord_manager.set_enabled(self.enable_discord_rpc);
+            log::info!("Discord RPC: {}", self.enable_discord_rpc);
             self.mark_dirty();
         }
     }

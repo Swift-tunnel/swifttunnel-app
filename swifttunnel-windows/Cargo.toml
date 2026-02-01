@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-fps-booster"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel - Game Booster with PC Optimizations"
@@ -147,6 +147,9 @@ num_cpus = "1.16"
 
 # Stack-allocated buffers for zero-alloc packet processing
 arrayvec = "0.7"
+
+# Discord Rich Presence for activity status
+discord-rich-presence = "0.2"
 
 # Test configuration
 [[test]]
