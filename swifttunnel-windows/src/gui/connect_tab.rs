@@ -435,6 +435,36 @@ impl BoosterApp {
                                     });
                                 });
                         }
+
+                        // Custom Relay badge (only when experimental mode + V3 + custom relay configured)
+                        if self.experimental_mode
+                            && self.routing_mode == crate::settings::RoutingMode::V3
+                            && !self.custom_relay_server.is_empty()
+                        {
+                            let relay_color = egui::Color32::from_rgb(255, 180, 0); // Orange/amber for experimental
+                            egui::Frame::NONE
+                                .fill(relay_color.gamma_multiply(0.1))
+                                .stroke(egui::Stroke::new(1.0, relay_color.gamma_multiply(0.3)))
+                                .rounding(8.0)
+                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        ui.label(egui::RichText::new("*").size(12.0).color(relay_color));
+                                        ui.vertical(|ui| {
+                                            ui.spacing_mut().item_spacing.y = 1.0;
+                                            ui.label(egui::RichText::new("Custom Relay").size(10.0).color(TEXT_MUTED));
+                                            // Show shortened version of the relay server
+                                            let display = if self.custom_relay_server.len() > 20 {
+                                                format!("{}...", &self.custom_relay_server[..17])
+                                            } else {
+                                                self.custom_relay_server.clone()
+                                            };
+                                            ui.label(egui::RichText::new(display).size(11.0).color(relay_color));
+                                        });
+                                    });
+                                });
+                        }
                     });
 
                     // Throughput graph (new row)

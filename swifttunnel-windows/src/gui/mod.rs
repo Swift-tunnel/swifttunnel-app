@@ -225,6 +225,9 @@ pub struct BoosterApp {
     last_applied_latency: u32,
     /// Enable experimental features (Practice Mode, etc.)
     experimental_mode: bool,
+    /// Custom relay server override (experimental feature, V3 only)
+    /// Format: "host:port" - empty for auto (uses VPN server IP:51821)
+    custom_relay_server: String,
     /// Logo texture handle (loaded from embedded PNG)
     logo_texture: Option<egui::TextureHandle>,
     /// Routing mode for split tunnel (V1 = process-based, V2 = hybrid/ExitLag-style)
@@ -511,6 +514,8 @@ impl BoosterApp {
             last_applied_latency: saved_settings.artificial_latency_ms,
             // Experimental mode
             experimental_mode: saved_settings.experimental_mode,
+            // Custom relay server override (experimental)
+            custom_relay_server: saved_settings.custom_relay_server.clone(),
             // Routing mode for split tunnel
             routing_mode: saved_settings.routing_mode,
             // Logo texture (loaded from embedded PNG)
@@ -655,6 +660,8 @@ impl BoosterApp {
             experimental_mode: self.experimental_mode,
             // Save routing mode setting
             routing_mode: self.routing_mode,
+            // Save custom relay server (experimental)
+            custom_relay_server: self.custom_relay_server.clone(),
         };
 
         let _ = save_settings(&settings);
@@ -2107,13 +2114,20 @@ impl BoosterApp {
         let rt = Arc::clone(&self.runtime);
         let routing_mode = self.routing_mode;
 
+        // Custom relay server (only used in V3 mode with experimental mode enabled)
+        let custom_relay = if self.experimental_mode && !self.custom_relay_server.is_empty() {
+            Some(self.custom_relay_server.clone())
+        } else {
+            None
+        };
+
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();
 
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode).await {
+                    if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode, custom_relay).await {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }

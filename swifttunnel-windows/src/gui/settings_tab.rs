@@ -206,6 +206,75 @@ impl BoosterApp {
 
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("! Experimental features may be unstable or change without notice.").size(10.0).color(STATUS_WARNING).italics());
+
+                // Custom Relay section (only visible when experimental mode is enabled)
+                if current_experimental_mode {
+                    ui.add_space(16.0);
+                    ui.add(egui::Separator::default().spacing(0.0));
+                    ui.add_space(16.0);
+
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Custom Relay Server").size(13.0).color(TEXT_PRIMARY));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("V3 ONLY").size(9.0).color(egui::Color32::from_rgb(255, 180, 0)));
+                            });
+                            ui.label(egui::RichText::new("Override the relay server for V3 mode. Format: host:port").size(11.0).color(TEXT_SECONDARY));
+                        });
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Text input for custom relay
+                    let mut custom_relay = self.custom_relay_server.clone();
+                    let text_edit = egui::TextEdit::singleline(&mut custom_relay)
+                        .hint_text("e.g., relay.example.com:51821 (leave empty for auto)")
+                        .desired_width(ui.available_width() - 80.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.add(text_edit).changed() {
+                            self.custom_relay_server = custom_relay.clone();
+                            self.mark_dirty();
+                        }
+
+                        // Clear button
+                        if !self.custom_relay_server.is_empty() {
+                            if ui.add(
+                                egui::Button::new(egui::RichText::new("Clear").size(11.0).color(TEXT_PRIMARY))
+                                    .fill(BG_ELEVATED).rounding(4.0)
+                            ).clicked() {
+                                self.custom_relay_server.clear();
+                                self.mark_dirty();
+                                log::info!("Custom relay server cleared");
+                            }
+                        }
+                    });
+
+                    // Validation and status
+                    ui.add_space(8.0);
+                    if !self.custom_relay_server.is_empty() {
+                        // Validate format
+                        let parts: Vec<&str> = self.custom_relay_server.split(':').collect();
+                        let is_valid = parts.len() == 2 && parts[1].parse::<u16>().is_ok();
+
+                        if is_valid {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("+").size(11.0).color(STATUS_CONNECTED));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new(format!("Using custom relay: {}", self.custom_relay_server)).size(11.0).color(STATUS_CONNECTED));
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("!").size(11.0).color(STATUS_ERROR));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Invalid format. Use host:port (e.g., relay.example.com:51821)").size(11.0).color(STATUS_ERROR));
+                            });
+                        }
+                    } else {
+                        ui.label(egui::RichText::new("Auto mode: Uses VPN server IP with port 51821").size(10.0).color(TEXT_MUTED));
+                    }
+                }
             });
 
         ui.add_space(16.0);

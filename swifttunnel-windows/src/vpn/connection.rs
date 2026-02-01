@@ -196,6 +196,7 @@ impl VpnConnection {
         region: &str,
         tunnel_apps: Vec<String>,
         routing_mode: crate::settings::RoutingMode,
+        custom_relay_server: Option<String>,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -212,7 +213,7 @@ impl VpnConnection {
 
         // V3 mode: Skip Wintun/WireGuard entirely - just use UDP relay
         if routing_mode == crate::settings::RoutingMode::V3 {
-            return self.connect_v3(access_token, region, tunnel_apps).await;
+            return self.connect_v3(access_token, region, tunnel_apps, custom_relay_server).await;
         }
 
         // V1/V2: Full WireGuard tunnel with encryption
@@ -367,6 +368,7 @@ impl VpnConnection {
         access_token: &str,
         region: &str,
         tunnel_apps: Vec<String>,
+        custom_relay_server: Option<String>,
     ) -> VpnResult<()> {
         log::info!("========================================");
         log::info!("V3 MODE: Lightweight UDP Relay");
@@ -825,9 +827,32 @@ impl VpnConnection {
         })?;
         log::info!("V3: Split tunnel driver initialized");
 
-        // Create UDP relay to relay server (port 51821 on same IP as VPN server)
-        let relay_port = 51821u16;
-        let relay_server = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
+        // Create UDP relay to relay server
+        // Use custom relay if configured (experimental feature), otherwise auto-detect from VPN server
+        let (relay_server, relay_port): (String, u16) = if let Some(ref custom) = custom_relay_server {
+            if !custom.is_empty() {
+                // Parse custom relay format: "host:port"
+                let parts: Vec<&str> = custom.split(':').collect();
+                if parts.len() == 2 {
+                    if let Ok(port) = parts[1].parse::<u16>() {
+                        log::info!("V3: Using CUSTOM relay server: {}", custom);
+                        (parts[0].to_string(), port)
+                    } else {
+                        log::warn!("V3: Invalid custom relay port '{}', using default", parts[1]);
+                        (config.endpoint.split(':').next().unwrap_or(&config.endpoint).to_string(), 51821)
+                    }
+                } else {
+                    log::warn!("V3: Invalid custom relay format '{}', expected host:port", custom);
+                    (config.endpoint.split(':').next().unwrap_or(&config.endpoint).to_string(), 51821)
+                }
+            } else {
+                // Empty custom relay = auto mode
+                (config.endpoint.split(':').next().unwrap_or(&config.endpoint).to_string(), 51821)
+            }
+        } else {
+            // No custom relay = auto mode (use VPN server IP with default port 51821)
+            (config.endpoint.split(':').next().unwrap_or(&config.endpoint).to_string(), 51821)
+        };
 
         log::info!("V3: Creating UDP relay to {}:{}", relay_server, relay_port);
 
