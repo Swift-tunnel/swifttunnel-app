@@ -151,9 +151,11 @@ impl DiscordManager {
 
     /// Set Discord activity based on state
     fn set_activity(client: &mut DiscordIpcClient, state: &DiscordState) -> Result<(), String> {
-        let payload = match state {
+        // Build and send activity based on state
+        // Each branch creates its own owned strings to avoid lifetime issues
+        match state {
             DiscordState::Idle => {
-                activity::Activity::new()
+                let payload = activity::Activity::new()
                     .state("Idle")
                     .details("VPN Disconnected")
                     .assets(
@@ -161,12 +163,15 @@ impl DiscordManager {
                             .large_image("swifttunnel")
                             .large_text("SwiftTunnel")
                     )
-                    .buttons(Self::create_buttons())
+                    .buttons(Self::create_buttons());
+                client.set_activity(payload)
+                    .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
             DiscordState::Connecting { region } => {
                 let region_name = region_display_name(region);
-                activity::Activity::new()
-                    .state(&format!("Connecting to {}...", region_name))
+                let state_str = format!("Connecting to {}...", region_name);
+                let payload = activity::Activity::new()
+                    .state(&state_str)
                     .details("Establishing VPN")
                     .assets(
                         activity::Assets::new()
@@ -175,7 +180,9 @@ impl DiscordManager {
                             .small_image(region_flag_key(region))
                             .small_text(region_name)
                     )
-                    .buttons(Self::create_buttons())
+                    .buttons(Self::create_buttons());
+                client.set_activity(payload)
+                    .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
             DiscordState::Connected { region, connected_at } => {
                 let region_name = region_display_name(region);
@@ -185,9 +192,10 @@ impl DiscordManager {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64 - elapsed_secs as i64)
                     .unwrap_or(0);
+                let state_str = format!("Connected to {}", region_name);
 
-                activity::Activity::new()
-                    .state(&format!("Connected to {}", region_name))
+                let payload = activity::Activity::new()
+                    .state(&state_str)
                     .details("VPN Active")
                     .assets(
                         activity::Assets::new()
@@ -200,7 +208,9 @@ impl DiscordManager {
                         activity::Timestamps::new()
                             .start(start_timestamp)
                     )
-                    .buttons(Self::create_buttons())
+                    .buttons(Self::create_buttons());
+                client.set_activity(payload)
+                    .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
             DiscordState::PlayingGame { game_name, region, connected_at } => {
                 let region_name = region_display_name(region);
@@ -210,10 +220,12 @@ impl DiscordManager {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64 - elapsed_secs as i64)
                     .unwrap_or(0);
+                let state_str = format!("Connected to {}", region_name);
+                let details_str = format!("Playing {}", display_name);
 
-                activity::Activity::new()
-                    .state(&format!("Connected to {}", region_name))
-                    .details(&format!("Playing {}", display_name))
+                let payload = activity::Activity::new()
+                    .state(&state_str)
+                    .details(&details_str)
                     .assets(
                         activity::Assets::new()
                             .large_image(game_icon_key(game_name))
@@ -225,12 +237,11 @@ impl DiscordManager {
                         activity::Timestamps::new()
                             .start(start_timestamp)
                     )
-                    .buttons(Self::create_buttons())
+                    .buttons(Self::create_buttons());
+                client.set_activity(payload)
+                    .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
-        };
-
-        client.set_activity(payload)
-            .map_err(|e| format!("Failed to set activity: {}", e))?;
+        }
 
         debug!("Discord activity updated: {:?}", state);
         Ok(())
