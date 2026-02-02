@@ -44,9 +44,15 @@ impl GamePreset {
     pub fn process_names(&self) -> &'static [&'static str] {
         match self {
             GamePreset::Roblox => &[
+                // Main game client (most common)
                 "robloxplayerbeta.exe",
+                "robloxplayer.exe",           // Some users don't have "beta" suffix
+                "windows10universal.exe",      // Microsoft Store version
+                // Launchers
                 "robloxplayerlauncher.exe",
+                // Studio
                 "robloxstudiobeta.exe",
+                "robloxstudio.exe",           // Some users don't have "beta" suffix
                 "robloxstudiolauncherbeta.exe",
                 "robloxstudiolauncher.exe",
             ],

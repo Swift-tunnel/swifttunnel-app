@@ -2519,15 +2519,18 @@ fn run_packet_worker(
 
                 // === GAME SERVER DETECTION (Bloxstrap-style) ===
                 // Track Roblox game server IPs for notifications
+                // STABILITY FIX (v1.0.8): Use try_write() to avoid blocking in hot path
+                // If lock is contended, skip recording this packet (not critical)
                 if ip_packet.len() >= 20 {
                     let dst_ip = Ipv4Addr::new(
                         ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
                     );
                     if is_roblox_game_server_ip(dst_ip) {
-                        // Record game server (lock-free write, deduplicates via HashSet)
-                        let mut servers = detected_game_servers.write();
-                        if servers.insert(dst_ip) {
-                            log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+                        // Non-blocking write - skip if lock contended (prevents freeze)
+                        if let Some(mut servers) = detected_game_servers.try_write() {
+                            if servers.insert(dst_ip) {
+                                log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+                            }
                         }
                     }
                 }
@@ -2698,6 +2701,45 @@ fn run_packet_worker(
             } else {
                 stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
                 stats.bytes_bypassed.fetch_add(packet_len, Ordering::Relaxed);
+
+                // DIAGNOSTIC LOGGING (v1.0.8): Log first 20 bypassed UDP packets to help debug
+                // "Tunneled: 0" issues where Roblox traffic isn't being detected
+                if worker_id == 0 {
+                    thread_local! {
+                        static BYPASS_LOG_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+                    }
+                    let log_count = BYPASS_LOG_COUNT.with(|c| {
+                        let n = c.get();
+                        if n < 20 { c.set(n + 1); }
+                        n
+                    });
+
+                    // Only log first 20 UDP packets (UDP is what we care about for games)
+                    if log_count < 20 && work.data.len() > 14 + 20 + 4 {
+                        let ip_start = 14;
+                        let protocol_num = work.data[ip_start + 9];
+                        if protocol_num == 17 { // UDP only
+                            let src_ip = Ipv4Addr::new(
+                                work.data[ip_start + 12], work.data[ip_start + 13],
+                                work.data[ip_start + 14], work.data[ip_start + 15]
+                            );
+                            let dst_ip = Ipv4Addr::new(
+                                work.data[ip_start + 16], work.data[ip_start + 17],
+                                work.data[ip_start + 18], work.data[ip_start + 19]
+                            );
+                            let ihl = ((work.data[ip_start] & 0xF) as usize) * 4;
+                            let transport_start = ip_start + ihl;
+                            let src_port = u16::from_be_bytes([work.data[transport_start], work.data[transport_start + 1]]);
+                            let dst_port = u16::from_be_bytes([work.data[transport_start + 2], work.data[transport_start + 3]]);
+
+                            log::info!(
+                                "BYPASS #{}: UDP {}:{} -> {}:{} | tunnel_apps={:?}",
+                                log_count + 1, src_ip, src_port, dst_ip, dst_port,
+                                snapshot.tunnel_apps.iter().take(3).collect::<Vec<_>>()
+                            );
+                        }
+                    }
+                }
 
                 // CRITICAL FIX: Forward bypass packets to adapter
                 // Previously this was missing, causing all non-tunnel traffic to be dropped!
@@ -3208,8 +3250,18 @@ fn should_route_to_vpn_with_inline_cache(
 
     // Phase 3: Inline lookup (slow path, ~500μs, but only once per connection)
     // This checks if the source process is a tunnel app
-    SYSCALL_LOOKUPS.with(|c| c.set(c.get() + 1));
-    let is_tunnel_app = inline_connection_lookup(src_ip, src_port, protocol, snapshot);
+    //
+    // STABILITY FIX (v1.0.8): Skip blocking Windows API calls in V3 mode
+    // The GetExtendedTcpTable/UdpTable calls can block and cause system freezes
+    // when combined with ndisapi packet interception. V3 mode relies on speculative
+    // tunneling instead (destination IP matching).
+    let is_tunnel_app = if snapshot.routing_mode == crate::settings::RoutingMode::V3 {
+        // V3: Skip expensive syscall, rely on speculative tunneling below
+        false
+    } else {
+        SYSCALL_LOOKUPS.with(|c| c.set(c.get() + 1));
+        inline_connection_lookup(src_ip, src_port, protocol, snapshot)
+    };
 
     // Cache the process check result for subsequent packets from this connection
     // Limit cache size to prevent unbounded growth

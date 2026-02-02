@@ -455,6 +455,11 @@ impl ProcessSnapshot {
     ///
     /// If cache lookup fails, performs ON-DEMAND IP Helper API query.
     /// This guarantees first-packet tunneling for ETW-detected processes.
+    ///
+    /// STABILITY FIX (v1.0.8): Skip expensive Windows API calls in V3 mode.
+    /// The GetExtendedTcpTable/UdpTable calls can block and cause system freezes
+    /// when combined with ndisapi packet interception. V3 mode relies on speculative
+    /// tunneling via destination IP matching instead.
     #[inline(always)]
     fn is_tunnel_connection(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
         // Direct lookup - O(1) average case
@@ -470,6 +475,13 @@ impl ProcessSnapshot {
             if let Some(&pid) = self.connections.get(&any_key) {
                 return self.is_tunnel_pid(pid);
             }
+        }
+
+        // STABILITY FIX (v1.0.8): Skip blocking Windows API calls in V3 mode
+        // V3 relies on speculative tunneling (destination IP matching) instead
+        // This prevents the system freeze caused by blocking calls in hot path
+        if self.routing_mode == RoutingMode::V3 {
+            return false; // Let speculative tunneling handle it
         }
 
         // FIRST-PACKET GUARANTEE: On-demand lookup via IP Helper API
