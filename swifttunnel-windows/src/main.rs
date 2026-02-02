@@ -105,6 +105,36 @@ fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
     }
 }
 
+/// Detect GPU vendor from registry
+fn detect_gpu_vendor() -> Option<(&'static str, &'static str)> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    // Check display adapter registry keys
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let display_key = hklm.open_subkey(
+        r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    ).ok()?;
+
+    // Check subkeys 0000, 0001, etc for GPU info
+    for i in 0..10 {
+        let subkey_name = format!("{:04}", i);
+        if let Ok(subkey) = display_key.open_subkey(&subkey_name) {
+            if let Ok(desc) = subkey.get_value::<String, _>("DriverDesc") {
+                let desc_lower = desc.to_lowercase();
+                if desc_lower.contains("nvidia") || desc_lower.contains("geforce") {
+                    return Some(("NVIDIA", "https://www.nvidia.com/Download/index.aspx"));
+                } else if desc_lower.contains("amd") || desc_lower.contains("radeon") {
+                    return Some(("AMD", "https://www.amd.com/en/support"));
+                } else if desc_lower.contains("intel") {
+                    return Some(("Intel", "https://www.intel.com/content/www/us/en/download-center/home.html"));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Set up crash logging to capture panics
 fn setup_panic_hook() {
     panic::set_hook(Box::new(|info| {
@@ -145,6 +175,46 @@ fn setup_panic_hook() {
 
             if std::fs::write(&crash_file, &crash_info).is_ok() {
                 eprintln!("Crash log written to: {}", crash_file.display());
+            }
+        }
+
+        // Check if this is an OpenGL/glow panic and show user-friendly message
+        let is_opengl_panic = location.contains("glow")
+            || message.to_lowercase().contains("opengl")
+            || message.to_lowercase().contains("gl context")
+            || message.contains("0x1F0");  // GL_VENDOR/RENDERER/VERSION constants
+
+        if is_opengl_panic {
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_YESNO, MB_ICONERROR, IDYES};
+            use windows::core::PCWSTR;
+
+            // Detect GPU vendor for targeted driver update link
+            let gpu_info = detect_gpu_vendor();
+            let (vendor_name, driver_url) = gpu_info.unwrap_or(("Unknown", "https://www.google.com/search?q=update+graphics+driver"));
+
+            let title: Vec<u16> = "SwiftTunnel - Graphics Driver Update Required\0".encode_utf16().collect();
+            let msg = format!(
+                "SwiftTunnel cannot start - your {} graphics driver needs updating.\n\n\
+                OpenGL initialization failed. This usually means your graphics \n\
+                driver is outdated or corrupted.\n\n\
+                Would you like to open the {} driver download page?\n\n\
+                (If using Remote Desktop, run SwiftTunnel directly on your PC instead)\0",
+                vendor_name, vendor_name
+            );
+            let message_wide: Vec<u16> = msg.encode_utf16().collect();
+
+            let result = unsafe {
+                MessageBoxW(
+                    None,
+                    PCWSTR(message_wide.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_YESNO | MB_ICONERROR,
+                )
+            };
+
+            // If user clicked Yes, open the driver download page
+            if result == IDYES {
+                let _ = open::that(driver_url);
             }
         }
     }));
