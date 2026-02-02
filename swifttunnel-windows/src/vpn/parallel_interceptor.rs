@@ -191,6 +191,10 @@ const THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// - Check if the thread is finished every 100ms
 /// - If timeout is reached, log a warning and return false (thread still running)
 /// - This prevents stop() from hanging indefinitely if a thread is stuck
+///
+/// STABILITY FIX: On timeout, we explicitly forget the JoinHandle to detach the thread.
+/// This is safer than letting the handle drop (which would call join and block forever).
+/// The detached thread will be cleaned up when the process exits.
 fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
     let start = Instant::now();
     let poll_interval = Duration::from_millis(100);
@@ -212,14 +216,17 @@ fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
     }
 
     // Timeout reached - thread is stuck
-    log::warn!(
-        "{} thread did not finish within {:?} - continuing without join (thread may leak)",
+    log::error!(
+        "STABILITY: {} thread did not stop within {:?} - detaching thread to prevent hang",
         name,
         THREAD_JOIN_TIMEOUT
     );
-    // Note: We intentionally don't call join() here as it would block forever.
-    // The thread will be terminated when the process exits.
-    // This is a tradeoff: we leak the thread but don't hang the app.
+
+    // CRITICAL: Forget the handle to detach the thread instead of blocking on drop
+    // This prevents the app from hanging during shutdown, at the cost of leaking the thread.
+    // The thread will be forcibly terminated when the process exits.
+    std::mem::forget(handle);
+
     false
 }
 
@@ -2193,11 +2200,25 @@ fn run_packet_reader(
 
     let physical_handle = adapters[physical_idx].get_handle();
 
+    // RAII guard for Windows HANDLE to prevent leaks on error
+    struct HandleGuard(HANDLE);
+    impl Drop for HandleGuard {
+        fn drop(&mut self) {
+            // Check for null (0) and INVALID_HANDLE_VALUE (-1 as isize cast to pointer)
+            if self.0.0 as isize != 0 && self.0.0 as isize != -1 {
+                unsafe { let _ = CloseHandle(self.0); }
+            }
+        }
+    }
+
     // Create event for packet notification
     let event: HANDLE = unsafe {
         CreateEventW(None, true, false, None)
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to create event: {}", e)))?
     };
+
+    // Wrap in RAII guard - will close handle if we return early due to error
+    let event_guard = HandleGuard(event);
 
     driver
         .set_packet_event(physical_handle, event)
@@ -2210,6 +2231,9 @@ fn run_packet_reader(
             FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL,
         )
         .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
+
+    // Transfer ownership from guard - we'll close manually in cleanup
+    std::mem::forget(event_guard);
 
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
     let mut passthrough_to_adapter: EthMRequest<BATCH_SIZE>;
@@ -2258,7 +2282,13 @@ fn run_packet_reader(
                 // Parse to get source port for hashing
                 if let Some((src_port, _)) = parse_ports(data) {
                     // Hash by source port to select worker
-                    let worker_id = (src_port as usize) % num_workers;
+                    // DEFENSIVE: Prevent division by zero (should never happen with num_workers >= 1)
+                    let worker_id = if num_workers > 0 {
+                        (src_port as usize) % num_workers
+                    } else {
+                        log::error!("CRITICAL: num_workers is 0 - this should never happen");
+                        0
+                    };
 
                     // Try to send to worker (non-blocking)
                     // Use ArrayVec for stack allocation - avoids heap alloc per packet
@@ -2607,6 +2637,15 @@ fn run_packet_worker(
                                 // CRITICAL: Use send() not send_to() because socket is connected
                                 match ctx.socket.send(data) {
                                     Ok(_) => (true, data.len()),
+                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                        // STABILITY FIX: Retry once on WouldBlock (socket buffer full)
+                                        // This prevents packet drops during traffic bursts
+                                        std::thread::sleep(std::time::Duration::from_micros(50));
+                                        match ctx.socket.send(data) {
+                                            Ok(_) => (true, data.len()),
+                                            Err(_) => (false, 0),
+                                        }
+                                    }
                                     Err(_) => (false, 0),
                                 }
                             }
@@ -2825,17 +2864,28 @@ fn run_cache_refresher(
                     0,
                 ) == 0
                 {
-                    let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
-                    let entries = std::slice::from_raw_parts(
-                        table.table.as_ptr(),
-                        table.dwNumEntries as usize,
-                    );
+                    // BOUNDS CHECK: Validate buffer has at least the header size
+                    let header_size = std::mem::size_of::<u32>(); // dwNumEntries
+                    if buffer.len() >= header_size {
+                        let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+                        let num_entries = table.dwNumEntries as usize;
 
-                    for entry in entries {
-                        let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
-                        let local_port = u16::from_be(entry.dwLocalPort as u16);
-                        let key = ConnectionKey::new(local_ip, local_port, Protocol::Tcp);
-                        connections.insert(key, entry.dwOwningPid);
+                        // BOUNDS CHECK: Validate num_entries doesn't exceed buffer capacity
+                        let entry_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+                        let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
+                        let safe_entries = num_entries.min(max_entries);
+
+                        let entries = std::slice::from_raw_parts(
+                            table.table.as_ptr(),
+                            safe_entries,
+                        );
+
+                        for entry in entries {
+                            let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
+                            let local_port = u16::from_be(entry.dwLocalPort as u16);
+                            let key = ConnectionKey::new(local_ip, local_port, Protocol::Tcp);
+                            connections.insert(key, entry.dwOwningPid);
+                        }
                     }
                 }
             }
@@ -2864,17 +2914,28 @@ fn run_cache_refresher(
                     0,
                 ) == 0
                 {
-                    let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
-                    let entries = std::slice::from_raw_parts(
-                        table.table.as_ptr(),
-                        table.dwNumEntries as usize,
-                    );
+                    // BOUNDS CHECK: Validate buffer has at least the header size
+                    let header_size = std::mem::size_of::<u32>(); // dwNumEntries
+                    if buffer.len() >= header_size {
+                        let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
+                        let num_entries = table.dwNumEntries as usize;
 
-                    for entry in entries {
-                        let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
-                        let local_port = u16::from_be(entry.dwLocalPort as u16);
-                        let key = ConnectionKey::new(local_ip, local_port, Protocol::Udp);
-                        connections.insert(key, entry.dwOwningPid);
+                        // BOUNDS CHECK: Validate num_entries doesn't exceed buffer capacity
+                        let entry_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
+                        let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
+                        let safe_entries = num_entries.min(max_entries);
+
+                        let entries = std::slice::from_raw_parts(
+                            table.table.as_ptr(),
+                            safe_entries,
+                        );
+
+                        for entry in entries {
+                            let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
+                            let local_port = u16::from_be(entry.dwLocalPort as u16);
+                            let key = ConnectionKey::new(local_ip, local_port, Protocol::Udp);
+                            connections.insert(key, entry.dwOwningPid);
+                        }
                     }
                 }
             }
@@ -3328,10 +3389,26 @@ fn inline_connection_lookup(
                     return false;
                 }
 
+                // BOUNDS CHECK: Validate buffer has at least the header size
+                let header_size = std::mem::size_of::<u32>(); // dwNumEntries
+                if buffer.len() < header_size {
+                    if debug_log {
+                        log::debug!("inline_lookup: TCP table buffer too small");
+                    }
+                    return false;
+                }
+
                 let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+                let num_entries = table.dwNumEntries as usize;
+
+                // BOUNDS CHECK: Validate num_entries doesn't exceed buffer capacity
+                let entry_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+                let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
+                let safe_entries = num_entries.min(max_entries);
+
                 let rows = std::slice::from_raw_parts(
                     table.table.as_ptr(),
-                    table.dwNumEntries as usize,
+                    safe_entries,
                 );
 
                 if debug_log {
@@ -3421,10 +3498,23 @@ fn inline_connection_lookup(
                     return false;
                 }
 
+                // BOUNDS CHECK: Validate buffer has at least the header size
+                let header_size = std::mem::size_of::<u32>(); // dwNumEntries
+                if buffer.len() < header_size {
+                    return false;
+                }
+
                 let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
+                let num_entries = table.dwNumEntries as usize;
+
+                // BOUNDS CHECK: Validate num_entries doesn't exceed buffer capacity
+                let entry_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
+                let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
+                let safe_entries = num_entries.min(max_entries);
+
                 let rows = std::slice::from_raw_parts(
                     table.table.as_ptr(),
-                    table.dwNumEntries as usize,
+                    safe_entries,
                 );
 
                 for row in rows {

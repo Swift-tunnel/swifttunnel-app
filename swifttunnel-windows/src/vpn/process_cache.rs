@@ -70,6 +70,32 @@ const ROBLOX_RANGES: &[(u32, u32, u32)] = &[
 const ROBLOX_PORT_MIN: u16 = 49152;
 const ROBLOX_PORT_MAX: u16 = 65535;
 
+/// Validate that a mask is a valid CIDR mask for the given prefix length
+/// A valid CIDR mask has all 1s on the left and all 0s on the right
+#[inline(always)]
+const fn is_valid_cidr_mask(mask: u32, prefix: u32) -> bool {
+    if prefix > 32 {
+        return false;
+    }
+    if prefix == 0 {
+        return mask == 0;
+    }
+    let expected = !0u32 << (32 - prefix);
+    mask == expected
+}
+
+// Compile-time validation of ROBLOX_RANGES masks
+// This ensures all hardcoded masks are valid CIDR masks
+// Uses ROBLOX_RANGES directly to avoid duplication and ensure all entries are validated
+const _: () = {
+    let mut i = 0;
+    while i < ROBLOX_RANGES.len() {
+        let (_network, mask, prefix) = ROBLOX_RANGES[i];
+        assert!(is_valid_cidr_mask(mask, prefix), "Invalid CIDR mask in ROBLOX_RANGES");
+        i += 1;
+    }
+};
+
 /// Check if an IP address is within a CIDR range
 #[inline(always)]
 fn ip_in_range(ip: Ipv4Addr, network: u32, mask: u32) -> bool {
@@ -221,11 +247,29 @@ fn lookup_connection_pid(local_ip: Ipv4Addr, local_port: u16, protocol: Protocol
                     return None;
                 }
 
+                // BOUNDS CHECK: Validate buffer has at least the header size
+                let header_size = std::mem::size_of::<u32>(); // dwNumEntries
+                if buffer.len() < header_size {
+                    log::warn!("TCP table buffer too small for header");
+                    return None;
+                }
+
                 // Search for matching connection
                 let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+                let num_entries = table.dwNumEntries as usize;
+
+                // BOUNDS CHECK: Validate num_entries doesn't exceed buffer capacity
+                let entry_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+                let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
+                let safe_entries = num_entries.min(max_entries);
+
+                if safe_entries < num_entries {
+                    log::warn!("TCP table num_entries ({}) exceeds buffer capacity ({})", num_entries, max_entries);
+                }
+
                 let entries = std::slice::from_raw_parts(
                     table.table.as_ptr(),
-                    table.dwNumEntries as usize,
+                    safe_entries,
                 );
 
                 for entry in entries {
@@ -269,11 +313,29 @@ fn lookup_connection_pid(local_ip: Ipv4Addr, local_port: u16, protocol: Protocol
                     return None;
                 }
 
+                // BOUNDS CHECK: Validate buffer has at least the header size
+                let header_size = std::mem::size_of::<u32>(); // dwNumEntries
+                if buffer.len() < header_size {
+                    log::warn!("UDP table buffer too small for header");
+                    return None;
+                }
+
                 // Search for matching endpoint
                 let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
+                let num_entries = table.dwNumEntries as usize;
+
+                // BOUNDS CHECK: Validate num_entries doesn't exceed buffer capacity
+                let entry_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
+                let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
+                let safe_entries = num_entries.min(max_entries);
+
+                if safe_entries < num_entries {
+                    log::warn!("UDP table num_entries ({}) exceeds buffer capacity ({})", num_entries, max_entries);
+                }
+
                 let entries = std::slice::from_raw_parts(
                     table.table.as_ptr(),
-                    table.dwNumEntries as usize,
+                    safe_entries,
                 );
 
                 for entry in entries {
