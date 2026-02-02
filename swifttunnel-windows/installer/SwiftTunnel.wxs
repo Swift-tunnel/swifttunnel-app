@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="SwiftTunnel"
              Language="1033"
-             Version="1.0.4.0"
+             Version="1.0.5.0"
              Manufacturer="SwiftTunnel"
              UpgradeCode="8B5E7A12-4F3D-4A2B-9C5E-1D2F3A4B5C6D">
 
@@ -19,6 +19,11 @@
 
         <!-- Require Admin for installation -->
         <Property Id="MSIUSEREALADMINDETECTION" Value="1" />
+
+        <!-- Launch condition: Check for admin rights with friendly error message -->
+        <Condition Message="SwiftTunnel requires administrator privileges to install.&#13;&#10;&#13;&#10;Please right-click the installer and select 'Run as administrator'.">
+            <![CDATA[Privileged]]>
+        </Condition>
 
         <!-- Icon for Add/Remove Programs -->
         <Icon Id="SwiftTunnelIcon" SourceFile="$(var.SourceDir)\swifttunnel.ico" />
