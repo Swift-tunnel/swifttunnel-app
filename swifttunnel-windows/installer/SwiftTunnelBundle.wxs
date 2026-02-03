@@ -7,11 +7,12 @@
         Manufacturer="SwiftTunnel"
         UpgradeCode="6A7B4A14-9C42-4A24-9D67-8F70A8D2F3B9"
         Compressed="yes"
-        IconSourceFile="swifttunnel.ico">
+        IconSourceFile="$(var.InstallerDir)\swifttunnel.ico"
+        InstallPrivilegeLevel="elevated">
 
         <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
             <bal:WixStandardBootstrapperApplication
-                LicenseFile="license.rtf" />
+                LicenseFile="$(var.InstallerDir)\license.rtf" />
         </BootstrapperApplicationRef>
 
         <Chain>

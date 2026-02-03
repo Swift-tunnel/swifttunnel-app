@@ -60,7 +60,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Compiling WiX bootstrapper source..." -ForegroundColor Yellow
-& $candleExe -ext WixBalExtension -out $bundleWixobjFile -dMsiPath="$msiFile" $bundleWxsFile
+& $candleExe -ext WixBalExtension -out $bundleWixobjFile -dMsiPath="$msiFile" -dInstallerDir="$ScriptDir" $bundleWxsFile
 if ($LASTEXITCODE -ne 0) {
     Write-Host "WiX bootstrapper compilation failed!" -ForegroundColor Red
     exit 1
