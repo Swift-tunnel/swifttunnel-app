@@ -1,4 +1,4 @@
-# SwiftTunnel MSI Builder
+# SwiftTunnel MSI + Bootstrapper Builder
 # Requires WiX Toolset v3.11+ to be installed
 
 param(
@@ -10,7 +10,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DistDir = Join-Path (Split-Path -Parent $ScriptDir) "dist"
 $OutputDir = Join-Path $ScriptDir "output"
 
-Write-Host "SwiftTunnel MSI Builder" -ForegroundColor Cyan
+Write-Host "SwiftTunnel Installer Builder" -ForegroundColor Cyan
 Write-Host "========================" -ForegroundColor Cyan
 
 # Check WiX installation
@@ -34,12 +34,15 @@ if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir | Out-Null
 }
 
-Write-Host "Compiling WiX source..." -ForegroundColor Yellow
+Write-Host "Compiling WiX MSI source..." -ForegroundColor Yellow
 $candleExe = Join-Path $WixPath "candle.exe"
 $lightExe = Join-Path $WixPath "light.exe"
 $wxsFile = Join-Path $ScriptDir "SwiftTunnel.wxs"
+$bundleWxsFile = Join-Path $ScriptDir "SwiftTunnelBundle.wxs"
 $wixobjFile = Join-Path $OutputDir "SwiftTunnel.wixobj"
+$bundleWixobjFile = Join-Path $OutputDir "SwiftTunnelBundle.wixobj"
 $msiFile = Join-Path $OutputDir "SwiftTunnel-Setup.msi"
+$bundleExe = Join-Path $OutputDir "SwiftTunnel-Setup.exe"
 
 # Run candle (compiler)
 & $candleExe -arch x64 -dSourceDir="$DistDir" -out $wixobjFile $wxsFile
@@ -56,8 +59,26 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+Write-Host "Compiling WiX bootstrapper source..." -ForegroundColor Yellow
+& $candleExe -ext WixBalExtension -out $bundleWixobjFile -dMsiPath="$msiFile" $bundleWxsFile
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WiX bootstrapper compilation failed!" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Linking bootstrapper EXE..." -ForegroundColor Yellow
+& $lightExe -ext WixBalExtension -out $bundleExe $bundleWixobjFile
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WiX bootstrapper linking failed!" -ForegroundColor Red
+    exit 1
+}
+
 Write-Host ""
-Write-Host "MSI package created successfully!" -ForegroundColor Green
-Write-Host "Output: $msiFile" -ForegroundColor White
+Write-Host "Installer created successfully!" -ForegroundColor Green
+Write-Host "MSI: $msiFile" -ForegroundColor White
 $msiSize = (Get-Item $msiFile).Length / 1MB
-Write-Host "Size: $([math]::Round($msiSize, 2)) MB" -ForegroundColor White
+Write-Host "MSI Size: $([math]::Round($msiSize, 2)) MB" -ForegroundColor White
+
+$bundleSize = (Get-Item $bundleExe).Length / 1MB
+Write-Host "EXE: $bundleExe" -ForegroundColor White
+Write-Host "EXE Size: $([math]::Round($bundleSize, 2)) MB" -ForegroundColor White
