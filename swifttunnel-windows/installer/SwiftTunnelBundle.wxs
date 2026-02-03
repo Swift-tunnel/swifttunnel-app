@@ -7,8 +7,7 @@
         Manufacturer="SwiftTunnel"
         UpgradeCode="6A7B4A14-9C42-4A24-9D67-8F70A8D2F3B9"
         Compressed="yes"
-        IconSourceFile="$(var.InstallerDir)\swifttunnel.ico"
-        InstallPrivilegeLevel="elevated">
+        IconSourceFile="$(var.InstallerDir)\swifttunnel.ico">
 
         <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
             <bal:WixStandardBootstrapperApplication
@@ -18,7 +17,7 @@
         <Chain>
             <MsiPackage
                 SourceFile="$(var.MsiPath)"
-                PerMachine="yes"
+                ForcePerMachine="yes"
                 DisplayInternalUI="yes"
                 Vital="yes" />
         </Chain>
