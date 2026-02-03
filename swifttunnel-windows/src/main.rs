@@ -73,9 +73,18 @@ impl Drop for SingleInstanceGuard {
     }
 }
 
+/// Result of single-instance check
+enum SingleInstanceResult {
+    /// We acquired the lock - we're the only instance
+    Acquired(SingleInstanceGuard),
+    /// Another instance is already running
+    AlreadyRunning,
+    /// Failed to check (permissions, etc.) - let the app run anyway
+    CheckFailed,
+}
+
 /// Try to acquire single-instance mutex
-/// Returns Some(guard) if we're the first instance, None if another instance is running
-fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
+fn try_acquire_single_instance() -> SingleInstanceResult {
     unsafe {
         let mutex_name = std::ffi::CString::new(SINGLE_INSTANCE_MUTEX).unwrap();
         let handle = CreateMutexA(
@@ -90,16 +99,17 @@ fn try_acquire_single_instance() -> Option<SingleInstanceGuard> {
                 if error == ERROR_ALREADY_EXISTS {
                     // Another instance is already running
                     let _ = CloseHandle(h);
-                    None
+                    SingleInstanceResult::AlreadyRunning
                 } else {
                     // We're the first instance
-                    Some(SingleInstanceGuard { _handle: h })
+                    SingleInstanceResult::Acquired(SingleInstanceGuard { _handle: h })
                 }
             }
-            Err(_) => {
-                // Failed to create mutex - assume we can run
-                warn!("Failed to create single-instance mutex, continuing anyway");
-                None
+            Err(e) => {
+                // Failed to create mutex - let the app run anyway
+                // This can happen due to permissions or other system issues
+                warn!("Failed to create single-instance mutex: {:?}, continuing anyway", e);
+                SingleInstanceResult::CheckFailed
             }
         }
     }
@@ -295,18 +305,22 @@ fn main() -> eframe::Result<()> {
     //
     // IMPORTANT: When --resume-connect is used, the old process may still be exiting.
     // We retry a few times to handle this race condition.
-    let _instance_guard = {
+    let _instance_guard: Option<SingleInstanceGuard> = {
         let max_attempts = if is_resume_connect { 10 } else { 1 };
-        let mut guard = None;
+        let mut result = SingleInstanceResult::AlreadyRunning;
 
         for attempt in 1..=max_attempts {
-            match try_acquire_single_instance() {
-                Some(g) => {
+            result = try_acquire_single_instance();
+            match &result {
+                SingleInstanceResult::Acquired(_) => {
                     info!("Single-instance lock acquired (attempt {})", attempt);
-                    guard = Some(g);
                     break;
                 }
-                None => {
+                SingleInstanceResult::CheckFailed => {
+                    info!("Single-instance check failed, continuing anyway");
+                    break;
+                }
+                SingleInstanceResult::AlreadyRunning => {
                     if attempt < max_attempts {
                         info!("Waiting for previous instance to exit (attempt {}/{})", attempt, max_attempts);
                         std::thread::sleep(Duration::from_millis(200));
@@ -315,13 +329,41 @@ fn main() -> eframe::Result<()> {
             }
         }
 
-        match guard {
-            Some(g) => g,
-            None => {
+        match result {
+            SingleInstanceResult::Acquired(g) => Some(g),
+            SingleInstanceResult::CheckFailed => {
+                // Mutex check failed - let the app run anyway
+                // This prevents the app from being unusable due to permission issues
+                None
+            }
+            SingleInstanceResult::AlreadyRunning => {
                 if is_resume_connect {
                     warn!("Could not acquire lock after {} attempts, previous instance may still be running", max_attempts);
                 }
                 info!("Another instance of SwiftTunnel is already running. Exiting.");
+
+                // Show user-friendly message since console is hidden in release builds
+                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONINFORMATION};
+                use windows::core::PCWSTR;
+
+                let title: Vec<u16> = "SwiftTunnel\0".encode_utf16().collect();
+                let msg: Vec<u16> = "SwiftTunnel is already running.\n\n\
+                    Check your system tray (click the ^ arrow in the bottom-right corner).\n\n\
+                    If you don't see the icon there, try:\n\
+                    1. Open Task Manager (Ctrl+Shift+Esc)\n\
+                    2. Find 'swifttunnel' in the list\n\
+                    3. Click 'End Task'\n\
+                    4. Try launching SwiftTunnel again\0".encode_utf16().collect();
+
+                unsafe {
+                    MessageBoxW(
+                        None,
+                        PCWSTR(msg.as_ptr()),
+                        PCWSTR(title.as_ptr()),
+                        MB_OK | MB_ICONINFORMATION,
+                    );
+                }
+
                 return Ok(());
             }
         }
