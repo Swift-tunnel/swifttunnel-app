@@ -9,9 +9,9 @@ use std::time::Duration;
 /// GitHub repository for SwiftTunnel releases
 const GITHUB_REPO: &str = "Swift-tunnel/swifttunnel-app";
 
-/// Expected MSI asset name pattern
-const MSI_PATTERN: &str = "SwiftTunnel";
-const MSI_EXTENSION: &str = ".msi";
+/// Expected installer asset name pattern
+const INSTALLER_PATTERN: &str = "SwiftTunnel";
+const INSTALLER_EXTENSION: &str = ".exe";
 const CHECKSUM_EXTENSION: &str = ".sha256";
 
 /// Update checker that queries GitHub releases API
@@ -143,16 +143,22 @@ impl UpdateChecker {
             return Ok(None);
         }
 
-        // Find MSI asset
-        let msi_asset = release
+        // Find bootstrapper EXE asset (preferred) or fall back to MSI for older releases
+        let installer_asset = release
             .assets
             .iter()
-            .find(|a| a.name.starts_with(MSI_PATTERN) && a.name.ends_with(MSI_EXTENSION));
+            .find(|a| a.name.starts_with(INSTALLER_PATTERN) && a.name.ends_with(INSTALLER_EXTENSION))
+            .or_else(|| {
+                // Fall back to MSI for older releases that don't have the bootstrapper
+                release.assets.iter().find(|a| {
+                    a.name.starts_with(INSTALLER_PATTERN) && a.name.ends_with(".msi")
+                })
+            });
 
-        let msi_asset = match msi_asset {
+        let installer_asset = match installer_asset {
             Some(asset) => asset,
             None => {
-                error!("No MSI asset found in release");
+                error!("No installer asset found in release");
                 return Err("Release has no Windows installer".to_string());
             }
         };
@@ -161,18 +167,18 @@ impl UpdateChecker {
         let checksum_url = release
             .assets
             .iter()
-            .find(|a| a.name == format!("{}{}", msi_asset.name, CHECKSUM_EXTENSION))
+            .find(|a| a.name == format!("{}{}", installer_asset.name, CHECKSUM_EXTENSION))
             .map(|a| a.browser_download_url.clone());
 
         info!(
             "Update available: {} -> {} ({})",
-            self.current_version, remote_version, msi_asset.name
+            self.current_version, remote_version, installer_asset.name
         );
 
         Ok(Some(UpdateInfo {
             version: remote_version.to_string(),
-            download_url: msi_asset.browser_download_url.clone(),
-            size: msi_asset.size,
+            download_url: installer_asset.browser_download_url.clone(),
+            size: installer_asset.size,
             checksum_url,
             release_notes: release.body,
             published_at: release.published_at,

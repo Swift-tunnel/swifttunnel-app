@@ -1,4 +1,4 @@
-//! Update downloader - downloads MSI with progress reporting
+//! Update downloader - downloads installer with progress reporting
 
 use futures_util::StreamExt;
 use log::{debug, error, info};
@@ -144,12 +144,12 @@ pub async fn download_checksum(url: &str) -> Result<String, String> {
 /// Maximum age for update files before cleanup (24 hours)
 const MAX_UPDATE_FILE_AGE_SECS: u64 = 24 * 60 * 60;
 
-/// Maximum number of MSI files to keep
-const MAX_MSI_FILES: usize = 2;
+/// Maximum number of installer files to keep
+const MAX_INSTALLER_FILES: usize = 2;
 
 /// Clean up old update files
 ///
-/// Removes MSI files that are:
+/// Removes installer files (EXE and MSI) that are:
 /// 1. Older than 24 hours
 /// 2. Beyond the 2 most recent files
 pub async fn cleanup_updates() -> Result<(), String> {
@@ -166,8 +166,8 @@ pub async fn cleanup_updates() -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to read updates directory: {}", e))?;
 
-    // Collect all MSI files with their metadata
-    let mut msi_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+    // Collect all installer files (EXE and MSI) with their metadata
+    let mut installer_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
 
     while let Some(entry) = entries
         .next_entry()
@@ -175,22 +175,27 @@ pub async fn cleanup_updates() -> Result<(), String> {
         .map_err(|e| format!("Error reading directory entry: {}", e))?
     {
         let path = entry.path();
-        if path.extension().map(|e| e == "msi").unwrap_or(false) {
+        let is_installer = path
+            .extension()
+            .map(|e| e == "exe" || e == "msi")
+            .unwrap_or(false);
+
+        if is_installer {
             if let Ok(metadata) = entry.metadata().await {
                 if let Ok(modified) = metadata.modified() {
-                    msi_files.push((path, modified));
+                    installer_files.push((path, modified));
                 }
             }
         }
     }
 
     // Sort by modification time (newest first)
-    msi_files.sort_by(|a, b| b.1.cmp(&a.1));
+    installer_files.sort_by(|a, b| b.1.cmp(&a.1));
 
     let now = std::time::SystemTime::now();
 
-    for (i, (path, modified)) in msi_files.iter().enumerate() {
-        let should_delete = if i >= MAX_MSI_FILES {
+    for (i, (path, modified)) in installer_files.iter().enumerate() {
+        let should_delete = if i >= MAX_INSTALLER_FILES {
             // Delete files beyond the limit
             true
         } else if let Ok(age) = now.duration_since(*modified) {
@@ -207,7 +212,8 @@ pub async fn cleanup_updates() -> Result<(), String> {
             }
 
             // Also delete associated checksum file
-            let checksum_path = path.with_extension("msi.sha256");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let checksum_path = path.with_extension(format!("{}.sha256", ext));
             if checksum_path.exists() {
                 let _ = tokio::fs::remove_file(&checksum_path).await;
             }
