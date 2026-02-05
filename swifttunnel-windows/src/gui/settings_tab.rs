@@ -580,7 +580,7 @@ impl BoosterApp {
             });
 
         if do_login { self.start_login(); }
-        if open_signup { let _ = open::that("https://swifttunnel.net/signup"); }
+        if open_signup { crate::utils::open_url("https://swifttunnel.net/signup"); }
 
         if let Some(error) = &self.auth_error.clone() {
             ui.add_space(12.0);

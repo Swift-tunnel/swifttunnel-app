@@ -745,6 +745,21 @@ mod settings_tests {
 mod oauth_tests {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
+    fn percent_encode_test(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        for byte in s.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    result.push(byte as char);
+                }
+                _ => {
+                    result.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+        result
+    }
+
     #[test]
     fn test_pkce_code_verifier_length() {
         // PKCE code verifier should be 43-128 characters
@@ -781,7 +796,7 @@ mod oauth_tests {
         let auth_url = format!(
             "{}/authorize?client_id={}&redirect_uri={}&response_type=code&state={}&code_challenge={}&code_challenge_method=S256",
             base_url, client_id,
-            urlencoding::encode(redirect_uri),
+            percent_encode_test(redirect_uri),
             state, code_challenge
         );
 

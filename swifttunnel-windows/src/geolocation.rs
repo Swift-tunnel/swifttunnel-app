@@ -9,6 +9,17 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
+/// Shared HTTP client with 5s timeout for geolocation lookups
+fn geo_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build geolocation HTTP client")
+    })
+}
+
 /// Cache for server locations to avoid repeated API calls
 static LOCATION_CACHE: std::sync::OnceLock<Arc<Mutex<HashMap<Ipv4Addr, String>>>> = std::sync::OnceLock::new();
 
@@ -52,10 +63,7 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
     let url = format!("https://ipinfo.io/{}/json", ip);
     log::info!("Querying location for IP: {}", ip);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .ok()?;
+    let client = geo_http_client();
 
     let response = client.get(&url).send().await.ok()?;
 

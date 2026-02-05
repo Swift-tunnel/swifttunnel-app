@@ -7,10 +7,9 @@ description = "SwiftTunnel - Game Booster with PC Optimizations"
 default-run = "swifttunnel-fps-booster"
 
 [dependencies]
-# GUI Framework - egui 0.33 with glow (OpenGL) renderer
-# Note: wgpu/DX12 backend is incompatible with windows 0.62 (required by ndisapi)
-# RDP/VM users will see a helpful error message to run locally
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+# GUI Framework - egui 0.33 with wgpu (DX12/DX11/Vulkan) + glow (OpenGL) fallback
+# Both renderers compiled in: wgpu tried first for broad GPU compat, glow as fallback
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu", "glow"] }
 egui = "0.33"
 
 
@@ -51,11 +50,11 @@ windows = { version = "0.62", features = [
 ] }
 
 # System utilities
-sysinfo = "0.32"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 winreg = "0.52"
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "fs", "io-util", "macros"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -63,7 +62,7 @@ serde_json = "1.0"
 
 # Logging
 log = "0.4"
-env_logger = "0.11"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
 
 # Error handling
 anyhow = "1.0"
@@ -73,7 +72,7 @@ thiserror = "1.0"
 dirs = "5.0"
 
 # HTTP client for API calls
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # VPN Core - WireGuard userspace implementation
 boringtun = "0.6"
@@ -89,17 +88,14 @@ ndisapi = "0.6"
 x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
 
 # Additional async utilities for VPN packet handling
-futures = "0.3"
 futures-util = "0.3"
 
-# SHA256 hex encoding for update verification
-hex = "0.4"
 
 # Semantic versioning comparison for updates
 semver = "1.0"
 
 # Regular expressions for error message simplification
-regex = "1"
+regex-lite = "0.1"
 
 # Secure credential storage (DPAPI on Windows)
 keyring = "3"
@@ -111,13 +107,10 @@ rand = "0.8"
 
 # URL handling
 url = "2"
-urlencoding = "2"
 
 # Date/time handling
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 
-# Open URLs in browser
-open = "5"
 
 # Lightweight HTTP server for OAuth callback
 tiny_http = "0.12"
@@ -131,8 +124,6 @@ winrt-notification = "0.5"
 # Image loading for tray icon
 image = { version = "0.25", default-features = false, features = ["png"] }
 
-# Ctrl+C handler for CLI tools
-ctrlc = "3.4"
 
 # Fast mutex for CLI testbench
 parking_lot = "0.12"
@@ -189,3 +180,4 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"

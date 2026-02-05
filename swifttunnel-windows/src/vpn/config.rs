@@ -10,6 +10,13 @@ use super::{VpnError, VpnResult};
 /// API base URL for SwiftTunnel
 const API_BASE_URL: &str = "https://swifttunnel.net";
 
+/// Shared HTTP client — reuses connection pool and TLS session cache
+fn http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::Client::new())
+}
+
 /// Request body for generating VPN config
 #[derive(Debug, Clone, Serialize)]
 pub struct VpnConfigRequest {
@@ -42,7 +49,7 @@ pub async fn fetch_vpn_config(
     access_token: &str,
     region: &str,
 ) -> VpnResult<VpnConfig> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = format!("{}/api/vpn/generate-config", API_BASE_URL);
 
     let request = VpnConfigRequest {
@@ -168,7 +175,7 @@ pub async fn update_latency(
     config_id: &str,
     latency_ms: u32,
 ) -> VpnResult<bool> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = format!("{}/api/vpn/latency", API_BASE_URL);
 
     log::info!("Updating latency to {}ms for config {}", latency_ms, config_id);

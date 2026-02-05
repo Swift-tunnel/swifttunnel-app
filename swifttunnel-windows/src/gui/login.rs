@@ -278,8 +278,8 @@ impl BoosterApp {
         });
 
         if do_login { self.start_login(); }
-        if open_signup { let _ = open::that("https://swifttunnel.net/signup"); }
-        if open_forgot_password { let _ = open::that("https://swifttunnel.net/forgot-password"); }
+        if open_signup { crate::utils::open_url("https://swifttunnel.net/signup"); }
+        if open_forgot_password { crate::utils::open_url("https://swifttunnel.net/forgot-password"); }
     }
 
     /// Render the login pending spinner

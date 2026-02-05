@@ -71,6 +71,26 @@ pub fn is_administrator() -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  URL OPENING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Open a URL in the user's default browser using Windows ShellExecuteW
+#[cfg(windows)]
+pub fn open_url(url: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+    unsafe {
+        ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(url), None, None, SW_SHOW);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_url(_url: &str) {
+    // No-op on non-Windows platforms
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  ELEVATION UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
 

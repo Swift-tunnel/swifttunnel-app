@@ -21,6 +21,8 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 pub struct DiscordManager {
     /// Channel to send activity updates
     tx: Sender<DiscordActivity>,
+    /// Stored receiver for lazy thread spawn (only used when starting disabled)
+    pending_rx: Option<Receiver<DiscordActivity>>,
     /// Handle to the background thread
     thread_handle: Option<JoinHandle<()>>,
     /// Whether RPC is enabled (user setting)
@@ -32,15 +34,20 @@ pub struct DiscordManager {
 }
 
 impl DiscordManager {
-    /// Create a new Discord manager and start the background thread
+    /// Create a new Discord manager. Only spawns the background thread when enabled.
     pub fn new(enabled: bool) -> Self {
         let (tx, rx) = mpsc::channel::<DiscordActivity>();
 
-        // Always spawn the thread - it will handle enable/disable via channel messages
-        let thread_handle = Some(Self::spawn_rpc_thread(rx));
+        // Only spawn thread if enabled — saves one thread + IPC connection attempts when disabled
+        let (thread_handle, pending_rx) = if enabled {
+            (Some(Self::spawn_rpc_thread(rx)), None)
+        } else {
+            (None, Some(rx))
+        };
 
         Self {
             tx,
+            pending_rx,
             thread_handle,
             enabled,
             current_state: None,
@@ -312,6 +319,12 @@ impl DiscordManager {
             // Clear presence when disabled (but keep current_state for later restore)
             let _ = self.tx.send(DiscordActivity::Clear);
         } else if enabled && !was_enabled {
+            // Lazy-spawn the thread if it hasn't been started yet
+            if self.thread_handle.is_none() {
+                if let Some(rx) = self.pending_rx.take() {
+                    self.thread_handle = Some(Self::spawn_rpc_thread(rx));
+                }
+            }
             // Restore state when re-enabled
             if let Some(state) = self.current_state.clone() {
                 let _ = self.tx.send(DiscordActivity::SetActivity(state));
