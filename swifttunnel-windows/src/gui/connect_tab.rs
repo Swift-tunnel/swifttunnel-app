@@ -679,49 +679,45 @@ impl BoosterApp {
                             .collect();
 
                         // Draw fill under lines (subtle)
-                        if tx_points.len() >= 2 {
-                            for i in 0..tx_points.len()-1 {
-                                let quad = [
-                                    tx_points[i],
-                                    tx_points[i + 1],
-                                    egui::pos2(tx_points[i + 1].x, graph_rect.bottom()),
-                                    egui::pos2(tx_points[i].x, graph_rect.bottom()),
-                                ];
-                                painter.add(egui::Shape::convex_polygon(
-                                    quad.to_vec(),
-                                    ACCENT_CYAN.gamma_multiply(0.1),
-                                    egui::Stroke::NONE,
-                                ));
-                            }
+                        for pair in tx_points.windows(2) {
+                            let quad = [
+                                pair[0],
+                                pair[1],
+                                egui::pos2(pair[1].x, graph_rect.bottom()),
+                                egui::pos2(pair[0].x, graph_rect.bottom()),
+                            ];
+                            painter.add(egui::Shape::convex_polygon(
+                                quad.to_vec(),
+                                ACCENT_CYAN.gamma_multiply(0.1),
+                                egui::Stroke::NONE,
+                            ));
                         }
 
-                        if rx_points.len() >= 2 {
-                            for i in 0..rx_points.len()-1 {
-                                let quad = [
-                                    rx_points[i],
-                                    rx_points[i + 1],
-                                    egui::pos2(rx_points[i + 1].x, graph_rect.bottom()),
-                                    egui::pos2(rx_points[i].x, graph_rect.bottom()),
-                                ];
-                                painter.add(egui::Shape::convex_polygon(
-                                    quad.to_vec(),
-                                    STATUS_CONNECTED.gamma_multiply(0.1),
-                                    egui::Stroke::NONE,
-                                ));
-                            }
+                        for pair in rx_points.windows(2) {
+                            let quad = [
+                                pair[0],
+                                pair[1],
+                                egui::pos2(pair[1].x, graph_rect.bottom()),
+                                egui::pos2(pair[0].x, graph_rect.bottom()),
+                            ];
+                            painter.add(egui::Shape::convex_polygon(
+                                quad.to_vec(),
+                                STATUS_CONNECTED.gamma_multiply(0.1),
+                                egui::Stroke::NONE,
+                            ));
                         }
 
                         // Draw lines
-                        for i in 0..tx_points.len()-1 {
+                        for pair in tx_points.windows(2) {
                             painter.line_segment(
-                                [tx_points[i], tx_points[i + 1]],
+                                [pair[0], pair[1]],
                                 egui::Stroke::new(1.5, ACCENT_CYAN.gamma_multiply(0.8))
                             );
                         }
 
-                        for i in 0..rx_points.len()-1 {
+                        for pair in rx_points.windows(2) {
                             painter.line_segment(
-                                [rx_points[i], rx_points[i + 1]],
+                                [pair[0], pair[1]],
                                 egui::Stroke::new(1.5, STATUS_CONNECTED.gamma_multiply(0.8))
                             );
                         }

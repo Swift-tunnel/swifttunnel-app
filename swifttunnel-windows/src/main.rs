@@ -38,7 +38,7 @@ use crate::gui::set_auto_connect_pending;
 
 use eframe::NativeOptions;
 use log::{error, info, warn};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use std::panic;
 use tokio::runtime::Runtime;
@@ -408,7 +408,9 @@ fn main() -> eframe::Result<()> {
     }
 
     // Create tokio runtime for async operations
-    let rt = Runtime::new().expect("Failed to create tokio runtime");
+    // Stored in OnceLock so it outlives both wgpu and glow run_native calls
+    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+    let rt = RUNTIME.get_or_init(|| Runtime::new().expect("Failed to create tokio runtime"));
 
     // Clean up any stale state from previous crash/force kill
     // This ensures split tunnel driver is reset before we start
