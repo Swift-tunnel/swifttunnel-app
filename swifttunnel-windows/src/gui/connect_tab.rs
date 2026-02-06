@@ -9,8 +9,12 @@ use std::sync::atomic::Ordering;
 
 impl BoosterApp {
     pub(crate) fn render_connect_tab(&mut self, ui: &mut egui::Ui) {
-        // Show update banner if available
+        // Show update banner if available (adds spacing after if shown)
+        let had_banner = self.has_update_banner();
         self.render_update_banner(ui);
+        if had_banner {
+            ui.add_space(12.0);
+        }
 
         let is_logged_in = matches!(self.auth_state, AuthState::LoggedIn(_));
 
@@ -57,73 +61,85 @@ impl BoosterApp {
 
                 ui.add_space(12.0);
 
-                // Game preset cards in a horizontal row
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
+                // Game preset cards in responsive grid
+                let available = self.content_area_width.min(ui.available_width());
+                let card_spacing = 10.0;
+                let presets = GamePreset::all();
+                let is_connected = self.vpn_state.is_connected();
 
-                    // Calculate card width based on available space (3 cards per row)
-                    let available = self.content_area_width.min(ui.available_width());
-                    let card_width = (available - 20.0) / 3.0;
+                // Responsive columns: 3 if enough space (>= 140px per card), else 2
+                let cols = if (available - card_spacing * 2.0) / 3.0 >= 140.0 { 3 } else { 2 };
+                let card_width = ((available - card_spacing * (cols as f32 - 1.0)) / cols as f32).floor();
 
-                    for preset in GamePreset::all() {
-                        let is_selected = self.selected_game_presets.contains(preset);
-                        let is_connected = self.vpn_state.is_connected();
+                let mut preset_iter = presets.iter().peekable();
+                while preset_iter.peek().is_some() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(card_spacing, 0.0);
 
-                        let card_bg = if is_selected {
-                            ACCENT_PRIMARY.gamma_multiply(0.15)
-                        } else {
-                            BG_ELEVATED
-                        };
-                        let card_border = if is_selected {
-                            egui::Stroke::new(2.0, ACCENT_PRIMARY)
-                        } else {
-                            egui::Stroke::new(1.0, BG_HOVER)
-                        };
+                        for _ in 0..cols {
+                            if let Some(preset) = preset_iter.next() {
+                                let is_selected = self.selected_game_presets.contains(preset);
 
-                        let response = egui::Frame::NONE
-                            .fill(card_bg)
-                            .stroke(card_border)
-                            .rounding(8.0)
-                            .inner_margin(egui::Margin::symmetric(8, 12))
-                            .show(ui, |ui| {
-                                ui.set_min_width(card_width);
-                                ui.set_max_width(card_width);
+                                let card_bg = if is_selected {
+                                    ACCENT_PRIMARY.gamma_multiply(0.15)
+                                } else {
+                                    BG_ELEVATED
+                                };
+                                let card_border = if is_selected {
+                                    egui::Stroke::new(2.0, ACCENT_PRIMARY)
+                                } else {
+                                    egui::Stroke::new(1.0, BG_HOVER)
+                                };
 
-                                ui.vertical_centered(|ui| {
-                                    // Game icon
-                                    ui.label(egui::RichText::new(preset.icon()).size(24.0));
-                                    ui.add_space(4.0);
+                                let response = egui::Frame::NONE
+                                    .fill(card_bg)
+                                    .stroke(card_border)
+                                    .rounding(8.0)
+                                    .inner_margin(egui::Margin::symmetric(8, 12))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(card_width);
+                                        ui.set_max_width(card_width);
 
-                                    // Game name
-                                    let name_color = if is_selected { TEXT_PRIMARY } else { TEXT_SECONDARY };
-                                    ui.label(egui::RichText::new(preset.display_name())
-                                        .size(13.0).color(name_color).strong());
+                                        ui.vertical_centered(|ui| {
+                                            // Game icon
+                                            ui.label(egui::RichText::new(preset.icon()).size(24.0));
+                                            ui.add_space(4.0);
 
-                                    // Selection indicator
+                                            // Game name
+                                            let name_color = if is_selected { TEXT_PRIMARY } else { TEXT_SECONDARY };
+                                            ui.label(egui::RichText::new(preset.display_name())
+                                                .size(13.0).color(name_color).strong());
+
+                                            // Selection indicator
+                                            if is_selected {
+                                                ui.add_space(2.0);
+                                                ui.label(egui::RichText::new("+").size(10.0).color(ACCENT_PRIMARY));
+                                            }
+                                        });
+                                    })
+                                    .response;
+
+                                // Handle click (only when not connected)
+                                if response.interact(egui::Sense::click()).clicked() && !is_connected {
                                     if is_selected {
-                                        ui.add_space(2.0);
-                                        ui.label(egui::RichText::new("+").size(10.0).color(ACCENT_PRIMARY));
+                                        self.selected_game_presets.remove(preset);
+                                    } else {
+                                        self.selected_game_presets.insert(*preset);
                                     }
-                                });
-                            })
-                            .response;
+                                    self.mark_dirty();
+                                }
 
-                        // Handle click (only when not connected)
-                        if response.interact(egui::Sense::click()).clicked() && !is_connected {
-                            if is_selected {
-                                self.selected_game_presets.remove(preset);
-                            } else {
-                                self.selected_game_presets.insert(*preset);
+                                // Change cursor on hover (only when not connected)
+                                if !is_connected {
+                                    response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                                }
                             }
-                            self.mark_dirty();
                         }
-
-                        // Change cursor on hover (only when not connected)
-                        if !is_connected {
-                            response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                        }
+                    });
+                    if preset_iter.peek().is_some() {
+                        ui.add_space(8.0);
                     }
-                });
+                }
 
                 // Warning if no game selected
                 if self.selected_game_presets.is_empty() {
@@ -663,49 +679,45 @@ impl BoosterApp {
                             .collect();
 
                         // Draw fill under lines (subtle)
-                        if tx_points.len() >= 2 {
-                            for i in 0..tx_points.len()-1 {
-                                let quad = [
-                                    tx_points[i],
-                                    tx_points[i + 1],
-                                    egui::pos2(tx_points[i + 1].x, graph_rect.bottom()),
-                                    egui::pos2(tx_points[i].x, graph_rect.bottom()),
-                                ];
-                                painter.add(egui::Shape::convex_polygon(
-                                    quad.to_vec(),
-                                    ACCENT_CYAN.gamma_multiply(0.1),
-                                    egui::Stroke::NONE,
-                                ));
-                            }
+                        for pair in tx_points.windows(2) {
+                            let quad = [
+                                pair[0],
+                                pair[1],
+                                egui::pos2(pair[1].x, graph_rect.bottom()),
+                                egui::pos2(pair[0].x, graph_rect.bottom()),
+                            ];
+                            painter.add(egui::Shape::convex_polygon(
+                                quad.to_vec(),
+                                ACCENT_CYAN.gamma_multiply(0.1),
+                                egui::Stroke::NONE,
+                            ));
                         }
 
-                        if rx_points.len() >= 2 {
-                            for i in 0..rx_points.len()-1 {
-                                let quad = [
-                                    rx_points[i],
-                                    rx_points[i + 1],
-                                    egui::pos2(rx_points[i + 1].x, graph_rect.bottom()),
-                                    egui::pos2(rx_points[i].x, graph_rect.bottom()),
-                                ];
-                                painter.add(egui::Shape::convex_polygon(
-                                    quad.to_vec(),
-                                    STATUS_CONNECTED.gamma_multiply(0.1),
-                                    egui::Stroke::NONE,
-                                ));
-                            }
+                        for pair in rx_points.windows(2) {
+                            let quad = [
+                                pair[0],
+                                pair[1],
+                                egui::pos2(pair[1].x, graph_rect.bottom()),
+                                egui::pos2(pair[0].x, graph_rect.bottom()),
+                            ];
+                            painter.add(egui::Shape::convex_polygon(
+                                quad.to_vec(),
+                                STATUS_CONNECTED.gamma_multiply(0.1),
+                                egui::Stroke::NONE,
+                            ));
                         }
 
                         // Draw lines
-                        for i in 0..tx_points.len()-1 {
+                        for pair in tx_points.windows(2) {
                             painter.line_segment(
-                                [tx_points[i], tx_points[i + 1]],
+                                [pair[0], pair[1]],
                                 egui::Stroke::new(1.5, ACCENT_CYAN.gamma_multiply(0.8))
                             );
                         }
 
-                        for i in 0..rx_points.len()-1 {
+                        for pair in rx_points.windows(2) {
                             painter.line_segment(
-                                [rx_points[i], rx_points[i + 1]],
+                                [pair[0], pair[1]],
                                 egui::Stroke::new(1.5, STATUS_CONNECTED.gamma_multiply(0.8))
                             );
                         }
@@ -821,19 +833,21 @@ impl BoosterApp {
             return;
         }
 
-        // Calculate grid dimensions - 2 columns with responsive spacing
+        // Calculate grid dimensions - responsive columns
         let available_width = self.content_area_width.min(ui.available_width());
         let card_spacing = 10.0;
-        let card_width = ((available_width - card_spacing) / 2.0).floor();
-        let inner_width = (card_width - 24.0).max(100.0); // Account for inner_margin (12 * 2)
+        // Use 2 columns if wide enough (>= 180px inner per card), else 1 column
+        let region_cols = if (available_width - card_spacing) / 2.0 - 24.0 >= 180.0 { 2 } else { 1 };
+        let card_width = ((available_width - card_spacing * (region_cols as f32 - 1.0).max(0.0)) / region_cols as f32).floor();
+        let inner_width = (card_width - 24.0).max(120.0); // Account for inner_margin (12 * 2)
 
-        // Create 2-column grid with enhanced cards
+        // Create responsive-column grid with enhanced cards
         let mut region_iter = regions.iter().peekable();
         while region_iter.peek().is_some() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = card_spacing;
 
-                for _ in 0..2 {
+                for _ in 0..region_cols {
                     if let Some(region) = region_iter.next() {
                         let is_selected = self.selected_region == region.id;
                         let latency = latencies.get(&region.id).map(|(_, l)| *l);
@@ -865,7 +879,7 @@ impl BoosterApp {
                                 ui.set_min_height(80.0);
 
                                 ui.vertical(|ui| {
-                                    // Top row: Country code + latency (simplified layout)
+                                    // Top row: Country code + latency
                                     ui.horizontal(|ui| {
                                         // Country code badge
                                         egui::Frame::NONE
@@ -894,36 +908,35 @@ impl BoosterApp {
                                                 });
                                         }
 
-                                        // Flexible spacer
-                                        ui.add_space(ui.available_width() - 55.0);
-
-                                        // Latency display (compact) with pulsing dot for real-time indicator
-                                        if let Some(ms) = latency {
-                                            let lat_color = latency_color(ms);
-                                            // Pulsing dot shows latencies are live
-                                            let elapsed = self.app_start_time.elapsed().as_secs_f32();
-                                            let pulse = ((elapsed * 1.5).sin() + 1.0) / 2.0;
-                                            let dot_alpha = 0.6 + pulse * 0.4;
-                                            let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                                            ui.painter().circle_filled(dot_rect.center(), 3.0, lat_color.gamma_multiply(dot_alpha));
-                                            ui.add_space(2.0);
-                                            ui.label(egui::RichText::new(format!("{}ms", ms))
-                                                .size(11.0)
-                                                .color(lat_color)
-                                                .strong());
-                                        } else if is_finding {
-                                            let elapsed = self.app_start_time.elapsed().as_secs_f32();
-                                            let dots = match ((elapsed * 2.0) as i32) % 4 {
-                                                0 => ".", 1 => "..", 2 => "...", _ => "",
-                                            };
-                                            ui.label(egui::RichText::new(format!("{}", dots))
-                                                .size(10.0)
-                                                .color(TEXT_DIMMED));
-                                        } else {
-                                            ui.label(egui::RichText::new("--")
-                                                .size(11.0)
-                                                .color(TEXT_DIMMED));
-                                        }
+                                        // Push latency to the right using right-to-left layout
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            // Latency display (compact) with pulsing dot for real-time indicator
+                                            if let Some(ms) = latency {
+                                                let lat_color = latency_color(ms);
+                                                ui.label(egui::RichText::new(format!("{}ms", ms))
+                                                    .size(11.0)
+                                                    .color(lat_color)
+                                                    .strong());
+                                                // Pulsing dot shows latencies are live
+                                                let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                                                let pulse = ((elapsed * 1.5).sin() + 1.0) / 2.0;
+                                                let dot_alpha = 0.6 + pulse * 0.4;
+                                                let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                                ui.painter().circle_filled(dot_rect.center(), 3.0, lat_color.gamma_multiply(dot_alpha));
+                                            } else if is_finding {
+                                                let elapsed = self.app_start_time.elapsed().as_secs_f32();
+                                                let dots = match ((elapsed * 2.0) as i32) % 4 {
+                                                    0 => ".", 1 => "..", 2 => "...", _ => "",
+                                                };
+                                                ui.label(egui::RichText::new(format!("{}", dots))
+                                                    .size(10.0)
+                                                    .color(TEXT_DIMMED));
+                                            } else {
+                                                ui.label(egui::RichText::new("--")
+                                                    .size(11.0)
+                                                    .color(TEXT_DIMMED));
+                                            }
+                                        });
                                     });
 
                                     ui.add_space(6.0);
@@ -941,30 +954,27 @@ impl BoosterApp {
                                             ui.label(egui::RichText::new("\u{2699}").size(9.0).color(ACCENT_SECONDARY));
                                         }
 
-                                        // Push gear to right
-                                        let remaining = ui.available_width();
-                                        if remaining > 26.0 {
-                                            ui.add_space(remaining - 26.0);
-                                        }
-
-                                        let gear_btn = ui.add(
-                                            egui::Button::new(egui::RichText::new("\u{2699}").size(12.0).color(TEXT_MUTED))
-                                                .fill(BG_HOVER.gamma_multiply(0.5))
-                                                .rounding(4.0)
-                                                .min_size(egui::vec2(24.0, 24.0))
-                                                .sense(egui::Sense::click())
-                                        );
-                                        if gear_btn.clicked() {
-                                            if self.server_selection_popup.as_ref() == Some(&region.id) {
-                                                self.server_selection_popup = None;
-                                            } else {
-                                                self.server_selection_popup = Some(region.id.clone());
+                                        // Push gear button to right
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let gear_btn = ui.add(
+                                                egui::Button::new(egui::RichText::new("\u{2699}").size(12.0).color(TEXT_MUTED))
+                                                    .fill(BG_HOVER.gamma_multiply(0.5))
+                                                    .rounding(4.0)
+                                                    .min_size(egui::vec2(24.0, 24.0))
+                                                    .sense(egui::Sense::click())
+                                            );
+                                            if gear_btn.clicked() {
+                                                if self.server_selection_popup.as_ref() == Some(&region.id) {
+                                                    self.server_selection_popup = None;
+                                                } else {
+                                                    self.server_selection_popup = Some(region.id.clone());
+                                                }
+                                                gear_clicked.set(true);
                                             }
-                                            gear_clicked.set(true);
-                                        }
-                                        if gear_btn.hovered() {
-                                            gear_clicked.set(true);
-                                        }
+                                            if gear_btn.hovered() {
+                                                gear_clicked.set(true);
+                                            }
+                                        });
                                     });
 
                                     ui.add_space(2.0);
@@ -1226,20 +1236,22 @@ impl BoosterApp {
     pub(crate) fn render_skeleton_region_cards(&self, ui: &mut egui::Ui) {
         let available_width = self.content_area_width.min(ui.available_width());
         let card_spacing = 10.0;
-        let card_width = ((available_width - card_spacing) / 2.0).floor();
-        let inner_width = (card_width - 24.0).max(100.0);
+        let skeleton_cols = if (available_width - card_spacing) / 2.0 - 24.0 >= 180.0 { 2 } else { 1 };
+        let card_width = ((available_width - card_spacing * (skeleton_cols as f32 - 1.0).max(0.0)) / skeleton_cols as f32).floor();
+        let inner_width = (card_width - 24.0).max(120.0);
 
         // Shimmer animation progress
         let elapsed = self.app_start_time.elapsed().as_secs_f32();
         let shimmer_progress = (elapsed / SHIMMER_ANIMATION_DURATION).fract();
 
-        // Render 4 skeleton cards (2 rows)
-        for row in 0..2 {
+        // Render 4 skeleton cards
+        let skeleton_rows = (4 + skeleton_cols - 1) / skeleton_cols;
+        for row in 0..skeleton_rows {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = card_spacing;
 
-                for col in 0..2 {
-                    let card_offset = (row * 2 + col) as f32 * 0.1;
+                for col in 0..skeleton_cols {
+                    let card_offset = (row * skeleton_cols + col) as f32 * 0.1;
                     let local_shimmer = (shimmer_progress + card_offset) % 1.0;
 
                     egui::Frame::NONE

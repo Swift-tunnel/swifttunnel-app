@@ -38,7 +38,7 @@ use crate::gui::set_auto_connect_pending;
 
 use eframe::NativeOptions;
 use log::{error, info, warn};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use std::panic;
 use tokio::runtime::Runtime;
@@ -188,13 +188,18 @@ fn setup_panic_hook() {
             }
         }
 
-        // Check if this is an OpenGL/glow panic and show user-friendly message
-        let is_opengl_panic = location.contains("glow")
-            || message.to_lowercase().contains("opengl")
-            || message.to_lowercase().contains("gl context")
+        // Check if this is a graphics/renderer panic and show user-friendly message
+        let msg_lower = message.to_lowercase();
+        let is_graphics_panic = location.contains("glow")
+            || location.contains("wgpu")
+            || msg_lower.contains("opengl")
+            || msg_lower.contains("gl context")
+            || msg_lower.contains("dx12")
+            || msg_lower.contains("d3d")
+            || msg_lower.contains("vulkan")
             || message.contains("0x1F0");  // GL_VENDOR/RENDERER/VERSION constants
 
-        if is_opengl_panic {
+        if is_graphics_panic {
             use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_YESNO, MB_ICONERROR, IDYES};
             use windows::core::PCWSTR;
 
@@ -224,7 +229,7 @@ fn setup_panic_hook() {
 
             // If user clicked Yes, open the driver download page
             if result == IDYES {
-                let _ = open::that(driver_url);
+                utils::open_url(driver_url);
             }
         }
     }));
@@ -403,7 +408,9 @@ fn main() -> eframe::Result<()> {
     }
 
     // Create tokio runtime for async operations
-    let rt = Runtime::new().expect("Failed to create tokio runtime");
+    // Stored in OnceLock so it outlives both wgpu and glow run_native calls
+    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+    let rt = RUNTIME.get_or_init(|| Runtime::new().expect("Failed to create tokio runtime"));
 
     // Clean up any stale state from previous crash/force kill
     // This ensures split tunnel driver is reset before we start
@@ -540,7 +547,7 @@ fn main() -> eframe::Result<()> {
     let app_title = format!("SwiftTunnel v{}", env!("CARGO_PKG_VERSION"));
     let viewport = egui::ViewportBuilder::default()
         .with_title(&app_title)
-        .with_min_inner_size([480.0, 600.0])  // Smaller minimum for flexibility
+        .with_min_inner_size([560.0, 650.0])  // Minimum size for 3-col game cards + 2-col region grid
         .with_inner_size([window_state.width, window_state.height])
         .with_resizable(true)           // Allow window resizing
         .with_decorations(true)         // Show title bar with min/max/close buttons
@@ -550,81 +557,81 @@ fn main() -> eframe::Result<()> {
     // Check if running in RDP session and warn user
     let in_rdp = is_rdp_session();
     if in_rdp {
-        warn!("Running in RDP session - OpenGL may not work. Please run SwiftTunnel directly on your gaming PC.");
+        warn!("Running in RDP session - graphics may not work. Please run SwiftTunnel directly on your gaming PC.");
     }
 
-    // Use glow (OpenGL) renderer - requires GPU/OpenGL 2.0+
-    info!("Using glow (OpenGL) renderer");
-    let options = NativeOptions {
-        viewport,
-        renderer: eframe::Renderer::Glow,
-        vsync: true, // Enable VSync to cap frame rate and reduce GPU usage
-        ..Default::default()
-    };
-
-    // Try to run the GUI - handle failure gracefully in RDP/VM environments
+    // Try wgpu (DX12/DX11/Vulkan) first — works on virtually all Windows GPUs
+    // Falls back to glow (OpenGL) if wgpu fails (e.g. very old VMs)
+    info!("Trying wgpu (DX12/DX11) renderer");
     let result = eframe::run_native(
         "SwiftTunnel FPS Booster",
-        options,
+        NativeOptions {
+            viewport: viewport.clone(),
+            renderer: eframe::Renderer::Wgpu,
+            vsync: true,
+            ..Default::default()
+        },
         Box::new(move |cc| {
             let mut app = BoosterApp::new(cc);
-
-            // Set initial system info
-            let monitor = PerformanceMonitor::new();
-            app.set_system_info(monitor.get_system_info());
-
-            // Note: OAuth callback is now handled via localhost HTTP server
-            // (auth::oauth_server) and processed in the GUI update loop,
-            // not from deep links.
-
-            // GUI repainting is handled by gui.rs with smart conditional logic:
-            // - Fast repaints (60 FPS) during animations/loading
-            // - Slow repaints (10 FPS) when connected
-            // - No repaints when idle (only on user interaction)
-            // This reduces GPU usage from ~36% to ~1-3% when idle.
-
+            app.set_system_info(performance_monitor::get_system_info_lightweight());
             Ok(Box::new(app))
         }),
     );
 
-    // Handle GUI startup failure
+    if result.is_ok() {
+        return Ok(());
+    }
+
+    // wgpu failed — fall back to glow (OpenGL)
+    let wgpu_err = result.unwrap_err();
+    warn!("wgpu renderer failed: {}. Falling back to glow (OpenGL)", wgpu_err);
+
+    let result = eframe::run_native(
+        "SwiftTunnel FPS Booster",
+        NativeOptions {
+            viewport,
+            renderer: eframe::Renderer::Glow,
+            vsync: true,
+            ..Default::default()
+        },
+        Box::new(move |cc| {
+            let mut app = BoosterApp::new(cc);
+            app.set_system_info(performance_monitor::get_system_info_lightweight());
+            Ok(Box::new(app))
+        }),
+    );
+
+    // Handle total failure — both renderers failed
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
-            let error_msg = format!("{}", e);
+            error!("Both renderers failed. wgpu: {}, glow: {}", wgpu_err, e);
 
-            error!("GUI startup failed: {}", e);
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
+            use windows::core::PCWSTR;
 
-            // Check if this is a graphics/OpenGL issue
-            if error_msg.contains("opengl") || error_msg.contains("OpenGL") ||
-               error_msg.contains("adapter") || error_msg.contains("swap") {
-                // Show a user-friendly message box
-                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
-                use windows::core::PCWSTR;
+            let title: Vec<u16> = "SwiftTunnel - Graphics Error\0".encode_utf16().collect();
 
-                let title: Vec<u16> = "SwiftTunnel - Graphics Error\0".encode_utf16().collect();
+            let msg = if in_rdp {
+                "SwiftTunnel cannot start in Remote Desktop.\n\n\
+                Graphics are not available over RDP.\n\n\
+                Please run SwiftTunnel directly on your gaming PC,\n\
+                not through Remote Desktop.\0"
+            } else {
+                "SwiftTunnel cannot start - no compatible graphics found.\n\n\
+                Please ensure your graphics drivers are up to date.\n\n\
+                If you're using a VM, enable 3D acceleration.\0"
+            };
 
-                let msg = if in_rdp {
-                    "SwiftTunnel cannot start in Remote Desktop.\n\n\
-                    OpenGL graphics are not available over RDP.\n\n\
-                    Please run SwiftTunnel directly on your gaming PC,\n\
-                    not through Remote Desktop.\0"
-                } else {
-                    "SwiftTunnel cannot start - OpenGL 2.0+ required.\n\n\
-                    Please ensure your graphics drivers are up to date.\n\n\
-                    If you're using a VM, enable 3D acceleration.\0"
-                };
+            let message: Vec<u16> = msg.encode_utf16().collect();
 
-                let message: Vec<u16> = msg.encode_utf16().collect();
-
-                unsafe {
-                    MessageBoxW(
-                        None,
-                        PCWSTR(message.as_ptr()),
-                        PCWSTR(title.as_ptr()),
-                        MB_OK | MB_ICONERROR,
-                    );
-                }
+            unsafe {
+                MessageBoxW(
+                    None,
+                    PCWSTR(message.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_OK | MB_ICONERROR,
+                );
             }
 
             Err(e)

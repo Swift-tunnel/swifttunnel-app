@@ -12,6 +12,22 @@ use std::time::Duration as StdDuration;
 
 const OAUTH_LOGIN_URL: &str = "https://swifttunnel.net/login";
 
+/// Percent-encode a string for use in URL query parameters (RFC 3986 unreserved chars)
+fn percent_encode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            _ => {
+                result.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    result
+}
+
 /// Maximum number of token refresh retries
 const MAX_REFRESH_RETRIES: u32 = 3;
 
@@ -329,20 +345,14 @@ impl AuthManager {
         let oauth_url = format!(
             "{}?desktop=true&state={}&provider=google&redirect_port={}",
             OAUTH_LOGIN_URL,
-            urlencoding::encode(&state),
+            percent_encode(&state),
             port
         );
 
         info!("Opening browser to: {}", oauth_url);
 
         // Open the browser
-        if let Err(e) = open::that(&oauth_url) {
-            error!("Failed to open browser: {}", e);
-            // Clean up the server
-            let mut server_guard = self.oauth_server.lock().unwrap();
-            *server_guard = None;
-            return Err(AuthError::ApiError(format!("Failed to open browser: {}", e)));
-        }
+        crate::utils::open_url(&oauth_url);
 
         // Store the OAuth server
         {

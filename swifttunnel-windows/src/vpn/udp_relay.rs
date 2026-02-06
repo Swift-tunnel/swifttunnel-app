@@ -123,18 +123,19 @@ impl UdpRelay {
             return Ok(0);
         }
 
-        // Build packet: [session_id][payload]
-        let mut packet = Vec::with_capacity(SESSION_ID_LEN + payload.len());
-        packet.extend_from_slice(&self.session_id);
-        packet.extend_from_slice(payload);
+        // Build packet: [session_id][payload] on the stack (no heap alloc)
+        let total_len = SESSION_ID_LEN + payload.len();
+        let mut packet = [0u8; SESSION_ID_LEN + 1500];
+        packet[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
+        packet[SESSION_ID_LEN..total_len].copy_from_slice(payload);
 
         // Try to send, retry once on WouldBlock
-        let sent = match self.socket.send_to(&packet, self.relay_addr) {
+        let sent = match self.socket.send_to(&packet[..total_len], self.relay_addr) {
             Ok(sent) => sent,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Retry once after tiny delay
                 std::thread::sleep(Duration::from_micros(50));
-                self.socket.send_to(&packet, self.relay_addr)
+                self.socket.send_to(&packet[..total_len], self.relay_addr)
                     .context("Retry send failed")?
             }
             Err(e) => return Err(e.into()),

@@ -6,6 +6,11 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
+/// Convert bytes to lowercase hex string
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 /// Verify SHA256 checksum of a file
 /// Returns Ok(true) if checksum matches, Ok(false) if mismatch, Err on I/O error
 pub async fn verify_checksum(file_path: &Path, expected_hex: &str) -> Result<bool, String> {
@@ -32,7 +37,7 @@ pub async fn verify_checksum(file_path: &Path, expected_hex: &str) -> Result<boo
     }
 
     let result = hasher.finalize();
-    let computed_hex = hex::encode(result);
+    let computed_hex = hex_encode(&result);
 
     let expected_lower = expected_hex.to_lowercase();
     let matches = computed_hex == expected_lower;
@@ -72,7 +77,7 @@ pub async fn compute_checksum(file_path: &Path) -> Result<String, String> {
     }
 
     let result = hasher.finalize();
-    Ok(hex::encode(result))
+    Ok(hex_encode(&result))
 }
 
 #[cfg(test)]

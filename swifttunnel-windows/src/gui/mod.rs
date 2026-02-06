@@ -1008,9 +1008,12 @@ impl eframe::App for BoosterApp {
         if is_loading || is_vpn_transitioning || is_logging_in || is_awaiting_oauth_here || is_updating || has_animations || is_network_testing || is_smart_selecting {
             // Fast repaint for animations (60 FPS target)
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        } else if is_connected || has_pending_latency {
-            // Slow repaint for pulse animation and latency countdown (10 FPS is enough)
+        } else if has_pending_latency {
+            // 10 FPS for latency countdown display
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else if is_connected {
+            // 5 FPS for idle pulse animation (saves ~2-5% GPU on integrated graphics)
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         // Otherwise, egui will only repaint on user interaction (clicks, typing, etc.)
 
@@ -2468,6 +2471,15 @@ impl BoosterApp {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 impl BoosterApp {
+    /// Check if the update banner will be shown (for spacing purposes)
+    pub(crate) fn has_update_banner(&self) -> bool {
+        if let Ok(state) = self.update_state.lock() {
+            !matches!(&*state, UpdateState::Idle | UpdateState::UpToDate | UpdateState::Checking)
+        } else {
+            false
+        }
+    }
+
     /// Render the update banner at the top of the Connect tab
     pub(crate) fn render_update_banner(&mut self, ui: &mut egui::Ui) {
         let state = match self.update_state.lock() {

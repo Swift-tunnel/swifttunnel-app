@@ -9,8 +9,10 @@ pub struct PerformanceMonitor {
 
 impl PerformanceMonitor {
     pub fn new() -> Self {
-        let mut system = System::new_all();
-        system.refresh_all();
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::All, true);
+        system.refresh_memory();
+        system.refresh_cpu_all();
 
         Self {
             system,
@@ -20,42 +22,41 @@ impl PerformanceMonitor {
 
     /// Update performance metrics
     pub fn update_metrics(&mut self, metrics: &mut PerformanceMetrics) {
-        // Refresh only what we need (processes + memory) instead of refresh_all()
-        // which queries CPU, disks, networks, components - all unnecessary here
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
-        self.system.refresh_memory();
+        // If we know the PID from last scan, only refresh that one process
+        if let Some(pid) = metrics.process_id {
+            let pid = sysinfo::Pid::from_u32(pid);
+            self.system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
 
-        // Find Roblox process
-        let roblox_process = self.find_roblox_process();
-
-        if let Some((pid, process)) = roblox_process {
-            metrics.roblox_running = true;
-            metrics.process_id = Some(pid);
-
-            // Get CPU usage (per core, so we average it)
-            metrics.cpu_usage = process.cpu_usage();
-
-            // Get RAM usage
-            metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0; // Convert to MB
-
+            // Check if process is still alive
+            if let Some(process) = self.system.process(pid) {
+                metrics.cpu_usage = process.cpu_usage();
+                metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
+            } else {
+                // Process exited, clear state and do full scan next time
+                metrics.roblox_running = false;
+                metrics.process_id = None;
+                metrics.cpu_usage = 0.0;
+                metrics.ram_usage = 0.0;
+            }
         } else {
-            metrics.roblox_running = false;
-            metrics.process_id = None;
-            metrics.cpu_usage = 0.0;
-            metrics.ram_usage = 0.0;
+            // No known PID — do full process scan to find Roblox
+            self.system.refresh_processes(ProcessesToUpdate::All, true);
+            if let Some((pid, process)) = self.find_roblox_process() {
+                metrics.roblox_running = true;
+                metrics.process_id = Some(pid);
+                metrics.cpu_usage = process.cpu_usage();
+                metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
+            } else {
+                metrics.roblox_running = false;
+                metrics.process_id = None;
+                metrics.cpu_usage = 0.0;
+                metrics.ram_usage = 0.0;
+            }
         }
 
-        // Get total system CPU usage
-        let _total_cpu = self.system.global_cpu_usage();
-
         // Get total system RAM
+        self.system.refresh_memory();
         metrics.ram_total = self.system.total_memory() as f64 / 1024.0 / 1024.0;
-
-        // FPS would need to be read from game or estimated
-        // For now, we'll leave it as is (would require more advanced techniques)
-
-        // Ping would come from network monitor
-        // metrics.ping is updated elsewhere
     }
 
     /// Find Roblox process
@@ -111,6 +112,21 @@ impl PerformanceMonitor {
 impl Default for PerformanceMonitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Get system info without requiring a full PerformanceMonitor instance.
+/// Only refreshes memory and CPU — avoids expensive full process scan.
+pub fn get_system_info_lightweight() -> SystemInfo {
+    let mut system = System::new();
+    system.refresh_memory();
+    system.refresh_cpu_all();
+    SystemInfo {
+        total_memory: system.total_memory() / 1024 / 1024,
+        used_memory: system.used_memory() / 1024 / 1024,
+        cpu_count: system.cpus().len(),
+        os_version: System::long_os_version().unwrap_or_else(|| "Unknown".to_string()),
+        system_name: System::name().unwrap_or_else(|| "Unknown".to_string()),
     }
 }
 

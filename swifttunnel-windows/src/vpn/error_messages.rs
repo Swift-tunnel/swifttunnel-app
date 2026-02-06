@@ -142,12 +142,10 @@ fn simplify_message(msg: &str) -> String {
         .replace("0x80320001", "does not exist");
 
     // Remove long hex codes like "0x8007xxxx"
-    let re_hex = regex::Regex::new(r"0x[0-9a-fA-F]{8}").ok();
-    let result = if let Some(re) = re_hex {
-        re.replace_all(&simplified, "[error]").to_string()
-    } else {
-        simplified
-    };
+    use std::sync::OnceLock;
+    static RE_HEX: OnceLock<regex_lite::Regex> = OnceLock::new();
+    let re = RE_HEX.get_or_init(|| regex_lite::Regex::new(r"0x[0-9a-fA-F]{8}").unwrap());
+    let result = re.replace_all(&simplified, "[error]").to_string();
 
     // Truncate if too long
     if result.len() > 200 {
