@@ -2629,7 +2629,7 @@ impl BoosterApp {
                     Err(e) => {
                         log::error!("Update check failed: {}", e);
                         if let Ok(mut state) = update_state.lock() {
-                            *state = UpdateState::Failed(e);
+                            *state = UpdateState::Failed(e.to_string());
                         }
                     }
                 }
@@ -2731,7 +2731,7 @@ impl BoosterApp {
                     Err(e) => {
                         log::error!("Download failed: {}", e);
                         if let Ok(mut state) = update_state.lock() {
-                            *state = UpdateState::Failed(e);
+                            *state = UpdateState::Failed(e.to_string());
                         }
                     }
                 }
@@ -2770,7 +2770,7 @@ impl BoosterApp {
             Err(e) => {
                 log::error!("Failed to start installer: {}", e);
                 if let Ok(mut state) = self.update_state.lock() {
-                    *state = UpdateState::Failed(e);
+                    *state = UpdateState::Failed(e.to_string());
                 }
             }
         }

@@ -19,6 +19,8 @@ use super::tunnel::WireguardTunnel;
 use super::routes::RouteManager;
 use super::config::{fetch_vpn_config, parse_ip_cidr};
 use super::{VpnError, VpnResult};
+use super::split_tunnel::MacSplitTunnel;
+use super::packet_interceptor::ThroughputStats;
 
 /// Refresh interval for process exclusion scanning (ms)
 /// Lower = faster detection of new processes, slightly higher CPU
@@ -103,8 +105,7 @@ pub struct VpnConnection {
     route_manager: Option<RouteManager>,
     config: Option<VpnConfig>,
     process_monitor_stop: Arc<AtomicBool>,
-    // MacSplitTunnel will be added by another agent (Task #3)
-    // split_tunnel: Option<Arc<Mutex<MacSplitTunnel>>>,
+    split_tunnel: Option<Arc<std::sync::Mutex<MacSplitTunnel>>>,
 }
 
 impl VpnConnection {
@@ -116,6 +117,7 @@ impl VpnConnection {
             route_manager: None,
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
+            split_tunnel: None,
         }
     }
 
@@ -125,6 +127,23 @@ impl VpnConnection {
 
     pub fn state_handle(&self) -> Arc<Mutex<ConnectionState>> {
         Arc::clone(&self.state)
+    }
+
+    /// Get throughput statistics from the split tunnel
+    pub fn get_throughput_stats(&self) -> Option<ThroughputStats> {
+        self.split_tunnel.as_ref().and_then(|st| {
+            st.try_lock().ok().map(|driver| driver.get_throughput_stats())
+        })
+    }
+
+    /// Get split tunnel diagnostic info for UI display
+    pub fn get_split_tunnel_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
+        // Return basic diagnostics: (adapter_name, has_default_route, tunneled, bypassed)
+        self.split_tunnel.as_ref().and_then(|st| {
+            st.try_lock().ok().map(|_driver| {
+                (self.adapter.as_ref().map(|a| a.interface_name().to_string()), false, 0u64, 0u64)
+            })
+        })
     }
 
     /// Get the current config ID (for latency updates)

@@ -263,9 +263,9 @@ async fn check_and_update(state: Arc<Mutex<AutoUpdateState>>) -> Result<AutoUpda
         Err(e) => {
             error!("Failed to install update: {}", e);
             if let Ok(mut s) = state.lock() {
-                *s = AutoUpdateState::Failed(e.clone());
+                *s = AutoUpdateState::Failed(format!("{}", e));
             }
-            Err(e)
+            Err(e.to_string())
         }
     }
 }

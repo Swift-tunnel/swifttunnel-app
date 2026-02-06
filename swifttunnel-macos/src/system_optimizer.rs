@@ -232,6 +232,48 @@ impl SystemOptimizer {
 
         Ok(())
     }
+
+    // Stub methods for GUI compatibility (Windows features with no macOS equivalent)
+
+    pub fn set_timer_resolution(&mut self, _enabled: bool) -> Result<()> {
+        info!("Timer resolution: macOS manages this automatically");
+        Ok(())
+    }
+
+    pub fn apply_mmcss_profile(&mut self) -> Result<()> {
+        info!("MMCSS: No equivalent on macOS, using QoS classes instead");
+        self.set_qos_user_interactive()
+    }
+
+    pub fn restore_mmcss_profile(&mut self) -> Result<()> {
+        info!("MMCSS restore: No action needed on macOS");
+        Ok(())
+    }
+
+    pub fn enable_game_mode(&mut self) -> Result<()> {
+        info!("Game Mode: macOS has no equivalent, skipping");
+        Ok(())
+    }
+
+    pub fn disable_game_mode(&mut self) -> Result<()> {
+        info!("Game Mode disable: No action needed on macOS");
+        Ok(())
+    }
+
+    pub fn create_restore_point(name: &str) -> Result<String> {
+        info!("System Restore: macOS uses Time Machine instead, skipping");
+        Ok(format!("{} (Time Machine)", name))
+    }
+
+    pub fn open_system_restore() -> Result<()> {
+        info!("Opening Time Machine preferences");
+        let _ = std::process::Command::new("open")
+            .arg("-b")
+            .arg("com.apple.systempreferences")
+            .arg("/System/Library/PreferencePanes/TimeMachine.prefPane")
+            .spawn();
+        Ok(())
+    }
 }
 
 impl Default for SystemOptimizer {

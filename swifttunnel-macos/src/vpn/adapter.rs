@@ -23,7 +23,7 @@ pub const DEFAULT_MTU: u32 = 1420;
 ///
 /// Returns true if running as root (UID 0), false otherwise.
 fn is_root() -> bool {
-    nix::unistd::geteuid().is_root()
+    unsafe { libc::geteuid() == 0 }
 }
 
 /// Convert CIDR prefix to subnet mask string
@@ -82,7 +82,6 @@ impl UtunAdapter {
         // Create TUN device using tun-rs
         let device = DeviceBuilder::new()
             .mtu(DEFAULT_MTU as u16)
-            .up()
             .build_async()
             .map_err(|e| {
                 log::error!("Failed to create utun device: {}", e);
@@ -90,7 +89,7 @@ impl UtunAdapter {
             })?;
 
         // Get the assigned interface name (e.g., "utun3")
-        let interface_name = device.as_ref().name().map_err(|e| {
+        let interface_name = device.name().map_err(|e| {
             VpnError::AdapterCreate(format!("Failed to get interface name: {}", e))
         })?;
 

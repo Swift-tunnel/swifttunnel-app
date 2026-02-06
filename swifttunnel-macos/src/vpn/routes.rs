@@ -107,7 +107,8 @@ fn get_internet_ip_from_route() -> VpnResult<Ipv4Addr> {
         if addr.interface_name == interface {
             if let Some(sockaddr) = addr.address {
                 if let Some(inet) = sockaddr.as_sockaddr_in() {
-                    let ip = Ipv4Addr::from(u32::from_be(inet.ip()));
+                    let ip_u32: u32 = inet.ip().into();
+                    let ip = Ipv4Addr::from(u32::from_be(ip_u32));
                     if !ip.is_loopback() && !ip.is_link_local() {
                         log::info!("Internet interface IP (ifaddrs): {} on {}", ip, interface);
                         return Ok(ip);
@@ -194,7 +195,8 @@ pub fn get_interface_for_ip(ip: Ipv4Addr) -> VpnResult<String> {
     for addr in addrs {
         if let Some(sockaddr) = addr.address {
             if let Some(inet) = sockaddr.as_sockaddr_in() {
-                let iface_ip = Ipv4Addr::from(u32::from_be(inet.ip()));
+                let ip_u32: u32 = inet.ip().into();
+                let iface_ip = Ipv4Addr::from(u32::from_be(ip_u32));
                 if iface_ip == ip {
                     return Ok(addr.interface_name.clone());
                 }

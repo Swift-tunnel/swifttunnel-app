@@ -29,14 +29,6 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             }
         }
 
-        VpnError::DriverNotOpen => {
-            "Split tunnel driver not open.\n\nPlease try reconnecting.".to_string()
-        }
-
-        VpnError::DriverNotInitialized => {
-            "Split tunnel driver not initialized.\n\nPlease try reconnecting.".to_string()
-        }
-
         // Adapter issues
         VpnError::AdapterCreate(msg) => {
             if msg.contains("Administrator") || msg.contains("privileges") {
@@ -160,8 +152,6 @@ pub fn short_error(error: &VpnError) -> &'static str {
     match error {
         VpnError::SplitTunnelNotAvailable => "Driver not installed",
         VpnError::SplitTunnelSetupFailed(_) => "Split tunnel failed",
-        VpnError::DriverNotOpen => "Driver not open",
-        VpnError::DriverNotInitialized => "Driver not initialized",
         VpnError::AdapterCreate(_) => "Adapter creation failed",
         VpnError::Route(_) => "Route setup failed",
         VpnError::Connection(_) => "Connection failed",

@@ -92,7 +92,7 @@ impl ProcessTracker {
         }
 
         // Enumerate all PIDs
-        let pids = match libproc::proc_pid::listpids(libproc::proc_pid::ProcFilter::All) {
+        let pids = match libproc::processes::pids_by_type(libproc::processes::ProcFilter::All) {
             Ok(pids) => pids,
             Err(e) => {
                 return Err(VpnError::SplitTunnel(format!(
@@ -109,20 +109,25 @@ impl ProcessTracker {
                 continue;
             }
 
-            // Get file descriptors for this process
-            let fds = match libproc::proc_pid::pidinfo::<libproc::proc_pid::ListFDs>(pid, 0) {
+            // Get number of file descriptors via TaskAllInfo, then list them
+            let max_fds = match libproc::proc_pid::pidinfo::<libproc::task_info::TaskAllInfo>(pid, 0) {
+                Ok(info) => info.pbsd.pbi_nfiles as usize,
+                Err(_) => continue,
+            };
+
+            let fds = match libproc::proc_pid::listpidinfo::<libproc::file_info::ListFDs>(pid, max_fds) {
                 Ok(fds) => fds,
                 Err(_) => continue, // Can't access this process (permission denied, zombie, etc.)
             };
 
             for fd in &fds {
                 // Only interested in socket file descriptors
-                if fd.proc_fdtype != libproc::proc_pid::ProcFDType::Socket as u32 {
+                if fd.proc_fdtype != libproc::file_info::ProcFDType::Socket as u32 {
                     continue;
                 }
 
                 // Get socket info for this FD
-                let socket_info = match libproc::proc_pid::pidfdinfo::<libproc::net_info::SocketFdInfo>(
+                let socket_info = match libproc::file_info::pidfdinfo::<libproc::net_info::SocketFDInfo>(
                     pid,
                     fd.proc_fd,
                 ) {
@@ -349,7 +354,7 @@ pub fn lookup_pid_for_connection(
     local_port: u16,
     protocol: Protocol,
 ) -> Option<u32> {
-    let pids = libproc::proc_pid::listpids(libproc::proc_pid::ProcFilter::All).ok()?;
+    let pids = libproc::processes::pids_by_type(libproc::processes::ProcFilter::All).ok()?;
 
     for pid in &pids {
         let pid = *pid as i32;
@@ -357,18 +362,23 @@ pub fn lookup_pid_for_connection(
             continue;
         }
 
-        let fds = match libproc::proc_pid::pidinfo::<libproc::proc_pid::ListFDs>(pid, 0) {
+        let max_fds = match libproc::proc_pid::pidinfo::<libproc::task_info::TaskAllInfo>(pid, 0) {
+            Ok(info) => info.pbsd.pbi_nfiles as usize,
+            Err(_) => continue,
+        };
+
+        let fds = match libproc::proc_pid::listpidinfo::<libproc::file_info::ListFDs>(pid, max_fds) {
             Ok(fds) => fds,
             Err(_) => continue,
         };
 
         for fd in &fds {
-            if fd.proc_fdtype != libproc::proc_pid::ProcFDType::Socket as u32 {
+            if fd.proc_fdtype != libproc::file_info::ProcFDType::Socket as u32 {
                 continue;
             }
 
             let socket_info =
-                match libproc::proc_pid::pidfdinfo::<libproc::net_info::SocketFdInfo>(
+                match libproc::file_info::pidfdinfo::<libproc::net_info::SocketFDInfo>(
                     pid,
                     fd.proc_fd,
                 ) {

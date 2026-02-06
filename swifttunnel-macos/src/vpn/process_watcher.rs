@@ -262,7 +262,7 @@ fn run_kqueue_loop(
 
                 let mut eventlist = Vec::new();
                 // kevent with changelist to register, empty eventlist
-                match kq.kevent(&changelist, &mut eventlist, Some(Duration::from_millis(0))) {
+                match kq.kevent(&changelist, &mut eventlist, Some(libc::timespec { tv_sec: 0, tv_nsec: 0 })) {
                     Ok(_) => {
                         registered_pids.insert(pid);
                         log::debug!("kqueue: Registered PID {} for monitoring", pid);
@@ -278,7 +278,8 @@ fn run_kqueue_loop(
         // Wait for events
         let mut events = vec![KEvent::new(0, EventFilter::EVFILT_PROC, EventFlag::empty(), FilterFlag::empty(), 0, 0); 16];
 
-        let n = match kq.kevent(&[], &mut events, Some(timeout)) {
+        let ts = libc::timespec { tv_sec: timeout.as_secs() as i64, tv_nsec: timeout.subsec_nanos() as i64 };
+        let n = match kq.kevent(&[], &mut events, Some(ts)) {
             Ok(n) => n,
             Err(e) => {
                 if stop_flag.load(Ordering::Relaxed) {

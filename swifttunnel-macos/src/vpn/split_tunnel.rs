@@ -85,6 +85,14 @@ impl GamePreset {
         }
     }
 
+    pub fn icon(&self) -> &'static str {
+        match self {
+            GamePreset::Roblox => "\u{1F3AE}",
+            GamePreset::Valorant => "\u{1F3AF}",
+            GamePreset::Fortnite => "\u{1F3DD}",
+        }
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             GamePreset::Roblox => "Roblox",
@@ -602,7 +610,7 @@ fn coordination_loop(
 /// Get PIDs that belong to tunnel apps
 fn get_tunnel_pids(tracker: &ProcessTracker, tunnel_apps: &HashSet<String>) -> Vec<u32> {
     // Enumerate all processes and find ones matching tunnel apps
-    let pids = match libproc::proc_pid::listpids(libproc::proc_pid::ProcFilter::All) {
+    let pids = match libproc::processes::pids_by_type(libproc::processes::ProcFilter::All) {
         Ok(pids) => pids,
         Err(_) => return Vec::new(),
     };
@@ -641,17 +649,22 @@ fn collect_game_ports(
 
     // Enumerate file descriptors for tunnel PIDs and extract their bound ports
     for &pid in &tunnel_pids {
-        let fds = match libproc::proc_pid::pidinfo::<libproc::proc_pid::ListFDs>(pid as i32, 0) {
+        let max_fds = match libproc::proc_pid::pidinfo::<libproc::task_info::TaskAllInfo>(pid as i32, 0) {
+            Ok(info) => info.pbsd.pbi_nfiles as usize,
+            Err(_) => continue,
+        };
+
+        let fds = match libproc::proc_pid::listpidinfo::<libproc::file_info::ListFDs>(pid as i32, max_fds) {
             Ok(fds) => fds,
             Err(_) => continue,
         };
 
         for fd in &fds {
-            if fd.proc_fdtype != libproc::proc_pid::ProcFDType::Socket as u32 {
+            if fd.proc_fdtype != libproc::file_info::ProcFDType::Socket as u32 {
                 continue;
             }
 
-            let socket_info = match libproc::proc_pid::pidfdinfo::<libproc::net_info::SocketFdInfo>(
+            let socket_info = match libproc::file_info::pidfdinfo::<libproc::net_info::SocketFDInfo>(
                 pid as i32,
                 fd.proc_fd,
             ) {
