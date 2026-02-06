@@ -1,0 +1,134 @@
+[package]
+name = "swifttunnel-macos"
+version = "1.0.0"
+edition = "2021"
+authors = ["SwiftTunnel <support@swifttunnel.net>"]
+description = "SwiftTunnel macOS - Game Booster with VPN Split Tunneling"
+
+[dependencies]
+# GUI Framework - egui with Metal renderer on macOS
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu", "glow"] }
+egui = "0.33"
+
+# System utilities
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "fs", "io-util", "macros", "process", "signal"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Home directory detection
+dirs = "5.0"
+
+# HTTP client for API calls
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# VPN Core - WireGuard userspace implementation (cross-platform)
+boringtun = "0.6"
+
+# macOS TUN adapter (utun interface)
+tun-rs = { version = "2", features = ["async"] }
+
+# Curve25519 key exchange - MUST match boringtun's version exactly
+x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
+
+# Additional async utilities for VPN packet handling
+futures-util = "0.3"
+
+# Semantic versioning comparison for updates
+semver = "1.0"
+
+# Regular expressions for error message simplification
+regex-lite = "0.1"
+
+# Secure credential storage (macOS Keychain via keyring)
+keyring = { version = "3", features = ["apple-native"] }
+
+# Cryptography for PKCE
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+# URL handling
+url = "2"
+
+# Date/time handling
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+
+# Lightweight HTTP server for OAuth callback
+tiny_http = "0.12"
+
+# System tray support (cross-platform, uses NSStatusItem on macOS)
+tray-icon = "0.19"
+
+# macOS notifications
+mac-notification-sys = "0.6"
+
+# Image loading for tray icon
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Fast mutex
+parking_lot = "0.12"
+
+# Per-CPU parallel packet processing
+crossbeam-channel = "0.5"
+
+# Lock-free Arc swapping for RCU pattern
+arc-swap = "1.7"
+
+num_cpus = "1.16"
+
+# Stack-allocated buffers for zero-alloc packet processing
+arrayvec = "0.7"
+
+# Discord Rich Presence for activity status
+discord-rich-presence = "0.2"
+
+# macOS-specific: process info (libproc bindings)
+libproc = "0.14"
+
+# macOS-specific: low-level system calls (kqueue, routing, etc.)
+nix = { version = "0.29", features = ["event", "net", "process", "signal", "socket"] }
+
+# macOS-specific: libc for Mach APIs, setpriority, etc.
+libc = "0.2"
+
+# macOS-specific: plist reading/writing for Roblox settings
+plist = "1"
+
+# macOS-specific: raw packet capture via BPF
+pcap = { version = "2", features = ["capture-stream"] }
+
+# macOS-specific: packet construction and parsing
+pnet = "0.35"
+
+# Cross-platform default gateway detection
+default-net = "0.22"
+
+# Library crate (shared modules used by binary and tests)
+[lib]
+name = "swifttunnel_macos"
+path = "src/lib.rs"
+
+# Main application binary
+[[bin]]
+name = "swifttunnel-macos"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

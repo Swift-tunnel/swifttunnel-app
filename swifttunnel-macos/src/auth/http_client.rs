@@ -1,0 +1,265 @@
+//! HTTP client for SwiftTunnel API
+
+use super::types::{AuthError, SupabaseAuthResponse, VpnConfig, ExchangeTokenResponse};
+use log::{debug, error, info};
+use reqwest::Client;
+use serde_json::json;
+
+const API_BASE_URL: &str = "https://swifttunnel.net";
+const SUPABASE_URL: &str = "https://auth.swifttunnel.net";
+const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvbnVnanZvcWtsdmdibmh4c2hnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyNTU3ODksImV4cCI6MjA4MDgzMTc4OX0.Jmme0whahuX2KEmklBZQzCcJnsHJemyO8U9TdynbyNE";
+
+/// HTTP client for authentication API calls
+pub struct AuthClient {
+    client: Client,
+}
+
+impl AuthClient {
+    /// Create a new AuthClient
+    pub fn new() -> Self {
+        let client = Client::builder()
+            .user_agent("SwiftTunnel-Desktop/0.1.0")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self { client }
+    }
+
+    /// Sign in with email and password via Supabase
+    pub async fn sign_in_with_password(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<SupabaseAuthResponse, AuthError> {
+        let url = format!("{}/auth/v1/token?grant_type=password", SUPABASE_URL);
+
+        debug!("Signing in user: {}", email);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("apikey", SUPABASE_ANON_KEY)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "email": email,
+                "password": password,
+            }))
+            .send()
+            .await
+            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Sign in failed: {} - {}", status, body);
+
+            // Parse error message from Supabase
+            if body.contains("Invalid login credentials") {
+                return Err(AuthError::ApiError("Invalid email or password".to_string()));
+            }
+            return Err(AuthError::ApiError(format!(
+                "Sign in failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let data: SupabaseAuthResponse = response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))?;
+
+        info!("Sign in successful for user {}", data.user.id);
+        Ok(data)
+    }
+
+    /// Refresh the access token via Supabase
+    pub async fn refresh_token(&self, refresh_token: &str) -> Result<SupabaseAuthResponse, AuthError> {
+        let url = format!("{}/auth/v1/token?grant_type=refresh_token", SUPABASE_URL);
+
+        debug!("Refreshing token via Supabase");
+
+        let response = self
+            .client
+            .post(&url)
+            .header("apikey", SUPABASE_ANON_KEY)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "refresh_token": refresh_token,
+            }))
+            .send()
+            .await
+            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Refresh token failed: {} - {}", status, body);
+            return Err(AuthError::ApiError(format!(
+                "Refresh failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let data: SupabaseAuthResponse = response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))?;
+
+        info!("Token refresh successful");
+        Ok(data)
+    }
+
+    /// Fetch VPN configuration for a region
+    pub async fn get_vpn_config(
+        &self,
+        access_token: &str,
+        region: &str,
+    ) -> Result<VpnConfig, AuthError> {
+        let url = format!("{}/api/vpn/generate-config", API_BASE_URL);
+
+        debug!("Fetching VPN config for region {}", region);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(&json!({
+                "region": region,
+            }))
+            .send()
+            .await
+            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Get VPN config failed: {} - {}", status, body);
+            return Err(AuthError::ApiError(format!(
+                "Config fetch failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let data: VpnConfig = response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse config: {}", e)))?;
+
+        info!("Got VPN config for region {}", region);
+        Ok(data)
+    }
+
+    /// Exchange OAuth token for magic link token (desktop OAuth flow)
+    /// Called after receiving the callback from browser OAuth
+    pub async fn exchange_oauth_token(
+        &self,
+        exchange_token: &str,
+        state: &str,
+    ) -> Result<ExchangeTokenResponse, AuthError> {
+        let url = format!("{}/api/auth/desktop/exchange", API_BASE_URL);
+
+        debug!("Exchanging OAuth token for session");
+
+        let response = self
+            .client
+            .put(&url)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "exchange_token": exchange_token,
+                "state": state,
+            }))
+            .send()
+            .await
+            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Exchange token failed: {} - {}", status, body);
+
+            if body.contains("Invalid exchange token") {
+                return Err(AuthError::ApiError("Invalid or expired exchange token. Please try again.".to_string()));
+            }
+            if body.contains("Token already used") {
+                return Err(AuthError::ApiError("This login link has already been used. Please try again.".to_string()));
+            }
+            if body.contains("Token expired") {
+                return Err(AuthError::ApiError("Login link expired. Please try again.".to_string()));
+            }
+
+            return Err(AuthError::ApiError(format!(
+                "Exchange failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let data: ExchangeTokenResponse = response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse exchange response: {}", e)))?;
+
+        info!("Successfully exchanged OAuth token");
+        Ok(data)
+    }
+
+    /// Verify magic link token with Supabase to get access/refresh tokens
+    pub async fn verify_magic_link(
+        &self,
+        email: &str,
+        token_hash: &str,
+    ) -> Result<SupabaseAuthResponse, AuthError> {
+        let url = format!("{}/auth/v1/verify", SUPABASE_URL);
+
+        debug!("Verifying magic link token for {} (token_hash: {}...)", email, &token_hash[..token_hash.len().min(8)]);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("apikey", SUPABASE_ANON_KEY)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "type": "magiclink",
+                "token_hash": token_hash,
+            }))
+            .send()
+            .await
+            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Verify magic link failed: {} - {}", status, body);
+
+            if body.contains("Token has expired") || body.contains("token is expired") || body.contains("expired") {
+                return Err(AuthError::ApiError("Login link has expired. Please try signing in again.".to_string()));
+            }
+            if body.contains("Invalid token") || body.contains("token is invalid") || body.contains("invalid") {
+                return Err(AuthError::ApiError("Invalid login link. Please try signing in again.".to_string()));
+            }
+            if body.contains("already been used") || body.contains("used") {
+                return Err(AuthError::ApiError("This login link was already used. Please try signing in again.".to_string()));
+            }
+
+            return Err(AuthError::ApiError(format!(
+                "Verification failed ({}). Please try signing in again.",
+                status
+            )));
+        }
+
+        let data: SupabaseAuthResponse = response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse auth response: {}", e)))?;
+
+        info!("Magic link verification successful");
+        Ok(data)
+    }
+
+}
+
+impl Default for AuthClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
