@@ -190,8 +190,7 @@ fn setup_panic_hook() {
 
         // Check if this is a graphics/renderer panic and show user-friendly message
         let msg_lower = message.to_lowercase();
-        let is_graphics_panic = location.contains("glow")
-            || location.contains("wgpu")
+        let is_graphics_panic = location.contains("wgpu")
             || msg_lower.contains("opengl")
             || msg_lower.contains("gl context")
             || msg_lower.contains("dx12")
@@ -210,7 +209,7 @@ fn setup_panic_hook() {
             let title: Vec<u16> = "SwiftTunnel - Graphics Driver Update Required\0".encode_utf16().collect();
             let msg = format!(
                 "SwiftTunnel cannot start - your {} graphics driver needs updating.\n\n\
-                OpenGL initialization failed. This usually means your graphics \n\
+                Graphics initialization failed. This usually means your graphics \n\
                 driver is outdated or corrupted.\n\n\
                 Would you like to open the {} driver download page?\n\n\
                 (If using Remote Desktop, run SwiftTunnel directly on your PC instead)\0",
@@ -408,7 +407,7 @@ fn main() -> eframe::Result<()> {
     }
 
     // Create tokio runtime for async operations
-    // Stored in OnceLock so it outlives both wgpu and glow run_native calls
+    // Stored in OnceLock for 'static lifetime (must outlive run_native call)
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
     let rt = RUNTIME.get_or_init(|| Runtime::new().expect("Failed to create tokio runtime"));
 
@@ -560,13 +559,12 @@ fn main() -> eframe::Result<()> {
         warn!("Running in RDP session - graphics may not work. Please run SwiftTunnel directly on your gaming PC.");
     }
 
-    // Try wgpu (DX12/DX11/Vulkan) first — works on virtually all Windows GPUs
-    // Falls back to glow (OpenGL) if wgpu fails (e.g. very old VMs)
-    info!("Trying wgpu (DX12/DX11) renderer");
+    // Launch with wgpu renderer (Vulkan primary, GLES fallback)
+    info!("Starting wgpu renderer");
     let result = eframe::run_native(
         "SwiftTunnel FPS Booster",
         NativeOptions {
-            viewport: viewport.clone(),
+            viewport,
             renderer: eframe::Renderer::Wgpu,
             vsync: true,
             ..Default::default()
@@ -578,34 +576,10 @@ fn main() -> eframe::Result<()> {
         }),
     );
 
-    if result.is_ok() {
-        return Ok(());
-    }
-
-    // wgpu failed — fall back to glow (OpenGL)
-    let wgpu_err = result.unwrap_err();
-    warn!("wgpu renderer failed: {}. Falling back to glow (OpenGL)", wgpu_err);
-
-    let result = eframe::run_native(
-        "SwiftTunnel FPS Booster",
-        NativeOptions {
-            viewport,
-            renderer: eframe::Renderer::Glow,
-            vsync: true,
-            ..Default::default()
-        },
-        Box::new(move |cc| {
-            let mut app = BoosterApp::new(cc);
-            app.set_system_info(performance_monitor::get_system_info_lightweight());
-            Ok(Box::new(app))
-        }),
-    );
-
-    // Handle total failure — both renderers failed
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
-            error!("Both renderers failed. wgpu: {}, glow: {}", wgpu_err, e);
+            error!("wgpu renderer failed: {}", e);
 
             use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
             use windows::core::PCWSTR;

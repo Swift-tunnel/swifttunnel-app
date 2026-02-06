@@ -66,7 +66,7 @@ pub fn run_auto_updater() -> AutoUpdateResult {
         }
     });
 
-    // Create minimal splash window with glow (OpenGL) renderer
+    // Create minimal splash window
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SwiftTunnel")
@@ -75,7 +75,7 @@ pub fn run_auto_updater() -> AutoUpdateResult {
             .with_decorations(false)
             .with_transparent(false)
             .with_always_on_top(),
-        renderer: eframe::Renderer::Glow,
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 
