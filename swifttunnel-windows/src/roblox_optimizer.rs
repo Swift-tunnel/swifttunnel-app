@@ -247,14 +247,11 @@ impl RobloxOptimizer {
         // Write updated content back
         fs::write(&self.settings_path, &content)?;
 
-        // Set read-only to prevent Roblox from overwriting our FPS settings
-        if config.unlock_fps {
-            if let Err(e) = self.set_readonly() {
-                warn!("Could not set read-only attribute: {}. Roblox may reset the FPS cap.", e);
-            } else {
-                info!("FPS settings protected with read-only attribute");
-            }
-        }
+        // Note: We no longer set the file to read-only. Setting it read-only
+        // caused Roblox to fail with "Failed to apply critical settings" because
+        // Roblox needs to write to this file during its startup sequence.
+        // The FPS settings may be reset by Roblox, but the background monitor
+        // will re-detect and re-apply them when needed.
 
         // Apply dynamic render optimization
         if let Err(e) = self.apply_dynamic_render_optimization(&config.dynamic_render_optimization) {
@@ -461,7 +458,7 @@ impl RobloxOptimizer {
         // Low=3, Medium=2, High=1 (lower value = more aggressive optimization)
         settings.insert(
             "DFIntDebugDynamicRenderKiloPixels".to_string(),
-            serde_json::Value::String(render_value.to_string()),
+            serde_json::json!(render_value),
         );
 
         // Write settings to file
