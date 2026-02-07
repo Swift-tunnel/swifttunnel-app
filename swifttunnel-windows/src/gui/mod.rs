@@ -1014,8 +1014,11 @@ impl eframe::App for BoosterApp {
         } else if is_connected {
             // 5 FPS for idle pulse animation (saves ~2-5% GPU on integrated graphics)
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        } else if self.system_tray.is_some() {
+            // Must keep polling to process tray events (show, quit, toggle)
+            // even when the window is hidden/minimized to tray
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
-        // Otherwise, egui will only repaint on user interaction (clicks, typing, etc.)
 
         // Handle tray events
         let (toggle_opt, quit, show_window) = if let Some(ref tray) = self.system_tray {
@@ -1050,6 +1053,9 @@ impl eframe::App for BoosterApp {
                             let _ = ShowWindow(hwnd, SW_RESTORE);
                             let _ = ShowWindow(hwnd, SW_SHOW);
                             let _ = SetForegroundWindow(hwnd);
+                            // Sync egui's internal state so it knows the window is visible again
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                             log::info!("Window restored via Windows API");
                         }
                         _ => {

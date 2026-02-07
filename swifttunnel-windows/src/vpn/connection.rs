@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use crate::auth::types::VpnConfig;
+use crate::dns::CloudflareDns;
 use super::adapter::WintunAdapter;
 use super::tunnel::{WireguardTunnel, TunnelStats};
 use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
@@ -835,27 +836,40 @@ impl VpnConnection {
             // Custom relay configured - resolve with DNS support
             log::info!("V3: Using CUSTOM relay server: {}", custom);
 
-            // Use tokio's async DNS resolution (supports both IPs and hostnames)
-            match tokio::net::lookup_host(custom).await {
-                Ok(mut addrs) => {
-                    match addrs.next() {
-                        Some(addr) => {
-                            log::info!("V3: Resolved custom relay to {}", addr);
-                            addr
-                        }
-                        None => {
-                            let _ = driver.close();
-                            return Err(VpnError::SplitTunnelSetupFailed(
-                                format!("DNS resolution returned no addresses for '{}'", custom)
-                            ));
-                        }
-                    }
-                }
-                Err(e) => {
+            // Parse host:port and resolve via Cloudflare DNS (1.1.1.1)
+            let (host, port) = if let Some((h, p)) = custom.rsplit_once(':') {
+                let port: u16 = p.parse().map_err(|e| {
                     let _ = driver.close();
-                    return Err(VpnError::SplitTunnelSetupFailed(
-                        format!("Failed to resolve custom relay '{}': {}", custom, e)
-                    ));
+                    VpnError::SplitTunnelSetupFailed(format!("Invalid port in '{}': {}", custom, e))
+                })?;
+                (h, port)
+            } else {
+                let _ = driver.close();
+                return Err(VpnError::SplitTunnelSetupFailed(
+                    format!("Custom relay '{}' must include a port (e.g. host:51821)", custom)
+                ));
+            };
+
+            // Try parsing as IP first to skip DNS for raw IPs
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                let addr = SocketAddr::new(ip, port);
+                log::info!("V3: Custom relay is IP address: {}", addr);
+                addr
+            } else {
+                // Resolve hostname via Cloudflare DNS
+                let dns = CloudflareDns::shared();
+                match dns.resolve_host(host, port).await {
+                    Ok(addrs) => {
+                        let addr = addrs[0];
+                        log::info!("V3: Resolved custom relay to {}", addr);
+                        addr
+                    }
+                    Err(e) => {
+                        let _ = driver.close();
+                        return Err(VpnError::SplitTunnelSetupFailed(
+                            format!("Failed to resolve custom relay '{}': {}", custom, e)
+                        ));
+                    }
                 }
             }
         } else {

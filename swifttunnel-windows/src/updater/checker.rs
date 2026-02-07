@@ -1,6 +1,7 @@
 //! Update checker - fetches GitHub releases and compares versions
 
 use super::types::{GithubRelease, UpdateInfo};
+use crate::dns::CloudflareDns;
 use crate::with_retry;
 use log::{debug, error, info};
 use semver::Version;
@@ -37,6 +38,7 @@ impl UpdateChecker {
             client: reqwest::Client::builder()
                 .user_agent("SwiftTunnel-Updater")
                 .timeout(std::time::Duration::from_secs(30))
+                .dns_resolver(CloudflareDns::shared())
                 .build()
                 .expect("Failed to create HTTP client"),
             current_version,

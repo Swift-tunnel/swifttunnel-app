@@ -4,6 +4,7 @@
 //! These are publicly available and don't require licensing like Ookla's Speedtest.
 
 use super::types::{SpeedTestProgress, SpeedTestResults};
+use crate::dns::CloudflareDns;
 use log::{debug, error, info};
 use reqwest::Client;
 use std::sync::mpsc::Sender;
@@ -42,6 +43,7 @@ pub async fn run_speed_test(
 
     let client = Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .dns_resolver(CloudflareDns::shared())
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 

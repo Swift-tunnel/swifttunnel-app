@@ -18,8 +18,11 @@ use anyhow::{Result, Context};
 /// Session ID length in bytes
 const SESSION_ID_LEN: usize = 8;
 
-/// Maximum packet size (MTU - IP header - UDP header - session ID)
-const MAX_PAYLOAD_SIZE: usize = 1500 - 20 - 8 - SESSION_ID_LEN;
+/// Maximum payload size for relay packets
+/// Allow full IP packets (up to 1500 bytes) to avoid silently dropping large game packets.
+/// Packets that cause the outer UDP datagram to exceed path MTU will be IP-fragmented
+/// by the OS, which is preferable to silent drops that cause Roblox Error 277.
+const MAX_PAYLOAD_SIZE: usize = 1500;
 
 /// Keepalive interval to maintain NAT bindings - 15s is safer for strict NATs
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -59,26 +62,41 @@ impl UdpRelay {
         socket.set_read_timeout(Some(READ_TIMEOUT))
             .context("Failed to set read timeout")?;
 
-        // Increase receive buffer to 256KB to handle burst traffic
+        // Increase send and receive buffers to 256KB to handle burst traffic
+        // Default Windows SO_SNDBUF is only 8KB which causes WouldBlock under
+        // Roblox's 30-60 packets/sec rate, leading to silent packet drops (Error 277)
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawSocket;
             let raw = socket.as_raw_socket();
             let buf_size: i32 = 256 * 1024;
-            let result = unsafe {
-                // SO_RCVBUF = 0x1002
-                windows::Win32::Networking::WinSock::setsockopt(
-                    windows::Win32::Networking::WinSock::SOCKET(raw as usize),
+            let sock = windows::Win32::Networking::WinSock::SOCKET(raw as usize);
+
+            unsafe {
+                let buf_bytes = std::slice::from_raw_parts(
+                    &buf_size as *const i32 as *const u8,
+                    4,
+                );
+
+                let result = windows::Win32::Networking::WinSock::setsockopt(
+                    sock,
                     windows::Win32::Networking::WinSock::SOL_SOCKET,
                     windows::Win32::Networking::WinSock::SO_RCVBUF,
-                    Some(std::slice::from_raw_parts(
-                        &buf_size as *const i32 as *const u8,
-                        4
-                    ))
-                )
-            };
-            if result != 0 {
-                log::warn!("UDP Relay: Failed to set SO_RCVBUF to 256KB, using default");
+                    Some(buf_bytes),
+                );
+                if result != 0 {
+                    log::warn!("UDP Relay: Failed to set SO_RCVBUF to 256KB, using default");
+                }
+
+                let result = windows::Win32::Networking::WinSock::setsockopt(
+                    sock,
+                    windows::Win32::Networking::WinSock::SOL_SOCKET,
+                    windows::Win32::Networking::WinSock::SO_SNDBUF,
+                    Some(buf_bytes),
+                );
+                if result != 0 {
+                    log::warn!("UDP Relay: Failed to set SO_SNDBUF to 256KB, using default");
+                }
             }
         }
 

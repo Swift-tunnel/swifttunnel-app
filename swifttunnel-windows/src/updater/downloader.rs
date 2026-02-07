@@ -1,5 +1,6 @@
 //! Update downloader - downloads installer with progress reporting
 
+use crate::dns::CloudflareDns;
 use futures_util::StreamExt;
 use log::{debug, error, info};
 use std::path::PathBuf;
@@ -34,6 +35,7 @@ pub async fn download_update(
     let client = reqwest::Client::builder()
         .user_agent("SwiftTunnel-Updater")
         .timeout(std::time::Duration::from_secs(600)) // 10 minute timeout for large files
+        .dns_resolver(CloudflareDns::shared())
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -105,6 +107,7 @@ pub async fn download_checksum(url: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent("SwiftTunnel-Updater")
         .timeout(std::time::Duration::from_secs(30))
+        .dns_resolver(CloudflareDns::shared())
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 

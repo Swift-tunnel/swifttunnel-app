@@ -3,8 +3,9 @@
 //! Handles fetching VPN configuration from the SwiftTunnel API,
 //! including WireGuard keys, server endpoints, and assigned IPs.
 
-use serde::{Deserialize, Serialize};
 use crate::auth::types::VpnConfig;
+use crate::dns::CloudflareDns;
+use serde::{Deserialize, Serialize};
 use super::{VpnError, VpnResult};
 
 /// API base URL for SwiftTunnel
@@ -14,7 +15,12 @@ const API_BASE_URL: &str = "https://swifttunnel.net";
 fn http_client() -> &'static reqwest::Client {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| reqwest::Client::new())
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .dns_resolver(CloudflareDns::shared())
+            .build()
+            .expect("Failed to build VPN HTTP client")
+    })
 }
 
 /// Request body for generating VPN config

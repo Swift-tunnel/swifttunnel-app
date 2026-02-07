@@ -2615,8 +2615,13 @@ fn run_packet_worker(
                         }
                         Err(e) => {
                             direct_encrypt_fail += 1;
-                            if direct_encrypt_fail <= 10 {
-                                log::warn!("Worker {}: V3 relay forward failed: {}", worker_id, e);
+                            // Log first 10 failures, then every 100th to avoid log spam
+                            // but keep visibility into persistent relay issues (Error 277)
+                            if direct_encrypt_fail <= 10 || direct_encrypt_fail % 100 == 0 {
+                                log::warn!(
+                                    "Worker {}: V3 relay forward failed ({} total): {}",
+                                    worker_id, direct_encrypt_fail, e
+                                );
                             }
                         }
                     }
@@ -3308,6 +3313,15 @@ fn should_route_to_vpn_with_inline_cache(
                     src_ip, src_port, dst_ip, dst_port
                 );
             }
+
+            // Cache speculative hit so subsequent packets from this source port
+            // use the fast inline cache path. Critical for V3 mode where
+            // inline_connection_lookup is disabled (stability fix v1.0.8).
+            // Without this, every V3 packet re-does the speculative IP range check.
+            if inline_cache.len() < 10000 {
+                inline_cache.insert(cache_key, true);
+            }
+
             true // Speculatively tunnel to game server
         } else {
             false
@@ -4183,9 +4197,10 @@ fn run_v3_inbound_receiver(
     const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
     const NO_TRAFFIC_WARNING_SECS: u64 = 10;
 
-    // Keepalive interval for relay (every 20 seconds is plenty)
+    // Keepalive interval for relay - must match udp_relay::KEEPALIVE_INTERVAL (15s)
+    // 20s was too long and could cause NAT timeout on strict networks (Error 277)
     let mut last_keepalive = std::time::Instant::now();
-    const KEEPALIVE_INTERVAL_SECS: u64 = 20;
+    const KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
     log::info!("V3 inbound receiver: entering main loop, waiting for relay traffic...");
 
