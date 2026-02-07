@@ -190,12 +190,12 @@ fn setup_panic_hook() {
 
         // Check if this is a graphics/renderer panic and show user-friendly message
         let msg_lower = message.to_lowercase();
-        let is_graphics_panic = location.contains("wgpu")
+        let is_graphics_panic = location.contains("glow")
+            || location.contains("glutin")
             || msg_lower.contains("opengl")
             || msg_lower.contains("gl context")
-            || msg_lower.contains("dx12")
-            || msg_lower.contains("d3d")
-            || msg_lower.contains("vulkan")
+            || msg_lower.contains("egl")
+            || msg_lower.contains("wgl")
             || message.contains("0x1F0");  // GL_VENDOR/RENDERER/VERSION constants
 
         if is_graphics_panic {
@@ -206,14 +206,16 @@ fn setup_panic_hook() {
             let gpu_info = detect_gpu_vendor();
             let (vendor_name, driver_url) = gpu_info.unwrap_or(("Unknown", "https://www.google.com/search?q=update+graphics+driver"));
 
-            let title: Vec<u16> = "SwiftTunnel - Graphics Driver Update Required\0".encode_utf16().collect();
+            let title: Vec<u16> = "SwiftTunnel - Graphics Error\0".encode_utf16().collect();
             let msg = format!(
-                "SwiftTunnel cannot start - your {} graphics driver needs updating.\n\n\
-                Graphics initialization failed. This usually means your graphics \n\
-                driver is outdated or corrupted.\n\n\
+                "SwiftTunnel failed to initialize graphics.\n\n\
+                This can happen if:\n\
+                - Your graphics drivers are very outdated\n\
+                - You're running via Remote Desktop (RDP)\n\
+                - Your system doesn't support OpenGL 2.1+\n\n\
                 Would you like to open the {} driver download page?\n\n\
-                (If using Remote Desktop, run SwiftTunnel directly on your PC instead)\0",
-                vendor_name, vendor_name
+                You can also report this issue at swifttunnel.net/support\0",
+                vendor_name
             );
             let message_wide: Vec<u16> = msg.encode_utf16().collect();
 
@@ -559,13 +561,13 @@ fn main() -> eframe::Result<()> {
         warn!("Running in RDP session - graphics may not work. Please run SwiftTunnel directly on your gaming PC.");
     }
 
-    // Launch with wgpu renderer (Vulkan primary, GLES fallback)
-    info!("Starting wgpu renderer");
+    // Launch with glow (OpenGL) renderer for maximum compatibility
+    info!("Starting OpenGL renderer");
     let result = eframe::run_native(
         "SwiftTunnel FPS Booster",
         NativeOptions {
             viewport,
-            renderer: eframe::Renderer::Wgpu,
+            renderer: eframe::Renderer::Glow,
             vsync: true,
             ..Default::default()
         },
@@ -579,7 +581,7 @@ fn main() -> eframe::Result<()> {
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
-            error!("wgpu renderer failed: {}", e);
+            error!("OpenGL renderer failed: {}", e);
 
             use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
             use windows::core::PCWSTR;
@@ -592,9 +594,11 @@ fn main() -> eframe::Result<()> {
                 Please run SwiftTunnel directly on your gaming PC,\n\
                 not through Remote Desktop.\0"
             } else {
-                "SwiftTunnel cannot start - no compatible graphics found.\n\n\
-                Please ensure your graphics drivers are up to date.\n\n\
-                If you're using a VM, enable 3D acceleration.\0"
+                "SwiftTunnel could not initialize OpenGL graphics.\n\n\
+                Try these steps:\n\
+                1. Update your graphics drivers\n\
+                2. If in a VM, enable 3D acceleration\n\
+                3. Report the issue at swifttunnel.net/support\0"
             };
 
             let message: Vec<u16> = msg.encode_utf16().collect();

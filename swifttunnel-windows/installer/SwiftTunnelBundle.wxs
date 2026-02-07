@@ -3,7 +3,7 @@
      xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
     <Bundle
         Name="SwiftTunnel Setup"
-        Version="1.0.11.0"
+        Version="1.0.12.0"
         Manufacturer="SwiftTunnel"
         UpgradeCode="6A7B4A14-9C42-4A24-9D67-8F70A8D2F3B9"
         Compressed="yes"

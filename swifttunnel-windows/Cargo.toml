@@ -1,18 +1,14 @@
 [package]
 name = "swifttunnel-fps-booster"
-version = "1.0.11"
+version = "1.0.12"
 edition = "2021"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel - Game Booster with PC Optimizations"
 default-run = "swifttunnel-fps-booster"
 
 [dependencies]
-# GUI Framework - egui 0.33 with wgpu renderer
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu"] }
-# Explicit wgpu backends — eframe's default-features=false strips these out.
-# DX12 excluded: gpu-allocator/wgpu-hal windows-crate type mismatch in wgpu 27.
-# Vulkan = primary (all modern GPUs), GLES = universal fallback.
-wgpu = { version = "27", default-features = false, features = ["vulkan", "gles"] }
+# GUI Framework - egui 0.33 with glow (OpenGL) renderer for maximum compatibility
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
 egui = "0.33"
 
 

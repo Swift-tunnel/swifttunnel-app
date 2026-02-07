@@ -75,7 +75,7 @@ pub fn run_auto_updater() -> AutoUpdateResult {
             .with_decorations(false)
             .with_transparent(false)
             .with_always_on_top(),
-        renderer: eframe::Renderer::Wgpu,
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
