@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use arc_swap::ArcSwap;
 use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
-use crate::settings::RoutingMode;
 
 // ============================================================================
 // GAME SERVER IP RANGES (for V2 hybrid routing)
@@ -373,20 +372,17 @@ pub struct ProcessSnapshot {
     pub version: u64,
     /// Timestamp when snapshot was created
     pub created_at: std::time::Instant,
-    /// Routing mode (V1 = process-only, V2 = hybrid)
-    pub routing_mode: RoutingMode,
 }
 
 impl ProcessSnapshot {
     /// Create empty snapshot
-    pub fn empty(tunnel_apps: HashSet<String>, routing_mode: RoutingMode) -> Self {
+    pub fn empty(tunnel_apps: HashSet<String>) -> Self {
         Self {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
             tunnel_apps,
             version: 0,
             created_at: std::time::Instant::now(),
-            routing_mode,
         }
     }
 
@@ -410,12 +406,10 @@ impl ProcessSnapshot {
         self.is_tunnel_connection(local_ip, local_port, protocol)
     }
 
-    /// Check if connection should be tunneled with destination info (V2 support)
+    /// Check if connection should be tunneled with destination info
     ///
-    /// This is the new method that supports V2 hybrid routing.
-    ///
-    /// V2 PERMISSIVE MODE (v0.9.5):
-    /// - If process IS a tunnel app → use permissive check (port range only)
+    /// PERMISSIVE MODE (v0.9.5):
+    /// - If process IS a tunnel app → use permissive check (all UDP)
     /// - If process is NOT detected → use strict check (known IP ranges + port)
     ///
     /// This fixes the "zero traffic" bug where Roblox connects to servers
@@ -432,17 +426,10 @@ impl ProcessSnapshot {
         // First check: Is this from a tunnel app?
         let is_tunnel_app = self.is_tunnel_connection(local_ip, local_port, protocol);
 
-        // V1 mode: process check is enough
-        if self.routing_mode == RoutingMode::V1 {
-            return is_tunnel_app;
-        }
-
-        // V2 mode with PERMISSIVE process trust:
         // If we KNOW it's a tunnel app, trust it and tunnel its UDP traffic
         // even if the destination IP isn't in our known list.
         // This handles new Roblox server deployments gracefully.
         if is_tunnel_app {
-            // Trust the process - just check if it looks like game traffic (UDP to high port)
             return is_likely_game_traffic(dst_port, protocol);
         }
 
@@ -453,13 +440,11 @@ impl ProcessSnapshot {
 
     /// Check if connection belongs to a tunnel app (internal helper)
     ///
-    /// If cache lookup fails, performs ON-DEMAND IP Helper API query.
-    /// This guarantees first-packet tunneling for ETW-detected processes.
-    ///
-    /// STABILITY FIX (v1.0.8): Skip expensive Windows API calls in V3 mode.
-    /// The GetExtendedTcpTable/UdpTable calls can block and cause system freezes
-    /// when combined with ndisapi packet interception. V3 mode relies on speculative
-    /// tunneling via destination IP matching instead.
+    /// Checks the process cache for PID ownership. Does NOT perform
+    /// expensive on-demand IP Helper API lookups (GetExtendedTcpTable/UdpTable)
+    /// as those can block and cause system freezes when combined with
+    /// ndisapi packet interception. Instead, relies on speculative tunneling
+    /// via destination IP matching for first packets.
     #[inline(always)]
     fn is_tunnel_connection(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
         // Direct lookup - O(1) average case
@@ -477,56 +462,7 @@ impl ProcessSnapshot {
             }
         }
 
-        // STABILITY FIX (v1.0.8): Skip blocking Windows API calls in V3 mode
-        // V3 relies on speculative tunneling (destination IP matching) instead
-        // This prevents the system freeze caused by blocking calls in hot path
-        if self.routing_mode == RoutingMode::V3 {
-            return false; // Let speculative tunneling handle it
-        }
-
-        // FIRST-PACKET GUARANTEE: On-demand lookup via IP Helper API
-        // This is expensive but only happens for packets not yet in cache.
-        // Critical for ETW-detected processes whose connections haven't
-        // been added to the cache yet.
-        if let Some(pid) = lookup_connection_pid(local_ip, local_port, protocol) {
-            // Fast path: check if PID is in our snapshot's pid_names
-            if self.is_tunnel_pid(pid) {
-                log::debug!(
-                    "On-demand lookup found tunnel PID {} for {}:{}/{}",
-                    pid, local_ip, local_port,
-                    if protocol == Protocol::Tcp { "TCP" } else { "UDP" }
-                );
-                return true;
-            }
-
-            // SNAPSHOT STALENESS FIX: PID found but not in snapshot!
-            // This happens when:
-            // 1. ETW detected process and called register_process_immediate()
-            // 2. A new snapshot was created with the PID
-            // 3. BUT this worker thread is still using an OLD snapshot
-            // 4. First packet arrives and on-demand lookup finds the PID
-            // 5. is_tunnel_pid() returns false because OLD snapshot doesn't have this PID
-            //
-            // Solution: Query the OS directly for the process name and check
-            // against tunnel_apps. This is a fallback for stale snapshots.
-            if let Some(name) = get_process_name_by_pid_fast(pid) {
-                let name_lower = name.to_lowercase();
-                let name_stem = name_lower.trim_end_matches(".exe");
-
-                for app in &self.tunnel_apps {
-                    let app_stem = app.trim_end_matches(".exe");
-                    if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
-                        log::info!(
-                            "First-packet: Direct lookup matched tunnel app '{}' (PID: {}) for {}:{}/{}",
-                            name, pid, local_ip, local_port,
-                            if protocol == Protocol::Tcp { "TCP" } else { "UDP" }
-                        );
-                        return true;
-                    }
-                }
-            }
-        }
-
+        // Not in cache - let speculative tunneling (destination IP matching) handle it
         false
     }
 
@@ -610,52 +546,19 @@ pub struct LockFreeProcessCache {
     version: AtomicU64,
     /// Apps to tunnel
     tunnel_apps: HashSet<String>,
-    /// Routing mode (V1 = process-only, V2 = hybrid)
-    routing_mode: RoutingMode,
 }
 
 impl LockFreeProcessCache {
     /// Create new lock-free cache
-    pub fn new(tunnel_apps: Vec<String>, routing_mode: RoutingMode) -> Self {
+    pub fn new(tunnel_apps: Vec<String>) -> Self {
         let apps: HashSet<String> = tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect();
-        let initial = Arc::new(ProcessSnapshot::empty(apps.clone(), routing_mode));
+        let initial = Arc::new(ProcessSnapshot::empty(apps.clone()));
 
         Self {
             current: ArcSwap::from(initial),
             version: AtomicU64::new(0),
             tunnel_apps: apps,
-            routing_mode,
         }
-    }
-
-    /// Get current routing mode
-    pub fn routing_mode(&self) -> RoutingMode {
-        self.routing_mode
-    }
-
-    /// Set routing mode and refresh snapshot
-    pub fn set_routing_mode(&mut self, mode: RoutingMode) {
-        self.routing_mode = mode;
-
-        // Force immediate snapshot update so workers see the new routing_mode
-        let old_snap = self.get_snapshot();
-        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
-
-        let new_snapshot = Arc::new(ProcessSnapshot {
-            connections: old_snap.connections.clone(),
-            pid_names: old_snap.pid_names.clone(),
-            tunnel_apps: self.tunnel_apps.clone(),
-            version,
-            created_at: std::time::Instant::now(),
-            routing_mode: self.routing_mode,
-        });
-
-        self.current.store(new_snapshot);
-
-        log::info!(
-            "set_routing_mode: Updated to {:?}",
-            self.routing_mode
-        );
     }
 
     /// Get current snapshot (lock-free!)
@@ -697,7 +600,7 @@ impl LockFreeProcessCache {
             tunnel_apps: self.tunnel_apps.clone(),
             version,
             created_at: std::time::Instant::now(),
-            routing_mode: self.routing_mode,
+
         });
 
         // Atomically swap in new snapshot - arc-swap handles cleanup safely
@@ -723,7 +626,7 @@ impl LockFreeProcessCache {
             tunnel_apps: self.tunnel_apps.clone(),  // Use NEW tunnel_apps
             version,
             created_at: std::time::Instant::now(),
-            routing_mode: self.routing_mode,
+
         });
 
         // Atomically swap in new snapshot - arc-swap handles cleanup safely
@@ -772,7 +675,7 @@ impl LockFreeProcessCache {
             tunnel_apps: self.tunnel_apps.clone(),
             version,
             created_at: std::time::Instant::now(),
-            routing_mode: self.routing_mode,
+
         });
 
         self.current.store(new_snapshot);
@@ -793,7 +696,7 @@ mod tests {
 
     #[test]
     fn test_lock_free_snapshot() {
-        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()], RoutingMode::V1);
+        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()]);
 
         // Get snapshot
         let snap1 = cache.get_snapshot();
@@ -824,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_should_tunnel_0000_fallback() {
-        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()], RoutingMode::V1);
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
 
         let mut connections = HashMap::new();
         // App binds to 0.0.0.0:50000
@@ -845,8 +748,8 @@ mod tests {
     }
 
     #[test]
-    fn test_v2_routing_game_server() {
-        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()], RoutingMode::V2);
+    fn test_permissive_routing() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
 
         let mut connections = HashMap::new();
         connections.insert(
@@ -861,22 +764,23 @@ mod tests {
 
         let snap = cache.get_snapshot();
 
-        // V2: Should tunnel UDP to Roblox game server (128.116.x.x)
+        // Should tunnel UDP to Roblox game server (128.116.x.x)
         assert!(snap.should_tunnel_v2(
             Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Udp,
             Ipv4Addr::new(128, 116, 50, 100), 55000  // Roblox game server
         ));
 
-        // V2: Should NOT tunnel TCP to Roblox game server (wrong protocol)
+        // Should NOT tunnel TCP (web API calls don't need VPN routing)
         assert!(!snap.should_tunnel_v2(
             Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Tcp,
             Ipv4Addr::new(128, 116, 50, 100), 55000
         ));
 
-        // V2: Should NOT tunnel UDP to non-game IP (CDN, API, etc.)
-        assert!(!snap.should_tunnel_v2(
+        // Permissive: SHOULD tunnel UDP to non-game IP from tunnel app
+        // We trust the process - ALL its UDP gets tunneled (STUN, voice chat, etc.)
+        assert!(snap.should_tunnel_v2(
             Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Udp,
-            Ipv4Addr::new(1, 1, 1, 1), 443  // Not a game server
+            Ipv4Addr::new(1, 1, 1, 1), 443
         ));
     }
 
@@ -886,7 +790,7 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        let cache = Arc::new(LockFreeProcessCache::new(vec!["test.exe".to_string()], RoutingMode::V1));
+        let cache = Arc::new(LockFreeProcessCache::new(vec!["test.exe".to_string()]));
 
         // Spawn reader threads that continuously get snapshots
         let readers: Vec<_> = (0..4).map(|i| {
@@ -940,7 +844,6 @@ mod tests {
 
         let cache = LockFreeProcessCache::new(
             vec!["robloxplayerbeta".to_string(), "roblox".to_string()],
-            RoutingMode::V1
         );
 
         let snap = cache.get_snapshot();

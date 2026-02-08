@@ -292,7 +292,7 @@ pub struct ParallelInterceptor {
 
 impl ParallelInterceptor {
     /// Create new parallel interceptor
-    pub fn new(tunnel_apps: Vec<String>, routing_mode: crate::settings::RoutingMode) -> Self {
+    pub fn new(tunnel_apps: Vec<String>) -> Self {
         // Use physical cores only (hyperthreading doesn't help packet processing)
         // Cap at 4 workers - more threads = more overhead with diminishing returns
         // ExitLag-style efficiency: fewer threads, smarter scheduling
@@ -300,10 +300,9 @@ impl ParallelInterceptor {
         let num_workers = physical_cores.min(4).max(1);
 
         log::info!(
-            "Creating parallel interceptor with {} workers (CPUs: {}), routing mode: {:?}",
+            "Creating parallel interceptor with {} workers (CPUs: {})",
             num_workers,
             num_cpus::get(),
-            routing_mode
         );
 
         let worker_stats: Vec<Arc<WorkerStats>> =
@@ -311,7 +310,7 @@ impl ParallelInterceptor {
 
         Self {
             num_workers,
-            process_cache: Arc::new(LockFreeProcessCache::new(tunnel_apps, routing_mode)),
+            process_cache: Arc::new(LockFreeProcessCache::new(tunnel_apps)),
             stop_flag: Arc::new(AtomicBool::new(false)),
             worker_handles: Vec::new(),
             reader_handle: None,
@@ -3241,32 +3240,14 @@ fn should_route_to_vpn_with_inline_cache(
     let cache_key = (src_ip, src_port, protocol);
     if inline_cache.contains_key(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        // Process IS a tunnel app - use permissive check in V2/V3 mode
-        return match snapshot.routing_mode {
-            crate::settings::RoutingMode::V1 => true,
-            crate::settings::RoutingMode::V2 | crate::settings::RoutingMode::V3 => {
-                // PERMISSIVE MODE (v0.9.5): Trust the process, just check if it's game-like traffic
-                // This fixes zero traffic when Roblox uses servers not in our IP list
-                // V3 uses same routing logic as V2, just different transport (UDP relay vs WireGuard)
-                super::process_cache::is_likely_game_traffic(dst_port, protocol)
-            }
-        };
+        // Process IS a tunnel app - trust it, tunnel all its UDP
+        return super::process_cache::is_likely_game_traffic(dst_port, protocol);
     }
 
-    // Phase 3: Inline lookup (slow path, ~500μs, but only once per connection)
-    // This checks if the source process is a tunnel app
-    //
-    // STABILITY FIX (v1.0.8): Skip blocking Windows API calls in V3 mode
-    // The GetExtendedTcpTable/UdpTable calls can block and cause system freezes
-    // when combined with ndisapi packet interception. V3 mode relies on speculative
-    // tunneling instead (destination IP matching).
-    let is_tunnel_app = if snapshot.routing_mode == crate::settings::RoutingMode::V3 {
-        // V3: Skip expensive syscall, rely on speculative tunneling below
-        false
-    } else {
-        SYSCALL_LOOKUPS.with(|c| c.set(c.get() + 1));
-        inline_connection_lookup(src_ip, src_port, protocol, snapshot)
-    };
+    // Phase 3: Skip inline lookup (expensive GetExtendedTcpTable/UdpTable syscalls
+    // can block and cause system freezes with ndisapi packet interception).
+    // Rely on speculative tunneling (destination IP matching) for first packets.
+    let is_tunnel_app = false;
 
     // Cache the process check result for subsequent packets from this connection
     // Limit cache size to prevent unbounded growth
@@ -3327,16 +3308,8 @@ fn should_route_to_vpn_with_inline_cache(
             false
         }
     } else {
-        // Process IS a tunnel app
-        match snapshot.routing_mode {
-            crate::settings::RoutingMode::V1 => true,
-            crate::settings::RoutingMode::V2 | crate::settings::RoutingMode::V3 => {
-                // PERMISSIVE MODE (v0.9.5): Trust the process, just check if it's game-like traffic
-                // This fixes zero traffic when Roblox uses servers not in our IP list
-                // V3 uses same routing logic as V2, just different transport (UDP relay vs WireGuard)
-                super::process_cache::is_likely_game_traffic(dst_port, protocol)
-            }
-        }
+        // Process IS a tunnel app - trust it, tunnel all its UDP
+        super::process_cache::is_likely_game_traffic(dst_port, protocol)
     };
 
     // Log stats periodically

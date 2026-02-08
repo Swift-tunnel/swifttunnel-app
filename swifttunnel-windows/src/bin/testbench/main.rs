@@ -27,7 +27,7 @@ use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
 use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
 use swifttunnel_fps_booster::vpn::routes::{RouteManager, get_internet_interface_ip};
 use swifttunnel_fps_booster::auth::types::AuthState;
-use swifttunnel_fps_booster::settings::RoutingMode;
+
 
 /// Testbench credentials
 const TESTBENCH_EMAIL: &str = "testbench@swifttunnel.net";
@@ -422,7 +422,6 @@ fn verify_traffic_routing() {
         vpn_config.assigned_ip.clone(),
         original_internet_ip.clone(),
         interface_luid,
-        RoutingMode::V1,  // Use V1 for testbench (process-based)
     );
 
     if let Err(e) = driver.configure(split_config) {
@@ -639,7 +638,6 @@ fn test_split_tunnel_driver() {
         "10.64.0.1".to_string(),
         "192.168.1.1".to_string(),
         0,
-        RoutingMode::V1,  // Use V1 for testbench
     );
 
     match driver.configure(config) {
@@ -703,7 +701,7 @@ fn test_full_split_tunnel_flow() {
     };
     println!("   Internet IP: {}", internet_ip);
 
-    let config = SplitTunnelConfig::new(tunnel_apps, tunnel_ip, internet_ip, tunnel_luid, RoutingMode::V1);
+    let config = SplitTunnelConfig::new(tunnel_apps, tunnel_ip, internet_ip, tunnel_luid);
 
     match driver.configure(config) {
         Ok(_) => {
@@ -1238,7 +1236,6 @@ fn test_split_tunnel_two_apps() {
         vpn_config.assigned_ip.clone(),
         original_internet_ip.clone(),
         interface_luid,
-        RoutingMode::V1,  // Use V1 for testbench
     );
 
     if let Err(e) = driver.configure(split_config) {
@@ -1609,7 +1606,6 @@ fn run_vpn_benchmark() {
         vpn_config.assigned_ip.clone(),
         original_internet_ip.clone(),
         interface_luid,
-        RoutingMode::V1,  // Use V1 for testbench
     );
 
     if let Err(e) = driver.configure(split_config) {
@@ -2081,7 +2077,6 @@ fn run_latency_test() {
         vpn_config.assigned_ip.clone(),
         original_internet_ip.clone(),
         interface_luid,
-        RoutingMode::V1,  // Use V1 for testbench
     );
 
     if let Err(e) = driver.configure(split_config) {

@@ -452,9 +452,8 @@ impl BoosterApp {
                                 });
                         }
 
-                        // Custom Relay badge (only when experimental mode + V3 + custom relay configured)
+                        // Custom Relay badge (only when experimental mode + custom relay configured)
                         if self.experimental_mode
-                            && self.routing_mode == crate::settings::RoutingMode::V3
                             && !self.custom_relay_server.is_empty()
                         {
                             let relay_color = egui::Color32::from_rgb(255, 180, 0); // Orange/amber for experimental

@@ -100,7 +100,7 @@ pub struct PendingConnection {
     pub region: String,
     pub server: String,
     pub apps: Vec<String>,
-    pub routing_mode: u8, // 0 = V1, 1 = V2
+    pub routing_mode: u8, // Legacy field, kept for IPC compatibility
     pub timestamp: u64,
 }
 

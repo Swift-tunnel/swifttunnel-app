@@ -231,8 +231,6 @@ pub struct BoosterApp {
     custom_relay_server: String,
     /// Logo texture handle (loaded from embedded PNG)
     logo_texture: Option<egui::TextureHandle>,
-    /// Routing mode for split tunnel (V1 = process-based, V2 = hybrid/ExitLag-style)
-    routing_mode: crate::settings::RoutingMode,
     /// Pending auto-connect from elevation (--resume-connect flag)
     /// Set when app is relaunched with admin privileges to continue connection
     auto_connect_pending: Option<PendingConnection>,
@@ -521,8 +519,6 @@ impl BoosterApp {
             experimental_mode: saved_settings.experimental_mode,
             // Custom relay server override (experimental)
             custom_relay_server: saved_settings.custom_relay_server.clone(),
-            // Routing mode for split tunnel
-            routing_mode: saved_settings.routing_mode,
             // Logo texture (loaded from embedded PNG)
             logo_texture: Self::load_logo_texture(&cc.egui_ctx),
             // Auto-connect from elevation (take from static if --resume-connect was used)
@@ -666,8 +662,7 @@ impl BoosterApp {
             artificial_latency_ms: self.artificial_latency_ms,
             // Save experimental mode setting
             experimental_mode: self.experimental_mode,
-            // Save routing mode setting
-            routing_mode: self.routing_mode,
+            _routing_mode: serde_json::Value::Null,
             // Save custom relay server (experimental)
             custom_relay_server: self.custom_relay_server.clone(),
             // Save Discord RPC setting
@@ -974,13 +969,6 @@ impl eframe::App for BoosterApp {
                     if self.selected_game_presets.is_empty() {
                         self.selected_game_presets.insert(crate::vpn::GamePreset::Roblox);
                     }
-
-                    // Set routing mode from pending
-                    self.routing_mode = match pending.routing_mode {
-                        1 => crate::settings::RoutingMode::V2,
-                        2 => crate::settings::RoutingMode::V3,
-                        _ => crate::settings::RoutingMode::V1,
-                    };
 
                     // Mark as consumed before connecting to prevent loop
                     self.auto_connect_consumed = true;
@@ -1953,11 +1941,7 @@ impl BoosterApp {
                 region: self.selected_region.clone(),
                 server,
                 apps,
-                routing_mode: match self.routing_mode {
-                    crate::settings::RoutingMode::V1 => 0,
-                    crate::settings::RoutingMode::V2 => 1,
-                    crate::settings::RoutingMode::V3 => 2,
-                },
+                routing_mode: 2, // V3 (only mode)
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -2164,9 +2148,7 @@ impl BoosterApp {
 
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
-        let routing_mode = self.routing_mode;
-
-        // Custom relay server (only used in V3 mode with experimental mode enabled)
+        // Custom relay server (only used with experimental mode enabled)
         let custom_relay = if self.experimental_mode && !self.custom_relay_server.is_empty() {
             Some(self.custom_relay_server.clone())
         } else {
@@ -2179,7 +2161,7 @@ impl BoosterApp {
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps, routing_mode, custom_relay).await {
+                    if let Err(e) = connection.connect(&access_token, &region, apps, custom_relay).await {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }
