@@ -490,3 +490,273 @@ impl DynamicServerList {
         best_server.map(|s| (s, best_avg_latency))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_server(region: &str, ip: &str) -> DynamicServerInfo {
+        DynamicServerInfo {
+            region: region.to_string(),
+            name: format!("{} Server", region),
+            country_code: "US".to_string(),
+            ip: ip.to_string(),
+            port: 51820,
+            phantun_available: false,
+            phantun_port: None,
+        }
+    }
+
+    fn make_region(id: &str, servers: Vec<&str>) -> DynamicGamingRegion {
+        DynamicGamingRegion {
+            id: id.to_string(),
+            name: format!("{} Region", id),
+            description: format!("Gaming region {}", id),
+            country_code: "US".to_string(),
+            servers: servers.into_iter().map(String::from).collect(),
+        }
+    }
+
+    // --- DynamicServerList ---
+
+    #[test]
+    fn test_new_empty() {
+        let list = DynamicServerList::new_empty();
+        assert!(list.is_empty());
+        assert!(!list.has_error());
+        assert_eq!(list.error_message(), None);
+        assert_eq!(list.source, ServerListSource::Loading);
+    }
+
+    #[test]
+    fn test_new_error() {
+        let list = DynamicServerList::new_error("network down".to_string());
+        assert!(list.is_empty());
+        assert!(list.has_error());
+        assert_eq!(list.error_message(), Some("network down"));
+    }
+
+    #[test]
+    fn test_update() {
+        let mut list = DynamicServerList::new_empty();
+        let servers = vec![make_server("us-east", "1.2.3.4")];
+        let regions = vec![make_region("na-east", vec!["us-east"])];
+
+        list.update(servers.clone(), regions.clone(), ServerListSource::Api);
+
+        assert!(!list.is_empty());
+        assert_eq!(list.source, ServerListSource::Api);
+        assert_eq!(list.servers().len(), 1);
+        assert_eq!(list.regions().len(), 1);
+    }
+
+    #[test]
+    fn test_get_server() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server("us-east", "1.2.3.4"),
+                make_server("eu-west", "5.6.7.8"),
+            ],
+            vec![],
+            ServerListSource::Api,
+        );
+
+        let server = list.get_server("us-east");
+        assert!(server.is_some());
+        assert_eq!(server.unwrap().ip, "1.2.3.4");
+
+        assert!(list.get_server("us-west").is_none());
+    }
+
+    #[test]
+    fn test_get_region() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![],
+            vec![make_region("na-east", vec!["us-east"])],
+            ServerListSource::Cache,
+        );
+
+        let region = list.get_region("na-east");
+        assert!(region.is_some());
+        assert_eq!(region.unwrap().name, "na-east Region");
+
+        assert!(list.get_region("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_latency_get_set() {
+        let mut list = DynamicServerList::new_empty();
+
+        // No latency initially
+        assert_eq!(list.get_latency("us-east"), None);
+
+        // Set latency
+        list.set_latency("us-east", Some(25));
+        assert_eq!(list.get_latency("us-east"), Some(25));
+
+        // Set None latency
+        list.set_latency("eu-west", None);
+        assert_eq!(list.get_latency("eu-west"), None);
+
+        // Overwrite
+        list.set_latency("us-east", Some(30));
+        assert_eq!(list.get_latency("us-east"), Some(30));
+    }
+
+    #[test]
+    fn test_servers_in_region() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server("us-east-1", "1.2.3.4"),
+                make_server("us-east-2", "1.2.3.5"),
+                make_server("eu-west-1", "5.6.7.8"),
+            ],
+            vec![make_region("na-east", vec!["us-east-1", "us-east-2"])],
+            ServerListSource::Api,
+        );
+
+        let servers = list.servers_in_region("na-east");
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].region, "us-east-1");
+        assert_eq!(servers[1].region, "us-east-2");
+
+        // Nonexistent region returns empty
+        assert!(list.servers_in_region("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn test_servers_in_region_with_missing_server() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![make_server("us-east-1", "1.2.3.4")],
+            vec![make_region("na-east", vec!["us-east-1", "us-east-missing"])],
+            ServerListSource::Api,
+        );
+
+        // Only returns servers that actually exist
+        let servers = list.servers_in_region("na-east");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].region, "us-east-1");
+    }
+
+    #[test]
+    fn test_get_region_best_latency() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server("us-east-1", "1.2.3.4"),
+                make_server("us-east-2", "1.2.3.5"),
+            ],
+            vec![make_region("na-east", vec!["us-east-1", "us-east-2"])],
+            ServerListSource::Api,
+        );
+
+        // No latencies yet
+        assert_eq!(list.get_region_best_latency("na-east"), None);
+
+        // Set latencies
+        list.set_latency("us-east-1", Some(50));
+        list.set_latency("us-east-2", Some(25));
+
+        assert_eq!(list.get_region_best_latency("na-east"), Some(25));
+
+        // Nonexistent region
+        assert_eq!(list.get_region_best_latency("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_get_region_best_latency_with_none_latency() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server("us-east-1", "1.2.3.4"),
+                make_server("us-east-2", "1.2.3.5"),
+            ],
+            vec![make_region("na-east", vec!["us-east-1", "us-east-2"])],
+            ServerListSource::Api,
+        );
+
+        // One server has latency, one has None
+        list.set_latency("us-east-1", Some(40));
+        list.set_latency("us-east-2", None);
+
+        // Should return the one with actual latency
+        assert_eq!(list.get_region_best_latency("na-east"), Some(40));
+    }
+
+    // --- CachedServerList ---
+
+    #[test]
+    fn test_cached_server_list_is_fresh_when_recent() {
+        let cached = CachedServerList {
+            data: ServerListResponse {
+                servers: vec![],
+                regions: vec![],
+                version: "1.0".to_string(),
+            },
+            cached_at: Utc::now(),
+        };
+        assert!(cached.is_fresh());
+    }
+
+    #[test]
+    fn test_cached_server_list_is_stale_when_old() {
+        let cached = CachedServerList {
+            data: ServerListResponse {
+                servers: vec![],
+                regions: vec![],
+                version: "1.0".to_string(),
+            },
+            cached_at: Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECONDS + 1),
+        };
+        assert!(!cached.is_fresh());
+    }
+
+    // --- ServerListSource Display ---
+
+    #[test]
+    fn test_server_list_source_display_loading() {
+        assert_eq!(ServerListSource::Loading.to_string(), "Loading...");
+    }
+
+    #[test]
+    fn test_server_list_source_display_api() {
+        assert_eq!(ServerListSource::Api.to_string(), "API");
+    }
+
+    #[test]
+    fn test_server_list_source_display_cache() {
+        assert_eq!(ServerListSource::Cache.to_string(), "Cache");
+    }
+
+    #[test]
+    fn test_server_list_source_display_stale_cache() {
+        assert_eq!(ServerListSource::StaleCache.to_string(), "Stale Cache");
+    }
+
+    #[test]
+    fn test_server_list_source_display_error() {
+        let src = ServerListSource::Error("network timeout".to_string());
+        assert_eq!(src.to_string(), "Error: network timeout");
+    }
+
+    // --- ServerListSource PartialEq ---
+
+    #[test]
+    fn test_server_list_source_eq() {
+        assert_eq!(ServerListSource::Loading, ServerListSource::Loading);
+        assert_eq!(ServerListSource::Api, ServerListSource::Api);
+        assert_ne!(ServerListSource::Loading, ServerListSource::Api);
+        assert_eq!(
+            ServerListSource::Error("x".to_string()),
+            ServerListSource::Error("x".to_string())
+        );
+        assert_ne!(
+            ServerListSource::Error("x".to_string()),
+            ServerListSource::Error("y".to_string())
+        );
+    }
+}

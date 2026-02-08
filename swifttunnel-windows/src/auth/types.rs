@@ -141,3 +141,110 @@ pub enum AuthError {
     #[error("API error: {0}")]
     ApiError(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn make_session(expires_at: DateTime<Utc>) -> AuthSession {
+        AuthSession {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at,
+            user: UserInfo {
+                id: "user-1".to_string(),
+                email: "test@example.com".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_auth_session_is_expired_when_past() {
+        let session = make_session(Utc::now() - Duration::hours(1));
+        assert!(session.is_expired());
+    }
+
+    #[test]
+    fn test_auth_session_is_not_expired_when_future() {
+        let session = make_session(Utc::now() + Duration::hours(1));
+        assert!(!session.is_expired());
+    }
+
+    #[test]
+    fn test_auth_session_expires_soon_when_less_than_5_min() {
+        let session = make_session(Utc::now() + Duration::minutes(3));
+        assert!(session.expires_soon());
+    }
+
+    #[test]
+    fn test_auth_session_not_expires_soon_when_more_than_5_min() {
+        let session = make_session(Utc::now() + Duration::minutes(10));
+        assert!(!session.expires_soon());
+    }
+
+    #[test]
+    fn test_auth_state_default_is_logged_out() {
+        assert_eq!(AuthState::default(), AuthState::LoggedOut);
+    }
+
+    #[test]
+    fn test_vpn_config_deserialize_camel_case() {
+        let json = r#"{
+            "id": "cfg-123",
+            "region": "us-east",
+            "serverEndpoint": "1.2.3.4:51820",
+            "serverPublicKey": "pubkey123",
+            "privateKey": "privkey456",
+            "publicKey": "clientpub789",
+            "assignedIp": "10.0.42.15/32",
+            "allowedIps": ["0.0.0.0/0"],
+            "dns": ["1.1.1.1"],
+            "phantunEnabled": false,
+            "phantunPort": null
+        }"#;
+        let config: VpnConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.region, "us-east");
+        assert_eq!(config.endpoint, "1.2.3.4:51820");
+        assert_eq!(config.server_public_key, "pubkey123");
+        assert_eq!(config.private_key, "privkey456");
+        assert_eq!(config.public_key, "clientpub789");
+        assert_eq!(config.assigned_ip, "10.0.42.15/32");
+        assert_eq!(config.allowed_ips, vec!["0.0.0.0/0"]);
+        assert_eq!(config.dns, vec!["1.1.1.1"]);
+        assert!(!config.phantun_enabled);
+        assert!(config.phantun_port.is_none());
+    }
+
+    #[test]
+    fn test_exchange_token_response_deserialize() {
+        let json = r#"{
+            "type": "magiclink",
+            "token": "tok-abc",
+            "email": "user@example.com",
+            "user_id": "uid-123"
+        }"#;
+        let resp: ExchangeTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.token_type, "magiclink");
+        assert_eq!(resp.token, "tok-abc");
+        assert_eq!(resp.email, "user@example.com");
+        assert_eq!(resp.user_id, "uid-123");
+    }
+
+    #[test]
+    fn test_auth_error_display() {
+        assert_eq!(AuthError::NotAuthenticated.to_string(), "Not authenticated");
+        assert_eq!(
+            AuthError::NetworkError("timeout".to_string()).to_string(),
+            "Network error: timeout"
+        );
+        assert_eq!(
+            AuthError::StorageError("disk full".to_string()).to_string(),
+            "Storage error: disk full"
+        );
+        assert_eq!(
+            AuthError::ApiError("401".to_string()).to_string(),
+            "API error: 401"
+        );
+    }
+}

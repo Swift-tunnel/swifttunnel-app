@@ -656,3 +656,149 @@ impl Drop for VpnConnection {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_is_disconnected() {
+        let state = ConnectionState::default();
+        assert_eq!(state, ConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn test_is_connected_true_for_connected() {
+        let state = ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: "us-east".to_string(),
+            server_endpoint: "1.2.3.4:51820".to_string(),
+            assigned_ip: "10.0.0.2".to_string(),
+            split_tunnel_active: true,
+            tunneled_processes: vec!["RobloxPlayerBeta.exe".to_string()],
+        };
+        assert!(state.is_connected());
+    }
+
+    #[test]
+    fn test_is_connected_false_for_other_states() {
+        assert!(!ConnectionState::Disconnected.is_connected());
+        assert!(!ConnectionState::FetchingConfig.is_connected());
+        assert!(!ConnectionState::CreatingAdapter.is_connected());
+        assert!(!ConnectionState::Connecting.is_connected());
+        assert!(!ConnectionState::ConfiguringSplitTunnel.is_connected());
+        assert!(!ConnectionState::ConfiguringRoutes.is_connected());
+        assert!(!ConnectionState::Disconnecting.is_connected());
+        assert!(!ConnectionState::Error("err".to_string()).is_connected());
+    }
+
+    #[test]
+    fn test_is_connecting_true_for_connecting_states() {
+        assert!(ConnectionState::FetchingConfig.is_connecting());
+        assert!(ConnectionState::CreatingAdapter.is_connecting());
+        assert!(ConnectionState::Connecting.is_connecting());
+        assert!(ConnectionState::ConfiguringSplitTunnel.is_connecting());
+        assert!(ConnectionState::ConfiguringRoutes.is_connecting());
+    }
+
+    #[test]
+    fn test_is_connecting_false_for_non_connecting_states() {
+        assert!(!ConnectionState::Disconnected.is_connecting());
+        assert!(!ConnectionState::Disconnecting.is_connecting());
+        assert!(!ConnectionState::Error("err".to_string()).is_connecting());
+
+        let connected = ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: "eu-west".to_string(),
+            server_endpoint: "5.6.7.8:51820".to_string(),
+            assigned_ip: "10.0.0.3".to_string(),
+            split_tunnel_active: false,
+            tunneled_processes: vec![],
+        };
+        assert!(!connected.is_connecting());
+    }
+
+    #[test]
+    fn test_is_error() {
+        assert!(ConnectionState::Error("something broke".to_string()).is_error());
+        assert!(!ConnectionState::Disconnected.is_error());
+        assert!(!ConnectionState::Connecting.is_error());
+    }
+
+    #[test]
+    fn test_error_message_some_for_error() {
+        let state = ConnectionState::Error("timeout".to_string());
+        assert_eq!(state.error_message(), Some("timeout"));
+    }
+
+    #[test]
+    fn test_error_message_none_for_other_states() {
+        assert_eq!(ConnectionState::Disconnected.error_message(), None);
+        assert_eq!(ConnectionState::FetchingConfig.error_message(), None);
+        assert_eq!(ConnectionState::Connecting.error_message(), None);
+        assert_eq!(ConnectionState::Disconnecting.error_message(), None);
+
+        let connected = ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: "us-west".to_string(),
+            server_endpoint: "1.2.3.4:51820".to_string(),
+            assigned_ip: "10.0.0.2".to_string(),
+            split_tunnel_active: false,
+            tunneled_processes: vec![],
+        };
+        assert_eq!(connected.error_message(), None);
+    }
+
+    #[test]
+    fn test_status_text_all_variants() {
+        assert_eq!(ConnectionState::Disconnected.status_text(), "Disconnected");
+        assert_eq!(ConnectionState::FetchingConfig.status_text(), "Fetching configuration...");
+        assert_eq!(ConnectionState::CreatingAdapter.status_text(), "Creating network adapter...");
+        assert_eq!(ConnectionState::Connecting.status_text(), "Connecting to server...");
+        assert_eq!(ConnectionState::ConfiguringSplitTunnel.status_text(), "Configuring split tunnel...");
+        assert_eq!(ConnectionState::ConfiguringRoutes.status_text(), "Setting up routes...");
+        assert_eq!(ConnectionState::Disconnecting.status_text(), "Disconnecting...");
+        assert_eq!(ConnectionState::Error("x".to_string()).status_text(), "Error");
+
+        let connected = ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: "us-east".to_string(),
+            server_endpoint: "1.2.3.4:51820".to_string(),
+            assigned_ip: "10.0.0.2".to_string(),
+            split_tunnel_active: true,
+            tunneled_processes: vec![],
+        };
+        assert_eq!(connected.status_text(), "Connected");
+    }
+
+    #[test]
+    fn test_vpn_connection_new_starts_disconnected() {
+        let conn = VpnConnection::new();
+        // VpnConnection::new() creates Disconnected state
+        // We can verify via state_handle by trying to lock it
+        let state = conn.state_handle();
+        let guard = state.try_lock().unwrap();
+        assert_eq!(*guard, ConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn test_vpn_connection_default_is_new() {
+        let conn = VpnConnection::default();
+        let state = conn.state_handle();
+        let guard = state.try_lock().unwrap();
+        assert_eq!(*guard, ConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn test_vpn_connection_no_config_initially() {
+        let conn = VpnConnection::new();
+        assert!(conn.config().is_none());
+        assert!(conn.get_config_id().is_none());
+    }
+
+    #[test]
+    fn test_vpn_connection_split_tunnel_not_active_initially() {
+        let conn = VpnConnection::new();
+        assert!(!conn.is_split_tunnel_active());
+    }
+}

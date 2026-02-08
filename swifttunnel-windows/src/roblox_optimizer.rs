@@ -509,3 +509,196 @@ impl Default for RobloxOptimizer {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Helper: create a RobloxOptimizer pointing at a specific path
+    fn optimizer_with_path(settings_path: PathBuf) -> RobloxOptimizer {
+        RobloxOptimizer {
+            settings_path,
+            backup_path: PathBuf::from("test_backup.xml"),
+        }
+    }
+
+    // ── extract_int_value ───────────────────────────────────────────
+
+    #[test]
+    fn extract_int_value_parses_int_tag() {
+        let xml = r#"<roblox><int name="FramerateCap">144</int></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_int_value(xml, "FramerateCap"), Some(144));
+    }
+
+    #[test]
+    fn extract_int_value_returns_none_for_missing_field() {
+        let xml = r#"<roblox><int name="FramerateCap">60</int></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_int_value(xml, "NonExistent"), None);
+    }
+
+    #[test]
+    fn extract_int_value_parses_token_tag() {
+        let xml = r#"<roblox><token name="SavedQualityLevel">7</token></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_int_value(xml, "SavedQualityLevel"), Some(7));
+    }
+
+    #[test]
+    fn extract_int_value_returns_none_for_non_numeric() {
+        let xml = r#"<roblox><int name="FramerateCap">abc</int></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_int_value(xml, "FramerateCap"), None);
+    }
+
+    #[test]
+    fn extract_int_value_handles_whitespace() {
+        let xml = r#"<roblox><int name="FramerateCap">  240  </int></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_int_value(xml, "FramerateCap"), Some(240));
+    }
+
+    // ── extract_bool_value ──────────────────────────────────────────
+
+    #[test]
+    fn extract_bool_value_parses_true() {
+        let xml = r#"<roblox><bool name="Fullscreen">true</bool></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_bool_value(xml, "Fullscreen"), Some(true));
+    }
+
+    #[test]
+    fn extract_bool_value_parses_false() {
+        let xml = r#"<roblox><bool name="Fullscreen">false</bool></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_bool_value(xml, "Fullscreen"), Some(false));
+    }
+
+    #[test]
+    fn extract_bool_value_case_insensitive() {
+        let xml = r#"<roblox><bool name="Fullscreen">True</bool></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_bool_value(xml, "Fullscreen"), Some(true));
+    }
+
+    #[test]
+    fn extract_bool_value_returns_none_for_missing() {
+        let xml = r#"<roblox><bool name="Fullscreen">true</bool></roblox>"#;
+        assert_eq!(RobloxOptimizer::extract_bool_value(xml, "Missing"), None);
+    }
+
+    // ── set_xml_int_value ───────────────────────────────────────────
+
+    #[test]
+    fn set_xml_int_value_replaces_existing() {
+        let xml = r#"<roblox><int name="FramerateCap">60</int></roblox>"#;
+        let opt = optimizer_with_path(PathBuf::from("dummy"));
+        let result = opt.set_xml_int_value(xml, "FramerateCap", 999);
+        assert_eq!(result, r#"<roblox><int name="FramerateCap">999</int></roblox>"#);
+    }
+
+    #[test]
+    fn set_xml_int_value_returns_original_if_not_found() {
+        let xml = r#"<roblox><int name="FramerateCap">60</int></roblox>"#;
+        let opt = optimizer_with_path(PathBuf::from("dummy"));
+        let result = opt.set_xml_int_value(xml, "NonExistent", 123);
+        assert_eq!(result, xml);
+    }
+
+    // ── graphics_quality_to_int ─────────────────────────────────────
+
+    #[test]
+    fn graphics_quality_to_int_all_variants() {
+        let opt = optimizer_with_path(PathBuf::from("dummy"));
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Automatic), 0);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Manual), 0);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level1), 1);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level2), 2);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level3), 3);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level4), 4);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level5), 5);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level6), 6);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level7), 7);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level8), 8);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level9), 9);
+        assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level10), 10);
+    }
+
+    // ── find_settings_file ──────────────────────────────────────────
+
+    #[test]
+    fn find_settings_file_picks_highest_numbered() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_find");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Create files 5 and 10
+        fs::write(dir.join("GlobalBasicSettings_5.xml"), "a").unwrap();
+        fs::write(dir.join("GlobalBasicSettings_10.xml"), "b").unwrap();
+
+        let result = RobloxOptimizer::find_settings_file(&dir);
+        assert_eq!(result, dir.join("GlobalBasicSettings_10.xml"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_settings_file_falls_back_to_default() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fallback");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // No settings files exist
+        let result = RobloxOptimizer::find_settings_file(&dir);
+        assert_eq!(result, dir.join("GlobalBasicSettings_13.xml"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── read_current_settings ───────────────────────────────────────
+
+    #[test]
+    fn read_current_settings_parses_xml() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_read");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let xml = r#"<roblox>
+            <int name="FramerateCap">240</int>
+            <int name="GraphicsQualityLevel">8</int>
+            <bool name="Fullscreen">true</bool>
+        </roblox>"#;
+
+        let path = dir.join("settings.xml");
+        fs::write(&path, xml).unwrap();
+
+        let opt = optimizer_with_path(path);
+        let settings = opt.read_current_settings().unwrap();
+
+        assert_eq!(settings.fps_cap, 240);
+        assert_eq!(settings.graphics_quality, 8);
+        assert!(settings.fullscreen);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_current_settings_uses_defaults_for_missing() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_defaults");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let xml = r#"<roblox></roblox>"#;
+        let path = dir.join("settings.xml");
+        fs::write(&path, xml).unwrap();
+
+        let opt = optimizer_with_path(path);
+        let settings = opt.read_current_settings().unwrap();
+
+        assert_eq!(settings.fps_cap, 60);
+        assert_eq!(settings.graphics_quality, 5);
+        assert!(!settings.fullscreen);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_current_settings_errors_if_file_missing() {
+        let opt = optimizer_with_path(PathBuf::from("nonexistent_file.xml"));
+        assert!(opt.read_current_settings().is_err());
+    }
+}

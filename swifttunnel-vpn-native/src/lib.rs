@@ -414,3 +414,174 @@ pub extern "C" fn swifttunnel_split_tunnel_get_default_apps() -> *mut c_char {
         Err(_) => std::ptr::null_mut(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // State constant tests
+    #[test]
+    fn test_state_disconnected() {
+        assert_eq!(STATE_DISCONNECTED, 0);
+    }
+
+    #[test]
+    fn test_state_fetching_config() {
+        assert_eq!(STATE_FETCHING_CONFIG, 1);
+    }
+
+    #[test]
+    fn test_state_creating_adapter() {
+        assert_eq!(STATE_CREATING_ADAPTER, 2);
+    }
+
+    #[test]
+    fn test_state_connecting() {
+        assert_eq!(STATE_CONNECTING, 3);
+    }
+
+    #[test]
+    fn test_state_configuring_split_tunnel() {
+        assert_eq!(STATE_CONFIGURING_SPLIT_TUNNEL, 4);
+    }
+
+    #[test]
+    fn test_state_connected() {
+        assert_eq!(STATE_CONNECTED, 5);
+    }
+
+    #[test]
+    fn test_state_disconnecting() {
+        assert_eq!(STATE_DISCONNECTING, 6);
+    }
+
+    #[test]
+    fn test_state_error() {
+        assert_eq!(STATE_ERROR, -1);
+    }
+
+    // Return code tests
+    #[test]
+    fn test_success_code() {
+        assert_eq!(SUCCESS, 0);
+    }
+
+    #[test]
+    fn test_error_invalid_param() {
+        assert_eq!(ERROR_INVALID_PARAM, -1);
+    }
+
+    #[test]
+    fn test_error_not_initialized() {
+        assert_eq!(ERROR_NOT_INITIALIZED, -2);
+    }
+
+    #[test]
+    fn test_error_already_connected() {
+        assert_eq!(ERROR_ALREADY_CONNECTED, -3);
+    }
+
+    #[test]
+    fn test_error_not_connected() {
+        assert_eq!(ERROR_NOT_CONNECTED, -4);
+    }
+
+    #[test]
+    fn test_error_internal() {
+        assert_eq!(ERROR_INTERNAL, -5);
+    }
+
+    // State constants are sequential from 0..=6
+    #[test]
+    fn test_state_constants_sequential() {
+        let states = [
+            STATE_DISCONNECTED,
+            STATE_FETCHING_CONFIG,
+            STATE_CREATING_ADAPTER,
+            STATE_CONNECTING,
+            STATE_CONFIGURING_SPLIT_TUNNEL,
+            STATE_CONNECTED,
+            STATE_DISCONNECTING,
+        ];
+        for (i, &state) in states.iter().enumerate() {
+            assert_eq!(state, i as i32, "State at index {} should be {}", i, i);
+        }
+    }
+
+    // Return codes are all negative (except SUCCESS)
+    #[test]
+    fn test_error_codes_are_negative() {
+        assert!(ERROR_INVALID_PARAM < 0);
+        assert!(ERROR_NOT_INITIALIZED < 0);
+        assert!(ERROR_ALREADY_CONNECTED < 0);
+        assert!(ERROR_NOT_CONNECTED < 0);
+        assert!(ERROR_INTERNAL < 0);
+    }
+
+    // Return codes are all distinct
+    #[test]
+    fn test_error_codes_distinct() {
+        let codes = [
+            SUCCESS,
+            ERROR_INVALID_PARAM,
+            ERROR_NOT_INITIALIZED,
+            ERROR_ALREADY_CONNECTED,
+            ERROR_NOT_CONNECTED,
+            ERROR_INTERNAL,
+        ];
+        for i in 0..codes.len() {
+            for j in (i + 1)..codes.len() {
+                assert_ne!(codes[i], codes[j], "Codes at index {} and {} should differ", i, j);
+            }
+        }
+    }
+
+    // ConnectConfig deserialization
+    #[test]
+    fn test_connect_config_deserialize() {
+        let json = r#"{
+            "access_token": "tok",
+            "region": "us-east",
+            "endpoint": "1.2.3.4:51820",
+            "server_public_key": "abc=",
+            "private_key": "priv=",
+            "public_key": "pub=",
+            "assigned_ip": "10.0.0.2",
+            "dns": ["1.1.1.1"],
+            "split_tunnel_apps": ["roblox.exe"]
+        }"#;
+        let config: ConnectConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.region, "us-east");
+        assert_eq!(config.endpoint, "1.2.3.4:51820");
+        assert_eq!(config.dns, vec!["1.1.1.1"]);
+        assert_eq!(config.split_tunnel_apps, vec!["roblox.exe"]);
+    }
+
+    #[test]
+    fn test_connect_config_serialize_roundtrip() {
+        let config = ConnectConfig {
+            access_token: "token".to_string(),
+            region: "eu-west".to_string(),
+            endpoint: "5.6.7.8:51820".to_string(),
+            server_public_key: "spk=".to_string(),
+            private_key: "pk=".to_string(),
+            public_key: "pubk=".to_string(),
+            assigned_ip: "10.0.0.5".to_string(),
+            dns: vec!["8.8.8.8".to_string()],
+            split_tunnel_apps: vec![],
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: ConnectConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.region, "eu-west");
+        assert_eq!(deserialized.assigned_ip, "10.0.0.5");
+    }
+
+    // set_error / clear_error helpers
+    #[test]
+    fn test_set_and_clear_error() {
+        set_error("test error".to_string());
+        assert_eq!(LAST_ERROR.lock().as_ref().unwrap(), "test error");
+        clear_error();
+        assert!(LAST_ERROR.lock().is_none());
+    }
+}

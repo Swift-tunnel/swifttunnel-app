@@ -468,3 +468,150 @@ pub mod tier_info {
     pub const TIER_1_TITLE: &str = "TIER 1 - Safe Optimizations";
     pub const TIER_1_DESC: &str = "These optimizations have no side effects and are fully reversible. They use standard Windows APIs and registry settings that are commonly used by gaming software. All changes revert when SwiftTunnel closes or when you disable the boost.";
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Config defaults ──
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert_eq!(config.profile, OptimizationProfile::Balanced);
+        assert!(!config.auto_start_with_roblox);
+        assert!(config.show_overlay);
+    }
+
+    #[test]
+    fn test_system_optimization_config_default() {
+        let cfg = SystemOptimizationConfig::default();
+        assert!(cfg.set_high_priority);
+        assert!(!cfg.set_cpu_affinity);
+        assert!(cfg.cpu_cores.is_empty());
+        assert!(cfg.disable_fullscreen_optimization);
+        assert!(cfg.clear_standby_memory);
+        assert!(cfg.disable_game_bar);
+        assert_eq!(cfg.power_plan, PowerPlan::HighPerformance);
+        assert!(cfg.timer_resolution_1ms);
+        assert!(cfg.mmcss_gaming_profile);
+        assert!(cfg.game_mode_enabled);
+    }
+
+    #[test]
+    fn test_network_config_default() {
+        let cfg = NetworkConfig::default();
+        assert!(cfg.enable_network_boost);
+        assert!(cfg.optimize_dns);
+        assert!(cfg.prioritize_roblox_traffic);
+        assert_eq!(cfg.custom_dns_primary, Some("1.1.1.1".to_string()));
+        assert_eq!(cfg.custom_dns_secondary, Some("8.8.8.8".to_string()));
+        assert!(cfg.disable_nagle);
+        assert!(cfg.disable_network_throttling);
+        assert!(!cfg.optimize_mtu);
+        assert!(cfg.gaming_qos);
+    }
+
+    #[test]
+    fn test_roblox_settings_config_default() {
+        let cfg = RobloxSettingsConfig::default();
+        assert_eq!(cfg.graphics_quality, GraphicsQuality::Manual);
+        assert!(cfg.unlock_fps);
+        assert_eq!(cfg.target_fps, 144);
+        assert!(!cfg.disable_shadows);
+        assert!(!cfg.reduce_texture_quality);
+        assert!(!cfg.disable_post_processing);
+        assert_eq!(cfg.dynamic_render_optimization, DynamicRenderMode::Off);
+    }
+
+    // ── GraphicsQuality ──
+
+    #[test]
+    fn test_graphics_quality_to_level() {
+        assert_eq!(GraphicsQuality::Automatic.to_level(), 0);
+        assert_eq!(GraphicsQuality::Manual.to_level(), 0);
+        assert_eq!(GraphicsQuality::Level1.to_level(), 1);
+        assert_eq!(GraphicsQuality::Level2.to_level(), 2);
+        assert_eq!(GraphicsQuality::Level3.to_level(), 3);
+        assert_eq!(GraphicsQuality::Level4.to_level(), 4);
+        assert_eq!(GraphicsQuality::Level5.to_level(), 5);
+        assert_eq!(GraphicsQuality::Level6.to_level(), 6);
+        assert_eq!(GraphicsQuality::Level7.to_level(), 7);
+        assert_eq!(GraphicsQuality::Level8.to_level(), 8);
+        assert_eq!(GraphicsQuality::Level9.to_level(), 9);
+        assert_eq!(GraphicsQuality::Level10.to_level(), 10);
+    }
+
+    #[test]
+    fn test_graphics_quality_from_level_valid() {
+        assert_eq!(GraphicsQuality::from_level(1), GraphicsQuality::Level1);
+        assert_eq!(GraphicsQuality::from_level(5), GraphicsQuality::Level5);
+        assert_eq!(GraphicsQuality::from_level(10), GraphicsQuality::Level10);
+    }
+
+    #[test]
+    fn test_graphics_quality_from_level_invalid() {
+        assert_eq!(GraphicsQuality::from_level(0), GraphicsQuality::Level5);
+        assert_eq!(GraphicsQuality::from_level(-1), GraphicsQuality::Level5);
+        assert_eq!(GraphicsQuality::from_level(11), GraphicsQuality::Level5);
+        assert_eq!(GraphicsQuality::from_level(999), GraphicsQuality::Level5);
+    }
+
+    // ── DynamicRenderMode ──
+
+    #[test]
+    fn test_dynamic_render_mode_render_value() {
+        assert_eq!(DynamicRenderMode::Off.render_value(), None);
+        assert_eq!(DynamicRenderMode::Low.render_value(), Some(3));
+        assert_eq!(DynamicRenderMode::Medium.render_value(), Some(2));
+        assert_eq!(DynamicRenderMode::High.render_value(), Some(1));
+    }
+
+    #[test]
+    fn test_dynamic_render_mode_is_enabled() {
+        assert!(!DynamicRenderMode::Off.is_enabled());
+        assert!(DynamicRenderMode::Low.is_enabled());
+        assert!(DynamicRenderMode::Medium.is_enabled());
+        assert!(DynamicRenderMode::High.is_enabled());
+    }
+
+    // ── RiskLevel ──
+
+    #[test]
+    fn test_risk_level_label() {
+        assert_eq!(RiskLevel::Safe.label(), "Safe");
+        assert_eq!(RiskLevel::LowRisk.label(), "Low Risk");
+        assert_eq!(RiskLevel::MediumRisk.label(), "Medium Risk");
+    }
+
+    // ── PerformanceMetrics ──
+
+    #[test]
+    fn test_performance_metrics_default() {
+        let m = PerformanceMetrics::default();
+        assert_eq!(m.fps, 0.0);
+        assert_eq!(m.cpu_usage, 0.0);
+        assert_eq!(m.ram_usage, 0.0);
+        assert_eq!(m.ram_total, 0.0);
+        assert_eq!(m.ping, 0);
+        assert!(!m.roblox_running);
+        assert!(m.process_id.is_none());
+    }
+
+    // ── boost_info ──
+
+    #[test]
+    fn test_system_boosts_count() {
+        assert_eq!(boost_info::system_boosts().len(), 4);
+    }
+
+    #[test]
+    fn test_network_boosts_count() {
+        assert_eq!(boost_info::network_boosts().len(), 4);
+    }
+
+    #[test]
+    fn test_roblox_boosts_count() {
+        assert_eq!(boost_info::roblox_boosts().len(), 1);
+    }
+}

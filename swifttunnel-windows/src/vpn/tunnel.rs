@@ -740,3 +740,32 @@ impl Drop for WireguardTunnel {
         self.stop();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tunnel_stats_default() {
+        let stats = TunnelStats::default();
+        assert_eq!(stats.bytes_sent, 0);
+        assert_eq!(stats.bytes_received, 0);
+        assert_eq!(stats.packets_sent, 0);
+        assert_eq!(stats.packets_received, 0);
+        assert_eq!(stats.handshakes, 0);
+        assert!(stats.last_handshake_time.is_none());
+    }
+
+    #[test]
+    fn test_tunnel_stats_clone() {
+        let mut stats = TunnelStats::default();
+        stats.bytes_sent = 1024;
+        stats.packets_sent = 10;
+        stats.last_handshake_time = Some(std::time::Instant::now());
+
+        let cloned = stats.clone();
+        assert_eq!(cloned.bytes_sent, 1024);
+        assert_eq!(cloned.packets_sent, 10);
+        assert!(cloned.last_handshake_time.is_some());
+    }
+}

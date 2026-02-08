@@ -258,3 +258,138 @@ impl TailedFile {
         Ok(lines)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::net::Ipv4Addr;
+
+    // ── is_private_ip ───────────────────────────────────────────────
+
+    #[test]
+    fn is_private_ip_10_range() {
+        assert!(is_private_ip(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(10, 255, 255, 255)));
+    }
+
+    #[test]
+    fn is_private_ip_172_range() {
+        assert!(is_private_ip(Ipv4Addr::new(172, 16, 0, 0)));
+        assert!(is_private_ip(Ipv4Addr::new(172, 31, 255, 255)));
+    }
+
+    #[test]
+    fn is_private_ip_192_168_range() {
+        assert!(is_private_ip(Ipv4Addr::new(192, 168, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(192, 168, 255, 255)));
+    }
+
+    #[test]
+    fn is_private_ip_loopback() {
+        assert!(is_private_ip(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(is_private_ip(Ipv4Addr::new(127, 255, 255, 255)));
+    }
+
+    #[test]
+    fn is_private_ip_public_ips_return_false() {
+        assert!(!is_private_ip(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(!is_private_ip(Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(!is_private_ip(Ipv4Addr::new(203, 0, 113, 5)));
+    }
+
+    #[test]
+    fn is_private_ip_boundary_172_15_is_public() {
+        assert!(!is_private_ip(Ipv4Addr::new(172, 15, 255, 255)));
+    }
+
+    #[test]
+    fn is_private_ip_boundary_172_32_is_public() {
+        assert!(!is_private_ip(Ipv4Addr::new(172, 32, 0, 0)));
+    }
+
+    // ── get_patterns (regex matching) ───────────────────────────────
+
+    #[test]
+    fn joining_pattern_matches_log_line() {
+        let (joining, _) = get_patterns();
+        let line = "! Joining game 'abc-def-123' place 12345 at 203.0.113.5";
+        let caps = joining.captures(line).expect("should match joining pattern");
+        assert_eq!(caps.get(1).unwrap().as_str(), "203.0.113.5");
+    }
+
+    #[test]
+    fn udmux_pattern_matches_log_line() {
+        let (_, udmux) = get_patterns();
+        let line = "UDMUX Address = 198.51.100.10, Port = 54321";
+        let caps = udmux.captures(line).expect("should match udmux pattern");
+        assert_eq!(caps.get(1).unwrap().as_str(), "198.51.100.10");
+    }
+
+    #[test]
+    fn patterns_do_not_match_random_strings() {
+        let (joining, udmux) = get_patterns();
+        let line = "Loading assets from CDN...";
+        assert!(joining.captures(line).is_none());
+        assert!(udmux.captures(line).is_none());
+    }
+
+    #[test]
+    fn joining_pattern_captures_ip_only() {
+        let (joining, _) = get_patterns();
+        let line = "! Joining game '550e8400-e29b-41d4-a716-446655440000' place 99999 at 1.2.3.4";
+        let caps = joining.captures(line).unwrap();
+        assert_eq!(caps.get(1).unwrap().as_str(), "1.2.3.4");
+    }
+
+    // ── find_newest_log_file ────────────────────────────────────────
+
+    #[test]
+    fn find_newest_log_file_returns_most_recent() {
+        let dir = std::env::temp_dir().join("roblox_watcher_test_logs");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Create older file
+        let old_path = dir.join("old.log");
+        fs::write(&old_path, "old").unwrap();
+
+        // Small delay to ensure different modification times
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Create newer file
+        let new_path = dir.join("new.log");
+        fs::write(&new_path, "new").unwrap();
+
+        let result = find_newest_log_file(&dir).unwrap();
+        assert_eq!(result, new_path);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_newest_log_file_ignores_non_log_files() {
+        let dir = std::env::temp_dir().join("roblox_watcher_test_nonlog");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("data.txt"), "not a log").unwrap();
+        fs::write(dir.join("actual.log"), "a log").unwrap();
+
+        let result = find_newest_log_file(&dir).unwrap();
+        assert_eq!(result, dir.join("actual.log"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_newest_log_file_returns_none_for_empty_dir() {
+        let dir = std::env::temp_dir().join("roblox_watcher_test_empty");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(find_newest_log_file(&dir).is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

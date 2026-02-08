@@ -224,3 +224,146 @@ pub struct NetworkTestResultsCache {
     /// Last speed test results
     pub last_speed: Option<SpeedTestResults>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ConnectionQuality::from_metrics ──
+
+    #[test]
+    fn test_connection_quality_excellent() {
+        // All metrics below excellent thresholds
+        assert_eq!(
+            ConnectionQuality::from_metrics(29.9, 0.9, 4.9),
+            ConnectionQuality::Excellent
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(0.0, 0.0, 0.0),
+            ConnectionQuality::Excellent
+        );
+    }
+
+    #[test]
+    fn test_connection_quality_good() {
+        // At excellent boundary -> falls to Good
+        assert_eq!(
+            ConnectionQuality::from_metrics(30.0, 0.0, 0.0),
+            ConnectionQuality::Good
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(0.0, 1.0, 0.0),
+            ConnectionQuality::Good
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(0.0, 0.0, 5.0),
+            ConnectionQuality::Good
+        );
+        // Just below Good thresholds
+        assert_eq!(
+            ConnectionQuality::from_metrics(49.9, 1.9, 9.9),
+            ConnectionQuality::Good
+        );
+    }
+
+    #[test]
+    fn test_connection_quality_fair() {
+        assert_eq!(
+            ConnectionQuality::from_metrics(50.0, 0.0, 0.0),
+            ConnectionQuality::Fair
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(79.9, 4.9, 19.9),
+            ConnectionQuality::Fair
+        );
+    }
+
+    #[test]
+    fn test_connection_quality_poor() {
+        assert_eq!(
+            ConnectionQuality::from_metrics(80.0, 0.0, 0.0),
+            ConnectionQuality::Poor
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(119.9, 9.9, 39.9),
+            ConnectionQuality::Poor
+        );
+    }
+
+    #[test]
+    fn test_connection_quality_bad() {
+        assert_eq!(
+            ConnectionQuality::from_metrics(120.0, 0.0, 0.0),
+            ConnectionQuality::Bad
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(0.0, 10.0, 0.0),
+            ConnectionQuality::Bad
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(0.0, 0.0, 40.0),
+            ConnectionQuality::Bad
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(200.0, 50.0, 100.0),
+            ConnectionQuality::Bad
+        );
+    }
+
+    // ── ConnectionQuality labels and emojis ──
+
+    #[test]
+    fn test_connection_quality_labels() {
+        assert_eq!(ConnectionQuality::Excellent.label(), "Excellent");
+        assert_eq!(ConnectionQuality::Good.label(), "Good");
+        assert_eq!(ConnectionQuality::Fair.label(), "Fair");
+        assert_eq!(ConnectionQuality::Poor.label(), "Poor");
+        assert_eq!(ConnectionQuality::Bad.label(), "Bad");
+    }
+
+    #[test]
+    fn test_connection_quality_emojis() {
+        assert_eq!(ConnectionQuality::Excellent.emoji(), "\u{1f7e2}");
+        assert_eq!(ConnectionQuality::Good.emoji(), "\u{1f7e2}");
+        assert_eq!(ConnectionQuality::Fair.emoji(), "\u{1f7e1}");
+        assert_eq!(ConnectionQuality::Poor.emoji(), "\u{1f7e0}");
+        assert_eq!(ConnectionQuality::Bad.emoji(), "\u{1f534}");
+    }
+
+    // ── Default impls ──
+
+    #[test]
+    fn test_stability_test_state_default() {
+        let state = StabilityTestState::default();
+        assert!(!state.running);
+        assert_eq!(state.progress, 0.0);
+        assert!(state.ping_samples.is_empty());
+        assert!(state.results.is_none());
+    }
+
+    #[test]
+    fn test_speed_test_state_default() {
+        let state = SpeedTestState::default();
+        assert!(!state.running);
+        assert_eq!(state.phase, SpeedTestPhase::Idle);
+        assert_eq!(state.download_speed, 0.0);
+        assert_eq!(state.upload_speed, 0.0);
+        assert_eq!(state.phase_progress, 0.0);
+        assert!(state.results.is_none());
+    }
+
+    #[test]
+    fn test_speed_test_phase_labels() {
+        assert_eq!(SpeedTestPhase::Idle.label(), "Ready");
+        assert_eq!(SpeedTestPhase::Download.label(), "Testing Download");
+        assert_eq!(SpeedTestPhase::Upload.label(), "Testing Upload");
+        assert_eq!(SpeedTestPhase::Complete.label(), "Complete");
+    }
+
+    #[test]
+    fn test_network_analyzer_state_default() {
+        let state = NetworkAnalyzerState::default();
+        assert!(!state.stability.running);
+        assert!(!state.speed.running);
+    }
+}

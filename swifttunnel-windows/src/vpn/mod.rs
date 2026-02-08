@@ -107,3 +107,118 @@ pub enum VpnError {
 }
 
 pub type VpnResult<T> = Result<T, VpnError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vpn_error_display_config_fetch() {
+        let err = VpnError::ConfigFetch("timeout".to_string());
+        assert_eq!(err.to_string(), "Failed to fetch VPN config: timeout");
+    }
+
+    #[test]
+    fn test_vpn_error_display_adapter_create() {
+        let err = VpnError::AdapterCreate("driver missing".to_string());
+        assert_eq!(err.to_string(), "Failed to create Wintun adapter: driver missing");
+    }
+
+    #[test]
+    fn test_vpn_error_display_tunnel_init() {
+        let err = VpnError::TunnelInit("bad key".to_string());
+        assert_eq!(err.to_string(), "Failed to initialize WireGuard tunnel: bad key");
+    }
+
+    #[test]
+    fn test_vpn_error_display_handshake_failed() {
+        let err = VpnError::HandshakeFailed("timeout".to_string());
+        assert_eq!(err.to_string(), "WireGuard handshake failed: timeout");
+    }
+
+    #[test]
+    fn test_vpn_error_display_split_tunnel() {
+        let err = VpnError::SplitTunnel("driver error".to_string());
+        assert_eq!(err.to_string(), "Split tunnel driver error: driver error");
+    }
+
+    #[test]
+    fn test_vpn_error_display_split_tunnel_not_available() {
+        let err = VpnError::SplitTunnelNotAvailable;
+        assert_eq!(
+            err.to_string(),
+            "Split tunnel driver not available - please install Windows Packet Filter driver"
+        );
+    }
+
+    #[test]
+    fn test_vpn_error_display_split_tunnel_setup_failed() {
+        let err = VpnError::SplitTunnelSetupFailed("no interface".to_string());
+        assert_eq!(err.to_string(), "Split tunnel setup failed: no interface");
+    }
+
+    #[test]
+    fn test_vpn_error_display_driver_not_open() {
+        let err = VpnError::DriverNotOpen;
+        assert_eq!(err.to_string(), "Split tunnel driver not open");
+    }
+
+    #[test]
+    fn test_vpn_error_display_driver_not_initialized() {
+        let err = VpnError::DriverNotInitialized;
+        assert_eq!(
+            err.to_string(),
+            "Split tunnel driver not initialized - call initialize() first"
+        );
+    }
+
+    #[test]
+    fn test_vpn_error_display_connection() {
+        let err = VpnError::Connection("already connected".to_string());
+        assert_eq!(err.to_string(), "Connection error: already connected");
+    }
+
+    #[test]
+    fn test_vpn_error_display_network() {
+        let err = VpnError::Network("socket bind failed".to_string());
+        assert_eq!(err.to_string(), "Network error: socket bind failed");
+    }
+
+    #[test]
+    fn test_vpn_error_display_route() {
+        let err = VpnError::Route("add route failed".to_string());
+        assert_eq!(err.to_string(), "Route error: add route failed");
+    }
+
+    #[test]
+    fn test_vpn_error_display_invalid_config() {
+        let err = VpnError::InvalidConfig("missing key".to_string());
+        assert_eq!(err.to_string(), "Invalid configuration: missing key");
+    }
+
+    #[test]
+    fn test_vpn_error_display_not_authenticated() {
+        let err = VpnError::NotAuthenticated;
+        assert_eq!(err.to_string(), "Not authenticated");
+    }
+
+    #[test]
+    fn test_vpn_error_display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err = VpnError::Io(io_err);
+        assert_eq!(err.to_string(), "IO error: file not found");
+    }
+
+    #[test]
+    fn test_vpn_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied");
+        let vpn_err: VpnError = io_err.into();
+        match vpn_err {
+            VpnError::Io(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+                assert_eq!(e.to_string(), "access denied");
+            }
+            other => panic!("Expected VpnError::Io, got {:?}", other),
+        }
+    }
+}

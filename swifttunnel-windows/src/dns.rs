@@ -82,3 +82,33 @@ impl reqwest::dns::Resolve for CloudflareDns {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_returns_valid_arc() {
+        let dns = CloudflareDns::shared();
+        // Should get a valid Arc (not panic)
+        assert!(Arc::strong_count(&dns) >= 1);
+    }
+
+    #[test]
+    fn shared_returns_same_instance() {
+        let a = CloudflareDns::shared();
+        let b = CloudflareDns::shared();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    #[ignore] // Requires network access
+    fn resolve_host_returns_addresses() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let dns = CloudflareDns::shared();
+            let addrs = dns.resolve_host("cloudflare.com", 443).await.unwrap();
+            assert!(!addrs.is_empty());
+        });
+    }
+}

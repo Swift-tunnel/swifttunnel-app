@@ -554,3 +554,45 @@ impl Default for AuthManager {
         Self::new().expect("Failed to create AuthManager")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::percent_encode;
+
+    #[test]
+    fn test_unreserved_chars_pass_through() {
+        assert_eq!(percent_encode("ABCDEFghijklmnop"), "ABCDEFghijklmnop");
+        assert_eq!(percent_encode("0123456789"), "0123456789");
+        assert_eq!(percent_encode("-_.~"), "-_.~");
+    }
+
+    #[test]
+    fn test_reserved_chars_are_encoded() {
+        assert_eq!(percent_encode(" "), "%20");
+        assert_eq!(percent_encode("/"), "%2F");
+        assert_eq!(percent_encode("?"), "%3F");
+        assert_eq!(percent_encode("&"), "%26");
+        assert_eq!(percent_encode("="), "%3D");
+        assert_eq!(percent_encode("+"), "%2B");
+        assert_eq!(percent_encode("@"), "%40");
+    }
+
+    #[test]
+    fn test_empty_string() {
+        assert_eq!(percent_encode(""), "");
+    }
+
+    #[test]
+    fn test_mixed_url_encoding() {
+        assert_eq!(
+            percent_encode("hello world&foo=bar"),
+            "hello%20world%26foo%3Dbar"
+        );
+    }
+
+    #[test]
+    fn test_all_unreserved_rfc3986() {
+        let unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
+        assert_eq!(percent_encode(unreserved), unreserved);
+    }
+}
