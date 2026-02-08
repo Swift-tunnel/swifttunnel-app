@@ -385,28 +385,25 @@ fn main() -> eframe::Result<()> {
                 if is_resume_connect {
                     warn!("Could not acquire lock after {} attempts, previous instance may still be running", max_attempts);
                 }
-                info!("Another instance of SwiftTunnel is already running. Exiting.");
+                info!("Another instance of SwiftTunnel is already running. Restoring existing window.");
 
-                // Show user-friendly message since console is hidden in release builds
-                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONINFORMATION};
+                // Restore the existing window instead of showing a message box
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+                };
                 use windows::core::PCWSTR;
 
-                let title: Vec<u16> = "SwiftTunnel\0".encode_utf16().collect();
-                let msg: Vec<u16> = "SwiftTunnel is already running.\n\n\
-                    Check your system tray (click the ^ arrow in the bottom-right corner).\n\n\
-                    If you don't see the icon there, try:\n\
-                    1. Open Task Manager (Ctrl+Shift+Esc)\n\
-                    2. Find 'swifttunnel' in the list\n\
-                    3. Click 'End Task'\n\
-                    4. Try launching SwiftTunnel again\0".encode_utf16().collect();
-
+                let app_title: Vec<u16> = format!("SwiftTunnel v{}\0", env!("CARGO_PKG_VERSION"))
+                    .encode_utf16()
+                    .collect();
                 unsafe {
-                    MessageBoxW(
-                        None,
-                        PCWSTR(msg.as_ptr()),
-                        PCWSTR(title.as_ptr()),
-                        MB_OK | MB_ICONINFORMATION,
-                    );
+                    if let Ok(hwnd) = FindWindowW(PCWSTR::null(), PCWSTR(app_title.as_ptr())) {
+                        if !hwnd.is_invalid() {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = ShowWindow(hwnd, SW_SHOW);
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                    }
                 }
 
                 return Ok(());
