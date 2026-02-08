@@ -325,9 +325,9 @@ pub mod boost_info {
 
     pub const TIMER_RESOLUTION: BoostInfo = BoostInfo {
         id: "timer_resolution",
-        title: "1ms Timer Resolution",
-        short_desc: "Smoother frame pacing",
-        long_desc: "Increases Windows system timer precision from ~15.6ms to 1ms. This allows more precise frame timing and reduces micro-stuttering. Automatically restored when SwiftTunnel closes.",
+        title: "0.5ms Timer Resolution",
+        short_desc: "Max precision frame pacing",
+        long_desc: "Increases Windows system timer precision from ~15.6ms to 0.5ms using NtSetTimerResolution. This allows the most precise frame timing possible and minimizes micro-stuttering. Automatically restored when SwiftTunnel closes.",
         impact: "Smoother frame delivery, reduced stutter",
         risk_level: RiskLevel::Safe,
         requires_admin: false,

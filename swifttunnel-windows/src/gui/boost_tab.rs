@@ -63,8 +63,8 @@ const BOOST_HIGH_PRIORITY: BoostConfig = BoostConfig {
 
 const BOOST_TIMER_RESOLUTION: BoostConfig = BoostConfig {
     id: "timer_resolution",
-    name: "1ms Timer",
-    description: "Smoother frame pacing",
+    name: "0.5ms Timer",
+    description: "Max precision frame pacing",
     icon: "TMR",
     impact: "Lower input lag",
     category: BoostCategory::System,

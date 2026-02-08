@@ -6,6 +6,11 @@ use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Threading::*;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 
+// NtSetTimerResolution from ntdll.dll for sub-millisecond timer resolution (0.5ms)
+unsafe extern "system" {
+    fn NtSetTimerResolution(DesiredResolution: u32, SetResolution: u8, CurrentResolution: *mut u32) -> i32;
+}
+
 pub struct SystemOptimizer {
     original_priority: Option<u32>,
     timer_resolution_active: bool,
@@ -240,23 +245,38 @@ impl SystemOptimizer {
 
     // ===== TIER 1 (SAFE) BOOSTS =====
 
-    /// Set system timer resolution to 1ms for smoother frame pacing
-    /// This reduces the minimum sleep/wait time from 15.6ms to 1ms
+    /// Set system timer resolution to 0.5ms for smoother frame pacing
+    /// Uses NtSetTimerResolution for sub-millisecond precision (5000 = 0.5ms in 100ns units)
+    /// Falls back to timeBeginPeriod(1) if NtSetTimerResolution fails
     pub fn set_timer_resolution(&mut self, enable: bool) -> Result<()> {
         if enable && !self.timer_resolution_active {
-            info!("Setting timer resolution to 1ms");
+            info!("Setting timer resolution to 0.5ms");
             unsafe {
-                let result = timeBeginPeriod(1);
-                if result == 0 { // TIMERR_NOERROR
+                // Try NtSetTimerResolution for 0.5ms (5000 * 100ns = 0.5ms)
+                let mut current: u32 = 0;
+                let status = NtSetTimerResolution(5000, 1, &mut current);
+                if status == 0 { // STATUS_SUCCESS
                     self.timer_resolution_active = true;
-                    info!("Timer resolution set to 1ms successfully");
+                    info!("Timer resolution set to 0.5ms via NtSetTimerResolution (actual: {:.3}ms)", current as f64 / 10000.0);
                 } else {
-                    warn!("Failed to set timer resolution: error code {}", result);
+                    // Fallback to timeBeginPeriod(1) for 1ms
+                    warn!("NtSetTimerResolution failed (0x{:08X}), falling back to 1ms", status);
+                    let result = timeBeginPeriod(1);
+                    if result == 0 {
+                        self.timer_resolution_active = true;
+                        info!("Timer resolution set to 1ms via timeBeginPeriod (fallback)");
+                    } else {
+                        warn!("Failed to set timer resolution: error code {}", result);
+                    }
                 }
             }
         } else if !enable && self.timer_resolution_active {
             info!("Restoring default timer resolution");
             unsafe {
+                // Undo NtSetTimerResolution
+                let mut current: u32 = 0;
+                let _ = NtSetTimerResolution(5000, 0, &mut current);
+                // Also undo timeBeginPeriod in case fallback was used
                 let _ = timeEndPeriod(1);
                 self.timer_resolution_active = false;
             }
