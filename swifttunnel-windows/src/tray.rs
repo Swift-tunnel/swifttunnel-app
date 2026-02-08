@@ -203,9 +203,13 @@ fn restore_window() {
     };
     use windows::core::PCWSTR;
 
-    let class_name: Vec<u16> = "eframe\0".encode_utf16().collect();
+    // Find by window title — the title is set in main.rs as "SwiftTunnel v{version}"
+    let title: Vec<u16> = format!("SwiftTunnel v{}\0", env!("CARGO_PKG_VERSION"))
+        .encode_utf16()
+        .collect();
     unsafe {
-        if let Ok(hwnd) = FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR::null()) {
+        // Pass null class name, search by title only
+        if let Ok(hwnd) = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) {
             if !hwnd.is_invalid() {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
                 let _ = ShowWindow(hwnd, SW_SHOW);
