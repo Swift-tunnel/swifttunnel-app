@@ -36,6 +36,9 @@ fn main() {
             res.set_icon("installer/swifttunnel.ico");
             res.set("ProductName", "SwiftTunnel");
             res.set("FileDescription", "SwiftTunnel Game Booster");
+            res.set("CompanyName", "SwiftTunnel");
+            res.set("OriginalFilename", "swifttunnel-fps-booster.exe");
+            res.set("InternalName", "swifttunnel-fps-booster");
             res.set("LegalCopyright", "Copyright © 2024-2026 SwiftTunnel");
             // Set version from Cargo.toml - CRITICAL: ensures Windows Properties shows correct version
             res.set("FileVersion", env!("CARGO_PKG_VERSION"));

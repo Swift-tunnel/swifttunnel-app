@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-fps-booster"
-version = "1.0.17"
+version = "1.0.18"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel - Game Booster with PC Optimizations"
@@ -189,5 +189,5 @@ winres = "0.1"
 opt-level = 3
 lto = true
 codegen-units = 1
-strip = true
+strip = "debuginfo"
 panic = "abort"
