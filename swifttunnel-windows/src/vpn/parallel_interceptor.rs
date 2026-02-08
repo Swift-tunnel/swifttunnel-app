@@ -3070,7 +3070,7 @@ fn run_cache_refresher(
             // Count connections for tunnel PIDs
             let tunnel_connections: Vec<_> = connections
                 .iter()
-                .filter(|(_, &pid)| tunnel_pids_found.iter().any(|(tp, _)| *tp == pid))
+                .filter(|(_, pid)| tunnel_pids_found.iter().any(|(tp, _)| tp == *pid))
                 .collect();
 
             if !tunnel_pids_found.is_empty() || tunnel_connections.len() > 0 {

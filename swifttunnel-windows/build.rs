@@ -7,10 +7,9 @@ fn main() {
         let is_driver_installer = bin_name == "driver-installer";
 
         // Driver installer always requires admin (it installs a kernel driver).
-        // Main app: AsInvoker in debug, RequireAdministrator in release.
+        // Main app: AsInvoker always — Velopack installs per-user, no admin needed.
+        // The app auto-elevates via ShellExecuteW "runas" when VPN connect needs admin.
         let execution_level = if is_driver_installer {
-            ExecutionLevel::RequireAdministrator
-        } else if std::env::var("PROFILE").as_deref() == Ok("release") {
             ExecutionLevel::RequireAdministrator
         } else {
             ExecutionLevel::AsInvoker

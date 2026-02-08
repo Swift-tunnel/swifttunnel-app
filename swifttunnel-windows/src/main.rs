@@ -307,6 +307,25 @@ fn main() -> eframe::Result<()> {
     info!("Log file: {}", log_file_path.display());
     info!("Log level: {:?}", log_level);
 
+    // Auto-elevate to admin on startup (once) so VPN/driver features work
+    // without repeated UAC prompts during the session
+    if !utils::is_administrator() {
+        info!("Not running as admin, requesting elevation...");
+        match utils::relaunch_elevated() {
+            Ok(()) => {
+                info!("Relaunched elevated, exiting this process");
+                return Ok(());
+            }
+            Err(e) => {
+                // User cancelled UAC or elevation failed — continue without admin
+                // VPN features will prompt again when needed
+                warn!("Elevation failed or cancelled: {}, continuing without admin", e);
+            }
+        }
+    } else {
+        info!("Running with administrator privileges");
+    }
+
     // Recover TSO settings if app previously crashed while TSO was disabled
     // This prevents users from being stuck with degraded network performance
     recover_tso_on_startup();

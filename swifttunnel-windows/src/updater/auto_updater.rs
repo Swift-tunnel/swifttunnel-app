@@ -74,8 +74,10 @@ pub fn run_auto_updater() -> AutoUpdateResult {
             AutoUpdateResult::NoUpdate
         }
         Err(e) => {
-            warn!("Update check failed: {}", e);
-            AutoUpdateResult::Failed(format!("Update check failed: {}", e))
+            // Don't treat network errors as failures - just skip silently
+            // (no releases uploaded yet, offline, GitHub down, etc.)
+            warn!("Update check failed (ignored): {}", e);
+            AutoUpdateResult::NoUpdate
         }
     }
 }
@@ -99,9 +101,7 @@ pub fn check_for_updates_background(update_state: Arc<Mutex<UpdateState>>) {
         let um = match create_update_manager() {
             Some(um) => um,
             None => {
-                if let Ok(mut state) = update_state.lock() {
-                    *state = UpdateState::Failed("Not installed via Velopack".to_string());
-                }
+                // Not installed via Velopack (dev mode) — stay idle, no error
                 return;
             }
         };
@@ -123,9 +123,11 @@ pub fn check_for_updates_background(update_state: Arc<Mutex<UpdateState>>) {
                 }
             }
             Err(e) => {
-                error!("Update check failed: {}", e);
+                // Network errors (404, offline, etc.) are not user-visible failures
+                // Just log and stay idle - no error banner
+                warn!("Background update check failed (ignored): {}", e);
                 if let Ok(mut state) = update_state.lock() {
-                    *state = UpdateState::Failed(e.to_string());
+                    *state = UpdateState::UpToDate;
                 }
             }
         }
@@ -139,8 +141,9 @@ pub fn download_and_apply_update(update_state: Arc<Mutex<UpdateState>>, version:
         let um = match create_update_manager() {
             Some(um) => um,
             None => {
+                // Not installed via Velopack — silently reset to idle
                 if let Ok(mut state) = update_state.lock() {
-                    *state = UpdateState::Failed("Not installed via Velopack".to_string());
+                    *state = UpdateState::Idle;
                 }
                 return;
             }
