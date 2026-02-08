@@ -85,6 +85,7 @@ impl SystemTray {
                     if event.id == show_id {
                         info!("Tray: Show window requested");
                         show_clone.store(true, Ordering::SeqCst);
+                        restore_window();
                     } else if event.id == toggle_id {
                         info!("Tray: Toggle optimizations requested");
                         toggle_clone.store(true, Ordering::SeqCst);
@@ -124,10 +125,12 @@ impl SystemTray {
                         TrayIconEvent::Click { button: tray_icon::MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } => {
                             info!("Tray: Icon clicked, showing window");
                             show_click_clone.store(true, Ordering::SeqCst);
+                            restore_window();
                         }
                         TrayIconEvent::DoubleClick { button: tray_icon::MouseButton::Left, .. } => {
                             info!("Tray: Icon double-clicked, showing window");
                             show_click_clone.store(true, Ordering::SeqCst);
+                            restore_window();
                         }
                         _ => {}
                     }
@@ -185,6 +188,30 @@ impl Drop for SystemTray {
         self.stop_threads.store(true, Ordering::SeqCst);
         // Give threads a moment to notice the stop flag
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Restore the window using Win32 APIs directly.
+///
+/// This is called from tray event handler threads so that window restoration
+/// works even when the eframe `update()` loop is not running (i.e., when the
+/// window is hidden via `ViewportCommand::Visible(false)`).
+#[cfg(target_os = "windows")]
+fn restore_window() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+    use windows::core::PCWSTR;
+
+    let class_name: Vec<u16> = "eframe\0".encode_utf16().collect();
+    unsafe {
+        if let Ok(hwnd) = FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR::null()) {
+            if !hwnd.is_invalid() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
     }
 }
 
