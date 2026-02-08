@@ -16,6 +16,9 @@ impl BoosterApp {
             ui.add_space(12.0);
         }
 
+        // Show driver install banner if driver is missing
+        self.render_driver_banner(ui);
+
         let is_logged_in = matches!(self.auth_state, AuthState::LoggedIn(_));
 
         if !is_logged_in {
@@ -41,20 +44,25 @@ impl BoosterApp {
     pub(crate) fn render_game_preset_selector(&mut self, ui: &mut egui::Ui) {
         egui::Frame::NONE
             .fill(BG_CARD)
-            .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
             .rounding(12.0)
             .inner_margin(16)
             .show(ui, |ui| {
 
                 // Section header
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(">").size(16.0));
                     ui.label(egui::RichText::new("Game Selection").size(14.0).color(TEXT_PRIMARY).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let count = self.selected_game_presets.len();
                         if count > 0 {
-                            ui.label(egui::RichText::new(format!("{} selected", count))
-                                .size(11.0).color(ACCENT_PRIMARY));
+                            egui::Frame::NONE
+                                .fill(ACCENT_PRIMARY.gamma_multiply(0.12))
+                                .rounding(8.0)
+                                .inner_margin(egui::Margin::symmetric(8, 3))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new(format!("{} selected", count))
+                                        .size(10.0).color(ACCENT_PRIMARY).strong());
+                                });
                         }
                     });
                 });
@@ -62,7 +70,7 @@ impl BoosterApp {
                 ui.add_space(12.0);
 
                 // Game preset cards in responsive grid
-                let available = self.content_area_width.min(ui.available_width());
+                let available = ui.available_width();
                 let card_spacing = 10.0;
                 let presets = GamePreset::all();
                 let is_connected = self.vpn_state.is_connected();
@@ -81,14 +89,14 @@ impl BoosterApp {
                                 let is_selected = self.selected_game_presets.contains(preset);
 
                                 let card_bg = if is_selected {
-                                    ACCENT_PRIMARY.gamma_multiply(0.15)
+                                    ACCENT_PRIMARY.gamma_multiply(0.12)
                                 } else {
                                     BG_ELEVATED
                                 };
                                 let card_border = if is_selected {
-                                    egui::Stroke::new(2.0, ACCENT_PRIMARY)
+                                    egui::Stroke::new(1.5, ACCENT_PRIMARY)
                                 } else {
-                                    egui::Stroke::new(1.0, BG_HOVER)
+                                    egui::Stroke::new(1.0, BORDER_SUBTLE)
                                 };
 
                                 let response = egui::Frame::NONE
@@ -101,19 +109,22 @@ impl BoosterApp {
                                         ui.set_max_width(card_width);
 
                                         ui.vertical_centered(|ui| {
-                                            // Game icon
-                                            ui.label(egui::RichText::new(preset.icon()).size(24.0));
-                                            ui.add_space(4.0);
-
-                                            // Game name
+                                            // Game name as primary element
                                             let name_color = if is_selected { TEXT_PRIMARY } else { TEXT_SECONDARY };
                                             ui.label(egui::RichText::new(preset.display_name())
                                                 .size(13.0).color(name_color).strong());
 
                                             // Selection indicator
                                             if is_selected {
-                                                ui.add_space(2.0);
-                                                ui.label(egui::RichText::new("+").size(10.0).color(ACCENT_PRIMARY));
+                                                ui.add_space(4.0);
+                                                egui::Frame::NONE
+                                                    .fill(ACCENT_PRIMARY.gamma_multiply(0.2))
+                                                    .rounding(4.0)
+                                                    .inner_margin(egui::Margin::symmetric(6, 2))
+                                                    .show(ui, |ui| {
+                                                        ui.label(egui::RichText::new("Selected")
+                                                            .size(9.0).color(ACCENT_PRIMARY));
+                                                    });
                                             }
                                         });
                                     })
@@ -145,7 +156,6 @@ impl BoosterApp {
                 if self.selected_game_presets.is_empty() {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("!").size(12.0).color(STATUS_WARNING));
                         ui.label(egui::RichText::new("Select at least one game to enable split tunneling")
                             .size(11.0).color(STATUS_WARNING));
                     });
@@ -157,7 +167,7 @@ impl BoosterApp {
         let mut go_settings = false;
 
         egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
             .rounding(12.0).inner_margin(20)
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
@@ -200,17 +210,17 @@ impl BoosterApp {
         let instant_connecting = self.connecting_initiated.is_some()
             && matches!(self.vpn_state, ConnectionState::Disconnected);
 
-        let (status_text, status_icon, status_color, detail_text, show_connected_info) = if instant_connecting {
+        let (status_text, _status_icon, status_color, detail_text, show_connected_info) = if instant_connecting {
             // Show connecting state immediately while VPN state catches up
-            ("Connecting", "o", STATUS_WARNING, "Initiating...".to_string(), false)
+            ("Connecting", "", STATUS_WARNING, "Initiating...".to_string(), false)
         } else {
             match &self.vpn_state {
-                ConnectionState::Disconnected => ("Disconnected", "o", STATUS_INACTIVE, "Ready to connect".to_string(), false),
-                ConnectionState::FetchingConfig => ("Connecting", "o", STATUS_WARNING, "Fetching config...".to_string(), false),
-                ConnectionState::CreatingAdapter => ("Connecting", "o", STATUS_WARNING, "Creating adapter...".to_string(), false),
-                ConnectionState::Connecting => ("Connecting", "o", STATUS_WARNING, "Establishing tunnel...".to_string(), false),
-                ConnectionState::ConfiguringSplitTunnel => ("Connecting", "o", STATUS_WARNING, "Configuring split tunnel...".to_string(), false),
-                ConnectionState::ConfiguringRoutes => ("Connecting", "o", STATUS_WARNING, "Setting up routes...".to_string(), false),
+                ConnectionState::Disconnected => ("Disconnected", "", STATUS_INACTIVE, "Ready to connect".to_string(), false),
+                ConnectionState::FetchingConfig => ("Connecting", "", STATUS_WARNING, "Fetching config...".to_string(), false),
+                ConnectionState::CreatingAdapter => ("Connecting", "", STATUS_WARNING, "Creating adapter...".to_string(), false),
+                ConnectionState::Connecting => ("Connecting", "", STATUS_WARNING, "Establishing tunnel...".to_string(), false),
+                ConnectionState::ConfiguringSplitTunnel => ("Connecting", "", STATUS_WARNING, "Configuring split tunnel...".to_string(), false),
+                ConnectionState::ConfiguringRoutes => ("Connecting", "", STATUS_WARNING, "Setting up routes...".to_string(), false),
                 ConnectionState::Connected { server_region, .. } => {
                     let name = if let Ok(list) = self.dynamic_server_list.lock() {
                         list.get_server(server_region)
@@ -219,9 +229,9 @@ impl BoosterApp {
                     } else {
                         server_region.clone()
                     };
-                    ("Protected", "o", STATUS_CONNECTED, name, true)
+                    ("Protected", "", STATUS_CONNECTED, name, true)
                 }
-                ConnectionState::Disconnecting => ("Disconnecting", "o", STATUS_WARNING, "Please wait...".to_string(), false),
+                ConnectionState::Disconnecting => ("Disconnecting", "", STATUS_WARNING, "Please wait...".to_string(), false),
                 ConnectionState::Error(msg) => {
                     // Format user-friendly VPN error messages
                     let user_friendly = if msg.contains("Administrator privileges required") {
@@ -241,7 +251,7 @@ impl BoosterApp {
                     } else {
                         msg.clone()
                     };
-                    ("Error", "x", STATUS_ERROR, user_friendly, false)
+                    ("Error", "", STATUS_ERROR, user_friendly, false)
                 }
             }
         };
@@ -278,7 +288,7 @@ impl BoosterApp {
              STATUS_ERROR.gamma_multiply(0.3),
              1.0)
         } else {
-            (BG_CARD, BG_ELEVATED, 1.0)
+            (BG_CARD, BORDER_SUBTLE, 1.0)
         };
 
         egui::Frame::NONE
@@ -311,9 +321,6 @@ impl BoosterApp {
                         ui.painter().circle_filled(center, 16.0, STATUS_CONNECTED);
                         // Inner highlight
                         ui.painter().circle_filled(center, 8.0, STATUS_CONNECTED_GLOW.gamma_multiply(0.5));
-                        // Shield icon
-                        ui.painter().text(center, egui::Align2::CENTER_CENTER,
-                            "+", egui::FontId::proportional(14.0), egui::Color32::WHITE);
                     } else if is_connecting {
                         // Spinning animation for connecting
                         let elapsed = self.app_start_time.elapsed().as_secs_f32();
@@ -347,13 +354,11 @@ impl BoosterApp {
                     ui.add_space(14.0);
 
                     ui.vertical(|ui| {
-                        // Status text with icon
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(status_text)
-                                .size(20.0)
-                                .color(status_color)
-                                .strong());
-                        });
+                        // Status text
+                        ui.label(egui::RichText::new(status_text)
+                            .size(20.0)
+                            .color(status_color)
+                            .strong());
                         ui.add_space(2.0);
                         ui.label(egui::RichText::new(&detail_text)
                             .size(13.0)
@@ -361,23 +366,22 @@ impl BoosterApp {
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (btn_text, btn_icon, btn_color) = if is_connected {
-                            ("Disconnect", "O", STATUS_ERROR)
+                        let (btn_text, btn_color) = if is_connected {
+                            ("Disconnect", STATUS_ERROR)
                         } else if is_connecting {
-                            ("Cancel", "x", STATUS_WARNING)
+                            ("Cancel", STATUS_WARNING)
                         } else {
-                            ("Connect", "->", ACCENT_PRIMARY)
+                            ("Connect", ACCENT_PRIMARY)
                         };
 
-                        // Button with icon
                         let btn_response = ui.add(
-                            egui::Button::new(egui::RichText::new(format!("{}  {}", btn_text, btn_icon))
+                            egui::Button::new(egui::RichText::new(btn_text)
                                 .size(14.0)
                                 .color(TEXT_PRIMARY)
                                 .strong())
                                 .fill(btn_color)
                                 .rounding(10.0)
-                                .min_size(egui::vec2(130.0, 46.0))
+                                .min_size(egui::vec2(120.0, 44.0))
                         );
 
                         if btn_response.clicked() {
@@ -417,7 +421,6 @@ impl BoosterApp {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(egui::RichText::new("[t]").size(12.0));
                                     ui.vertical(|ui| {
                                         ui.spacing_mut().item_spacing.y = 1.0;
                                         ui.label(egui::RichText::new("Uptime").size(10.0).color(TEXT_MUTED));
@@ -428,10 +431,10 @@ impl BoosterApp {
 
                         // Split tunnel badge (if active)
                         if split_tunnel_active {
-                            let (tunnel_icon, tunnel_text, tunnel_color) = if tunneled_processes.is_empty() {
-                                ("...", "Waiting...", STATUS_WARNING)
+                            let (tunnel_text, tunnel_color) = if tunneled_processes.is_empty() {
+                                ("Waiting...", STATUS_WARNING)
                             } else {
-                                ("+", &tunneled_processes.join(", ") as &str, STATUS_CONNECTED)
+                                (&tunneled_processes.join(", ") as &str, STATUS_CONNECTED)
                             };
 
                             egui::Frame::NONE
@@ -442,7 +445,6 @@ impl BoosterApp {
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
-                                        ui.label(egui::RichText::new(tunnel_icon).size(12.0).color(tunnel_color));
                                         ui.vertical(|ui| {
                                             ui.spacing_mut().item_spacing.y = 1.0;
                                             ui.label(egui::RichText::new("Split Tunnel").size(10.0).color(TEXT_MUTED));
@@ -456,7 +458,7 @@ impl BoosterApp {
                         if self.experimental_mode
                             && !self.custom_relay_server.is_empty()
                         {
-                            let relay_color = egui::Color32::from_rgb(255, 180, 0); // Orange/amber for experimental
+                            let relay_color = STATUS_WARNING;
                             egui::Frame::NONE
                                 .fill(relay_color.gamma_multiply(0.1))
                                 .stroke(egui::Stroke::new(1.0, relay_color.gamma_multiply(0.3)))
@@ -465,7 +467,6 @@ impl BoosterApp {
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
-                                        ui.label(egui::RichText::new("*").size(12.0).color(relay_color));
                                         ui.vertical(|ui| {
                                             ui.spacing_mut().item_spacing.y = 1.0;
                                             ui.label(egui::RichText::new("Custom Relay").size(10.0).color(TEXT_MUTED));
@@ -592,7 +593,6 @@ impl BoosterApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.label(egui::RichText::new("=").size(12.0));
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.label(egui::RichText::new("Throughput").size(10.0).color(TEXT_MUTED));
@@ -621,15 +621,12 @@ impl BoosterApp {
                 ui.vertical(|ui| {
                     // Header with current values
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("=").size(11.0));
-                        ui.add_space(4.0);
                         ui.label(egui::RichText::new("Tunnel Traffic").size(10.0).color(TEXT_MUTED));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // TX in cyan, RX in green
-                            ui.label(egui::RichText::new(format!("v{}", format_bytes_per_sec(current_rx)))
+                            ui.label(egui::RichText::new(format!("DN {}", format_bytes_per_sec(current_rx)))
                                 .size(10.0).color(STATUS_CONNECTED));
                             ui.label(egui::RichText::new(" / ").size(10.0).color(TEXT_MUTED));
-                            ui.label(egui::RichText::new(format!("^{}", format_bytes_per_sec(current_tx)))
+                            ui.label(egui::RichText::new(format!("UP {}", format_bytes_per_sec(current_tx)))
                                 .size(10.0).color(ACCENT_CYAN));
                         });
                     });
@@ -743,9 +740,6 @@ impl BoosterApp {
 
         // Section header with enhanced styling
         ui.horizontal(|ui| {
-            // Globe icon for regions
-            ui.label(egui::RichText::new("o").size(14.0));
-            ui.add_space(4.0);
             ui.label(egui::RichText::new("SELECT REGION").size(11.0).color(TEXT_SECONDARY).strong());
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -754,14 +748,16 @@ impl BoosterApp {
                     let elapsed = self.app_start_time.elapsed().as_secs_f32();
                     let pulse = ((elapsed * 3.0).sin() + 1.0) / 2.0;
                     let color = lerp_color(ACCENT_PRIMARY, ACCENT_CYAN, pulse);
-                    ui.label(egui::RichText::new("o").size(8.0).color(color));
+                    let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot_rect.center(), 3.0, color);
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Loading...").size(11.0).color(ACCENT_PRIMARY));
                 } else if is_finding {
                     let elapsed = self.app_start_time.elapsed().as_secs_f32();
                     let pulse = ((elapsed * 3.0).sin() + 1.0) / 2.0;
                     let color = lerp_color(ACCENT_CYAN, STATUS_CONNECTED, pulse);
-                    ui.label(egui::RichText::new("o").size(8.0).color(color));
+                    let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot_rect.center(), 3.0, color);
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Measuring...").size(11.0).color(ACCENT_CYAN));
                 } else {
@@ -794,8 +790,7 @@ impl BoosterApp {
                     .inner_margin(egui::Margin::symmetric(24, 20))
                     .show(ui, |ui| {
                                 ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new("!").size(32.0).color(STATUS_ERROR));
-                            ui.add_space(12.0);
+                            ui.add_space(8.0);
                             ui.label(egui::RichText::new("Failed to load servers")
                                 .size(15.0)
                                 .color(TEXT_PRIMARY)
@@ -806,7 +801,7 @@ impl BoosterApp {
                                 .color(TEXT_SECONDARY));
                             ui.add_space(16.0);
                             if ui.add(
-                                egui::Button::new(egui::RichText::new("~  Retry").size(13.0).color(TEXT_PRIMARY))
+                                egui::Button::new(egui::RichText::new("Retry").size(13.0).color(TEXT_PRIMARY))
                                     .fill(ACCENT_PRIMARY)
                                     .rounding(8.0)
                                     .min_size(egui::vec2(100.0, 36.0))
@@ -859,10 +854,10 @@ impl BoosterApp {
                         let (bg, border_color, border_width) = if is_selected {
                             (lerp_color(ACCENT_PRIMARY.gamma_multiply(0.12), ACCENT_PRIMARY.gamma_multiply(0.18), hover_val),
                              ACCENT_PRIMARY,
-                             2.0)
+                             1.5)
                         } else {
                             let hover_bg = lerp_color(BG_CARD, BG_ELEVATED, hover_val * 0.5);
-                            let hover_border = lerp_color(BG_ELEVATED, ACCENT_PRIMARY.gamma_multiply(0.4), hover_val);
+                            let hover_border = lerp_color(BORDER_SUBTLE, ACCENT_PRIMARY.gamma_multiply(0.4), hover_val);
                             (hover_bg, hover_border, 1.0 + hover_val * 0.5)
                         };
 
@@ -950,7 +945,7 @@ impl BoosterApp {
                                         // Forced server indicator
                                         if self.forced_servers.contains_key(&region.id) {
                                             ui.add_space(2.0);
-                                            ui.label(egui::RichText::new("\u{2699}").size(9.0).color(ACCENT_SECONDARY));
+                                            ui.label(egui::RichText::new("Pinned").size(9.0).color(ACCENT_SECONDARY));
                                         }
 
                                         // Push gear button to right
@@ -1074,7 +1069,7 @@ impl BoosterApp {
         // Show popup window - use open() to track when X button is clicked
         let popup_id = egui::Id::new("server_selection_popup");
         let mut window_open = true;
-        let close_popup = egui::Window::new(format!("\u{2699} Select Server - {}", region_name))
+        let close_popup = egui::Window::new(format!("Select Server - {}", region_name))
             .id(popup_id)
             .open(&mut window_open)  // Track window close via X button
             .collapsible(false)
@@ -1084,7 +1079,7 @@ impl BoosterApp {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .frame(egui::Frame::popup(ui.style())
                 .fill(BG_CARD)
-                .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+                .stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
                 .rounding(12.0)
                 .inner_margin(16))
             .show(ui.ctx(), |ui| {
@@ -1095,19 +1090,15 @@ impl BoosterApp {
                 // "Auto (Best Ping)" option
                 let is_auto = current_forced.is_none();
                 let auto_response = egui::Frame::NONE
-                    .fill(if is_auto { ACCENT_PRIMARY.gamma_multiply(0.15) } else { BG_ELEVATED.gamma_multiply(0.5) })
+                    .fill(if is_auto { ACCENT_PRIMARY.gamma_multiply(0.12) } else { BG_ELEVATED.gamma_multiply(0.5) })
                     .stroke(egui::Stroke::new(
                         if is_auto { 1.5 } else { 1.0 },
-                        if is_auto { ACCENT_PRIMARY } else { BG_ELEVATED }
+                        if is_auto { ACCENT_PRIMARY } else { BORDER_SUBTLE }
                     ))
                     .rounding(8.0)
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            if is_auto {
-                                ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_PRIMARY).strong());
-                                ui.add_space(6.0);
-                            }
                             ui.label(egui::RichText::new("Auto (Best Ping)")
                                 .size(13.0)
                                 .color(if is_auto { TEXT_PRIMARY } else { TEXT_SECONDARY })
@@ -1145,19 +1136,15 @@ impl BoosterApp {
                     let display_name = self.format_server_display_name(server_id);
 
                     let server_response = egui::Frame::NONE
-                        .fill(if is_selected { ACCENT_SECONDARY.gamma_multiply(0.15) } else { egui::Color32::TRANSPARENT })
+                        .fill(if is_selected { ACCENT_SECONDARY.gamma_multiply(0.12) } else { egui::Color32::TRANSPARENT })
                         .stroke(egui::Stroke::new(
                             if is_selected { 1.5 } else { 1.0 },
-                            if is_selected { ACCENT_SECONDARY } else { BG_ELEVATED.gamma_multiply(0.5) }
+                            if is_selected { ACCENT_SECONDARY } else { BORDER_SUBTLE.gamma_multiply(0.5) }
                         ))
                         .rounding(8.0)
                         .inner_margin(egui::Margin::symmetric(12, 8))
                         .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                if is_selected {
-                                    ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_SECONDARY).strong());
-                                    ui.add_space(6.0);
-                                }
                                 ui.label(egui::RichText::new(&display_name)
                                     .size(12.0)
                                     .color(if is_selected { TEXT_PRIMARY } else { TEXT_SECONDARY }));
@@ -1168,9 +1155,9 @@ impl BoosterApp {
                                         ui.label(egui::RichText::new(format!("{}ms", ms))
                                             .size(11.0)
                                             .color(lat_color));
-                                        ui.label(egui::RichText::new("*")
-                                            .size(10.0)
-                                            .color(STATUS_CONNECTED));
+                                        // Small dot for best server indicator
+                                        let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                        ui.painter().circle_filled(dot_rect.center(), 3.0, STATUS_CONNECTED);
                                     }
                                 });
                             });
@@ -1255,7 +1242,7 @@ impl BoosterApp {
 
                     egui::Frame::NONE
                         .fill(BG_CARD)
-                        .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+                        .stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
                         .rounding(12.0)
                         .inner_margin(egui::Margin::symmetric(12, 12))
                         .show(ui, |ui| {
@@ -1348,14 +1335,13 @@ impl BoosterApp {
 
         egui::Frame::NONE
             .fill(BG_CARD)
-            .stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
             .rounding(12.0)
             .inner_margin(16)
             .show(ui, |ui| {
 
                 // Section header with value badge
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("[t]").size(16.0));
                     ui.label(egui::RichText::new("Practice Mode").size(14.0).color(TEXT_PRIMARY).strong());
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1441,11 +1427,10 @@ impl BoosterApp {
             self.render_tunnel_diagnostics(ui);
         } else {
             egui::Frame::NONE
-                .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+                .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
                 .rounding(12.0).inner_margin(20)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("?").size(12.0).color(ACCENT_PRIMARY));
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 4.0;
@@ -1466,12 +1451,10 @@ impl BoosterApp {
         });
 
         egui::Frame::NONE
-            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BG_ELEVATED))
+            .fill(BG_CARD).stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
             .rounding(12.0).inner_margin(16)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("📊").size(14.0));
-                    ui.add_space(8.0);
                     ui.label(egui::RichText::new("Tunnel Status").size(13.0).color(TEXT_PRIMARY).strong());
                 });
 
@@ -1487,9 +1470,22 @@ impl BoosterApp {
 
                         // Default route indicator
                         if has_default_route {
-                            ui.label(egui::RichText::new("✓").size(10.0).color(STATUS_CONNECTED));
+                            egui::Frame::NONE
+                                .fill(STATUS_CONNECTED.gamma_multiply(0.12))
+                                .rounding(4.0)
+                                .inner_margin(egui::Margin::symmetric(4, 1))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new("OK").size(9.0).color(STATUS_CONNECTED));
+                                });
                         } else {
-                            ui.label(egui::RichText::new("⚠").size(10.0).color(STATUS_WARNING))
+                            egui::Frame::NONE
+                                .fill(STATUS_WARNING.gamma_multiply(0.12))
+                                .rounding(4.0)
+                                .inner_margin(egui::Margin::symmetric(4, 1))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new("No Route").size(9.0).color(STATUS_WARNING));
+                                })
+                                .response
                                 .on_hover_text("Adapter may not have default route - check network settings");
                         }
                     });
@@ -1683,7 +1679,7 @@ impl BoosterApp {
     }
 }
 
-/// Format packet count for display (e.g., 1234 → "1.2K", 1234567 → "1.2M")
+/// Format packet count for display (e.g., 1234 -> "1.2K", 1234567 -> "1.2M")
 fn format_packet_count(count: u64) -> String {
     if count >= 1_000_000 {
         format!("{:.1}M", count as f64 / 1_000_000.0)

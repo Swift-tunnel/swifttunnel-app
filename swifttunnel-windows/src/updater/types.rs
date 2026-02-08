@@ -1,33 +1,21 @@
 //! Types for the auto-updater module
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Current state of the update process
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpdateState {
     /// No update activity
     Idle,
-    /// Checking GitHub for updates
+    /// Checking for updates
     Checking,
-    /// Update available (not yet downloading)
+    /// Update available
     Available(UpdateInfo),
     /// Downloading update
     Downloading {
         info: UpdateInfo,
         progress: f32,
-        downloaded: u64,
-        total: u64,
     },
-    /// Verifying checksum
-    Verifying(UpdateInfo),
-    /// Ready to install (downloaded and verified)
-    ReadyToInstall {
-        info: UpdateInfo,
-        msi_path: PathBuf,
-    },
-    /// Installing update
-    Installing,
     /// No update available (already on latest)
     UpToDate,
     /// Update check or download failed
@@ -35,14 +23,11 @@ pub enum UpdateState {
 }
 
 impl UpdateState {
-    /// Returns true if an update is available or ready
+    /// Returns true if an update is available or downloading
     pub fn has_update(&self) -> bool {
         matches!(
             self,
-            UpdateState::Available(_)
-                | UpdateState::Downloading { .. }
-                | UpdateState::Verifying(_)
-                | UpdateState::ReadyToInstall { .. }
+            UpdateState::Available(_) | UpdateState::Downloading { .. }
         )
     }
 
@@ -55,9 +40,7 @@ impl UpdateState {
     pub fn get_info(&self) -> Option<&UpdateInfo> {
         match self {
             UpdateState::Available(info)
-            | UpdateState::Downloading { info, .. }
-            | UpdateState::Verifying(info)
-            | UpdateState::ReadyToInstall { info, .. } => Some(info),
+            | UpdateState::Downloading { info, .. } => Some(info),
             _ => None,
         }
     }
@@ -74,18 +57,8 @@ impl UpdateState {
 /// Information about an available update
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateInfo {
-    /// New version (e.g., "0.3.1")
+    /// New version string
     pub version: String,
-    /// Download URL for the MSI
-    pub download_url: String,
-    /// Size in bytes
-    pub size: u64,
-    /// SHA256 checksum URL
-    pub checksum_url: Option<String>,
-    /// Release notes (optional)
-    pub release_notes: Option<String>,
-    /// Release date
-    pub published_at: Option<String>,
 }
 
 /// User settings for auto-updates
@@ -116,24 +89,6 @@ impl Default for UpdateSettings {
     }
 }
 
-/// GitHub Release API response structure
-#[derive(Debug, Deserialize)]
-pub struct GithubRelease {
-    pub tag_name: String,
-    pub name: Option<String>,
-    pub body: Option<String>,
-    pub published_at: Option<String>,
-    pub assets: Vec<GithubAsset>,
-}
-
-/// GitHub Release Asset structure
-#[derive(Debug, Deserialize)]
-pub struct GithubAsset {
-    pub name: String,
-    pub browser_download_url: String,
-    pub size: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,19 +102,12 @@ mod tests {
 
         let info = UpdateInfo {
             version: "0.3.1".to_string(),
-            download_url: "https://example.com".to_string(),
-            size: 1000,
-            checksum_url: None,
-            release_notes: None,
-            published_at: None,
         };
 
         assert!(UpdateState::Available(info.clone()).has_update());
         assert!(UpdateState::Downloading {
             info: info.clone(),
             progress: 0.5,
-            downloaded: 500,
-            total: 1000
         }
         .has_update());
     }

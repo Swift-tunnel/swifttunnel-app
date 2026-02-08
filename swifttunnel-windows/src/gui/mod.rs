@@ -41,7 +41,9 @@ use crate::structs::*;
 use crate::system_optimizer::SystemOptimizer;
 use crate::network_booster::NetworkBooster;
 use crate::tray::SystemTray;
-use crate::updater::{UpdateChecker, UpdateInfo, UpdateSettings, UpdateState, download_update, download_checksum, verify_checksum, install_update};
+use crate::updater::{UpdateSettings, UpdateState};
+use crate::updater::auto_updater::{check_for_updates_background, download_and_apply_update};
+use crate::updater::types::UpdateInfo;
 use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set, ThroughputStats};
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
@@ -256,6 +258,14 @@ pub struct BoosterApp {
     discord_manager: DiscordManager,
     /// Enable Discord Rich Presence (user setting)
     enable_discord_rpc: bool,
+    /// Whether the WinPkFilter/ndisapi driver is installed (None = not checked yet)
+    driver_installed: Option<bool>,
+    /// Whether the user dismissed the driver install banner
+    driver_install_dismissed: bool,
+    /// Whether a driver installation is currently in progress
+    driver_installing: bool,
+    /// Channel to receive driver install result (true = success)
+    driver_install_result_rx: Option<std::sync::mpsc::Receiver<bool>>,
 }
 
 impl BoosterApp {
@@ -538,6 +548,11 @@ impl BoosterApp {
             // Discord Rich Presence
             discord_manager: DiscordManager::new(saved_settings.enable_discord_rpc),
             enable_discord_rpc: saved_settings.enable_discord_rpc,
+            // Driver status (checked on first frame)
+            driver_installed: None,
+            driver_install_dismissed: false,
+            driver_installing: false,
+            driver_install_result_rx: None,
         }
     }
 
@@ -1475,6 +1490,40 @@ impl eframe::App for BoosterApp {
             if start.elapsed() >= std::time::Duration::from_secs(2) {
                 self.update_check_started = true;
                 self.start_update_check();
+            }
+        }
+
+        // Check if WinPkFilter driver is installed (once on startup, after 1 second)
+        if self.driver_installed.is_none() {
+            static DRIVER_CHECK_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let start = DRIVER_CHECK_TIME.get_or_init(std::time::Instant::now);
+            if start.elapsed() >= std::time::Duration::from_secs(1) {
+                let available = crate::vpn::split_tunnel::SplitTunnelDriver::check_driver_available();
+                log::info!("Driver availability check: {}", if available { "installed" } else { "not found" });
+                self.driver_installed = Some(available);
+            }
+        }
+
+        // Poll for driver installation result
+        if self.driver_installing {
+            if let Some(ref rx) = self.driver_install_result_rx {
+                if let Ok(success) = rx.try_recv() {
+                    self.driver_installing = false;
+                    self.driver_install_result_rx = None;
+                    if success {
+                        log::info!("Driver installed successfully, re-checking availability");
+                        self.driver_installed = Some(
+                            crate::vpn::split_tunnel::SplitTunnelDriver::check_driver_available()
+                        );
+                    } else {
+                        log::warn!("Driver installation failed or was cancelled");
+                        self.status_message = Some((
+                            "Driver installation failed. You may need to restart your PC.".to_string(),
+                            STATUS_ERROR,
+                            std::time::Instant::now(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -2479,7 +2528,6 @@ impl BoosterApp {
         match &state {
             UpdateState::Idle | UpdateState::UpToDate | UpdateState::Checking => return,
             UpdateState::Failed(msg) => {
-                // Show error banner briefly, then hide
                 egui::Frame::NONE
                     .fill(STATUS_ERROR.gamma_multiply(0.15))
                     .stroke(egui::Stroke::new(1.0, STATUS_ERROR.gamma_multiply(0.3)))
@@ -2494,84 +2542,53 @@ impl BoosterApp {
                         });
                     });
             }
-            _ => {
+            UpdateState::Available(info) => {
+                // Check if this version was dismissed
+                if self.update_settings.dismissed_version.as_ref() == Some(&info.version) {
+                    return;
+                }
                 egui::Frame::NONE
                     .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
                     .stroke(egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.3)))
                     .rounding(8.0)
                     .inner_margin(12)
                     .show(ui, |ui| {
-                        match &state {
-                            UpdateState::Available(info) => {
-                                // Check if this version was dismissed
-                                if self.update_settings.dismissed_version.as_ref() == Some(&info.version) {
-                                    return;
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_PRIMARY));
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new(format!("Update v{} available", info.version))
+                                .size(13.0).color(TEXT_PRIMARY).strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("x").size(12.0).color(TEXT_MUTED)
+                                ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
+                                    self.dismiss_update(&info.version.clone());
                                 }
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_PRIMARY));
-                                    ui.add_space(8.0);
-                                    ui.label(egui::RichText::new(format!("Update v{} available", info.version))
-                                        .size(13.0).color(TEXT_PRIMARY).strong());
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.add(egui::Button::new(
-                                            egui::RichText::new("x").size(12.0).color(TEXT_MUTED)
-                                        ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
-                                            self.dismiss_update(&info.version.clone());
-                                        }
-                                        ui.add_space(8.0);
-                                        if ui.add(egui::Button::new(
-                                            egui::RichText::new("Download").size(11.0).color(TEXT_PRIMARY)
-                                        ).fill(ACCENT_PRIMARY).rounding(4.0)).clicked() {
-                                            self.start_update_download(info.clone());
-                                        }
-                                    });
-                                });
-                            }
-                            UpdateState::Downloading { info, progress, downloaded, total } => {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.add_space(8.0);
-                                    let downloaded_mb = *downloaded as f64 / (1024.0 * 1024.0);
-                                    let total_mb = *total as f64 / (1024.0 * 1024.0);
-                                    ui.label(egui::RichText::new(format!(
-                                        "Downloading v{}... {:.1}/{:.1} MB ({:.0}%)",
-                                        info.version, downloaded_mb, total_mb, progress * 100.0
-                                    )).size(13.0).color(TEXT_PRIMARY));
-                                });
-                            }
-                            UpdateState::Verifying(info) => {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.add_space(8.0);
-                                    ui.label(egui::RichText::new(format!("Verifying v{}...", info.version))
-                                        .size(13.0).color(TEXT_PRIMARY));
-                                });
-                            }
-                            UpdateState::ReadyToInstall { info, .. } => {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("+").size(14.0).color(STATUS_CONNECTED));
-                                    ui.add_space(8.0);
-                                    ui.label(egui::RichText::new(format!("v{} ready to install", info.version))
-                                        .size(13.0).color(TEXT_PRIMARY).strong());
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.add(egui::Button::new(
-                                            egui::RichText::new("Install Now").size(11.0).color(TEXT_PRIMARY)
-                                        ).fill(STATUS_CONNECTED).rounding(4.0)).clicked() {
-                                            self.trigger_update_install();
-                                        }
-                                    });
-                                });
-                            }
-                            UpdateState::Installing => {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.add_space(8.0);
-                                    ui.label(egui::RichText::new("Installing update... App will restart.")
-                                        .size(13.0).color(TEXT_PRIMARY));
-                                });
-                            }
-                            _ => {}
-                        }
+                                ui.add_space(8.0);
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("Update Now").size(11.0).color(TEXT_PRIMARY)
+                                ).fill(ACCENT_PRIMARY).rounding(4.0)).clicked() {
+                                    self.start_update_download(info.clone());
+                                }
+                            });
+                        });
+                    });
+            }
+            UpdateState::Downloading { info, progress } => {
+                egui::Frame::NONE
+                    .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
+                    .stroke(egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.3)))
+                    .rounding(8.0)
+                    .inner_margin(12)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new(format!(
+                                "Downloading v{}... {:.0}%",
+                                info.version, progress * 100.0
+                            )).size(13.0).color(TEXT_PRIMARY));
+                        });
                     });
             }
         }
@@ -2581,193 +2598,149 @@ impl BoosterApp {
 
     /// Start checking for updates in the background
     pub(crate) fn start_update_check(&mut self) {
-        // Set state to Checking
         if let Ok(mut state) = self.update_state.lock() {
             *state = UpdateState::Checking;
         }
 
         let update_state = Arc::clone(&self.update_state);
-        let rt = Arc::clone(&self.runtime);
-
-        std::thread::spawn(move || {
-            rt.block_on(async {
-                let checker = match UpdateChecker::new() {
-                    Some(c) => c,
-                    None => {
-                        log::error!("Update checker failed to initialize - version parsing issue");
-                        if let Ok(mut state) = update_state.lock() {
-                            *state = UpdateState::Failed("Version parsing error".to_string());
-                        }
-                        return;
-                    }
-                };
-                match checker.check_for_update().await {
-                    Ok(Some(info)) => {
-                        log::info!("Update available: v{}", info.version);
-                        if let Ok(mut state) = update_state.lock() {
-                            *state = UpdateState::Available(info);
-                        }
-                    }
-                    Ok(None) => {
-                        log::info!("Already on latest version");
-                        if let Ok(mut state) = update_state.lock() {
-                            *state = UpdateState::UpToDate;
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Update check failed: {}", e);
-                        if let Ok(mut state) = update_state.lock() {
-                            *state = UpdateState::Failed(e);
-                        }
-                    }
-                }
-            });
-        });
+        check_for_updates_background(update_state);
     }
 
-    /// Start downloading an update in the background
+    /// Start downloading and applying an update via Velopack
     fn start_update_download(&mut self, info: UpdateInfo) {
-        let update_state = Arc::clone(&self.update_state);
-        let rt = Arc::clone(&self.runtime);
-
-        // Set initial downloading state
-        if let Ok(mut state) = update_state.lock() {
-            *state = UpdateState::Downloading {
-                info: info.clone(),
-                progress: 0.0,
-                downloaded: 0,
-                total: info.size,
-            };
-        }
-
-        std::thread::spawn(move || {
-            rt.block_on(async {
-                // Generate filename from URL
-                let filename = info.download_url
-                    .split('/')
-                    .last()
-                    .unwrap_or("SwiftTunnel-update.msi")
-                    .to_string();
-
-                // Progress callback to update state
-                let progress_state = Arc::clone(&update_state);
-                let info_clone = info.clone();
-                let on_progress: Box<dyn Fn(u64, u64) + Send + Sync> = Box::new(move |downloaded, total| {
-                    let progress = if total > 0 { downloaded as f32 / total as f32 } else { 0.0 };
-                    if let Ok(mut state) = progress_state.lock() {
-                        *state = UpdateState::Downloading {
-                            info: info_clone.clone(),
-                            progress,
-                            downloaded,
-                            total,
-                        };
-                    }
-                });
-
-                // Download the MSI
-                match download_update(&info.download_url, &filename, Some(on_progress)).await {
-                    Ok(msi_path) => {
-                        log::info!("Download complete: {}", msi_path.display());
-
-                        // Set verifying state
-                        if let Ok(mut state) = update_state.lock() {
-                            *state = UpdateState::Verifying(info.clone());
-                        }
-
-                        // Verify checksum if available
-                        let verified = if let Some(ref checksum_url) = info.checksum_url {
-                            match download_checksum(checksum_url).await {
-                                Ok(expected) => {
-                                    match verify_checksum(&msi_path, &expected).await {
-                                        Ok(true) => true,
-                                        Ok(false) => {
-                                            log::error!("Checksum verification failed!");
-                                            // Delete the bad file
-                                            let _ = tokio::fs::remove_file(&msi_path).await;
-                                            if let Ok(mut state) = update_state.lock() {
-                                                *state = UpdateState::Failed("Checksum verification failed. Download corrupted.".to_string());
-                                            }
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            log::error!("Checksum error: {}", e);
-                                            // Continue anyway if we can't verify
-                                            true
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!("Could not download checksum: {}", e);
-                                    // Continue anyway if no checksum available
-                                    true
-                                }
-                            }
-                        } else {
-                            log::warn!("No checksum file available, skipping verification");
-                            true
-                        };
-
-                        if verified {
-                            if let Ok(mut state) = update_state.lock() {
-                                *state = UpdateState::ReadyToInstall {
-                                    info: info.clone(),
-                                    msi_path,
-                                };
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Download failed: {}", e);
-                        if let Ok(mut state) = update_state.lock() {
-                            *state = UpdateState::Failed(e);
-                        }
-                    }
-                }
-            });
-        });
-    }
-
-    /// Trigger the update installation
-    fn trigger_update_install(&mut self) {
-        let msi_path = match self.update_state.lock() {
-            Ok(state) => {
-                if let UpdateState::ReadyToInstall { msi_path, .. } = &*state {
-                    msi_path.clone()
-                } else {
-                    return;
-                }
-            }
-            Err(_) => return,
-        };
-
-        // Set installing state
-        if let Ok(mut state) = self.update_state.lock() {
-            *state = UpdateState::Installing;
-        }
-
-        // Disconnect VPN before exiting for update
+        // Disconnect VPN before update
         self.disconnect_vpn_sync();
 
-        // Run installation
-        match install_update(&msi_path) {
-            Ok(()) => {
-                log::info!("Update installer launched, exiting app...");
-                // Exit the app to allow installer to run
-                std::process::exit(0);
-            }
-            Err(e) => {
-                log::error!("Failed to start installer: {}", e);
-                if let Ok(mut state) = self.update_state.lock() {
-                    *state = UpdateState::Failed(e);
-                }
-            }
-        }
+        let update_state = Arc::clone(&self.update_state);
+        download_and_apply_update(update_state, info.version);
     }
 
     /// Dismiss the update banner for a specific version
     fn dismiss_update(&mut self, version: &str) {
         self.update_settings.dismissed_version = Some(version.to_string());
         self.mark_dirty();
+    }
+
+    // ─── Driver install banner ──────────────────────────────────────────────
+
+    /// Whether the driver install banner should show
+    pub(crate) fn has_driver_banner(&self) -> bool {
+        !self.driver_install_dismissed
+            && matches!(self.driver_installed, Some(false))
+            && !self.driver_installing
+    }
+
+    /// Render a banner prompting the user to install the network driver
+    pub(crate) fn render_driver_banner(&mut self, ui: &mut egui::Ui) {
+        if self.driver_installing {
+            // Show installing state
+            egui::Frame::NONE
+                .fill(ACCENT_SECONDARY.gamma_multiply(0.15))
+                .stroke(egui::Stroke::new(1.0, ACCENT_SECONDARY.gamma_multiply(0.3)))
+                .rounding(8.0)
+                .inner_margin(12)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Installing network driver...")
+                            .size(13.0).color(TEXT_PRIMARY));
+                    });
+                });
+            ui.add_space(12.0);
+            return;
+        }
+
+        if !self.has_driver_banner() {
+            return;
+        }
+
+        egui::Frame::NONE
+            .fill(STATUS_WARNING.gamma_multiply(0.12))
+            .stroke(egui::Stroke::new(1.0, STATUS_WARNING.gamma_multiply(0.3)))
+            .rounding(8.0)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("!").size(14.0).color(STATUS_WARNING));
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Network driver required")
+                            .size(13.0).color(TEXT_PRIMARY).strong());
+                        ui.label(egui::RichText::new("Install the packet filter driver to enable game optimization.")
+                            .size(11.0).color(TEXT_MUTED));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new("x").size(12.0).color(TEXT_MUTED)
+                        ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
+                            self.driver_install_dismissed = true;
+                        }
+                        ui.add_space(8.0);
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new("Install Driver").size(11.0).color(TEXT_PRIMARY)
+                        ).fill(STATUS_WARNING.gamma_multiply(0.8)).rounding(4.0)).clicked() {
+                            self.launch_driver_installer();
+                        }
+                    });
+                });
+            });
+        ui.add_space(12.0);
+    }
+
+    /// Launch the driver-installer.exe binary with UAC elevation
+    fn launch_driver_installer(&mut self) {
+        self.driver_installing = true;
+
+        // Find driver-installer.exe next to our own exe
+        let installer_path = match std::env::current_exe() {
+            Ok(exe) => exe.parent()
+                .map(|dir| dir.join("driver-installer.exe"))
+                .unwrap_or_default(),
+            Err(e) => {
+                log::error!("Failed to get current exe path: {}", e);
+                self.driver_installing = false;
+                return;
+            }
+        };
+
+        if !installer_path.exists() {
+            log::error!("driver-installer.exe not found at: {}", installer_path.display());
+            self.driver_installing = false;
+            self.status_message = Some((
+                "Driver installer not found. Please reinstall SwiftTunnel.".to_string(),
+                STATUS_ERROR,
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+
+        let path_str = installer_path.to_string_lossy().to_string();
+        log::info!("Launching driver installer: {}", path_str);
+
+        // Launch installer in background thread, report result via channel
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        self.driver_install_result_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let success = match std::process::Command::new(&path_str)
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    log::info!("Driver installer output: {}", stdout.trim());
+                    output.status.success()
+                }
+                Err(e) => {
+                    log::error!("Failed to run driver installer: {}", e);
+                    false
+                }
+            };
+            let _ = tx.send(success);
+        });
     }
 
     /// Update server with current latency setting

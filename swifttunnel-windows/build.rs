@@ -3,16 +3,27 @@ use embed_manifest::manifest::{ExecutionLevel, DpiAwareness};
 
 fn main() {
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
-        // Use AsInvoker for development - app will request elevation when needed
-        // For release builds, change to RequireAdministrator
-        let execution_level = if std::env::var("PROFILE").as_deref() == Ok("release") {
+        let bin_name = std::env::var("CARGO_BIN_NAME").unwrap_or_default();
+        let is_driver_installer = bin_name == "driver-installer";
+
+        // Driver installer always requires admin (it installs a kernel driver).
+        // Main app: AsInvoker in debug, RequireAdministrator in release.
+        let execution_level = if is_driver_installer {
+            ExecutionLevel::RequireAdministrator
+        } else if std::env::var("PROFILE").as_deref() == Ok("release") {
             ExecutionLevel::RequireAdministrator
         } else {
             ExecutionLevel::AsInvoker
         };
 
+        let manifest_name = if is_driver_installer {
+            "SwiftTunnel.DriverInstaller"
+        } else {
+            "SwiftTunnel.FPSBooster"
+        };
+
         embed_manifest(
-            new_manifest("SwiftTunnel.FPSBooster")
+            new_manifest(manifest_name)
                 .version(1, 0, 0, 0)
                 .requested_execution_level(execution_level)
                 .dpi_awareness(DpiAwareness::PerMonitorV2)
@@ -20,16 +31,19 @@ fn main() {
         .expect("Failed to embed manifest");
 
         // Embed icon and version info into executable (shows in Task Manager, Explorer, etc.)
-        let mut res = winres::WindowsResource::new();
-        res.set_icon("installer/swifttunnel.ico");
-        res.set("ProductName", "SwiftTunnel");
-        res.set("FileDescription", "SwiftTunnel Game Booster");
-        res.set("LegalCopyright", "Copyright © 2024-2026 SwiftTunnel");
-        // Set version from Cargo.toml - CRITICAL: ensures Windows Properties shows correct version
-        res.set("FileVersion", env!("CARGO_PKG_VERSION"));
-        res.set("ProductVersion", env!("CARGO_PKG_VERSION"));
-        if let Err(e) = res.compile() {
-            eprintln!("Warning: Failed to embed icon: {}", e);
+        // Only for the main binary - driver-installer doesn't need an icon
+        if !is_driver_installer {
+            let mut res = winres::WindowsResource::new();
+            res.set_icon("installer/swifttunnel.ico");
+            res.set("ProductName", "SwiftTunnel");
+            res.set("FileDescription", "SwiftTunnel Game Booster");
+            res.set("LegalCopyright", "Copyright © 2024-2026 SwiftTunnel");
+            // Set version from Cargo.toml - CRITICAL: ensures Windows Properties shows correct version
+            res.set("FileVersion", env!("CARGO_PKG_VERSION"));
+            res.set("ProductVersion", env!("CARGO_PKG_VERSION"));
+            if let Err(e) = res.compile() {
+                eprintln!("Warning: Failed to embed icon: {}", e);
+            }
         }
     }
 }

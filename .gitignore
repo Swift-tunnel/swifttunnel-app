@@ -20,6 +20,14 @@ roblox_settings_backup.xml
 *.exe
 .claude/
 
+# Build artifacts
+swifttunnel-windows/installer/output/
+swifttunnel-windows/releases/
+swifttunnel-windows/_velopack_staging/
+swifttunnel-windows/dist/drivers/
+swifttunnel-windows/dist/license.rtf
+swifttunnel-windows/dist/swifttunnel.ico
+
 # Documentation (private)
 CLAUDE.md
 PC-BOOSTS.md

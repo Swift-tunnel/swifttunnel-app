@@ -237,6 +237,26 @@ fn setup_panic_hook() {
 }
 
 fn main() -> eframe::Result<()> {
+    // Velopack MUST be first - it handles install/uninstall/update hooks
+    // and may terminate the process during those lifecycle events
+    velopack::VelopackApp::build()
+        .on_first_run(|version| {
+            // First launch after fresh install via Velopack
+            let _ = log::info!("First run after Velopack install: v{}", version);
+        })
+        .on_restarted(|version| {
+            // App restarted after an update was applied
+            let _ = log::info!("Restarted after update to v{}", version);
+        })
+        .on_before_uninstall_fast_callback(|_version| {
+            // Cleanup before uninstall (30 second timeout)
+            // Remove WinPkFilter driver state and firewall rules
+            vpn::split_tunnel::SplitTunnelDriver::cleanup_stale_state();
+            // Restore any modified network settings
+            vpn::emergency_tso_restore();
+        })
+        .run();
+
     // Set up panic hook FIRST, before any other initialization
     setup_panic_hook();
 

@@ -144,6 +144,9 @@ arrayvec = "0.7"
 # Discord Rich Presence for activity status
 discord-rich-presence = "0.2"
 
+# Velopack installer/updater framework (replaces WiX MSI)
+velopack = "0.0"
+
 # Test configuration
 [[test]]
 name = "vpn_tests"
@@ -168,6 +171,11 @@ path = "src/bin/ip_checker.rs"
 [[bin]]
 name = "testbench"
 path = "src/bin/testbench/main.rs"
+
+# Driver installer (runs elevated for WinpkFilter MSI install)
+[[bin]]
+name = "driver-installer"
+path = "src/bin/driver_installer.rs"
 
 
 [dev-dependencies]
