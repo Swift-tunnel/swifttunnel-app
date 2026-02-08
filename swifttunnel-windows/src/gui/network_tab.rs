@@ -33,7 +33,7 @@ impl BoosterApp {
 
         // Tab header
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(":: Network Analyzer")
+            ui.label(egui::RichText::new("Network Analyzer")
                 .size(20.0)
                 .color(TEXT_PRIMARY)
                 .strong());
@@ -43,11 +43,11 @@ impl BoosterApp {
                     .color(TEXT_MUTED));
             });
         });
-        ui.add_space(16.0);
+        ui.add_space(SPACING_MD);
 
         // Connection Stability Test section
         self.render_stability_section(ui);
-        ui.add_space(20.0);
+        ui.add_space(SPACING_LG);
 
         // Speed Test section
         self.render_speed_test_section(ui);
@@ -55,15 +55,12 @@ impl BoosterApp {
 
     /// Render the Connection Stability Test section
     pub(crate) fn render_stability_section(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::NONE
-            .fill(BG_CARD)
-            .rounding(12.0)
-            .inner_margin(egui::Margin::same(16))
+        card_frame()
             .show(ui, |ui| {
                 // Section header
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("@ Connection Stability")
-                        .size(16.0)
+                    ui.label(egui::RichText::new("Connection Stability")
+                        .size(15.0)
                         .color(TEXT_PRIMARY)
                         .strong());
 
@@ -78,9 +75,9 @@ impl BoosterApp {
                                 crate::network_analyzer::ConnectionQuality::Bad => (STATUS_ERROR, "Bad"),
                             };
                             egui::Frame::NONE
-                                .fill(badge_color.gamma_multiply(0.2))
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(8, 4))
+                                .fill(badge_color.gamma_multiply(0.15))
+                                .rounding(6.0)
+                                .inner_margin(egui::Margin::symmetric(10, 4))
                                 .show(ui, |ui| {
                                     ui.label(egui::RichText::new(badge_text)
                                         .size(11.0)
@@ -90,52 +87,69 @@ impl BoosterApp {
                         }
                     });
                 });
-                ui.add_space(12.0);
+                ui.add_space(SPACING_MD);
 
                 // Ping chart
                 self.render_ping_chart(ui);
-                ui.add_space(12.0);
+                ui.add_space(SPACING_MD);
 
                 // Stats row
                 if let Some(ref results) = self.network_analyzer_state.stability.results {
                     ui.horizontal(|ui| {
                         // Avg Ping
                         self.render_stat_box(ui, "Avg Ping", &format!("{:.0}ms", results.avg_ping), latency_color(results.avg_ping as u32));
-                        ui.add_space(8.0);
+                        ui.add_space(SPACING_SM);
                         // Jitter
                         self.render_stat_box(ui, "Jitter", &format!("{:.1}ms", results.jitter), TEXT_SECONDARY);
-                        ui.add_space(8.0);
+                        ui.add_space(SPACING_SM);
                         // Packet Loss
                         let loss_color = if results.packet_loss < 1.0 { STATUS_CONNECTED } else if results.packet_loss < 5.0 { STATUS_WARNING } else { STATUS_ERROR };
                         self.render_stat_box(ui, "Loss", &format!("{:.1}%", results.packet_loss), loss_color);
-                        ui.add_space(8.0);
+                        ui.add_space(SPACING_SM);
                         // Min/Max
                         self.render_stat_box(ui, "Min/Max", &format!("{}/{}ms", results.min_ping, results.max_ping), TEXT_MUTED);
                     });
                 } else if self.network_analyzer_state.stability.running {
                     ui.horizontal(|ui| {
                         ui.spinner();
+                        ui.add_space(SPACING_SM);
                         ui.label(egui::RichText::new(format!("Testing... {:.0}%", self.network_analyzer_state.stability.progress * 100.0))
                             .size(13.0)
                             .color(TEXT_SECONDARY));
                     });
+
+                    // Progress bar
+                    ui.add_space(SPACING_SM);
+                    let progress = self.network_analyzer_state.stability.progress;
+                    let bar_rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), egui::Sense::hover()).0;
+                    let painter = ui.painter();
+                    painter.rect_filled(bar_rect, 2.0, BG_ELEVATED);
+                    let filled_width = bar_rect.width() * progress;
+                    if filled_width > 0.0 {
+                        painter.rect_filled(
+                            egui::Rect::from_min_size(bar_rect.min, egui::vec2(filled_width, 4.0)),
+                            2.0,
+                            ACCENT_PRIMARY
+                        );
+                    }
                 }
 
-                ui.add_space(12.0);
+                ui.add_space(SPACING_MD);
 
                 // Start/Stop button
                 let is_running = self.network_analyzer_state.stability.running;
-                let button_text = if is_running { "[] Stop Test" } else { "> Start Stability Test" };
+                let button_text = if is_running { "Stop Test" } else { "Start Stability Test" };
                 let button_color = if is_running { STATUS_ERROR } else { ACCENT_PRIMARY };
 
                 let button = egui::Button::new(
                     egui::RichText::new(button_text)
-                        .size(14.0)
-                        .color(TEXT_PRIMARY)
+                        .size(13.0)
+                        .color(if is_running { TEXT_PRIMARY } else { BG_BASE })
+                        .strong()
                 )
                 .fill(button_color)
                 .rounding(8.0)
-                .min_size(egui::vec2(ui.available_width(), 38.0));
+                .min_size(egui::vec2(ui.available_width(), BUTTON_MIN_HEIGHT));
 
                 if ui.add(button).clicked() {
                     if is_running {
@@ -166,7 +180,7 @@ impl BoosterApp {
             let y = rect.max.y - (ref_ms / max_ms) * rect.height();
             painter.line_segment(
                 [egui::pos2(rect.min.x + 4.0, y), egui::pos2(rect.max.x - 4.0, y)],
-                egui::Stroke::new(1.0, BG_HOVER)
+                egui::Stroke::new(1.0, BORDER_SUBTLE)
             );
             painter.text(
                 egui::pos2(rect.min.x + 6.0, y - 8.0),
@@ -216,15 +230,9 @@ impl BoosterApp {
                         painter.circle_filled(egui::pos2(x, y), 3.0, color);
                     }
                     None => {
-                        // Packet loss - draw red X at bottom
+                        // Packet loss - draw red marker at bottom
                         let y = rect.max.y - 10.0;
-                        painter.text(
-                            egui::pos2(x, y),
-                            egui::Align2::CENTER_CENTER,
-                            "x",
-                            egui::FontId::proportional(12.0),
-                            STATUS_ERROR
-                        );
+                        painter.circle_filled(egui::pos2(x, y), 3.0, STATUS_ERROR);
                     }
                 }
             }
@@ -244,12 +252,13 @@ impl BoosterApp {
     pub(crate) fn render_stat_box(&self, ui: &mut egui::Ui, label: &str, value: &str, value_color: egui::Color32) {
         egui::Frame::NONE
             .fill(BG_ELEVATED)
-            .rounding(6.0)
-            .inner_margin(egui::Margin::symmetric(12, 8))
+            .rounding(8.0)
+            .inner_margin(egui::Margin::symmetric(14, 10))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new(label).size(10.0).color(TEXT_MUTED));
-                    ui.label(egui::RichText::new(value).size(14.0).color(value_color).strong());
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new(value).size(15.0).color(value_color).strong());
                 });
             });
     }
@@ -299,15 +308,12 @@ impl BoosterApp {
 
     /// Render the Speed Test section
     pub(crate) fn render_speed_test_section(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::NONE
-            .fill(BG_CARD)
-            .rounding(12.0)
-            .inner_margin(egui::Margin::same(16))
+        card_frame()
             .show(ui, |ui| {
                 // Section header
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("^ Speed Test")
-                        .size(16.0)
+                    ui.label(egui::RichText::new("Speed Test")
+                        .size(15.0)
                         .color(TEXT_PRIMARY)
                         .strong());
 
@@ -319,11 +325,11 @@ impl BoosterApp {
                         }
                     });
                 });
-                ui.add_space(16.0);
+                ui.add_space(SPACING_MD);
 
                 // Speed gauges
                 ui.horizontal(|ui| {
-                    let gauge_width = (ui.available_width() - 16.0) / 2.0;
+                    let gauge_width = (ui.available_width() - SPACING_MD) / 2.0;
 
                     // Download gauge
                     ui.vertical(|ui| {
@@ -331,7 +337,7 @@ impl BoosterApp {
                         self.render_speed_gauge(ui, "Download", self.network_analyzer_state.speed.download_speed, ACCENT_CYAN, true);
                     });
 
-                    ui.add_space(16.0);
+                    ui.add_space(SPACING_MD);
 
                     // Upload gauge
                     ui.vertical(|ui| {
@@ -340,19 +346,20 @@ impl BoosterApp {
                     });
                 });
 
-                ui.add_space(16.0);
+                ui.add_space(SPACING_MD);
 
                 // Phase indicator
                 if self.network_analyzer_state.speed.running {
                     let phase = &self.network_analyzer_state.speed.phase;
                     let phase_text = match phase {
-                        crate::network_analyzer::SpeedTestPhase::Download => "v Testing Download...",
-                        crate::network_analyzer::SpeedTestPhase::Upload => "^ Testing Upload...",
+                        crate::network_analyzer::SpeedTestPhase::Download => "Testing Download...",
+                        crate::network_analyzer::SpeedTestPhase::Upload => "Testing Upload...",
                         _ => "Starting...",
                     };
 
                     ui.horizontal(|ui| {
                         ui.spinner();
+                        ui.add_space(SPACING_SM);
                         ui.label(egui::RichText::new(phase_text)
                             .size(13.0)
                             .color(TEXT_SECONDARY));
@@ -360,33 +367,36 @@ impl BoosterApp {
                         // Progress bar
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let progress = self.network_analyzer_state.speed.phase_progress;
-                            let progress_rect = ui.allocate_exact_size(egui::vec2(100.0, 4.0), egui::Sense::hover()).0;
+                            let progress_rect = ui.allocate_exact_size(egui::vec2(120.0, 4.0), egui::Sense::hover()).0;
                             let painter = ui.painter();
                             painter.rect_filled(progress_rect, 2.0, BG_ELEVATED);
                             let filled_width = progress_rect.width() * progress;
-                            painter.rect_filled(
-                                egui::Rect::from_min_size(progress_rect.min, egui::vec2(filled_width, 4.0)),
-                                2.0,
-                                ACCENT_PRIMARY
-                            );
+                            if filled_width > 0.0 {
+                                painter.rect_filled(
+                                    egui::Rect::from_min_size(progress_rect.min, egui::vec2(filled_width, 4.0)),
+                                    2.0,
+                                    ACCENT_PRIMARY
+                                );
+                            }
                         });
                     });
-                    ui.add_space(8.0);
+                    ui.add_space(SPACING_SM);
                 }
 
                 // Start button
                 let is_running = self.network_analyzer_state.speed.running;
-                let button_text = if is_running { "[] Stop Test" } else { "> Start Speed Test" };
-                let button_color = if is_running { STATUS_ERROR } else { GRADIENT_CYAN_START };
+                let button_text = if is_running { "Stop Test" } else { "Start Speed Test" };
+                let button_color = if is_running { STATUS_ERROR } else { ACCENT_CYAN };
 
                 let button = egui::Button::new(
                     egui::RichText::new(button_text)
-                        .size(14.0)
-                        .color(TEXT_PRIMARY)
+                        .size(13.0)
+                        .color(if is_running { TEXT_PRIMARY } else { BG_BASE })
+                        .strong()
                 )
                 .fill(button_color)
                 .rounding(8.0)
-                .min_size(egui::vec2(ui.available_width(), 38.0));
+                .min_size(egui::vec2(ui.available_width(), BUTTON_MIN_HEIGHT));
 
                 if ui.add(button).clicked() {
                     if is_running {
@@ -398,7 +408,7 @@ impl BoosterApp {
 
                 // Last test info
                 if let Some(ref results) = self.network_analyzer_state.speed.results {
-                    ui.add_space(8.0);
+                    ui.add_space(SPACING_SM);
                     ui.label(egui::RichText::new(format!(
                         "Last test: {} ({})",
                         results.timestamp.format("%H:%M:%S"),
@@ -419,7 +429,7 @@ impl BoosterApp {
         let radius = gauge_size * 0.4;
 
         // Draw background arc
-        let arc_width = 12.0;
+        let arc_width = 10.0;
         let segments = 60;
         for i in 0..segments {
             let angle1 = std::f32::consts::PI - (i as f32 / segments as f32) * std::f32::consts::PI;
@@ -445,7 +455,7 @@ impl BoosterApp {
 
             // Gradient effect - more saturated towards the end
             let segment_ratio = i as f32 / fill_segments.max(1) as f32;
-            let segment_color = lerp_color(color.gamma_multiply(0.6), color, segment_ratio);
+            let segment_color = lerp_color(color.gamma_multiply(0.5), color, segment_ratio);
 
             painter.line_segment([p1, p2], egui::Stroke::new(arc_width, segment_color));
         }
@@ -456,23 +466,23 @@ impl BoosterApp {
             center + egui::vec2(0.0, -15.0),
             egui::Align2::CENTER_CENTER,
             &speed_text,
-            egui::FontId::proportional(24.0),
+            egui::FontId::proportional(22.0),
             TEXT_PRIMARY
         );
 
         // Draw label below
         painter.text(
-            center + egui::vec2(0.0, 10.0),
+            center + egui::vec2(0.0, 8.0),
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::proportional(12.0),
-            TEXT_SECONDARY
+            egui::FontId::proportional(11.0),
+            TEXT_MUTED
         );
 
         // Draw scale markers
         for (ratio, label) in [(0.0, "0"), (0.25, "250"), (0.5, "500"), (0.75, "750"), (1.0, "1000")] {
             let angle = std::f32::consts::PI - ratio * std::f32::consts::PI;
-            let marker_pos = center + egui::vec2(angle.cos() * (radius + 20.0), -angle.sin() * (radius + 20.0));
+            let marker_pos = center + egui::vec2(angle.cos() * (radius + 18.0), -angle.sin() * (radius + 18.0));
             painter.text(
                 marker_pos,
                 egui::Align2::CENTER_CENTER,

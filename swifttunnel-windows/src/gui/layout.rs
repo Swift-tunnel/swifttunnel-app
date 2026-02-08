@@ -1,4 +1,4 @@
-//! Layout module - ExitLag-style sidebar navigation and app structure
+//! Layout module - sidebar navigation and app structure
 
 use super::*;
 use super::theme::*;
@@ -17,10 +17,10 @@ impl NavItem {
     /// Icon character for the nav item
     pub fn icon(&self) -> &'static str {
         match self {
-            NavItem::Connect => "\u{1F310}", // 🌐 Globe
-            NavItem::Boost => "\u{26A1}",    // ⚡ Lightning
-            NavItem::Network => "\u{1F4CA}", // 📊 Chart
-            NavItem::Settings => "\u{2699}",  // ⚙ Gear
+            NavItem::Connect => "C",
+            NavItem::Boost => "B",
+            NavItem::Network => "N",
+            NavItem::Settings => "S",
         }
     }
 
@@ -267,27 +267,102 @@ impl BoosterApp {
 
             // Background
             let bg_color = if is_active {
-                ACCENT_PRIMARY.gamma_multiply(0.15)
+                ACCENT_PRIMARY.gamma_multiply(0.12)
             } else {
                 lerp_color(egui::Color32::TRANSPARENT, BG_HOVER, hover_val)
             };
 
             ui.painter().rect_filled(button_rect, 10.0, bg_color);
 
-            // Icon
+            // Icon (drawn with painter)
             let icon_color = if is_active {
                 ACCENT_PRIMARY
             } else {
                 lerp_color(TEXT_MUTED, TEXT_PRIMARY, hover_val)
             };
 
-            ui.painter().text(
-                button_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                nav_item.icon(),
-                egui::FontId::proportional(if is_active { 18.0 } else { 16.0 }),
-                icon_color
-            );
+            let icon_stroke = egui::Stroke::new(1.6, icon_color);
+            let c = button_rect.center();
+            let s = 8.0; // icon half-size
+
+            match nav_item {
+                NavItem::Connect => {
+                    // Speedometer: arc + needle
+                    let segments = 20;
+                    let start_angle = std::f32::consts::PI * 0.8;
+                    let end_angle = std::f32::consts::PI * 0.2;
+                    let sweep = std::f32::consts::TAU - (start_angle - end_angle);
+                    let r = s;
+                    let points: Vec<egui::Pos2> = (0..=segments)
+                        .map(|i| {
+                            let t = i as f32 / segments as f32;
+                            let angle = start_angle + sweep * t;
+                            egui::pos2(c.x + r * angle.cos(), c.y - r * angle.sin())
+                        })
+                        .collect();
+                    for w in points.windows(2) {
+                        ui.painter().line_segment([w[0], w[1]], icon_stroke);
+                    }
+                    // Needle pointing upper-right
+                    let needle_angle = std::f32::consts::PI * 0.65;
+                    let needle_end = egui::pos2(c.x + (s - 2.0) * needle_angle.cos(), c.y - (s - 2.0) * needle_angle.sin());
+                    ui.painter().line_segment([c, needle_end], egui::Stroke::new(2.0, icon_color));
+                    ui.painter().circle_filled(c, 2.0, icon_color);
+                }
+                NavItem::Boost => {
+                    // Lightning bolt
+                    let pts = [
+                        egui::pos2(c.x + 1.0, c.y - s),
+                        egui::pos2(c.x - 3.0, c.y + 1.0),
+                        egui::pos2(c.x + 1.0, c.y + 1.0),
+                        egui::pos2(c.x - 1.0, c.y + s),
+                        egui::pos2(c.x + 3.0, c.y - 1.0),
+                        egui::pos2(c.x - 1.0, c.y - 1.0),
+                        egui::pos2(c.x + 1.0, c.y - s),
+                    ];
+                    for w in pts.windows(2) {
+                        ui.painter().line_segment([w[0], w[1]], egui::Stroke::new(1.8, icon_color));
+                    }
+                }
+                NavItem::Network => {
+                    // Wifi: 3 arcs + dot
+                    ui.painter().circle_filled(egui::pos2(c.x, c.y + s - 2.0), 2.0, icon_color);
+                    for (i, radius) in [4.5_f32, 7.5, 10.5].iter().enumerate() {
+                        let segments = 12;
+                        let arc_center = egui::pos2(c.x, c.y + s - 2.0);
+                        let start = std::f32::consts::PI * 0.25;
+                        let end = std::f32::consts::PI * 0.75;
+                        let alpha = 1.0 - i as f32 * 0.15;
+                        let arc_stroke = egui::Stroke::new(1.6, icon_color.gamma_multiply(alpha));
+                        let points: Vec<egui::Pos2> = (0..=segments)
+                            .map(|j| {
+                                let t = j as f32 / segments as f32;
+                                let angle = start + (end - start) * t;
+                                egui::pos2(
+                                    arc_center.x + radius * angle.cos(),
+                                    arc_center.y - radius * angle.sin(),
+                                )
+                            })
+                            .collect();
+                        for w in points.windows(2) {
+                            ui.painter().line_segment([w[0], w[1]], arc_stroke);
+                        }
+                    }
+                }
+                NavItem::Settings => {
+                    // Gear: circle with notches
+                    let r_outer = s;
+                    let r_inner = s * 0.55;
+                    ui.painter().circle_stroke(c, r_inner, icon_stroke);
+                    let teeth = 6;
+                    for i in 0..teeth {
+                        let angle = (i as f32 / teeth as f32) * std::f32::consts::TAU;
+                        let inner_pt = egui::pos2(c.x + r_inner * angle.cos(), c.y + r_inner * angle.sin());
+                        let outer_pt = egui::pos2(c.x + r_outer * angle.cos(), c.y + r_outer * angle.sin());
+                        ui.painter().line_segment([inner_pt, outer_pt], egui::Stroke::new(2.5, icon_color));
+                    }
+                }
+            }
 
             // Tooltip on hover
             if is_hovered {
@@ -327,21 +402,22 @@ impl BoosterApp {
                 ui.set_max_height(TOP_BAR_HEIGHT);
 
                 ui.horizontal(|ui| {
-                    ui.add_space(CONTENT_PADDING);
+                    ui.add_space(SPACING_MD);
 
-                    // Connection toggle (large ON/OFF button)
+                    // Connection toggle
                     self.render_connection_toggle(ui);
 
-                    // App name
-                    ui.add_space(SPACING_MD);
+                    ui.add_space(SPACING_SM);
+
+                    // App name - compact
                     ui.vertical(|ui| {
-                        ui.add_space(8.0);
+                        ui.add_space(10.0);
                         ui.label(egui::RichText::new("SwiftTunnel")
-                            .size(18.0)
+                            .size(16.0)
                             .color(TEXT_PRIMARY)
                             .strong());
                         ui.label(egui::RichText::new("Game Booster")
-                            .size(11.0)
+                            .size(10.0)
                             .color(TEXT_DIMMED));
                     });
 
@@ -349,28 +425,22 @@ impl BoosterApp {
                     if self.state.optimizations_active {
                         let active_count = self.count_active_boosts();
                         if active_count > 0 {
-                            ui.add_space(SPACING_MD);
+                            ui.add_space(SPACING_SM);
                             egui::Frame::NONE
-                                .fill(ACCENT_PRIMARY.gamma_multiply(0.12))
-                                .stroke(egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.2)))
-                                .rounding(12.0)
-                                .inner_margin(egui::Margin::symmetric(10, 4))
+                                .fill(ACCENT_PRIMARY.gamma_multiply(0.08))
+                                .stroke(egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.15)))
+                                .rounding(10.0)
+                                .inner_margin(egui::Margin::symmetric(8, 3))
                                 .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(">")
-                                            .size(10.0)
-                                            .color(ACCENT_PRIMARY));
-                                        ui.add_space(2.0);
-                                        ui.label(egui::RichText::new(format!("{} boosts", active_count))
-                                            .size(11.0)
-                                            .color(ACCENT_PRIMARY));
-                                    });
+                                    ui.label(egui::RichText::new(format!("{} boosts", active_count))
+                                        .size(10.0)
+                                        .color(ACCENT_PRIMARY));
                                 });
                         }
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(CONTENT_PADDING);
+                        ui.add_space(SPACING_MD);
 
                         // User info (if available)
                         if let Some(ref user) = self.user_info {
@@ -378,7 +448,7 @@ impl BoosterApp {
                         }
 
                         // Status indicator
-                        ui.add_space(SPACING_MD);
+                        ui.add_space(SPACING_SM);
                         self.render_status_badge(ui);
                     });
                 });
@@ -390,54 +460,49 @@ impl BoosterApp {
         let is_connected = self.vpn_state.is_connected();
         let is_connecting = self.vpn_state.is_connecting() || self.connecting_initiated.is_some();
 
-        let toggle_size = egui::vec2(100.0, 40.0);
+        let toggle_size = egui::vec2(88.0, 36.0);
         let (rect, response) = ui.allocate_exact_size(toggle_size, egui::Sense::click());
 
         let is_hovered = response.hovered();
 
         // Determine state and colors
-        let (label, bg_color, glow_color) = if is_connected {
-            ("ON", STATUS_CONNECTED, STATUS_CONNECTED_GLOW)
+        let (label, bg_color) = if is_connected {
+            ("ON", STATUS_CONNECTED)
         } else if is_connecting {
-            ("...", STATUS_WARNING, STATUS_WARNING)
+            ("...", STATUS_WARNING)
         } else {
-            ("OFF", BG_ELEVATED, BG_HOVER)
+            ("OFF", BG_ELEVATED)
         };
 
         let bg = if is_hovered && !is_connecting {
-            lighten(bg_color, 0.1)
+            lighten(bg_color, 0.08)
         } else {
             bg_color
         };
 
-        // Draw glow effect when connected
+        // Subtle glow when connected
         if is_connected {
-            let elapsed = self.app_start_time.elapsed().as_secs_f32();
-            let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
-            let glow_alpha = 0.15 + pulse * 0.1;
-
-            // Outer glow
             ui.painter().rect_filled(
-                rect.expand(3.0),
-                14.0,
-                glow_color.gamma_multiply(glow_alpha)
+                rect.expand(2.0),
+                10.0,
+                STATUS_CONNECTED.gamma_multiply(0.1)
             );
         }
 
         // Main button
-        ui.painter().rect_filled(rect, 12.0, bg);
+        ui.painter().rect_filled(rect, 8.0, bg);
 
         // Border
         let border_color = if is_connected {
-            STATUS_CONNECTED.gamma_multiply(0.5)
+            STATUS_CONNECTED.gamma_multiply(0.3)
         } else if is_connecting {
-            STATUS_WARNING.gamma_multiply(0.5)
+            STATUS_WARNING.gamma_multiply(0.3)
         } else if is_hovered {
             BORDER_HOVER
         } else {
             BORDER_SUBTLE
         };
-        ui.painter().rect(rect, 12.0, egui::Color32::TRANSPARENT, egui::Stroke::new(1.0, border_color), egui::StrokeKind::Middle);
+        ui.painter().rect(rect, 8.0, egui::Color32::TRANSPARENT, egui::Stroke::new(1.0, border_color), egui::StrokeKind::Middle);
 
         // Label
         let text_color = if is_connected || is_connecting {
@@ -450,7 +515,7 @@ impl BoosterApp {
             rect.center(),
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::proportional(16.0),
+            egui::FontId::proportional(14.0),
             text_color
         );
 
@@ -468,20 +533,20 @@ impl BoosterApp {
     fn render_user_badge(&self, ui: &mut egui::Ui, user: &crate::auth::UserInfo) {
         egui::Frame::NONE
             .fill(BG_ELEVATED)
-            .rounding(20.0)
-            .inner_margin(egui::Margin::symmetric(10, 4))
+            .rounding(16.0)
+            .inner_margin(egui::Margin::symmetric(8, 3))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
 
                     // User icon
-                    let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
-                    ui.painter().circle_filled(icon_rect.center(), 10.0, ACCENT_SECONDARY.gamma_multiply(0.3));
+                    let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                    ui.painter().circle_filled(icon_rect.center(), 9.0, ACCENT_SECONDARY.gamma_multiply(0.2));
                     ui.painter().text(
                         icon_rect.center(),
                         egui::Align2::CENTER_CENTER,
                         user.email.chars().next().unwrap_or('U').to_uppercase().to_string(),
-                        egui::FontId::proportional(10.0),
+                        egui::FontId::proportional(9.0),
                         ACCENT_SECONDARY
                     );
 
@@ -512,43 +577,34 @@ impl BoosterApp {
         };
 
         egui::Frame::NONE
-            .fill(status_color.gamma_multiply(0.12))
-            .stroke(egui::Stroke::new(1.0, status_color.gamma_multiply(0.25)))
-            .rounding(14.0)
-            .inner_margin(egui::Margin::symmetric(12, 6))
+            .fill(status_color.gamma_multiply(0.08))
+            .stroke(egui::Stroke::new(1.0, status_color.gamma_multiply(0.15)))
+            .rounding(12.0)
+            .inner_margin(egui::Margin::symmetric(10, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.x = 5.0;
 
-                    // Animated indicator dot
-                    let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-
-                    if is_connected {
-                        // Pulse animation
-                        let elapsed = self.app_start_time.elapsed().as_secs_f32();
-                        let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
-                        let glow_radius = 3.0 + pulse * 2.0;
-                        ui.painter().circle_filled(dot_rect.center(), glow_radius, status_color.gamma_multiply(0.4));
-                    }
-
+                    // Status dot
+                    let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
                     ui.painter().circle_filled(dot_rect.center(), 3.0, status_color);
 
                     ui.label(egui::RichText::new(status_text)
-                        .size(11.0)
+                        .size(10.0)
                         .color(status_color)
                         .strong());
                 });
             });
     }
 
-    /// Render decorative header banner (ExitLag-style)
+    /// Render clean header banner with page title
     fn render_header_banner(&self, ui: &mut egui::Ui) {
         let banner_width = ui.available_width();
         let (banner_rect, _) = ui.allocate_exact_size(egui::vec2(banner_width, HEADER_BANNER_HEIGHT), egui::Sense::hover());
 
         let painter = ui.painter_at(banner_rect);
 
-        // Gradient background
+        // Subtle gradient background
         for y in 0..HEADER_BANNER_HEIGHT as i32 {
             let t = y as f32 / HEADER_BANNER_HEIGHT;
             let color = lerp_color(GRADIENT_BANNER_START, GRADIENT_BANNER_END, t);
@@ -559,62 +615,37 @@ impl BoosterApp {
             );
         }
 
-        // Decorative geometric shapes (like ExitLag's phone/device graphic)
-        let elapsed = self.app_start_time.elapsed().as_secs_f32();
-
-        // Animated gradient line at top
-        let line_y = banner_rect.min.y + 2.0;
-        let line_width = banner_width * 0.6;
-        let line_offset = ((elapsed * 0.3).sin() + 1.0) / 2.0 * (banner_width - line_width);
-
-        // Draw gradient accent line
-        for x in 0..line_width as i32 {
-            let t = x as f32 / line_width;
-            let color = lerp_color(GRADIENT_ACCENT_START, GRADIENT_ACCENT_END, t);
-            let alpha = if t < 0.1 || t > 0.9 {
-                (t.min(1.0 - t) * 10.0).min(1.0) * 0.6
-            } else {
-                0.6
-            };
-            painter.vline(
-                banner_rect.min.x + line_offset + x as f32,
-                line_y..=line_y + 2.0,
-                egui::Stroke::new(1.0, color.gamma_multiply(alpha))
-            );
-        }
-
-        // Abstract tech pattern in top-right
-        let pattern_x = banner_rect.max.x - 200.0;
-        let pattern_y = banner_rect.min.y + 20.0;
-
-        // Floating rectangles with glow
-        for i in 0..5 {
-            let offset = (elapsed * 0.5 + i as f32 * 0.7).sin() * 8.0;
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(pattern_x + i as f32 * 35.0 + offset, pattern_y + (i as f32 * 15.0).sin() * 10.0),
-                egui::vec2(25.0, 45.0 - i as f32 * 5.0)
-            );
-
-            let alpha = 0.05 + (i as f32 * 0.02);
-            painter.rect_filled(rect, 4.0, ACCENT_PRIMARY.gamma_multiply(alpha));
-            painter.rect(rect, 4.0, egui::Color32::TRANSPARENT, egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(alpha * 1.5)), egui::StrokeKind::Middle);
-        }
-
-        // Page title overlay
-        let title = match self.current_tab {
-            Tab::Connect => "Connect",
-            Tab::Boost => "FPS Boost",
-            Tab::Network => "Network",
-            Tab::Settings => "Settings",
+        // Page title and subtitle
+        let (title, subtitle) = match self.current_tab {
+            Tab::Connect => ("Connect", "VPN tunnel"),
+            Tab::Boost => ("FPS Boost", "System optimization"),
+            Tab::Network => ("Network", "Connection analysis"),
+            Tab::Settings => ("Settings", "Preferences"),
         };
 
-        // Title - no extra padding since banner is inside padded frame
+        // Title
         painter.text(
-            egui::pos2(banner_rect.min.x + 4.0, banner_rect.max.y - 30.0),
+            egui::pos2(banner_rect.min.x + 4.0, banner_rect.center().y - 6.0),
             egui::Align2::LEFT_CENTER,
             title,
-            egui::FontId::proportional(28.0),
+            egui::FontId::proportional(22.0),
             TEXT_PRIMARY
         );
+
+        // Subtitle
+        painter.text(
+            egui::pos2(banner_rect.min.x + 4.0, banner_rect.center().y + 14.0),
+            egui::Align2::LEFT_CENTER,
+            subtitle,
+            egui::FontId::proportional(11.0),
+            TEXT_DIMMED
+        );
+
+        // Accent underline bar
+        let underline_rect = egui::Rect::from_min_size(
+            egui::pos2(banner_rect.min.x, banner_rect.max.y - 2.0),
+            egui::vec2(48.0, 2.0)
+        );
+        painter.rect_filled(underline_rect, 1.0, ACCENT_PRIMARY.gamma_multiply(0.5));
     }
 }

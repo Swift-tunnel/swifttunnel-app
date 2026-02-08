@@ -18,9 +18,9 @@ pub enum BoostCategory {
 impl BoostCategory {
     pub fn icon(&self) -> &'static str {
         match self {
-            BoostCategory::System => ">",
-            BoostCategory::Network => "o",
-            BoostCategory::Roblox => "*",
+            BoostCategory::System => "SYS",
+            BoostCategory::Network => "NET",
+            BoostCategory::Roblox => "GFX",
         }
     }
 
@@ -56,7 +56,7 @@ const BOOST_HIGH_PRIORITY: BoostConfig = BoostConfig {
     id: "high_priority",
     name: "High Priority",
     description: "Sets game to high CPU priority",
-    icon: "^",
+    icon: "CPU",
     impact: "+5-15% FPS",
     category: BoostCategory::System,
 };
@@ -65,7 +65,7 @@ const BOOST_TIMER_RESOLUTION: BoostConfig = BoostConfig {
     id: "timer_resolution",
     name: "1ms Timer",
     description: "Smoother frame pacing",
-    icon: "[t]",
+    icon: "TMR",
     impact: "Lower input lag",
     category: BoostCategory::System,
 };
@@ -74,7 +74,7 @@ const BOOST_MMCSS: BoostConfig = BoostConfig {
     id: "mmcss",
     name: "MMCSS Profile",
     description: "Gaming thread priority",
-    icon: ":::",
+    icon: "THD",
     impact: "Better scheduling",
     category: BoostCategory::System,
 };
@@ -83,7 +83,7 @@ const BOOST_GAME_MODE: BoostConfig = BoostConfig {
     id: "game_mode",
     name: "Game Mode",
     description: "Windows gaming optimizations",
-    icon: ">",
+    icon: "WIN",
     impact: "Fewer interrupts",
     category: BoostCategory::System,
 };
@@ -92,7 +92,7 @@ const BOOST_DISABLE_NAGLE: BoostConfig = BoostConfig {
     id: "disable_nagle",
     name: "Disable Nagle",
     description: "Send packets immediately",
-    icon: "->",
+    icon: "PKT",
     impact: "-5-20ms latency",
     category: BoostCategory::Network,
 };
@@ -101,7 +101,7 @@ const BOOST_NETWORK_THROTTLING: BoostConfig = BoostConfig {
     id: "network_throttling",
     name: "No Throttling",
     description: "Remove network limits",
-    icon: "=",
+    icon: "BW",
     impact: "Consistent speed",
     category: BoostCategory::Network,
 };
@@ -110,7 +110,7 @@ const BOOST_OPTIMIZE_MTU: BoostConfig = BoostConfig {
     id: "optimize_mtu",
     name: "Optimize MTU",
     description: "Reduce packet fragmentation",
-    icon: "#",
+    icon: "MTU",
     impact: "Fewer retries",
     category: BoostCategory::Network,
 };
@@ -187,7 +187,6 @@ impl BoosterApp {
                         let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
                         ui.painter().circle_filled(center, 16.0 + pulse * 3.0, status_color.gamma_multiply(0.2));
                         ui.painter().circle_filled(center, 14.0, status_color);
-                        ui.painter().text(center, egui::Align2::CENTER_CENTER, ">", egui::FontId::proportional(14.0), TEXT_PRIMARY);
                     } else {
                         ui.painter().circle_filled(center, 14.0, BG_ELEVATED);
                         ui.painter().circle_stroke(center, 14.0, egui::Stroke::new(1.5, status_color));
@@ -275,10 +274,10 @@ impl BoosterApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
 
-            for (profile, label, icon, desc) in [
-                (OptimizationProfile::LowEnd, "Performance", ">", "Max FPS"),
-                (OptimizationProfile::Balanced, "Balanced", "=", "FPS + Quality"),
-                (OptimizationProfile::HighEnd, "Quality", "*", "Best Visuals"),
+            for (profile, label, desc) in [
+                (OptimizationProfile::LowEnd, "Performance", "Max FPS"),
+                (OptimizationProfile::Balanced, "Balanced", "FPS + Quality"),
+                (OptimizationProfile::HighEnd, "Quality", "Best Visuals"),
             ] {
                 let is_selected = self.selected_profile == profile;
                 let card_id = format!("preset_{:?}", profile);
@@ -306,12 +305,9 @@ impl BoosterApp {
                         ui.set_max_width(btn_width - 16.0);
 
                         ui.vertical_centered(|ui| {
-                            let icon_color = if is_selected { TEXT_PRIMARY } else { ACCENT_PRIMARY };
-                            ui.label(egui::RichText::new(icon).size(18.0).color(icon_color));
-                            ui.add_space(4.0);
-
                             let text_color = if is_selected { TEXT_PRIMARY } else { TEXT_SECONDARY };
                             ui.label(egui::RichText::new(label).size(13.0).color(text_color).strong());
+                            ui.add_space(2.0);
 
                             let desc_color = if is_selected { TEXT_PRIMARY.gamma_multiply(0.8) } else { TEXT_MUTED };
                             ui.label(egui::RichText::new(desc).size(10.0).color(desc_color));
@@ -344,8 +340,6 @@ impl BoosterApp {
             .show(ui, |ui| {
                 // Header
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("*").size(16.0).color(ACCENT_CYAN));
-                    ui.add_space(6.0);
                     ui.label(egui::RichText::new("Roblox Settings").size(14.0).color(TEXT_PRIMARY).strong());
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -355,7 +349,7 @@ impl BoosterApp {
                             .rounding(8.0)
                             .inner_margin(egui::Margin::symmetric(8, 3))
                             .show(ui, |ui| {
-                                ui.label(egui::RichText::new("+ Protected")
+                                ui.label(egui::RichText::new("Protected")
                                     .size(10.0)
                                     .color(STATUS_CONNECTED));
                             });
@@ -375,7 +369,7 @@ impl BoosterApp {
                         // Uncapped toggle
                         let mut uncapped = is_uncapped;
                         if ui.add(
-                            egui::Button::new(egui::RichText::new(if uncapped { "~ Uncapped" } else { "Uncapped" }).size(11.0).color(if uncapped { TEXT_PRIMARY } else { TEXT_SECONDARY }))
+                            egui::Button::new(egui::RichText::new(if uncapped { "Uncapped" } else { "Uncapped" }).size(11.0).color(if uncapped { TEXT_PRIMARY } else { TEXT_SECONDARY }))
                                 .fill(if uncapped { ACCENT_PRIMARY } else { BG_ELEVATED })
                                 .rounding(6.0)
                                 .min_size(egui::vec2(80.0, 28.0))
@@ -473,7 +467,6 @@ impl BoosterApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Dynamic Render").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(8.0);
-                    // "Hidden feature" badge to draw attention
                     egui::Frame::NONE
                         .fill(ACCENT_LIME.gamma_multiply(0.15))
                         .rounding(4.0)
@@ -526,7 +519,7 @@ impl BoosterApp {
                                     .color(if is_sel { ACCENT_LIME } else { TEXT_MUTED }));
                             } else {
                                 ui.add_space(2.0);
-                                ui.label(egui::RichText::new("—").size(9.0).color(TEXT_MUTED));
+                                ui.label(egui::RichText::new("--").size(9.0).color(TEXT_MUTED));
                             }
                         });
                         ui.add_space(4.0);
@@ -539,7 +532,15 @@ impl BoosterApp {
     fn render_boost_category_grid(&mut self, ui: &mut egui::Ui, category: BoostCategory, boosts: &[&BoostConfig]) {
         // Section header
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(category.icon()).size(14.0).color(ACCENT_PRIMARY));
+            // Category label badge instead of ASCII icon
+            egui::Frame::NONE
+                .fill(ACCENT_PRIMARY.gamma_multiply(0.12))
+                .rounding(4.0)
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(category.icon())
+                        .size(9.0).color(ACCENT_PRIMARY).strong());
+                });
             ui.add_space(4.0);
             ui.label(egui::RichText::new(category.title()).size(12.0).color(TEXT_PRIMARY).strong());
 
@@ -589,16 +590,16 @@ impl BoosterApp {
                 // Use full available width for single column layout
 
                 ui.horizontal(|ui| {
-                    // Icon - use blue accent when enabled
+                    // Short text label instead of ASCII icon
                     let icon_bg = if is_enabled { ACCENT_PRIMARY.gamma_multiply(0.15) } else { BG_ELEVATED };
                     let icon_color = if is_enabled { ACCENT_PRIMARY } else { TEXT_MUTED };
 
                     egui::Frame::NONE
                         .fill(icon_bg)
-                        .rounding(8.0)
-                        .inner_margin(egui::Margin::same(8))
+                        .rounding(6.0)
+                        .inner_margin(egui::Margin::symmetric(8, 8))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new(boost.icon).size(14.0).color(icon_color));
+                            ui.label(egui::RichText::new(boost.icon).size(10.0).color(icon_color).strong());
                         });
 
                     ui.add_space(SPACING_SM);
@@ -640,12 +641,17 @@ impl BoosterApp {
                     });
                 });
 
-                // Impact badge - blue accent when enabled
+                // Impact badge
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let impact_color = if is_enabled { ACCENT_PRIMARY } else { TEXT_DIMMED };
-                    ui.label(egui::RichText::new("+").size(9.0).color(impact_color));
-                    ui.label(egui::RichText::new(boost.impact).size(9.0).color(impact_color));
+                    egui::Frame::NONE
+                        .fill(impact_color.gamma_multiply(0.08))
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(boost.impact).size(9.0).color(impact_color));
+                        });
                 });
             });
 
@@ -695,8 +701,6 @@ impl BoosterApp {
         card_frame()
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_SECONDARY));
-                    ui.add_space(4.0);
                     ui.label(egui::RichText::new("System Protection").size(13.0).color(TEXT_PRIMARY).strong());
                 });
                 ui.add_space(4.0);
@@ -706,7 +710,7 @@ impl BoosterApp {
 
                 ui.horizontal(|ui| {
                     if ui.add(
-                        egui::Button::new(egui::RichText::new("+ Create Restore Point").size(12.0).color(TEXT_PRIMARY))
+                        egui::Button::new(egui::RichText::new("Create Restore Point").size(12.0).color(TEXT_PRIMARY))
                             .fill(ACCENT_PRIMARY)
                             .rounding(8.0)
                             .min_size(egui::vec2(160.0, 36.0))
@@ -736,14 +740,14 @@ impl BoosterApp {
             match SystemOptimizer::create_restore_point("SwiftTunnel - Before PC Boosts") {
                 Ok(desc) => {
                     self.restore_point_status = Some((
-                        format!("+ Restore point created: {}", desc),
+                        format!("Restore point created: {}", desc),
                         STATUS_CONNECTED,
                         std::time::Instant::now()
                     ));
                 }
                 Err(e) => {
                     self.restore_point_status = Some((
-                        format!("x Failed: {}", e),
+                        format!("Failed: {}", e),
                         STATUS_ERROR,
                         std::time::Instant::now()
                     ));
@@ -754,7 +758,7 @@ impl BoosterApp {
         if open_restore {
             if let Err(e) = SystemOptimizer::open_system_restore() {
                 self.restore_point_status = Some((
-                    format!("x Failed to open: {}", e),
+                    format!("Failed to open: {}", e),
                     STATUS_ERROR,
                     std::time::Instant::now()
                 ));
