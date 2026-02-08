@@ -104,6 +104,8 @@ pub struct VpnConnection {
     process_monitor_stop: Arc<AtomicBool>,
     /// ETW process watcher for instant game detection
     etw_watcher: Option<ProcessWatcher>,
+    /// Auto-router for automatic relay switching based on game server region
+    auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
 }
 
 impl VpnConnection {
@@ -114,6 +116,7 @@ impl VpnConnection {
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
             etw_watcher: None,
+            auto_router: None,
         }
     }
 
@@ -167,6 +170,11 @@ impl VpnConnection {
                 driver.clear_detected_game_servers();
             }
         }
+    }
+
+    /// Get the auto-router for GUI display or external access
+    pub fn auto_router(&self) -> Option<&Arc<super::auto_routing::AutoRouter>> {
+        self.auto_router.as_ref()
     }
 
     async fn set_state(&self, state: ConnectionState) {
@@ -385,6 +393,13 @@ impl VpnConnection {
         driver.set_relay_context(relay);
         log::info!("V3: UDP relay context set");
 
+        // Set up auto-routing
+        let auto_router = Arc::new(super::auto_routing::AutoRouter::new(true, &config.region));
+        auto_router.set_current_relay(relay_addr, &config.region);
+        driver.set_auto_router(Arc::clone(&auto_router));
+        self.auto_router = Some(Arc::clone(&auto_router));
+        log::info!("V3: Auto-router initialized for region {}", config.region);
+
         // Configure split tunnel driver
         // tunnel_interface_luid = 0 (no Wintun), tunnel_ip = internet_ip (no NAT needed for UDP relay)
         let split_config = SplitTunnelConfig::new(
@@ -577,6 +592,12 @@ impl VpnConnection {
 
         // Cleanup WFP block filters
         super::wfp_block::cleanup();
+
+        // Reset auto-router
+        if let Some(ref auto_router) = self.auto_router {
+            auto_router.reset();
+        }
+        self.auto_router = None;
 
         // Clear split tunnel
         if let Some(ref driver) = self.split_tunnel {

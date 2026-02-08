@@ -288,6 +288,8 @@ pub struct ParallelInterceptor {
     /// Flag to trigger immediate cache refresh (set by ETW when game process detected)
     /// This enables instant detection without polling - ExitLag-style efficiency
     refresh_now_flag: Arc<AtomicBool>,
+    /// Auto-router for automatic relay switching based on game server region
+    auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
 }
 
 impl ParallelInterceptor {
@@ -337,6 +339,7 @@ impl ParallelInterceptor {
             inbound_receiver_handle: None,
             detected_game_servers: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
             refresh_now_flag: Arc::new(AtomicBool::new(false)),
+            auto_router: None,
         }
     }
 
@@ -460,6 +463,11 @@ impl ParallelInterceptor {
     /// Get the current relay address (for auto-routing comparison)
     pub fn current_relay_addr(&self) -> Option<std::net::SocketAddr> {
         self.relay_ctx.as_ref().map(|r| r.relay_addr())
+    }
+
+    /// Set the auto-router for automatic relay switching based on game server region
+    pub fn set_auto_router(&mut self, router: Arc<super::auto_routing::AutoRouter>) {
+        self.auto_router = Some(router);
     }
 
     /// Set inbound handler for decrypted packets
@@ -1152,6 +1160,7 @@ impl ParallelInterceptor {
             let vpn_encrypt_ctx = self.vpn_encrypt_ctx.clone();
             let relay_ctx = self.relay_ctx.clone();
             let detected_game_servers = Arc::clone(&self.detected_game_servers);
+            let auto_router = self.auto_router.clone();
 
             let handle = thread::spawn(move || {
                 // Set CPU affinity for this worker
@@ -1170,6 +1179,7 @@ impl ParallelInterceptor {
                     vpn_encrypt_ctx,
                     relay_ctx,
                     detected_game_servers,
+                    auto_router,
                 );
             });
 
@@ -2372,6 +2382,7 @@ fn run_packet_worker(
     vpn_encrypt_ctx: Option<VpnEncryptContext>,
     relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
+    auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
 ) {
     log::info!("Worker {} started", worker_id);
 
@@ -2547,6 +2558,22 @@ fn run_packet_worker(
                         if let Some(mut servers) = detected_game_servers.try_write() {
                             if servers.insert(dst_ip) {
                                 log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+                            }
+                        }
+
+                        // === AUTO ROUTING ===
+                        if let Some(ref auto_router) = auto_router {
+                            match auto_router.evaluate_game_server(dst_ip) {
+                                super::auto_routing::AutoRoutingAction::SwitchRelay { new_addr, new_region, game_region } => {
+                                    if let Some(ref relay) = relay_ctx {
+                                        relay.switch_relay(new_addr);
+                                        log::info!(
+                                            "Auto-routing: Worker {} switched relay to {} ({}) for game region {}",
+                                            worker_id, new_addr, new_region, game_region
+                                        );
+                                    }
+                                }
+                                super::auto_routing::AutoRoutingAction::NoAction => {}
                             }
                         }
                     }

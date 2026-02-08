@@ -175,7 +175,7 @@ impl AutoRouter {
         let current_st_region = self.current_st_region.read().clone();
 
         // Check if we're already on the best region
-        if current_st_region.starts_with(best_st_region) {
+        if current_st_region == best_st_region || current_st_region.starts_with(&format!("{}-", best_st_region)) {
             // Already on an optimal server (e.g. "singapore-02" starts with "singapore")
             *self.current_game_region.write() = Some(game_region);
             *self.pending_region_change.write() = None;
@@ -185,7 +185,7 @@ impl AutoRouter {
         // Find the best server in the target region
         let servers = self.available_servers.read();
         let best_server = servers.iter()
-            .find(|(region, _)| region.starts_with(best_st_region));
+            .find(|(region, _)| region == best_st_region || region.starts_with(&format!("{}-", best_st_region)));
 
         if let Some((new_region, new_addr)) = best_server {
             let new_region = new_region.clone();
@@ -353,5 +353,29 @@ mod tests {
         // Non-Roblox IP should never trigger switch
         let action = router.evaluate_game_server(Ipv4Addr::new(8, 8, 8, 8));
         assert!(matches!(action, AutoRoutingAction::NoAction));
+    }
+
+    #[test]
+    fn test_region_matching_no_false_prefix_matches() {
+        // Verifies that region matching requires an exact match or a "-" delimiter,
+        // so "americano" does NOT match "america" but "america-01" does.
+        let region = "america";
+
+        let matches_region = |candidate: &str| -> bool {
+            candidate == region || candidate.starts_with(&format!("{}-", region))
+        };
+
+        // Exact match
+        assert!(matches_region("america"));
+        // Hyphenated sub-region should match
+        assert!(matches_region("america-01"));
+        assert!(matches_region("america-west"));
+        // False prefix that is NOT the same region
+        assert!(!matches_region("americano"));
+        assert!(!matches_region("americas"));
+        assert!(!matches_region("american"));
+        // Completely different region
+        assert!(!matches_region("singapore"));
+        assert!(!matches_region("tokyo-02"));
     }
 }

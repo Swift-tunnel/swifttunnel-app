@@ -263,6 +263,19 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Set the auto-router for automatic relay switching based on game server region
+    pub fn set_auto_router(&mut self, router: std::sync::Arc<super::auto_routing::AutoRouter>) {
+        if self.use_parallel {
+            if let Some(ref mut interceptor) = self.parallel_interceptor {
+                interceptor.set_auto_router(router);
+            } else {
+                log::warn!("Cannot set auto router: parallel interceptor not created yet");
+            }
+        } else {
+            log::info!("Auto router not used in legacy mode");
+        }
+    }
+
     /// Set the V3 UDP relay context for unencrypted game traffic relay
     ///
     /// This enables lowest-latency mode: workers forward packets directly to relay
