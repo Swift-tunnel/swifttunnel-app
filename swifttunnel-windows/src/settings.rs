@@ -106,9 +106,16 @@ pub struct AppSettings {
     /// Enable Discord Rich Presence (show VPN status in Discord)
     #[serde(default = "default_discord_rpc")]
     pub enable_discord_rpc: bool,
+    /// Enable auto-routing: automatically switch relay server when game server region changes
+    #[serde(default = "default_auto_routing")]
+    pub auto_routing_enabled: bool,
 }
 
 fn default_discord_rpc() -> bool {
+    true // Enabled by default
+}
+
+fn default_auto_routing() -> bool {
     true // Enabled by default
 }
 
@@ -150,6 +157,7 @@ impl Default for AppSettings {
             _routing_mode: serde_json::Value::Null,
             custom_relay_server: String::new(),
             enable_discord_rpc: default_discord_rpc(),
+            auto_routing_enabled: default_auto_routing(),
         }
     }
 }
@@ -258,6 +266,14 @@ mod tests {
         assert!(loaded.optimizations_active);
         assert_eq!(loaded.selected_region, "tokyo");
         assert_eq!(loaded.selected_server, "tokyo-02");
+    }
+
+    #[test]
+    fn test_settings_auto_routing_default() {
+        // Settings without auto_routing_enabled should default to true
+        let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
+        let loaded: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(loaded.auto_routing_enabled);
     }
 
     #[test]

@@ -594,6 +594,70 @@ impl VpnConnection {
         self.config.as_ref()
     }
 
+    /// Switch relay server without disconnecting (Auto Routing).
+    ///
+    /// This atomically swaps the relay address used by all packet workers.
+    /// The split tunnel (ndisapi), process cache, and all worker threads
+    /// stay running. Only the relay destination changes.
+    ///
+    /// Returns Ok(()) if the switch was successful.
+    pub async fn switch_server(
+        &self,
+        new_relay_addr: std::net::SocketAddr,
+        new_region: &str,
+    ) -> VpnResult<()> {
+        // Must be connected
+        {
+            let state = self.state.lock().await;
+            if !state.is_connected() {
+                return Err(VpnError::Connection("Not connected - cannot switch server".to_string()));
+            }
+        }
+
+        // Switch the relay via the split tunnel driver
+        let switched = if let Some(ref st) = self.split_tunnel {
+            match st.try_lock() {
+                Ok(driver) => driver.switch_relay_addr(new_relay_addr),
+                Err(_) => {
+                    return Err(VpnError::Connection("Split tunnel locked - try again".to_string()));
+                }
+            }
+        } else {
+            return Err(VpnError::Connection("No split tunnel active".to_string()));
+        };
+
+        if !switched {
+            return Err(VpnError::Connection("Failed to switch relay address".to_string()));
+        }
+
+        // Update connection state with new server info
+        {
+            let mut state = self.state.lock().await;
+            if let ConnectionState::Connected {
+                ref mut server_region,
+                ref mut server_endpoint,
+                ..
+            } = *state {
+                *server_region = new_region.to_string();
+                *server_endpoint = new_relay_addr.to_string();
+            }
+        }
+
+        log::info!(
+            "Auto-routing: Switched relay to {} ({})",
+            new_relay_addr, new_region
+        );
+
+        Ok(())
+    }
+
+    /// Get the current relay address for auto-routing comparison
+    pub fn current_relay_addr(&self) -> Option<std::net::SocketAddr> {
+        self.split_tunnel.as_ref().and_then(|st| {
+            st.try_lock().ok().and_then(|driver| driver.current_relay_addr())
+        })
+    }
+
     pub fn is_split_tunnel_active(&self) -> bool {
         self.split_tunnel.is_some()
     }

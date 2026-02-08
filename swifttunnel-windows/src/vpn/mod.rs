@@ -38,6 +38,7 @@ pub mod servers;
 pub mod error_messages;
 pub mod udp_relay;
 pub mod tso_recovery;
+pub mod auto_routing;
 
 pub use config::{fetch_vpn_config, update_latency, VpnConfigRequest};
 pub use tso_recovery::{recover_tso_on_startup, emergency_tso_restore};
@@ -56,6 +57,7 @@ pub use servers::{
     load_server_list, ServerListSource,
 };
 pub use error_messages::{user_friendly_error, short_error};
+pub use auto_routing::{AutoRouter, AutoRoutingAction, AutoRoutingEvent};
 
 /// VPN-related errors
 #[derive(Debug, thiserror::Error)]

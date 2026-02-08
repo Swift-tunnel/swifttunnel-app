@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use anyhow::{Result, Context};
+use arc_swap::ArcSwap;
 
 /// Session ID length in bytes
 const SESSION_ID_LEN: usize = 8;
@@ -34,8 +35,8 @@ const READ_TIMEOUT: Duration = Duration::from_micros(100);
 pub struct UdpRelay {
     /// Socket for communicating with relay server
     socket: UdpSocket,
-    /// Relay server address
-    relay_addr: SocketAddr,
+    /// Relay server address (swappable for auto-routing)
+    relay_addr: ArcSwap<SocketAddr>,
     /// Unique session ID for this connection
     session_id: [u8; SESSION_ID_LEN],
     /// Stop flag
@@ -112,7 +113,7 @@ impl UdpRelay {
 
         Ok(Self {
             socket,
-            relay_addr,
+            relay_addr: ArcSwap::from_pointee(relay_addr),
             session_id,
             stop_flag: Arc::new(AtomicBool::new(false)),
             packets_sent: AtomicU64::new(0),
@@ -148,12 +149,13 @@ impl UdpRelay {
         packet[SESSION_ID_LEN..total_len].copy_from_slice(payload);
 
         // Try to send, retry once on WouldBlock
-        let sent = match self.socket.send_to(&packet[..total_len], self.relay_addr) {
+        let current_addr = **self.relay_addr.load();
+        let sent = match self.socket.send_to(&packet[..total_len], current_addr) {
             Ok(sent) => sent,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Retry once after tiny delay
                 std::thread::sleep(Duration::from_micros(50));
-                self.socket.send_to(&packet[..total_len], self.relay_addr)
+                self.socket.send_to(&packet[..total_len], current_addr)
                     .context("Retry send failed")?
             }
             Err(e) => return Err(e.into()),
@@ -177,7 +179,8 @@ impl UdpRelay {
         match self.socket.recv_from(&mut recv_buf) {
             Ok((len, from)) => {
                 // Verify it's from our relay server
-                if from != self.relay_addr {
+                let expected_addr = **self.relay_addr.load();
+                if from != expected_addr {
                     log::warn!("UDP Relay: Received packet from unexpected source {}", from);
                     return Ok(None);
                 }
@@ -224,7 +227,8 @@ impl UdpRelay {
 
         if should_send {
             // Send empty payload with just session ID
-            self.socket.send_to(&self.session_id, self.relay_addr)
+            let current_addr = **self.relay_addr.load();
+            self.socket.send_to(&self.session_id, current_addr)
                 .context("Failed to send keepalive")?;
             if let Ok(mut guard) = self.last_activity.lock() {
                 *guard = Instant::now();
@@ -260,7 +264,19 @@ impl UdpRelay {
 
     /// Get the relay server address
     pub fn relay_addr(&self) -> SocketAddr {
-        self.relay_addr
+        **self.relay_addr.load()
+    }
+
+    /// Atomically switch to a new relay server address.
+    /// The next outbound packet will go to the new address.
+    /// This is the core of Auto Routing - zero-disruption server switching.
+    pub fn switch_relay(&self, new_addr: SocketAddr) {
+        let old_addr = **self.relay_addr.load();
+        self.relay_addr.store(Arc::new(new_addr));
+        log::info!(
+            "UDP Relay: Switched relay {} -> {} (session {:016x})",
+            old_addr, new_addr, self.session_id_u64()
+        );
     }
 
     /// Get session ID bytes

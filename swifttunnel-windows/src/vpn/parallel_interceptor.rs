@@ -444,6 +444,24 @@ impl ParallelInterceptor {
         self.relay_ctx.clone()
     }
 
+    /// Switch the relay server address for auto-routing.
+    /// This atomically updates the relay address that all workers use.
+    /// Workers will send their next packet to the new address.
+    pub fn switch_relay_addr(&self, new_addr: std::net::SocketAddr) -> bool {
+        if let Some(ref relay) = self.relay_ctx {
+            relay.switch_relay(new_addr);
+            true
+        } else {
+            log::warn!("Cannot switch relay: no relay context set");
+            false
+        }
+    }
+
+    /// Get the current relay address (for auto-routing comparison)
+    pub fn current_relay_addr(&self) -> Option<std::net::SocketAddr> {
+        self.relay_ctx.as_ref().map(|r| r.relay_addr())
+    }
+
     /// Set inbound handler for decrypted packets
     ///
     /// This handler is called for each decrypted packet received on the

@@ -918,6 +918,21 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Switch relay address (proxy to ParallelInterceptor)
+    pub fn switch_relay_addr(&self, new_addr: std::net::SocketAddr) -> bool {
+        if let Some(ref interceptor) = self.parallel_interceptor {
+            interceptor.switch_relay_addr(new_addr)
+        } else {
+            log::warn!("Cannot switch relay: no parallel interceptor");
+            false
+        }
+    }
+
+    /// Get current relay address (proxy to ParallelInterceptor)
+    pub fn current_relay_addr(&self) -> Option<std::net::SocketAddr> {
+        self.parallel_interceptor.as_ref().and_then(|p| p.current_relay_addr())
+    }
+
     /// Trigger immediate cache refresh (called by ETW when game process detected)
     /// This wakes up the cache refresher from its 2-second sleep
     pub fn trigger_cache_refresh(&self) {
