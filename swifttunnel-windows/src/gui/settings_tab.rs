@@ -64,6 +64,7 @@ impl BoosterApp {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_general_settings(&mut self, ui: &mut egui::Ui) {
         // About section
         card_frame()
@@ -213,7 +214,9 @@ impl BoosterApp {
 
         // Experimental Features section
         let mut toggle_experimental_mode = false;
+        let mut toggle_auto_routing = false;
         let current_experimental_mode = self.experimental_mode;
+        let current_auto_routing = self.auto_routing_enabled;
 
         card_frame()
             .show(ui, |ui| {
@@ -342,6 +345,46 @@ impl BoosterApp {
                     } else {
                         ui.label(egui::RichText::new("Auto mode: Uses VPN server IP with port 51821").size(10.0).color(TEXT_MUTED));
                     }
+
+                    // Auto Routing section
+                    ui.add_space(SPACING_MD);
+                    ui.add(egui::Separator::default().spacing(0.0));
+                    ui.add_space(SPACING_MD);
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Auto Routing").size(13.0).color(TEXT_PRIMARY));
+                        ui.add_space(4.0);
+                        egui::Frame::NONE
+                            .fill(ACCENT_PRIMARY.gamma_multiply(0.15))
+                            .rounding(4.0)
+                            .inner_margin(egui::Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("BETA").size(9.0).color(ACCENT_PRIMARY).strong());
+                            });
+                    });
+                    ui.label(egui::RichText::new("Automatically switch relay server when your game server changes region").size(11.0).color(TEXT_SECONDARY));
+
+                    ui.add_space(SPACING_SM);
+
+                    toggle_auto_routing = render_setting_row(
+                        ui,
+                        "Enable auto routing",
+                        "Detect game server region changes and switch relays automatically",
+                        current_auto_routing,
+                    );
+
+                    ui.add_space(SPACING_SM);
+                    if current_auto_routing {
+                        egui::Frame::NONE
+                            .fill(ACCENT_PRIMARY.gamma_multiply(0.08))
+                            .rounding(6.0)
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("When you teleport to a server in a different region, SwiftTunnel will automatically switch to the nearest relay for optimal latency.").size(10.0).color(ACCENT_PRIMARY));
+                            });
+                    } else {
+                        ui.label(egui::RichText::new("Auto-routing is disabled. You'll stay on your selected server.").size(10.0).color(TEXT_MUTED));
+                    }
                 }
             });
 
@@ -370,6 +413,11 @@ impl BoosterApp {
             self.enable_discord_rpc = !self.enable_discord_rpc;
             self.discord_manager.set_enabled(self.enable_discord_rpc);
             log::info!("Discord RPC: {}", self.enable_discord_rpc);
+            self.mark_dirty();
+        }
+        if toggle_auto_routing {
+            self.auto_routing_enabled = !self.auto_routing_enabled;
+            log::info!("Auto routing: {}", self.auto_routing_enabled);
             self.mark_dirty();
         }
     }

@@ -116,7 +116,7 @@ fn default_discord_rpc() -> bool {
 }
 
 fn default_auto_routing() -> bool {
-    true // Enabled by default
+    false // Off by default, opt-in via experimental mode
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -270,10 +270,10 @@ mod tests {
 
     #[test]
     fn test_settings_auto_routing_default() {
-        // Settings without auto_routing_enabled should default to true
+        // Settings without auto_routing_enabled should default to false (opt-in via experimental)
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(loaded.auto_routing_enabled);
+        assert!(!loaded.auto_routing_enabled);
     }
 
     #[test]

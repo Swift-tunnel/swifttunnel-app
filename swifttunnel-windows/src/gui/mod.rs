@@ -25,7 +25,7 @@ pub use animations::*;
 
 use crate::auth::{AuthManager, AuthState, UserInfo};
 use crate::discord_rpc::DiscordManager;
-use crate::geolocation::get_ip_location;
+use crate::geolocation::roblox_ip_to_region;
 use crate::hidden_command;
 use swifttunnel_fps_booster::notification::show_server_location;
 use swifttunnel_fps_booster::roblox_watcher::{RobloxWatcher, RobloxEvent};
@@ -182,9 +182,6 @@ pub struct BoosterApp {
     previously_tunneled: std::collections::HashSet<String>,
     // Previously detected game server IPs (to avoid duplicate notifications)
     detected_game_servers: std::collections::HashSet<std::net::Ipv4Addr>,
-    // Channel for game server location lookups (ip, location)
-    game_server_location_rx: std::sync::mpsc::Receiver<(std::net::Ipv4Addr, String)>,
-    game_server_location_tx: std::sync::mpsc::Sender<(std::net::Ipv4Addr, String)>,
     // Roblox log watcher for game server detection (Bloxstrap-style)
     roblox_watcher: Option<RobloxWatcher>,
     // Flag to force quit (bypass minimize-to-tray)
@@ -231,6 +228,8 @@ pub struct BoosterApp {
     /// Custom relay server override (experimental feature, V3 only)
     /// Format: "host:port" - empty for auto (uses VPN server IP:51821)
     custom_relay_server: String,
+    /// Enable auto-routing: automatically switch relay when game server region changes
+    auto_routing_enabled: bool,
     /// Logo texture handle (loaded from embedded PNG)
     logo_texture: Option<egui::TextureHandle>,
     /// Pending auto-connect from elevation (--resume-connect flag)
@@ -288,9 +287,6 @@ impl BoosterApp {
         // Create channels for network analyzer progress updates
         let (stability_tx, stability_rx) = std::sync::mpsc::channel::<StabilityTestProgress>();
         let (speed_tx, speed_rx) = std::sync::mpsc::channel::<SpeedTestProgress>();
-
-        // Create channel for game server location lookups (Bloxstrap-style notifications)
-        let (game_server_tx, game_server_rx) = std::sync::mpsc::channel::<(std::net::Ipv4Addr, String)>();
 
         // Create channel for network boost operation results
         let (network_boost_result_tx, network_boost_result_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
@@ -476,8 +472,6 @@ impl BoosterApp {
             process_notification: None,
             previously_tunneled: std::collections::HashSet::new(),
             detected_game_servers: std::collections::HashSet::new(),
-            game_server_location_rx: game_server_rx,
-            game_server_location_tx: game_server_tx,
             // Roblox log watcher (always active for server region detection)
             roblox_watcher: {
                 log::info!("Starting Roblox log watcher for game server detection...");
@@ -529,6 +523,8 @@ impl BoosterApp {
             experimental_mode: saved_settings.experimental_mode,
             // Custom relay server override (experimental)
             custom_relay_server: saved_settings.custom_relay_server.clone(),
+            // Auto-routing setting
+            auto_routing_enabled: saved_settings.auto_routing_enabled,
             // Logo texture (loaded from embedded PNG)
             logo_texture: Self::load_logo_texture(&cc.egui_ctx),
             // Auto-connect from elevation (take from static if --resume-connect was used)
@@ -682,6 +678,8 @@ impl BoosterApp {
             custom_relay_server: self.custom_relay_server.clone(),
             // Save Discord RPC setting
             enable_discord_rpc: self.enable_discord_rpc,
+            // Save auto-routing setting
+            auto_routing_enabled: self.auto_routing_enabled,
         };
 
         let _ = save_settings(&settings);
@@ -1527,36 +1525,41 @@ impl eframe::App for BoosterApp {
             }
         }
 
-        // Poll Roblox watcher for game server detections (Bloxstrap-style)
-        if let Some(ref watcher) = self.roblox_watcher {
-            for event in watcher.poll() {
-                match event {
-                    RobloxEvent::GameServerDetected { ip } => {
-                        if !self.detected_game_servers.contains(&ip) {
-                            log::info!("Roblox game server detected: {}", ip);
-                            self.detected_game_servers.insert(ip);
-
-                            // Spawn async task to get location
-                            let tx = self.game_server_location_tx.clone();
-                            let runtime = Arc::clone(&self.runtime);
-                            std::thread::spawn(move || {
-                                runtime.block_on(async move {
-                                    if let Some(location) = get_ip_location(ip).await {
-                                        let _ = tx.send((ip, location));
-                                    }
-                                });
-                            });
+        // Check for new game server detections via split tunnel (instant, no API needed)
+        if self.vpn_state.is_connected() {
+            if let Ok(vpn) = self.vpn_connection.try_lock() {
+                let current_servers = vpn.get_detected_game_servers();
+                for ip in &current_servers {
+                    if !self.detected_game_servers.contains(ip) {
+                        self.detected_game_servers.insert(*ip);
+                        let region = roblox_ip_to_region(*ip);
+                        if region != crate::geolocation::RobloxRegion::Unknown {
+                            log::info!("Game server {} detected: {}", ip, region.display_name());
+                            show_server_location(region.display_name());
                         }
                     }
                 }
             }
         }
 
-        // Receive game server location lookups - show Windows toast notification (Bloxstrap-style)
-        while let Ok((ip, location)) = self.game_server_location_rx.try_recv() {
-            log::info!("Game server {} located: {}", ip, location);
-            // Show Windows toast notification instead of in-app toast
-            show_server_location(&location);
+        // Poll Roblox log watcher for game server detections when VPN is disconnected (Bloxstrap-style)
+        if !self.vpn_state.is_connected() {
+            if let Some(ref watcher) = self.roblox_watcher {
+                for event in watcher.poll() {
+                    match event {
+                        RobloxEvent::GameServerDetected { ip } => {
+                            if !self.detected_game_servers.contains(&ip) {
+                                let region = roblox_ip_to_region(ip);
+                                if region != crate::geolocation::RobloxRegion::Unknown {
+                                    log::info!("Roblox game server detected (log watcher): {} ({})", ip, region.display_name());
+                                    self.detected_game_servers.insert(ip);
+                                    show_server_location(region.display_name());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Render the main app layout with sidebar
@@ -2204,13 +2207,25 @@ impl BoosterApp {
             None
         };
 
+        // Build available servers list for auto-routing
+        let available_servers: Vec<(String, std::net::SocketAddr)> = if let Ok(list) = self.dynamic_server_list.lock() {
+            list.servers().iter().filter_map(|s| {
+                let addr: std::net::SocketAddr = format!("{}:{}", s.ip, s.port).parse().ok()?;
+                Some((s.region.clone(), addr))
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
+        let auto_routing_enabled = self.experimental_mode && self.auto_routing_enabled;
+
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();
 
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps, custom_relay).await {
+                    if let Err(e) = connection.connect(&access_token, &region, apps, custom_relay, auto_routing_enabled, available_servers).await {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }

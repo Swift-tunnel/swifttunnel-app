@@ -481,6 +481,34 @@ impl BoosterApp {
                                     });
                                 });
                         }
+
+                        // Auto Routing badge (only when experimental mode + auto routing enabled)
+                        if self.experimental_mode && self.auto_routing_enabled {
+                            let game_region_name = self.vpn_connection.try_lock().ok()
+                                .and_then(|conn| conn.auto_router().and_then(|r| r.current_game_region()).map(|r| r.display_name().to_string()));
+
+                            let (badge_text, badge_color) = if let Some(region) = game_region_name {
+                                (format!("Game: {}", region), STATUS_CONNECTED)
+                            } else {
+                                ("Monitoring...".to_string(), TEXT_MUTED)
+                            };
+
+                            egui::Frame::NONE
+                                .fill(badge_color.gamma_multiply(0.1))
+                                .stroke(egui::Stroke::new(1.0, badge_color.gamma_multiply(0.3)))
+                                .rounding(8.0)
+                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        ui.vertical(|ui| {
+                                            ui.spacing_mut().item_spacing.y = 1.0;
+                                            ui.label(egui::RichText::new("Auto Routing").size(10.0).color(TEXT_MUTED));
+                                            ui.label(egui::RichText::new(&badge_text).size(11.0).color(badge_color));
+                                        });
+                                    });
+                                });
+                        }
                     });
 
                     // Throughput graph (new row)
