@@ -185,7 +185,7 @@ impl UdpRelay {
                 // Verify it's from our relay server
                 let expected_addr = **self.relay_addr.load();
                 if from != expected_addr {
-                    log::warn!("UDP Relay: Received packet from unexpected source {}", from);
+                    log::warn!("UDP Relay: Received packet from unexpected source {} (expected {})", from, expected_addr);
                     return Ok(None);
                 }
 

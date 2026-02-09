@@ -2652,6 +2652,17 @@ fn run_packet_worker(
                 // Forward packets directly to relay server without encryption
                 // This provides lowest latency and CPU usage (like ExitLag)
                 if let Some(ref relay) = relay_ctx {
+                    // Log relay destination for first few packets (auto-routing debug)
+                    if direct_encrypt_success + direct_encrypt_fail < 10 {
+                        log::info!(
+                            "Worker {}: Forwarding to relay {} (pkt #{}, dst={})",
+                            worker_id, relay.relay_addr(),
+                            direct_encrypt_success + direct_encrypt_fail + 1,
+                            if ip_packet.len() >= 20 {
+                                format!("{}.{}.{}.{}", ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19])
+                            } else { "?".to_string() }
+                        );
+                    }
                     match relay.forward_outbound(packet_to_send) {
                         Ok(sent) => {
                             direct_encrypt_success += 1;  // Reuse counter for relay
