@@ -6,7 +6,7 @@
 //! Similar to GearUp's AIR (Adaptive Intelligent Routing) and ExitLag's
 //! automatic region detection.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -15,9 +15,6 @@ use crate::geolocation::{RobloxRegion, roblox_ip_to_region};
 
 /// Minimum time between relay switches to prevent flapping
 const MIN_SWITCH_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Number of consecutive packets to a new region before triggering a switch
-const REGION_CHANGE_THRESHOLD: u32 = 5;
 
 /// Maximum switches per minute
 const MAX_SWITCHES_PER_MINUTE: u32 = 3;
@@ -36,8 +33,8 @@ pub struct AutoRouter {
     last_switch_time: RwLock<Instant>,
     /// Number of switches in the current minute window
     switches_this_minute: RwLock<(u32, Instant)>,
-    /// Consecutive packet count to a new region (for debounce)
-    pending_region_change: RwLock<Option<(RobloxRegion, u32)>>,
+    /// Game server IPs we've already routed (to detect new teleports)
+    seen_game_servers: RwLock<HashSet<Ipv4Addr>>,
     /// Callback: list of (region_id, relay_addr) for available servers
     available_servers: RwLock<Vec<(String, SocketAddr)>>,
     /// Log of auto-routing events for UI display
@@ -76,7 +73,7 @@ impl AutoRouter {
             current_st_region: RwLock::new(initial_region.to_string()),
             last_switch_time: RwLock::new(Instant::now() - MIN_SWITCH_INTERVAL),
             switches_this_minute: RwLock::new((0, Instant::now())),
-            pending_region_change: RwLock::new(None),
+            seen_game_servers: RwLock::new(HashSet::new()),
             available_servers: RwLock::new(Vec::new()),
             event_log: RwLock::new(VecDeque::new()),
         }
@@ -138,36 +135,26 @@ impl AutoRouter {
             return AutoRoutingAction::NoAction;
         }
 
-        // Check if this is a new region
+        // Check if this is the same region we're already tracking
         let current = self.current_game_region.read().clone();
         if current.as_ref() == Some(&game_region) {
-            // Same region - reset pending change counter
-            *self.pending_region_change.write() = None;
             return AutoRoutingAction::NoAction;
         }
 
-        // Debounce: count consecutive packets to the new region
-        let mut pending = self.pending_region_change.write();
-        if let Some((ref pending_region, ref mut count)) = *pending {
-            if *pending_region == game_region {
-                *count += 1;
-                if *count < REGION_CHANGE_THRESHOLD {
-                    return AutoRoutingAction::NoAction;
-                }
-                // Threshold met - proceed with switch evaluation
-            } else {
-                // Different region than pending - reset
-                *pending = Some((game_region.clone(), 1));
-                return AutoRoutingAction::NoAction;
-            }
-        } else {
-            *pending = Some((game_region.clone(), 1));
+        // Check if this is a new game server IP (teleport detection).
+        // Use try_write() to avoid blocking the hot path — if the lock is
+        // contended, fall through to NoAction and retry on the next packet.
+        let is_new_ip = match self.seen_game_servers.try_write() {
+            Some(mut seen) => seen.insert(game_server_ip),
+            None => return AutoRoutingAction::NoAction,
+        };
+
+        // Already-seen IP in a different region — no action (protect against flapping)
+        if !is_new_ip {
             return AutoRoutingAction::NoAction;
         }
-        // CRITICAL: Must drop the pending_region_change write lock before calling
-        // record_switch(), which also acquires write locks on this and other fields.
-        // parking_lot::RwLock is NOT reentrant, so holding this would deadlock.
-        drop(pending);
+
+        // New IP in a different region — switch immediately
 
         // Find the best SwiftTunnel server for this game region
         let best_st_region = match game_region.best_swifttunnel_region() {
@@ -180,7 +167,6 @@ impl AutoRouter {
         if current_st_region == best_st_region || current_st_region.starts_with(&format!("{}-", best_st_region)) {
             // Already on an optimal server (e.g. "singapore-02" starts with "singapore")
             *self.current_game_region.write() = Some(game_region);
-            *self.pending_region_change.write() = None;
             return AutoRoutingAction::NoAction;
         }
 
@@ -246,7 +232,6 @@ impl AutoRouter {
         *self.current_st_region.write() = to_region.to_string();
         *self.current_relay_addr.write() = Some(new_addr);
         *self.current_game_region.write() = Some(game_region.clone());
-        *self.pending_region_change.write() = None;
 
         // Add to event log (keep last 20 events)
         let event = AutoRoutingEvent {
@@ -278,7 +263,7 @@ impl AutoRouter {
     pub fn reset(&self) {
         *self.current_game_region.write() = None;
         *self.current_relay_addr.write() = None;
-        *self.pending_region_change.write() = None;
+        self.seen_game_servers.write().clear();
     }
 }
 
@@ -311,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_router_debounce() {
+    fn test_auto_router_immediate_switch_new_ip() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
         router.set_current_relay(
@@ -319,16 +304,30 @@ mod tests {
             "singapore",
         );
 
-        // First few packets should be debounced (NoAction)
+        // First evaluation of a new IP in a different region should switch immediately
         let us_east_ip = Ipv4Addr::new(128, 116, 102, 1);
-        for _ in 0..(REGION_CHANGE_THRESHOLD - 1) {
-            let action = router.evaluate_game_server(us_east_ip);
-            assert!(matches!(action, AutoRoutingAction::NoAction));
-        }
-
-        // After threshold, should trigger switch
         let action = router.evaluate_game_server(us_east_ip);
         assert!(matches!(action, AutoRoutingAction::SwitchRelay { .. }));
+    }
+
+    #[test]
+    fn test_auto_router_same_ip_no_double_switch() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay(
+            "54.255.205.216:51821".parse().unwrap(),
+            "singapore",
+        );
+
+        let us_east_ip = Ipv4Addr::new(128, 116, 102, 1);
+
+        // First call switches
+        let action = router.evaluate_game_server(us_east_ip);
+        assert!(matches!(action, AutoRoutingAction::SwitchRelay { .. }));
+
+        // Second call with same IP should be NoAction (already seen)
+        let action = router.evaluate_game_server(us_east_ip);
+        assert!(matches!(action, AutoRoutingAction::NoAction));
     }
 
     #[test]
