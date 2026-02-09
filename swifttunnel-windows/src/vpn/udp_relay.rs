@@ -222,6 +222,19 @@ impl UdpRelay {
         }
     }
 
+    /// Send an immediate keepalive (session_id-only packet) to the current relay.
+    /// Used after auto-routing switch to establish session on the new relay ASAP.
+    pub fn send_keepalive_now(&self) -> Result<()> {
+        let current_addr = **self.relay_addr.load();
+        self.socket.send_to(&self.session_id, current_addr)
+            .context("Failed to send immediate keepalive")?;
+        if let Ok(mut guard) = self.last_activity.lock() {
+            *guard = Instant::now();
+        }
+        log::info!("UDP Relay: Sent immediate keepalive to {} (session {:016x})", current_addr, self.session_id_u64());
+        Ok(())
+    }
+
     /// Send keepalive to maintain NAT binding
     pub fn send_keepalive(&self) -> Result<()> {
         let should_send = self.last_activity

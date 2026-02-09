@@ -414,9 +414,21 @@ impl VpnConnection {
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
                             log::info!("Auto-routing: {} resolved to {} ({})", ip, location, region.display_name());
+                            let old_region = router_for_lookup.current_region();
                             if let Some((new_addr, new_region)) = router_for_lookup.handle_region_lookup(region) {
-                                log::info!("Auto-routing: Switching relay to {} ({})", new_addr, new_region);
+                                log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {})", old_region, new_region, new_addr);
                                 relay_for_lookup.switch_relay(new_addr);
+                                // Immediately send keepalive to new relay to establish session
+                                // Without this, the new relay doesn't know our session_id until
+                                // the first organic outbound packet arrives (causing a blackout)
+                                if let Err(e) = relay_for_lookup.send_keepalive_now() {
+                                    log::warn!("Auto-routing: Failed to send keepalive to new relay: {}", e);
+                                }
+                                log::info!("Auto-routing: Relay addr is now {}", relay_for_lookup.relay_addr());
+                                // Show a distinct toast so tester can confirm relay actually switched
+                                crate::notification::show_relay_switch(&old_region, &new_region, &location);
+                            } else {
+                                log::info!("Auto-routing: No switch needed (already on best region for {})", location);
                             }
                             // Release held packets — lookup is done, relay is now correct
                             router_for_lookup.clear_pending_lookup(ip);
