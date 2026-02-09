@@ -2100,8 +2100,11 @@ fn inject_inbound_packet(
         );
     }
 
-    // Make a mutable copy for NAT rewriting
-    let mut packet = ip_packet.to_vec();
+    // Stack-allocated buffer for NAT rewriting (zero allocation)
+    let mut packet_buf = [0u8; 1600];
+    let packet_len = ip_packet.len().min(1600);
+    packet_buf[..packet_len].copy_from_slice(&ip_packet[..packet_len]);
+    let packet = &mut packet_buf[..packet_len];
 
     if needs_nat {
         let new_dst = config.internet_ip.unwrap();
@@ -2155,8 +2158,8 @@ fn inject_inbound_packet(
         }
     }
 
-    // Create Ethernet frame
-    const MAX_ETHER_FRAME: usize = 1522;
+    // Create Ethernet frame (stack-allocated buffer)
+    const MAX_ETHER_FRAME: usize = 1622; // 14 header + 1600 payload + 8 padding
     let frame_len = 14 + packet.len();
 
     if frame_len > MAX_ETHER_FRAME {
@@ -2164,7 +2167,8 @@ fn inject_inbound_packet(
         return None;
     }
 
-    let mut ethernet_frame = vec![0u8; frame_len];
+    let mut ethernet_frame_buf = [0u8; MAX_ETHER_FRAME];
+    let ethernet_frame = &mut ethernet_frame_buf[..frame_len];
     ethernet_frame[0..6].copy_from_slice(&config.adapter_mac); // Destination = physical adapter
     ethernet_frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // Locally administered src MAC
     ethernet_frame[12] = 0x08; // EtherType: IPv4
@@ -2403,10 +2407,12 @@ fn run_packet_worker(
     let mut no_wintun_session = 0u64;
 
     // Performance timing (v0.5.57 - measure hot path latency)
+    // Sample every 128th packet to reduce per-packet overhead
     let mut total_lookup_ns = 0u64;
     let mut total_encrypt_ns = 0u64;
     let mut lookup_count = 0u64;
     let mut encrypt_count = 0u64;
+    let mut timing_sample_counter = 0u64;
 
     // Log initial tunnel apps
     if worker_id == 0 {
@@ -2508,10 +2514,15 @@ fn run_packet_worker(
         if work.is_outbound {
             // Check if should tunnel (timed for performance measurement)
             // Uses hybrid approach: snapshot cache (fast) + per-worker inline cache (for misses)
-            let lookup_start = std::time::Instant::now();
+            // Sample timing every 128th packet to reduce overhead
+            timing_sample_counter += 1;
+            let should_sample = (timing_sample_counter & 127) == 0;
+            let lookup_start = if should_sample { Some(std::time::Instant::now()) } else { None };
             let should_tunnel = should_route_to_vpn_with_inline_cache(&work.data, &snapshot, &mut inline_cache);
-            total_lookup_ns += lookup_start.elapsed().as_nanos() as u64;
-            lookup_count += 1;
+            if let Some(start) = lookup_start {
+                total_lookup_ns += start.elapsed().as_nanos() as u64;
+                lookup_count += 1;
+            }
 
             // Periodic diagnostic logging (every 500 packets on worker 0)
             if worker_id == 0 && diagnostic_counter % 500 == 0 {
@@ -2675,7 +2686,8 @@ fn run_packet_worker(
                 // All work (encrypt + send) must happen inside the thread-local scope
                 else if let Some(ref ctx) = vpn_encrypt_ctx {
                     // Encrypt and send within thread-local scope (zero allocation!)
-                    let encrypt_start = std::time::Instant::now();
+                    // Sample timing every 128th packet to reduce overhead
+                    let encrypt_start = if should_sample { Some(std::time::Instant::now()) } else { None };
                     let (success, encrypted_len) = ENCRYPT_BUFFER.with(|buf| {
                         let mut encrypt_buf = buf.borrow_mut();
                         let result = {
@@ -2710,8 +2722,10 @@ fn run_packet_worker(
                             }
                         }
                     });
-                    total_encrypt_ns += encrypt_start.elapsed().as_nanos() as u64;
-                    encrypt_count += 1;
+                    if let Some(start) = encrypt_start {
+                        total_encrypt_ns += start.elapsed().as_nanos() as u64;
+                        encrypt_count += 1;
+                    }
 
                     if success {
                         direct_encrypt_success += 1;
@@ -4308,9 +4322,8 @@ fn run_v3_inbound_receiver(
                 }
             }
             Ok(None) => {
-                // No packet available (non-blocking)
-                // Small sleep to avoid busy-spinning
-                std::thread::sleep(std::time::Duration::from_micros(100));
+                // No packet available (socket timeout already acts as sleep)
+                continue;
             }
             Err(e) => {
                 log::warn!("V3 inbound receiver: receive error: {}", e);

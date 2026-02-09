@@ -23,8 +23,8 @@ use crossbeam_channel::Receiver;
 
 /// Refresh interval for process exclusion scanning (ms)
 /// Lower = faster detection of new processes, slightly higher CPU
-/// 50ms ensures game traffic is tunneled almost instantly on launch
-const REFRESH_INTERVAL_MS: u64 = 50;
+/// 500ms balances detection speed with CPU usage
+const REFRESH_INTERVAL_MS: u64 = 500;
 
 /// VPN connection state
 #[derive(Debug, Clone, PartialEq)]
@@ -459,7 +459,7 @@ impl VpnConnection {
             log::info!("V3: Process monitor started");
 
             let mut last_refresh = std::time::Instant::now();
-            const ETW_POLL_INTERVAL_MS: u64 = 5;
+            const ETW_POLL_INTERVAL_MS: u64 = 100;
 
             loop {
                 if stop_flag.load(Ordering::SeqCst) {
