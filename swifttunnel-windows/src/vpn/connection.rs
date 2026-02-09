@@ -197,6 +197,8 @@ impl VpnConnection {
         region: &str,
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
+        auto_routing_enabled: bool,
+        available_servers: Vec<(String, std::net::SocketAddr)>,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -243,7 +245,7 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
 
         let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
-            match self.setup_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server).await {
+            match self.setup_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server, auto_routing_enabled, available_servers).await {
                 Ok(processes) => {
                     log::info!("V3 split tunnel setup succeeded");
                     (processes, true)
@@ -293,6 +295,8 @@ impl VpnConnection {
         config: &VpnConfig,
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
+        auto_routing_enabled: bool,
+        available_servers: Vec<(String, std::net::SocketAddr)>,
     ) -> VpnResult<Vec<String>> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -394,11 +398,12 @@ impl VpnConnection {
         log::info!("V3: UDP relay context set");
 
         // Set up auto-routing
-        let auto_router = Arc::new(super::auto_routing::AutoRouter::new(true, &config.region));
+        let auto_router = Arc::new(super::auto_routing::AutoRouter::new(auto_routing_enabled, &config.region));
         auto_router.set_current_relay(relay_addr, &config.region);
+        auto_router.set_available_servers(available_servers);
         driver.set_auto_router(Arc::clone(&auto_router));
         self.auto_router = Some(Arc::clone(&auto_router));
-        log::info!("V3: Auto-router initialized for region {}", config.region);
+        log::info!("V3: Auto-router initialized for region {} (enabled: {})", config.region, auto_routing_enabled);
 
         // Configure split tunnel driver
         // tunnel_interface_luid = 0 (no Wintun), tunnel_ip = internet_ip (no NAT needed for UDP relay)
@@ -454,6 +459,7 @@ impl VpnConnection {
         self.process_monitor_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
+        let auto_router_for_monitor = self.auto_router.clone();
 
         tokio::spawn(async move {
             log::info!("V3: Process monitor started");
@@ -562,6 +568,21 @@ impl VpnConnection {
                         log::warn!("V3: Exclusion refresh error: {}", e);
                     }
                 }
+
+                // Sync auto-routing state to connection state
+                if let Some(ref auto_router) = auto_router_for_monitor {
+                    let current_auto_region = auto_router.current_region();
+                    let mut state = state_handle.lock().await;
+                    if let ConnectionState::Connected {
+                        ref mut server_region,
+                        ..
+                    } = *state {
+                        if *server_region != current_auto_region && !current_auto_region.is_empty() {
+                            log::info!("Auto-routing: Syncing UI state to region '{}'", current_auto_region);
+                            *server_region = current_auto_region;
+                        }
+                    }
+                }
             }
 
             log::info!("V3: Process monitor stopped");
@@ -620,6 +641,10 @@ impl VpnConnection {
     /// This atomically swaps the relay address used by all packet workers.
     /// The split tunnel (ndisapi), process cache, and all worker threads
     /// stay running. Only the relay destination changes.
+    ///
+    /// NOTE: Currently unused - auto-routing switches happen directly in worker
+    /// threads via relay.switch_relay(). This method is kept for future GUI-initiated
+    /// manual server switching, as it correctly updates ConnectionState.
     ///
     /// Returns Ok(()) if the switch was successful.
     pub async fn switch_server(

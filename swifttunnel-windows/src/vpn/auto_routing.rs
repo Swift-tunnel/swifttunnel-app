@@ -6,6 +6,7 @@
 //! Similar to GearUp's AIR (Adaptive Intelligent Routing) and ExitLag's
 //! automatic region detection.
 
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -40,7 +41,7 @@ pub struct AutoRouter {
     /// Callback: list of (region_id, relay_addr) for available servers
     available_servers: RwLock<Vec<(String, SocketAddr)>>,
     /// Log of auto-routing events for UI display
-    event_log: RwLock<Vec<AutoRoutingEvent>>,
+    event_log: RwLock<VecDeque<AutoRoutingEvent>>,
 }
 
 /// An auto-routing event for the UI log
@@ -73,11 +74,11 @@ impl AutoRouter {
             current_game_region: RwLock::new(None),
             current_relay_addr: RwLock::new(None),
             current_st_region: RwLock::new(initial_region.to_string()),
-            last_switch_time: RwLock::new(Instant::now()),
+            last_switch_time: RwLock::new(Instant::now() - MIN_SWITCH_INTERVAL),
             switches_this_minute: RwLock::new((0, Instant::now())),
             pending_region_change: RwLock::new(None),
             available_servers: RwLock::new(Vec::new()),
-            event_log: RwLock::new(Vec::new()),
+            event_log: RwLock::new(VecDeque::new()),
         }
     }
 
@@ -124,7 +125,8 @@ impl AutoRouter {
     /// Evaluate a detected game server IP and determine if we should switch relays.
     ///
     /// This is called from the packet processing path when a new Roblox game server
-    /// IP is detected. It must be fast (no blocking, no allocations on hot path).
+    /// IP is detected. It must be fast (no blocking). Note: some small allocations
+    /// occur (clone, format) but are negligible for this use case.
     pub fn evaluate_game_server(&self, game_server_ip: Ipv4Addr) -> AutoRoutingAction {
         if !self.is_enabled() {
             return AutoRoutingAction::NoAction;
@@ -162,16 +164,16 @@ impl AutoRouter {
             *pending = Some((game_region.clone(), 1));
             return AutoRoutingAction::NoAction;
         }
+        // CRITICAL: Must drop the pending_region_change write lock before calling
+        // record_switch(), which also acquires write locks on this and other fields.
+        // parking_lot::RwLock is NOT reentrant, so holding this would deadlock.
         drop(pending);
 
-        // Check rate limits
-        if !self.can_switch() {
-            log::debug!("Auto-routing: Rate limited, skipping switch");
-            return AutoRoutingAction::NoAction;
-        }
-
         // Find the best SwiftTunnel server for this game region
-        let best_st_region = game_region.best_swifttunnel_region();
+        let best_st_region = match game_region.best_swifttunnel_region() {
+            Some(r) => r,
+            None => return AutoRoutingAction::NoAction,
+        };
         let current_st_region = self.current_st_region.read().clone();
 
         // Check if we're already on the best region
@@ -191,8 +193,10 @@ impl AutoRouter {
             let new_region = new_region.clone();
             let new_addr = *new_addr;
 
-            // Record the switch
-            self.record_switch(&current_st_region, &new_region, &game_region);
+            // Record the switch (also performs rate-limit check atomically)
+            if !self.record_switch(&current_st_region, &new_region, &game_region, new_addr) {
+                return AutoRoutingAction::NoAction;
+            }
 
             AutoRoutingAction::SwitchRelay {
                 new_addr,
@@ -208,44 +212,41 @@ impl AutoRouter {
         }
     }
 
-    /// Check if we're allowed to switch (rate limiting)
-    fn can_switch(&self) -> bool {
+    /// Record a relay switch, atomically checking rate limits.
+    /// Returns true if the switch was recorded, false if rate-limited or already switched.
+    fn record_switch(&self, from_region: &str, to_region: &str, game_region: &RobloxRegion, new_addr: SocketAddr) -> bool {
+        // Idempotency: another worker may have already switched to this region
+        if *self.current_st_region.read() == to_region {
+            return false;
+        }
+
         let now = Instant::now();
 
         // Check minimum interval
         if now.duration_since(*self.last_switch_time.read()) < MIN_SWITCH_INTERVAL {
+            log::debug!("Auto-routing: Rate limited (min interval), skipping switch");
             return false;
         }
 
-        // Check per-minute limit
+        // Check per-minute limit under a single write lock
         let mut window = self.switches_this_minute.write();
         if now.duration_since(window.1) > Duration::from_secs(60) {
             // Reset minute window
             *window = (0, now);
         }
         if window.0 >= MAX_SWITCHES_PER_MINUTE {
+            log::debug!("Auto-routing: Rate limited (max per minute), skipping switch");
             return false;
         }
-
-        true
-    }
-
-    /// Record a relay switch
-    fn record_switch(&self, from_region: &str, to_region: &str, game_region: &RobloxRegion) {
-        let now = Instant::now();
+        // Rate limit passed - increment counter while we still hold the lock
+        window.0 += 1;
+        drop(window);
 
         *self.last_switch_time.write() = now;
         *self.current_st_region.write() = to_region.to_string();
+        *self.current_relay_addr.write() = Some(new_addr);
         *self.current_game_region.write() = Some(game_region.clone());
         *self.pending_region_change.write() = None;
-
-        // Update rate limit counter
-        let mut window = self.switches_this_minute.write();
-        if now.duration_since(window.1) > Duration::from_secs(60) {
-            *window = (1, now);
-        } else {
-            window.0 += 1;
-        }
 
         // Add to event log (keep last 20 events)
         let event = AutoRoutingEvent {
@@ -260,15 +261,17 @@ impl AutoRouter {
         };
 
         let mut log = self.event_log.write();
-        log.push(event);
+        log.push_back(event);
         if log.len() > 20 {
-            log.remove(0);
+            log.pop_front();
         }
 
         log::info!(
             "Auto-routing: Switched {} -> {} (game server in {})",
             from_region, to_region, game_region.display_name()
         );
+
+        true
     }
 
     /// Reset state (call on disconnect)

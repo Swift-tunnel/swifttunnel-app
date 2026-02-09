@@ -171,7 +171,11 @@ impl UdpRelay {
 
     /// Receive a packet from the relay (inbound: game server -> relay -> game client)
     ///
-    /// Returns the payload with session ID stripped, or None if no packet available
+    /// Returns the payload with session ID stripped, or None if no packet available.
+    ///
+    /// NOTE: After an auto-routing relay switch, in-flight response packets from the
+    /// OLD relay server will be dropped here (source address validation fails).
+    /// This is expected and acceptable - games handle transient packet loss gracefully.
     pub fn receive_inbound(&self, buffer: &mut [u8]) -> Result<Option<usize>> {
         // Temporary buffer to receive with session ID
         let mut recv_buf = [0u8; 1600];

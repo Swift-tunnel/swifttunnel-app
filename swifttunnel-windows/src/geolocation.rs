@@ -168,22 +168,22 @@ pub enum RobloxRegion {
 
 impl RobloxRegion {
     /// Get the best SwiftTunnel gaming region for this Roblox region
-    pub fn best_swifttunnel_region(&self) -> &'static str {
+    pub fn best_swifttunnel_region(&self) -> Option<&'static str> {
         match self {
-            RobloxRegion::Singapore => "singapore",
-            RobloxRegion::Tokyo => "tokyo",
-            RobloxRegion::Mumbai => "mumbai",
-            RobloxRegion::Sydney => "sydney",
-            RobloxRegion::London => "london",
-            RobloxRegion::Amsterdam => "amsterdam",
-            RobloxRegion::Paris => "paris",
-            RobloxRegion::Frankfurt => "germany",
-            RobloxRegion::Warsaw => "germany",  // Closest SwiftTunnel region
-            RobloxRegion::UsEast => "america",
-            RobloxRegion::UsCentral => "america",
-            RobloxRegion::UsWest => "america",
-            RobloxRegion::Brazil => "brazil",
-            RobloxRegion::Unknown => "singapore",  // Fallback
+            RobloxRegion::Unknown => None,
+            RobloxRegion::Singapore => Some("singapore"),
+            RobloxRegion::Tokyo => Some("tokyo"),
+            RobloxRegion::Mumbai => Some("mumbai"),
+            RobloxRegion::Sydney => Some("sydney"),
+            RobloxRegion::London => Some("london"),
+            RobloxRegion::Amsterdam => Some("amsterdam"),
+            RobloxRegion::Paris => Some("paris"),
+            RobloxRegion::Frankfurt => Some("germany"),
+            RobloxRegion::Warsaw => Some("germany"),  // Closest SwiftTunnel region
+            RobloxRegion::UsEast => Some("america"),
+            RobloxRegion::UsCentral => Some("america"),
+            RobloxRegion::UsWest => Some("america"),
+            RobloxRegion::Brazil => Some("brazil"),
         }
     }
 
@@ -315,8 +315,9 @@ mod tests {
 
     #[test]
     fn test_roblox_region_best_swifttunnel() {
-        assert_eq!(RobloxRegion::Singapore.best_swifttunnel_region(), "singapore");
-        assert_eq!(RobloxRegion::UsEast.best_swifttunnel_region(), "america");
-        assert_eq!(RobloxRegion::Frankfurt.best_swifttunnel_region(), "germany");
+        assert_eq!(RobloxRegion::Singapore.best_swifttunnel_region(), Some("singapore"));
+        assert_eq!(RobloxRegion::UsEast.best_swifttunnel_region(), Some("america"));
+        assert_eq!(RobloxRegion::Frankfurt.best_swifttunnel_region(), Some("germany"));
+        assert_eq!(RobloxRegion::Unknown.best_swifttunnel_region(), None);
     }
 }
