@@ -27,25 +27,26 @@ use crossbeam_channel::Receiver;
 const REFRESH_INTERVAL_MS: u64 = 50;
 
 /// Quick-ping candidate relay servers and return the best one.
-/// Pings all candidates in parallel with a single UDP probe each.
+/// Pings all candidates in parallel using ICMP (same as GUI latency measurement).
 /// Returns (region_name, addr, latency_ms) for the fastest responder.
 async fn ping_and_select_best(candidates: &[(String, SocketAddr)]) -> Option<(String, SocketAddr, u32)> {
-    use tokio::net::UdpSocket;
-    use tokio::time::timeout;
+    use crate::vpn::servers::measure_latency_icmp;
 
     let mut tasks = Vec::new();
     for (region, addr) in candidates {
         let region = region.clone();
         let addr = *addr;
         tasks.push(tokio::spawn(async move {
-            // Single UDP ping - send 1 byte, wait for any response
-            let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
-            let start = Instant::now();
-            socket.send_to(&[0u8; 1], addr).await.ok()?;
-            let mut buf = [0u8; 64];
-            match timeout(Duration::from_secs(2), socket.recv_from(&mut buf)).await {
-                Ok(Ok(_)) => {
-                    let ms = start.elapsed().as_millis() as u32;
+            let ip = addr.ip().to_string();
+            // Use ICMP ping — reliable for all server types.
+            // The previous UDP probe ([0u8; 1] to relay port 51821) never got responses
+            // because relay servers only respond to valid session ID packets.
+            let result = tokio::task::spawn_blocking(move || {
+                measure_latency_icmp(&ip)
+            }).await;
+
+            match result {
+                Ok(Some(ms)) => {
                     log::info!("Auto-routing ping: {} ({}) = {}ms", region, addr, ms);
                     Some((region, addr, ms))
                 }

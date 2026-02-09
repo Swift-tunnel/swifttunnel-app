@@ -209,8 +209,14 @@ impl AutoRouter {
         }
 
         let servers = self.available_servers.read();
-        let candidates: Vec<(String, SocketAddr)> = servers.iter()
+        let mut candidates_with_latency: Vec<&(String, SocketAddr, Option<u32>)> = servers.iter()
             .filter(|(region, _, _)| region == best_st_region || region.starts_with(&format!("{}-", best_st_region)))
+            .collect();
+
+        // Sort by cached latency (lowest first) so fallback picks best cached server
+        candidates_with_latency.sort_by_key(|(_, _, latency)| latency.unwrap_or(u32::MAX));
+
+        let candidates: Vec<(String, SocketAddr)> = candidates_with_latency.into_iter()
             .map(|(region, addr, _)| (region.clone(), *addr))
             .collect();
 
