@@ -216,10 +216,13 @@ impl std::fmt::Display for RobloxRegion {
 /// Map a Roblox game server IP to its geographic region.
 ///
 /// Uses hard-coded /24 subnet mappings based on Roblox's AS22697 infrastructure.
-/// This is more reliable than generic geolocation APIs for Roblox's self-hosted servers.
+/// Primary source: BTRoblox extension (most widely-used, community-validated).
+/// Cross-referenced with ipinfo.io geolocation and DevForum posts.
 ///
 /// Sources:
+/// - BTRoblox extension (background.js) - complete 0-127 octet mapping
 /// - https://devforum.roblox.com/t/roblox-server-region-a-list-of-roblox-ip-ranges/3094401
+/// - ipinfo.io AS22697 geolocation lookups
 pub fn roblox_ip_to_region(ip: Ipv4Addr) -> RobloxRegion {
     let octets = ip.octets();
 
@@ -230,32 +233,47 @@ pub fn roblox_ip_to_region(ip: Ipv4Addr) -> RobloxRegion {
 
     // Map by third octet (/24 blocks)
     match octets[2] {
-        // Asia-Pacific
-        50 | 97 => RobloxRegion::Singapore,
-        55 | 120 => RobloxRegion::Tokyo,
-        104 => RobloxRegion::Mumbai,
+        // ── Asia-Pacific ──────────────────────────────────────────────
+        50 | 79 | 97 => RobloxRegion::Singapore,
+        6 | 55 | 58 | 59 | 60 | 82 | 83 | 120 => RobloxRegion::Tokyo,
+        7 | 9 | 104 => RobloxRegion::Mumbai,
         51 => RobloxRegion::Sydney,
 
-        // Europe
-        33 | 119 => RobloxRegion::London,
-        21 => RobloxRegion::Amsterdam,
-        4 | 122 => RobloxRegion::Paris,
-        5 | 44 | 123 => RobloxRegion::Frankfurt,
-        31 | 124 => RobloxRegion::Warsaw,
+        // ── Europe ────────────────────────────────────────────────────
+        33 | 35 | 36 | 72 | 73 | 89 | 119 => RobloxRegion::London,
+        13 | 21 | 54 | 121 => RobloxRegion::Amsterdam,
+        4 | 19 | 20 | 26 | 122 => RobloxRegion::Paris,
+        5 | 8 | 39 | 40 | 41 | 42 | 43 | 44 | 123 => RobloxRegion::Frankfurt,
+        2 | 3 | 31 | 124 => RobloxRegion::Warsaw,
 
-        // North America - East
-        102 | 53 => RobloxRegion::UsEast,     // Ashburn, VA
-        32 => RobloxRegion::UsEast,            // NYC
-        22 | 99 => RobloxRegion::UsEast,       // Atlanta
-        45 | 127 => RobloxRegion::UsEast,      // Miami
+        // ── US East ──────────────────────────────────────────────────
+        // Ashburn / Virginia
+        10 | 11 | 52 | 53 | 56 | 70 | 71 | 74 | 75 | 76 | 77 | 78
+        | 80 | 87 | 96 | 102 | 114 => RobloxRegion::UsEast,
+        // NYC / Secaucus NJ
+        15 | 16 | 17 | 23 | 32 | 65 | 66 | 126 => RobloxRegion::UsEast,
+        // Atlanta
+        22 | 24 | 25 | 99 => RobloxRegion::UsEast,
+        // Miami
+        18 | 37 | 38 | 45 | 85 | 127 => RobloxRegion::UsEast,
 
-        // North America - Central
-        101 | 48 => RobloxRegion::UsCentral,   // Chicago
-        95 => RobloxRegion::UsCentral,         // Dallas
+        // ── US Central ───────────────────────────────────────────────
+        // Chicago / Elk Grove Village
+        27 | 28 | 29 | 34 | 46 | 47 | 48 | 84 | 88 | 101 | 112 | 113
+            => RobloxRegion::UsCentral,
+        // Dallas
+        95 => RobloxRegion::UsCentral,
 
-        // North America - West
-        116 | 1 | 63 => RobloxRegion::UsWest,  // Los Angeles
-        115 => RobloxRegion::UsWest,           // Seattle
+        // ── US West ──────────────────────────────────────────────────
+        // Los Angeles
+        1 | 49 | 63 | 116 => RobloxRegion::UsWest,
+        // Seattle
+        62 | 115 => RobloxRegion::UsWest,
+        // San Jose / Santa Clara
+        57 | 67 | 68 | 69 | 81 | 105 | 117 => RobloxRegion::UsWest,
+        // San Mateo (Roblox HQ area - may be infra but in Bay Area)
+        12 | 61 | 64 | 86 | 90 | 91 | 92 | 93 | 94 | 98 | 100 | 103
+        | 106 | 107 | 108 | 109 | 110 | 111 | 125 => RobloxRegion::UsWest,
 
         _ => RobloxRegion::Unknown,
     }
@@ -298,19 +316,79 @@ mod tests {
     #[test]
     fn test_roblox_ip_to_region_singapore() {
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 50, 100)), RobloxRegion::Singapore);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 79, 50)), RobloxRegion::Singapore);
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 97, 50)), RobloxRegion::Singapore);
     }
 
     #[test]
+    fn test_roblox_ip_to_region_tokyo() {
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 6, 1)), RobloxRegion::Tokyo);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 55, 1)), RobloxRegion::Tokyo);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 82, 1)), RobloxRegion::Tokyo);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 120, 1)), RobloxRegion::Tokyo);
+    }
+
+    #[test]
+    fn test_roblox_ip_to_region_europe() {
+        // London
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 33, 1)), RobloxRegion::London);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 35, 1)), RobloxRegion::London);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 119, 1)), RobloxRegion::London);
+        // Amsterdam
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 21, 1)), RobloxRegion::Amsterdam);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 54, 1)), RobloxRegion::Amsterdam);
+        // Frankfurt
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 5, 1)), RobloxRegion::Frankfurt);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 44, 1)), RobloxRegion::Frankfurt);
+        // Warsaw
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 31, 1)), RobloxRegion::Warsaw);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 124, 1)), RobloxRegion::Warsaw);
+    }
+
+    #[test]
     fn test_roblox_ip_to_region_us_east() {
+        // Ashburn
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 102, 1)), RobloxRegion::UsEast);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 80, 1)), RobloxRegion::UsEast);
+        // NYC
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 32, 200)), RobloxRegion::UsEast);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 65, 1)), RobloxRegion::UsEast);
+        // Atlanta
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 22, 1)), RobloxRegion::UsEast);
+        // Miami
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 45, 1)), RobloxRegion::UsEast);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 127, 1)), RobloxRegion::UsEast);
+    }
+
+    #[test]
+    fn test_roblox_ip_to_region_us_central() {
+        // Chicago
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 48, 1)), RobloxRegion::UsCentral);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 101, 1)), RobloxRegion::UsCentral);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 84, 1)), RobloxRegion::UsCentral);
+        // Dallas
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 95, 1)), RobloxRegion::UsCentral);
+    }
+
+    #[test]
+    fn test_roblox_ip_to_region_us_west() {
+        // LA
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 1, 1)), RobloxRegion::UsWest);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 63, 1)), RobloxRegion::UsWest);
+        // Seattle
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 115, 1)), RobloxRegion::UsWest);
+        // San Jose
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 57, 1)), RobloxRegion::UsWest);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 105, 1)), RobloxRegion::UsWest);
     }
 
     #[test]
     fn test_roblox_ip_to_region_unknown() {
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(1, 1, 1, 1)), RobloxRegion::Unknown);
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 200, 1)), RobloxRegion::Unknown);
+        // Decommissioned Hong Kong ranges → Unknown
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 0, 1)), RobloxRegion::Unknown);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 14, 1)), RobloxRegion::Unknown);
     }
 
     #[test]
