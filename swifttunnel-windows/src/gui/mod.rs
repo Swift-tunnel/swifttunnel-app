@@ -302,6 +302,27 @@ impl BoosterApp {
         });
         let auth_state = auth_manager.get_state();
         let user_info = auth_manager.get_user();
+        let auth_manager = Arc::new(Mutex::new(auth_manager));
+
+        // Refresh user profile on startup to pick up admin changes (e.g., tester access)
+        if matches!(auth_state, AuthState::LoggedIn(_)) {
+            let auth_clone = Arc::clone(&auth_manager);
+            let rt_clone = Arc::clone(&runtime);
+            let tx = auth_update_tx.clone();
+            std::thread::spawn(move || {
+                rt_clone.block_on(async {
+                    if let Ok(auth) = auth_clone.lock() {
+                        match auth.refresh_profile().await {
+                            Ok(()) => {
+                                let new_state = auth.get_state();
+                                let _ = tx.send(new_state);
+                            }
+                            Err(e) => log::warn!("Startup profile refresh failed (non-fatal): {}", e),
+                        }
+                    }
+                });
+            });
+        }
 
         let mut app_state = AppState::default();
         app_state.config = saved_settings.config.clone();
@@ -406,7 +427,7 @@ impl BoosterApp {
             system_optimizer: SystemOptimizer::new(),
             network_booster: NetworkBooster::new(),
             status_message: None,
-            auth_manager: Arc::new(Mutex::new(auth_manager)),
+            auth_manager,
             auth_state,
             user_info,
             auth_error: None,

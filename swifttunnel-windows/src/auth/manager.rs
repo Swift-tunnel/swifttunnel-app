@@ -286,6 +286,40 @@ impl AuthManager {
         })
     }
 
+    /// Re-fetch the user profile and update the stored session
+    ///
+    /// Call this on app startup to pick up changes made via the admin panel
+    /// (e.g., tester access granted/revoked) without requiring a full re-login.
+    pub async fn refresh_profile(&self) -> Result<(), AuthError> {
+        let session = match self.get_state() {
+            AuthState::LoggedIn(session) => session,
+            _ => return Ok(()),
+        };
+
+        let profile = self.client.fetch_user_profile(&session.access_token).await?;
+        info!("Profile refreshed on startup: is_tester={}", profile.is_tester);
+
+        if profile.is_tester != session.user.is_tester {
+            info!("Tester status changed: {} -> {}", session.user.is_tester, profile.is_tester);
+            let updated_session = AuthSession {
+                user: UserInfo {
+                    is_tester: profile.is_tester,
+                    ..session.user
+                },
+                ..session
+            };
+
+            let _ = self.storage.store_session(&updated_session);
+
+            {
+                let mut state = self.state.lock().unwrap();
+                *state = AuthState::LoggedIn(updated_session);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get a valid access token, refreshing if needed
     pub async fn get_access_token(&self) -> Result<String, AuthError> {
         self.refresh_if_needed().await?;
