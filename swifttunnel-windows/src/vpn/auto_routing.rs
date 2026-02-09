@@ -189,12 +189,13 @@ impl AutoRouter {
         log::info!("Auto-routing: Lookup complete for {}, releasing packets", ip);
     }
 
-    /// Handle the result of an async region lookup (called from background task).
+    /// Get candidate relay servers for a game region.
     ///
-    /// Determines if we need to switch relays based on the looked-up region.
-    /// Returns `Some((new_addr, new_region))` if a switch should happen.
-    pub fn handle_region_lookup(&self, game_region: RobloxRegion) -> Option<(SocketAddr, String)> {
-        if game_region == RobloxRegion::Unknown {
+    /// Returns `None` if already on the correct region or no candidates exist.
+    /// Returns `Some((candidates, game_region))` where candidates are (region_name, addr)
+    /// pairs that should be pinged to find the best one.
+    pub fn get_candidates_for_region(&self, game_region: &RobloxRegion) -> Option<Vec<(String, SocketAddr)>> {
+        if *game_region == RobloxRegion::Unknown {
             return None;
         }
 
@@ -203,44 +204,41 @@ impl AutoRouter {
 
         // Check if we're already on the best region
         if current_st_region == best_st_region || current_st_region.starts_with(&format!("{}-", best_st_region)) {
-            *self.current_game_region.write() = Some(game_region);
+            *self.current_game_region.write() = Some(game_region.clone());
             return None;
         }
 
-        // Find the best server in the target region (lowest latency wins)
         let servers = self.available_servers.read();
-        let candidates: Vec<_> = servers.iter()
+        let candidates: Vec<(String, SocketAddr)> = servers.iter()
             .filter(|(region, _, _)| region == best_st_region || region.starts_with(&format!("{}-", best_st_region)))
+            .map(|(region, addr, _)| (region.clone(), *addr))
             .collect();
 
-        // Pick server with lowest cached latency; fall back to first if no latency data
-        let best_server = candidates.iter()
-            .filter(|(_, _, latency)| latency.is_some())
-            .min_by_key(|(_, _, latency)| latency.unwrap())
-            .or_else(|| candidates.first());
-
-        if let Some((new_region, new_addr, latency)) = best_server {
-            log::info!(
-                "Auto-routing: Selected {} ({}) for region '{}' (latency: {}, {} candidates)",
-                new_region, new_addr, best_st_region,
-                latency.map_or("unknown".to_string(), |ms| format!("{}ms", ms)),
-                candidates.len()
-            );
-            let new_region = new_region.clone();
-            let new_addr = *new_addr;
-            drop(servers);
-
-            // Record the switch (also performs rate-limit check atomically)
-            if self.record_switch(&current_st_region, &new_region, &game_region, new_addr) {
-                Some((new_addr, new_region))
-            } else {
-                None
-            }
-        } else {
+        if candidates.is_empty() {
             log::warn!(
                 "Auto-routing: No server found for region '{}' (game region: {})",
                 best_st_region, game_region
             );
+            None
+        } else {
+            log::info!("Auto-routing: {} candidates for region '{}': {:?}",
+                candidates.len(), best_st_region,
+                candidates.iter().map(|(r, a)| format!("{} ({})", r, a)).collect::<Vec<_>>()
+            );
+            Some(candidates)
+        }
+    }
+
+    /// Commit a relay switch after the best server has been selected (called from background task).
+    ///
+    /// `selected_region` and `selected_addr` are the result of pinging candidates.
+    /// Returns `Some((addr, region))` if the switch was recorded, `None` if rate-limited.
+    pub fn commit_switch(&self, game_region: RobloxRegion, selected_region: String, selected_addr: SocketAddr) -> Option<(SocketAddr, String)> {
+        let current_st_region = self.current_st_region.read().clone();
+
+        if self.record_switch(&current_st_region, &selected_region, &game_region, selected_addr) {
+            Some((selected_addr, selected_region))
+        } else {
             None
         }
     }
@@ -356,13 +354,21 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_region_lookup_switches_relay() {
+    fn test_get_candidates_switches_relay() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
         router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
 
-        // Simulating ipinfo.io lookup result: game server is in US East
-        let result = router.handle_region_lookup(RobloxRegion::UsEast);
+        // Game server in US East — should return america candidates
+        let candidates = router.get_candidates_for_region(&RobloxRegion::UsEast);
+        assert!(candidates.is_some());
+        let candidates = candidates.unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, "america-01");
+        assert_eq!(candidates[0].1, "54.225.245.114:51821".parse::<SocketAddr>().unwrap());
+
+        // Commit the switch
+        let result = router.commit_switch(RobloxRegion::UsEast, candidates[0].0.clone(), candidates[0].1);
         assert!(result.is_some());
         let (addr, region) = result.unwrap();
         assert_eq!(region, "america-01");
@@ -370,23 +376,23 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_region_lookup_same_region_no_switch() {
+    fn test_get_candidates_same_region_no_switch() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
         router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
 
-        // Already on Singapore — no switch needed
-        let result = router.handle_region_lookup(RobloxRegion::Singapore);
-        assert!(result.is_none());
+        // Already on Singapore — should return None (no candidates needed)
+        let candidates = router.get_candidates_for_region(&RobloxRegion::Singapore);
+        assert!(candidates.is_none());
     }
 
     #[test]
-    fn test_handle_region_lookup_unknown_no_switch() {
+    fn test_get_candidates_unknown_no_switch() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
 
-        let result = router.handle_region_lookup(RobloxRegion::Unknown);
-        assert!(result.is_none());
+        let candidates = router.get_candidates_for_region(&RobloxRegion::Unknown);
+        assert!(candidates.is_none());
     }
 
     #[test]

@@ -26,6 +26,52 @@ use crossbeam_channel::Receiver;
 /// 50ms ensures game traffic is tunneled almost instantly on launch
 const REFRESH_INTERVAL_MS: u64 = 50;
 
+/// Quick-ping candidate relay servers and return the best one.
+/// Pings all candidates in parallel with a single UDP probe each.
+/// Returns (region_name, addr, latency_ms) for the fastest responder.
+async fn ping_and_select_best(candidates: &[(String, SocketAddr)]) -> Option<(String, SocketAddr, u32)> {
+    use tokio::net::UdpSocket;
+    use tokio::time::timeout;
+
+    let mut tasks = Vec::new();
+    for (region, addr) in candidates {
+        let region = region.clone();
+        let addr = *addr;
+        tasks.push(tokio::spawn(async move {
+            // Single UDP ping - send 1 byte, wait for any response
+            let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+            let start = Instant::now();
+            socket.send_to(&[0u8; 1], addr).await.ok()?;
+            let mut buf = [0u8; 64];
+            match timeout(Duration::from_secs(2), socket.recv_from(&mut buf)).await {
+                Ok(Ok(_)) => {
+                    let ms = start.elapsed().as_millis() as u32;
+                    log::info!("Auto-routing ping: {} ({}) = {}ms", region, addr, ms);
+                    Some((region, addr, ms))
+                }
+                _ => {
+                    log::info!("Auto-routing ping: {} ({}) = timeout", region, addr);
+                    None
+                }
+            }
+        }));
+    }
+
+    let mut best: Option<(String, SocketAddr, u32)> = None;
+    for task in tasks {
+        if let Ok(Some((region, addr, ms))) = task.await {
+            if best.as_ref().map_or(true, |(_, _, best_ms)| ms < *best_ms) {
+                best = Some((region, addr, ms));
+            }
+        }
+    }
+
+    if let Some((ref region, ref addr, ms)) = best {
+        log::info!("Auto-routing: Best candidate: {} ({}) at {}ms", region, addr, ms);
+    }
+    best
+}
+
 /// VPN connection state
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
@@ -415,20 +461,43 @@ impl VpnConnection {
                         Some((region, location)) => {
                             log::info!("Auto-routing: {} resolved to {} ({})", ip, location, region.display_name());
                             let old_region = router_for_lookup.current_region();
-                            if let Some((new_addr, new_region)) = router_for_lookup.handle_region_lookup(region) {
-                                log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {})", old_region, new_region, new_addr);
-                                relay_for_lookup.switch_relay(new_addr);
-                                // Send burst of keepalives to new relay to:
-                                // 1. Establish session on new relay ASAP
-                                // 2. Punch through NAT/firewall quickly (3 packets at 50ms intervals)
-                                // Without this, the new relay doesn't know our session_id and
-                                // NAT may not have a mapping yet, causing an inbound blackout.
-                                if let Err(e) = relay_for_lookup.send_keepalive_burst() {
-                                    log::warn!("Auto-routing: Failed to send keepalive burst to new relay: {}", e);
+
+                            // Step 1: Get candidate servers for the target region
+                            let candidates = router_for_lookup.get_candidates_for_region(&region);
+
+                            if let Some(candidates) = candidates {
+                                // Step 2: Quick-ping each candidate to find the best one
+                                let best = ping_and_select_best(&candidates).await;
+
+                                if let Some((selected_region, selected_addr, latency_ms)) = best {
+                                    // Step 3: Commit the switch with the best server
+                                    if let Some((new_addr, new_region)) = router_for_lookup.commit_switch(region, selected_region, selected_addr) {
+                                        log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {}, ping: {}ms)",
+                                            old_region, new_region, new_addr, latency_ms);
+                                        relay_for_lookup.switch_relay(new_addr);
+                                        // Send burst of keepalives to new relay to:
+                                        // 1. Establish session on new relay ASAP
+                                        // 2. Punch through NAT/firewall quickly (3 packets at 50ms intervals)
+                                        if let Err(e) = relay_for_lookup.send_keepalive_burst() {
+                                            log::warn!("Auto-routing: Failed to send keepalive burst to new relay: {}", e);
+                                        }
+                                        log::info!("Auto-routing: Relay addr is now {}", relay_for_lookup.relay_addr());
+                                        crate::notification::show_relay_switch(&old_region, &new_region, &location);
+                                    }
+                                } else {
+                                    log::warn!("Auto-routing: All candidate pings failed, using first candidate");
+                                    // Fallback: use first candidate without ping
+                                    let (fallback_region, fallback_addr) = candidates[0].clone();
+                                    if let Some((new_addr, new_region)) = router_for_lookup.commit_switch(region, fallback_region, fallback_addr) {
+                                        log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {}, no ping data)",
+                                            old_region, new_region, new_addr);
+                                        relay_for_lookup.switch_relay(new_addr);
+                                        if let Err(e) = relay_for_lookup.send_keepalive_burst() {
+                                            log::warn!("Auto-routing: Failed to send keepalive burst: {}", e);
+                                        }
+                                        crate::notification::show_relay_switch(&old_region, &new_region, &location);
+                                    }
                                 }
-                                log::info!("Auto-routing: Relay addr is now {}", relay_for_lookup.relay_addr());
-                                // Show a distinct toast so tester can confirm relay actually switched
-                                crate::notification::show_relay_switch(&old_region, &new_region, &location);
                             } else {
                                 log::info!("Auto-routing: No switch needed (already on best region for {})", location);
                             }
