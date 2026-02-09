@@ -11,7 +11,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use parking_lot::RwLock;
-use crate::geolocation::{RobloxRegion, roblox_ip_to_region};
+use crate::geolocation::RobloxRegion;
 
 /// Minimum time between relay switches to prevent flapping
 const MIN_SWITCH_INTERVAL: Duration = Duration::from_secs(10);
@@ -39,6 +39,8 @@ pub struct AutoRouter {
     available_servers: RwLock<Vec<(String, SocketAddr)>>,
     /// Log of auto-routing events for UI display
     event_log: RwLock<VecDeque<AutoRoutingEvent>>,
+    /// Channel to send game server IPs for async geolocation lookup
+    lookup_sender: RwLock<Option<tokio::sync::mpsc::UnboundedSender<Ipv4Addr>>>,
 }
 
 /// An auto-routing event for the UI log
@@ -76,7 +78,13 @@ impl AutoRouter {
             seen_game_servers: RwLock::new(HashSet::new()),
             available_servers: RwLock::new(Vec::new()),
             event_log: RwLock::new(VecDeque::new()),
+            lookup_sender: RwLock::new(None),
         }
+    }
+
+    /// Set the channel for sending game server IPs to the background lookup task
+    pub fn set_lookup_channel(&self, sender: tokio::sync::mpsc::UnboundedSender<Ipv4Addr>) {
+        *self.lookup_sender.write() = Some(sender);
     }
 
     /// Enable or disable auto-routing
@@ -119,25 +127,16 @@ impl AutoRouter {
         events.iter().rev().take(max).cloned().collect()
     }
 
-    /// Evaluate a detected game server IP and determine if we should switch relays.
+    /// Evaluate a detected game server IP and trigger an async region lookup.
     ///
-    /// This is called from the packet processing path when a new Roblox game server
-    /// IP is detected. It must be fast (no blocking). Note: some small allocations
-    /// occur (clone, format) but are negligible for this use case.
+    /// This is called from the packet processing hot path when a new Roblox game server
+    /// IP is detected. It must be fast (no blocking). New IPs are sent to a background
+    /// task that performs an ipinfo.io lookup and switches the relay if needed.
+    ///
+    /// Always returns NoAction — the actual relay switch happens asynchronously
+    /// via `handle_region_lookup()` when the ipinfo.io response arrives.
     pub fn evaluate_game_server(&self, game_server_ip: Ipv4Addr) -> AutoRoutingAction {
         if !self.is_enabled() {
-            return AutoRoutingAction::NoAction;
-        }
-
-        // Determine game server region
-        let game_region = roblox_ip_to_region(game_server_ip);
-        if game_region == RobloxRegion::Unknown {
-            return AutoRoutingAction::NoAction;
-        }
-
-        // Check if this is the same region we're already tracking
-        let current = self.current_game_region.read().clone();
-        if current.as_ref() == Some(&game_region) {
             return AutoRoutingAction::NoAction;
         }
 
@@ -149,25 +148,35 @@ impl AutoRouter {
             None => return AutoRoutingAction::NoAction,
         };
 
-        // Already-seen IP in a different region — no action (protect against flapping)
         if !is_new_ip {
             return AutoRoutingAction::NoAction;
         }
 
-        // New IP in a different region — switch immediately
+        // New IP detected — send to background lookup task for ipinfo.io resolution
+        if let Some(sender) = self.lookup_sender.read().as_ref() {
+            let _ = sender.send(game_server_ip);
+            log::info!("Auto-routing: New game server {} detected, looking up region...", game_server_ip);
+        }
 
-        // Find the best SwiftTunnel server for this game region
-        let best_st_region = match game_region.best_swifttunnel_region() {
-            Some(r) => r,
-            None => return AutoRoutingAction::NoAction,
-        };
+        AutoRoutingAction::NoAction
+    }
+
+    /// Handle the result of an async region lookup (called from background task).
+    ///
+    /// Determines if we need to switch relays based on the looked-up region.
+    /// Returns `Some((new_addr, new_region))` if a switch should happen.
+    pub fn handle_region_lookup(&self, game_region: RobloxRegion) -> Option<(SocketAddr, String)> {
+        if game_region == RobloxRegion::Unknown {
+            return None;
+        }
+
+        let best_st_region = game_region.best_swifttunnel_region()?;
         let current_st_region = self.current_st_region.read().clone();
 
         // Check if we're already on the best region
         if current_st_region == best_st_region || current_st_region.starts_with(&format!("{}-", best_st_region)) {
-            // Already on an optimal server (e.g. "singapore-02" starts with "singapore")
             *self.current_game_region.write() = Some(game_region);
-            return AutoRoutingAction::NoAction;
+            return None;
         }
 
         // Find the best server in the target region
@@ -178,23 +187,20 @@ impl AutoRouter {
         if let Some((new_region, new_addr)) = best_server {
             let new_region = new_region.clone();
             let new_addr = *new_addr;
+            drop(servers);
 
             // Record the switch (also performs rate-limit check atomically)
-            if !self.record_switch(&current_st_region, &new_region, &game_region, new_addr) {
-                return AutoRoutingAction::NoAction;
-            }
-
-            AutoRoutingAction::SwitchRelay {
-                new_addr,
-                new_region,
-                game_region,
+            if self.record_switch(&current_st_region, &new_region, &game_region, new_addr) {
+                Some((new_addr, new_region))
+            } else {
+                None
             }
         } else {
             log::warn!(
                 "Auto-routing: No server found for region '{}' (game region: {})",
                 best_st_region, game_region
             );
-            AutoRoutingAction::NoAction
+            None
         }
     }
 
@@ -270,6 +276,7 @@ impl AutoRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geolocation::RobloxRegion;
 
     fn make_servers() -> Vec<(String, SocketAddr)> {
         vec![
@@ -296,87 +303,81 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_router_immediate_switch_new_ip() {
+    fn test_auto_router_evaluate_always_noaction() {
+        // evaluate_game_server now always returns NoAction (async lookup handles switching)
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
-        router.set_current_relay(
-            "54.255.205.216:51821".parse().unwrap(),
-            "singapore",
-        );
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
 
-        // First evaluation of a new IP in a different region should switch immediately
-        let us_east_ip = Ipv4Addr::new(128, 116, 102, 1);
-        let action = router.evaluate_game_server(us_east_ip);
-        assert!(matches!(action, AutoRoutingAction::SwitchRelay { .. }));
-    }
-
-    #[test]
-    fn test_auto_router_same_ip_no_double_switch() {
-        let router = AutoRouter::new(true, "singapore");
-        router.set_available_servers(make_servers());
-        router.set_current_relay(
-            "54.255.205.216:51821".parse().unwrap(),
-            "singapore",
-        );
-
-        let us_east_ip = Ipv4Addr::new(128, 116, 102, 1);
-
-        // First call switches
-        let action = router.evaluate_game_server(us_east_ip);
-        assert!(matches!(action, AutoRoutingAction::SwitchRelay { .. }));
-
-        // Second call with same IP should be NoAction (already seen)
-        let action = router.evaluate_game_server(us_east_ip);
+        let action = router.evaluate_game_server(Ipv4Addr::new(128, 116, 102, 1));
         assert!(matches!(action, AutoRoutingAction::NoAction));
     }
 
     #[test]
-    fn test_auto_router_same_region_no_switch() {
+    fn test_handle_region_lookup_switches_relay() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
-        router.set_current_relay(
-            "54.255.205.216:51821".parse().unwrap(),
-            "singapore",
-        );
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
 
-        // Singapore game server while on Singapore relay = no switch
-        let sg_ip = Ipv4Addr::new(128, 116, 50, 100);
-        for _ in 0..10 {
-            let action = router.evaluate_game_server(sg_ip);
-            assert!(matches!(action, AutoRoutingAction::NoAction));
-        }
+        // Simulating ipinfo.io lookup result: game server is in US East
+        let result = router.handle_region_lookup(RobloxRegion::UsEast);
+        assert!(result.is_some());
+        let (addr, region) = result.unwrap();
+        assert_eq!(region, "america-01");
+        assert_eq!(addr, "54.225.245.114:51821".parse::<SocketAddr>().unwrap());
     }
 
     #[test]
-    fn test_auto_router_unknown_ip_no_switch() {
+    fn test_handle_region_lookup_same_region_no_switch() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        // Already on Singapore — no switch needed
+        let result = router.handle_region_lookup(RobloxRegion::Singapore);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_handle_region_lookup_unknown_no_switch() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
 
-        // Non-Roblox IP should never trigger switch
-        let action = router.evaluate_game_server(Ipv4Addr::new(8, 8, 8, 8));
-        assert!(matches!(action, AutoRoutingAction::NoAction));
+        let result = router.handle_region_lookup(RobloxRegion::Unknown);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_auto_router_deduplicates_ips() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+
+        // First call sends to channel
+        router.evaluate_game_server(ip);
+        assert!(rx.try_recv().is_ok());
+
+        // Second call with same IP should NOT send again
+        router.evaluate_game_server(ip);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
     fn test_region_matching_no_false_prefix_matches() {
-        // Verifies that region matching requires an exact match or a "-" delimiter,
-        // so "americano" does NOT match "america" but "america-01" does.
         let region = "america";
 
         let matches_region = |candidate: &str| -> bool {
             candidate == region || candidate.starts_with(&format!("{}-", region))
         };
 
-        // Exact match
         assert!(matches_region("america"));
-        // Hyphenated sub-region should match
         assert!(matches_region("america-01"));
         assert!(matches_region("america-west"));
-        // False prefix that is NOT the same region
         assert!(!matches_region("americano"));
         assert!(!matches_region("americas"));
         assert!(!matches_region("american"));
-        // Completely different region
         assert!(!matches_region("singapore"));
         assert!(!matches_region("tokyo-02"));
     }

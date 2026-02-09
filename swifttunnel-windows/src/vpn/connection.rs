@@ -394,6 +394,7 @@ impl VpnConnection {
             }
         };
 
+        let relay_for_lookup = Arc::clone(&relay);
         driver.set_relay_context(relay);
         log::info!("V3: UDP relay context set");
 
@@ -401,6 +402,33 @@ impl VpnConnection {
         let auto_router = Arc::new(super::auto_routing::AutoRouter::new(auto_routing_enabled, &config.region));
         auto_router.set_current_relay(relay_addr, &config.region);
         auto_router.set_available_servers(available_servers);
+
+        // Spawn background task for async ipinfo.io region lookups
+        if auto_routing_enabled {
+            let (lookup_tx, mut lookup_rx) = tokio::sync::mpsc::unbounded_channel::<std::net::Ipv4Addr>();
+            auto_router.set_lookup_channel(lookup_tx);
+
+            let router_for_lookup = Arc::clone(&auto_router);
+            tokio::spawn(async move {
+                while let Some(ip) = lookup_rx.recv().await {
+                    match crate::geolocation::lookup_game_server_region(ip).await {
+                        Some((region, location)) => {
+                            log::info!("Auto-routing: {} resolved to {} ({})", ip, location, region.display_name());
+                            if let Some((new_addr, new_region)) = router_for_lookup.handle_region_lookup(region) {
+                                log::info!("Auto-routing: Switching relay to {} ({})", new_addr, new_region);
+                                relay_for_lookup.switch_relay(new_addr);
+                            }
+                        }
+                        None => {
+                            log::warn!("Auto-routing: ipinfo.io lookup failed for {}", ip);
+                        }
+                    }
+                }
+                log::debug!("Auto-routing: Lookup task exiting (channel closed)");
+            });
+            log::info!("V3: Auto-routing lookup task spawned");
+        }
+
         driver.set_auto_router(Arc::clone(&auto_router));
         self.auto_router = Some(Arc::clone(&auto_router));
         log::info!("V3: Auto-router initialized for region {} (enabled: {})", config.region, auto_routing_enabled);

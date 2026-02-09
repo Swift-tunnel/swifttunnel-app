@@ -25,7 +25,6 @@ pub use animations::*;
 
 use crate::auth::{AuthManager, AuthState, UserInfo};
 use crate::discord_rpc::DiscordManager;
-use crate::geolocation::roblox_ip_to_region;
 use crate::hidden_command;
 use swifttunnel_fps_booster::notification::show_server_location;
 use swifttunnel_fps_booster::roblox_watcher::{RobloxWatcher, RobloxEvent};
@@ -1525,18 +1524,21 @@ impl eframe::App for BoosterApp {
             }
         }
 
-        // Check for new game server detections via split tunnel (instant, no API needed)
+        // Check for new game server detections via split tunnel
         if self.vpn_state.is_connected() {
             if let Ok(vpn) = self.vpn_connection.try_lock() {
                 let current_servers = vpn.get_detected_game_servers();
                 for ip in &current_servers {
                     if !self.detected_game_servers.contains(ip) {
                         self.detected_game_servers.insert(*ip);
-                        let region = roblox_ip_to_region(*ip);
-                        if region != crate::geolocation::RobloxRegion::Unknown {
-                            log::info!("Game server {} detected: {}", ip, region.display_name());
-                            show_server_location(region.display_name());
-                        }
+                        // Async ipinfo.io lookup for accurate region detection
+                        let ip_owned = *ip;
+                        self.runtime.spawn(async move {
+                            if let Some((_region, location)) = crate::geolocation::lookup_game_server_region(ip_owned).await {
+                                log::info!("Game server {} detected: {}", ip_owned, location);
+                                show_server_location(&location);
+                            }
+                        });
                     }
                 }
             }
@@ -1549,12 +1551,14 @@ impl eframe::App for BoosterApp {
                     match event {
                         RobloxEvent::GameServerDetected { ip } => {
                             if !self.detected_game_servers.contains(&ip) {
-                                let region = roblox_ip_to_region(ip);
-                                if region != crate::geolocation::RobloxRegion::Unknown {
-                                    log::info!("Roblox game server detected (log watcher): {} ({})", ip, region.display_name());
-                                    self.detected_game_servers.insert(ip);
-                                    show_server_location(region.display_name());
-                                }
+                                self.detected_game_servers.insert(ip);
+                                // Async ipinfo.io lookup for accurate region detection
+                                self.runtime.spawn(async move {
+                                    if let Some((_region, location)) = crate::geolocation::lookup_game_server_region(ip).await {
+                                        log::info!("Roblox game server detected (log watcher): {} ({})", ip, location);
+                                        show_server_location(&location);
+                                    }
+                                });
                             }
                         }
                     }

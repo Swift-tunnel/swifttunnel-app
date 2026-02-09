@@ -213,6 +213,91 @@ impl std::fmt::Display for RobloxRegion {
     }
 }
 
+/// Determine Roblox game server region from ipinfo.io city/country fields.
+///
+/// This is the runtime counterpart to the hardcoded `roblox_ip_to_region()` table.
+/// Used by auto-routing and toast notifications for accurate region detection.
+pub fn ipinfo_to_roblox_region(city: &str, country: &str) -> RobloxRegion {
+    match country {
+        "SG" => RobloxRegion::Singapore,
+        "JP" => RobloxRegion::Tokyo,
+        "IN" => RobloxRegion::Mumbai,
+        "AU" => RobloxRegion::Sydney,
+        "BR" => RobloxRegion::Brazil,
+        "GB" => RobloxRegion::London,
+        "NL" => RobloxRegion::Amsterdam,
+        "FR" => RobloxRegion::Paris,
+        "PL" => RobloxRegion::Warsaw,
+        "DE" => RobloxRegion::Frankfurt,
+        "US" => {
+            // Determine US sub-region from city name
+            let city_lower = city.to_lowercase();
+            if city_lower.contains("chicago") || city_lower.contains("elk grove")
+                || city_lower.contains("dallas") || city_lower.contains("houston")
+            {
+                RobloxRegion::UsCentral
+            } else if city_lower.contains("ashburn") || city_lower.contains("leesburg")
+                || city_lower.contains("sterling") || city_lower.contains("reston")
+                || city_lower.contains("new york") || city_lower.contains("secaucus")
+                || city_lower.contains("newark") || city_lower.contains("atlanta")
+                || city_lower.contains("miami") || city_lower.contains("jacksonville")
+                || city_lower.contains("fort lauderdale")
+            {
+                RobloxRegion::UsEast
+            } else {
+                // Default US to West (LA, San Jose, Seattle, San Mateo all West Coast)
+                RobloxRegion::UsWest
+            }
+        }
+        _ => RobloxRegion::Unknown,
+    }
+}
+
+/// Look up a game server IP's region via ipinfo.io (async).
+///
+/// Returns `(RobloxRegion, location_string)` where location_string is like "Singapore, SG".
+/// Used by auto-routing for accurate runtime region detection.
+pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
+    let _permit = get_semaphore().acquire().await.ok()?;
+
+    // Check cache first
+    let cached_location = {
+        let cache = get_cache();
+        cache.lock().ok().and_then(|c| c.get(&ip).cloned())
+    };
+
+    let (city, country, location) = if let Some(loc) = cached_location {
+        // Parse cached "City, Country" or "City, Region, Country" string
+        let parts: Vec<&str> = loc.split(", ").collect();
+        let city = parts.first().unwrap_or(&"").to_string();
+        let country = parts.last().unwrap_or(&"").to_string();
+        (city, country, loc)
+    } else {
+        let url = format!("https://ipinfo.io/{}/json", ip);
+        let client = geo_http_client();
+        let response = client.get(&url).send().await.ok()?;
+        if !response.status().is_success() {
+            log::warn!("ipinfo.io returned status {} for {}", response.status(), ip);
+            return None;
+        }
+        let info: IpInfoResponse = response.json().await.ok()?;
+        let city = info.city.clone().unwrap_or_default();
+        let country = info.country.clone().unwrap_or_default();
+        let location = format_location(&info)?;
+
+        // Cache the result
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(ip, location.clone());
+        }
+
+        (city, country, location)
+    };
+
+    let region = ipinfo_to_roblox_region(&city, &country);
+    log::info!("Geo lookup: {} -> {} ({})", ip, location, region.display_name());
+    Some((region, location))
+}
+
 /// Map a Roblox game server IP to its geographic region.
 ///
 /// Uses hard-coded /24 subnet mappings based on Roblox's AS22697 infrastructure.
