@@ -6,6 +6,20 @@ use log::{debug, error, info};
 use reqwest::Client;
 use serde_json::json;
 
+/// Response from the user profile API
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UserProfileResponse {
+    pub id: String,
+    #[serde(default)]
+    pub full_name: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub is_tester: bool,
+}
+
 const API_BASE_URL: &str = "https://swifttunnel.net";
 const SUPABASE_URL: &str = "https://auth.swifttunnel.net";
 const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvbnVnanZvcWtsdmdibmh4c2hnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyNTU3ODksImV4cCI6MjA4MDgzMTc4OX0.Jmme0whahuX2KEmklBZQzCcJnsHJemyO8U9TdynbyNE";
@@ -202,6 +216,42 @@ impl AuthClient {
             .map_err(|e| AuthError::ApiError(format!("Failed to parse exchange response: {}", e)))?;
 
         info!("Successfully exchanged OAuth token");
+        Ok(data)
+    }
+
+    /// Fetch user profile from SwiftTunnel API (includes tester status)
+    pub async fn fetch_user_profile(
+        &self,
+        access_token: &str,
+    ) -> Result<UserProfileResponse, AuthError> {
+        let url = format!("{}/api/user/profile", API_BASE_URL);
+
+        debug!("Fetching user profile");
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Fetch user profile failed: {} - {}", status, body);
+            return Err(AuthError::ApiError(format!(
+                "Profile fetch failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let data: UserProfileResponse = response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse profile: {}", e)))?;
+
+        info!("Fetched user profile (is_tester: {})", data.is_tester);
         Ok(data)
     }
 

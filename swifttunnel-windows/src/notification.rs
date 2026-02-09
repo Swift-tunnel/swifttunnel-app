@@ -6,9 +6,35 @@
 use std::path::Path;
 use winrt_notification::{Duration, IconCrop, Sound, Toast};
 
-/// SwiftTunnel's App User Model ID for Windows notifications
-/// This allows Windows to display "SwiftTunnel" as the notification source
+/// SwiftTunnel's App User Model ID for Windows notifications.
+/// Only works when the app is installed with a matching Start menu shortcut.
 const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.GameBooster";
+
+/// Check if our custom AUMID is registered (Start menu shortcut exists)
+fn is_aumid_registered() -> bool {
+    // Check for Start menu shortcut that registers our AUMID
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let shortcut = Path::new(&appdata)
+            .join(r"Microsoft\Windows\Start Menu\Programs\SwiftTunnel.lnk");
+        if shortcut.exists() {
+            return true;
+        }
+    }
+    // Also check Program Files install marker
+    Path::new(r"C:\Program Files\SwiftTunnel\swifttunnel.exe").exists()
+}
+
+/// Get the best AUMID for toast notifications.
+/// Falls back to PowerShell's AUMID when our app isn't properly installed,
+/// which ensures notifications actually appear (at the cost of showing
+/// "Windows PowerShell" as the source instead of "SwiftTunnel").
+fn get_aumid() -> &'static str {
+    if is_aumid_registered() {
+        SWIFTTUNNEL_AUMID
+    } else {
+        Toast::POWERSHELL_APP_ID
+    }
+}
 
 /// Get the path to the SwiftTunnel icon
 fn get_icon_path() -> Option<std::path::PathBuf> {
@@ -43,23 +69,29 @@ fn get_icon_path() -> Option<std::path::PathBuf> {
 /// * `title` - The notification title (e.g., "Connected to server")
 /// * `message` - The notification body (e.g., "Location: Singapore, SG")
 pub fn show_notification(title: &str, message: &str) {
-    let mut toast = Toast::new(SWIFTTUNNEL_AUMID)
-        .title(title)
-        .text1(message)
-        .sound(Some(Sound::Default))
-        .duration(Duration::Short);
+    // Run on a background thread to avoid blocking the GUI thread
+    let title = title.to_string();
+    let message = message.to_string();
+    std::thread::spawn(move || {
+        let aumid = get_aumid();
+        let mut toast = Toast::new(aumid)
+            .title(&title)
+            .text1(&message)
+            .sound(Some(Sound::Default))
+            .duration(Duration::Short);
 
-    // Add icon if available
-    if let Some(icon_path) = get_icon_path() {
-        toast = toast.icon(&icon_path, IconCrop::Square, "SwiftTunnel");
-    }
+        // Add icon if available (only when using our own AUMID)
+        if aumid == SWIFTTUNNEL_AUMID {
+            if let Some(icon_path) = get_icon_path() {
+                toast = toast.icon(&icon_path, IconCrop::Square, "SwiftTunnel");
+            }
+        }
 
-    let result = toast.show();
-
-    match result {
-        Ok(_) => log::debug!("Notification shown: {} - {}", title, message),
-        Err(e) => log::warn!("Failed to show notification: {}", e),
-    }
+        match toast.show() {
+            Ok(_) => log::debug!("Notification shown: {} - {}", title, message),
+            Err(e) => log::warn!("Failed to show notification: {}", e),
+        }
+    });
 }
 
 /// Show a server location notification (Bloxstrap-style)
