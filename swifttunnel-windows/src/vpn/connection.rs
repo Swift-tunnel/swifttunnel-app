@@ -198,7 +198,7 @@ impl VpnConnection {
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
         auto_routing_enabled: bool,
-        available_servers: Vec<(String, std::net::SocketAddr)>,
+        available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -296,7 +296,7 @@ impl VpnConnection {
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
         auto_routing_enabled: bool,
-        available_servers: Vec<(String, std::net::SocketAddr)>,
+        available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
     ) -> VpnResult<Vec<String>> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -418,11 +418,13 @@ impl VpnConnection {
                             if let Some((new_addr, new_region)) = router_for_lookup.handle_region_lookup(region) {
                                 log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {})", old_region, new_region, new_addr);
                                 relay_for_lookup.switch_relay(new_addr);
-                                // Immediately send keepalive to new relay to establish session
-                                // Without this, the new relay doesn't know our session_id until
-                                // the first organic outbound packet arrives (causing a blackout)
-                                if let Err(e) = relay_for_lookup.send_keepalive_now() {
-                                    log::warn!("Auto-routing: Failed to send keepalive to new relay: {}", e);
+                                // Send burst of keepalives to new relay to:
+                                // 1. Establish session on new relay ASAP
+                                // 2. Punch through NAT/firewall quickly (3 packets at 50ms intervals)
+                                // Without this, the new relay doesn't know our session_id and
+                                // NAT may not have a mapping yet, causing an inbound blackout.
+                                if let Err(e) = relay_for_lookup.send_keepalive_burst() {
+                                    log::warn!("Auto-routing: Failed to send keepalive burst to new relay: {}", e);
                                 }
                                 log::info!("Auto-routing: Relay addr is now {}", relay_for_lookup.relay_addr());
                                 // Show a distinct toast so tester can confirm relay actually switched

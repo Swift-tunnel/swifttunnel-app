@@ -35,8 +35,8 @@ pub struct AutoRouter {
     switches_this_minute: RwLock<(u32, Instant)>,
     /// Game server IPs we've already routed (to detect new teleports)
     seen_game_servers: RwLock<HashSet<Ipv4Addr>>,
-    /// Callback: list of (region_id, relay_addr) for available servers
-    available_servers: RwLock<Vec<(String, SocketAddr)>>,
+    /// Callback: list of (region_id, relay_addr, cached_latency_ms) for available servers
+    available_servers: RwLock<Vec<(String, SocketAddr, Option<u32>)>>,
     /// Log of auto-routing events for UI display
     event_log: RwLock<VecDeque<AutoRoutingEvent>>,
     /// Channel to send game server IPs for async geolocation lookup
@@ -61,12 +61,6 @@ pub struct AutoRoutingEvent {
 pub enum AutoRoutingAction {
     /// No action needed - current relay is optimal or conditions not met
     NoAction,
-    /// Switch to a different relay server
-    SwitchRelay {
-        new_addr: SocketAddr,
-        new_region: String,
-        game_region: RobloxRegion,
-    },
 }
 
 impl AutoRouter {
@@ -101,10 +95,17 @@ impl AutoRouter {
         self.enabled.load(Ordering::Acquire)
     }
 
-    /// Update the list of available relay servers
-    /// Called when server list is fetched/refreshed
-    pub fn set_available_servers(&self, servers: Vec<(String, SocketAddr)>) {
+    /// Update the list of available relay servers with cached latency data.
+    /// Called when server list is fetched/refreshed.
+    /// Latency is used to pick the best server when multiple match a region.
+    pub fn set_available_servers(&self, servers: Vec<(String, SocketAddr, Option<u32>)>) {
         log::info!("Auto-routing: Updated available servers ({} servers)", servers.len());
+        for (region, addr, latency) in &servers {
+            log::info!("  {} ({}) - latency: {}",
+                region, addr,
+                latency.map_or("unknown".to_string(), |ms| format!("{}ms", ms))
+            );
+        }
         *self.available_servers.write() = servers;
     }
 
@@ -161,6 +162,8 @@ impl AutoRouter {
         // so the game server only ever sees traffic from the correct relay.
         if let Some(mut pending) = self.pending_lookups.try_write() {
             pending.insert(game_server_ip);
+        } else {
+            log::warn!("Auto-routing: Failed to acquire pending_lookups write lock for {} — packets may leak to wrong relay during lookup", game_server_ip);
         }
         if let Some(sender) = self.lookup_sender.read().as_ref() {
             let _ = sender.send(game_server_ip);
@@ -178,11 +181,12 @@ impl AutoRouter {
     }
 
     /// Clear a pending lookup (called when the ipinfo.io lookup completes).
+    /// Uses write() (blocking) because this runs in the async background task,
+    /// not the packet processing hot path. Must not fail silently or packets
+    /// to this IP would be dropped forever.
     pub fn clear_pending_lookup(&self, ip: Ipv4Addr) {
-        if let Some(mut pending) = self.pending_lookups.try_write() {
-            pending.remove(&ip);
-            log::info!("Auto-routing: Lookup complete for {}, releasing packets", ip);
-        }
+        self.pending_lookups.write().remove(&ip);
+        log::info!("Auto-routing: Lookup complete for {}, releasing packets", ip);
     }
 
     /// Handle the result of an async region lookup (called from background task).
@@ -203,12 +207,25 @@ impl AutoRouter {
             return None;
         }
 
-        // Find the best server in the target region
+        // Find the best server in the target region (lowest latency wins)
         let servers = self.available_servers.read();
-        let best_server = servers.iter()
-            .find(|(region, _)| region == best_st_region || region.starts_with(&format!("{}-", best_st_region)));
+        let candidates: Vec<_> = servers.iter()
+            .filter(|(region, _, _)| region == best_st_region || region.starts_with(&format!("{}-", best_st_region)))
+            .collect();
 
-        if let Some((new_region, new_addr)) = best_server {
+        // Pick server with lowest cached latency; fall back to first if no latency data
+        let best_server = candidates.iter()
+            .filter(|(_, _, latency)| latency.is_some())
+            .min_by_key(|(_, _, latency)| latency.unwrap())
+            .or_else(|| candidates.first());
+
+        if let Some((new_region, new_addr, latency)) = best_server {
+            log::info!(
+                "Auto-routing: Selected {} ({}) for region '{}' (latency: {}, {} candidates)",
+                new_region, new_addr, best_st_region,
+                latency.map_or("unknown".to_string(), |ms| format!("{}ms", ms)),
+                candidates.len()
+            );
             let new_region = new_region.clone();
             let new_addr = *new_addr;
             drop(servers);
@@ -303,17 +320,17 @@ mod tests {
     use super::*;
     use crate::geolocation::RobloxRegion;
 
-    fn make_servers() -> Vec<(String, SocketAddr)> {
+    fn make_servers() -> Vec<(String, SocketAddr, Option<u32>)> {
         vec![
-            ("singapore".to_string(), "54.255.205.216:51821".parse().unwrap()),
-            ("singapore-02".to_string(), "51.79.128.67:51821".parse().unwrap()),
-            ("mumbai".to_string(), "3.111.230.152:51821".parse().unwrap()),
-            ("america-01".to_string(), "54.225.245.114:51821".parse().unwrap()),
-            ("tokyo-02".to_string(), "45.32.253.124:51821".parse().unwrap()),
-            ("sydney".to_string(), "54.153.235.165:51821".parse().unwrap()),
-            ("germany-01".to_string(), "63.181.160.158:51821".parse().unwrap()),
-            ("london-01".to_string(), "172.237.119.240:51821".parse().unwrap()),
-            ("brazil-02".to_string(), "172.233.20.214:51821".parse().unwrap()),
+            ("singapore".to_string(), "54.255.205.216:51821".parse().unwrap(), None),
+            ("singapore-02".to_string(), "51.79.128.67:51821".parse().unwrap(), None),
+            ("mumbai".to_string(), "3.111.230.152:51821".parse().unwrap(), None),
+            ("america-01".to_string(), "54.225.245.114:51821".parse().unwrap(), None),
+            ("tokyo-02".to_string(), "45.32.253.124:51821".parse().unwrap(), None),
+            ("sydney".to_string(), "54.153.235.165:51821".parse().unwrap(), None),
+            ("germany-01".to_string(), "63.181.160.158:51821".parse().unwrap(), None),
+            ("london-01".to_string(), "172.237.119.240:51821".parse().unwrap(), None),
+            ("brazil-02".to_string(), "172.233.20.214:51821".parse().unwrap(), None),
         ]
     }
 

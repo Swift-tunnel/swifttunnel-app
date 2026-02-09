@@ -31,12 +31,20 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// Read timeout - shorter for tighter packet pickup loop
 const READ_TIMEOUT: Duration = Duration::from_micros(100);
 
+/// Grace period after relay switch: accept packets from BOTH old and new relay.
+/// This eliminates the inbound blackout while the new relay establishes session.
+const RELAY_SWITCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
+
 /// UDP Relay client for Game Booster mode
 pub struct UdpRelay {
     /// Socket for communicating with relay server
     socket: UdpSocket,
     /// Relay server address (swappable for auto-routing)
     relay_addr: ArcSwap<SocketAddr>,
+    /// Previous relay address — accepted during grace period after switch
+    previous_relay_addr: ArcSwap<Option<SocketAddr>>,
+    /// When the last relay switch occurred (for grace period calculation)
+    switch_time: ArcSwap<Option<Instant>>,
     /// Unique session ID for this connection
     session_id: [u8; SESSION_ID_LEN],
     /// Stop flag
@@ -114,6 +122,8 @@ impl UdpRelay {
         Ok(Self {
             socket,
             relay_addr: ArcSwap::from_pointee(relay_addr),
+            previous_relay_addr: ArcSwap::from_pointee(None),
+            switch_time: ArcSwap::from_pointee(None),
             session_id,
             stop_flag: Arc::new(AtomicBool::new(false)),
             packets_sent: AtomicU64::new(0),
@@ -173,20 +183,32 @@ impl UdpRelay {
     ///
     /// Returns the payload with session ID stripped, or None if no packet available.
     ///
-    /// NOTE: After an auto-routing relay switch, in-flight response packets from the
-    /// OLD relay server will be dropped here (source address validation fails).
-    /// This is expected and acceptable - games handle transient packet loss gracefully.
+    /// After an auto-routing relay switch, packets from the OLD relay are accepted
+    /// during a 2-second grace period. This eliminates the inbound blackout that
+    /// occurs while the new relay establishes the game server session mapping.
     pub fn receive_inbound(&self, buffer: &mut [u8]) -> Result<Option<usize>> {
         // Temporary buffer to receive with session ID
         let mut recv_buf = [0u8; 1600];
 
         match self.socket.recv_from(&mut recv_buf) {
             Ok((len, from)) => {
-                // Verify it's from our relay server
+                // Verify it's from our relay server (current or previous during grace period)
                 let expected_addr = **self.relay_addr.load();
                 if from != expected_addr {
-                    log::warn!("UDP Relay: Received packet from unexpected source {} (expected {})", from, expected_addr);
-                    return Ok(None);
+                    // Check if within grace period for previous relay
+                    let in_grace = if let (Some(prev), Some(switched_at)) =
+                        ((**self.previous_relay_addr.load()).as_ref(), (**self.switch_time.load()).as_ref())
+                    {
+                        from == *prev && switched_at.elapsed() < RELAY_SWITCH_GRACE_PERIOD
+                    } else {
+                        false
+                    };
+
+                    if !in_grace {
+                        log::warn!("UDP Relay: Received packet from unexpected source {} (expected {})", from, expected_addr);
+                        return Ok(None);
+                    }
+                    log::trace!("UDP Relay: Accepting packet from previous relay {} (grace period)", from);
                 }
 
                 // Must have at least session ID
@@ -232,6 +254,33 @@ impl UdpRelay {
             *guard = Instant::now();
         }
         log::info!("UDP Relay: Sent immediate keepalive to {} (session {:016x})", current_addr, self.session_id_u64());
+        Ok(())
+    }
+
+    /// Send a burst of keepalives to quickly establish NAT mapping and relay session.
+    /// Sends 3 keepalives at 0ms, 50ms, 100ms spacing to punch through NAT/firewalls
+    /// faster than a single packet. Used after auto-routing relay switch.
+    pub fn send_keepalive_burst(&self) -> Result<()> {
+        let current_addr = **self.relay_addr.load();
+        for i in 0..3 {
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            match self.socket.send_to(&self.session_id, current_addr) {
+                Ok(_) => {}
+                Err(e) if i == 0 => return Err(e.into()),
+                Err(e) => {
+                    log::warn!("UDP Relay: Keepalive burst #{} failed: {}", i + 1, e);
+                }
+            }
+        }
+        if let Ok(mut guard) = self.last_activity.lock() {
+            *guard = Instant::now();
+        }
+        log::info!(
+            "UDP Relay: Sent keepalive burst (3 packets) to {} (session {:016x})",
+            current_addr, self.session_id_u64()
+        );
         Ok(())
     }
 
@@ -286,13 +335,16 @@ impl UdpRelay {
 
     /// Atomically switch to a new relay server address.
     /// The next outbound packet will go to the new address.
-    /// This is the core of Auto Routing - zero-disruption server switching.
+    /// Stores the old address so receive_inbound() can accept packets from both
+    /// relays during a grace period, eliminating the inbound blackout.
     pub fn switch_relay(&self, new_addr: SocketAddr) {
         let old_addr = **self.relay_addr.load();
+        self.previous_relay_addr.store(Arc::new(Some(old_addr)));
+        self.switch_time.store(Arc::new(Some(Instant::now())));
         self.relay_addr.store(Arc::new(new_addr));
         log::info!(
-            "UDP Relay: Switched relay {} -> {} (session {:016x})",
-            old_addr, new_addr, self.session_id_u64()
+            "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
+            old_addr, new_addr, self.session_id_u64(), RELAY_SWITCH_GRACE_PERIOD.as_secs()
         );
     }
 

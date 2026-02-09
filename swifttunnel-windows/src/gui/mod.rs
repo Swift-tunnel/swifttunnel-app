@@ -2233,12 +2233,14 @@ impl BoosterApp {
             None
         };
 
-        // Build available servers list for auto-routing
+        // Build available servers list for auto-routing with cached latency data.
+        // Latency is used to pick the best server when multiple match a region.
         // NOTE: Use port 51821 (V3 relay port), NOT s.port (51820 = WireGuard endpoint port)
-        let available_servers: Vec<(String, std::net::SocketAddr)> = if let Ok(list) = self.dynamic_server_list.lock() {
+        let available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)> = if let Ok(list) = self.dynamic_server_list.lock() {
             list.servers().iter().filter_map(|s| {
                 let addr: std::net::SocketAddr = format!("{}:51821", s.ip).parse().ok()?;
-                Some((s.region.clone(), addr))
+                let latency = list.get_latency(&s.region);
+                Some((s.region.clone(), addr, latency))
             }).collect()
         } else {
             Vec::new()

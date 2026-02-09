@@ -2562,24 +2562,10 @@ fn run_packet_worker(
                         }
 
                         // === AUTO ROUTING ===
-                        // CRITICAL ORDERING: This MUST run before relay.forward_outbound() below.
-                        // When a player teleports, we need to switch the relay BEFORE the first
-                        // packet is sent to the new game server. Otherwise the game server
-                        // establishes a session with the old relay's IP and rejects traffic
-                        // from the new relay (Roblox Error 2).
+                        // Notify auto-router of new game server IPs (triggers async region lookup).
+                        // The actual relay switch happens asynchronously via handle_region_lookup().
                         if let Some(ref auto_router) = auto_router {
-                            match auto_router.evaluate_game_server(dst_ip) {
-                                super::auto_routing::AutoRoutingAction::SwitchRelay { new_addr, new_region, game_region } => {
-                                    if let Some(ref relay) = relay_ctx {
-                                        relay.switch_relay(new_addr);
-                                        log::info!(
-                                            "Auto-routing: Worker {} switched relay to {} ({}) for game region {}",
-                                            worker_id, new_addr, new_region, game_region
-                                        );
-                                    }
-                                }
-                                super::auto_routing::AutoRoutingAction::NoAction => {}
-                            }
+                            auto_router.evaluate_game_server(dst_ip);
                         }
                     }
                 }
