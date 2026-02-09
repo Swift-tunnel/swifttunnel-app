@@ -2648,6 +2648,23 @@ fn run_packet_worker(
                 // from NAT_BUFFER (thread-local, valid for duration of this function)
                 let packet_to_send = unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
 
+                // === PACKET HOLD: Drop packets while auto-routing lookup is pending ===
+                // When a new game server IP is detected, we hold (drop) packets to it
+                // until the ipinfo.io lookup completes and the relay switches. This
+                // prevents the game server from seeing traffic from the old relay IP,
+                // which causes Roblox Error 2/277. RakNet will retransmit the held packets.
+                if ip_packet.len() >= 20 {
+                    let dst_ip = Ipv4Addr::new(
+                        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+                    );
+                    if let Some(ref auto_router) = auto_router {
+                        if auto_router.is_lookup_pending(dst_ip) {
+                            // Skip this packet — RakNet will retransmit after relay switch
+                            continue;
+                        }
+                    }
+                }
+
                 // === V3: UDP RELAY (NO ENCRYPTION) ===
                 // Forward packets directly to relay server without encryption
                 // This provides lowest latency and CPU usage (like ExitLag)

@@ -41,6 +41,9 @@ pub struct AutoRouter {
     event_log: RwLock<VecDeque<AutoRoutingEvent>>,
     /// Channel to send game server IPs for async geolocation lookup
     lookup_sender: RwLock<Option<tokio::sync::mpsc::UnboundedSender<Ipv4Addr>>>,
+    /// IPs currently being looked up — packets to these are held (dropped) until
+    /// the lookup completes, preventing the game server from seeing a relay IP change.
+    pending_lookups: RwLock<HashSet<Ipv4Addr>>,
 }
 
 /// An auto-routing event for the UI log
@@ -79,6 +82,7 @@ impl AutoRouter {
             available_servers: RwLock::new(Vec::new()),
             event_log: RwLock::new(VecDeque::new()),
             lookup_sender: RwLock::new(None),
+            pending_lookups: RwLock::new(HashSet::new()),
         }
     }
 
@@ -152,13 +156,33 @@ impl AutoRouter {
             return AutoRoutingAction::NoAction;
         }
 
-        // New IP detected — send to background lookup task for ipinfo.io resolution
+        // New IP detected — add to pending set and send to background lookup task.
+        // While pending, packets to this IP will be held (dropped) by the interceptor
+        // so the game server only ever sees traffic from the correct relay.
+        if let Some(mut pending) = self.pending_lookups.try_write() {
+            pending.insert(game_server_ip);
+        }
         if let Some(sender) = self.lookup_sender.read().as_ref() {
             let _ = sender.send(game_server_ip);
-            log::info!("Auto-routing: New game server {} detected, looking up region...", game_server_ip);
+            log::info!("Auto-routing: New game server {} detected, holding packets while looking up region...", game_server_ip);
         }
 
         AutoRoutingAction::NoAction
+    }
+
+    /// Check if the given game server IP has a region lookup in progress.
+    /// Packets to pending IPs should be held (dropped) to prevent the game server
+    /// from seeing traffic from a relay that's about to change.
+    pub fn is_lookup_pending(&self, ip: Ipv4Addr) -> bool {
+        self.pending_lookups.read().contains(&ip)
+    }
+
+    /// Clear a pending lookup (called when the ipinfo.io lookup completes).
+    pub fn clear_pending_lookup(&self, ip: Ipv4Addr) {
+        if let Some(mut pending) = self.pending_lookups.try_write() {
+            pending.remove(&ip);
+            log::info!("Auto-routing: Lookup complete for {}, releasing packets", ip);
+        }
     }
 
     /// Handle the result of an async region lookup (called from background task).
@@ -270,6 +294,7 @@ impl AutoRouter {
         *self.current_game_region.write() = None;
         *self.current_relay_addr.write() = None;
         self.seen_game_servers.write().clear();
+        self.pending_lookups.write().clear();
     }
 }
 

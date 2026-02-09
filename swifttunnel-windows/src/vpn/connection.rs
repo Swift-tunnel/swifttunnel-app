@@ -418,9 +418,14 @@ impl VpnConnection {
                                 log::info!("Auto-routing: Switching relay to {} ({})", new_addr, new_region);
                                 relay_for_lookup.switch_relay(new_addr);
                             }
+                            // Release held packets — lookup is done, relay is now correct
+                            router_for_lookup.clear_pending_lookup(ip);
                         }
                         None => {
-                            log::warn!("Auto-routing: ipinfo.io lookup failed for {}", ip);
+                            log::warn!("Auto-routing: ipinfo.io lookup failed for {}, releasing packets on current relay", ip);
+                            // Release packets even on failure — better to route through
+                            // wrong relay than hold packets forever
+                            router_for_lookup.clear_pending_lookup(ip);
                         }
                     }
                 }
