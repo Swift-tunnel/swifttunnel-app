@@ -2208,9 +2208,10 @@ impl BoosterApp {
         };
 
         // Build available servers list for auto-routing
+        // NOTE: Use port 51821 (V3 relay port), NOT s.port (51820 = WireGuard endpoint port)
         let available_servers: Vec<(String, std::net::SocketAddr)> = if let Ok(list) = self.dynamic_server_list.lock() {
             list.servers().iter().filter_map(|s| {
-                let addr: std::net::SocketAddr = format!("{}:{}", s.ip, s.port).parse().ok()?;
+                let addr: std::net::SocketAddr = format!("{}:51821", s.ip).parse().ok()?;
                 Some((s.region.clone(), addr))
             }).collect()
         } else {
