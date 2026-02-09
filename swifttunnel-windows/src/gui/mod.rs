@@ -2200,8 +2200,9 @@ impl BoosterApp {
 
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
-        // Custom relay server (only used with experimental mode enabled)
-        let custom_relay = if self.experimental_mode && !self.custom_relay_server.is_empty() {
+        // Custom relay server (only used with tester + experimental mode enabled)
+        let is_tester = self.user_info.as_ref().map(|u| u.is_tester).unwrap_or(false);
+        let custom_relay = if is_tester && self.experimental_mode && !self.custom_relay_server.is_empty() {
             Some(self.custom_relay_server.clone())
         } else {
             None
@@ -2217,7 +2218,7 @@ impl BoosterApp {
             Vec::new()
         };
 
-        let auto_routing_enabled = self.experimental_mode && self.auto_routing_enabled;
+        let auto_routing_enabled = is_tester && self.experimental_mode && self.auto_routing_enabled;
 
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();

@@ -31,8 +31,9 @@ impl BoosterApp {
         self.render_game_preset_selector(ui);
         ui.add_space(16.0);
         self.render_region_selector(ui);
-        // Only show Practice Mode if experimental mode is enabled
-        if self.experimental_mode {
+        // Only show Practice Mode if tester + experimental mode enabled
+        let is_tester = self.user_info.as_ref().map(|u| u.is_tester).unwrap_or(false);
+        if is_tester && self.experimental_mode {
             ui.add_space(16.0);
             self.render_latency_slider(ui);
         }
@@ -454,8 +455,9 @@ impl BoosterApp {
                                 });
                         }
 
-                        // Custom Relay badge (only when experimental mode + custom relay configured)
-                        if self.experimental_mode
+                        // Custom Relay badge (only when tester + experimental mode + custom relay configured)
+                        let is_tester_badge = self.user_info.as_ref().map(|u| u.is_tester).unwrap_or(false);
+                        if is_tester_badge && self.experimental_mode
                             && !self.custom_relay_server.is_empty()
                         {
                             let relay_color = STATUS_WARNING;
@@ -482,8 +484,8 @@ impl BoosterApp {
                                 });
                         }
 
-                        // Auto Routing badge (only when experimental mode + auto routing enabled)
-                        if self.experimental_mode && self.auto_routing_enabled {
+                        // Auto Routing badge (only when tester + experimental mode + auto routing enabled)
+                        if is_tester_badge && self.experimental_mode && self.auto_routing_enabled {
                             let game_region_name = self.vpn_connection.try_lock().ok()
                                 .and_then(|conn| conn.auto_router().and_then(|r| r.current_game_region()).map(|r| r.display_name().to_string()));
 

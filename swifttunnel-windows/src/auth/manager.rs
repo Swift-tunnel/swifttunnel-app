@@ -126,14 +126,28 @@ impl AuthManager {
         // Call Supabase auth
         match self.client.sign_in_with_password(email, password).await {
             Ok(response) => {
+                let mut user_info = UserInfo {
+                    id: response.user.id,
+                    email: response.user.email.unwrap_or_else(|| email.to_string()),
+                    is_tester: false,
+                };
+
+                // Fetch user profile to get tester status
+                match self.client.fetch_user_profile(&response.access_token).await {
+                    Ok(profile) => {
+                        user_info.is_tester = profile.is_tester;
+                        info!("User profile fetched: is_tester={}", profile.is_tester);
+                    }
+                    Err(e) => {
+                        warn!("Failed to fetch user profile (non-fatal): {}", e);
+                    }
+                }
+
                 let session = AuthSession {
                     access_token: response.access_token,
                     refresh_token: response.refresh_token,
                     expires_at: Utc::now() + Duration::seconds(response.expires_in),
-                    user: UserInfo {
-                        id: response.user.id,
-                        email: response.user.email.unwrap_or_else(|| email.to_string()),
-                    },
+                    user: user_info,
                 };
 
                 // Store session
@@ -251,6 +265,15 @@ impl AuthManager {
     async fn try_refresh_token(&self, session: &AuthSession) -> Result<AuthSession, AuthError> {
         let refresh_response = self.client.refresh_token(&session.refresh_token).await?;
 
+        // Re-fetch tester status on refresh (in case admin changed it)
+        let is_tester = match self.client.fetch_user_profile(&refresh_response.access_token).await {
+            Ok(profile) => profile.is_tester,
+            Err(e) => {
+                debug!("Failed to fetch profile on refresh (keeping old value): {}", e);
+                session.user.is_tester
+            }
+        };
+
         Ok(AuthSession {
             access_token: refresh_response.access_token,
             refresh_token: refresh_response.refresh_token,
@@ -258,6 +281,7 @@ impl AuthManager {
             user: UserInfo {
                 id: refresh_response.user.id,
                 email: refresh_response.user.email.unwrap_or_else(|| session.user.email.clone()),
+                is_tester,
             },
         })
     }
@@ -488,6 +512,18 @@ impl AuthManager {
             }
         };
 
+        // Fetch user profile to get tester status
+        let is_tester = match self.client.fetch_user_profile(&auth_response.access_token).await {
+            Ok(profile) => {
+                info!("User profile fetched after OAuth: is_tester={}", profile.is_tester);
+                profile.is_tester
+            }
+            Err(e) => {
+                warn!("Failed to fetch user profile after OAuth (non-fatal): {}", e);
+                false
+            }
+        };
+
         // Create session
         let session = AuthSession {
             access_token: auth_response.access_token,
@@ -496,6 +532,7 @@ impl AuthManager {
             user: UserInfo {
                 id: auth_response.user.id,
                 email: auth_response.user.email.unwrap_or(exchange_response.email),
+                is_tester,
             },
         };
 

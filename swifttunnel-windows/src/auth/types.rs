@@ -59,6 +59,9 @@ impl AuthSession {
 pub struct UserInfo {
     pub id: String,
     pub email: String,
+    /// Whether user has tester access (gates experimental features)
+    #[serde(default)]
+    pub is_tester: bool,
 }
 
 /// Supabase auth response
@@ -155,6 +158,7 @@ mod tests {
             user: UserInfo {
                 id: "user-1".to_string(),
                 email: "test@example.com".to_string(),
+                is_tester: false,
             },
         }
     }

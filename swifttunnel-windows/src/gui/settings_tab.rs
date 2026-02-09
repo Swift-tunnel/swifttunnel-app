@@ -212,7 +212,8 @@ impl BoosterApp {
 
         ui.add_space(SPACING_MD);
 
-        // Experimental Features section
+        // Experimental Features section (only visible to testers)
+        let is_tester = self.user_info.as_ref().map(|u| u.is_tester).unwrap_or(false);
         let mut toggle_experimental_mode = false;
         let mut toggle_auto_routing = false;
         let current_experimental_mode = self.experimental_mode;
@@ -222,6 +223,19 @@ impl BoosterApp {
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("Experimental").size(14.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(SPACING_SM);
+
+                if !is_tester {
+                    egui::Frame::NONE
+                        .fill(BG_ELEVATED)
+                        .rounding(6.0)
+                        .inner_margin(egui::Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Experimental features require tester access.").size(12.0).color(TEXT_SECONDARY));
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new("Request tester access from an admin to unlock Practice Mode, Custom Relay, and Auto Routing.").size(10.0).color(TEXT_MUTED));
+                        });
+                    return;
+                }
 
                 // Experimental mode toggle
                 toggle_experimental_mode = render_setting_row(
