@@ -229,6 +229,9 @@ pub struct BoosterApp {
     custom_relay_server: String,
     /// Enable auto-routing: automatically switch relay when game server region changes
     auto_routing_enabled: bool,
+    /// Whitelisted game regions where VPN should be bypassed during auto-routing
+    /// Stored as RobloxRegion display names (e.g., "Singapore", "Tokyo", "US East")
+    whitelisted_regions: std::collections::HashSet<String>,
     /// Logo texture handle (loaded from embedded PNG)
     logo_texture: Option<egui::TextureHandle>,
     /// Pending auto-connect from elevation (--resume-connect flag)
@@ -545,6 +548,8 @@ impl BoosterApp {
             custom_relay_server: saved_settings.custom_relay_server.clone(),
             // Auto-routing setting
             auto_routing_enabled: saved_settings.auto_routing_enabled,
+            // Whitelisted regions for auto-routing bypass
+            whitelisted_regions: saved_settings.whitelisted_regions.iter().cloned().collect(),
             // Logo texture (loaded from embedded PNG)
             logo_texture: Self::load_logo_texture(&cc.egui_ctx),
             // Auto-connect from elevation (take from static if --resume-connect was used)
@@ -700,6 +705,8 @@ impl BoosterApp {
             enable_discord_rpc: self.enable_discord_rpc,
             // Save auto-routing setting
             auto_routing_enabled: self.auto_routing_enabled,
+            // Save whitelisted regions
+            whitelisted_regions: self.whitelisted_regions.iter().cloned().collect(),
         };
 
         let _ = save_settings(&settings);
@@ -2247,6 +2254,7 @@ impl BoosterApp {
         };
 
         let auto_routing_enabled = is_tester && self.experimental_mode && self.auto_routing_enabled;
+        let whitelisted_regions: Vec<String> = self.whitelisted_regions.iter().cloned().collect();
 
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();
@@ -2254,7 +2262,7 @@ impl BoosterApp {
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps, custom_relay, auto_routing_enabled, available_servers).await {
+                    if let Err(e) = connection.connect(&access_token, &region, apps, custom_relay, auto_routing_enabled, available_servers, whitelisted_regions).await {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }

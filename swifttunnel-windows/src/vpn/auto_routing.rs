@@ -44,6 +44,12 @@ pub struct AutoRouter {
     /// IPs currently being looked up — packets to these are held (dropped) until
     /// the lookup completes, preventing the game server from seeing a relay IP change.
     pending_lookups: RwLock<HashSet<Ipv4Addr>>,
+    /// Game regions where VPN should be bypassed (user's regular internet used instead).
+    /// Stored as RobloxRegion display names (e.g., "Singapore", "Tokyo").
+    whitelisted_regions: RwLock<HashSet<String>>,
+    /// Whether auto-routing has bypassed VPN for the current game region.
+    /// Read by the packet interceptor (AtomicBool for lock-free hot path check).
+    auto_routing_bypassed: AtomicBool,
 }
 
 /// An auto-routing event for the UI log
@@ -77,6 +83,8 @@ impl AutoRouter {
             event_log: RwLock::new(VecDeque::new()),
             lookup_sender: RwLock::new(None),
             pending_lookups: RwLock::new(HashSet::new()),
+            whitelisted_regions: RwLock::new(HashSet::new()),
+            auto_routing_bypassed: AtomicBool::new(false),
         }
     }
 
@@ -93,6 +101,24 @@ impl AutoRouter {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
+    }
+
+    /// Set the whitelisted regions (game regions where VPN should be bypassed).
+    /// Accepts display names like "Singapore", "Tokyo", "US East".
+    pub fn set_whitelisted_regions(&self, regions: Vec<String>) {
+        log::info!("Auto-routing: Whitelisted regions updated: {:?}", regions);
+        *self.whitelisted_regions.write() = regions.into_iter().collect();
+    }
+
+    /// Check whether VPN is currently bypassed due to a whitelisted game region.
+    /// Lock-free AtomicBool check for use in the packet processing hot path.
+    pub fn is_bypassed(&self) -> bool {
+        self.auto_routing_bypassed.load(Ordering::Acquire)
+    }
+
+    /// Check if a game region is whitelisted (should bypass VPN).
+    fn is_region_whitelisted(&self, region: &RobloxRegion) -> bool {
+        self.whitelisted_regions.read().contains(region.display_name())
     }
 
     /// Update the list of available relay servers with cached latency data.
@@ -198,6 +224,29 @@ impl AutoRouter {
         if *game_region == RobloxRegion::Unknown {
             return None;
         }
+
+        // Check if this game region is whitelisted (user wants to bypass VPN)
+        if self.is_region_whitelisted(game_region) {
+            log::info!("Auto-routing: Game region {} is whitelisted — bypassing VPN", game_region.display_name());
+            self.auto_routing_bypassed.store(true, Ordering::Release);
+            *self.current_game_region.write() = Some(game_region.clone());
+
+            // Log the bypass event
+            let mut log = self.event_log.write();
+            log.push_back(AutoRoutingEvent {
+                timestamp: Instant::now(),
+                from_region: self.current_st_region.read().clone(),
+                to_region: "BYPASS".to_string(),
+                game_server_region: game_region.display_name().to_string(),
+                reason: format!("{} is whitelisted — using direct connection", game_region.display_name()),
+            });
+            if log.len() > 20 { log.pop_front(); }
+
+            return None;
+        }
+
+        // Not whitelisted — clear bypass flag and proceed with normal routing
+        self.auto_routing_bypassed.store(false, Ordering::Release);
 
         let best_st_region = game_region.best_swifttunnel_region()?;
         let current_st_region = self.current_st_region.read().clone();
@@ -316,6 +365,7 @@ impl AutoRouter {
         *self.current_relay_addr.write() = None;
         self.seen_game_servers.write().clear();
         self.pending_lookups.write().clear();
+        self.auto_routing_bypassed.store(false, Ordering::Release);
     }
 }
 
@@ -416,6 +466,70 @@ mod tests {
         // Second call with same IP should NOT send again
         router.evaluate_game_server(ip);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_whitelisted_region_bypasses_vpn() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        // Whitelist US East
+        router.set_whitelisted_regions(vec!["US East".to_string()]);
+
+        // Game server in US East — should bypass (return None) and set bypassed flag
+        let candidates = router.get_candidates_for_region(&RobloxRegion::UsEast);
+        assert!(candidates.is_none());
+        assert!(router.is_bypassed());
+
+        // Game region should still be tracked
+        assert_eq!(router.current_game_region(), Some(RobloxRegion::UsEast));
+    }
+
+    #[test]
+    fn test_non_whitelisted_region_not_bypassed() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        // Whitelist Singapore only
+        router.set_whitelisted_regions(vec!["Singapore".to_string()]);
+
+        // Game server in US East — should NOT bypass, should return candidates
+        let candidates = router.get_candidates_for_region(&RobloxRegion::UsEast);
+        assert!(candidates.is_some());
+        assert!(!router.is_bypassed());
+    }
+
+    #[test]
+    fn test_bypass_clears_when_non_whitelisted_region_detected() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        router.set_whitelisted_regions(vec!["US East".to_string()]);
+
+        // First: whitelisted region → bypassed
+        router.get_candidates_for_region(&RobloxRegion::UsEast);
+        assert!(router.is_bypassed());
+
+        // Then: non-whitelisted region → bypass cleared
+        router.get_candidates_for_region(&RobloxRegion::Tokyo);
+        assert!(!router.is_bypassed());
+    }
+
+    #[test]
+    fn test_reset_clears_bypass() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_whitelisted_regions(vec!["US East".to_string()]);
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        router.get_candidates_for_region(&RobloxRegion::UsEast);
+        assert!(router.is_bypassed());
+
+        router.reset();
+        assert!(!router.is_bypassed());
     }
 
     #[test]

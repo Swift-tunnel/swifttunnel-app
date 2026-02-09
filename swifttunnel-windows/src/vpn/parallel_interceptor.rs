@@ -2534,7 +2534,28 @@ fn run_packet_worker(
                 );
             }
 
-            if should_tunnel {
+            // Auto-routing whitelist bypass: if the current game region is whitelisted,
+            // game packets that would normally be tunneled are passed through to the
+            // real adapter instead. Lock-free AtomicBool check (<1ns overhead).
+            let auto_routing_bypass = should_tunnel
+                && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
+
+            // When bypassing, still run game server detection + auto-routing evaluation
+            // so we can detect teleports to non-whitelisted regions and resume tunneling.
+            if auto_routing_bypass && work.data.len() > 14 + 20 {
+                let ip_start = 14;
+                let dst_ip = Ipv4Addr::new(
+                    work.data[ip_start + 16], work.data[ip_start + 17],
+                    work.data[ip_start + 18], work.data[ip_start + 19]
+                );
+                if is_roblox_game_server_ip(dst_ip) {
+                    if let Some(ref ar) = auto_router {
+                        ar.evaluate_game_server(dst_ip);
+                    }
+                }
+            }
+
+            if should_tunnel && !auto_routing_bypass {
                 stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
                 stats.bytes_tunneled.fetch_add(packet_len, Ordering::Relaxed);
                 throughput.add_tx(packet_len);

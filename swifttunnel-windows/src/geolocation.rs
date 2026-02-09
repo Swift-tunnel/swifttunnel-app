@@ -167,6 +167,25 @@ pub enum RobloxRegion {
 }
 
 impl RobloxRegion {
+    /// All game-server regions (excluding Unknown) for UI display
+    pub fn all_regions() -> &'static [RobloxRegion] {
+        &[
+            RobloxRegion::Singapore,
+            RobloxRegion::Tokyo,
+            RobloxRegion::Mumbai,
+            RobloxRegion::Sydney,
+            RobloxRegion::London,
+            RobloxRegion::Amsterdam,
+            RobloxRegion::Paris,
+            RobloxRegion::Frankfurt,
+            RobloxRegion::Warsaw,
+            RobloxRegion::UsEast,
+            RobloxRegion::UsCentral,
+            RobloxRegion::UsWest,
+            RobloxRegion::Brazil,
+        ]
+    }
+
     /// Get the best SwiftTunnel gaming region for this Roblox region
     pub fn best_swifttunnel_region(&self) -> Option<&'static str> {
         match self {

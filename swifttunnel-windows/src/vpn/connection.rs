@@ -246,6 +246,7 @@ impl VpnConnection {
         custom_relay_server: Option<String>,
         auto_routing_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
+        whitelisted_regions: Vec<String>,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -292,7 +293,7 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
 
         let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
-            match self.setup_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server, auto_routing_enabled, available_servers).await {
+            match self.setup_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server, auto_routing_enabled, available_servers, whitelisted_regions).await {
                 Ok(processes) => {
                     log::info!("V3 split tunnel setup succeeded");
                     (processes, true)
@@ -344,6 +345,7 @@ impl VpnConnection {
         custom_relay_server: Option<String>,
         auto_routing_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
+        whitelisted_regions: Vec<String>,
     ) -> VpnResult<Vec<String>> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -449,6 +451,9 @@ impl VpnConnection {
         let auto_router = Arc::new(super::auto_routing::AutoRouter::new(auto_routing_enabled, &config.region));
         auto_router.set_current_relay(relay_addr, &config.region);
         auto_router.set_available_servers(available_servers);
+        if !whitelisted_regions.is_empty() {
+            auto_router.set_whitelisted_regions(whitelisted_regions);
+        }
 
         // Spawn background task for async ipinfo.io region lookups
         if auto_routing_enabled {
