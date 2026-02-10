@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    branches: [live]
+    paths:
+      - 'swifttunnel-windows/Cargo.toml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: depot-windows-2025
+
+    defaults:
+      run:
+        working-directory: swifttunnel-windows
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $match) {
+            echo "::error::Could not extract version from Cargo.toml"
+            exit 1
+          }
+          $version = $match.Matches.Groups[1].Value
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "Detected version: $version"
+
+      - name: Check if release already exists
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v${{ steps.version.outputs.VERSION }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            echo "SKIP=true" >> $env:GITHUB_OUTPUT
+            echo "::notice::Release $tag already exists — skipping"
+          } else {
+            echo "SKIP=false" >> $env:GITHUB_OUTPUT
+            echo "No existing release for $tag — proceeding with build"
+          }
+
+      - name: Setup Rust
+        if: steps.check.outputs.SKIP != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup .NET SDK 8
+        if: steps.check.outputs.SKIP != 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install vpk
+        if: steps.check.outputs.SKIP != 'true'
+        shell: pwsh
+        run: dotnet tool install -g vpk
+
+      - name: Cache cargo
+        if: steps.check.outputs.SKIP != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            swifttunnel-windows/target/
+          key: release-cargo-${{ hashFiles('swifttunnel-windows/Cargo.lock') }}
+          restore-keys: release-cargo-
+
+      - name: Build release
+        if: steps.check.outputs.SKIP != 'true'
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Stage Velopack package
+        if: steps.check.outputs.SKIP != 'true'
+        shell: pwsh
+        run: |
+          $staging = "_velopack_staging"
+          $releaseDir = "target\x86_64-pc-windows-msvc\release"
+
+          if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          New-Item -ItemType Directory -Path "$staging\drivers" | Out-Null
+
+          # Main executable
+          Copy-Item "$releaseDir\swifttunnel-fps-booster.exe" "$staging\"
+
+          # Driver installer (optional — only built when driver_installer.rs exists)
+          if (Test-Path "$releaseDir\driver-installer.exe") {
+            Copy-Item "$releaseDir\driver-installer.exe" "$staging\"
+          }
+
+          # Wintun DLL (checked into dist/)
+          Copy-Item "dist\wintun.dll" "$staging\"
+
+          # WinpkFilter driver MSI (download if not present)
+          $driverMsi = "dist\drivers\WinpkFilter-x64.msi"
+          if (-not (Test-Path $driverMsi)) {
+            New-Item -ItemType Directory -Path "dist\drivers" -Force | Out-Null
+            $url = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/WinpkFilter-x64.msi"
+            Invoke-WebRequest -Uri $url -OutFile $driverMsi -UseBasicParsing
+            $size = (Get-Item $driverMsi).Length
+            if ($size -lt 1000000) {
+              throw "Downloaded WinpkFilter MSI is suspiciously small ($size bytes) — download may have failed"
+            }
+          }
+          Copy-Item $driverMsi "$staging\drivers\"
+
+          echo "Staged files:"
+          Get-ChildItem $staging -Recurse -File | ForEach-Object {
+            echo "  $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
+          }
+
+      - name: Package with vpk
+        if: steps.check.outputs.SKIP != 'true'
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          New-Item -ItemType Directory -Path releases -Force | Out-Null
+          vpk pack -u SwiftTunnel -v $version -p _velopack_staging -e swifttunnel-fps-booster.exe --icon assets\swifttunnel.ico -o releases
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.SKIP != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $tag = "v$version"
+          $files = (Get-ChildItem releases -File).FullName
+
+          gh release create $tag $files --title "SwiftTunnel v$version" --generate-notes --prerelease

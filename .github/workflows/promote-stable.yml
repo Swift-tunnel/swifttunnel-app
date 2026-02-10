@@ -1,0 +1,42 @@
+name: Promote to Stable
+
+on:
+  push:
+    branches: [stable]
+    paths:
+      - 'swifttunnel-windows/Cargo.toml'
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Promote Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' swifttunnel-windows/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not extract version from Cargo.toml"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Promote release to stable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.version.outputs.VERSION }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --prerelease=false
+            echo "Promoted $TAG to stable release"
+          else
+            echo "::warning::No release found for $TAG — nothing to promote"
+          fi
