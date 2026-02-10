@@ -29,7 +29,7 @@ const MAX_PAYLOAD_SIZE: usize = 1500;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Read timeout - shorter for tighter packet pickup loop
-const READ_TIMEOUT: Duration = Duration::from_micros(100);
+const READ_TIMEOUT: Duration = Duration::from_millis(10);
 
 /// Grace period after relay switch: accept packets from BOTH old and new relay.
 /// This eliminates the inbound blackout while the new relay establishes session.

@@ -288,6 +288,8 @@ pub struct ParallelInterceptor {
     /// Flag to trigger immediate cache refresh (set by ETW when game process detected)
     /// This enables instant detection without polling - ExitLag-style efficiency
     refresh_now_flag: Arc<AtomicBool>,
+    /// Condvar to wake the cache refresher thread instead of 50ms polling
+    refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     /// Auto-router for automatic relay switching based on game server region
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
 }
@@ -339,6 +341,7 @@ impl ParallelInterceptor {
             inbound_receiver_handle: None,
             detected_game_servers: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
             refresh_now_flag: Arc::new(AtomicBool::new(false)),
+            refresh_condvar: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
             auto_router: None,
         }
     }
@@ -347,6 +350,12 @@ impl ParallelInterceptor {
     /// This is the key to instant detection without polling
     pub fn trigger_refresh(&self) {
         self.refresh_now_flag.store(true, Ordering::Release);
+        // Wake the cache refresher thread via Condvar
+        let (lock, cvar) = &*self.refresh_condvar;
+        if let Ok(mut signaled) = lock.lock() {
+            *signaled = true;
+            cvar.notify_one();
+        }
     }
 
     /// Get list of detected game server IPs (for notifications)
@@ -1141,8 +1150,9 @@ impl ParallelInterceptor {
         let refresher_stop = Arc::clone(&self.stop_flag);
         let refresher_cache = Arc::clone(&self.process_cache);
         let refresh_now = Arc::clone(&self.refresh_now_flag);
+        let refresh_condvar = Arc::clone(&self.refresh_condvar);
         self.refresher_handle = Some(thread::spawn(move || {
-            run_cache_refresher(refresher_cache, refresher_stop, refresh_now);
+            run_cache_refresher(refresher_cache, refresher_stop, refresh_now, refresh_condvar);
         }));
 
         // Reset throughput stats on start
@@ -1806,11 +1816,12 @@ fn run_inbound_receiver(
     const NO_TRAFFIC_WARNING_SECS: u64 = 10; // Warn if no traffic after 10s from start
     const TRAFFIC_STOPPED_WARNING_SECS: u64 = 30; // Warn if traffic stops for 30s
 
-    // For keepalive timer - call update_timers() every 50ms
+    // For keepalive timer - call update_timers() every 1s
     // This is critical because tunnel's keepalive task is disabled when split tunnel is active
     // to avoid endpoint confusion. We must send keepalives from THIS socket.
+    // WireGuard keepalive is 25s, so 1s resolution is plenty.
     let mut last_timer_check = std::time::Instant::now();
-    const TIMER_INTERVAL_MS: u64 = 50;
+    const TIMER_INTERVAL_MS: u64 = 1000;
 
     log::info!("Inbound receiver: entering main loop, waiting for VPN traffic...");
 
@@ -1872,7 +1883,7 @@ fn run_inbound_receiver(
             );
         }
 
-        // === KEEPALIVE TIMER (every 50ms) ===
+        // === KEEPALIVE TIMER (every 1s) ===
         if now.duration_since(last_timer_check).as_millis() >= TIMER_INTERVAL_MS as u128 {
             last_timer_check = now;
 
@@ -2100,8 +2111,11 @@ fn inject_inbound_packet(
         );
     }
 
-    // Make a mutable copy for NAT rewriting
-    let mut packet = ip_packet.to_vec();
+    // Stack-allocated buffer for NAT rewriting (zero allocation)
+    let mut packet_buf = [0u8; 1600];
+    let packet_len = ip_packet.len().min(1600);
+    packet_buf[..packet_len].copy_from_slice(&ip_packet[..packet_len]);
+    let packet = &mut packet_buf[..packet_len];
 
     if needs_nat {
         let new_dst = config.internet_ip.unwrap();
@@ -2155,8 +2169,8 @@ fn inject_inbound_packet(
         }
     }
 
-    // Create Ethernet frame
-    const MAX_ETHER_FRAME: usize = 1522;
+    // Create Ethernet frame (stack-allocated buffer)
+    const MAX_ETHER_FRAME: usize = 1622; // 14 header + 1600 payload + 8 padding
     let frame_len = 14 + packet.len();
 
     if frame_len > MAX_ETHER_FRAME {
@@ -2164,7 +2178,8 @@ fn inject_inbound_packet(
         return None;
     }
 
-    let mut ethernet_frame = vec![0u8; frame_len];
+    let mut ethernet_frame_buf = [0u8; MAX_ETHER_FRAME];
+    let ethernet_frame = &mut ethernet_frame_buf[..frame_len];
     ethernet_frame[0..6].copy_from_slice(&config.adapter_mac); // Destination = physical adapter
     ethernet_frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // Locally administered src MAC
     ethernet_frame[12] = 0x08; // EtherType: IPv4
@@ -2403,10 +2418,12 @@ fn run_packet_worker(
     let mut no_wintun_session = 0u64;
 
     // Performance timing (v0.5.57 - measure hot path latency)
+    // Sample every 128th packet to reduce per-packet overhead
     let mut total_lookup_ns = 0u64;
     let mut total_encrypt_ns = 0u64;
     let mut lookup_count = 0u64;
     let mut encrypt_count = 0u64;
+    let mut timing_sample_counter = 0u64;
 
     // Log initial tunnel apps
     if worker_id == 0 {
@@ -2458,10 +2475,10 @@ fn run_packet_worker(
 
         // Adaptive timeout based on recent activity:
         // - 5ms when recently active (gaming latency acceptable)
-        // - 50ms after 10 consecutive timeouts (idle, save CPU)
+        // - 150ms after 10 consecutive timeouts (idle, save CPU)
         // The reader thread has the event-driven wakeup, workers just need
         // to process what the reader dispatches to them
-        let timeout_ms = if consecutive_timeouts > 10 { 50 } else { 5 };
+        let timeout_ms = if consecutive_timeouts > 10 { 150 } else { 5 };
 
         let work = match receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
             Ok(w) => {
@@ -2508,10 +2525,15 @@ fn run_packet_worker(
         if work.is_outbound {
             // Check if should tunnel (timed for performance measurement)
             // Uses hybrid approach: snapshot cache (fast) + per-worker inline cache (for misses)
-            let lookup_start = std::time::Instant::now();
+            // Sample timing every 128th packet to reduce overhead
+            timing_sample_counter += 1;
+            let should_sample = (timing_sample_counter & 127) == 0;
+            let lookup_start = if should_sample { Some(std::time::Instant::now()) } else { None };
             let should_tunnel = should_route_to_vpn_with_inline_cache(&work.data, &snapshot, &mut inline_cache);
-            total_lookup_ns += lookup_start.elapsed().as_nanos() as u64;
-            lookup_count += 1;
+            if let Some(start) = lookup_start {
+                total_lookup_ns += start.elapsed().as_nanos() as u64;
+                lookup_count += 1;
+            }
 
             // Periodic diagnostic logging (every 500 packets on worker 0)
             if worker_id == 0 && diagnostic_counter % 500 == 0 {
@@ -2715,7 +2737,8 @@ fn run_packet_worker(
                 // All work (encrypt + send) must happen inside the thread-local scope
                 else if let Some(ref ctx) = vpn_encrypt_ctx {
                     // Encrypt and send within thread-local scope (zero allocation!)
-                    let encrypt_start = std::time::Instant::now();
+                    // Sample timing every 128th packet to reduce overhead
+                    let encrypt_start = if should_sample { Some(std::time::Instant::now()) } else { None };
                     let (success, encrypted_len) = ENCRYPT_BUFFER.with(|buf| {
                         let mut encrypt_buf = buf.borrow_mut();
                         let result = {
@@ -2750,8 +2773,10 @@ fn run_packet_worker(
                             }
                         }
                     });
-                    total_encrypt_ns += encrypt_start.elapsed().as_nanos() as u64;
-                    encrypt_count += 1;
+                    if let Some(start) = encrypt_start {
+                        total_encrypt_ns += start.elapsed().as_nanos() as u64;
+                        encrypt_count += 1;
+                    }
 
                     if success {
                         direct_encrypt_success += 1;
@@ -2905,6 +2930,7 @@ fn run_cache_refresher(
     cache: Arc<LockFreeProcessCache>,
     stop_flag: Arc<AtomicBool>,
     refresh_now: Arc<AtomicBool>,
+    refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 ) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
@@ -2941,30 +2967,37 @@ fn run_cache_refresher(
             first_run = false;
             log::info!("Cache refresher: Performing initial refresh immediately");
         } else {
-            // EVENT-DRIVEN REFRESH: Sleep in short bursts, wake on ETW trigger
-            // This is the key optimization - instead of polling at 50Hz (20ms),
-            // we sleep for 2 seconds total but check every 50ms if ETW triggered
-            //
-            // Result: 0.5 Hz idle polling vs 50 Hz before = 100x reduction
-            // But instant response when game launches (ETW sets refresh_now flag)
-            let mut slept_ms = 0u32;
-            const SLEEP_CHUNK_MS: u32 = 50;
-            const MAX_SLEEP_MS: u32 = 2000; // 2 second fallback
+            // EVENT-DRIVEN REFRESH: Block on Condvar until ETW signals or 2s timeout
+            // Zero CPU when idle, instant wakeup when game launches
+            let tunnel_apps = cache.tunnel_apps();
+            let wait_timeout = if tunnel_apps.is_empty() {
+                // No apps to tunnel - sleep longer (5s) since nothing to track
+                Duration::from_secs(5)
+            } else {
+                // Normal: 2 second fallback
+                Duration::from_secs(2)
+            };
 
-            while slept_ms < MAX_SLEEP_MS {
-                // Check if ETW triggered immediate refresh
-                if refresh_now.swap(false, Ordering::AcqRel) {
-                    log::info!("Cache refresher: ETW triggered immediate refresh");
-                    break;
+            let (lock, cvar) = &*refresh_condvar;
+            if let Ok(mut signaled) = lock.lock() {
+                // Wait until signaled or timeout
+                let result = cvar.wait_timeout_while(
+                    signaled,
+                    wait_timeout,
+                    |s| !*s && !stop_flag.load(Ordering::Relaxed),
+                );
+                if let Ok((mut guard, _)) = result {
+                    *guard = false; // Reset signal
                 }
+            }
 
-                // Check stop flag
-                if stop_flag.load(Ordering::Relaxed) {
-                    return;
-                }
+            // Check if ETW triggered (also reset the atomic flag)
+            if refresh_now.swap(false, Ordering::AcqRel) {
+                log::info!("Cache refresher: ETW triggered immediate refresh");
+            }
 
-                std::thread::sleep(std::time::Duration::from_millis(SLEEP_CHUNK_MS as u64));
-                slept_ms += SLEEP_CHUNK_MS;
+            if stop_flag.load(Ordering::Relaxed) {
+                return;
             }
         }
 
@@ -4348,9 +4381,8 @@ fn run_v3_inbound_receiver(
                 }
             }
             Ok(None) => {
-                // No packet available (non-blocking)
-                // Small sleep to avoid busy-spinning
-                std::thread::sleep(std::time::Duration::from_micros(100));
+                // No packet available (socket timeout already acts as sleep)
+                continue;
             }
             Err(e) => {
                 log::warn!("V3 inbound receiver: receive error: {}", e);

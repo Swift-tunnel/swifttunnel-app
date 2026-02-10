@@ -1,4 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicBool;
+
+/// Flag indicating the boost/performance tab is currently visible in the GUI.
+/// When false and no optimizations are applied, the background performance
+/// monitor sleeps longer to reduce CPU usage.
+pub static PERF_MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Optimization profile presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
