@@ -23,29 +23,29 @@ use swifttunnel_fps_booster::vpn;
 // Re-export hidden_command for use in other modules
 pub use swifttunnel_fps_booster::hidden_command;
 
+use crate::gui::BoosterApp; // Local module
+use crate::gui::set_auto_connect_pending;
+use network_booster::NetworkBooster;
+use performance_monitor::PerformanceMonitor;
+use roblox_optimizer::RobloxOptimizer;
+use settings::load_settings;
 use structs::*;
 use system_optimizer::SystemOptimizer;
-use roblox_optimizer::RobloxOptimizer;
-use performance_monitor::PerformanceMonitor;
-use network_booster::NetworkBooster;
-use crate::gui::BoosterApp;  // Local module
-use settings::load_settings;
-use updater::{run_auto_updater, AutoUpdateResult, cleanup_updates};
-use utils::{rotate_log_if_needed, load_pending_connection};
+use updater::{AutoUpdateResult, cleanup_updates, run_auto_updater};
+use utils::{load_pending_connection, rotate_log_if_needed};
 use vpn::split_tunnel::SplitTunnelDriver;
-use vpn::{recover_tso_on_startup, emergency_tso_restore};
-use crate::gui::set_auto_connect_pending;
+use vpn::{emergency_tso_restore, recover_tso_on_startup};
 
 use eframe::NativeOptions;
 use log::{error, info, warn};
+use std::panic;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use std::panic;
 use tokio::runtime::Runtime;
-use windows::core::PCSTR;
-use windows::Win32::Foundation::{HANDLE, CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Threading::CreateMutexA;
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+use windows::core::PCSTR;
 
 // Note: OAuth callback is now handled via localhost HTTP server (auth::oauth_server)
 // instead of deep links. This eliminates the second-instance problem.
@@ -56,11 +56,8 @@ const SINGLE_INSTANCE_MUTEX: &str = "SwiftTunnel_SingleInstance_Mutex_v1";
 /// Check if running in a Remote Desktop (RDP) session
 /// Uses GetSystemMetrics(SM_REMOTESESSION) which returns nonzero if in RDP
 fn is_rdp_session() -> bool {
-    unsafe {
-        GetSystemMetrics(SM_REMOTESESSION) != 0
-    }
+    unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
 }
-
 
 /// RAII wrapper for Windows mutex handle
 struct SingleInstanceGuard {
@@ -88,8 +85,8 @@ fn try_acquire_single_instance() -> SingleInstanceResult {
     unsafe {
         let mutex_name = std::ffi::CString::new(SINGLE_INSTANCE_MUTEX).unwrap();
         let handle = CreateMutexA(
-            None,           // Default security attributes
-            true,           // Initially owned
+            None, // Default security attributes
+            true, // Initially owned
             PCSTR(mutex_name.as_ptr() as *const u8),
         );
 
@@ -108,7 +105,10 @@ fn try_acquire_single_instance() -> SingleInstanceResult {
             Err(e) => {
                 // Failed to create mutex - let the app run anyway
                 // This can happen due to permissions or other system issues
-                warn!("Failed to create single-instance mutex: {:?}, continuing anyway", e);
+                warn!(
+                    "Failed to create single-instance mutex: {:?}, continuing anyway",
+                    e
+                );
                 SingleInstanceResult::CheckFailed
             }
         }
@@ -117,14 +117,16 @@ fn try_acquire_single_instance() -> SingleInstanceResult {
 
 /// Detect GPU vendor from registry
 fn detect_gpu_vendor() -> Option<(&'static str, &'static str)> {
-    use winreg::enums::*;
     use winreg::RegKey;
+    use winreg::enums::*;
 
     // Check display adapter registry keys
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let display_key = hklm.open_subkey(
-        r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-    ).ok()?;
+    let display_key = hklm
+        .open_subkey(
+            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}",
+        )
+        .ok()?;
 
     // Check subkeys 0000, 0001, etc for GPU info
     for i in 0..10 {
@@ -137,7 +139,10 @@ fn detect_gpu_vendor() -> Option<(&'static str, &'static str)> {
                 } else if desc_lower.contains("amd") || desc_lower.contains("radeon") {
                     return Some(("AMD", "https://www.amd.com/en/support"));
                 } else if desc_lower.contains("intel") {
-                    return Some(("Intel", "https://www.intel.com/content/www/us/en/download-center/home.html"));
+                    return Some((
+                        "Intel",
+                        "https://www.intel.com/content/www/us/en/download-center/home.html",
+                    ));
                 }
             }
         }
@@ -153,7 +158,8 @@ fn setup_panic_hook() {
         emergency_tso_restore();
 
         // Get location info
-        let location = info.location()
+        let location = info
+            .location()
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "unknown location".to_string());
 
@@ -196,15 +202,20 @@ fn setup_panic_hook() {
             || msg_lower.contains("gl context")
             || msg_lower.contains("egl")
             || msg_lower.contains("wgl")
-            || message.contains("0x1F0");  // GL_VENDOR/RENDERER/VERSION constants
+            || message.contains("0x1F0"); // GL_VENDOR/RENDERER/VERSION constants
 
         if is_graphics_panic {
-            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_YESNO, MB_ICONERROR, IDYES};
+            use windows::Win32::UI::WindowsAndMessaging::{
+                IDYES, MB_ICONERROR, MB_YESNO, MessageBoxW,
+            };
             use windows::core::PCWSTR;
 
             // Detect GPU vendor for targeted driver update link
             let gpu_info = detect_gpu_vendor();
-            let (vendor_name, driver_url) = gpu_info.unwrap_or(("Unknown", "https://www.google.com/search?q=update+graphics+driver"));
+            let (vendor_name, driver_url) = gpu_info.unwrap_or((
+                "Unknown",
+                "https://www.google.com/search?q=update+graphics+driver",
+            ));
 
             let title: Vec<u16> = "SwiftTunnel - Graphics Error\0".encode_utf16().collect();
             let msg = format!(
@@ -319,7 +330,10 @@ fn main() -> eframe::Result<()> {
             Err(e) => {
                 // User cancelled UAC or elevation failed — continue without admin
                 // VPN features will prompt again when needed
-                warn!("Elevation failed or cancelled: {}, continuing without admin", e);
+                warn!(
+                    "Elevation failed or cancelled: {}, continuing without admin",
+                    e
+                );
             }
         }
     } else {
@@ -337,7 +351,10 @@ fn main() -> eframe::Result<()> {
     if is_resume_connect {
         info!("--resume-connect flag detected, checking for pending connection...");
         if let Some(pending) = load_pending_connection() {
-            info!("Found pending connection: region={}, server={}", pending.region, pending.server);
+            info!(
+                "Found pending connection: region={}, server={}",
+                pending.region, pending.server
+            );
             set_auto_connect_pending(pending);
         } else {
             warn!("--resume-connect flag present but no valid pending connection found");
@@ -367,7 +384,10 @@ fn main() -> eframe::Result<()> {
                 }
                 SingleInstanceResult::AlreadyRunning => {
                     if attempt < max_attempts {
-                        info!("Waiting for previous instance to exit (attempt {}/{})", attempt, max_attempts);
+                        info!(
+                            "Waiting for previous instance to exit (attempt {}/{})",
+                            attempt, max_attempts
+                        );
                         std::thread::sleep(Duration::from_millis(200));
                     }
                 }
@@ -383,13 +403,18 @@ fn main() -> eframe::Result<()> {
             }
             SingleInstanceResult::AlreadyRunning => {
                 if is_resume_connect {
-                    warn!("Could not acquire lock after {} attempts, previous instance may still be running", max_attempts);
+                    warn!(
+                        "Could not acquire lock after {} attempts, previous instance may still be running",
+                        max_attempts
+                    );
                 }
-                info!("Another instance of SwiftTunnel is already running. Restoring existing window.");
+                info!(
+                    "Another instance of SwiftTunnel is already running. Restoring existing window."
+                );
 
                 // Restore the existing window instead of showing a message box
                 use windows::Win32::UI::WindowsAndMessaging::{
-                    FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+                    FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
                 };
                 use windows::core::PCWSTR;
 
@@ -424,9 +449,12 @@ fn main() -> eframe::Result<()> {
         });
     }
 
+    // Load persisted settings early (used by updater channel and window state)
+    let saved_settings = load_settings();
+
     // Run Discord-like auto-updater before main app (splash screen)
     info!("Running auto-updater check...");
-    match run_auto_updater() {
+    match run_auto_updater(saved_settings.update_channel) {
         AutoUpdateResult::NoUpdate => {
             info!("No update available, continuing to main app");
         }
@@ -471,7 +499,11 @@ fn main() -> eframe::Result<()> {
             // When the boost tab isn't visible and no optimizations are applied,
             // slow down polling to reduce CPU usage (5s instead of 1s)
             let active = structs::PERF_MONITOR_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
-            let sleep_secs = if active || optimizations_applied { 1 } else { 5 };
+            let sleep_secs = if active || optimizations_applied {
+                1
+            } else {
+                5
+            };
             tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
 
             let mut state = state_clone.lock().unwrap();
@@ -489,20 +521,23 @@ fn main() -> eframe::Result<()> {
                     if let Some(pid) = state.metrics.process_id {
                         info!("Auto-applying optimizations...");
 
-                        if let Err(e) = system_optimizer.apply_optimizations(
-                            &state.config.system_optimization,
-                            pid
-                        ) {
+                        if let Err(e) = system_optimizer
+                            .apply_optimizations(&state.config.system_optimization, pid)
+                        {
                             error!("Failed to apply system optimizations: {}", e);
                             state.last_error = Some(format!("System optimization error: {}", e));
                         }
 
-                        if let Err(e) = roblox_optimizer.apply_optimizations(&state.config.roblox_settings) {
+                        if let Err(e) =
+                            roblox_optimizer.apply_optimizations(&state.config.roblox_settings)
+                        {
                             error!("Failed to apply Roblox optimizations: {}", e);
                             state.last_error = Some(format!("Roblox optimization error: {}", e));
                         }
 
-                        if let Err(e) = network_booster.apply_optimizations(&state.config.network_settings) {
+                        if let Err(e) =
+                            network_booster.apply_optimizations(&state.config.network_settings)
+                        {
                             error!("Failed to apply network optimizations: {}", e);
                             state.last_error = Some(format!("Network optimization error: {}", e));
                         }
@@ -535,20 +570,24 @@ fn main() -> eframe::Result<()> {
             }
 
             // Manual optimization toggle
-            if state.optimizations_active && !optimizations_applied && state.metrics.roblox_running {
+            if state.optimizations_active && !optimizations_applied && state.metrics.roblox_running
+            {
                 if let Some(pid) = state.metrics.process_id {
                     info!("Manually applying optimizations...");
 
-                    if let Err(e) = system_optimizer.apply_optimizations(
-                        &state.config.system_optimization,
-                        pid
-                    ) {
+                    if let Err(e) =
+                        system_optimizer.apply_optimizations(&state.config.system_optimization, pid)
+                    {
                         error!("Failed to apply system optimizations: {}", e);
                         state.last_error = Some(format!("System optimization error: {}", e));
-                    } else if let Err(e) = roblox_optimizer.apply_optimizations(&state.config.roblox_settings) {
+                    } else if let Err(e) =
+                        roblox_optimizer.apply_optimizations(&state.config.roblox_settings)
+                    {
                         error!("Failed to apply Roblox optimizations: {}", e);
                         state.last_error = Some(format!("Roblox optimization error: {}", e));
-                    } else if let Err(e) = network_booster.apply_optimizations(&state.config.network_settings) {
+                    } else if let Err(e) =
+                        network_booster.apply_optimizations(&state.config.network_settings)
+                    {
                         error!("Failed to apply network optimizations: {}", e);
                         state.last_error = Some(format!("Network optimization error: {}", e));
                     } else {
@@ -580,7 +619,6 @@ fn main() -> eframe::Result<()> {
     });
 
     // Load saved settings for window state
-    let saved_settings = load_settings();
     let window_state = &saved_settings.window_state;
 
     // Build viewport - ALWAYS start maximized (fullscreen)
@@ -588,17 +626,19 @@ fn main() -> eframe::Result<()> {
     let app_title = format!("SwiftTunnel v{}", env!("CARGO_PKG_VERSION"));
     let viewport = egui::ViewportBuilder::default()
         .with_title(&app_title)
-        .with_min_inner_size([560.0, 650.0])  // Minimum size for 3-col game cards + 2-col region grid
+        .with_min_inner_size([560.0, 650.0]) // Minimum size for 3-col game cards + 2-col region grid
         .with_inner_size([window_state.width, window_state.height])
-        .with_resizable(true)           // Allow window resizing
-        .with_decorations(true)         // Show title bar with min/max/close buttons
-        .with_transparent(false)        // Solid window background
-        .with_maximized(true);          // FORCE maximized on startup
+        .with_resizable(true) // Allow window resizing
+        .with_decorations(true) // Show title bar with min/max/close buttons
+        .with_transparent(false) // Solid window background
+        .with_maximized(true); // FORCE maximized on startup
 
     // Check if running in RDP session and warn user
     let in_rdp = is_rdp_session();
     if in_rdp {
-        warn!("Running in RDP session - graphics may not work. Please run SwiftTunnel directly on your gaming PC.");
+        warn!(
+            "Running in RDP session - graphics may not work. Please run SwiftTunnel directly on your gaming PC."
+        );
     }
 
     // Launch with glow (OpenGL) renderer for maximum compatibility
@@ -623,7 +663,7 @@ fn main() -> eframe::Result<()> {
         Err(e) => {
             error!("OpenGL renderer failed: {}", e);
 
-            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK, MB_ICONERROR};
+            use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
             use windows::core::PCWSTR;
 
             let title: Vec<u16> = "SwiftTunnel - Graphics Error\0".encode_utf16().collect();

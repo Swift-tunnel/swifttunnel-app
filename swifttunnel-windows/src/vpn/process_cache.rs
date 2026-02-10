@@ -13,12 +13,12 @@
 //! V2 ROUTING (v0.7.3): Added ExitLag-style hybrid routing that checks
 //! both process ownership AND destination IP ranges.
 
+use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
+use arc_swap::ArcSwap;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use arc_swap::ArcSwap;
-use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
 // GAME SERVER IP RANGES (for V2 hybrid routing)
@@ -41,23 +41,18 @@ const ROBLOX_RANGES: &[(u32, u32, u32)] = &[
     // APAC: Singapore, Tokyo, Hong Kong, Mumbai, Sydney
     // SA: São Paulo
     (0x80740000, 0xFFFF8000, 17), // 128.116.0.0/17
-
     // ============ SECONDARY GAME SERVERS ============
     // San Jose/Palo Alto secondary servers
     (0xD1CE2800, 0xFFFFF800, 21), // 209.206.40.0/21
-
     // ============ ASIA-PACIFIC ============
     (0x678C1C00, 0xFFFFFE00, 23), // 103.140.28.0/23 - APAC servers
-
     // ============ CHINA (LUOBU) ============
     (0x678EDC00, 0xFFFFFE00, 23), // 103.142.220.0/23 - Luobu China
-
     // ============ API/MATCHMAKING ============
     // These handle authentication, matchmaking, and game joining
     (0x17ADC000, 0xFFFFFF00, 24), // 23.173.192.0/24
     (0x8DC10300, 0xFFFFFF00, 24), // 141.193.3.0/24
     (0xCDC93E00, 0xFFFFFF00, 24), // 205.201.62.0/24
-
     // ============ INFRASTRUCTURE ============
     (0xCC09B800, 0xFFFFFF00, 24), // 204.9.184.0/24
     (0xCC0DA800, 0xFFFFFC00, 22), // 204.13.168.0/22 (covers .168-.171)
@@ -90,7 +85,10 @@ const _: () = {
     let mut i = 0;
     while i < ROBLOX_RANGES.len() {
         let (_network, mask, prefix) = ROBLOX_RANGES[i];
-        assert!(is_valid_cidr_mask(mask, prefix), "Invalid CIDR mask in ROBLOX_RANGES");
+        assert!(
+            is_valid_cidr_mask(mask, prefix),
+            "Invalid CIDR mask in ROBLOX_RANGES"
+        );
         i += 1;
     }
 };
@@ -209,8 +207,8 @@ fn get_process_name_by_pid_fast(_pid: u32) -> Option<String> {
 /// a process but the connection tables haven't been refreshed yet.
 #[cfg(windows)]
 fn lookup_connection_pid(local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> Option<u32> {
-    use windows::Win32::NetworkManagement::IpHelper::*;
     use windows::Win32::Foundation::*;
+    use windows::Win32::NetworkManagement::IpHelper::*;
 
     unsafe {
         match protocol {
@@ -263,19 +261,22 @@ fn lookup_connection_pid(local_ip: Ipv4Addr, local_port: u16, protocol: Protocol
                 let safe_entries = num_entries.min(max_entries);
 
                 if safe_entries < num_entries {
-                    log::warn!("TCP table num_entries ({}) exceeds buffer capacity ({})", num_entries, max_entries);
+                    log::warn!(
+                        "TCP table num_entries ({}) exceeds buffer capacity ({})",
+                        num_entries,
+                        max_entries
+                    );
                 }
 
-                let entries = std::slice::from_raw_parts(
-                    table.table.as_ptr(),
-                    safe_entries,
-                );
+                let entries = std::slice::from_raw_parts(table.table.as_ptr(), safe_entries);
 
                 for entry in entries {
                     let entry_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
                     let entry_port = u16::from_be(entry.dwLocalPort as u16);
 
-                    if entry_port == local_port && (entry_ip == local_ip || entry_ip == Ipv4Addr::UNSPECIFIED) {
+                    if entry_port == local_port
+                        && (entry_ip == local_ip || entry_ip == Ipv4Addr::UNSPECIFIED)
+                    {
                         return Some(entry.dwOwningPid);
                     }
                 }
@@ -329,19 +330,22 @@ fn lookup_connection_pid(local_ip: Ipv4Addr, local_port: u16, protocol: Protocol
                 let safe_entries = num_entries.min(max_entries);
 
                 if safe_entries < num_entries {
-                    log::warn!("UDP table num_entries ({}) exceeds buffer capacity ({})", num_entries, max_entries);
+                    log::warn!(
+                        "UDP table num_entries ({}) exceeds buffer capacity ({})",
+                        num_entries,
+                        max_entries
+                    );
                 }
 
-                let entries = std::slice::from_raw_parts(
-                    table.table.as_ptr(),
-                    safe_entries,
-                );
+                let entries = std::slice::from_raw_parts(table.table.as_ptr(), safe_entries);
 
                 for entry in entries {
                     let entry_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
                     let entry_port = u16::from_be(entry.dwLocalPort as u16);
 
-                    if entry_port == local_port && (entry_ip == local_ip || entry_ip == Ipv4Addr::UNSPECIFIED) {
+                    if entry_port == local_port
+                        && (entry_ip == local_ip || entry_ip == Ipv4Addr::UNSPECIFIED)
+                    {
                         return Some(entry.dwOwningPid);
                     }
                 }
@@ -352,7 +356,11 @@ fn lookup_connection_pid(local_ip: Ipv4Addr, local_port: u16, protocol: Protocol
 }
 
 #[cfg(not(windows))]
-fn lookup_connection_pid(_local_ip: Ipv4Addr, _local_port: u16, _protocol: Protocol) -> Option<u32> {
+fn lookup_connection_pid(
+    _local_ip: Ipv4Addr,
+    _local_port: u16,
+    _protocol: Protocol,
+) -> Option<u32> {
     None
 }
 
@@ -396,12 +404,7 @@ impl ProcessSnapshot {
     ///   - AND destination is a known game server IP
     ///   - AND protocol is UDP
     #[inline(always)]
-    pub fn should_tunnel(
-        &self,
-        local_ip: Ipv4Addr,
-        local_port: u16,
-        protocol: Protocol,
-    ) -> bool {
+    pub fn should_tunnel(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
         // V1 mode: just check process (original behavior)
         self.is_tunnel_connection(local_ip, local_port, protocol)
     }
@@ -446,7 +449,12 @@ impl ProcessSnapshot {
     /// ndisapi packet interception. Instead, relies on speculative tunneling
     /// via destination IP matching for first packets.
     #[inline(always)]
-    fn is_tunnel_connection(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
+    fn is_tunnel_connection(
+        &self,
+        local_ip: Ipv4Addr,
+        local_port: u16,
+        protocol: Protocol,
+    ) -> bool {
         // Direct lookup - O(1) average case
         let key = ConnectionKey::new(local_ip, local_port, protocol);
 
@@ -520,8 +528,16 @@ impl ProcessSnapshot {
     /// Get stats
     pub fn stats(&self) -> TrackerStats {
         TrackerStats {
-            tcp_connections: self.connections.keys().filter(|k| k.protocol == Protocol::Tcp).count(),
-            udp_connections: self.connections.keys().filter(|k| k.protocol == Protocol::Udp).count(),
+            tcp_connections: self
+                .connections
+                .keys()
+                .filter(|k| k.protocol == Protocol::Tcp)
+                .count(),
+            udp_connections: self
+                .connections
+                .keys()
+                .filter(|k| k.protocol == Protocol::Udp)
+                .count(),
             stale_connections: 0, // No stale in snapshot
             tracked_pids: self.pid_names.len(),
         }
@@ -585,7 +601,11 @@ impl LockFreeProcessCache {
     /// SAFETY: arc-swap's store() handles the atomic swap correctly.
     /// The old Arc is returned and dropped, decrementing its refcount.
     /// Memory is only freed when refcount reaches zero (all readers done).
-    pub fn update(&self, connections: HashMap<ConnectionKey, u32>, pid_names: HashMap<u32, String>) {
+    pub fn update(
+        &self,
+        connections: HashMap<ConnectionKey, u32>,
+        pid_names: HashMap<u32, String>,
+    ) {
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Pre-lowercase all names at insertion time (not in hot path!)
@@ -600,7 +620,6 @@ impl LockFreeProcessCache {
             tunnel_apps: self.tunnel_apps.clone(),
             version,
             created_at: std::time::Instant::now(),
-
         });
 
         // Atomically swap in new snapshot - arc-swap handles cleanup safely
@@ -623,10 +642,9 @@ impl LockFreeProcessCache {
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections: old_snap.connections.clone(),
             pid_names: old_snap.pid_names.clone(),
-            tunnel_apps: self.tunnel_apps.clone(),  // Use NEW tunnel_apps
+            tunnel_apps: self.tunnel_apps.clone(), // Use NEW tunnel_apps
             version,
             created_at: std::time::Instant::now(),
-
         });
 
         // Atomically swap in new snapshot - arc-swap handles cleanup safely
@@ -675,14 +693,14 @@ impl LockFreeProcessCache {
             tunnel_apps: self.tunnel_apps.clone(),
             version,
             created_at: std::time::Instant::now(),
-
         });
 
         self.current.store(new_snapshot);
 
         log::info!(
             "ETW: Immediately registered process {} (PID: {}) for tunneling",
-            name, pid
+            name,
+            pid
         );
     }
 }
@@ -766,21 +784,30 @@ mod tests {
 
         // Should tunnel UDP to Roblox game server (128.116.x.x)
         assert!(snap.should_tunnel_v2(
-            Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Udp,
-            Ipv4Addr::new(128, 116, 50, 100), 55000  // Roblox game server
+            Ipv4Addr::new(192, 168, 1, 100),
+            50000,
+            Protocol::Udp,
+            Ipv4Addr::new(128, 116, 50, 100),
+            55000 // Roblox game server
         ));
 
         // Should NOT tunnel TCP (web API calls don't need VPN routing)
         assert!(!snap.should_tunnel_v2(
-            Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Tcp,
-            Ipv4Addr::new(128, 116, 50, 100), 55000
+            Ipv4Addr::new(192, 168, 1, 100),
+            50000,
+            Protocol::Tcp,
+            Ipv4Addr::new(128, 116, 50, 100),
+            55000
         ));
 
         // Permissive: SHOULD tunnel UDP to non-game IP from tunnel app
         // We trust the process - ALL its UDP gets tunneled (STUN, voice chat, etc.)
         assert!(snap.should_tunnel_v2(
-            Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Udp,
-            Ipv4Addr::new(1, 1, 1, 1), 443
+            Ipv4Addr::new(192, 168, 1, 100),
+            50000,
+            Protocol::Udp,
+            Ipv4Addr::new(1, 1, 1, 1),
+            443
         ));
     }
 
@@ -793,19 +820,21 @@ mod tests {
         let cache = Arc::new(LockFreeProcessCache::new(vec!["test.exe".to_string()]));
 
         // Spawn reader threads that continuously get snapshots
-        let readers: Vec<_> = (0..4).map(|i| {
-            let cache_clone = Arc::clone(&cache);
-            thread::spawn(move || {
-                for _ in 0..1000 {
-                    let snap = cache_clone.get_snapshot();
-                    // Access the snapshot data - this would crash with old implementation
-                    let _ = snap.version;
-                    let _ = snap.connections.len();
-                    thread::sleep(Duration::from_micros(10));
-                }
-                log::debug!("Reader {} finished", i);
+        let readers: Vec<_> = (0..4)
+            .map(|i| {
+                let cache_clone = Arc::clone(&cache);
+                thread::spawn(move || {
+                    for _ in 0..1000 {
+                        let snap = cache_clone.get_snapshot();
+                        // Access the snapshot data - this would crash with old implementation
+                        let _ = snap.version;
+                        let _ = snap.connections.len();
+                        thread::sleep(Duration::from_micros(10));
+                    }
+                    log::debug!("Reader {} finished", i);
+                })
             })
-        }).collect();
+            .collect();
 
         // Writer thread that continuously updates
         let cache_writer = Arc::clone(&cache);
@@ -842,9 +871,8 @@ mod tests {
         // Since we can't actually trigger this in a unit test (requires real
         // Windows process state), we verify the matching logic works correctly.
 
-        let cache = LockFreeProcessCache::new(
-            vec!["robloxplayerbeta".to_string(), "roblox".to_string()],
-        );
+        let cache =
+            LockFreeProcessCache::new(vec!["robloxplayerbeta".to_string(), "roblox".to_string()]);
 
         let snap = cache.get_snapshot();
 

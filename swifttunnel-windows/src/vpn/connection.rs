@@ -6,20 +6,20 @@
 //! - UDP relay for game traffic forwarding
 //! - Connection state tracking
 
+use super::config::fetch_vpn_config;
+use super::parallel_interceptor::ThroughputStats;
+use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
+use super::routes::get_internet_interface_ip;
+use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
+use super::{VpnError, VpnResult};
+use crate::auth::types::VpnConfig;
+use crate::dns::CloudflareDns;
+use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use crate::auth::types::VpnConfig;
-use crate::dns::CloudflareDns;
-use super::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig};
-use super::parallel_interceptor::ThroughputStats;
-use super::process_watcher::{ProcessWatcher, ProcessStartEvent};
-use super::routes::get_internet_interface_ip;
-use super::config::fetch_vpn_config;
-use super::{VpnError, VpnResult};
-use crossbeam_channel::Receiver;
 
 /// Refresh interval for process exclusion scanning (ms)
 /// Lower = faster detection of new processes, slightly higher CPU
@@ -29,7 +29,9 @@ const REFRESH_INTERVAL_MS: u64 = 500;
 /// Quick-ping candidate relay servers and return the best one.
 /// Pings all candidates in parallel using ICMP (same as GUI latency measurement).
 /// Returns (region_name, addr, latency_ms) for the fastest responder.
-async fn ping_and_select_best(candidates: &[(String, SocketAddr)]) -> Option<(String, SocketAddr, u32)> {
+async fn ping_and_select_best(
+    candidates: &[(String, SocketAddr)],
+) -> Option<(String, SocketAddr, u32)> {
     use crate::vpn::servers::measure_latency_icmp;
 
     let mut tasks = Vec::new();
@@ -41,9 +43,7 @@ async fn ping_and_select_best(candidates: &[(String, SocketAddr)]) -> Option<(St
             // Use ICMP ping — reliable for all server types.
             // The previous UDP probe ([0u8; 1] to relay port 51821) never got responses
             // because relay servers only respond to valid session ID packets.
-            let result = tokio::task::spawn_blocking(move || {
-                measure_latency_icmp(&ip)
-            }).await;
+            let result = tokio::task::spawn_blocking(move || measure_latency_icmp(&ip)).await;
 
             match result {
                 Ok(Some(ms)) => {
@@ -68,7 +68,12 @@ async fn ping_and_select_best(candidates: &[(String, SocketAddr)]) -> Option<(St
     }
 
     if let Some((ref region, ref addr, ms)) = best {
-        log::info!("Auto-routing: Best candidate: {} ({}) at {}ms", region, addr, ms);
+        log::info!(
+            "Auto-routing: Best candidate: {} ({}) at {}ms",
+            region,
+            addr,
+            ms
+        );
     }
     best
 }
@@ -181,7 +186,9 @@ impl VpnConnection {
     /// Uses try_lock() to avoid blocking the GUI thread.
     pub fn get_throughput_stats(&self) -> Option<ThroughputStats> {
         self.split_tunnel.as_ref().and_then(|st| {
-            st.try_lock().ok().and_then(|driver| driver.get_throughput_stats())
+            st.try_lock()
+                .ok()
+                .and_then(|driver| driver.get_throughput_stats())
         })
     }
 
@@ -191,7 +198,9 @@ impl VpnConnection {
     /// Uses try_lock() to avoid blocking the GUI thread.
     pub fn get_split_tunnel_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
         self.split_tunnel.as_ref().and_then(|st| {
-            st.try_lock().ok().and_then(|driver| driver.get_diagnostics())
+            st.try_lock()
+                .ok()
+                .and_then(|driver| driver.get_diagnostics())
         })
     }
 
@@ -205,9 +214,14 @@ impl VpnConnection {
     /// Returns a list of Roblox game server IPs that have been tunneled.
     /// Uses try_lock() to avoid blocking the GUI thread.
     pub fn get_detected_game_servers(&self) -> Vec<std::net::Ipv4Addr> {
-        self.split_tunnel.as_ref().and_then(|st| {
-            st.try_lock().ok().map(|driver| driver.get_detected_game_servers())
-        }).unwrap_or_default()
+        self.split_tunnel
+            .as_ref()
+            .and_then(|st| {
+                st.try_lock()
+                    .ok()
+                    .map(|driver| driver.get_detected_game_servers())
+            })
+            .unwrap_or_default()
     }
 
     /// Clear detected game servers (call on disconnect)
@@ -285,15 +299,29 @@ impl VpnConnection {
 
         // Initialize WFP block filter engine (for instant process blocking)
         if let Err(e) = super::wfp_block::init() {
-            log::warn!("WFP block filter init failed (will use speculative tunneling): {}", e);
+            log::warn!(
+                "WFP block filter init failed (will use speculative tunneling): {}",
+                e
+            );
         }
 
         // Step 2: Skip Wintun - go directly to split tunnel
         // V3 doesn't need a virtual adapter
-        self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
+        self.set_state(ConnectionState::ConfiguringSplitTunnel)
+            .await;
 
         let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
-            match self.setup_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server, auto_routing_enabled, available_servers, whitelisted_regions).await {
+            match self
+                .setup_split_tunnel(
+                    &config,
+                    tunnel_apps.clone(),
+                    custom_relay_server,
+                    auto_routing_enabled,
+                    available_servers,
+                    whitelisted_regions,
+                )
+                .await
+            {
                 Ok(processes) => {
                     log::info!("V3 split tunnel setup succeeded");
                     (processes, true)
@@ -304,7 +332,8 @@ impl VpnConnection {
                     self.set_state(ConnectionState::Error(format!(
                         "V3 split tunnel failed: {}",
                         e
-                    ))).await;
+                    )))
+                    .await;
                     return Err(e);
                 }
             }
@@ -324,7 +353,8 @@ impl VpnConnection {
             assigned_ip: "V3-Relay".to_string(), // No VPN IP in V3 mode
             split_tunnel_active,
             tunneled_processes,
-        }).await;
+        })
+        .await;
 
         log::info!("V3 connected successfully (no encryption, lowest latency)");
         Ok(())
@@ -351,10 +381,7 @@ impl VpnConnection {
 
         // Get internet interface IP for NAT rewriting on inbound packets
         let internet_ip = get_internet_interface_ip().map_err(|e| {
-            VpnError::SplitTunnelSetupFailed(format!(
-                "Failed to get internet interface IP: {}",
-                e
-            ))
+            VpnError::SplitTunnelSetupFailed(format!("Failed to get internet interface IP: {}", e))
         })?;
         log::info!("V3: Internet interface IP: {}", internet_ip);
 
@@ -394,9 +421,10 @@ impl VpnConnection {
                 (h, port)
             } else {
                 let _ = driver.close();
-                return Err(VpnError::SplitTunnelSetupFailed(
-                    format!("Custom relay '{}' must include a port (e.g. host:51821)", custom)
-                ));
+                return Err(VpnError::SplitTunnelSetupFailed(format!(
+                    "Custom relay '{}' must include a port (e.g. host:51821)",
+                    custom
+                )));
             };
 
             // Try parsing as IP first to skip DNS for raw IPs
@@ -415,20 +443,23 @@ impl VpnConnection {
                     }
                     Err(e) => {
                         let _ = driver.close();
-                        return Err(VpnError::SplitTunnelSetupFailed(
-                            format!("Failed to resolve custom relay '{}': {}", custom, e)
-                        ));
+                        return Err(VpnError::SplitTunnelSetupFailed(format!(
+                            "Failed to resolve custom relay '{}': {}",
+                            custom, e
+                        )));
                     }
                 }
             }
         } else {
             // No custom relay = auto mode (use VPN server IP with default port 51821)
-            let vpn_ip = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
-            format!("{}:51821", vpn_ip)
-                .parse()
-                .map_err(|e| VpnError::SplitTunnelSetupFailed(
-                    format!("Invalid VPN server IP for relay: {}", e)
-                ))?
+            let vpn_ip = config
+                .endpoint
+                .split(':')
+                .next()
+                .unwrap_or(&config.endpoint);
+            format!("{}:51821", vpn_ip).parse().map_err(|e| {
+                VpnError::SplitTunnelSetupFailed(format!("Invalid VPN server IP for relay: {}", e))
+            })?
         };
 
         log::info!("V3: Creating UDP relay to {}", relay_addr);
@@ -437,9 +468,10 @@ impl VpnConnection {
             Ok(r) => std::sync::Arc::new(r),
             Err(e) => {
                 let _ = driver.close();
-                return Err(VpnError::SplitTunnelSetupFailed(
-                    format!("Failed to create V3 relay: {}", e)
-                ));
+                return Err(VpnError::SplitTunnelSetupFailed(format!(
+                    "Failed to create V3 relay: {}",
+                    e
+                )));
             }
         };
 
@@ -448,7 +480,10 @@ impl VpnConnection {
         log::info!("V3: UDP relay context set");
 
         // Set up auto-routing
-        let auto_router = Arc::new(super::auto_routing::AutoRouter::new(auto_routing_enabled, &config.region));
+        let auto_router = Arc::new(super::auto_routing::AutoRouter::new(
+            auto_routing_enabled,
+            &config.region,
+        ));
         auto_router.set_current_relay(relay_addr, &config.region);
         auto_router.set_available_servers(available_servers);
         if !whitelisted_regions.is_empty() {
@@ -457,7 +492,8 @@ impl VpnConnection {
 
         // Spawn background task for async ipinfo.io region lookups
         if auto_routing_enabled {
-            let (lookup_tx, mut lookup_rx) = tokio::sync::mpsc::unbounded_channel::<std::net::Ipv4Addr>();
+            let (lookup_tx, mut lookup_rx) =
+                tokio::sync::mpsc::unbounded_channel::<std::net::Ipv4Addr>();
             auto_router.set_lookup_channel(lookup_tx);
 
             let router_for_lookup = Arc::clone(&auto_router);
@@ -465,7 +501,12 @@ impl VpnConnection {
                 while let Some(ip) = lookup_rx.recv().await {
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
-                            log::info!("Auto-routing: {} resolved to {} ({})", ip, location, region.display_name());
+                            log::info!(
+                                "Auto-routing: {} resolved to {} ({})",
+                                ip,
+                                location,
+                                region.display_name()
+                            );
                             let old_region = router_for_lookup.current_region();
 
                             // Step 1: Get candidate servers for the target region
@@ -477,41 +518,79 @@ impl VpnConnection {
 
                                 if let Some((selected_region, selected_addr, latency_ms)) = best {
                                     // Step 3: Commit the switch with the best server
-                                    if let Some((new_addr, new_region)) = router_for_lookup.commit_switch(region, selected_region, selected_addr) {
-                                        log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {}, ping: {}ms)",
-                                            old_region, new_region, new_addr, latency_ms);
+                                    if let Some((new_addr, new_region)) = router_for_lookup
+                                        .commit_switch(region, selected_region, selected_addr)
+                                    {
+                                        log::info!(
+                                            "Auto-routing: SWITCHING relay {} -> {} (addr: {}, ping: {}ms)",
+                                            old_region,
+                                            new_region,
+                                            new_addr,
+                                            latency_ms
+                                        );
                                         relay_for_lookup.switch_relay(new_addr);
                                         // Send burst of keepalives to new relay to:
                                         // 1. Establish session on new relay ASAP
                                         // 2. Punch through NAT/firewall quickly (3 packets at 50ms intervals)
                                         if let Err(e) = relay_for_lookup.send_keepalive_burst() {
-                                            log::warn!("Auto-routing: Failed to send keepalive burst to new relay: {}", e);
+                                            log::warn!(
+                                                "Auto-routing: Failed to send keepalive burst to new relay: {}",
+                                                e
+                                            );
                                         }
-                                        log::info!("Auto-routing: Relay addr is now {}", relay_for_lookup.relay_addr());
-                                        crate::notification::show_relay_switch(&old_region, &new_region, &location);
+                                        log::info!(
+                                            "Auto-routing: Relay addr is now {}",
+                                            relay_for_lookup.relay_addr()
+                                        );
+                                        crate::notification::show_relay_switch(
+                                            &old_region,
+                                            &new_region,
+                                            &location,
+                                        );
                                     }
                                 } else {
-                                    log::warn!("Auto-routing: All candidate pings failed, using first candidate");
+                                    log::warn!(
+                                        "Auto-routing: All candidate pings failed, using first candidate"
+                                    );
                                     // Fallback: use first candidate without ping
                                     let (fallback_region, fallback_addr) = candidates[0].clone();
-                                    if let Some((new_addr, new_region)) = router_for_lookup.commit_switch(region, fallback_region, fallback_addr) {
-                                        log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {}, no ping data)",
-                                            old_region, new_region, new_addr);
+                                    if let Some((new_addr, new_region)) = router_for_lookup
+                                        .commit_switch(region, fallback_region, fallback_addr)
+                                    {
+                                        log::info!(
+                                            "Auto-routing: SWITCHING relay {} -> {} (addr: {}, no ping data)",
+                                            old_region,
+                                            new_region,
+                                            new_addr
+                                        );
                                         relay_for_lookup.switch_relay(new_addr);
                                         if let Err(e) = relay_for_lookup.send_keepalive_burst() {
-                                            log::warn!("Auto-routing: Failed to send keepalive burst: {}", e);
+                                            log::warn!(
+                                                "Auto-routing: Failed to send keepalive burst: {}",
+                                                e
+                                            );
                                         }
-                                        crate::notification::show_relay_switch(&old_region, &new_region, &location);
+                                        crate::notification::show_relay_switch(
+                                            &old_region,
+                                            &new_region,
+                                            &location,
+                                        );
                                     }
                                 }
                             } else {
-                                log::info!("Auto-routing: No switch needed (already on best region for {})", location);
+                                log::info!(
+                                    "Auto-routing: No switch needed (already on best region for {})",
+                                    location
+                                );
                             }
                             // Release held packets — lookup is done, relay is now correct
                             router_for_lookup.clear_pending_lookup(ip);
                         }
                         None => {
-                            log::warn!("Auto-routing: ipinfo.io lookup failed for {}, releasing packets on current relay", ip);
+                            log::warn!(
+                                "Auto-routing: ipinfo.io lookup failed for {}, releasing packets on current relay",
+                                ip
+                            );
                             // Release packets even on failure — better to route through
                             // wrong relay than hold packets forever
                             router_for_lookup.clear_pending_lookup(ip);
@@ -525,7 +604,11 @@ impl VpnConnection {
 
         driver.set_auto_router(Arc::clone(&auto_router));
         self.auto_router = Some(Arc::clone(&auto_router));
-        log::info!("V3: Auto-router initialized for region {} (enabled: {})", config.region, auto_routing_enabled);
+        log::info!(
+            "V3: Auto-router initialized for region {} (enabled: {})",
+            config.region,
+            auto_routing_enabled
+        );
 
         // Configure split tunnel driver
         // tunnel_interface_luid = 0 (no Wintun), tunnel_ip = internet_ip (no NAT needed for UDP relay)
@@ -560,22 +643,25 @@ impl VpnConnection {
         self.split_tunnel = Some(Arc::clone(&driver));
 
         // Start ETW process watcher for instant game detection
-        let watch_list: std::collections::HashSet<String> = tunnel_apps.iter()
-            .map(|s| s.to_lowercase())
-            .collect();
+        let watch_list: std::collections::HashSet<String> =
+            tunnel_apps.iter().map(|s| s.to_lowercase()).collect();
 
-        let etw_receiver: Option<Receiver<ProcessStartEvent>> = match ProcessWatcher::start(watch_list) {
-            Ok(watcher) => {
-                log::info!("V3: ETW process watcher started");
-                let receiver = watcher.receiver().clone();
-                self.etw_watcher = Some(watcher);
-                Some(receiver)
-            }
-            Err(e) => {
-                log::warn!("V3: ETW process watcher failed (continuing with polling): {}", e);
-                None
-            }
-        };
+        let etw_receiver: Option<Receiver<ProcessStartEvent>> =
+            match ProcessWatcher::start(watch_list) {
+                Ok(watcher) => {
+                    log::info!("V3: ETW process watcher started");
+                    let receiver = watcher.receiver().clone();
+                    self.etw_watcher = Some(watcher);
+                    Some(receiver)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "V3: ETW process watcher failed (continuing with polling): {}",
+                        e
+                    );
+                    None
+                }
+            };
 
         // Start process monitor (same as V1/V2)
         self.process_monitor_stop.store(false, Ordering::SeqCst);
@@ -641,14 +727,19 @@ impl VpnConnection {
                 for event in pending_events {
                     log::info!(
                         "V3 ETW: Detected {} (PID: {}) - blocking and registering",
-                        event.name, event.pid
+                        event.name,
+                        event.pid
                     );
 
                     // STEP 1: IMMEDIATELY block the process with WFP filter
                     // This prevents ANY packets (including STUN) from escaping before we're ready
                     if !event.image_path.is_empty() {
                         if let Err(e) = super::wfp_block::block_process_by_path(&event.image_path) {
-                            log::warn!("V3: WFP block failed for {}: {} (using speculative tunneling)", event.name, e);
+                            log::warn!(
+                                "V3: WFP block failed for {}: {} (using speculative tunneling)",
+                                event.name,
+                                e
+                            );
                         } else {
                             blocked_paths.push(event.image_path.clone());
                         }
@@ -710,11 +801,13 @@ impl VpnConnection {
                         if let ConnectionState::Connected {
                             ref mut tunneled_processes,
                             ..
-                        } = *state {
+                        } = *state
+                        {
                             if *tunneled_processes != running_names {
                                 if !running_names.is_empty() && tunneled_processes.is_empty() {
                                     log::info!("V3: Game detected, relaying: {:?}", running_names);
-                                } else if running_names.is_empty() && !tunneled_processes.is_empty() {
+                                } else if running_names.is_empty() && !tunneled_processes.is_empty()
+                                {
                                     log::info!("V3: All games exited");
                                 }
                                 *tunneled_processes = running_names;
@@ -733,9 +826,14 @@ impl VpnConnection {
                     if let ConnectionState::Connected {
                         ref mut server_region,
                         ..
-                    } = *state {
-                        if *server_region != current_auto_region && !current_auto_region.is_empty() {
-                            log::info!("Auto-routing: Syncing UI state to region '{}'", current_auto_region);
+                    } = *state
+                    {
+                        if *server_region != current_auto_region && !current_auto_region.is_empty()
+                        {
+                            log::info!(
+                                "Auto-routing: Syncing UI state to region '{}'",
+                                current_auto_region
+                            );
                             *server_region = current_auto_region;
                         }
                     }
@@ -813,7 +911,9 @@ impl VpnConnection {
         {
             let state = self.state.lock().await;
             if !state.is_connected() {
-                return Err(VpnError::Connection("Not connected - cannot switch server".to_string()));
+                return Err(VpnError::Connection(
+                    "Not connected - cannot switch server".to_string(),
+                ));
             }
         }
 
@@ -822,7 +922,9 @@ impl VpnConnection {
             match st.try_lock() {
                 Ok(driver) => driver.switch_relay_addr(new_relay_addr),
                 Err(_) => {
-                    return Err(VpnError::Connection("Split tunnel locked - try again".to_string()));
+                    return Err(VpnError::Connection(
+                        "Split tunnel locked - try again".to_string(),
+                    ));
                 }
             }
         } else {
@@ -830,7 +932,9 @@ impl VpnConnection {
         };
 
         if !switched {
-            return Err(VpnError::Connection("Failed to switch relay address".to_string()));
+            return Err(VpnError::Connection(
+                "Failed to switch relay address".to_string(),
+            ));
         }
 
         // Update connection state with new server info
@@ -840,7 +944,8 @@ impl VpnConnection {
                 ref mut server_region,
                 ref mut server_endpoint,
                 ..
-            } = *state {
+            } = *state
+            {
                 *server_region = new_region.to_string();
                 *server_endpoint = new_relay_addr.to_string();
             }
@@ -848,7 +953,8 @@ impl VpnConnection {
 
         log::info!(
             "Auto-routing: Switched relay to {} ({})",
-            new_relay_addr, new_region
+            new_relay_addr,
+            new_region
         );
 
         Ok(())
@@ -857,7 +963,9 @@ impl VpnConnection {
     /// Get the current relay address for auto-routing comparison
     pub fn current_relay_addr(&self) -> Option<std::net::SocketAddr> {
         self.split_tunnel.as_ref().and_then(|st| {
-            st.try_lock().ok().and_then(|driver| driver.current_relay_addr())
+            st.try_lock()
+                .ok()
+                .and_then(|driver| driver.current_relay_addr())
         })
     }
 
@@ -1019,13 +1127,34 @@ mod tests {
     #[test]
     fn test_status_text_all_variants() {
         assert_eq!(ConnectionState::Disconnected.status_text(), "Disconnected");
-        assert_eq!(ConnectionState::FetchingConfig.status_text(), "Fetching configuration...");
-        assert_eq!(ConnectionState::CreatingAdapter.status_text(), "Creating network adapter...");
-        assert_eq!(ConnectionState::Connecting.status_text(), "Connecting to server...");
-        assert_eq!(ConnectionState::ConfiguringSplitTunnel.status_text(), "Configuring split tunnel...");
-        assert_eq!(ConnectionState::ConfiguringRoutes.status_text(), "Setting up routes...");
-        assert_eq!(ConnectionState::Disconnecting.status_text(), "Disconnecting...");
-        assert_eq!(ConnectionState::Error("x".to_string()).status_text(), "Error");
+        assert_eq!(
+            ConnectionState::FetchingConfig.status_text(),
+            "Fetching configuration..."
+        );
+        assert_eq!(
+            ConnectionState::CreatingAdapter.status_text(),
+            "Creating network adapter..."
+        );
+        assert_eq!(
+            ConnectionState::Connecting.status_text(),
+            "Connecting to server..."
+        );
+        assert_eq!(
+            ConnectionState::ConfiguringSplitTunnel.status_text(),
+            "Configuring split tunnel..."
+        );
+        assert_eq!(
+            ConnectionState::ConfiguringRoutes.status_text(),
+            "Setting up routes..."
+        );
+        assert_eq!(
+            ConnectionState::Disconnecting.status_text(),
+            "Disconnecting..."
+        );
+        assert_eq!(
+            ConnectionState::Error("x".to_string()).status_text(),
+            "Error"
+        );
 
         let connected = ConnectionState::Connected {
             since: Instant::now(),

@@ -13,5 +13,5 @@ mod storage;
 pub mod types;
 
 pub use manager::AuthManager;
-pub use oauth_server::{OAuthServer, OAuthCallbackData, OAuthServerResult, DEFAULT_OAUTH_PORT};
+pub use oauth_server::{DEFAULT_OAUTH_PORT, OAuthCallbackData, OAuthServer, OAuthServerResult};
 pub use types::*;

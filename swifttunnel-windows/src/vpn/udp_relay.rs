@@ -9,12 +9,12 @@
 //! - Server sends back: [8-byte session_id][game server response]
 //! - Client strips session_id and injects response to game
 
-use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Session ID length in bytes
 const SESSION_ID_LEN: usize = 8;
@@ -62,13 +62,12 @@ impl UdpRelay {
     ///
     /// relay_addr should already be resolved (use tokio::net::lookup_host for DNS)
     pub fn new(relay_addr: SocketAddr) -> Result<Self> {
-
         // Bind to any available port
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .context("Failed to bind UDP socket")?;
+        let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket")?;
 
         // Set socket options for low latency
-        socket.set_read_timeout(Some(READ_TIMEOUT))
+        socket
+            .set_read_timeout(Some(READ_TIMEOUT))
             .context("Failed to set read timeout")?;
 
         // Increase send and receive buffers to 256KB to handle burst traffic
@@ -82,10 +81,7 @@ impl UdpRelay {
             let sock = windows::Win32::Networking::WinSock::SOCKET(raw as usize);
 
             unsafe {
-                let buf_bytes = std::slice::from_raw_parts(
-                    &buf_size as *const i32 as *const u8,
-                    4,
-                );
+                let buf_bytes = std::slice::from_raw_parts(&buf_size as *const i32 as *const u8, 4);
 
                 let result = windows::Win32::Networking::WinSock::setsockopt(
                     sock,
@@ -148,7 +144,11 @@ impl UdpRelay {
     /// Includes retry logic for transient send failures
     pub fn forward_outbound(&self, payload: &[u8]) -> Result<usize> {
         if payload.len() > MAX_PAYLOAD_SIZE {
-            log::warn!("UDP Relay: Packet too large ({} > {}), dropping", payload.len(), MAX_PAYLOAD_SIZE);
+            log::warn!(
+                "UDP Relay: Packet too large ({} > {}), dropping",
+                payload.len(),
+                MAX_PAYLOAD_SIZE
+            );
             return Ok(0);
         }
 
@@ -165,7 +165,8 @@ impl UdpRelay {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Retry once after tiny delay
                 std::thread::sleep(Duration::from_micros(50));
-                self.socket.send_to(&packet[..total_len], current_addr)
+                self.socket
+                    .send_to(&packet[..total_len], current_addr)
                     .context("Retry send failed")?
             }
             Err(e) => return Err(e.into()),
@@ -196,19 +197,27 @@ impl UdpRelay {
                 let expected_addr = **self.relay_addr.load();
                 if from != expected_addr {
                     // Check if within grace period for previous relay
-                    let in_grace = if let (Some(prev), Some(switched_at)) =
-                        ((**self.previous_relay_addr.load()).as_ref(), (**self.switch_time.load()).as_ref())
-                    {
+                    let in_grace = if let (Some(prev), Some(switched_at)) = (
+                        (**self.previous_relay_addr.load()).as_ref(),
+                        (**self.switch_time.load()).as_ref(),
+                    ) {
                         from == *prev && switched_at.elapsed() < RELAY_SWITCH_GRACE_PERIOD
                     } else {
                         false
                     };
 
                     if !in_grace {
-                        log::warn!("UDP Relay: Received packet from unexpected source {} (expected {})", from, expected_addr);
+                        log::warn!(
+                            "UDP Relay: Received packet from unexpected source {} (expected {})",
+                            from,
+                            expected_addr
+                        );
                         return Ok(None);
                     }
-                    log::trace!("UDP Relay: Accepting packet from previous relay {} (grace period)", from);
+                    log::trace!(
+                        "UDP Relay: Accepting packet from previous relay {} (grace period)",
+                        from
+                    );
                 }
 
                 // Must have at least session ID
@@ -248,12 +257,17 @@ impl UdpRelay {
     /// Used after auto-routing switch to establish session on the new relay ASAP.
     pub fn send_keepalive_now(&self) -> Result<()> {
         let current_addr = **self.relay_addr.load();
-        self.socket.send_to(&self.session_id, current_addr)
+        self.socket
+            .send_to(&self.session_id, current_addr)
             .context("Failed to send immediate keepalive")?;
         if let Ok(mut guard) = self.last_activity.lock() {
             *guard = Instant::now();
         }
-        log::info!("UDP Relay: Sent immediate keepalive to {} (session {:016x})", current_addr, self.session_id_u64());
+        log::info!(
+            "UDP Relay: Sent immediate keepalive to {} (session {:016x})",
+            current_addr,
+            self.session_id_u64()
+        );
         Ok(())
     }
 
@@ -279,14 +293,16 @@ impl UdpRelay {
         }
         log::info!(
             "UDP Relay: Sent keepalive burst (3 packets) to {} (session {:016x})",
-            current_addr, self.session_id_u64()
+            current_addr,
+            self.session_id_u64()
         );
         Ok(())
     }
 
     /// Send keepalive to maintain NAT binding
     pub fn send_keepalive(&self) -> Result<()> {
-        let should_send = self.last_activity
+        let should_send = self
+            .last_activity
             .lock()
             .map(|guard| guard.elapsed() >= KEEPALIVE_INTERVAL)
             .unwrap_or(true); // If poisoned, send keepalive anyway
@@ -294,7 +310,8 @@ impl UdpRelay {
         if should_send {
             // Send empty payload with just session ID
             let current_addr = **self.relay_addr.load();
-            self.socket.send_to(&self.session_id, current_addr)
+            self.socket
+                .send_to(&self.session_id, current_addr)
                 .context("Failed to send keepalive")?;
             if let Ok(mut guard) = self.last_activity.lock() {
                 *guard = Instant::now();
@@ -325,7 +342,9 @@ impl UdpRelay {
 
     /// Clone the socket for use in inbound receiver thread
     pub fn try_clone_socket(&self) -> Result<UdpSocket> {
-        self.socket.try_clone().context("Failed to clone relay socket")
+        self.socket
+            .try_clone()
+            .context("Failed to clone relay socket")
     }
 
     /// Get the relay server address
@@ -344,7 +363,10 @@ impl UdpRelay {
         self.relay_addr.store(Arc::new(new_addr));
         log::info!(
             "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
-            old_addr, new_addr, self.session_id_u64(), RELAY_SWITCH_GRACE_PERIOD.as_secs()
+            old_addr,
+            new_addr,
+            self.session_id_u64(),
+            RELAY_SWITCH_GRACE_PERIOD.as_secs()
         );
     }
 

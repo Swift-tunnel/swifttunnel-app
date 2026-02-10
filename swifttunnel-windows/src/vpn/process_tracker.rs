@@ -10,13 +10,13 @@
 //! - Configurable refresh interval
 //! - Process name caching for efficiency
 
+use super::{VpnError, VpnResult};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::ptr;
-use super::{VpnError, VpnResult};
-use windows::Win32::NetworkManagement::IpHelper::*;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use windows::Win32::Foundation::*;
-use sysinfo::{System, ProcessesToUpdate, ProcessRefreshKind, UpdateKind};
+use windows::Win32::NetworkManagement::IpHelper::*;
 
 /// Protocol type for connection tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -339,10 +339,8 @@ impl ProcessTracker {
             let name = process.name().to_string_lossy().to_lowercase();
             for tunnel_app in &self.tunnel_apps {
                 if name.contains(tunnel_app.trim_end_matches(".exe")) {
-                    self.pid_names.insert(
-                        _pid.as_u32(),
-                        process.name().to_string_lossy().to_string(),
-                    );
+                    self.pid_names
+                        .insert(_pid.as_u32(), process.name().to_string_lossy().to_string());
                     break;
                 }
             }

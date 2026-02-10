@@ -8,11 +8,11 @@
 //! - wintun.dll must be present in the application directory
 //! - Administrator privileges are required to create the adapter
 
+use super::{VpnError, VpnResult};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use wintun::{Adapter, Session};
-use super::{VpnError, VpnResult};
 
 /// Wintun adapter name
 const ADAPTER_NAME: &str = "SwiftTunnel";
@@ -34,11 +34,11 @@ fn is_administrator() -> bool {
     use std::ptr::null_mut;
 
     unsafe {
+        use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::Security::{
-            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
         };
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-        use windows::Win32::Foundation::CloseHandle;
 
         let mut token_handle = windows::Win32::Foundation::HANDLE::default();
 
@@ -121,7 +121,8 @@ impl WintunAdapter {
         if !is_administrator() {
             log::error!("Administrator privileges required for VPN");
             return Err(VpnError::AdapterCreate(
-                "Administrator privileges required. Please run SwiftTunnel as Administrator.".to_string()
+                "Administrator privileges required. Please run SwiftTunnel as Administrator."
+                    .to_string(),
             ));
         }
 
@@ -146,7 +147,11 @@ impl WintunAdapter {
                 w
             }
             Err(e) => {
-                log::error!("Failed to load Wintun DLL from {}: {}", dll_path.display(), e);
+                log::error!(
+                    "Failed to load Wintun DLL from {}: {}",
+                    dll_path.display(),
+                    e
+                );
                 return Err(VpnError::AdapterCreate(format!(
                     "Failed to load wintun.dll: {}. Ensure the DLL matches your system architecture (64-bit for 64-bit Windows).",
                     e
@@ -197,9 +202,9 @@ impl WintunAdapter {
     fn configure_ip(adapter: &Adapter, ip: IpAddr, cidr: u8) -> VpnResult<()> {
         use crate::hidden_command;
 
-        let adapter_name = adapter.get_name().map_err(|e| {
-            VpnError::AdapterCreate(format!("Failed to get adapter name: {}", e))
-        })?;
+        let adapter_name = adapter
+            .get_name()
+            .map_err(|e| VpnError::AdapterCreate(format!("Failed to get adapter name: {}", e)))?;
 
         log::info!("Configuring IP {} on adapter '{}'", ip, adapter_name);
 
@@ -222,7 +227,10 @@ impl WintunAdapter {
 
                 hidden_command("netsh")
                     .args([
-                        "interface", "ip", "set", "address",
+                        "interface",
+                        "ip",
+                        "set",
+                        "address",
                         &adapter_name,
                         "static",
                         &ipv4.to_string(),
@@ -230,15 +238,16 @@ impl WintunAdapter {
                     ])
                     .output()
             }
-            IpAddr::V6(ipv6) => {
-                hidden_command("netsh")
-                    .args([
-                        "interface", "ipv6", "set", "address",
-                        &adapter_name,
-                        &format!("{}/{}", ipv6, cidr),
-                    ])
-                    .output()
-            }
+            IpAddr::V6(ipv6) => hidden_command("netsh")
+                .args([
+                    "interface",
+                    "ipv6",
+                    "set",
+                    "address",
+                    &adapter_name,
+                    &format!("{}/{}", ipv6, cidr),
+                ])
+                .output(),
         };
 
         match output {
@@ -268,21 +277,32 @@ impl WintunAdapter {
     pub fn set_dns(&self, dns_servers: &[String]) -> VpnResult<()> {
         use crate::hidden_command;
 
-        let adapter_name = self.adapter.get_name().map_err(|e| {
-            VpnError::AdapterCreate(format!("Failed to get adapter name: {}", e))
-        })?;
+        let adapter_name = self
+            .adapter
+            .get_name()
+            .map_err(|e| VpnError::AdapterCreate(format!("Failed to get adapter name: {}", e)))?;
 
         for (i, dns) in dns_servers.iter().enumerate() {
             let index_arg = format!("index={}", i + 1);
             let args = if i == 0 {
                 vec![
-                    "interface", "ip", "set", "dns",
-                    &adapter_name, "static", dns,
+                    "interface",
+                    "ip",
+                    "set",
+                    "dns",
+                    &adapter_name,
+                    "static",
+                    dns,
                 ]
             } else {
                 vec![
-                    "interface", "ip", "add", "dns",
-                    &adapter_name, dns, &index_arg,
+                    "interface",
+                    "ip",
+                    "add",
+                    "dns",
+                    &adapter_name,
+                    dns,
+                    &index_arg,
                 ]
             };
 
@@ -309,13 +329,17 @@ impl WintunAdapter {
     pub fn set_mtu(&self, mtu: u32) -> VpnResult<()> {
         use crate::hidden_command;
 
-        let adapter_name = self.adapter.get_name().map_err(|e| {
-            VpnError::AdapterCreate(format!("Failed to get adapter name: {}", e))
-        })?;
+        let adapter_name = self
+            .adapter
+            .get_name()
+            .map_err(|e| VpnError::AdapterCreate(format!("Failed to get adapter name: {}", e)))?;
 
         let output = hidden_command("netsh")
             .args([
-                "interface", "ipv4", "set", "subinterface",
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
                 &adapter_name,
                 &format!("mtu={}", mtu),
                 "store=active",
@@ -375,9 +399,9 @@ impl WintunAdapter {
 
     /// Allocate a packet buffer for sending
     pub fn allocate_send_packet(&self, size: u16) -> VpnResult<wintun::Packet> {
-        self.session.allocate_send_packet(size).map_err(|e| {
-            VpnError::AdapterCreate(format!("Failed to allocate packet: {}", e))
-        })
+        self.session
+            .allocate_send_packet(size)
+            .map_err(|e| VpnError::AdapterCreate(format!("Failed to allocate packet: {}", e)))
     }
 
     /// Send a packet through the adapter

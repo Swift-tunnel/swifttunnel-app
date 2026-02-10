@@ -6,12 +6,12 @@
 //! Server list is cached locally and refreshed periodically.
 //! If API is unavailable and no cache exists, the app shows an error.
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 
 /// API endpoint for fetching server list
 const SERVERS_API_URL: &str = "https://swifttunnel.net/api/vpn/servers";
@@ -94,7 +94,6 @@ pub fn measure_latency_icmp(ip: &str) -> Option<u32> {
 // No hardcoded server data - everything is fetched from the API
 // See: https://swifttunnel.net/api/vpn/servers
 
-
 // =============================================================================
 // DYNAMIC SERVER LIST (Fetched from API)
 // =============================================================================
@@ -110,7 +109,6 @@ pub struct DynamicServerInfo {
     pub phantun_available: bool,
     pub phantun_port: Option<u16>,
 }
-
 
 /// Dynamic gaming region with owned strings (for API deserialization)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,21 +158,22 @@ pub fn load_cached_servers() -> Option<CachedServerList> {
     }
 
     match std::fs::read_to_string(&cache_path) {
-        Ok(content) => {
-            match serde_json::from_str::<CachedServerList>(&content) {
-                Ok(cached) => {
-                    log::info!("Loaded server cache from {:?}, age: {} seconds",
-                        cache_path,
-                        Utc::now().signed_duration_since(cached.cached_at).num_seconds()
-                    );
-                    Some(cached)
-                }
-                Err(e) => {
-                    log::warn!("Failed to parse server cache: {}", e);
-                    None
-                }
+        Ok(content) => match serde_json::from_str::<CachedServerList>(&content) {
+            Ok(cached) => {
+                log::info!(
+                    "Loaded server cache from {:?}, age: {} seconds",
+                    cache_path,
+                    Utc::now()
+                        .signed_duration_since(cached.cached_at)
+                        .num_seconds()
+                );
+                Some(cached)
             }
-        }
+            Err(e) => {
+                log::warn!("Failed to parse server cache: {}", e);
+                None
+            }
+        },
         Err(e) => {
             log::warn!("Failed to read server cache file: {}", e);
             None
@@ -259,7 +258,14 @@ pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
 /// 2. If cache is stale or missing, fetch from API
 /// 3. If API fails and cache exists (even stale), use cache
 /// 4. If all else fails, return Error - no hardcoded fallback!
-pub async fn load_server_list() -> Result<(Vec<DynamicServerInfo>, Vec<DynamicGamingRegion>, ServerListSource), String> {
+pub async fn load_server_list() -> Result<
+    (
+        Vec<DynamicServerInfo>,
+        Vec<DynamicGamingRegion>,
+        ServerListSource,
+    ),
+    String,
+> {
     // Try to load from cache first
     if let Some(cached) = load_cached_servers() {
         if cached.is_fresh() {
@@ -296,7 +302,10 @@ pub async fn load_server_list() -> Result<(Vec<DynamicServerInfo>, Vec<DynamicGa
         }
         Err(e) => {
             log::error!("Failed to fetch server list from API: {}", e);
-            return Err(format!("Could not load server list: {}. Please check your internet connection.", e));
+            return Err(format!(
+                "Could not load server list: {}. Please check your internet connection.",
+                e
+            ));
         }
     }
 }

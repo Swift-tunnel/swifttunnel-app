@@ -3,6 +3,7 @@
 //! Monitors Roblox log files to detect game server IPs.
 //! Similar to Bloxstrap's server location notification feature.
 
+use regex_lite::Regex;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -11,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
-use regex_lite::Regex;
 
 /// Events emitted by the Roblox watcher
 #[derive(Debug, Clone)]
@@ -47,7 +47,10 @@ impl RobloxWatcher {
         });
 
         log::info!("Roblox log watcher started");
-        Some(Self { receiver, stop_flag })
+        Some(Self {
+            receiver,
+            stop_flag,
+        })
     }
 
     /// Poll for new events (non-blocking)
@@ -61,7 +64,8 @@ impl RobloxWatcher {
 
     /// Stop the watcher
     pub fn stop(&self) {
-        self.stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stop_flag
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -119,7 +123,8 @@ fn watch_logs(
         // Check for new/updated log file every 2 seconds
         if last_file_check.elapsed() > Duration::from_secs(2) {
             if let Some(newest) = find_newest_log_file(&logs_dir) {
-                let should_switch = current_file.as_ref()
+                let should_switch = current_file
+                    .as_ref()
                     .map(|f| f.path != newest)
                     .unwrap_or(true);
 
@@ -154,7 +159,8 @@ fn watch_logs(
                                         if !is_private_ip(ip) && !seen_ips.contains(&ip) {
                                             seen_ips.insert(ip);
                                             log::info!("Detected game server: {}", ip);
-                                            let _ = sender.send(RobloxEvent::GameServerDetected { ip });
+                                            let _ =
+                                                sender.send(RobloxEvent::GameServerDetected { ip });
                                         }
                                     }
                                 }
@@ -180,7 +186,10 @@ fn find_newest_log_file(dir: &Path) -> Option<PathBuf> {
         .ok()?
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path().extension().map(|ext| ext == "log").unwrap_or(false)
+            e.path()
+                .extension()
+                .map(|ext| ext == "log")
+                .unwrap_or(false)
         })
         .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
         .map(|e| e.path())
@@ -314,7 +323,9 @@ mod tests {
     fn joining_pattern_matches_log_line() {
         let (joining, _) = get_patterns();
         let line = "! Joining game 'abc-def-123' place 12345 at 203.0.113.5";
-        let caps = joining.captures(line).expect("should match joining pattern");
+        let caps = joining
+            .captures(line)
+            .expect("should match joining pattern");
         assert_eq!(caps.get(1).unwrap().as_str(), "203.0.113.5");
     }
 

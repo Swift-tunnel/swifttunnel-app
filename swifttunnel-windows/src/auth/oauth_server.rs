@@ -11,7 +11,10 @@ use log::{debug, error, info, warn};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tiny_http::{Response, Server, StatusCode};
@@ -61,7 +64,10 @@ impl OAuthServer {
                 (s, DEFAULT_OAUTH_PORT)
             }
             Err(e) => {
-                warn!("Default port {} unavailable: {}, trying random port", DEFAULT_OAUTH_PORT, e);
+                warn!(
+                    "Default port {} unavailable: {}, trying random port",
+                    DEFAULT_OAUTH_PORT, e
+                );
                 // Try port 0 to get a random available port
                 match Server::http("127.0.0.1:0") {
                     Ok(s) => {
@@ -132,7 +138,8 @@ impl OAuthServer {
                                     tiny_http::Header::from_bytes(
                                         &b"Content-Type"[..],
                                         &b"text/html; charset=utf-8"[..],
-                                    ).unwrap()
+                                    )
+                                    .unwrap(),
                                 );
 
                             if let Err(e) = request.respond(response) {
@@ -157,7 +164,8 @@ impl OAuthServer {
                                     tiny_http::Header::from_bytes(
                                         &b"Content-Type"[..],
                                         &b"text/html; charset=utf-8"[..],
-                                    ).unwrap()
+                                    )
+                                    .unwrap(),
                                 );
                             let _ = request.respond(response);
                         }
@@ -285,12 +293,14 @@ impl OAuthServer {
         <div class="hint">You can close this window now.</div>
     </div>
 </body>
-</html>"#.to_string()
+</html>"#
+            .to_string()
     }
 
     /// Generate error HTML response
     fn error_html(message: &str) -> String {
-        format!(r#"<!DOCTYPE html>
+        format!(
+            r#"<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -360,7 +370,9 @@ impl OAuthServer {
         <div class="message">{}</div>
     </div>
 </body>
-</html>"#, message)
+</html>"#,
+            message
+        )
     }
 
     /// Wait for the OAuth callback with a timeout

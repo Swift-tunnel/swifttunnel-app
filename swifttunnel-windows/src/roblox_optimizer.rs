@@ -1,13 +1,16 @@
+use crate::hidden_command;
 use crate::structs::*;
-use log::{info, warn, error};
-use std::path::PathBuf;
-use std::fs;
+use log::{error, info, warn};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 #[cfg(windows)]
-use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY};
+use windows::Win32::Storage::FileSystem::{
+    SetFileAttributesW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+};
 
 /// Current Roblox settings read from the XML file
 #[derive(Debug, Clone)]
@@ -71,7 +74,8 @@ impl RobloxOptimizer {
         let fps_cap = Self::extract_int_value(&content, "FramerateCap").unwrap_or(60);
 
         // Parse graphics quality level
-        let graphics_quality = Self::extract_int_value(&content, "GraphicsQualityLevel").unwrap_or(5);
+        let graphics_quality =
+            Self::extract_int_value(&content, "GraphicsQualityLevel").unwrap_or(5);
 
         // Parse fullscreen
         let fullscreen = Self::extract_bool_value(&content, "Fullscreen").unwrap_or(false);
@@ -114,7 +118,9 @@ impl RobloxOptimizer {
         if let Some(start) = content.find(&pattern) {
             let value_start = start + pattern.len();
             if let Some(end) = content[value_start..].find("</bool>") {
-                let value_str = &content[value_start..value_start + end].trim().to_lowercase();
+                let value_str = &content[value_start..value_start + end]
+                    .trim()
+                    .to_lowercase();
                 return Some(value_str == "true");
             }
         }
@@ -209,7 +215,9 @@ impl RobloxOptimizer {
         info!("Applying Roblox optimizations via GlobalBasicSettings");
 
         if !self.settings_path.exists() {
-            return Err(anyhow::anyhow!("Roblox settings file not found. Please ensure Roblox is installed and has been run at least once."));
+            return Err(anyhow::anyhow!(
+                "Roblox settings file not found. Please ensure Roblox is installed and has been run at least once."
+            ));
         }
 
         // Remove read-only if it was set (so we can write)
@@ -217,7 +225,10 @@ impl RobloxOptimizer {
             info!("Settings file is read-only, removing attribute to apply changes...");
             if let Err(e) = self.remove_readonly() {
                 error!("Failed to remove read-only attribute: {}", e);
-                return Err(anyhow::anyhow!("Cannot modify settings: file is read-only and we couldn't remove the attribute. Error: {}", e));
+                return Err(anyhow::anyhow!(
+                    "Cannot modify settings: file is read-only and we couldn't remove the attribute. Error: {}",
+                    e
+                ));
             }
         }
 
@@ -254,7 +265,8 @@ impl RobloxOptimizer {
         // will re-detect and re-apply them when needed.
 
         // Apply dynamic render optimization
-        if let Err(e) = self.apply_dynamic_render_optimization(&config.dynamic_render_optimization) {
+        if let Err(e) = self.apply_dynamic_render_optimization(&config.dynamic_render_optimization)
+        {
             warn!("Could not apply dynamic render optimization: {}", e);
         }
 
@@ -358,7 +370,10 @@ impl RobloxOptimizer {
 
         // Also remove dynamic render optimization when restoring
         if let Err(e) = self.remove_dynamic_render_optimization() {
-            warn!("Could not remove dynamic render optimization during restore: {}", e);
+            warn!(
+                "Could not remove dynamic render optimization during restore: {}",
+                e
+            );
         }
 
         // Don't set read-only after restore - user is disabling optimizations
@@ -371,6 +386,91 @@ impl RobloxOptimizer {
         self.settings_path.exists()
     }
 
+    /// Check whether a Roblox client process is currently running.
+    pub fn is_roblox_running(&self) -> bool {
+        let process_names = ["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
+
+        process_names.iter().any(|process_name| {
+            hidden_command("tasklist")
+                .args(["/FI", &format!("IMAGENAME eq {}", process_name)])
+                .output()
+                .map(|output| {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    stdout.contains(process_name)
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    /// Force-close running Roblox client processes.
+    pub fn close_running_instances(&self) -> Result<()> {
+        let process_names = ["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
+
+        for process_name in process_names {
+            let output = hidden_command("taskkill")
+                .args(["/F", "/T", "/IM", process_name])
+                .output();
+
+            match output {
+                Ok(result) => {
+                    if result.status.success() {
+                        info!("Closed Roblox process: {}", process_name);
+                    } else {
+                        let stderr = String::from_utf8_lossy(&result.stderr).to_lowercase();
+                        let stdout = String::from_utf8_lossy(&result.stdout).to_lowercase();
+                        let not_running = stderr.contains("not found")
+                            || stderr.contains("not running")
+                            || stdout.contains("not found")
+                            || stdout.contains("not running")
+                            || stdout.contains("no running instance");
+                        if !not_running {
+                            warn!(
+                                "Taskkill for {} returned non-zero status: {}",
+                                process_name, stderr
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to execute taskkill for {}: {}", process_name, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reopen Roblox after applying boosts.
+    pub fn reopen_client(&self) -> Result<()> {
+        if let Some(version_folder) = Self::find_roblox_version_folder() {
+            let exe_path = version_folder.join("RobloxPlayerBeta.exe");
+            if exe_path.exists() {
+                match std::process::Command::new(&exe_path).spawn() {
+                    Ok(_) => {
+                        info!("Relaunched Roblox from {:?}", exe_path);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!("Failed to relaunch Roblox executable directly: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Fallback: launch via protocol handler.
+        let output = hidden_command("cmd")
+            .args(["/C", "start", "", "roblox://"])
+            .spawn();
+
+        match output {
+            Ok(_) => {
+                info!("Relaunched Roblox via roblox:// protocol");
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("Failed to relaunch Roblox: {}", e)),
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════
     //  DYNAMIC RENDER OPTIMIZATION
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -379,7 +479,9 @@ impl RobloxOptimizer {
     /// Returns the path to the latest version-* directory
     fn find_roblox_version_folder() -> Option<PathBuf> {
         let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-        let versions_dir = PathBuf::from(&local_app_data).join("Roblox").join("Versions");
+        let versions_dir = PathBuf::from(&local_app_data)
+            .join("Roblox")
+            .join("Versions");
 
         if !versions_dir.exists() {
             return None;
@@ -398,7 +500,9 @@ impl RobloxOptimizer {
                         if path.join("RobloxPlayerBeta.exe").exists() {
                             if let Ok(metadata) = entry.metadata() {
                                 if let Ok(modified) = metadata.modified() {
-                                    if latest_version.is_none() || modified > latest_version.as_ref()?.1 {
+                                    if latest_version.is_none()
+                                        || modified > latest_version.as_ref()?.1
+                                    {
                                         latest_version = Some((path, modified));
                                     }
                                 }
@@ -430,7 +534,10 @@ impl RobloxOptimizer {
     }
 
     /// Apply dynamic render optimization
-    pub fn apply_dynamic_render_optimization(&self, mode: &crate::structs::DynamicRenderMode) -> Result<()> {
+    pub fn apply_dynamic_render_optimization(
+        &self,
+        mode: &crate::structs::DynamicRenderMode,
+    ) -> Result<()> {
         // If mode is Off, remove the setting
         let render_value = match mode.render_value() {
             Some(v) => v,
@@ -448,7 +555,9 @@ impl RobloxOptimizer {
         // Read existing settings if file exists
         if settings_path.exists() {
             if let Ok(content) = fs::read_to_string(&settings_path) {
-                if let Ok(existing) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content) {
+                if let Ok(existing) =
+                    serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
+                {
                     settings = existing;
                 }
             }
@@ -528,7 +637,10 @@ mod tests {
     #[test]
     fn extract_int_value_parses_int_tag() {
         let xml = r#"<roblox><int name="FramerateCap">144</int></roblox>"#;
-        assert_eq!(RobloxOptimizer::extract_int_value(xml, "FramerateCap"), Some(144));
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(xml, "FramerateCap"),
+            Some(144)
+        );
     }
 
     #[test]
@@ -540,19 +652,28 @@ mod tests {
     #[test]
     fn extract_int_value_parses_token_tag() {
         let xml = r#"<roblox><token name="SavedQualityLevel">7</token></roblox>"#;
-        assert_eq!(RobloxOptimizer::extract_int_value(xml, "SavedQualityLevel"), Some(7));
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(xml, "SavedQualityLevel"),
+            Some(7)
+        );
     }
 
     #[test]
     fn extract_int_value_returns_none_for_non_numeric() {
         let xml = r#"<roblox><int name="FramerateCap">abc</int></roblox>"#;
-        assert_eq!(RobloxOptimizer::extract_int_value(xml, "FramerateCap"), None);
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(xml, "FramerateCap"),
+            None
+        );
     }
 
     #[test]
     fn extract_int_value_handles_whitespace() {
         let xml = r#"<roblox><int name="FramerateCap">  240  </int></roblox>"#;
-        assert_eq!(RobloxOptimizer::extract_int_value(xml, "FramerateCap"), Some(240));
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(xml, "FramerateCap"),
+            Some(240)
+        );
     }
 
     // ── extract_bool_value ──────────────────────────────────────────
@@ -560,19 +681,28 @@ mod tests {
     #[test]
     fn extract_bool_value_parses_true() {
         let xml = r#"<roblox><bool name="Fullscreen">true</bool></roblox>"#;
-        assert_eq!(RobloxOptimizer::extract_bool_value(xml, "Fullscreen"), Some(true));
+        assert_eq!(
+            RobloxOptimizer::extract_bool_value(xml, "Fullscreen"),
+            Some(true)
+        );
     }
 
     #[test]
     fn extract_bool_value_parses_false() {
         let xml = r#"<roblox><bool name="Fullscreen">false</bool></roblox>"#;
-        assert_eq!(RobloxOptimizer::extract_bool_value(xml, "Fullscreen"), Some(false));
+        assert_eq!(
+            RobloxOptimizer::extract_bool_value(xml, "Fullscreen"),
+            Some(false)
+        );
     }
 
     #[test]
     fn extract_bool_value_case_insensitive() {
         let xml = r#"<roblox><bool name="Fullscreen">True</bool></roblox>"#;
-        assert_eq!(RobloxOptimizer::extract_bool_value(xml, "Fullscreen"), Some(true));
+        assert_eq!(
+            RobloxOptimizer::extract_bool_value(xml, "Fullscreen"),
+            Some(true)
+        );
     }
 
     #[test]
@@ -588,7 +718,10 @@ mod tests {
         let xml = r#"<roblox><int name="FramerateCap">60</int></roblox>"#;
         let opt = optimizer_with_path(PathBuf::from("dummy"));
         let result = opt.set_xml_int_value(xml, "FramerateCap", 999);
-        assert_eq!(result, r#"<roblox><int name="FramerateCap">999</int></roblox>"#);
+        assert_eq!(
+            result,
+            r#"<roblox><int name="FramerateCap">999</int></roblox>"#
+        );
     }
 
     #[test]

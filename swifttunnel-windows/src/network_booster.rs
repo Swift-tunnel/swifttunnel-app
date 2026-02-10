@@ -1,5 +1,5 @@
-use crate::structs::*;
 use crate::hidden_command;
+use crate::structs::*;
 use log::{info, warn};
 use std::process::Command;
 
@@ -65,7 +65,9 @@ impl NetworkBooster {
         self.backup_dns_settings(&interface_name)?;
 
         // Set custom DNS
-        if let (Some(primary), Some(secondary)) = (&config.custom_dns_primary, &config.custom_dns_secondary) {
+        if let (Some(primary), Some(secondary)) =
+            (&config.custom_dns_primary, &config.custom_dns_secondary)
+        {
             self.set_dns(&interface_name, primary, secondary)?;
         }
 
@@ -122,7 +124,7 @@ impl NetworkBooster {
                 &format!(
                     "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses ('{}','{}')",
                     interface, primary, secondary
-                )
+                ),
             ])
             .output()?;
 
@@ -168,9 +170,7 @@ impl NetworkBooster {
     pub fn flush_dns_cache(&self) -> Result<()> {
         info!("Flushing DNS cache");
 
-        let output = hidden_command("ipconfig")
-            .arg("/flushdns")
-            .output()?;
+        let output = hidden_command("ipconfig").arg("/flushdns").output()?;
 
         if output.status.success() {
             info!("DNS cache flushed successfully");
@@ -221,7 +221,7 @@ impl NetworkBooster {
         let output = hidden_command("powershell")
             .args(&[
                 "-Command",
-                "Get-NetAdapter | Select-Object -ExpandProperty InterfaceGuid"
+                "Get-NetAdapter | Select-Object -ExpandProperty InterfaceGuid",
             ])
             .output();
 
@@ -251,7 +251,7 @@ impl NetworkBooster {
                             "REG_DWORD",
                             "/d",
                             "1",
-                            "/f"
+                            "/f",
                         ])
                         .output();
 
@@ -266,7 +266,7 @@ impl NetworkBooster {
                             "REG_DWORD",
                             "/d",
                             "1",
-                            "/f"
+                            "/f",
                         ])
                         .output();
                 }
@@ -296,7 +296,7 @@ impl NetworkBooster {
                 "REG_DWORD",
                 "/d",
                 "4294967295", // 0xFFFFFFFF
-                "/f"
+                "/f",
             ])
             .output();
 
@@ -324,7 +324,7 @@ impl NetworkBooster {
                 "REG_DWORD",
                 "/d",
                 "0",
-                "/f"
+                "/f",
             ])
             .output();
 
@@ -357,7 +357,10 @@ impl NetworkBooster {
                 if let Err(e) = self.apply_mtu(&interface_name, optimal_mtu) {
                     warn!("Failed to apply MTU: {}", e);
                 } else {
-                    info!("MTU optimized to {} for interface '{}'", optimal_mtu, interface_name);
+                    info!(
+                        "MTU optimized to {} for interface '{}'",
+                        optimal_mtu, interface_name
+                    );
                 }
             }
             Err(e) => {
@@ -381,7 +384,9 @@ impl NetworkBooster {
             .output()?;
 
         let mtu_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        mtu_str.parse::<u32>().map_err(|e| anyhow::anyhow!("Failed to parse MTU: {}", e))
+        mtu_str
+            .parse::<u32>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse MTU: {}", e))
     }
 
     /// Find the optimal MTU using ping with Don't Fragment flag
@@ -405,11 +410,14 @@ impl NetworkBooster {
             // Use ping with -f flag (Don't Fragment) and -l flag (packet size)
             let output = hidden_command("ping")
                 .args(&[
-                    "-n", "1",      // Send 1 packet
-                    "-f",           // Don't Fragment flag
-                    "-l", &test_size.to_string(), // Packet size
-                    "-w", "1000",   // 1 second timeout
-                    target
+                    "-n",
+                    "1",  // Send 1 packet
+                    "-f", // Don't Fragment flag
+                    "-l",
+                    &test_size.to_string(), // Packet size
+                    "-w",
+                    "1000", // 1 second timeout
+                    target,
                 ])
                 .output()?;
 
@@ -418,12 +426,16 @@ impl NetworkBooster {
 
             // Check if ping succeeded without fragmentation
             // If we see "Reply from" without "needs to be fragmented" or "Packet needs to be fragmented"
-            if output_str.contains("Reply from") &&
-               !output_lower.contains("fragment") &&
-               !output_lower.contains("too big") {
+            if output_str.contains("Reply from")
+                && !output_lower.contains("fragment")
+                && !output_lower.contains("too big")
+            {
                 // Found a working size, optimal MTU is test_size + header_overhead
                 let optimal_mtu = test_size + header_overhead;
-                info!("Found optimal MTU: {} (test size: {})", optimal_mtu, test_size);
+                info!(
+                    "Found optimal MTU: {} (test size: {})",
+                    optimal_mtu, test_size
+                );
                 return Ok(optimal_mtu);
             }
 
@@ -443,10 +455,13 @@ impl NetworkBooster {
         // Use netsh to set MTU
         let output = hidden_command("netsh")
             .args(&[
-                "interface", "ipv4", "set", "subinterface",
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
                 interface,
                 &format!("mtu={}", mtu),
-                "store=persistent"
+                "store=persistent",
             ])
             .output()?;
 
@@ -488,7 +503,7 @@ impl NetworkBooster {
                 "REG_DWORD",
                 "/d",
                 "1",
-                "/f"
+                "/f",
             ])
             .output();
 
@@ -516,7 +531,7 @@ impl NetworkBooster {
                 "REG_DWORD",
                 "/d",
                 "0",
-                "/f"
+                "/f",
             ])
             .output();
 
@@ -541,47 +556,157 @@ impl NetworkBooster {
 
             // Set Version
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Version", "/t", "REG_SZ", "/d", "1.0", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Version",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "1.0",
+                    "/f",
+                ])
                 .output();
 
             // Set Application Name
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Application Name", "/t", "REG_SZ", "/d", exe, "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Application Name",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    exe,
+                    "/f",
+                ])
                 .output();
 
             // Set Protocol (UDP for game traffic, but * for all)
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Protocol", "/t", "REG_SZ", "/d", "*", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Protocol",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "*",
+                    "/f",
+                ])
                 .output();
 
             // Set DSCP Value = 46 (EF - Expedited Forwarding)
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "DSCP Value", "/t", "REG_SZ", "/d", "46", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "DSCP Value",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "46",
+                    "/f",
+                ])
                 .output();
 
             // Set Throttle Rate = -1 (no throttling)
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Throttle Rate", "/t", "REG_SZ", "/d", "-1", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Throttle Rate",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "-1",
+                    "/f",
+                ])
                 .output();
 
             // Set wildcards for ports and IPs
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Local Port", "/t", "REG_SZ", "/d", "*", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Local Port",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "*",
+                    "/f",
+                ])
                 .output();
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Local IP", "/t", "REG_SZ", "/d", "*", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Local IP",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "*",
+                    "/f",
+                ])
                 .output();
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Local IP Prefix Length", "/t", "REG_SZ", "/d", "*", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Local IP Prefix Length",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "*",
+                    "/f",
+                ])
                 .output();
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Remote Port", "/t", "REG_SZ", "/d", "*", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Remote Port",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "*",
+                    "/f",
+                ])
                 .output();
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Remote IP", "/t", "REG_SZ", "/d", "*", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Remote IP",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "*",
+                    "/f",
+                ])
                 .output();
             let _ = hidden_command("reg")
-                .args(["add", &policy_path, "/v", "Remote IP Prefix Length", "/t", "REG_SZ", "/d", "*", "/f"])
+                .args([
+                    "add",
+                    &policy_path,
+                    "/v",
+                    "Remote IP Prefix Length",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    "*",
+                    "/f",
+                ])
                 .output();
 
             info!("Created QoS policy for {}", exe);

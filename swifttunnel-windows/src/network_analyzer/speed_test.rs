@@ -118,7 +118,10 @@ async fn run_download_test(
         .map_err(|e| format!("Download request failed: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("Download failed with status: {}", response.status()));
+        return Err(format!(
+            "Download failed with status: {}",
+            response.status()
+        ));
     }
 
     let mut stream = response.bytes_stream();

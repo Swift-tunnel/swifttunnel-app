@@ -4,7 +4,7 @@
 
 use crate::network_analyzer::NetworkTestResultsCache;
 use crate::structs::Config;
-use crate::updater::UpdateSettings;
+use crate::updater::{UpdateChannel, UpdateSettings};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -36,10 +36,10 @@ pub struct WindowState {
 impl Default for WindowState {
     fn default() -> Self {
         Self {
-            x: None,  // Let OS center the window
+            x: None, // Let OS center the window
             y: None,
-            width: 560.0,   // Good default width for the UI
-            height: 750.0,  // Good default height
+            width: 560.0,  // Good default width for the UI
+            height: 750.0, // Good default height
             maximized: false,
         }
     }
@@ -69,6 +69,9 @@ pub struct AppSettings {
     /// Update settings
     #[serde(default)]
     pub update_settings: UpdateSettings,
+    /// Selected update channel (Live = pre-release builds, Stable = vetted releases)
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
     /// Whether to minimize to tray instead of closing
     #[serde(default = "default_minimize_to_tray")]
     pub minimize_to_tray: bool,
@@ -150,6 +153,7 @@ impl Default for AppSettings {
             selected_server: "singapore".to_string(),
             current_tab: "connect".to_string(),
             update_settings: UpdateSettings::default(),
+            update_channel: UpdateChannel::Stable,
             minimize_to_tray: true,
             last_connected_region: None,
             expanded_boost_info: Vec::new(),
@@ -194,18 +198,16 @@ pub fn load_settings() -> AppSettings {
     }
 
     match fs::read_to_string(&path) {
-        Ok(content) => {
-            match serde_json::from_str(&content) {
-                Ok(settings) => {
-                    info!("Loaded settings from {:?}", path);
-                    settings
-                }
-                Err(e) => {
-                    error!("Failed to parse settings file: {}", e);
-                    AppSettings::default()
-                }
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(settings) => {
+                info!("Loaded settings from {:?}", path);
+                settings
             }
-        }
+            Err(e) => {
+                error!("Failed to parse settings file: {}", e);
+                AppSettings::default()
+            }
+        },
         Err(e) => {
             error!("Failed to read settings file: {}", e);
             AppSettings::default()
@@ -254,6 +256,7 @@ mod tests {
         assert!(!settings.optimizations_active);
         assert_eq!(settings.selected_region, "singapore");
         assert_eq!(settings.selected_server, "singapore");
+        assert_eq!(settings.update_channel, UpdateChannel::Stable);
     }
 
     #[test]
@@ -263,6 +266,7 @@ mod tests {
         settings.optimizations_active = true;
         settings.selected_region = "tokyo".to_string();
         settings.selected_server = "tokyo-02".to_string();
+        settings.update_channel = UpdateChannel::Live;
 
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
@@ -271,6 +275,7 @@ mod tests {
         assert!(loaded.optimizations_active);
         assert_eq!(loaded.selected_region, "tokyo");
         assert_eq!(loaded.selected_server, "tokyo-02");
+        assert_eq!(loaded.update_channel, UpdateChannel::Live);
     }
 
     #[test]
@@ -298,7 +303,11 @@ mod tests {
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
 
         assert_eq!(loaded.whitelisted_regions.len(), 2);
-        assert!(loaded.whitelisted_regions.contains(&"Singapore".to_string()));
+        assert!(
+            loaded
+                .whitelisted_regions
+                .contains(&"Singapore".to_string())
+        );
         assert!(loaded.whitelisted_regions.contains(&"US East".to_string()));
     }
 

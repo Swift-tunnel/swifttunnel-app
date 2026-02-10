@@ -47,8 +47,8 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -58,8 +58,8 @@ use boringtun::noise::{Tunn, TunnResult};
 
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
+use super::tso_recovery::{delete_tso_marker, write_tso_marker};
 use super::tunnel::FastMutex;
-use super::tso_recovery::{write_tso_marker, delete_tso_marker};
 use super::{VpnError, VpnResult};
 use crate::geolocation::is_roblox_game_server_ip;
 
@@ -309,8 +309,9 @@ impl ParallelInterceptor {
             num_cpus::get(),
         );
 
-        let worker_stats: Vec<Arc<WorkerStats>> =
-            (0..num_workers).map(|_| Arc::new(WorkerStats::default())).collect();
+        let worker_stats: Vec<Arc<WorkerStats>> = (0..num_workers)
+            .map(|_| Arc::new(WorkerStats::default()))
+            .collect();
 
         Self {
             num_workers,
@@ -339,7 +340,9 @@ impl ParallelInterceptor {
             relay_ctx: None,
             inbound_handler: None,
             inbound_receiver_handle: None,
-            detected_game_servers: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
+            detected_game_servers: Arc::new(parking_lot::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
             refresh_now_flag: Arc::new(AtomicBool::new(false)),
             refresh_condvar: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
             auto_router: None,
@@ -415,7 +418,12 @@ impl ParallelInterceptor {
     /// the inbound handler rewrites it to internet_ip so the original
     /// app socket can receive the response.
     pub fn set_nat_ips(&mut self, tunnel_ip: &str, internet_ip: &str) {
-        if let Ok(tun_ip) = tunnel_ip.split('/').next().unwrap_or(tunnel_ip).parse::<std::net::Ipv4Addr>() {
+        if let Ok(tun_ip) = tunnel_ip
+            .split('/')
+            .next()
+            .unwrap_or(tunnel_ip)
+            .parse::<std::net::Ipv4Addr>()
+        {
             self.tunnel_ip = Some(tun_ip);
             log::info!("Set NAT tunnel IP: {}", tun_ip);
         }
@@ -431,10 +439,7 @@ impl ParallelInterceptor {
     /// bypassing Wintun for outbound tunnel traffic. This is faster because
     /// it eliminates the Wintun buffer copy and context switch.
     pub fn set_vpn_encrypt_context(&mut self, ctx: VpnEncryptContext) {
-        log::info!(
-            "Set VPN encrypt context: server={}",
-            ctx.server_addr
-        );
+        log::info!("Set VPN encrypt context: server={}", ctx.server_addr);
         self.vpn_encrypt_ctx = Some(ctx);
     }
 
@@ -521,7 +526,8 @@ impl ParallelInterceptor {
     ) -> VpnResult<()> {
         log::info!(
             "Configuring parallel interceptor for VPN adapter: {} (LUID: {})",
-            vpn_adapter_name, vpn_adapter_luid
+            vpn_adapter_name,
+            vpn_adapter_luid
         );
 
         // Update tunnel apps in cache
@@ -542,8 +548,11 @@ impl ParallelInterceptor {
             match self.find_adapters(vpn_adapter_name, vpn_adapter_luid) {
                 Ok(()) => {
                     if attempt > 1 {
-                        log::info!("Adapter detection succeeded on attempt {} (after {}ms total delay)",
-                            attempt, RETRY_DELAYS_MS[..attempt as usize - 1].iter().sum::<u64>());
+                        log::info!(
+                            "Adapter detection succeeded on attempt {} (after {}ms total delay)",
+                            attempt,
+                            RETRY_DELAYS_MS[..attempt as usize - 1].iter().sum::<u64>()
+                        );
                     } else {
                         log::info!("Adapter detection succeeded on first attempt");
                     }
@@ -555,7 +564,10 @@ impl ParallelInterceptor {
                         let delay = RETRY_DELAYS_MS[attempt as usize - 1];
                         log::warn!(
                             "Adapter detection failed (attempt {}/{}): {}. Retrying in {}ms...",
-                            attempt, MAX_RETRIES, e, delay
+                            attempt,
+                            MAX_RETRIES,
+                            e,
+                            delay
                         );
                         std::thread::sleep(std::time::Duration::from_millis(delay));
                     }
@@ -570,7 +582,9 @@ impl ParallelInterceptor {
             RETRY_DELAYS_MS.iter().sum::<u64>(),
             last_error
         );
-        log::error!("This may indicate the Wintun adapter was not created successfully, or Windows networking APIs are slow to update.");
+        log::error!(
+            "This may indicate the Wintun adapter was not created successfully, or Windows networking APIs are slow to update."
+        );
 
         Err(VpnError::SplitTunnel(format!(
             "Failed to find VPN adapter after {} attempts: {}",
@@ -581,8 +595,8 @@ impl ParallelInterceptor {
     /// Get the interface index that has the default route (0.0.0.0/0)
     /// This ensures we intercept the correct adapter even on multi-NIC systems
     fn get_default_route_interface_index() -> Option<u32> {
-        use windows::Win32::NetworkManagement::IpHelper::*;
         use windows::Win32::Foundation::*;
+        use windows::Win32::NetworkManagement::IpHelper::*;
 
         unsafe {
             // Get routing table size
@@ -619,7 +633,11 @@ impl ParallelInterceptor {
             }
 
             if let Some(idx) = best_if_index {
-                log::info!("Default route is on interface index {} (metric: {})", idx, best_metric);
+                log::info!(
+                    "Default route is on interface index {} (metric: {})",
+                    idx,
+                    best_metric
+                );
             }
 
             best_if_index
@@ -633,7 +651,13 @@ impl ParallelInterceptor {
 
         unsafe {
             let mut size: u32 = 0;
-            let _ = GetAdaptersAddresses(AF_INET.0 as u32, GAA_FLAG_INCLUDE_PREFIX, None, None, &mut size);
+            let _ = GetAdaptersAddresses(
+                AF_INET.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                None,
+                &mut size,
+            );
 
             if size == 0 {
                 return None;
@@ -642,7 +666,14 @@ impl ParallelInterceptor {
             let mut buffer = vec![0u8; size as usize];
             let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
 
-            if GetAdaptersAddresses(AF_INET.0 as u32, GAA_FLAG_INCLUDE_PREFIX, None, Some(adapter_addresses), &mut size) != 0 {
+            if GetAdaptersAddresses(
+                AF_INET.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(adapter_addresses),
+                &mut size,
+            ) != 0
+            {
                 return None;
             }
 
@@ -655,7 +686,10 @@ impl ParallelInterceptor {
 
                 // Match by exact GUID comparison (strip \DEVICE\ prefix and compare)
                 let guid_from_adapter = adapter_guid.trim_start_matches("\\DEVICE\\");
-                if guid_from_adapter == name || guid_from_adapter.trim_matches('{').trim_matches('}') == name.trim_matches('{').trim_matches('}') {
+                if guid_from_adapter == name
+                    || guid_from_adapter.trim_matches('{').trim_matches('}')
+                        == name.trim_matches('{').trim_matches('}')
+                {
                     return Some(adapter.Anonymous1.Anonymous.IfIndex);
                 }
 
@@ -678,7 +712,10 @@ impl ParallelInterceptor {
         self.default_route_if_index = default_route_if_index;
 
         if let Some(idx) = default_route_if_index {
-            log::info!("Will prioritize adapter with interface index {} (has default route)", idx);
+            log::info!(
+                "Will prioritize adapter with interface index {} (has default route)",
+                idx
+            );
         } else {
             log::warn!("Could not determine default route interface - will use name-based scoring");
         }
@@ -724,7 +761,8 @@ impl ParallelInterceptor {
             // - This caused friendly_name to be empty
             // - Name-based matching failed because internal_name is just a GUID
             // - The LUID is always available and uniquely identifies our adapter
-            let is_vpn_by_luid = vpn_adapter_luid != 0 && check_adapter_matches_luid(&internal_name, vpn_adapter_luid);
+            let is_vpn_by_luid = vpn_adapter_luid != 0
+                && check_adapter_matches_luid(&internal_name, vpn_adapter_luid);
             let is_vpn_by_name = name_lower.contains(&vpn_adapter_name.to_lowercase())
                 || name_lower.contains("swifttunnel")
                 || name_lower.contains("wintun")
@@ -785,9 +823,9 @@ impl ParallelInterceptor {
                 // This fixes the bug where users with multiple NICs (e.g., disconnected Ethernet + WiFi)
                 // had traffic going through the wrong adapter
                 let adapter_if_index = Self::get_adapter_interface_index(&internal_name);
-                let has_default_route = adapter_if_index.is_some() &&
-                    default_route_if_index.is_some() &&
-                    adapter_if_index == default_route_if_index;
+                let has_default_route = adapter_if_index.is_some()
+                    && default_route_if_index.is_some()
+                    && adapter_if_index == default_route_if_index;
 
                 if has_default_route {
                     score += 1000; // Massive bonus - this is THE adapter internet traffic uses
@@ -801,15 +839,27 @@ impl ParallelInterceptor {
                 {
                     score += 100;
                 }
-                if friendly_lower.contains("wi-fi") || friendly_lower.contains("wifi") || friendly_lower.contains("wireless") {
+                if friendly_lower.contains("wi-fi")
+                    || friendly_lower.contains("wifi")
+                    || friendly_lower.contains("wireless")
+                {
                     score += 80; // WiFi is common for laptops
                 }
                 if !friendly_name.is_empty() {
                     score += 50;
                 }
                 score += (10 - idx.min(10)) as i32;
-                log::info!("    -> Physical adapter candidate (score: {}, has_default_route: {})", score, has_default_route);
-                physical_candidates.push((idx, friendly_name.clone(), internal_name.to_string(), score));
+                log::info!(
+                    "    -> Physical adapter candidate (score: {}, has_default_route: {})",
+                    score,
+                    has_default_route
+                );
+                physical_candidates.push((
+                    idx,
+                    friendly_name.clone(),
+                    internal_name.to_string(),
+                    score,
+                ));
             }
         }
 
@@ -820,14 +870,25 @@ impl ParallelInterceptor {
             // Warn if selected adapter doesn't have default route but others exist
             let has_default = *score >= 1000;
             if !has_default && default_route_if_index.is_some() {
-                log::warn!("Selected adapter '{}' does NOT have the default route - traffic may not be intercepted!", friendly_name);
-                log::warn!("This could cause split tunnel to fail. Check if the correct network adapter is being used.");
+                log::warn!(
+                    "Selected adapter '{}' does NOT have the default route - traffic may not be intercepted!",
+                    friendly_name
+                );
+                log::warn!(
+                    "This could cause split tunnel to fail. Check if the correct network adapter is being used."
+                );
             }
 
             self.physical_adapter_idx = Some(*idx);
             self.physical_adapter_name = Some(internal_name.clone());
             self.physical_adapter_friendly_name = Some(friendly_name.clone());
-            log::info!("Selected physical adapter: {} (index {}, internal: '{}', score: {})", friendly_name, idx, internal_name, score);
+            log::info!(
+                "Selected physical adapter: {} (index {}, internal: '{}', score: {})",
+                friendly_name,
+                idx,
+                internal_name,
+                score
+            );
         } else {
             return Err(VpnError::SplitTunnel(
                 "No physical adapter found".to_string(),
@@ -899,7 +960,10 @@ impl ParallelInterceptor {
                 Ok(None) => {
                     // Still running - check timeout
                     if start.elapsed() >= timeout {
-                        log::warn!("PowerShell timed out after {}s, killing process", timeout_secs);
+                        log::warn!(
+                            "PowerShell timed out after {}s, killing process",
+                            timeout_secs
+                        );
                         let _ = child.kill();
                         let _ = child.wait(); // Reap the process
                         return false;
@@ -970,7 +1034,9 @@ impl ParallelInterceptor {
             write_tso_marker(&friendly_name);
             self.tso_was_disabled = true;
         } else {
-            log::warn!("Failed to disable TSO (non-fatal) - adapter may not support these settings");
+            log::warn!(
+                "Failed to disable TSO (non-fatal) - adapter may not support these settings"
+            );
             // Don't fail - some adapters don't support these settings
         }
 
@@ -1043,7 +1109,10 @@ impl ParallelInterceptor {
             }
         };
 
-        log::info!("Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)", friendly_name);
+        log::info!(
+            "Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)",
+            friendly_name
+        );
 
         // Disable IPv6 binding on the adapter using netsh
         // This is safer than registry changes and takes effect immediately
@@ -1068,7 +1137,10 @@ impl ParallelInterceptor {
         );
 
         if Self::run_powershell_with_timeout(&script, 5) {
-            log::info!("IPv6 disabled successfully on {} - all traffic will use IPv4", friendly_name);
+            log::info!(
+                "IPv6 disabled successfully on {} - all traffic will use IPv4",
+                friendly_name
+            );
             self.ipv6_was_disabled = true;
         } else {
             log::warn!("Failed to disable IPv6 (non-fatal) - IPv6 traffic may bypass VPN");
@@ -1109,7 +1181,9 @@ impl ParallelInterceptor {
         if Self::run_powershell_with_timeout(&script, 5) {
             log::info!("IPv6 re-enabled on {}", friendly_name);
         } else {
-            log::warn!("Failed to re-enable IPv6 - manual re-enable may be needed via Network Settings");
+            log::warn!(
+                "Failed to re-enable IPv6 - manual re-enable may be needed via Network Settings"
+            );
         }
 
         self.ipv6_was_disabled = false;
@@ -1152,7 +1226,12 @@ impl ParallelInterceptor {
         let refresh_now = Arc::clone(&self.refresh_now_flag);
         let refresh_condvar = Arc::clone(&self.refresh_condvar);
         self.refresher_handle = Some(thread::spawn(move || {
-            run_cache_refresher(refresher_cache, refresher_stop, refresh_now, refresh_condvar);
+            run_cache_refresher(
+                refresher_cache,
+                refresher_stop,
+                refresh_now,
+                refresh_condvar,
+            );
         }));
 
         // Reset throughput stats on start
@@ -1199,14 +1278,19 @@ impl ParallelInterceptor {
         // Start packet reader/dispatcher thread
         let reader_stop = Arc::clone(&self.stop_flag);
         let num_workers = self.num_workers;
-        let physical_name = Arc::new(
-            self.physical_adapter_name
-                .clone()
-                .ok_or_else(|| VpnError::SplitTunnel("Physical adapter name not set".to_string()))?
-        );
+        let physical_name =
+            Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
+                VpnError::SplitTunnel("Physical adapter name not set".to_string())
+            })?);
 
         self.reader_handle = Some(thread::spawn(move || {
-            if let Err(e) = run_packet_reader(physical_idx, physical_name, senders, reader_stop, num_workers) {
+            if let Err(e) = run_packet_reader(
+                physical_idx,
+                physical_name,
+                senders,
+                reader_stop,
+                num_workers,
+            ) {
                 log::error!("Packet reader error: {}", e);
             }
         }));
@@ -1224,7 +1308,10 @@ impl ParallelInterceptor {
                 let throughput = self.throughput_stats.clone();
 
                 // Set socket to non-blocking for clean shutdown
-                if let Err(e) = ctx.socket.set_read_timeout(Some(std::time::Duration::from_millis(100))) {
+                if let Err(e) = ctx
+                    .socket
+                    .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                {
                     log::warn!("Failed to set socket read timeout: {}", e);
                 }
 
@@ -1233,7 +1320,9 @@ impl ParallelInterceptor {
                 }));
                 log::info!("V1/V2 inbound receiver thread started (WireGuard decryption)");
             } else {
-                log::warn!("Inbound receiver NOT started (failed to create config - physical_adapter_name not set?)");
+                log::warn!(
+                    "Inbound receiver NOT started (failed to create config - physical_adapter_name not set?)"
+                );
             }
         } else if let Some(ref relay_ctx) = self.relay_ctx {
             // V3: Unencrypted UDP relay - no decryption needed, just NAT rewrite and inject
@@ -1370,7 +1459,10 @@ impl ParallelInterceptor {
         let adapter = match adapters.iter().find(|a| a.get_name() == physical_name) {
             Some(a) => a,
             None => {
-                log::warn!("inject_inbound: physical adapter '{}' not found", physical_name);
+                log::warn!(
+                    "inject_inbound: physical adapter '{}' not found",
+                    physical_name
+                );
                 return;
             }
         };
@@ -1384,7 +1476,10 @@ impl ParallelInterceptor {
 
         // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
         if frame_len > MAX_ETHER_FRAME {
-            log::warn!("inject_inbound: packet too large ({} bytes), dropping", frame_len);
+            log::warn!(
+                "inject_inbound: packet too large ({} bytes), dropping",
+                frame_len
+            );
             return;
         }
 
@@ -1449,7 +1544,10 @@ impl ParallelInterceptor {
         let adapter_mac: [u8; 6] = match adapters.iter().find(|a| a.get_name() == &physical_name) {
             Some(a) => a.get_hw_address()[0..6].try_into().unwrap_or([0; 6]),
             None => {
-                log::error!("create_inbound_config: physical adapter '{}' not found", physical_name);
+                log::error!(
+                    "create_inbound_config: physical adapter '{}' not found",
+                    physical_name
+                );
                 return None;
             }
         };
@@ -1457,9 +1555,14 @@ impl ParallelInterceptor {
         log::info!(
             "create_inbound_config: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, NAT: {:?} -> {:?}",
             physical_name,
-            adapter_mac[0], adapter_mac[1], adapter_mac[2],
-            adapter_mac[3], adapter_mac[4], adapter_mac[5],
-            self.tunnel_ip, self.internet_ip
+            adapter_mac[0],
+            adapter_mac[1],
+            adapter_mac[2],
+            adapter_mac[3],
+            adapter_mac[4],
+            adapter_mac[5],
+            self.tunnel_ip,
+            self.internet_ip
         );
 
         Some(InboundConfig {
@@ -1503,7 +1606,10 @@ impl ParallelInterceptor {
         let adapter_mac: [u8; 6] = match adapters.iter().find(|a| a.get_name() == &physical_name) {
             Some(a) => a.get_hw_address()[0..6].try_into().unwrap_or([0; 6]),
             None => {
-                log::error!("create_inbound_handler: physical adapter '{}' not found", physical_name);
+                log::error!(
+                    "create_inbound_handler: physical adapter '{}' not found",
+                    physical_name
+                );
                 return None;
             }
         };
@@ -1511,8 +1617,12 @@ impl ParallelInterceptor {
         log::info!(
             "create_inbound_handler: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             physical_name,
-            adapter_mac[0], adapter_mac[1], adapter_mac[2],
-            adapter_mac[3], adapter_mac[4], adapter_mac[5]
+            adapter_mac[0],
+            adapter_mac[1],
+            adapter_mac[2],
+            adapter_mac[3],
+            adapter_mac[4],
+            adapter_mac[5]
         );
 
         // Track packets for logging (use atomic counter)
@@ -1522,17 +1632,18 @@ impl ParallelInterceptor {
             use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
             if ip_packet.len() < 20 {
-                log::warn!("inbound_handler: packet too short ({} bytes)", ip_packet.len());
+                log::warn!(
+                    "inbound_handler: packet too short ({} bytes)",
+                    ip_packet.len()
+                );
                 return;
             }
 
             // Parse IP header
-            let src_ip = std::net::Ipv4Addr::new(
-                ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
-            );
-            let dst_ip = std::net::Ipv4Addr::new(
-                ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
-            );
+            let src_ip =
+                std::net::Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
+            let dst_ip =
+                std::net::Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
             let protocol = ip_packet[9];
 
             // Parse ICMP error packets for diagnostics
@@ -1562,24 +1673,32 @@ impl ParallelInterceptor {
                     // Extract original destination from embedded IP header (at offset 28)
                     if ip_packet.len() >= 48 {
                         let orig_dst = std::net::Ipv4Addr::new(
-                            ip_packet[44], ip_packet[45], ip_packet[46], ip_packet[47]
+                            ip_packet[44],
+                            ip_packet[45],
+                            ip_packet[46],
+                            ip_packet[47],
                         );
                         log::warn!(
                             "inbound_handler: ICMP Error - {} (type={}, code={}) for packet to {}",
-                            desc, icmp_type, icmp_code, orig_dst
+                            desc,
+                            icmp_type,
+                            icmp_code,
+                            orig_dst
                         );
                     } else {
                         log::warn!(
                             "inbound_handler: ICMP Error - {} (type={}, code={})",
-                            desc, icmp_type, icmp_code
+                            desc,
+                            icmp_type,
+                            icmp_code
                         );
                     }
                 }
             }
 
             // Check if we need to do NAT (rewrite destination IP)
-            let needs_nat = tunnel_ip.is_some() && internet_ip.is_some()
-                && Some(dst_ip) == tunnel_ip;
+            let needs_nat =
+                tunnel_ip.is_some() && internet_ip.is_some() && Some(dst_ip) == tunnel_ip;
 
             // Make a mutable copy for NAT rewriting
             let mut packet = ip_packet.to_vec();
@@ -1637,7 +1756,10 @@ impl ParallelInterceptor {
 
             // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
             if frame_len > MAX_ETHER_FRAME {
-                log::warn!("inbound_handler: packet too large ({} bytes), dropping", frame_len);
+                log::warn!(
+                    "inbound_handler: packet too large ({} bytes), dropping",
+                    frame_len
+                );
                 return;
             }
 
@@ -1694,8 +1816,16 @@ impl ParallelInterceptor {
                     if count < 5 || count % 100 == 0 {
                         log::info!(
                             "inbound_handler: injected {} byte packet #{} (proto={}, {} -> {}{})",
-                            packet.len(), count + 1, protocol, src_ip, dst_ip,
-                            if needs_nat { format!(" [NAT -> {}]", internet_ip.unwrap()) } else { String::new() }
+                            packet.len(),
+                            count + 1,
+                            protocol,
+                            src_ip,
+                            dst_ip,
+                            if needs_nat {
+                                format!(" [NAT -> {}]", internet_ip.unwrap())
+                            } else {
+                                String::new()
+                            }
                         );
                     }
                 }
@@ -1715,10 +1845,7 @@ fn set_thread_affinity(core_id: usize) {
     #[cfg(target_os = "windows")]
     unsafe {
         let mask = 1usize << core_id;
-        let _ = SetThreadAffinityMask(
-            windows::Win32::System::Threading::GetCurrentThread(),
-            mask,
-        );
+        let _ = SetThreadAffinityMask(windows::Win32::System::Threading::GetCurrentThread(), mask);
     }
 }
 
@@ -1775,12 +1902,18 @@ fn run_inbound_receiver(
         }
     };
 
-    let adapter = match adapters.iter().find(|a| a.get_name() == &config.physical_adapter_name) {
+    let adapter = match adapters
+        .iter()
+        .find(|a| a.get_name() == &config.physical_adapter_name)
+    {
         Some(a) => a,
         None => {
             log::error!("========================================");
             log::error!("INBOUND RECEIVER FATAL ERROR");
-            log::error!("Physical adapter '{}' not found!", config.physical_adapter_name);
+            log::error!(
+                "Physical adapter '{}' not found!",
+                config.physical_adapter_name
+            );
             log::error!("Available adapters:");
             for a in adapters.iter() {
                 log::error!("  - {}", a.get_name());
@@ -1839,7 +1972,10 @@ fn run_inbound_receiver(
             let uptime_secs = now.duration_since(start_time).as_secs();
 
             // Check for "no traffic ever received" condition
-            if packets_decrypted == 0 && uptime_secs >= NO_TRAFFIC_WARNING_SECS && !no_traffic_warning_logged {
+            if packets_decrypted == 0
+                && uptime_secs >= NO_TRAFFIC_WARNING_SECS
+                && !no_traffic_warning_logged
+            {
                 no_traffic_warning_logged = true;
                 log::error!("========================================");
                 log::error!("WARNING: NO INBOUND TRAFFIC DETECTED!");
@@ -1862,7 +1998,9 @@ fn run_inbound_receiver(
             // Check for "traffic stopped" condition
             if let Some(last_pkt) = last_packet_time {
                 let secs_since_packet = now.duration_since(last_pkt).as_secs();
-                if secs_since_packet >= TRAFFIC_STOPPED_WARNING_SECS && !traffic_stopped_warning_logged {
+                if secs_since_packet >= TRAFFIC_STOPPED_WARNING_SECS
+                    && !traffic_stopped_warning_logged
+                {
                     traffic_stopped_warning_logged = true;
                     log::warn!("========================================");
                     log::warn!("WARNING: INBOUND TRAFFIC STOPPED!");
@@ -1876,10 +2014,19 @@ fn run_inbound_receiver(
 
             // Periodic health log (every 5 seconds at INFO level)
             let rx_bytes = throughput.bytes_rx.load(Ordering::Relaxed);
-            let rx_rate = if uptime_secs > 0 { rx_bytes / uptime_secs } else { 0 };
+            let rx_rate = if uptime_secs > 0 {
+                rx_bytes / uptime_secs
+            } else {
+                0
+            };
             log::info!(
                 "Inbound health: {}s uptime, {} recv, {} decrypted, {} injected, {} B/s avg, {} errors",
-                uptime_secs, packets_received, packets_decrypted, packets_injected, rx_rate, inject_errors + decrypt_errors
+                uptime_secs,
+                packets_received,
+                packets_decrypted,
+                packets_injected,
+                rx_rate,
+                inject_errors + decrypt_errors
             );
         }
 
@@ -1902,12 +2049,17 @@ fn run_inbound_receiver(
                             if keepalives_sent <= 5 || keepalives_sent % 50 == 0 {
                                 log::info!(
                                     "Inbound receiver: sent keepalive #{} ({} bytes)",
-                                    keepalives_sent, sent
+                                    keepalives_sent,
+                                    sent
                                 );
                             }
                         }
                         Err(e) => {
-                            log::error!("Inbound receiver: FAILED to send keepalive: {} (kind={:?})", e, e.kind());
+                            log::error!(
+                                "Inbound receiver: FAILED to send keepalive: {} (kind={:?})",
+                                e,
+                                e.kind()
+                            );
                             log::error!("  This may cause VPN connection to drop!");
                         }
                     }
@@ -1919,7 +2071,8 @@ fn run_inbound_receiver(
                     // No keepalive needed this tick - this is normal
                 }
                 other => {
-                    log::warn!("Inbound receiver: unexpected timer result: {:?}",
+                    log::warn!(
+                        "Inbound receiver: unexpected timer result: {:?}",
                         match other {
                             TunnResult::WriteToTunnelV4(_, _) => "WriteToTunnelV4",
                             TunnResult::WriteToTunnelV6(_, _) => "WriteToTunnelV6",
@@ -1940,7 +2093,11 @@ fn run_inbound_receiver(
                 continue;
             }
             Err(e) => {
-                log::warn!("Inbound receiver: socket recv error: {} (kind={:?})", e, e.kind());
+                log::warn!(
+                    "Inbound receiver: socket recv error: {} (kind={:?})",
+                    e,
+                    e.kind()
+                );
                 std::thread::sleep(std::time::Duration::from_millis(2));
                 continue;
             }
@@ -1954,7 +2111,11 @@ fn run_inbound_receiver(
 
         // Log first 10 received packets at INFO level to confirm traffic is flowing
         if packets_received <= 10 {
-            log::info!("Inbound: received packet #{} ({} bytes encrypted)", packets_received, n);
+            log::info!(
+                "Inbound: received packet #{} ({} bytes encrypted)",
+                packets_received,
+                n
+            );
         }
 
         // === DECRYPT PACKET ===
@@ -1983,18 +2144,18 @@ fn run_inbound_receiver(
                     let dst_ip = std::net::Ipv4Addr::new(data[16], data[17], data[18], data[19]);
                     log::info!(
                         "Inbound: decrypted #{} - {} bytes {} {} -> {}",
-                        packets_decrypted, data.len(), proto_name, src_ip, dst_ip
+                        packets_decrypted,
+                        data.len(),
+                        proto_name,
+                        src_ip,
+                        dst_ip
                     );
                 }
 
                 // Do NAT and inject to MSTCP
-                if let Some(injected) = inject_inbound_packet(
-                    data,
-                    &config,
-                    adapter_handle,
-                    &driver,
-                    packets_injected,
-                ) {
+                if let Some(injected) =
+                    inject_inbound_packet(data, &config, adapter_handle, &driver, packets_injected)
+                {
                     if injected {
                         packets_injected += 1;
                         // Log first 5 successful injections
@@ -2011,7 +2172,10 @@ fn run_inbound_receiver(
             }
             TunnResult::WriteToNetwork(data) => {
                 // Protocol message (handshake, etc.) - send back to VPN server
-                log::info!("Inbound: protocol message ({} bytes) - sending to server", data.len());
+                log::info!(
+                    "Inbound: protocol message ({} bytes) - sending to server",
+                    data.len()
+                );
                 if let Err(e) = ctx.socket.send(data) {
                     log::error!("Inbound: FAILED to send protocol message: {}", e);
                 }
@@ -2019,7 +2183,10 @@ fn run_inbound_receiver(
             TunnResult::Done => {
                 // No plaintext output (e.g., keepalive received)
                 if packets_received <= 10 {
-                    log::debug!("Inbound: packet #{} -> Done (keepalive response)", packets_received);
+                    log::debug!(
+                        "Inbound: packet #{} -> Done (keepalive response)",
+                        packets_received
+                    );
                 }
             }
             TunnResult::Err(e) => {
@@ -2027,10 +2194,14 @@ fn run_inbound_receiver(
                 // Log ALL decrypt errors since this is critical
                 log::error!(
                     "Inbound: DECRYPT ERROR on packet #{} ({} bytes): {:?}",
-                    packets_received, n, e
+                    packets_received,
+                    n,
+                    e
                 );
                 if decrypt_errors == 1 {
-                    log::error!("  First decrypt error - may indicate wrong encryption key or corrupted data");
+                    log::error!(
+                        "  First decrypt error - may indicate wrong encryption key or corrupted data"
+                    );
                 }
             }
         }
@@ -2048,7 +2219,10 @@ fn run_inbound_receiver(
     log::info!("  Inject errors: {}", inject_errors);
     log::info!("  Decrypt errors: {}", decrypt_errors);
     log::info!("  Keepalives sent: {}", keepalives_sent);
-    log::info!("  Total RX bytes: {}", throughput.bytes_rx.load(Ordering::Relaxed));
+    log::info!(
+        "  Total RX bytes: {}",
+        throughput.bytes_rx.load(Ordering::Relaxed)
+    );
 
     // Final health assessment
     if packets_decrypted == 0 && total_uptime > NO_TRAFFIC_WARNING_SECS {
@@ -2057,8 +2231,10 @@ fn run_inbound_receiver(
         log::error!("This indicates a socket handoff or routing issue.");
         log::error!("========================================");
     } else if inject_errors > packets_injected / 10 && packets_injected > 0 {
-        log::warn!("High injection error rate: {}/{} ({:.1}%)",
-            inject_errors, packets_decrypted,
+        log::warn!(
+            "High injection error rate: {}/{} ({:.1}%)",
+            inject_errors,
+            packets_decrypted,
             (inject_errors as f64 / packets_decrypted as f64) * 100.0
         );
     }
@@ -2077,37 +2253,47 @@ fn inject_inbound_packet(
     use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
     if ip_packet.len() < 20 {
-        log::warn!("inject_inbound_packet: packet too small ({} bytes)", ip_packet.len());
+        log::warn!(
+            "inject_inbound_packet: packet too small ({} bytes)",
+            ip_packet.len()
+        );
         return None;
     }
 
     // Parse IP header
-    let src_ip = std::net::Ipv4Addr::new(
-        ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
-    );
-    let dst_ip = std::net::Ipv4Addr::new(
-        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
-    );
+    let src_ip =
+        std::net::Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
+    let dst_ip =
+        std::net::Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
     let protocol = ip_packet[9];
 
     // Log every packet for debugging (first 10) - DEBUG level
     if packet_count < 10 {
         log::debug!(
             "inject_inbound_packet #{}: {} -> {}, proto={}, {} bytes, config.tunnel_ip={:?}, config.internet_ip={:?}",
-            packet_count, src_ip, dst_ip, protocol, ip_packet.len(),
-            config.tunnel_ip, config.internet_ip
+            packet_count,
+            src_ip,
+            dst_ip,
+            protocol,
+            ip_packet.len(),
+            config.tunnel_ip,
+            config.internet_ip
         );
     }
 
     // Check if we need to do NAT (rewrite destination IP from tunnel_ip to internet_ip)
-    let needs_nat = config.tunnel_ip.is_some() && config.internet_ip.is_some()
+    let needs_nat = config.tunnel_ip.is_some()
+        && config.internet_ip.is_some()
         && Some(dst_ip) == config.tunnel_ip;
 
     // Log NAT decision for debugging (first 10 packets) - DEBUG level
     if packet_count < 10 {
         log::debug!(
             "inject_inbound_packet #{}: needs_nat={} (dst={}, tunnel_ip={:?})",
-            packet_count, needs_nat, dst_ip, config.tunnel_ip
+            packet_count,
+            needs_nat,
+            dst_ip,
+            config.tunnel_ip
         );
     }
 
@@ -2124,7 +2310,11 @@ fn inject_inbound_packet(
         if packet_count < 10 {
             log::debug!(
                 "Inbound NAT #{}: {} -> {}, proto={}, {} bytes",
-                packet_count, dst_ip, new_dst, protocol, packet.len()
+                packet_count,
+                dst_ip,
+                new_dst,
+                protocol,
+                packet.len()
             );
         }
 
@@ -2154,10 +2344,8 @@ fn inject_inbound_packet(
             );
         } else if protocol == 17 && packet.len() >= transport_offset + 8 {
             // UDP: checksum at offset 6 within UDP header
-            let udp_checksum = u16::from_be_bytes([
-                packet[transport_offset + 6],
-                packet[transport_offset + 7],
-            ]);
+            let udp_checksum =
+                u16::from_be_bytes([packet[transport_offset + 6], packet[transport_offset + 7]]);
             if udp_checksum != 0 {
                 update_transport_checksum(
                     &mut packet,
@@ -2248,7 +2436,9 @@ fn run_packet_reader(
         fn drop(&mut self) {
             // Check for null (0) and INVALID_HANDLE_VALUE (-1 as isize cast to pointer)
             if self.0.0 as isize != 0 && self.0.0 as isize != -1 {
-                unsafe { let _ = CloseHandle(self.0); }
+                unsafe {
+                    let _ = CloseHandle(self.0);
+                }
             }
         }
     }
@@ -2268,10 +2458,7 @@ fn run_packet_reader(
 
     // Set adapter to tunnel mode
     driver
-        .set_adapter_mode(
-            physical_handle,
-            FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL,
-        )
+        .set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
         .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
 
     // Transfer ownership from guard - we'll close manually in cleanup
@@ -2296,12 +2483,9 @@ fn run_packet_reader(
         }
 
         // Read batch of packets
-        let mut to_read =
-            EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
+        let mut to_read = EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
 
-        let packets_read = driver
-            .read_packets::<BATCH_SIZE>(&mut to_read)
-            .unwrap_or(0);
+        let packets_read = driver.read_packets::<BATCH_SIZE>(&mut to_read).unwrap_or(0);
 
         if packets_read == 0 {
             unsafe {
@@ -2453,11 +2637,20 @@ fn run_packet_worker(
 
     // Log VPN encryption context availability
     if vpn_encrypt_ctx.is_some() {
-        log::info!("Worker {}: VPN encryption context AVAILABLE - direct encryption enabled", worker_id);
+        log::info!(
+            "Worker {}: VPN encryption context AVAILABLE - direct encryption enabled",
+            worker_id
+        );
     } else if wintun_session.is_some() {
-        log::info!("Worker {}: Wintun session AVAILABLE - tunnel routing enabled (fallback mode)", worker_id);
+        log::info!(
+            "Worker {}: Wintun session AVAILABLE - tunnel routing enabled (fallback mode)",
+            worker_id
+        );
     } else {
-        log::warn!("Worker {}: NO VPN context - tunnel packets will be bypassed!", worker_id);
+        log::warn!(
+            "Worker {}: NO VPN context - tunnel packets will be bypassed!",
+            worker_id
+        );
     }
 
     // Track direct encryption stats
@@ -2528,8 +2721,13 @@ fn run_packet_worker(
             // Sample timing every 128th packet to reduce overhead
             timing_sample_counter += 1;
             let should_sample = (timing_sample_counter & 127) == 0;
-            let lookup_start = if should_sample { Some(std::time::Instant::now()) } else { None };
-            let should_tunnel = should_route_to_vpn_with_inline_cache(&work.data, &snapshot, &mut inline_cache);
+            let lookup_start = if should_sample {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let should_tunnel =
+                should_route_to_vpn_with_inline_cache(&work.data, &snapshot, &mut inline_cache);
             if let Some(start) = lookup_start {
                 total_lookup_ns += start.elapsed().as_nanos() as u64;
                 lookup_count += 1;
@@ -2540,35 +2738,54 @@ fn run_packet_worker(
                 let tunneled = stats.packets_tunneled.load(Ordering::Relaxed);
                 let bypassed = stats.packets_bypassed.load(Ordering::Relaxed);
                 let total = tunneled + bypassed;
-                let tunnel_pct = if total > 0 { (tunneled as f64 / total as f64) * 100.0 } else { 0.0 };
+                let tunnel_pct = if total > 0 {
+                    (tunneled as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
 
                 // Calculate average latencies
-                let avg_lookup_ns = if lookup_count > 0 { total_lookup_ns / lookup_count } else { 0 };
-                let avg_encrypt_ns = if encrypt_count > 0 { total_encrypt_ns / encrypt_count } else { 0 };
+                let avg_lookup_ns = if lookup_count > 0 {
+                    total_lookup_ns / lookup_count
+                } else {
+                    0
+                };
+                let avg_encrypt_ns = if encrypt_count > 0 {
+                    total_encrypt_ns / encrypt_count
+                } else {
+                    0
+                };
 
                 log::info!(
                     "Worker 0 PERF: lookup={:.1}μs encrypt={:.1}μs | {} tunneled, {} bypassed ({:.1}%), direct: {}/{}, Wintun: {}/{}/{}",
                     avg_lookup_ns as f64 / 1000.0,
                     avg_encrypt_ns as f64 / 1000.0,
-                    tunneled, bypassed, tunnel_pct,
-                    direct_encrypt_success, direct_encrypt_fail,
-                    wintun_inject_success, wintun_inject_fail, no_wintun_session
+                    tunneled,
+                    bypassed,
+                    tunnel_pct,
+                    direct_encrypt_success,
+                    direct_encrypt_fail,
+                    wintun_inject_success,
+                    wintun_inject_fail,
+                    no_wintun_session
                 );
             }
 
             // Auto-routing whitelist bypass: if the current game region is whitelisted,
             // game packets that would normally be tunneled are passed through to the
             // real adapter instead. Lock-free AtomicBool check (<1ns overhead).
-            let auto_routing_bypass = should_tunnel
-                && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
+            let auto_routing_bypass =
+                should_tunnel && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
 
             // When bypassing, still run game server detection + auto-routing evaluation
             // so we can detect teleports to non-whitelisted regions and resume tunneling.
             if auto_routing_bypass && work.data.len() > 14 + 20 {
                 let ip_start = 14;
                 let dst_ip = Ipv4Addr::new(
-                    work.data[ip_start + 16], work.data[ip_start + 17],
-                    work.data[ip_start + 18], work.data[ip_start + 19]
+                    work.data[ip_start + 16],
+                    work.data[ip_start + 17],
+                    work.data[ip_start + 18],
+                    work.data[ip_start + 19],
                 );
                 if is_roblox_game_server_ip(dst_ip) {
                     if let Some(ref ar) = auto_router {
@@ -2579,7 +2796,9 @@ fn run_packet_worker(
 
             if should_tunnel && !auto_routing_bypass {
                 stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
-                stats.bytes_tunneled.fetch_add(packet_len, Ordering::Relaxed);
+                stats
+                    .bytes_tunneled
+                    .fetch_add(packet_len, Ordering::Relaxed);
                 throughput.add_tx(packet_len);
 
                 // Extract IP packet from Ethernet frame
@@ -2593,14 +2812,16 @@ fn run_packet_worker(
                 // STABILITY FIX (v1.0.8): Use try_write() to avoid blocking in hot path
                 // If lock is contended, skip recording this packet (not critical)
                 if ip_packet.len() >= 20 {
-                    let dst_ip = Ipv4Addr::new(
-                        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
-                    );
+                    let dst_ip =
+                        Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
                     if is_roblox_game_server_ip(dst_ip) {
                         // Non-blocking write - skip if lock contended (prevents freeze)
                         if let Some(mut servers) = detected_game_servers.try_write() {
                             if servers.insert(dst_ip) {
-                                log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+                                log::info!(
+                                    "Game server detected: {} (tunneled by SwiftTunnel)",
+                                    dst_ip
+                                );
                             }
                         }
 
@@ -2616,9 +2837,15 @@ fn run_packet_worker(
                 // === ZERO-ALLOCATION NAT REWRITING ===
                 // Use thread-local buffer instead of heap allocation for NAT
                 // This eliminates ~200-500ns per packet from malloc/free overhead
-                let (packet_to_send_ptr, packet_to_send_len): (*const u8, usize) = if ip_packet.len() >= 20 {
+                let (packet_to_send_ptr, packet_to_send_len): (*const u8, usize) = if ip_packet
+                    .len()
+                    >= 20
+                {
                     let src_ip = std::net::Ipv4Addr::new(
-                        ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]
+                        ip_packet[12],
+                        ip_packet[13],
+                        ip_packet[14],
+                        ip_packet[15],
                     );
 
                     // Check if we need source NAT
@@ -2648,7 +2875,11 @@ fn run_packet_worker(
                             if direct_encrypt_success + wintun_inject_success < 5 {
                                 log::info!(
                                     "Worker {}: Source NAT {} -> {}, {} bytes, proto={}",
-                                    worker_id, src_ip, new_src, pkt_len, protocol
+                                    worker_id,
+                                    src_ip,
+                                    new_src,
+                                    pkt_len,
+                                    protocol
                                 );
                             }
 
@@ -2675,7 +2906,8 @@ fn run_packet_worker(
 
                 // SAFETY: The pointer is either from ip_packet (still in scope) or
                 // from NAT_BUFFER (thread-local, valid for duration of this function)
-                let packet_to_send = unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
+                let packet_to_send =
+                    unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
 
                 // === PACKET HOLD: Drop packets while auto-routing lookup is pending ===
                 // When a new game server IP is detected, we hold (drop) packets to it
@@ -2683,9 +2915,8 @@ fn run_packet_worker(
                 // prevents the game server from seeing traffic from the old relay IP,
                 // which causes Roblox Error 2/277. RakNet will retransmit the held packets.
                 if ip_packet.len() >= 20 {
-                    let dst_ip = Ipv4Addr::new(
-                        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
-                    );
+                    let dst_ip =
+                        Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
                     if let Some(ref auto_router) = auto_router {
                         if auto_router.is_lookup_pending(dst_ip) {
                             // Skip this packet — RakNet will retransmit after relay switch
@@ -2702,20 +2933,27 @@ fn run_packet_worker(
                     if direct_encrypt_success + direct_encrypt_fail < 10 {
                         log::info!(
                             "Worker {}: Forwarding to relay {} (pkt #{}, dst={})",
-                            worker_id, relay.relay_addr(),
+                            worker_id,
+                            relay.relay_addr(),
                             direct_encrypt_success + direct_encrypt_fail + 1,
                             if ip_packet.len() >= 20 {
-                                format!("{}.{}.{}.{}", ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19])
-                            } else { "?".to_string() }
+                                format!(
+                                    "{}.{}.{}.{}",
+                                    ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+                                )
+                            } else {
+                                "?".to_string()
+                            }
                         );
                     }
                     match relay.forward_outbound(packet_to_send) {
                         Ok(sent) => {
-                            direct_encrypt_success += 1;  // Reuse counter for relay
+                            direct_encrypt_success += 1; // Reuse counter for relay
                             if direct_encrypt_success <= 5 && sent > 0 {
                                 log::info!(
                                     "Worker {}: V3 relay forward OK - {} bytes",
-                                    worker_id, sent
+                                    worker_id,
+                                    sent
                                 );
                             }
                         }
@@ -2726,7 +2964,9 @@ fn run_packet_worker(
                             if direct_encrypt_fail <= 10 || direct_encrypt_fail % 100 == 0 {
                                 log::warn!(
                                     "Worker {}: V3 relay forward failed ({} total): {}",
-                                    worker_id, direct_encrypt_fail, e
+                                    worker_id,
+                                    direct_encrypt_fail,
+                                    e
                                 );
                             }
                         }
@@ -2738,7 +2978,11 @@ fn run_packet_worker(
                 else if let Some(ref ctx) = vpn_encrypt_ctx {
                     // Encrypt and send within thread-local scope (zero allocation!)
                     // Sample timing every 128th packet to reduce overhead
-                    let encrypt_start = if should_sample { Some(std::time::Instant::now()) } else { None };
+                    let encrypt_start = if should_sample {
+                        Some(std::time::Instant::now())
+                    } else {
+                        None
+                    };
                     let (success, encrypted_len) = ENCRYPT_BUFFER.with(|buf| {
                         let mut encrypt_buf = buf.borrow_mut();
                         let result = {
@@ -2768,9 +3012,7 @@ fn run_packet_worker(
                                 // Packet was queued internally (handshake in progress)
                                 (true, 0)
                             }
-                            TunnResult::Err(_) | _ => {
-                                (false, 0)
-                            }
+                            TunnResult::Err(_) | _ => (false, 0),
                         }
                     });
                     if let Some(start) = encrypt_start {
@@ -2783,7 +3025,9 @@ fn run_packet_worker(
                         if direct_encrypt_success <= 5 && encrypted_len > 0 {
                             log::info!(
                                 "Worker {}: Direct encrypt OK - {} bytes -> {} bytes",
-                                worker_id, packet_to_send_len, encrypted_len
+                                worker_id,
+                                packet_to_send_len,
+                                encrypted_len
                             );
                         }
                     } else {
@@ -2814,7 +3058,9 @@ fn run_packet_worker(
                 }
             } else {
                 stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
-                stats.bytes_bypassed.fetch_add(packet_len, Ordering::Relaxed);
+                stats
+                    .bytes_bypassed
+                    .fetch_add(packet_len, Ordering::Relaxed);
 
                 // DIAGNOSTIC LOGGING (v1.0.8): Log first 20 bypassed UDP packets to help debug
                 // "Tunneled: 0" issues where Roblox traffic isn't being detected
@@ -2824,7 +3070,9 @@ fn run_packet_worker(
                     }
                     let log_count = BYPASS_LOG_COUNT.with(|c| {
                         let n = c.get();
-                        if n < 20 { c.set(n + 1); }
+                        if n < 20 {
+                            c.set(n + 1);
+                        }
                         n
                     });
 
@@ -2832,23 +3080,38 @@ fn run_packet_worker(
                     if log_count < 20 && work.data.len() > 14 + 20 + 4 {
                         let ip_start = 14;
                         let protocol_num = work.data[ip_start + 9];
-                        if protocol_num == 17 { // UDP only
+                        if protocol_num == 17 {
+                            // UDP only
                             let src_ip = Ipv4Addr::new(
-                                work.data[ip_start + 12], work.data[ip_start + 13],
-                                work.data[ip_start + 14], work.data[ip_start + 15]
+                                work.data[ip_start + 12],
+                                work.data[ip_start + 13],
+                                work.data[ip_start + 14],
+                                work.data[ip_start + 15],
                             );
                             let dst_ip = Ipv4Addr::new(
-                                work.data[ip_start + 16], work.data[ip_start + 17],
-                                work.data[ip_start + 18], work.data[ip_start + 19]
+                                work.data[ip_start + 16],
+                                work.data[ip_start + 17],
+                                work.data[ip_start + 18],
+                                work.data[ip_start + 19],
                             );
                             let ihl = ((work.data[ip_start] & 0xF) as usize) * 4;
                             let transport_start = ip_start + ihl;
-                            let src_port = u16::from_be_bytes([work.data[transport_start], work.data[transport_start + 1]]);
-                            let dst_port = u16::from_be_bytes([work.data[transport_start + 2], work.data[transport_start + 3]]);
+                            let src_port = u16::from_be_bytes([
+                                work.data[transport_start],
+                                work.data[transport_start + 1],
+                            ]);
+                            let dst_port = u16::from_be_bytes([
+                                work.data[transport_start + 2],
+                                work.data[transport_start + 3],
+                            ]);
 
                             log::info!(
                                 "BYPASS #{}: UDP {}:{} -> {}:{} | tunnel_apps={:?}",
-                                log_count + 1, src_ip, src_port, dst_ip, dst_port,
+                                log_count + 1,
+                                src_ip,
+                                src_port,
+                                dst_ip,
+                                dst_port,
                                 snapshot.tunnel_apps.iter().take(3).collect::<Vec<_>>()
                             );
                         }
@@ -2882,7 +3145,10 @@ fn send_bypass_packet(
     use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
     // Find adapter by internal name (GUID) - this is consistent across driver instances
-    let adapter = match adapters.iter().find(|a| a.get_name() == work.physical_adapter_name.as_str()) {
+    let adapter = match adapters
+        .iter()
+        .find(|a| a.get_name() == work.physical_adapter_name.as_str())
+    {
         Some(a) => a,
         None => {
             log::warn!(
@@ -2899,7 +3165,10 @@ fn send_bypass_packet(
     // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
     const MAX_ETHER_FRAME: usize = 1522;
     if work.data.len() > MAX_ETHER_FRAME {
-        log::warn!("send_bypass_packet: packet too large ({} bytes), dropping", work.data.len());
+        log::warn!(
+            "send_bypass_packet: packet too large ({} bytes), dropping",
+            work.data.len()
+        );
         return;
     }
 
@@ -2918,7 +3187,6 @@ fn send_bypass_packet(
         }
     }
 }
-
 
 /// Cache refresher thread - single writer
 ///
@@ -2981,11 +3249,9 @@ fn run_cache_refresher(
             let (lock, cvar) = &*refresh_condvar;
             if let Ok(mut signaled) = lock.lock() {
                 // Wait until signaled or timeout
-                let result = cvar.wait_timeout_while(
-                    signaled,
-                    wait_timeout,
-                    |s| !*s && !stop_flag.load(Ordering::Relaxed),
-                );
+                let result = cvar.wait_timeout_while(signaled, wait_timeout, |s| {
+                    !*s && !stop_flag.load(Ordering::Relaxed)
+                });
                 if let Ok((mut guard, _)) = result {
                     *guard = false; // Reset signal
                 }
@@ -3039,10 +3305,8 @@ fn run_cache_refresher(
                         let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
                         let safe_entries = num_entries.min(max_entries);
 
-                        let entries = std::slice::from_raw_parts(
-                            table.table.as_ptr(),
-                            safe_entries,
-                        );
+                        let entries =
+                            std::slice::from_raw_parts(table.table.as_ptr(), safe_entries);
 
                         for entry in entries {
                             let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
@@ -3089,10 +3353,8 @@ fn run_cache_refresher(
                         let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
                         let safe_entries = num_entries.min(max_entries);
 
-                        let entries = std::slice::from_raw_parts(
-                            table.table.as_ptr(),
-                            safe_entries,
-                        );
+                        let entries =
+                            std::slice::from_raw_parts(table.table.as_ptr(), safe_entries);
 
                         for entry in entries {
                             let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
@@ -3137,7 +3399,8 @@ fn run_cache_refresher(
                     if name.contains(app.trim_end_matches(".exe")) {
                         let pid_u32 = _pid.as_u32();
                         pid_names.insert(pid_u32, process.name().to_string_lossy().to_string());
-                        tunnel_pids_found.push((pid_u32, process.name().to_string_lossy().to_string()));
+                        tunnel_pids_found
+                            .push((pid_u32, process.name().to_string_lossy().to_string()));
 
                         if refresh_count < 10 {
                             log::info!(
@@ -3165,14 +3428,19 @@ fn run_cache_refresher(
 
         // Also log connections owned by tunnel apps
         if refresh_count < 10 && !tunnel_pids_found.is_empty() {
-            for ((key, &pid), (tunnel_pid, _name)) in connections.iter().flat_map(|c| {
-                tunnel_pids_found.iter().filter_map(move |tp| {
-                    if *c.1 == tp.0 { Some((c, tp)) } else { None }
+            for ((key, &pid), (tunnel_pid, _name)) in
+                connections.iter().flat_map(|c| {
+                    tunnel_pids_found
+                        .iter()
+                        .filter_map(move |tp| if *c.1 == tp.0 { Some((c, tp)) } else { None })
                 })
-            }) {
+            {
                 log::info!(
                     "Cache refresher: Tunnel app connection {}:{} ({:?}) owned by PID {}",
-                    key.local_ip, key.local_port, key.protocol, pid
+                    key.local_ip,
+                    key.local_port,
+                    key.protocol,
+                    pid
                 );
             }
         }
@@ -3196,7 +3464,10 @@ fn run_cache_refresher(
                     "Cache #{}: {} tunnel PIDs found: {:?}, {} tunnel connections",
                     refresh_count,
                     tunnel_pids_found.len(),
-                    tunnel_pids_found.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+                    tunnel_pids_found
+                        .iter()
+                        .map(|(_, n)| n.as_str())
+                        .collect::<Vec<_>>(),
                     tunnel_connections.len()
                 );
             }
@@ -3409,7 +3680,10 @@ fn should_route_to_vpn_with_inline_cache(
             if spec_count < 20 {
                 log::info!(
                     "SPECULATIVE TUNNEL: {}:{} -> {}:{} (PID unknown, but destination is game server)",
-                    src_ip, src_port, dst_ip, dst_port
+                    src_ip,
+                    src_port,
+                    dst_ip,
+                    dst_port
                 );
             }
 
@@ -3440,8 +3714,12 @@ fn should_route_to_vpn_with_inline_cache(
             let syscall_l = SYSCALL_LOOKUPS.with(|c| c.get());
             log::info!(
                 "Cache stats: total={} snapshot_hits={} inline_hits={} syscall={} | snapshot_apps={} connections={}",
-                total, snapshot_h, inline_h, syscall_l,
-                snapshot.tunnel_apps.len(), snapshot.connections.len()
+                total,
+                snapshot_h,
+                inline_h,
+                syscall_l,
+                snapshot.tunnel_apps.len(),
+                snapshot.connections.len()
             );
         }
     }
@@ -3450,7 +3728,11 @@ fn should_route_to_vpn_with_inline_cache(
     if total < 10 {
         log::debug!(
             "Packet #{}: {}:{} {:?} -> result={} (tunnel_apps={:?})",
-            total, src_ip, src_port, protocol, result,
+            total,
+            src_ip,
+            src_port,
+            protocol,
+            result,
             snapshot.tunnel_apps.iter().take(5).collect::<Vec<_>>()
         );
     }
@@ -3470,7 +3752,11 @@ fn should_route_to_vpn_with_inline_cache(
         if log_count < 20 {
             log::info!(
                 "V2 BYPASS: {}:{}/{:?} -> {}:{} | tunnel_app={}, port_ok=true, ip_in_ranges={}",
-                src_ip, src_port, protocol, dst_ip, dst_port,
+                src_ip,
+                src_port,
+                protocol,
+                dst_ip,
+                dst_port,
                 is_tunnel_app,
                 super::process_cache::is_roblox_game_server(dst_ip, dst_port, protocol)
             );
@@ -3563,15 +3849,15 @@ fn inline_connection_lookup(
                 let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
                 let safe_entries = num_entries.min(max_entries);
 
-                let rows = std::slice::from_raw_parts(
-                    table.table.as_ptr(),
-                    safe_entries,
-                );
+                let rows = std::slice::from_raw_parts(table.table.as_ptr(), safe_entries);
 
                 if debug_log {
                     log::debug!(
                         "inline_lookup #{}: searching TCP table ({} entries) for {}:{}",
-                        lookup_num, rows.len(), src_ip, src_port
+                        lookup_num,
+                        rows.len(),
+                        src_ip,
+                        src_port
                     );
                 }
 
@@ -3592,7 +3878,11 @@ fn inline_connection_lookup(
                         if debug_log || is_tunnel {
                             log::debug!(
                                 "inline_lookup #{}: MATCH {}:{} -> PID {} tunnel={}",
-                                lookup_num, local_ip, local_port, row.dwOwningPid, is_tunnel
+                                lookup_num,
+                                local_ip,
+                                local_port,
+                                row.dwOwningPid,
+                                is_tunnel
                             );
                         }
                         return is_tunnel;
@@ -3610,7 +3900,12 @@ fn inline_connection_lookup(
                         if debug_log || is_tunnel {
                             log::debug!(
                                 "inline_lookup #{}: MATCH 0.0.0.0:{} (for {}:{}) -> PID {} tunnel={}",
-                                lookup_num, local_port, src_ip, src_port, row.dwOwningPid, is_tunnel
+                                lookup_num,
+                                local_port,
+                                src_ip,
+                                src_port,
+                                row.dwOwningPid,
+                                is_tunnel
                             );
                         }
                         return is_tunnel;
@@ -3620,7 +3915,9 @@ fn inline_connection_lookup(
                 if debug_log {
                     log::debug!(
                         "inline_lookup #{}: NOT FOUND in TCP table for {}:{}",
-                        lookup_num, src_ip, src_port
+                        lookup_num,
+                        src_ip,
+                        src_port
                     );
                 }
             }
@@ -3669,10 +3966,7 @@ fn inline_connection_lookup(
                 let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
                 let safe_entries = num_entries.min(max_entries);
 
-                let rows = std::slice::from_raw_parts(
-                    table.table.as_ptr(),
-                    safe_entries,
-                );
+                let rows = std::slice::from_raw_parts(table.table.as_ptr(), safe_entries);
 
                 for row in rows {
                     // Match byte order handling with cache refresher
@@ -3698,8 +3992,14 @@ fn inline_connection_lookup(
         let tunneled = TUNNEL_COUNT.with(|c| c.get());
         log::debug!(
             "inline_lookup stats: {} lookups, {} found, {} tunneled ({:.1}% hit rate)",
-            lookup_num, found, tunneled,
-            if lookup_num > 0 { (found as f64 / lookup_num as f64) * 100.0 } else { 0.0 }
+            lookup_num,
+            found,
+            tunneled,
+            if lookup_num > 0 {
+                (found as f64 / lookup_num as f64) * 100.0
+            } else {
+                0.0
+            }
         );
     }
 
@@ -3712,7 +4012,10 @@ fn inline_connection_lookup(
 /// Uses Windows API QueryFullProcessImageNameW for fast process name lookup.
 fn is_pid_tunnel_app(pid: u32, snapshot: &ProcessSnapshot) -> bool {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
 
     // First try snapshot (fast path if PID is already known)
     if snapshot.is_tunnel_pid_public(pid) {
@@ -3730,7 +4033,14 @@ fn is_pid_tunnel_app(pid: u32, snapshot: &ProcessSnapshot) -> bool {
             let mut buffer = [0u16; 260];
             let mut size = buffer.len() as u32;
 
-            if QueryFullProcessImageNameW(h, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(buffer.as_mut_ptr()), &mut size).is_ok() {
+            if QueryFullProcessImageNameW(
+                h,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buffer.as_mut_ptr()),
+                &mut size,
+            )
+            .is_ok()
+            {
                 let _ = CloseHandle(h);
 
                 // Extract filename from full path
@@ -3819,7 +4129,7 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
 /// all adapters including Wintun TUN adapters that GetAdaptersInfo might miss.
 fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
@@ -3882,10 +4192,17 @@ fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
                     if adapter_guid == guid {
                         // Found matching adapter - get friendly name
                         if !adapter.FriendlyName.0.is_null() {
-                            let len = (0..).take_while(|&i| *adapter.FriendlyName.0.add(i) != 0).count();
-                            let friendly_slice = std::slice::from_raw_parts(adapter.FriendlyName.0, len);
+                            let len = (0..)
+                                .take_while(|&i| *adapter.FriendlyName.0.add(i) != 0)
+                                .count();
+                            let friendly_slice =
+                                std::slice::from_raw_parts(adapter.FriendlyName.0, len);
                             let friendly_name = String::from_utf16_lossy(friendly_slice);
-                            log::debug!("get_adapter_friendly_name_v2: Found '{}' for GUID {}", friendly_name, guid);
+                            log::debug!(
+                                "get_adapter_friendly_name_v2: Found '{}' for GUID {}",
+                                friendly_name,
+                                guid
+                            );
                             return Some(friendly_name);
                         }
                     }
@@ -3906,7 +4223,7 @@ fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
 /// identification even when friendly name lookup fails.
 fn check_adapter_matches_luid(internal_name: &str, target_luid: u64) -> bool {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
@@ -3975,7 +4292,8 @@ fn check_adapter_matches_luid(internal_name: &str, target_luid: u64) -> bool {
                         if adapter_guid == internal_guid {
                             log::debug!(
                                 "check_adapter_matches_luid: LUID {} matches adapter GUID {}",
-                                target_luid, adapter_guid
+                                target_luid,
+                                adapter_guid
                             );
                             return true;
                         }
@@ -4001,10 +4319,7 @@ fn update_transport_checksum(
     new_ip: &[u8; 4],
 ) {
     // Read old checksum
-    let old_checksum = u16::from_be_bytes([
-        packet[checksum_offset],
-        packet[checksum_offset + 1],
-    ]);
+    let old_checksum = u16::from_be_bytes([packet[checksum_offset], packet[checksum_offset + 1]]);
 
     // RFC 1624 formula: HC' = ~(~HC + ~m + m')
     // ~HC: one's complement of old checksum
@@ -4254,12 +4569,18 @@ fn run_v3_inbound_receiver(
         }
     };
 
-    let adapter = match adapters.iter().find(|a| a.get_name() == &config.physical_adapter_name) {
+    let adapter = match adapters
+        .iter()
+        .find(|a| a.get_name() == &config.physical_adapter_name)
+    {
         Some(a) => a,
         None => {
             log::error!("========================================");
             log::error!("V3 INBOUND RECEIVER FATAL ERROR");
-            log::error!("Physical adapter '{}' not found!", config.physical_adapter_name);
+            log::error!(
+                "Physical adapter '{}' not found!",
+                config.physical_adapter_name
+            );
             log::error!("Available adapters:");
             for a in adapters.iter() {
                 log::error!("  - {}", a.get_name());
@@ -4309,7 +4630,10 @@ fn run_v3_inbound_receiver(
             let uptime_secs = now.duration_since(start_time).as_secs();
 
             // Check for "no traffic ever received" condition
-            if packets_received == 0 && uptime_secs >= NO_TRAFFIC_WARNING_SECS && !no_traffic_warning_logged {
+            if packets_received == 0
+                && uptime_secs >= NO_TRAFFIC_WARNING_SECS
+                && !no_traffic_warning_logged
+            {
                 no_traffic_warning_logged = true;
                 log::error!("========================================");
                 log::error!("V3 WARNING: NO INBOUND TRAFFIC DETECTED!");
@@ -4326,10 +4650,18 @@ fn run_v3_inbound_receiver(
 
             // Periodic health log
             let rx_bytes = throughput.bytes_rx.load(Ordering::Relaxed);
-            let rx_rate = if uptime_secs > 0 { rx_bytes / uptime_secs } else { 0 };
+            let rx_rate = if uptime_secs > 0 {
+                rx_bytes / uptime_secs
+            } else {
+                0
+            };
             log::info!(
                 "V3 inbound health: {}s uptime, {} recv, {} injected, {} B/s avg, {} errors",
-                uptime_secs, packets_received, packets_injected, rx_rate, inject_errors
+                uptime_secs,
+                packets_received,
+                packets_injected,
+                rx_rate,
+                inject_errors
             );
         }
 
@@ -4352,27 +4684,41 @@ fn run_v3_inbound_receiver(
 
                 // Log first 10 received packets at INFO level
                 if packets_received <= 10 {
-                    log::info!("V3 inbound: received packet #{} ({} bytes)", packets_received, len);
+                    log::info!(
+                        "V3 inbound: received packet #{} ({} bytes)",
+                        packets_received,
+                        len
+                    );
                 }
 
                 // The payload is already plain IP packet (relay strips session ID)
                 let ip_packet = &recv_buf[..len];
 
                 // Inject to MSTCP with NAT rewriting
-                match inject_inbound_packet(ip_packet, &config, adapter_handle, &driver, packets_received) {
+                match inject_inbound_packet(
+                    ip_packet,
+                    &config,
+                    adapter_handle,
+                    &driver,
+                    packets_received,
+                ) {
                     Some(true) => {
                         packets_injected += 1;
                         if packets_injected <= 10 || packets_injected % 1000 == 0 {
                             log::info!(
                                 "V3 inbound: injected packet #{} ({} bytes)",
-                                packets_injected, len
+                                packets_injected,
+                                len
                             );
                         }
                     }
                     Some(false) => {
                         inject_errors += 1;
                         if inject_errors <= 10 {
-                            log::error!("V3 inbound: FAILED to inject packet #{}", packets_received);
+                            log::error!(
+                                "V3 inbound: FAILED to inject packet #{}",
+                                packets_received
+                            );
                         }
                     }
                     None => {
@@ -4402,7 +4748,10 @@ fn run_v3_inbound_receiver(
     log::info!("  Packets injected: {}", packets_injected);
     log::info!("  Inject errors: {}", inject_errors);
     log::info!("  Relay stats: sent={}, recv={}", sent, recv);
-    log::info!("  Total RX bytes: {}", throughput.bytes_rx.load(Ordering::Relaxed));
+    log::info!(
+        "  Total RX bytes: {}",
+        throughput.bytes_rx.load(Ordering::Relaxed)
+    );
 
     if packets_received == 0 && total_uptime > NO_TRAFFIC_WARNING_SECS {
         log::error!("========================================");

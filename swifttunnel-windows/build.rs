@@ -1,5 +1,5 @@
+use embed_manifest::manifest::{DpiAwareness, ExecutionLevel};
 use embed_manifest::{embed_manifest, new_manifest};
-use embed_manifest::manifest::{ExecutionLevel, DpiAwareness};
 
 fn main() {
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
@@ -25,7 +25,7 @@ fn main() {
             new_manifest(manifest_name)
                 .version(1, 0, 0, 0)
                 .requested_execution_level(execution_level)
-                .dpi_awareness(DpiAwareness::PerMonitorV2)
+                .dpi_awareness(DpiAwareness::PerMonitorV2),
         )
         .expect("Failed to embed manifest");
 

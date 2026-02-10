@@ -32,7 +32,7 @@ fn main() -> ExitCode {
         .args([
             "/i",
             &msi_path.to_string_lossy(),
-            "/qn",        // Quiet, no UI
+            "/qn", // Quiet, no UI
             "/norestart",
         ])
         .output()
@@ -51,7 +51,10 @@ fn main() -> ExitCode {
         3010 => println!("[driver-installer] Installation succeeded (reboot recommended)"),
         code => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("[driver-installer] ERROR: msiexec failed with code {}: {}", code, stderr);
+            eprintln!(
+                "[driver-installer] ERROR: msiexec failed with code {}: {}",
+                code, stderr
+            );
             return ExitCode::from(1);
         }
     }
@@ -76,26 +79,23 @@ fn main() -> ExitCode {
 fn find_msi() -> Option<PathBuf> {
     let candidates: Vec<PathBuf> = [
         // 1. Same directory as this exe: {exe_dir}\drivers\
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))),
+        std::env::current_exe().ok().and_then(|p| {
+            p.parent()
+                .map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))
+        }),
         // 2. Velopack per-user install: %LOCALAPPDATA%\SwiftTunnel\drivers\
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .map(|appdata| {
-                PathBuf::from(appdata)
-                    .join("SwiftTunnel")
-                    .join("drivers")
-                    .join("WinpkFilter-x64.msi")
-            }),
+        std::env::var("LOCALAPPDATA").ok().map(|appdata| {
+            PathBuf::from(appdata)
+                .join("SwiftTunnel")
+                .join("drivers")
+                .join("WinpkFilter-x64.msi")
+        }),
         // 3. Parent directory (for when exe is in a subdirectory): {exe_dir}\..\drivers\
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| {
-                p.parent()
-                    .and_then(|d| d.parent())
-                    .map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))
-            }),
+        std::env::current_exe().ok().and_then(|p| {
+            p.parent()
+                .and_then(|d| d.parent())
+                .map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))
+        }),
     ]
     .into_iter()
     .flatten()

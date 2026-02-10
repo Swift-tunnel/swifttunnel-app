@@ -1,6 +1,6 @@
 //! HTTP client for SwiftTunnel API
 
-use super::types::{AuthError, SupabaseAuthResponse, VpnConfig, ExchangeTokenResponse};
+use super::types::{AuthError, ExchangeTokenResponse, SupabaseAuthResponse, VpnConfig};
 use crate::dns::CloudflareDns;
 use log::{debug, error, info};
 use reqwest::Client;
@@ -90,7 +90,10 @@ impl AuthClient {
     }
 
     /// Refresh the access token via Supabase
-    pub async fn refresh_token(&self, refresh_token: &str) -> Result<SupabaseAuthResponse, AuthError> {
+    pub async fn refresh_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<SupabaseAuthResponse, AuthError> {
         let url = format!("{}/auth/v1/token?grant_type=refresh_token", SUPABASE_URL);
 
         debug!("Refreshing token via Supabase");
@@ -195,13 +198,19 @@ impl AuthClient {
             error!("Exchange token failed: {} - {}", status, body);
 
             if body.contains("Invalid exchange token") {
-                return Err(AuthError::ApiError("Invalid or expired exchange token. Please try again.".to_string()));
+                return Err(AuthError::ApiError(
+                    "Invalid or expired exchange token. Please try again.".to_string(),
+                ));
             }
             if body.contains("Token already used") {
-                return Err(AuthError::ApiError("This login link has already been used. Please try again.".to_string()));
+                return Err(AuthError::ApiError(
+                    "This login link has already been used. Please try again.".to_string(),
+                ));
             }
             if body.contains("Token expired") {
-                return Err(AuthError::ApiError("Login link expired. Please try again.".to_string()));
+                return Err(AuthError::ApiError(
+                    "Login link expired. Please try again.".to_string(),
+                ));
             }
 
             return Err(AuthError::ApiError(format!(
@@ -210,10 +219,9 @@ impl AuthClient {
             )));
         }
 
-        let data: ExchangeTokenResponse = response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse exchange response: {}", e)))?;
+        let data: ExchangeTokenResponse = response.json().await.map_err(|e| {
+            AuthError::ApiError(format!("Failed to parse exchange response: {}", e))
+        })?;
 
         info!("Successfully exchanged OAuth token");
         Ok(data)
@@ -263,7 +271,11 @@ impl AuthClient {
     ) -> Result<SupabaseAuthResponse, AuthError> {
         let url = format!("{}/auth/v1/verify", SUPABASE_URL);
 
-        debug!("Verifying magic link token for {} (token_hash: {}...)", email, &token_hash[..token_hash.len().min(8)]);
+        debug!(
+            "Verifying magic link token for {} (token_hash: {}...)",
+            email,
+            &token_hash[..token_hash.len().min(8)]
+        );
 
         let response = self
             .client
@@ -283,14 +295,26 @@ impl AuthClient {
             let body = response.text().await.unwrap_or_default();
             error!("Verify magic link failed: {} - {}", status, body);
 
-            if body.contains("Token has expired") || body.contains("token is expired") || body.contains("expired") {
-                return Err(AuthError::ApiError("Login link has expired. Please try signing in again.".to_string()));
+            if body.contains("Token has expired")
+                || body.contains("token is expired")
+                || body.contains("expired")
+            {
+                return Err(AuthError::ApiError(
+                    "Login link has expired. Please try signing in again.".to_string(),
+                ));
             }
-            if body.contains("Invalid token") || body.contains("token is invalid") || body.contains("invalid") {
-                return Err(AuthError::ApiError("Invalid login link. Please try signing in again.".to_string()));
+            if body.contains("Invalid token")
+                || body.contains("token is invalid")
+                || body.contains("invalid")
+            {
+                return Err(AuthError::ApiError(
+                    "Invalid login link. Please try signing in again.".to_string(),
+                ));
             }
             if body.contains("already been used") || body.contains("used") {
-                return Err(AuthError::ApiError("This login link was already used. Please try signing in again.".to_string()));
+                return Err(AuthError::ApiError(
+                    "This login link was already used. Please try signing in again.".to_string(),
+                ));
             }
 
             return Err(AuthError::ApiError(format!(
@@ -307,7 +331,6 @@ impl AuthClient {
         info!("Magic link verification successful");
         Ok(data)
     }
-
 }
 
 impl Default for AuthClient {

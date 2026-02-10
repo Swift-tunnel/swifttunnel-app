@@ -3,8 +3,8 @@
 //! Bypasses system DNS to avoid issues where ISP/network DNS blocks
 //! domains like GitHub that the app needs to reach.
 
-use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -57,10 +57,16 @@ impl CloudflareDns {
             .await
             .map_err(|e| format!("DNS resolution failed for '{}': {}", host, e))?;
 
-        let addrs: Vec<SocketAddr> = lookup.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
+        let addrs: Vec<SocketAddr> = lookup
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, port))
+            .collect();
 
         if addrs.is_empty() {
-            return Err(format!("DNS resolution returned no addresses for '{}'", host));
+            return Err(format!(
+                "DNS resolution returned no addresses for '{}'",
+                host
+            ));
         }
 
         Ok(addrs)

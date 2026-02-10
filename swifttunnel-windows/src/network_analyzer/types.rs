@@ -65,11 +65,11 @@ pub struct StabilityTestResults {
 /// Connection quality rating
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionQuality {
-    Excellent,  // < 30ms avg, < 1% loss, < 5ms jitter
-    Good,       // < 50ms avg, < 2% loss, < 10ms jitter
-    Fair,       // < 80ms avg, < 5% loss, < 20ms jitter
-    Poor,       // < 120ms avg, < 10% loss, < 40ms jitter
-    Bad,        // Everything else
+    Excellent, // < 30ms avg, < 1% loss, < 5ms jitter
+    Good,      // < 50ms avg, < 2% loss, < 10ms jitter
+    Fair,      // < 80ms avg, < 5% loss, < 20ms jitter
+    Poor,      // < 120ms avg, < 10% loss, < 40ms jitter
+    Bad,       // Everything else
 }
 
 impl ConnectionQuality {

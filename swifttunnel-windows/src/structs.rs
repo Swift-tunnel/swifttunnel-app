@@ -59,7 +59,9 @@ pub struct SystemOptimizationConfig {
     pub game_mode_enabled: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for SystemOptimizationConfig {
     fn default() -> Self {
@@ -228,7 +230,7 @@ impl Default for NetworkConfig {
             disable_nagle: true,
             disable_network_throttling: true,
             optimize_mtu: false, // Off by default as it requires admin and takes a few seconds
-            gaming_qos: true, // Enabled by default
+            gaming_qos: true,    // Enabled by default
         }
     }
 }
@@ -418,7 +420,12 @@ pub mod boost_info {
 
     /// Get all network boost infos
     pub fn network_boosts() -> [&'static BoostInfo; 4] {
-        [&DISABLE_NAGLE, &NETWORK_THROTTLING, &OPTIMIZE_MTU, &GAMING_QOS]
+        [
+            &DISABLE_NAGLE,
+            &NETWORK_THROTTLING,
+            &OPTIMIZE_MTU,
+            &GAMING_QOS,
+        ]
     }
 
     /// Get all Roblox boost infos

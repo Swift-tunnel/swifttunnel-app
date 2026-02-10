@@ -1,7 +1,7 @@
 //! Authentication manager - handles login/logout and token management
 
 use super::http_client::AuthClient;
-use super::oauth_server::{OAuthServer, OAuthServerResult, DEFAULT_OAUTH_PORT};
+use super::oauth_server::{DEFAULT_OAUTH_PORT, OAuthServer, OAuthServerResult};
 use super::storage::SecureStorage;
 use super::types::{AuthError, AuthSession, AuthState, OAuthPendingState, UserInfo};
 use chrono::{Duration, Utc};
@@ -57,7 +57,10 @@ impl AuthManager {
                 info!("  User email: {}", session.user.email);
                 info!("  User ID: {}", session.user.id);
                 info!("  Token length: {} chars", session.access_token.len());
-                info!("  Refresh token length: {} chars", session.refresh_token.len());
+                info!(
+                    "  Refresh token length: {} chars",
+                    session.refresh_token.len()
+                );
                 info!("  Expires at: {}", session.expires_at);
                 info!("  Is expired: {}", session.is_expired());
                 info!("  Expires soon: {}", session.expires_soon());
@@ -79,13 +82,16 @@ impl AuthManager {
             }
         };
 
-        info!("AuthManager initialized with state: {:?}", match &initial_state {
-            AuthState::LoggedIn(_) => "LoggedIn",
-            AuthState::LoggedOut => "LoggedOut",
-            AuthState::LoggingIn => "LoggingIn",
-            AuthState::AwaitingOAuthCallback(_) => "AwaitingOAuthCallback",
-            AuthState::Error(_) => "Error",
-        });
+        info!(
+            "AuthManager initialized with state: {:?}",
+            match &initial_state {
+                AuthState::LoggedIn(_) => "LoggedIn",
+                AuthState::LoggedOut => "LoggedOut",
+                AuthState::LoggingIn => "LoggingIn",
+                AuthState::AwaitingOAuthCallback(_) => "AwaitingOAuthCallback",
+                AuthState::Error(_) => "Error",
+            }
+        );
 
         Ok(Self {
             state: Arc::new(Mutex::new(initial_state)),
@@ -236,7 +242,10 @@ impl AuthManager {
 
         // All retries failed - track the failure
         let failure_count = self.storage.increment_refresh_failures();
-        warn!("Token refresh failed after {} attempts (total failures: {})", MAX_REFRESH_RETRIES, failure_count);
+        warn!(
+            "Token refresh failed after {} attempts (total failures: {})",
+            MAX_REFRESH_RETRIES, failure_count
+        );
 
         // If too many consecutive failures, the refresh token may be invalid
         // But we don't kick the user out - let them continue with stale data
@@ -266,10 +275,17 @@ impl AuthManager {
         let refresh_response = self.client.refresh_token(&session.refresh_token).await?;
 
         // Re-fetch tester status on refresh (in case admin changed it)
-        let is_tester = match self.client.fetch_user_profile(&refresh_response.access_token).await {
+        let is_tester = match self
+            .client
+            .fetch_user_profile(&refresh_response.access_token)
+            .await
+        {
             Ok(profile) => profile.is_tester,
             Err(e) => {
-                debug!("Failed to fetch profile on refresh (keeping old value): {}", e);
+                debug!(
+                    "Failed to fetch profile on refresh (keeping old value): {}",
+                    e
+                );
                 session.user.is_tester
             }
         };
@@ -280,7 +296,10 @@ impl AuthManager {
             expires_at: Utc::now() + Duration::seconds(refresh_response.expires_in),
             user: UserInfo {
                 id: refresh_response.user.id,
-                email: refresh_response.user.email.unwrap_or_else(|| session.user.email.clone()),
+                email: refresh_response
+                    .user
+                    .email
+                    .unwrap_or_else(|| session.user.email.clone()),
                 is_tester,
             },
         })
@@ -296,11 +315,20 @@ impl AuthManager {
             _ => return Ok(()),
         };
 
-        let profile = self.client.fetch_user_profile(&session.access_token).await?;
-        info!("Profile refreshed on startup: is_tester={}", profile.is_tester);
+        let profile = self
+            .client
+            .fetch_user_profile(&session.access_token)
+            .await?;
+        info!(
+            "Profile refreshed on startup: is_tester={}",
+            profile.is_tester
+        );
 
         if profile.is_tester != session.user.is_tester {
-            info!("Tester status changed: {} -> {}", session.user.is_tester, profile.is_tester);
+            info!(
+                "Tester status changed: {} -> {}",
+                session.user.is_tester, profile.is_tester
+            );
             let updated_session = AuthSession {
                 user: UserInfo {
                     is_tester: profile.is_tester,
@@ -385,7 +413,10 @@ impl AuthManager {
             Ok(server) => server,
             Err(e) => {
                 error!("Failed to start OAuth server: {}", e);
-                return Err(AuthError::ApiError(format!("Failed to start OAuth server: {}", e)));
+                return Err(AuthError::ApiError(format!(
+                    "Failed to start OAuth server: {}",
+                    e
+                )));
             }
         };
 
@@ -430,7 +461,10 @@ impl AuthManager {
             *auth_state = AuthState::AwaitingOAuthCallback(pending);
         }
 
-        info!("OAuth flow started, waiting for localhost callback with state: {}...", &state[..8]);
+        info!(
+            "OAuth flow started, waiting for localhost callback with state: {}...",
+            &state[..8]
+        );
         Ok(state)
     }
 
@@ -462,9 +496,11 @@ impl AuthManager {
         exchange_token: &str,
         callback_state: &str,
     ) -> Result<(), AuthError> {
-        info!("Completing OAuth callback (exchange_token: {}..., state: {}...)",
+        info!(
+            "Completing OAuth callback (exchange_token: {}..., state: {}...)",
             &exchange_token[..exchange_token.len().min(8)],
-            &callback_state[..callback_state.len().min(8)]);
+            &callback_state[..callback_state.len().min(8)]
+        );
 
         // Get expected state from memory
         let expected_state = {
@@ -473,7 +509,9 @@ impl AuthManager {
                 AuthState::AwaitingOAuthCallback(pending) => {
                     // Check if the OAuth flow has expired (10 minutes)
                     if Utc::now() - pending.started_at > Duration::minutes(10) {
-                        return Err(AuthError::ApiError("OAuth flow expired. Please try again.".to_string()));
+                        return Err(AuthError::ApiError(
+                            "OAuth flow expired. Please try again.".to_string(),
+                        ));
                     }
                     Some(pending.state.clone())
                 }
@@ -485,22 +523,30 @@ impl AuthManager {
             Some(s) => s,
             None => {
                 error!("OAuth state not found in memory");
-                return Err(AuthError::ApiError("Not waiting for OAuth callback. Please start sign-in again.".to_string()));
+                return Err(AuthError::ApiError(
+                    "Not waiting for OAuth callback. Please start sign-in again.".to_string(),
+                ));
             }
         };
 
         if callback_state != expected_state {
-            error!("State mismatch: expected {}..., got {}...",
+            error!(
+                "State mismatch: expected {}..., got {}...",
                 &expected_state[..expected_state.len().min(8)],
-                &callback_state[..callback_state.len().min(8)]);
+                &callback_state[..callback_state.len().min(8)]
+            );
             // Reset state
             {
                 let mut state = self.state.lock().unwrap();
-                *state = AuthState::Error("Security error: state mismatch. Please try again.".to_string());
+                *state = AuthState::Error(
+                    "Security error: state mismatch. Please try again.".to_string(),
+                );
             }
             // Stop OAuth server
             self.stop_oauth_server();
-            return Err(AuthError::ApiError("Security error: state mismatch".to_string()));
+            return Err(AuthError::ApiError(
+                "Security error: state mismatch".to_string(),
+            ));
         }
 
         // Stop the OAuth server now that we've received the callback
@@ -513,7 +559,11 @@ impl AuthManager {
         }
 
         // Exchange the token for a magic link
-        let exchange_response = match self.client.exchange_oauth_token(exchange_token, callback_state).await {
+        let exchange_response = match self
+            .client
+            .exchange_oauth_token(exchange_token, callback_state)
+            .await
+        {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to exchange OAuth token: {}", e);
@@ -525,9 +575,11 @@ impl AuthManager {
             }
         };
 
-        info!("Got magic link token for user: {} (token: {}...)",
+        info!(
+            "Got magic link token for user: {} (token: {}...)",
             exchange_response.email,
-            &exchange_response.token[..exchange_response.token.len().min(8)]);
+            &exchange_response.token[..exchange_response.token.len().min(8)]
+        );
 
         // Verify the magic link token to get access/refresh tokens
         let auth_response = match self
@@ -547,13 +599,23 @@ impl AuthManager {
         };
 
         // Fetch user profile to get tester status
-        let is_tester = match self.client.fetch_user_profile(&auth_response.access_token).await {
+        let is_tester = match self
+            .client
+            .fetch_user_profile(&auth_response.access_token)
+            .await
+        {
             Ok(profile) => {
-                info!("User profile fetched after OAuth: is_tester={}", profile.is_tester);
+                info!(
+                    "User profile fetched after OAuth: is_tester={}",
+                    profile.is_tester
+                );
                 profile.is_tester
             }
             Err(e) => {
-                warn!("Failed to fetch user profile after OAuth (non-fatal): {}", e);
+                warn!(
+                    "Failed to fetch user profile after OAuth (non-fatal): {}",
+                    e
+                );
                 false
             }
         };

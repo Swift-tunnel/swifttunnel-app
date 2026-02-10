@@ -1,8 +1,8 @@
 //! Layout module - sidebar navigation and app structure
 
-use super::*;
-use super::theme::*;
 use super::animations::*;
+use super::theme::*;
+use super::*;
 
 /// Navigation items for the sidebar
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -204,9 +204,11 @@ impl BoosterApp {
                     // Version at bottom
                     ui.vertical_centered(|ui| {
                         ui.add_space(SPACING_SM);
-                        ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                            .size(10.0)
-                            .color(TEXT_DIMMED));
+                        ui.label(
+                            egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .size(10.0)
+                                .color(TEXT_DIMMED),
+                        );
                     });
                 });
             });
@@ -223,11 +225,16 @@ impl BoosterApp {
             ui.add(image);
         } else {
             // Fallback gradient circle
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
             let painter = ui.painter();
 
             // Gradient effect (approximated with two circles)
-            painter.circle_filled(rect.center(), logo_size * 0.48, ACCENT_PRIMARY.gamma_multiply(0.3));
+            painter.circle_filled(
+                rect.center(),
+                logo_size * 0.48,
+                ACCENT_PRIMARY.gamma_multiply(0.3),
+            );
             painter.circle_filled(rect.center(), logo_size * 0.4, ACCENT_PRIMARY);
 
             // S letter
@@ -236,7 +243,7 @@ impl BoosterApp {
                 egui::Align2::CENTER_CENTER,
                 "S",
                 egui::FontId::proportional(16.0),
-                TEXT_PRIMARY
+                TEXT_PRIMARY,
             );
         }
     }
@@ -249,28 +256,29 @@ impl BoosterApp {
 
         ui.vertical_centered(|ui| {
             // Active indicator bar on left
-            let indicator_rect = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, 44.0), egui::Sense::hover()).0;
+            let indicator_rect = ui
+                .allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, 44.0), egui::Sense::hover())
+                .0;
 
             if is_active {
                 // Active indicator line on left edge
                 let line_rect = egui::Rect::from_min_size(
                     egui::pos2(indicator_rect.min.x, indicator_rect.min.y + 8.0),
-                    egui::vec2(3.0, 28.0)
+                    egui::vec2(3.0, 28.0),
                 );
                 ui.painter().rect_filled(line_rect, 2.0, ACCENT_PRIMARY);
             }
 
             // Button area
-            let button_rect = egui::Rect::from_center_size(
-                indicator_rect.center(),
-                egui::vec2(40.0, 40.0)
-            );
+            let button_rect =
+                egui::Rect::from_center_size(indicator_rect.center(), egui::vec2(40.0, 40.0));
 
             let response = ui.allocate_rect(button_rect, egui::Sense::click());
             let is_hovered = response.hovered();
 
             // Animate hover
-            self.animations.animate_hover(&item_id, is_hovered, hover_val);
+            self.animations
+                .animate_hover(&item_id, is_hovered, hover_val);
 
             // Background
             let bg_color = if is_active {
@@ -312,8 +320,12 @@ impl BoosterApp {
                     }
                     // Needle pointing upper-right
                     let needle_angle = std::f32::consts::PI * 0.65;
-                    let needle_end = egui::pos2(c.x + (s - 2.0) * needle_angle.cos(), c.y - (s - 2.0) * needle_angle.sin());
-                    ui.painter().line_segment([c, needle_end], egui::Stroke::new(2.0, icon_color));
+                    let needle_end = egui::pos2(
+                        c.x + (s - 2.0) * needle_angle.cos(),
+                        c.y - (s - 2.0) * needle_angle.sin(),
+                    );
+                    ui.painter()
+                        .line_segment([c, needle_end], egui::Stroke::new(2.0, icon_color));
                     ui.painter().circle_filled(c, 2.0, icon_color);
                 }
                 NavItem::Boost => {
@@ -328,12 +340,14 @@ impl BoosterApp {
                         egui::pos2(c.x + 1.0, c.y - s),
                     ];
                     for w in pts.windows(2) {
-                        ui.painter().line_segment([w[0], w[1]], egui::Stroke::new(1.8, icon_color));
+                        ui.painter()
+                            .line_segment([w[0], w[1]], egui::Stroke::new(1.8, icon_color));
                     }
                 }
                 NavItem::Network => {
                     // Wifi: 3 arcs + dot
-                    ui.painter().circle_filled(egui::pos2(c.x, c.y + s - 2.0), 2.0, icon_color);
+                    ui.painter()
+                        .circle_filled(egui::pos2(c.x, c.y + s - 2.0), 2.0, icon_color);
                     for (i, radius) in [4.5_f32, 7.5, 10.5].iter().enumerate() {
                         let segments = 12;
                         let arc_center = egui::pos2(c.x, c.y + s - 2.0);
@@ -364,9 +378,12 @@ impl BoosterApp {
                     let teeth = 6;
                     for i in 0..teeth {
                         let angle = (i as f32 / teeth as f32) * std::f32::consts::TAU;
-                        let inner_pt = egui::pos2(c.x + r_inner * angle.cos(), c.y + r_inner * angle.sin());
-                        let outer_pt = egui::pos2(c.x + r_outer * angle.cos(), c.y + r_outer * angle.sin());
-                        ui.painter().line_segment([inner_pt, outer_pt], egui::Stroke::new(2.5, icon_color));
+                        let inner_pt =
+                            egui::pos2(c.x + r_inner * angle.cos(), c.y + r_inner * angle.sin());
+                        let outer_pt =
+                            egui::pos2(c.x + r_outer * angle.cos(), c.y + r_outer * angle.sin());
+                        ui.painter()
+                            .line_segment([inner_pt, outer_pt], egui::Stroke::new(2.5, icon_color));
                     }
                 }
             }
@@ -379,15 +396,19 @@ impl BoosterApp {
                     ui.id().with(&item_id),
                     |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(nav_item.tooltip())
-                                .size(12.0)
-                                .color(TEXT_PRIMARY));
+                            ui.label(
+                                egui::RichText::new(nav_item.tooltip())
+                                    .size(12.0)
+                                    .color(TEXT_PRIMARY),
+                            );
                             ui.add_space(8.0);
-                            ui.label(egui::RichText::new(nav_item.shortcut())
-                                .size(10.0)
-                                .color(TEXT_MUTED));
+                            ui.label(
+                                egui::RichText::new(nav_item.shortcut())
+                                    .size(10.0)
+                                    .color(TEXT_MUTED),
+                            );
                         });
-                    }
+                    },
                 );
             }
 
@@ -419,13 +440,17 @@ impl BoosterApp {
                     // App name - compact
                     ui.vertical(|ui| {
                         ui.add_space(10.0);
-                        ui.label(egui::RichText::new("SwiftTunnel")
-                            .size(16.0)
-                            .color(TEXT_PRIMARY)
-                            .strong());
-                        ui.label(egui::RichText::new("Game Booster")
-                            .size(10.0)
-                            .color(TEXT_DIMMED));
+                        ui.label(
+                            egui::RichText::new("SwiftTunnel")
+                                .size(16.0)
+                                .color(TEXT_PRIMARY)
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new("Game Booster")
+                                .size(10.0)
+                                .color(TEXT_DIMMED),
+                        );
                     });
 
                     // Boost badge
@@ -439,9 +464,11 @@ impl BoosterApp {
                                 .rounding(10.0)
                                 .inner_margin(egui::Margin::symmetric(8, 3))
                                 .show(ui, |ui| {
-                                    ui.label(egui::RichText::new(format!("{} boosts", active_count))
-                                        .size(10.0)
-                                        .color(ACCENT_PRIMARY));
+                                    ui.label(
+                                        egui::RichText::new(format!("{} boosts", active_count))
+                                            .size(10.0)
+                                            .color(ACCENT_PRIMARY),
+                                    );
                                 });
                         }
                     }
@@ -489,11 +516,8 @@ impl BoosterApp {
 
         // Subtle glow when connected
         if is_connected {
-            ui.painter().rect_filled(
-                rect.expand(2.0),
-                10.0,
-                STATUS_CONNECTED.gamma_multiply(0.1)
-            );
+            ui.painter()
+                .rect_filled(rect.expand(2.0), 10.0, STATUS_CONNECTED.gamma_multiply(0.1));
         }
 
         // Main button
@@ -509,7 +533,13 @@ impl BoosterApp {
         } else {
             BORDER_SUBTLE
         };
-        ui.painter().rect(rect, 8.0, egui::Color32::TRANSPARENT, egui::Stroke::new(1.0, border_color), egui::StrokeKind::Middle);
+        ui.painter().rect(
+            rect,
+            8.0,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0, border_color),
+            egui::StrokeKind::Middle,
+        );
 
         // Label
         let text_color = if is_connected || is_connecting {
@@ -523,7 +553,7 @@ impl BoosterApp {
             egui::Align2::CENTER_CENTER,
             label,
             egui::FontId::proportional(14.0),
-            text_color
+            text_color,
         );
 
         // Handle click
@@ -547,14 +577,24 @@ impl BoosterApp {
                     ui.spacing_mut().item_spacing.x = 6.0;
 
                     // User icon
-                    let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
-                    ui.painter().circle_filled(icon_rect.center(), 9.0, ACCENT_SECONDARY.gamma_multiply(0.2));
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                    ui.painter().circle_filled(
+                        icon_rect.center(),
+                        9.0,
+                        ACCENT_SECONDARY.gamma_multiply(0.2),
+                    );
                     ui.painter().text(
                         icon_rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        user.email.chars().next().unwrap_or('U').to_uppercase().to_string(),
+                        user.email
+                            .chars()
+                            .next()
+                            .unwrap_or('U')
+                            .to_uppercase()
+                            .to_string(),
                         egui::FontId::proportional(9.0),
-                        ACCENT_SECONDARY
+                        ACCENT_SECONDARY,
                     );
 
                     // Email (truncated)
@@ -563,9 +603,11 @@ impl BoosterApp {
                     } else {
                         user.email.clone()
                     };
-                    ui.label(egui::RichText::new(display_email)
-                        .size(11.0)
-                        .color(TEXT_SECONDARY));
+                    ui.label(
+                        egui::RichText::new(display_email)
+                            .size(11.0)
+                            .color(TEXT_SECONDARY),
+                    );
                 });
             });
     }
@@ -593,13 +635,17 @@ impl BoosterApp {
                     ui.spacing_mut().item_spacing.x = 5.0;
 
                     // Status dot
-                    let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                    ui.painter().circle_filled(dot_rect.center(), 3.0, status_color);
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot_rect.center(), 3.0, status_color);
 
-                    ui.label(egui::RichText::new(status_text)
-                        .size(10.0)
-                        .color(status_color)
-                        .strong());
+                    ui.label(
+                        egui::RichText::new(status_text)
+                            .size(10.0)
+                            .color(status_color)
+                            .strong(),
+                    );
                 });
             });
     }
@@ -607,7 +653,10 @@ impl BoosterApp {
     /// Render clean header banner with page title
     fn render_header_banner(&self, ui: &mut egui::Ui) {
         let banner_width = ui.available_width();
-        let (banner_rect, _) = ui.allocate_exact_size(egui::vec2(banner_width, HEADER_BANNER_HEIGHT), egui::Sense::hover());
+        let (banner_rect, _) = ui.allocate_exact_size(
+            egui::vec2(banner_width, HEADER_BANNER_HEIGHT),
+            egui::Sense::hover(),
+        );
 
         let painter = ui.painter_at(banner_rect);
 
@@ -618,7 +667,7 @@ impl BoosterApp {
             painter.hline(
                 banner_rect.min.x..=banner_rect.max.x,
                 banner_rect.min.y + y as f32,
-                egui::Stroke::new(1.0, color)
+                egui::Stroke::new(1.0, color),
             );
         }
 
@@ -636,7 +685,7 @@ impl BoosterApp {
             egui::Align2::LEFT_CENTER,
             title,
             egui::FontId::proportional(22.0),
-            TEXT_PRIMARY
+            TEXT_PRIMARY,
         );
 
         // Subtitle
@@ -645,13 +694,13 @@ impl BoosterApp {
             egui::Align2::LEFT_CENTER,
             subtitle,
             egui::FontId::proportional(11.0),
-            TEXT_DIMMED
+            TEXT_DIMMED,
         );
 
         // Accent underline bar
         let underline_rect = egui::Rect::from_min_size(
             egui::pos2(banner_rect.min.x, banner_rect.max.y - 2.0),
-            egui::vec2(48.0, 2.0)
+            egui::vec2(48.0, 2.0),
         );
         painter.rect_filled(underline_rect, 1.0, ACCENT_PRIMARY.gamma_multiply(0.5));
     }

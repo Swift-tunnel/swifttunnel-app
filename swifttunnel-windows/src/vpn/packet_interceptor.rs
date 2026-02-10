@@ -16,15 +16,15 @@
 //! - Outbound: App → ndisapi intercept → WireGuard encapsulate → UDP to VPN server
 //! - Inbound: VPN server UDP → WireGuard decapsulate → Wintun adapter → App
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::net::Ipv4Addr;
-use super::process_tracker::{ProcessTracker, Protocol};
 use super::parallel_interceptor::ThroughputStats;
+use super::process_tracker::{ProcessTracker, Protocol};
 use super::{VpnError, VpnResult};
-use windows::Win32::Foundation::{HANDLE, CloseHandle};
-use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+use std::net::Ipv4Addr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersInfo, IP_ADAPTER_INFO};
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
 
 /// Get the friendly name for an adapter given its internal name (device GUID)
 fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
@@ -66,7 +66,8 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
             let adapter = &*current;
 
             // Get adapter name (GUID) - null-terminated string
-            let adapter_name_bytes: Vec<u8> = adapter.AdapterName
+            let adapter_name_bytes: Vec<u8> = adapter
+                .AdapterName
                 .iter()
                 .take_while(|&&b| b != 0)
                 .map(|&b| b as u8)
@@ -76,7 +77,8 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
             // Check if this is our adapter
             if adapter_guid.to_lowercase().contains(&guid.to_lowercase()) {
                 // Get description (friendly name) - null-terminated string
-                let desc_bytes: Vec<u8> = adapter.Description
+                let desc_bytes: Vec<u8> = adapter
+                    .Description
                     .iter()
                     .take_while(|&&b| b != 0)
                     .map(|&b| b as u8)
@@ -263,12 +265,20 @@ impl PacketInterceptor {
     ///
     /// Note: vpn_adapter_luid is accepted for API compatibility with parallel_interceptor
     /// but not currently used by the legacy interceptor.
-    pub fn configure(&mut self, vpn_adapter_name: &str, tunnel_apps: Vec<String>, _vpn_adapter_luid: u64) -> VpnResult<()> {
+    pub fn configure(
+        &mut self,
+        vpn_adapter_name: &str,
+        tunnel_apps: Vec<String>,
+        _vpn_adapter_luid: u64,
+    ) -> VpnResult<()> {
         if !self.driver_available {
             return Err(VpnError::SplitTunnelNotAvailable);
         }
 
-        log::info!("Configuring split tunnel for VPN adapter: {}", vpn_adapter_name);
+        log::info!(
+            "Configuring split tunnel for VPN adapter: {}",
+            vpn_adapter_name
+        );
 
         // Update tunnel apps
         self.process_tracker.set_tunnel_apps(tunnel_apps);
@@ -278,7 +288,8 @@ impl PacketInterceptor {
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
 
         // Get adapter list
-        let adapters = driver.get_tcpip_bound_adapters_info()
+        let adapters = driver
+            .get_tcpip_bound_adapters_info()
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to enumerate adapters: {}", e)))?;
 
         log::info!("Found {} adapters", adapters.len());
@@ -294,7 +305,12 @@ impl PacketInterceptor {
             // Try to get the friendly name using Windows API
             let friendly_name = get_adapter_friendly_name(&internal_name).unwrap_or_default();
 
-            log::info!("  Adapter {}: internal='{}' friendly='{}'", idx, internal_name, friendly_name);
+            log::info!(
+                "  Adapter {}: internal='{}' friendly='{}'",
+                idx,
+                internal_name,
+                friendly_name
+            );
 
             let name_lower = internal_name.to_lowercase();
             let friendly_lower = friendly_name.to_lowercase();
@@ -349,20 +365,37 @@ impl PacketInterceptor {
             if is_vpn_adapter {
                 vpn_adapter = Some((idx, friendly_name.clone(), internal_name.to_string()));
             } else if priority > 0 {
-                physical_candidates.push((idx, friendly_name.clone(), internal_name.to_string(), priority));
+                physical_candidates.push((
+                    idx,
+                    friendly_name.clone(),
+                    internal_name.to_string(),
+                    priority,
+                ));
             }
         }
 
         // Select best physical adapter (highest priority)
-        if let Some((idx, name, internal, _priority)) = physical_candidates.into_iter().max_by_key(|x| x.3) {
+        if let Some((idx, name, internal, _priority)) =
+            physical_candidates.into_iter().max_by_key(|x| x.3)
+        {
             self.physical_adapter_idx = Some(idx);
-            log::info!("Selected physical adapter at index {}: {} ({})", idx, name, internal);
+            log::info!(
+                "Selected physical adapter at index {}: {} ({})",
+                idx,
+                name,
+                internal
+            );
         }
 
         // Set VPN adapter
         if let Some((idx, name, internal)) = vpn_adapter {
             self.vpn_adapter_idx = Some(idx);
-            log::info!("Found VPN adapter at index {}: {} ({})", idx, name, internal);
+            log::info!(
+                "Found VPN adapter at index {}: {} ({})",
+                idx,
+                name,
+                internal
+            );
         }
 
         if self.physical_adapter_idx.is_none() {
@@ -378,8 +411,11 @@ impl PacketInterceptor {
             )));
         }
 
-        log::info!("Split tunnel configured - physical: {:?}, VPN: {:?}",
-            self.physical_adapter_idx, self.vpn_adapter_idx);
+        log::info!(
+            "Split tunnel configured - physical: {:?}, VPN: {:?}",
+            self.physical_adapter_idx,
+            self.vpn_adapter_idx
+        );
 
         Ok(())
     }
@@ -391,21 +427,31 @@ impl PacketInterceptor {
             return Ok(());
         }
 
-        let physical_idx = self.physical_adapter_idx
+        let physical_idx = self
+            .physical_adapter_idx
             .ok_or_else(|| VpnError::SplitTunnel("Physical adapter not configured".to_string()))?;
 
-        let vpn_idx = self.vpn_adapter_idx
+        let vpn_idx = self
+            .vpn_adapter_idx
             .ok_or_else(|| VpnError::SplitTunnel("VPN adapter not configured".to_string()))?;
 
         // WireGuard context is required for actual VPN routing
         let wg_ctx = self.wireguard_ctx.clone();
         if wg_ctx.is_none() {
-            log::warn!("No WireGuard context set - tunnel app packets will be logged but not routed through VPN");
+            log::warn!(
+                "No WireGuard context set - tunnel app packets will be logged but not routed through VPN"
+            );
         } else {
-            log::info!("WireGuard context available - tunnel app packets will be encrypted and sent to VPN");
+            log::info!(
+                "WireGuard context available - tunnel app packets will be encrypted and sent to VPN"
+            );
         }
 
-        log::info!("Starting packet interception (physical: {}, VPN: {})", physical_idx, vpn_idx);
+        log::info!(
+            "Starting packet interception (physical: {}, VPN: {})",
+            physical_idx,
+            vpn_idx
+        );
 
         self.stop_flag.store(false, Ordering::SeqCst);
         self.active = true;
@@ -479,23 +525,34 @@ impl PacketInterceptor {
         wg_ctx: Option<Arc<WireguardContext>>,
         throughput_stats: ThroughputStats,
     ) -> VpnResult<()> {
-        use ndisapi::{DirectionFlags, EthMRequest, EthMRequestMut, FilterFlags, IntermediateBuffer};
+        use ndisapi::{
+            DirectionFlags, EthMRequest, EthMRequestMut, FilterFlags, IntermediateBuffer,
+        };
 
         const PACKET_BUFFER_SIZE: usize = 64;
 
-        log::info!("Packet processing loop started (Wintun injection: {})",
-            if wg_ctx.is_some() { "enabled" } else { "disabled" });
+        log::info!(
+            "Packet processing loop started (Wintun injection: {})",
+            if wg_ctx.is_some() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
 
         // Initialize driver
         let driver = ndisapi::Ndisapi::new("NDISRD")
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
 
         // Get adapters
-        let adapters = driver.get_tcpip_bound_adapters_info()
+        let adapters = driver
+            .get_tcpip_bound_adapters_info()
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to get adapters: {}", e)))?;
 
         if physical_idx >= adapters.len() {
-            return Err(VpnError::SplitTunnel("Physical adapter index out of range".to_string()));
+            return Err(VpnError::SplitTunnel(
+                "Physical adapter index out of range".to_string(),
+            ));
         }
 
         let physical_handle = adapters[physical_idx].get_handle();
@@ -507,11 +564,13 @@ impl PacketInterceptor {
         };
 
         // Set event for the physical adapter
-        driver.set_packet_event(physical_handle, event)
+        driver
+            .set_packet_event(physical_handle, event)
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to set packet event: {}", e)))?;
 
         // Set adapter mode to tunnel mode (intercept sent and received packets)
-        driver.set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
+        driver
+            .set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
 
         let mut process_tracker = ProcessTracker::new(tunnel_apps.into_iter().collect());
@@ -557,10 +616,7 @@ impl PacketInterceptor {
             }
 
             // Read packets
-            let mut to_read = EthMRequestMut::from_iter(
-                physical_handle,
-                packets.iter_mut(),
-            );
+            let mut to_read = EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
 
             let packets_read = driver
                 .read_packets::<PACKET_BUFFER_SIZE>(&mut to_read)
@@ -568,7 +624,9 @@ impl PacketInterceptor {
 
             if packets_read == 0 {
                 // Reset event and continue
-                unsafe { let _ = ResetEvent(event); }
+                unsafe {
+                    let _ = ResetEvent(event);
+                }
                 continue;
             }
 
@@ -623,8 +681,14 @@ impl PacketInterceptor {
                                     if packets_injected % 1000 == 0 {
                                         log::info!(
                                             "Split tunnel stats: {} tunneled, {} total outbound ({:.1}% tunneled), {} injected, {} bytes TX",
-                                            tunneled_packets, total_packets,
-                                            if total_packets > 0 { (tunneled_packets as f64 / total_packets as f64) * 100.0 } else { 0.0 },
+                                            tunneled_packets,
+                                            total_packets,
+                                            if total_packets > 0 {
+                                                (tunneled_packets as f64 / total_packets as f64)
+                                                    * 100.0
+                                            } else {
+                                                0.0
+                                            },
                                             packets_injected,
                                             throughput_stats.get_bytes_tx()
                                         );
@@ -669,19 +733,28 @@ impl PacketInterceptor {
             }
 
             // Reset event
-            unsafe { let _ = ResetEvent(event); }
+            unsafe {
+                let _ = ResetEvent(event);
+            }
         }
 
         // Cleanup: reset adapter mode
         let _ = driver.set_adapter_mode(physical_handle, FilterFlags::default());
 
         // Close event handle
-        unsafe { let _ = CloseHandle(event); }
+        unsafe {
+            let _ = CloseHandle(event);
+        }
 
         log::info!(
             "Packet processing loop stopped - Final stats: {} tunneled / {} total ({:.1}%), {} injected into VPN, {} bytes TX",
-            tunneled_packets, total_packets,
-            if total_packets > 0 { (tunneled_packets as f64 / total_packets as f64) * 100.0 } else { 0.0 },
+            tunneled_packets,
+            total_packets,
+            if total_packets > 0 {
+                (tunneled_packets as f64 / total_packets as f64) * 100.0
+            } else {
+                0.0
+            },
             packets_injected,
             throughput_stats.get_bytes_tx()
         );
@@ -689,7 +762,11 @@ impl PacketInterceptor {
     }
 
     /// Check if a packet should be routed to VPN based on process tracking
-    fn should_route_to_vpn(data: &[u8], process_tracker: &ProcessTracker, log_decisions: bool) -> bool {
+    fn should_route_to_vpn(
+        data: &[u8],
+        process_tracker: &ProcessTracker,
+        log_decisions: bool,
+    ) -> bool {
         // Parse packet info
         let info = match PacketInfo::from_ethernet_frame(data, PacketDirection::Outbound) {
             Some(i) => i,
@@ -697,16 +774,24 @@ impl PacketInterceptor {
         };
 
         // Check if this packet belongs to a tunnel app
-        let should_tunnel = process_tracker.should_tunnel(info.src_ip, info.src_port, info.protocol);
+        let should_tunnel =
+            process_tracker.should_tunnel(info.src_ip, info.src_port, info.protocol);
 
         // Log routing decisions periodically for debugging
         if log_decisions {
             if let Some(pid) = process_tracker.get_pid(info.src_ip, info.src_port, info.protocol) {
-                let proc_name = process_tracker.get_process_name(pid).map(|s| s.as_str()).unwrap_or("unknown");
+                let proc_name = process_tracker
+                    .get_process_name(pid)
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
                 log::debug!(
                     "Packet {}:{} {:?} -> {} (PID {} {}) => {}",
-                    info.src_ip, info.src_port, info.protocol, info.dst_ip,
-                    pid, proc_name,
+                    info.src_ip,
+                    info.src_port,
+                    info.protocol,
+                    info.dst_ip,
+                    pid,
+                    proc_name,
                     if should_tunnel { "TUNNEL" } else { "BYPASS" }
                 );
             }
@@ -736,11 +821,11 @@ mod tests {
         // Minimal IPv4 TCP packet (IP header + TCP header start)
         let mut ip_packet = vec![0u8; 40];
         ip_packet[0] = 0x45; // IPv4, IHL=5
-        ip_packet[9] = 6;    // TCP
+        ip_packet[9] = 6; // TCP
         ip_packet[12..16].copy_from_slice(&[192, 168, 1, 1]); // src IP
-        ip_packet[16..20].copy_from_slice(&[10, 0, 0, 1]);    // dst IP
+        ip_packet[16..20].copy_from_slice(&[10, 0, 0, 1]); // dst IP
         ip_packet[20..22].copy_from_slice(&1234u16.to_be_bytes()); // src port
-        ip_packet[22..24].copy_from_slice(&80u16.to_be_bytes());   // dst port
+        ip_packet[22..24].copy_from_slice(&80u16.to_be_bytes()); // dst port
 
         let info = PacketInfo::from_ip_packet(&ip_packet, PacketDirection::Outbound).unwrap();
         assert_eq!(info.src_ip, Ipv4Addr::new(192, 168, 1, 1));
@@ -758,11 +843,11 @@ mod tests {
         frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // EtherType: IPv4
         // IP header
         frame[14] = 0x45; // IPv4, IHL=5
-        frame[23] = 17;   // UDP
-        frame[26..30].copy_from_slice(&[10, 0, 0, 1]);   // src IP
-        frame[30..34].copy_from_slice(&[8, 8, 8, 8]);    // dst IP
+        frame[23] = 17; // UDP
+        frame[26..30].copy_from_slice(&[10, 0, 0, 1]); // src IP
+        frame[30..34].copy_from_slice(&[8, 8, 8, 8]); // dst IP
         frame[34..36].copy_from_slice(&5000u16.to_be_bytes()); // src port
-        frame[36..38].copy_from_slice(&53u16.to_be_bytes());   // dst port
+        frame[36..38].copy_from_slice(&53u16.to_be_bytes()); // dst port
 
         let info = PacketInfo::from_ethernet_frame(&frame, PacketDirection::Outbound).unwrap();
         assert_eq!(info.src_ip, Ipv4Addr::new(10, 0, 0, 1));

@@ -1,15 +1,31 @@
 //! Velopack-based auto-updater
 //!
-//! Checks for updates from GitHub Releases via Velopack's HttpSource.
+//! Checks for updates from GitHub Releases API and then uses Velopack for
+//! download/apply.
 //! Falls back gracefully when not installed via Velopack (dev/debug builds).
 
-use super::types::{UpdateInfo, UpdateState};
-use log::{info, warn, error};
+use super::types::{UpdateChannel, UpdateInfo, UpdateState};
+use log::{error, info, warn};
+use semver::Version;
+use serde::Deserialize;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// GitHub Releases base URL for update feed
 /// Velopack expects releases.{channel}.json at this URL
-const RELEASES_URL: &str = "https://github.com/Swift-tunnel/swifttunnel-app/releases/latest/download";
+const RELEASES_URL: &str =
+    "https://github.com/Swift-tunnel/swifttunnel-app/releases/latest/download";
+const GITHUB_RELEASES_API_URL: &str =
+    "https://api.github.com/repos/Swift-tunnel/swifttunnel-app/releases";
+const UPDATE_HTTP_USER_AGENT: &str = "SwiftTunnel-Updater";
+
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    prerelease: bool,
+    #[serde(default)]
+    draft: bool,
+}
 
 /// Result of the auto-update check
 #[derive(Clone)]
@@ -25,11 +41,23 @@ pub enum AutoUpdateResult {
 /// With Velopack, pending updates are applied automatically by VelopackApp::build().run()
 /// in main(). This function just checks for NEW updates in the background.
 /// No splash screen needed - the check is fast and non-blocking.
-pub fn run_auto_updater() -> AutoUpdateResult {
-    info!("Checking for updates via Velopack...");
+pub fn run_auto_updater(channel: UpdateChannel) -> AutoUpdateResult {
+    info!("Checking for updates via Velopack ({})...", channel);
+
+    let expected_version = match find_latest_newer_version(channel) {
+        Ok(Some(version)) => version,
+        Ok(None) => {
+            info!("No newer eligible {} release found on GitHub API", channel);
+            return AutoUpdateResult::NoUpdate;
+        }
+        Err(e) => {
+            warn!("Failed to query GitHub releases API (ignored): {}", e);
+            return AutoUpdateResult::NoUpdate;
+        }
+    };
 
     // Try to create UpdateManager - will fail if not installed via Velopack
-    let um = match create_update_manager() {
+    let um = match create_update_manager(channel) {
         Some(um) => um,
         None => {
             info!("Not installed via Velopack (dev mode), skipping update check");
@@ -37,11 +65,19 @@ pub fn run_auto_updater() -> AutoUpdateResult {
         }
     };
 
-    // Check for updates synchronously (this is fast - just fetches a JSON file)
+    // Check feed with Velopack and make sure it matches channel-filtered API result
     match um.check_for_updates() {
         Ok(velopack::UpdateCheck::UpdateAvailable(update)) => {
             let version = update.TargetFullRelease.Version.to_string();
-            info!("Update available: v{}", version);
+            let parsed = Version::parse(&version).ok();
+            if parsed.as_ref() != Some(&expected_version) {
+                warn!(
+                    "Ignoring Velopack update {} because latest eligible {} release is {}",
+                    version, channel, expected_version
+                );
+                return AutoUpdateResult::NoUpdate;
+            }
+            info!("Update available: v{} ({})", version, channel);
 
             // Download and apply immediately at startup
             info!("Downloading update...");
@@ -83,22 +119,116 @@ pub fn run_auto_updater() -> AutoUpdateResult {
 }
 
 /// Create a Velopack UpdateManager, returning None if not installed via Velopack
-fn create_update_manager() -> Option<velopack::UpdateManager> {
+fn create_update_manager(channel: UpdateChannel) -> Option<velopack::UpdateManager> {
     let source = velopack::sources::HttpSource::new(RELEASES_URL);
-    match velopack::UpdateManager::new(source, None, None) {
+    let options = velopack::UpdateOptions {
+        ExplicitChannel: Some(channel.velopack_channel().to_string()),
+        ..Default::default()
+    };
+    match velopack::UpdateManager::new(source, Some(options), None) {
         Ok(um) => Some(um),
         Err(e) => {
-            info!("Velopack UpdateManager unavailable: {} (expected in dev mode)", e);
+            info!(
+                "Velopack UpdateManager unavailable: {} (expected in dev mode)",
+                e
+            );
             None
         }
     }
 }
 
+fn parse_release_version(tag_name: &str) -> Option<Version> {
+    let trimmed = tag_name.trim();
+    let normalized = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    Version::parse(normalized).ok()
+}
+
+fn fetch_latest_eligible_release_version(
+    channel: UpdateChannel,
+) -> Result<Option<Version>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create runtime for update API call: {}", e))?;
+
+    runtime.block_on(async move {
+        let client = reqwest::Client::builder()
+            .user_agent(UPDATE_HTTP_USER_AGENT)
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+        let response = client
+            .get(GITHUB_RELEASES_API_URL)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch GitHub releases: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "GitHub releases API returned HTTP {}",
+                response.status()
+            ));
+        }
+
+        let releases: Vec<GitHubRelease> = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse GitHub releases JSON: {}", e))?;
+
+        let mut latest: Option<Version> = None;
+        for release in releases {
+            if release.draft {
+                continue;
+            }
+            if channel == UpdateChannel::Stable && release.prerelease {
+                continue;
+            }
+            let Some(version) = parse_release_version(&release.tag_name) else {
+                continue;
+            };
+            if latest.as_ref().map(|v| version > *v).unwrap_or(true) {
+                latest = Some(version);
+            }
+        }
+
+        Ok(latest)
+    })
+}
+
+fn find_latest_newer_version(channel: UpdateChannel) -> Result<Option<Version>, String> {
+    let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|e| format!("Failed to parse current app version: {}", e))?;
+
+    let latest_eligible = fetch_latest_eligible_release_version(channel)?;
+    Ok(latest_eligible.filter(|v| v > &current_version))
+}
+
 /// Check for updates in the background and update shared state
 /// Used by the GUI for manual update checks
-pub fn check_for_updates_background(update_state: Arc<Mutex<UpdateState>>) {
+pub fn check_for_updates_background(update_state: Arc<Mutex<UpdateState>>, channel: UpdateChannel) {
     std::thread::spawn(move || {
-        let um = match create_update_manager() {
+        let expected_version = match find_latest_newer_version(channel) {
+            Ok(Some(version)) => version,
+            Ok(None) => {
+                if let Ok(mut state) = update_state.lock() {
+                    *state = UpdateState::UpToDate;
+                }
+                return;
+            }
+            Err(e) => {
+                warn!("Background GitHub release check failed (ignored): {}", e);
+                if let Ok(mut state) = update_state.lock() {
+                    *state = UpdateState::UpToDate;
+                }
+                return;
+            }
+        };
+
+        let um = match create_update_manager(channel) {
             Some(um) => um,
             None => {
                 // Not installed via Velopack (dev mode) — stay idle, no error
@@ -109,15 +239,24 @@ pub fn check_for_updates_background(update_state: Arc<Mutex<UpdateState>>) {
         match um.check_for_updates() {
             Ok(velopack::UpdateCheck::UpdateAvailable(update)) => {
                 let version = update.TargetFullRelease.Version.to_string();
-                info!("Update available: v{}", version);
-                if let Ok(mut state) = update_state.lock() {
-                    *state = UpdateState::Available(UpdateInfo {
-                        version,
-                    });
+                let parsed = Version::parse(&version).ok();
+                if parsed.as_ref() == Some(&expected_version) {
+                    info!("Update available: v{} ({})", version, channel);
+                    if let Ok(mut state) = update_state.lock() {
+                        *state = UpdateState::Available(UpdateInfo { version });
+                    }
+                } else {
+                    warn!(
+                        "Ignoring Velopack update {} because latest eligible {} release is {}",
+                        version, channel, expected_version
+                    );
+                    if let Ok(mut state) = update_state.lock() {
+                        *state = UpdateState::UpToDate;
+                    }
                 }
             }
             Ok(_) => {
-                info!("Already on latest version");
+                info!("No matching Velopack update available for {}", channel);
                 if let Ok(mut state) = update_state.lock() {
                     *state = UpdateState::UpToDate;
                 }
@@ -136,9 +275,24 @@ pub fn check_for_updates_background(update_state: Arc<Mutex<UpdateState>>) {
 
 /// Download and apply an update in the background
 /// Updates shared state with progress
-pub fn download_and_apply_update(update_state: Arc<Mutex<UpdateState>>, version: String) {
+pub fn download_and_apply_update(
+    update_state: Arc<Mutex<UpdateState>>,
+    version: String,
+    channel: UpdateChannel,
+) {
     std::thread::spawn(move || {
-        let um = match create_update_manager() {
+        let expected_version = match Version::parse(&version) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Ok(mut state) = update_state.lock() {
+                    *state =
+                        UpdateState::Failed(format!("Invalid update version '{}': {}", version, e));
+                }
+                return;
+            }
+        };
+
+        let um = match create_update_manager(channel) {
             Some(um) => um,
             None => {
                 // Not installed via Velopack — silently reset to idle
@@ -149,9 +303,21 @@ pub fn download_and_apply_update(update_state: Arc<Mutex<UpdateState>>, version:
             }
         };
 
-        // Re-check to get the update info
+        // Re-check to get the update info and confirm it matches requested version
         let update = match um.check_for_updates() {
-            Ok(velopack::UpdateCheck::UpdateAvailable(u)) => u,
+            Ok(velopack::UpdateCheck::UpdateAvailable(u)) => {
+                let available_version = Version::parse(&u.TargetFullRelease.Version).ok();
+                if available_version.as_ref() != Some(&expected_version) {
+                    if let Ok(mut state) = update_state.lock() {
+                        *state = UpdateState::Failed(format!(
+                            "Requested version {} is no longer available on {} channel",
+                            expected_version, channel
+                        ));
+                    }
+                    return;
+                }
+                u
+            }
             _ => {
                 if let Ok(mut state) = update_state.lock() {
                     *state = UpdateState::Failed("Update no longer available".to_string());
@@ -160,7 +326,9 @@ pub fn download_and_apply_update(update_state: Arc<Mutex<UpdateState>>, version:
             }
         };
 
-        let info = UpdateInfo { version: version.clone() };
+        let info = UpdateInfo {
+            version: expected_version.to_string(),
+        };
 
         // Set downloading state
         if let Ok(mut state) = update_state.lock() {

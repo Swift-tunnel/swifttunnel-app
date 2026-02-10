@@ -125,11 +125,17 @@ pub const LATENCY_BAD: egui::Color32 = egui::Color32::from_rgb(240, 90, 90);
 
 /// Get latency color based on ms value
 pub fn latency_color(ms: u32) -> egui::Color32 {
-    if ms < 30 { LATENCY_EXCELLENT }
-    else if ms < 60 { LATENCY_GOOD }
-    else if ms < 100 { LATENCY_FAIR }
-    else if ms < 150 { LATENCY_POOR }
-    else { LATENCY_BAD }
+    if ms < 30 {
+        LATENCY_EXCELLENT
+    } else if ms < 60 {
+        LATENCY_GOOD
+    } else if ms < 100 {
+        LATENCY_FAIR
+    } else if ms < 150 {
+        LATENCY_POOR
+    } else {
+        LATENCY_BAD
+    }
 }
 
 /// Calculate latency bar fill percentage (0.0 - 1.0)

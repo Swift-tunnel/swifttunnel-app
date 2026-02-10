@@ -6,12 +6,12 @@
 //! Similar to GearUp's AIR (Adaptive Intelligent Routing) and ExitLag's
 //! automatic region detection.
 
+use crate::geolocation::RobloxRegion;
+use parking_lot::RwLock;
 use std::collections::{HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
-use crate::geolocation::RobloxRegion;
 
 /// Minimum time between relay switches to prevent flapping
 const MIN_SWITCH_INTERVAL: Duration = Duration::from_secs(10);
@@ -96,7 +96,10 @@ impl AutoRouter {
     /// Enable or disable auto-routing
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
-        log::info!("Auto-routing: {}", if enabled { "enabled" } else { "disabled" });
+        log::info!(
+            "Auto-routing: {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -118,17 +121,24 @@ impl AutoRouter {
 
     /// Check if a game region is whitelisted (should bypass VPN).
     fn is_region_whitelisted(&self, region: &RobloxRegion) -> bool {
-        self.whitelisted_regions.read().contains(region.display_name())
+        self.whitelisted_regions
+            .read()
+            .contains(region.display_name())
     }
 
     /// Update the list of available relay servers with cached latency data.
     /// Called when server list is fetched/refreshed.
     /// Latency is used to pick the best server when multiple match a region.
     pub fn set_available_servers(&self, servers: Vec<(String, SocketAddr, Option<u32>)>) {
-        log::info!("Auto-routing: Updated available servers ({} servers)", servers.len());
+        log::info!(
+            "Auto-routing: Updated available servers ({} servers)",
+            servers.len()
+        );
         for (region, addr, latency) in &servers {
-            log::info!("  {} ({}) - latency: {}",
-                region, addr,
+            log::info!(
+                "  {} ({}) - latency: {}",
+                region,
+                addr,
                 latency.map_or("unknown".to_string(), |ms| format!("{}ms", ms))
             );
         }
@@ -189,11 +199,17 @@ impl AutoRouter {
         if let Some(mut pending) = self.pending_lookups.try_write() {
             pending.insert(game_server_ip);
         } else {
-            log::warn!("Auto-routing: Failed to acquire pending_lookups write lock for {} — packets may leak to wrong relay during lookup", game_server_ip);
+            log::warn!(
+                "Auto-routing: Failed to acquire pending_lookups write lock for {} — packets may leak to wrong relay during lookup",
+                game_server_ip
+            );
         }
         if let Some(sender) = self.lookup_sender.read().as_ref() {
             let _ = sender.send(game_server_ip);
-            log::info!("Auto-routing: New game server {} detected, holding packets while looking up region...", game_server_ip);
+            log::info!(
+                "Auto-routing: New game server {} detected, holding packets while looking up region...",
+                game_server_ip
+            );
         }
 
         AutoRoutingAction::NoAction
@@ -212,7 +228,10 @@ impl AutoRouter {
     /// to this IP would be dropped forever.
     pub fn clear_pending_lookup(&self, ip: Ipv4Addr) {
         self.pending_lookups.write().remove(&ip);
-        log::info!("Auto-routing: Lookup complete for {}, releasing packets", ip);
+        log::info!(
+            "Auto-routing: Lookup complete for {}, releasing packets",
+            ip
+        );
     }
 
     /// Get candidate relay servers for a game region.
@@ -220,14 +239,20 @@ impl AutoRouter {
     /// Returns `None` if already on the correct region or no candidates exist.
     /// Returns `Some((candidates, game_region))` where candidates are (region_name, addr)
     /// pairs that should be pinged to find the best one.
-    pub fn get_candidates_for_region(&self, game_region: &RobloxRegion) -> Option<Vec<(String, SocketAddr)>> {
+    pub fn get_candidates_for_region(
+        &self,
+        game_region: &RobloxRegion,
+    ) -> Option<Vec<(String, SocketAddr)>> {
         if *game_region == RobloxRegion::Unknown {
             return None;
         }
 
         // Check if this game region is whitelisted (user wants to bypass VPN)
         if self.is_region_whitelisted(game_region) {
-            log::info!("Auto-routing: Game region {} is whitelisted — bypassing VPN", game_region.display_name());
+            log::info!(
+                "Auto-routing: Game region {} is whitelisted — bypassing VPN",
+                game_region.display_name()
+            );
             self.auto_routing_bypassed.store(true, Ordering::Release);
             *self.current_game_region.write() = Some(game_region.clone());
 
@@ -238,9 +263,14 @@ impl AutoRouter {
                 from_region: self.current_st_region.read().clone(),
                 to_region: "BYPASS".to_string(),
                 game_server_region: game_region.display_name().to_string(),
-                reason: format!("{} is whitelisted — using direct connection", game_region.display_name()),
+                reason: format!(
+                    "{} is whitelisted — using direct connection",
+                    game_region.display_name()
+                ),
             });
-            if log.len() > 20 { log.pop_front(); }
+            if log.len() > 20 {
+                log.pop_front();
+            }
 
             return None;
         }
@@ -252,33 +282,45 @@ impl AutoRouter {
         let current_st_region = self.current_st_region.read().clone();
 
         // Check if we're already on the best region
-        if current_st_region == best_st_region || current_st_region.starts_with(&format!("{}-", best_st_region)) {
+        if current_st_region == best_st_region
+            || current_st_region.starts_with(&format!("{}-", best_st_region))
+        {
             *self.current_game_region.write() = Some(game_region.clone());
             return None;
         }
 
         let servers = self.available_servers.read();
-        let mut candidates_with_latency: Vec<&(String, SocketAddr, Option<u32>)> = servers.iter()
-            .filter(|(region, _, _)| region == best_st_region || region.starts_with(&format!("{}-", best_st_region)))
+        let mut candidates_with_latency: Vec<&(String, SocketAddr, Option<u32>)> = servers
+            .iter()
+            .filter(|(region, _, _)| {
+                region == best_st_region || region.starts_with(&format!("{}-", best_st_region))
+            })
             .collect();
 
         // Sort by cached latency (lowest first) so fallback picks best cached server
         candidates_with_latency.sort_by_key(|(_, _, latency)| latency.unwrap_or(u32::MAX));
 
-        let candidates: Vec<(String, SocketAddr)> = candidates_with_latency.into_iter()
+        let candidates: Vec<(String, SocketAddr)> = candidates_with_latency
+            .into_iter()
             .map(|(region, addr, _)| (region.clone(), *addr))
             .collect();
 
         if candidates.is_empty() {
             log::warn!(
                 "Auto-routing: No server found for region '{}' (game region: {})",
-                best_st_region, game_region
+                best_st_region,
+                game_region
             );
             None
         } else {
-            log::info!("Auto-routing: {} candidates for region '{}': {:?}",
-                candidates.len(), best_st_region,
-                candidates.iter().map(|(r, a)| format!("{} ({})", r, a)).collect::<Vec<_>>()
+            log::info!(
+                "Auto-routing: {} candidates for region '{}': {:?}",
+                candidates.len(),
+                best_st_region,
+                candidates
+                    .iter()
+                    .map(|(r, a)| format!("{} ({})", r, a))
+                    .collect::<Vec<_>>()
             );
             Some(candidates)
         }
@@ -288,10 +330,20 @@ impl AutoRouter {
     ///
     /// `selected_region` and `selected_addr` are the result of pinging candidates.
     /// Returns `Some((addr, region))` if the switch was recorded, `None` if rate-limited.
-    pub fn commit_switch(&self, game_region: RobloxRegion, selected_region: String, selected_addr: SocketAddr) -> Option<(SocketAddr, String)> {
+    pub fn commit_switch(
+        &self,
+        game_region: RobloxRegion,
+        selected_region: String,
+        selected_addr: SocketAddr,
+    ) -> Option<(SocketAddr, String)> {
         let current_st_region = self.current_st_region.read().clone();
 
-        if self.record_switch(&current_st_region, &selected_region, &game_region, selected_addr) {
+        if self.record_switch(
+            &current_st_region,
+            &selected_region,
+            &game_region,
+            selected_addr,
+        ) {
             Some((selected_addr, selected_region))
         } else {
             None
@@ -300,7 +352,13 @@ impl AutoRouter {
 
     /// Record a relay switch, atomically checking rate limits.
     /// Returns true if the switch was recorded, false if rate-limited or already switched.
-    fn record_switch(&self, from_region: &str, to_region: &str, game_region: &RobloxRegion, new_addr: SocketAddr) -> bool {
+    fn record_switch(
+        &self,
+        from_region: &str,
+        to_region: &str,
+        game_region: &RobloxRegion,
+        new_addr: SocketAddr,
+    ) -> bool {
         // Idempotency: another worker may have already switched to this region
         if *self.current_st_region.read() == to_region {
             return false;
@@ -341,7 +399,9 @@ impl AutoRouter {
             game_server_region: game_region.display_name().to_string(),
             reason: format!(
                 "Game server moved to {} - switching from {} to {}",
-                game_region.display_name(), from_region, to_region
+                game_region.display_name(),
+                from_region,
+                to_region
             ),
         };
 
@@ -353,7 +413,9 @@ impl AutoRouter {
 
         log::info!(
             "Auto-routing: Switched {} -> {} (game server in {})",
-            from_region, to_region, game_region.display_name()
+            from_region,
+            to_region,
+            game_region.display_name()
         );
 
         true
@@ -376,15 +438,51 @@ mod tests {
 
     fn make_servers() -> Vec<(String, SocketAddr, Option<u32>)> {
         vec![
-            ("singapore".to_string(), "54.255.205.216:51821".parse().unwrap(), None),
-            ("singapore-02".to_string(), "51.79.128.67:51821".parse().unwrap(), None),
-            ("mumbai".to_string(), "3.111.230.152:51821".parse().unwrap(), None),
-            ("america-01".to_string(), "54.225.245.114:51821".parse().unwrap(), None),
-            ("tokyo-02".to_string(), "45.32.253.124:51821".parse().unwrap(), None),
-            ("sydney".to_string(), "54.153.235.165:51821".parse().unwrap(), None),
-            ("germany-01".to_string(), "63.181.160.158:51821".parse().unwrap(), None),
-            ("london-01".to_string(), "172.237.119.240:51821".parse().unwrap(), None),
-            ("brazil-02".to_string(), "172.233.20.214:51821".parse().unwrap(), None),
+            (
+                "singapore".to_string(),
+                "54.255.205.216:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "singapore-02".to_string(),
+                "51.79.128.67:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "mumbai".to_string(),
+                "3.111.230.152:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "america-01".to_string(),
+                "54.225.245.114:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "tokyo-02".to_string(),
+                "45.32.253.124:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "sydney".to_string(),
+                "54.153.235.165:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "germany-01".to_string(),
+                "63.181.160.158:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "london-01".to_string(),
+                "172.237.119.240:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "brazil-02".to_string(),
+                "172.233.20.214:51821".parse().unwrap(),
+                None,
+            ),
         ]
     }
 
@@ -421,10 +519,17 @@ mod tests {
         let candidates = candidates.unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0, "america-01");
-        assert_eq!(candidates[0].1, "54.225.245.114:51821".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            candidates[0].1,
+            "54.225.245.114:51821".parse::<SocketAddr>().unwrap()
+        );
 
         // Commit the switch
-        let result = router.commit_switch(RobloxRegion::UsEast, candidates[0].0.clone(), candidates[0].1);
+        let result = router.commit_switch(
+            RobloxRegion::UsEast,
+            candidates[0].0.clone(),
+            candidates[0].1,
+        );
         assert!(result.is_some());
         let (addr, region) = result.unwrap();
         assert_eq!(region, "america-01");

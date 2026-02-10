@@ -1,6 +1,6 @@
 use crate::structs::*;
-use sysinfo::{System, Process, ProcessesToUpdate};
 use std::time::Duration;
+use sysinfo::{Process, ProcessesToUpdate, System};
 
 pub struct PerformanceMonitor {
     system: System,
@@ -25,7 +25,8 @@ impl PerformanceMonitor {
         // If we know the PID from last scan, only refresh that one process
         if let Some(pid) = metrics.process_id {
             let pid = sysinfo::Pid::from_u32(pid);
-            self.system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+            self.system
+                .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
 
             // Check if process is still alive
             if let Some(process) = self.system.process(pid) {
@@ -64,9 +65,10 @@ impl PerformanceMonitor {
         for (pid, process) in self.system.processes() {
             let process_name = process.name().to_string_lossy();
 
-            if process_name.contains("RobloxPlayerBeta") ||
-               process_name.contains("RobloxPlayer") ||
-               process_name.contains("Roblox") {
+            if process_name.contains("RobloxPlayerBeta")
+                || process_name.contains("RobloxPlayer")
+                || process_name.contains("Roblox")
+            {
                 return Some((pid.as_u32(), process));
             }
         }

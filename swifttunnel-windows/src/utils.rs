@@ -1,9 +1,9 @@
 //! Utility functions for SwiftTunnel
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
-use std::path::PathBuf;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -31,11 +31,11 @@ pub fn hidden_command(program: &str) -> Command {
 #[cfg(windows)]
 pub fn is_administrator() -> bool {
     unsafe {
+        use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::Security::{
-            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
         };
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-        use windows::Win32::Foundation::CloseHandle;
 
         let mut token_handle = windows::Win32::Foundation::HANDLE::default();
 
@@ -77,11 +77,18 @@ pub fn is_administrator() -> bool {
 /// Open a URL in the user's default browser using Windows ShellExecuteW
 #[cfg(windows)]
 pub fn open_url(url: &str) {
-    use windows::core::HSTRING;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+    use windows::core::HSTRING;
     unsafe {
-        ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(url), None, None, SW_SHOW);
+        ShellExecuteW(
+            None,
+            &HSTRING::from("open"),
+            &HSTRING::from(url),
+            None,
+            None,
+            SW_SHOW,
+        );
     }
 }
 
@@ -171,11 +178,18 @@ pub fn load_pending_connection() -> Option<PendingConnection> {
         .unwrap_or(0);
 
     if now - pending.timestamp > 30 {
-        log::warn!("Pending connection expired ({}s old)", now - pending.timestamp);
+        log::warn!(
+            "Pending connection expired ({}s old)",
+            now - pending.timestamp
+        );
         return None;
     }
 
-    log::info!("Loaded pending connection: region={}, server={}", pending.region, pending.server);
+    log::info!(
+        "Loaded pending connection: region={}, server={}",
+        pending.region,
+        pending.server
+    );
     Some(pending)
 }
 
@@ -198,8 +212,14 @@ pub fn relaunch_elevated() -> std::io::Result<()> {
 
     // Convert to wide string (UTF-16)
     let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
-    let file: Vec<u16> = OsStr::new(&*exe_path_str).encode_wide().chain(Some(0)).collect();
-    let params: Vec<u16> = OsStr::new("--resume-connect").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = OsStr::new(&*exe_path_str)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let params: Vec<u16> = OsStr::new("--resume-connect")
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
 
     log::info!("Relaunching elevated: {}", exe_path_str);
 
@@ -265,10 +285,7 @@ const DEFAULT_RETRY_DELAYS: [u64; 3] = [1000, 2000, 4000];
 ///     http_client.get(url).send().await
 /// }).await;
 /// ```
-pub async fn with_retry<T, E, F, Fut>(
-    max_attempts: u32,
-    operation: F,
-) -> Result<T, E>
+pub async fn with_retry<T, E, F, Fut>(max_attempts: u32, operation: F) -> Result<T, E>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -286,7 +303,10 @@ where
                     let delay_ms = DEFAULT_RETRY_DELAYS[delay_idx];
                     log::warn!(
                         "Attempt {}/{} failed: {}, retrying in {}ms...",
-                        attempt, max_attempts, e, delay_ms
+                        attempt,
+                        max_attempts,
+                        e,
+                        delay_ms
                     );
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 } else {
@@ -308,10 +328,7 @@ where
 ///
 /// # Returns
 /// The result of the first successful attempt, or the last error
-pub fn with_retry_sync<T, E, F>(
-    max_attempts: u32,
-    operation: F,
-) -> Result<T, E>
+pub fn with_retry_sync<T, E, F>(max_attempts: u32, operation: F) -> Result<T, E>
 where
     F: Fn() -> Result<T, E>,
     E: std::fmt::Display,
@@ -328,7 +345,10 @@ where
                     let delay_ms = DEFAULT_RETRY_DELAYS[delay_idx];
                     log::warn!(
                         "Attempt {}/{} failed: {}, retrying in {}ms...",
-                        attempt, max_attempts, e, delay_ms
+                        attempt,
+                        max_attempts,
+                        e,
+                        delay_ms
                     );
                     std::thread::sleep(Duration::from_millis(delay_ms));
                 } else {
@@ -374,7 +394,11 @@ pub fn rotate_log_if_needed(log_path: &std::path::Path) -> std::io::Result<bool>
     // Rename current log to .old
     std::fs::rename(log_path, &old_path)?;
 
-    log::info!("Rotated log file: {} -> {}", log_path.display(), old_path.display());
+    log::info!(
+        "Rotated log file: {} -> {}",
+        log_path.display(),
+        old_path.display()
+    );
     Ok(true)
 }
 

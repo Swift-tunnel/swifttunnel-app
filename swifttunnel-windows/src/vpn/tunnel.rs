@@ -10,17 +10,17 @@
 //! Performance note: Uses parking_lot::Mutex for the shared Tunn instance
 //! to minimize contention when multiple worker threads encrypt packets.
 
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
-use boringtun::noise::{Tunn, TunnResult};
 use super::adapter::WintunAdapter;
 use super::config::parse_key;
 use super::{VpnError, VpnResult};
 use crate::auth::types::VpnConfig;
+use boringtun::noise::{Tunn, TunnResult};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
 /// Fast mutex for WireGuard encryption (avoids std::sync::Mutex contention)
 pub use parking_lot::Mutex as FastMutex;
@@ -136,7 +136,10 @@ impl WireguardTunnel {
     /// handle keepalives from its own socket.
     pub fn set_skip_keepalives(&self, skip: bool) {
         self.skip_keepalives.store(skip, Ordering::SeqCst);
-        log::info!("Tunnel keepalives: {}", if skip { "DISABLED" } else { "enabled" });
+        log::info!(
+            "Tunnel keepalives: {}",
+            if skip { "DISABLED" } else { "enabled" }
+        );
     }
 
     /// Get the inbound handler (for passing to tasks)
@@ -194,7 +197,10 @@ impl WireguardTunnel {
             while !self.inbound_task_stopped.load(Ordering::SeqCst) {
                 if start.elapsed() > max_wait {
                     log::error!("========================================");
-                    log::error!("TIMEOUT: Inbound task did not stop in {}ms!", max_wait.as_millis());
+                    log::error!(
+                        "TIMEOUT: Inbound task did not stop in {}ms!",
+                        max_wait.as_millis()
+                    );
                     log::error!("This may cause packet loss / 0 B/s inbound!");
                     log::error!("Proceeding anyway, but connection may fail.");
                     log::error!("========================================");
@@ -205,7 +211,10 @@ impl WireguardTunnel {
 
             let elapsed = start.elapsed();
             if self.inbound_task_stopped.load(Ordering::SeqCst) {
-                log::info!("  Step 3: Inbound task CONFIRMED stopped ({}ms)", elapsed.as_millis());
+                log::info!(
+                    "  Step 3: Inbound task CONFIRMED stopped ({}ms)",
+                    elapsed.as_millis()
+                );
                 log::info!("  Socket handoff SUCCESSFUL - no race condition");
             }
             log::info!("========================================");
@@ -246,9 +255,10 @@ impl WireguardTunnel {
             peer_public_key.into(),
             None, // No preshared key
             Some(KEEPALIVE_INTERVAL),
-            0, // Tunnel index
+            0,    // Tunnel index
             None, // No rate limiter
-        ).map_err(|e| VpnError::TunnelInit(format!("Failed to create Tunn: {:?}", e)))?;
+        )
+        .map_err(|e| VpnError::TunnelInit(format!("Failed to create Tunn: {:?}", e)))?;
 
         // Wrap in FastMutex (parking_lot) for ~10x less contention under load
         let tunn = Arc::new(FastMutex::new(tunn));
@@ -272,8 +282,9 @@ impl WireguardTunnel {
 
         // Clone the socket BEFORE converting to Tokio - this clone will be used by split tunnel
         // Both sockets share the same underlying file descriptor/port
-        let socket_for_split_tunnel = std_socket.try_clone()
-            .map_err(|e| VpnError::Network(format!("Failed to clone socket for split tunnel: {}", e)))?;
+        let socket_for_split_tunnel = std_socket.try_clone().map_err(|e| {
+            VpnError::Network(format!("Failed to clone socket for split tunnel: {}", e))
+        })?;
 
         // Store the clone for split tunnel to use later
         *self.stored_socket.lock().unwrap() = Some(socket_for_split_tunnel);
@@ -286,7 +297,8 @@ impl WireguardTunnel {
         log::info!("========================================");
 
         // Set non-blocking mode for Tokio conversion
-        std_socket.set_nonblocking(true)
+        std_socket
+            .set_nonblocking(true)
             .map_err(|e| VpnError::Network(format!("Failed to set socket non-blocking: {}", e)))?;
 
         // Convert to Tokio socket for async tasks
@@ -393,9 +405,7 @@ impl WireguardTunnel {
                     let decap_result = tunn.decapsulate(None, &response_buf[..n], &mut buf);
                     // Copy data if we need to send, since we can't hold the guard across await
                     match decap_result {
-                        TunnResult::WriteToNetwork(data) => {
-                            Some(data.to_vec())
-                        }
+                        TunnResult::WriteToNetwork(data) => Some(data.to_vec()),
                         other => {
                             // Return the result directly for non-network cases
                             return match other {
@@ -403,9 +413,10 @@ impl WireguardTunnel {
                                     log::info!("WireGuard handshake completed successfully");
                                     Ok(())
                                 }
-                                TunnResult::Err(e) => {
-                                    Err(VpnError::HandshakeFailed(format!("Handshake error: {:?}", e)))
-                                }
+                                TunnResult::Err(e) => Err(VpnError::HandshakeFailed(format!(
+                                    "Handshake error: {:?}",
+                                    e
+                                ))),
                                 _ => {
                                     log::warn!("Unexpected handshake result: continuing anyway");
                                     Ok(())
@@ -523,7 +534,9 @@ impl WireguardTunnel {
                 // CRITICAL: Check if split tunnel has taken over inbound handling
                 // If so, we MUST stop reading to avoid competing for packets
                 if skip_inbound.load(Ordering::SeqCst) {
-                    log::info!("Inbound task: split tunnel took over - stopping to avoid race condition");
+                    log::info!(
+                        "Inbound task: split tunnel took over - stopping to avoid race condition"
+                    );
                     break;
                 }
 
@@ -533,11 +546,9 @@ impl WireguardTunnel {
                 }
 
                 // Receive from server with timeout
-                let recv_result = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    socket.recv(&mut recv_buf),
-                )
-                .await;
+                let recv_result =
+                    tokio::time::timeout(Duration::from_millis(100), socket.recv(&mut recv_buf))
+                        .await;
 
                 let n = match recv_result {
                     Ok(Ok(n)) => {
@@ -562,8 +573,12 @@ impl WireguardTunnel {
 
                 // Log all decryption results at info level to debug inbound flow
                 let result_desc = match &decrypted {
-                    TunnResult::WriteToTunnelV4(d, _) => format!("WriteToTunnelV4({} bytes)", d.len()),
-                    TunnResult::WriteToTunnelV6(d, _) => format!("WriteToTunnelV6({} bytes)", d.len()),
+                    TunnResult::WriteToTunnelV4(d, _) => {
+                        format!("WriteToTunnelV4({} bytes)", d.len())
+                    }
+                    TunnResult::WriteToTunnelV6(d, _) => {
+                        format!("WriteToTunnelV6({} bytes)", d.len())
+                    }
                     TunnResult::WriteToNetwork(d) => format!("WriteToNetwork({} bytes)", d.len()),
                     TunnResult::Done => "Done".to_string(),
                     TunnResult::Err(e) => format!("Err({:?})", e),
@@ -571,7 +586,12 @@ impl WireguardTunnel {
                 // Log first 10 results and then every 100th (per-session counter)
                 packet_count += 1;
                 if packet_count <= 10 || packet_count % 100 == 0 {
-                    log::info!("Tunnel inbound #{}: {} (received {} encrypted bytes)", packet_count, result_desc, n);
+                    log::info!(
+                        "Tunnel inbound #{}: {} (received {} encrypted bytes)",
+                        packet_count,
+                        result_desc,
+                        n
+                    );
                 }
 
                 match decrypted {
@@ -584,7 +604,9 @@ impl WireguardTunnel {
                         if let Some(handler) = handler_opt {
                             // Split tunnel mode: pass to handler for injection to physical adapter
                             if !handler_used {
-                                log::info!("Inbound task: using split tunnel handler for packet delivery");
+                                log::info!(
+                                    "Inbound task: using split tunnel handler for packet delivery"
+                                );
                                 handler_used = true;
                             }
                             handler(data);

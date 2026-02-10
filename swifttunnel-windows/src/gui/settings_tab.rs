@@ -1,10 +1,10 @@
 //! Settings tab rendering - general settings, performance summary, account management
 
-use super::*;
 use super::theme::*;
+use super::*;
 use crate::auth::AuthState;
 use crate::geolocation::RobloxRegion;
-use crate::updater::UpdateState;
+use crate::updater::{UpdateChannel, UpdateState};
 
 /// Helper: render a toggle switch with consistent styling
 fn render_toggle(ui: &mut egui::Ui, enabled: bool) -> bool {
@@ -13,10 +13,18 @@ fn render_toggle(ui: &mut egui::Ui, enabled: bool) -> bool {
     let clicked = response.clicked();
 
     let bg = if enabled { ACCENT_PRIMARY } else { BG_ELEVATED };
-    let knob_x = if enabled { rect.right() - (TOGGLE_KNOB_SIZE / 2.0) - 3.0 } else { rect.left() + (TOGGLE_KNOB_SIZE / 2.0) + 3.0 };
+    let knob_x = if enabled {
+        rect.right() - (TOGGLE_KNOB_SIZE / 2.0) - 3.0
+    } else {
+        rect.left() + (TOGGLE_KNOB_SIZE / 2.0) + 3.0
+    };
 
     ui.painter().rect_filled(rect, TOGGLE_HEIGHT / 2.0, bg);
-    ui.painter().circle_filled(egui::pos2(knob_x, rect.center().y), TOGGLE_KNOB_SIZE / 2.0, TEXT_PRIMARY);
+    ui.painter().circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        TOGGLE_KNOB_SIZE / 2.0,
+        TEXT_PRIMARY,
+    );
 
     clicked
 }
@@ -27,7 +35,11 @@ fn render_setting_row(ui: &mut egui::Ui, title: &str, description: &str, enabled
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.label(egui::RichText::new(title).size(12.0).color(TEXT_PRIMARY));
-            ui.label(egui::RichText::new(description).size(10.0).color(TEXT_MUTED));
+            ui.label(
+                egui::RichText::new(description)
+                    .size(10.0)
+                    .color(TEXT_MUTED),
+            );
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             clicked = render_toggle(ui, enabled);
@@ -40,16 +52,41 @@ impl BoosterApp {
     pub(crate) fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
         // Tab selector
         ui.horizontal(|ui| {
-            for (label, section) in [("General", SettingsSection::General), ("Account", SettingsSection::Account)] {
+            for (label, section) in [
+                ("General", SettingsSection::General),
+                ("Account", SettingsSection::Account),
+            ] {
                 let is_active = self.settings_section == section;
-                let text_color = if is_active { ACCENT_PRIMARY } else { TEXT_SECONDARY };
-                let bg = if is_active { ACCENT_PRIMARY.gamma_multiply(0.12) } else { egui::Color32::TRANSPARENT };
+                let text_color = if is_active {
+                    ACCENT_PRIMARY
+                } else {
+                    TEXT_SECONDARY
+                };
+                let bg = if is_active {
+                    ACCENT_PRIMARY.gamma_multiply(0.12)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
 
-                if ui.add(
-                    egui::Button::new(egui::RichText::new(label).size(13.0).color(text_color).strong())
-                        .fill(bg).rounding(8.0).min_size(egui::vec2(90.0, BUTTON_MIN_HEIGHT))
-                        .stroke(if is_active { egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.3)) } else { egui::Stroke::NONE })
-                ).clicked() {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(label)
+                                .size(13.0)
+                                .color(text_color)
+                                .strong(),
+                        )
+                        .fill(bg)
+                        .rounding(8.0)
+                        .min_size(egui::vec2(90.0, BUTTON_MIN_HEIGHT))
+                        .stroke(if is_active {
+                            egui::Stroke::new(1.0, ACCENT_PRIMARY.gamma_multiply(0.3))
+                        } else {
+                            egui::Stroke::NONE
+                        }),
+                    )
+                    .clicked()
+                {
                     self.settings_section = section;
                 }
                 ui.add_space(SPACING_SM);
@@ -68,16 +105,32 @@ impl BoosterApp {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn render_general_settings(&mut self, ui: &mut egui::Ui) {
         // About section
-        card_frame()
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("About").size(14.0).color(TEXT_PRIMARY).strong());
-                ui.add_space(SPACING_SM);
-                ui.label(egui::RichText::new(format!("SwiftTunnel v{}", env!("CARGO_PKG_VERSION"))).size(13.0).color(TEXT_PRIMARY));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Game Booster & PC Optimization Suite").size(12.0).color(TEXT_SECONDARY));
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Optimized for Roblox and other games").size(11.0).color(TEXT_MUTED));
-            });
+        card_frame().show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("About")
+                    .size(14.0)
+                    .color(TEXT_PRIMARY)
+                    .strong(),
+            );
+            ui.add_space(SPACING_SM);
+            ui.label(
+                egui::RichText::new(format!("SwiftTunnel v{}", env!("CARGO_PKG_VERSION")))
+                    .size(13.0)
+                    .color(TEXT_PRIMARY),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Game Booster & PC Optimization Suite")
+                    .size(12.0)
+                    .color(TEXT_SECONDARY),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Optimized for Roblox and other games")
+                    .size(11.0)
+                    .color(TEXT_MUTED),
+            );
+        });
 
         ui.add_space(SPACING_MD);
 
@@ -85,83 +138,158 @@ impl BoosterApp {
         let mut check_now = false;
         let mut toggle_auto_check = false;
         let current_auto_check = self.update_settings.auto_check;
+        let mut selected_update_channel = self.update_channel;
 
-        card_frame()
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Updates").size(14.0).color(TEXT_PRIMARY).strong());
-                ui.add_space(SPACING_SM);
+        card_frame().show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Updates")
+                    .size(14.0)
+                    .color(TEXT_PRIMARY)
+                    .strong(),
+            );
+            ui.add_space(SPACING_SM);
 
-                // Current version and check button
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("Current version: {}", env!("CARGO_PKG_VERSION"))).size(12.0).color(TEXT_SECONDARY));
+            // Current version and check button
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Current version: {}", env!("CARGO_PKG_VERSION")))
+                        .size(12.0)
+                        .color(TEXT_SECONDARY),
+                );
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Check for updates button
-                        let update_state = self.update_state.lock().map(|s| s.clone()).unwrap_or(UpdateState::Idle);
-                        let is_checking = matches!(update_state, UpdateState::Checking);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Check for updates button
+                    let update_state = self
+                        .update_state
+                        .lock()
+                        .map(|s| s.clone())
+                        .unwrap_or(UpdateState::Idle);
+                    let is_checking = matches!(update_state, UpdateState::Checking);
 
-                        if is_checking {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Checking...").size(11.0).color(TEXT_SECONDARY));
-                            });
-                        } else {
-                            if ui.add(
-                                egui::Button::new(egui::RichText::new("Check for Updates").size(11.0).color(BG_BASE).strong())
-                                    .fill(ACCENT_PRIMARY).rounding(6.0)
-                            ).clicked() {
-                                check_now = true;
-                            }
+                    if is_checking {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Checking...")
+                                    .size(11.0)
+                                    .color(TEXT_SECONDARY),
+                            );
+                        });
+                    } else {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Check for Updates")
+                                        .size(11.0)
+                                        .color(BG_BASE)
+                                        .strong(),
+                                )
+                                .fill(ACCENT_PRIMARY)
+                                .rounding(6.0),
+                            )
+                            .clicked()
+                        {
+                            check_now = true;
                         }
-                    });
+                    }
+                });
+            });
+
+            ui.add_space(SPACING_SM);
+
+            // Show update status
+            let update_state = self
+                .update_state
+                .lock()
+                .map(|s| s.clone())
+                .unwrap_or(UpdateState::Idle);
+            match &update_state {
+                UpdateState::UpToDate => {
+                    egui::Frame::NONE
+                        .fill(STATUS_CONNECTED.gamma_multiply(0.1))
+                        .rounding(6.0)
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("You're on the latest version")
+                                    .size(12.0)
+                                    .color(STATUS_CONNECTED),
+                            );
+                        });
+                }
+                UpdateState::Available(info) => {
+                    egui::Frame::NONE
+                        .fill(ACCENT_PRIMARY.gamma_multiply(0.1))
+                        .rounding(6.0)
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("Update v{} available", info.version))
+                                    .size(12.0)
+                                    .color(ACCENT_PRIMARY),
+                            );
+                        });
+                }
+                UpdateState::Failed(msg) => {
+                    egui::Frame::NONE
+                        .fill(STATUS_ERROR.gamma_multiply(0.1))
+                        .rounding(6.0)
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(msg).size(12.0).color(STATUS_ERROR));
+                        });
+                }
+                _ => {}
+            }
+
+            ui.add_space(SPACING_SM);
+
+            // Auto-check toggle
+            toggle_auto_check = render_setting_row(
+                ui,
+                "Check for updates on startup",
+                "Automatically check for new versions when the app starts",
+                current_auto_check,
+            );
+
+            ui.add_space(SPACING_SM);
+
+            // Update channel selector
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Update channel")
+                            .size(12.0)
+                            .color(TEXT_PRIMARY),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Live = latest builds (may have bugs), Stable = vetted releases",
+                        )
+                        .size(10.0)
+                        .color(TEXT_MUTED),
+                    );
                 });
 
-                ui.add_space(SPACING_SM);
-
-                // Show update status
-                let update_state = self.update_state.lock().map(|s| s.clone()).unwrap_or(UpdateState::Idle);
-                match &update_state {
-                    UpdateState::UpToDate => {
-                        egui::Frame::NONE
-                            .fill(STATUS_CONNECTED.gamma_multiply(0.1))
-                            .rounding(6.0)
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new("You're on the latest version").size(12.0).color(STATUS_CONNECTED));
-                            });
-                    }
-                    UpdateState::Available(info) => {
-                        egui::Frame::NONE
-                            .fill(ACCENT_PRIMARY.gamma_multiply(0.1))
-                            .rounding(6.0)
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new(format!("Update v{} available", info.version)).size(12.0).color(ACCENT_PRIMARY));
-                            });
-                    }
-                    UpdateState::Failed(msg) => {
-                        egui::Frame::NONE
-                            .fill(STATUS_ERROR.gamma_multiply(0.1))
-                            .rounding(6.0)
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new(msg).size(12.0).color(STATUS_ERROR));
-                            });
-                    }
-                    _ => {}
-                }
-
-                ui.add_space(SPACING_SM);
-
-                // Auto-check toggle
-                toggle_auto_check = render_setting_row(
-                    ui,
-                    "Check for updates on startup",
-                    "Automatically check for new versions when the app starts",
-                    current_auto_check,
-                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt("update_channel_selector")
+                        .selected_text(selected_update_channel.to_string())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut selected_update_channel,
+                                UpdateChannel::Stable,
+                                "Stable",
+                            );
+                            ui.selectable_value(
+                                &mut selected_update_channel,
+                                UpdateChannel::Live,
+                                "Live",
+                            );
+                        });
+                });
             });
+        });
 
         ui.add_space(SPACING_MD);
 
@@ -169,21 +297,32 @@ impl BoosterApp {
         let mut toggle_minimize_to_tray = false;
         let current_minimize_to_tray = self.minimize_to_tray;
 
-        card_frame()
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("System Tray").size(14.0).color(TEXT_PRIMARY).strong());
-                ui.add_space(SPACING_SM);
+        card_frame().show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("System Tray")
+                    .size(14.0)
+                    .color(TEXT_PRIMARY)
+                    .strong(),
+            );
+            ui.add_space(SPACING_SM);
 
-                toggle_minimize_to_tray = render_setting_row(
-                    ui,
-                    "Minimize to tray on close",
-                    "Keep SwiftTunnel running in the background when you close the window",
-                    current_minimize_to_tray,
-                );
+            toggle_minimize_to_tray = render_setting_row(
+                ui,
+                "Minimize to tray on close",
+                "Keep SwiftTunnel running in the background when you close the window",
+                current_minimize_to_tray,
+            );
 
-                ui.add_space(SPACING_SM);
-                ui.label(egui::RichText::new("Tip: Click the tray icon to show the window. Right-click for more options.").size(10.0).color(TEXT_MUTED).italics());
-            });
+            ui.add_space(SPACING_SM);
+            ui.label(
+                egui::RichText::new(
+                    "Tip: Click the tray icon to show the window. Right-click for more options.",
+                )
+                .size(10.0)
+                .color(TEXT_MUTED)
+                .italics(),
+            );
+        });
 
         ui.add_space(SPACING_MD);
 
@@ -191,30 +330,48 @@ impl BoosterApp {
         let mut toggle_discord_rpc = false;
         let current_discord_rpc = self.enable_discord_rpc;
 
-        card_frame()
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Discord").size(14.0).color(TEXT_PRIMARY).strong());
-                ui.add_space(SPACING_SM);
+        card_frame().show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Discord")
+                    .size(14.0)
+                    .color(TEXT_PRIMARY)
+                    .strong(),
+            );
+            ui.add_space(SPACING_SM);
 
-                toggle_discord_rpc = render_setting_row(
-                    ui,
-                    "Show status in Discord",
-                    "Display your VPN connection and game activity on your Discord profile",
-                    current_discord_rpc,
+            toggle_discord_rpc = render_setting_row(
+                ui,
+                "Show status in Discord",
+                "Display your VPN connection and game activity on your Discord profile",
+                current_discord_rpc,
+            );
+
+            ui.add_space(SPACING_SM);
+            if current_discord_rpc {
+                ui.label(
+                    egui::RichText::new("Your Discord friends can see your SwiftTunnel activity")
+                        .size(10.0)
+                        .color(TEXT_MUTED)
+                        .italics(),
                 );
-
-                ui.add_space(SPACING_SM);
-                if current_discord_rpc {
-                    ui.label(egui::RichText::new("Your Discord friends can see your SwiftTunnel activity").size(10.0).color(TEXT_MUTED).italics());
-                } else {
-                    ui.label(egui::RichText::new("Discord Rich Presence is disabled").size(10.0).color(TEXT_MUTED).italics());
-                }
-            });
+            } else {
+                ui.label(
+                    egui::RichText::new("Discord Rich Presence is disabled")
+                        .size(10.0)
+                        .color(TEXT_MUTED)
+                        .italics(),
+                );
+            }
+        });
 
         ui.add_space(SPACING_MD);
 
         // Experimental Features section (only visible to testers)
-        let is_tester = self.user_info.as_ref().map(|u| u.is_tester).unwrap_or(false);
+        let is_tester = self
+            .user_info
+            .as_ref()
+            .map(|u| u.is_tester)
+            .unwrap_or(false);
         let mut toggle_experimental_mode = false;
         let mut toggle_auto_routing = false;
         let current_experimental_mode = self.experimental_mode;
@@ -443,6 +600,23 @@ impl BoosterApp {
             self.update_settings.auto_check = !self.update_settings.auto_check;
             self.mark_dirty();
         }
+        if selected_update_channel != self.update_channel {
+            let previous_channel = self.update_channel;
+            self.update_channel = selected_update_channel;
+            self.mark_dirty();
+
+            if previous_channel == UpdateChannel::Stable
+                && selected_update_channel == UpdateChannel::Live
+            {
+                self.start_update_check();
+            } else if previous_channel == UpdateChannel::Live
+                && selected_update_channel == UpdateChannel::Stable
+            {
+                if let Ok(mut state) = self.update_state.lock() {
+                    *state = UpdateState::Idle;
+                }
+            }
+        }
         if toggle_minimize_to_tray {
             self.minimize_to_tray = !self.minimize_to_tray;
             // Also update the tray's setting
@@ -483,46 +657,103 @@ impl BoosterApp {
         let mut do_login = false;
         let mut open_signup = false;
 
-        card_frame()
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Sign In").size(16.0).color(TEXT_PRIMARY).strong());
-                ui.add_space(SPACING_MD);
+        card_frame().show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Sign In")
+                    .size(16.0)
+                    .color(TEXT_PRIMARY)
+                    .strong(),
+            );
+            ui.add_space(SPACING_MD);
 
-                ui.label(egui::RichText::new("Email").size(12.0).color(TEXT_SECONDARY));
-                ui.add_space(4.0);
-                ui.add(egui::TextEdit::singleline(&mut self.login_email).hint_text("you@example.com").desired_width(f32::INFINITY));
+            ui.label(
+                egui::RichText::new("Email")
+                    .size(12.0)
+                    .color(TEXT_SECONDARY),
+            );
+            ui.add_space(4.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.login_email)
+                    .hint_text("you@example.com")
+                    .desired_width(f32::INFINITY),
+            );
 
-                ui.add_space(SPACING_SM);
-                ui.label(egui::RichText::new("Password").size(12.0).color(TEXT_SECONDARY));
-                ui.add_space(4.0);
-                ui.add(egui::TextEdit::singleline(&mut self.login_password).hint_text("********").password(true).desired_width(f32::INFINITY));
+            ui.add_space(SPACING_SM);
+            ui.label(
+                egui::RichText::new("Password")
+                    .size(12.0)
+                    .color(TEXT_SECONDARY),
+            );
+            ui.add_space(4.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.login_password)
+                    .hint_text("********")
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            );
 
-                ui.add_space(SPACING_LG);
-                let btn_color = if can_login { ACCENT_PRIMARY } else { BG_ELEVATED };
-                let btn_text_color = if can_login { BG_BASE } else { TEXT_MUTED };
-                if ui.add(
-                    egui::Button::new(egui::RichText::new("Sign In").size(14.0).color(btn_text_color).strong())
-                        .fill(btn_color).rounding(8.0).min_size(egui::vec2(f32::INFINITY, 44.0))
-                ).clicked() && can_login {
-                    do_login = true;
+            ui.add_space(SPACING_LG);
+            let btn_color = if can_login {
+                ACCENT_PRIMARY
+            } else {
+                BG_ELEVATED
+            };
+            let btn_text_color = if can_login { BG_BASE } else { TEXT_MUTED };
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("Sign In")
+                            .size(14.0)
+                            .color(btn_text_color)
+                            .strong(),
+                    )
+                    .fill(btn_color)
+                    .rounding(8.0)
+                    .min_size(egui::vec2(f32::INFINITY, 44.0)),
+                )
+                .clicked()
+                && can_login
+            {
+                do_login = true;
+            }
+
+            ui.add_space(SPACING_SM);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("No account?")
+                        .size(12.0)
+                        .color(TEXT_SECONDARY),
+                );
+                if ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new("Sign up")
+                                .size(12.0)
+                                .color(ACCENT_PRIMARY)
+                                .underline(),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .clicked()
+                {
+                    open_signup = true;
                 }
-
-                ui.add_space(SPACING_SM);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("No account?").size(12.0).color(TEXT_SECONDARY));
-                    if ui.add(egui::Label::new(egui::RichText::new("Sign up").size(12.0).color(ACCENT_PRIMARY).underline()).sense(egui::Sense::click())).clicked() {
-                        open_signup = true;
-                    }
-                });
             });
+        });
 
-        if do_login { self.start_login(); }
-        if open_signup { crate::utils::open_url("https://swifttunnel.net/signup"); }
+        if do_login {
+            self.start_login();
+        }
+        if open_signup {
+            crate::utils::open_url("https://swifttunnel.net/signup");
+        }
 
         if let Some(error) = &self.auth_error.clone() {
             ui.add_space(SPACING_SM);
             egui::Frame::NONE
-                .fill(STATUS_ERROR.gamma_multiply(0.1)).rounding(8.0).inner_margin(12)
+                .fill(STATUS_ERROR.gamma_multiply(0.1))
+                .rounding(8.0)
+                .inner_margin(12)
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new(error).size(12.0).color(STATUS_ERROR));
                 });
@@ -531,49 +762,80 @@ impl BoosterApp {
 
     pub(crate) fn render_logged_in(&mut self, ui: &mut egui::Ui) {
         let user_email = self.user_info.as_ref().map(|u| u.email.clone());
-        let user_initial = user_email.as_ref()
+        let user_initial = user_email
+            .as_ref()
             .and_then(|e| e.chars().next())
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "U".to_string());
 
         let mut do_logout = false;
 
-        card_frame()
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    // Avatar circle
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 24.0, ACCENT_PRIMARY.gamma_multiply(0.2));
-                    ui.painter().circle_stroke(rect.center(), 24.0, egui::Stroke::new(1.5, ACCENT_PRIMARY.gamma_multiply(0.4)));
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, &user_initial, egui::FontId::proportional(20.0), ACCENT_PRIMARY);
+        card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Avatar circle
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
+                ui.painter()
+                    .circle_filled(rect.center(), 24.0, ACCENT_PRIMARY.gamma_multiply(0.2));
+                ui.painter().circle_stroke(
+                    rect.center(),
+                    24.0,
+                    egui::Stroke::new(1.5, ACCENT_PRIMARY.gamma_multiply(0.4)),
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &user_initial,
+                    egui::FontId::proportional(20.0),
+                    ACCENT_PRIMARY,
+                );
 
-                    ui.add_space(SPACING_SM);
-                    ui.vertical(|ui| {
-                        if let Some(email) = &user_email {
-                            ui.label(egui::RichText::new(email).size(14.0).color(TEXT_PRIMARY).strong());
-                        }
-                        ui.add_space(2.0);
-                        egui::Frame::NONE
-                            .fill(STATUS_CONNECTED.gamma_multiply(0.1))
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::symmetric(8, 3))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new("Signed in").size(11.0).color(STATUS_CONNECTED));
-                            });
-                    });
+                ui.add_space(SPACING_SM);
+                ui.vertical(|ui| {
+                    if let Some(email) = &user_email {
+                        ui.label(
+                            egui::RichText::new(email)
+                                .size(14.0)
+                                .color(TEXT_PRIMARY)
+                                .strong(),
+                        );
+                    }
+                    ui.add_space(2.0);
+                    egui::Frame::NONE
+                        .fill(STATUS_CONNECTED.gamma_multiply(0.1))
+                        .rounding(4.0)
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("Signed in")
+                                    .size(11.0)
+                                    .color(STATUS_CONNECTED),
+                            );
+                        });
+                });
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new("Sign Out").size(12.0).color(TEXT_SECONDARY))
-                                .fill(BG_ELEVATED).rounding(6.0)
-                                .stroke(egui::Stroke::new(1.0, BORDER_DEFAULT))
-                        ).clicked() {
-                            do_logout = true;
-                        }
-                    });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Sign Out")
+                                    .size(12.0)
+                                    .color(TEXT_SECONDARY),
+                            )
+                            .fill(BG_ELEVATED)
+                            .rounding(6.0)
+                            .stroke(egui::Stroke::new(1.0, BORDER_DEFAULT)),
+                        )
+                        .clicked()
+                    {
+                        do_logout = true;
+                    }
                 });
             });
+        });
 
-        if do_logout { self.logout(); }
+        if do_logout {
+            self.logout();
+        }
     }
 }

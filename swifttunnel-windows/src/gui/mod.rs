@@ -10,45 +10,51 @@
 //! - settings_tab: Settings panel UI
 //! - login: Authentication screens UI
 
-mod theme;
 mod animations;
-mod layout;
-mod connect_tab;
 mod boost_tab;
+mod connect_tab;
+mod layout;
+mod login;
 mod network_tab;
 mod settings_tab;
-mod login;
+mod theme;
 
 // Re-export theme colors and animation helpers for use in submodules
-pub use theme::*;
 pub use animations::*;
+pub use theme::*;
 
 use crate::auth::{AuthManager, AuthState, UserInfo};
 use crate::discord_rpc::DiscordManager;
 use crate::hidden_command;
-use swifttunnel_fps_booster::notification::show_server_location;
-use swifttunnel_fps_booster::roblox_watcher::{RobloxWatcher, RobloxEvent};
-use swifttunnel_fps_booster::utils::{PendingConnection, is_administrator, save_pending_connection, relaunch_elevated, pending_connection_path};
 use crate::network_analyzer::{
-    NetworkAnalyzerState, StabilityTestProgress, SpeedTestProgress,
-    run_stability_test, run_speed_test, speed_test::format_speed,
+    NetworkAnalyzerState, SpeedTestProgress, StabilityTestProgress, run_speed_test,
+    run_stability_test, speed_test::format_speed,
 };
+use crate::network_booster::NetworkBooster;
 use crate::performance_monitor::SystemInfo;
 use crate::roblox_optimizer::RobloxOptimizer;
-use crate::settings::{load_settings, save_settings, AppSettings, WindowState};
+use crate::settings::{AppSettings, WindowState, load_settings, save_settings};
 use crate::structs::*;
 use crate::system_optimizer::SystemOptimizer;
-use crate::network_booster::NetworkBooster;
 use crate::tray::SystemTray;
-use crate::updater::{UpdateSettings, UpdateState};
 use crate::updater::auto_updater::{check_for_updates_background, download_and_apply_update};
 use crate::updater::types::UpdateInfo;
-use crate::vpn::{ConnectionState, VpnConnection, DynamicServerList, DynamicGamingRegion, load_server_list, ServerListSource, GamePreset, get_apps_for_preset_set, ThroughputStats};
+use crate::updater::{UpdateChannel, UpdateSettings, UpdateState};
+use crate::vpn::{
+    ConnectionState, DynamicGamingRegion, DynamicServerList, GamePreset, ServerListSource,
+    ThroughputStats, VpnConnection, get_apps_for_preset_set, load_server_list,
+};
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use swifttunnel_fps_booster::notification::show_server_location;
+use swifttunnel_fps_booster::roblox_watcher::{RobloxEvent, RobloxWatcher};
+use swifttunnel_fps_booster::utils::{
+    PendingConnection, is_administrator, pending_connection_path, relaunch_elevated,
+    save_pending_connection,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  AUTO-CONNECT FROM ELEVATION
@@ -77,10 +83,19 @@ fn take_auto_connect_pending() -> Option<PendingConnection> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(PartialEq, Clone, Copy, Debug)]
-enum Tab { Connect, Boost, Network, Settings }
+enum Tab {
+    Connect,
+    Boost,
+    Network,
+    Settings,
+}
 
 #[derive(PartialEq, Clone, Copy)]
-enum SettingsSection { General, Performance, Account }
+enum SettingsSection {
+    General,
+    Performance,
+    Account,
+}
 
 /// Smart server selection state - shows animation while testing servers
 #[derive(Clone)]
@@ -123,6 +138,7 @@ pub struct BoosterApp {
     login_password: String,
 
     settings_dirty: bool,
+    boost_changes_pending: bool,
     last_save_time: std::time::Instant,
     settings_section: SettingsSection,
 
@@ -158,6 +174,7 @@ pub struct BoosterApp {
     // Auto-updater state
     update_state: Arc<Mutex<UpdateState>>,
     update_settings: UpdateSettings,
+    update_channel: UpdateChannel,
     update_check_started: bool,
 
     // Minimize to tray setting
@@ -280,7 +297,7 @@ impl BoosterApp {
                 .worker_threads(2)
                 .enable_all()
                 .build()
-                .expect("Failed to create tokio runtime")
+                .expect("Failed to create tokio runtime"),
         );
 
         // Create channel for immediate auth state notifications from async operations
@@ -291,10 +308,12 @@ impl BoosterApp {
         let (speed_tx, speed_rx) = std::sync::mpsc::channel::<SpeedTestProgress>();
 
         // Create channel for network boost operation results
-        let (network_boost_result_tx, network_boost_result_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
+        let (network_boost_result_tx, network_boost_result_rx) =
+            std::sync::mpsc::channel::<std::result::Result<(), String>>();
 
         // Create channel for smart server selection ping results
-        let (smart_selection_tx, smart_selection_rx) = std::sync::mpsc::channel::<(String, Option<u32>)>();
+        let (smart_selection_tx, smart_selection_rx) =
+            std::sync::mpsc::channel::<(String, Option<u32>)>();
 
         // Initialize auth manager - this can only fail if Windows DPAPI is unavailable,
         // which indicates a fundamental system issue. In that case, panic is acceptable.
@@ -320,7 +339,9 @@ impl BoosterApp {
                                 let new_state = auth.get_state();
                                 let _ = tx.send(new_state);
                             }
-                            Err(e) => log::warn!("Startup profile refresh failed (non-fatal): {}", e),
+                            Err(e) => {
+                                log::warn!("Startup profile refresh failed (non-fatal): {}", e)
+                            }
                         }
                     }
                 });
@@ -376,22 +397,32 @@ impl BoosterApp {
                     // Show "Measuring..." indicator only on first round
                     if is_first_round {
                         finding_clone.store(true, Ordering::SeqCst);
-                        log::info!("Starting initial latency measurement for {} regions...", regions.len());
+                        log::info!(
+                            "Starting initial latency measurement for {} regions...",
+                            regions.len()
+                        );
                     } else {
                         log::debug!("Refreshing latencies for {} regions...", regions.len());
                     }
 
                     for region in &regions {
-                        let server_ips: Vec<(String, String)> = region.servers.iter()
+                        let server_ips: Vec<(String, String)> = region
+                            .servers
+                            .iter()
                             .filter_map(|server_id| {
-                                servers.iter()
+                                servers
+                                    .iter()
                                     .find(|s| &s.region == server_id)
                                     .map(|s| (server_id.clone(), s.ip.clone()))
                             })
                             .collect();
 
                         if is_first_round {
-                            log::info!("Pinging region '{}' with {} servers", region.id, server_ips.len());
+                            log::info!(
+                                "Pinging region '{}' with {} servers",
+                                region.id,
+                                server_ips.len()
+                            );
                         }
 
                         if server_ips.is_empty() {
@@ -399,11 +430,17 @@ impl BoosterApp {
                         }
 
                         // Use fast ping for real-time updates (1 ping instead of 2)
-                        if let Some((best_server_id, latency)) = ping_region_fast(&server_ips).await {
+                        if let Some((best_server_id, latency)) = ping_region_fast(&server_ips).await
+                        {
                             if let Ok(mut lat) = latencies_clone.lock() {
                                 lat.insert(region.id.clone(), (best_server_id.clone(), latency));
                                 if is_first_round {
-                                    log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
+                                    log::info!(
+                                        "Region {} best server: {} ({}ms)",
+                                        region.id,
+                                        best_server_id,
+                                        latency
+                                    );
                                 }
                             }
                         }
@@ -437,9 +474,13 @@ impl BoosterApp {
             login_email: String::new(),
             login_password: String::new(),
             settings_dirty: false,
+            boost_changes_pending: false,
             last_save_time: std::time::Instant::now(),
             settings_section: SettingsSection::General,
-            system_tray: Self::init_system_tray(saved_settings.optimizations_active, saved_settings.minimize_to_tray),
+            system_tray: Self::init_system_tray(
+                saved_settings.optimizations_active,
+                saved_settings.minimize_to_tray,
+            ),
             vpn_connection: Arc::new(Mutex::new(VpnConnection::new())),
             vpn_state: ConnectionState::Disconnected,
             dynamic_server_list,
@@ -450,7 +491,9 @@ impl BoosterApp {
             region_latencies,
             finding_best_server,
             // Convert saved game preset strings to HashSet<GamePreset>
-            selected_game_presets: saved_settings.selected_game_presets.iter()
+            selected_game_presets: saved_settings
+                .selected_game_presets
+                .iter()
                 .filter_map(|s| match s.as_str() {
                     "roblox" => Some(GamePreset::Roblox),
                     "valorant" => Some(GamePreset::Valorant),
@@ -472,6 +515,7 @@ impl BoosterApp {
             // Auto-updater
             update_state: Arc::new(Mutex::new(UpdateState::Idle)),
             update_settings: saved_settings.update_settings.clone(),
+            update_channel: saved_settings.update_channel,
             update_check_started: false,
 
             // Minimize to tray
@@ -504,7 +548,9 @@ impl BoosterApp {
                         Some(watcher)
                     }
                     None => {
-                        log::info!("Roblox logs directory not found - game server detection disabled");
+                        log::info!(
+                            "Roblox logs directory not found - game server detection disabled"
+                        );
                         None
                     }
                 }
@@ -520,7 +566,8 @@ impl BoosterApp {
             network_analyzer_state: {
                 let mut state = NetworkAnalyzerState::default();
                 // Load cached results from settings
-                state.stability.results = saved_settings.network_test_results.last_stability.clone();
+                state.stability.results =
+                    saved_settings.network_test_results.last_stability.clone();
                 state.speed.results = saved_settings.network_test_results.last_speed.clone();
                 state
             },
@@ -590,7 +637,11 @@ impl BoosterApp {
                 let pixels = rgba.into_raw();
 
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
-                Some(ctx.load_texture("swifttunnel-logo", color_image, egui::TextureOptions::LINEAR))
+                Some(ctx.load_texture(
+                    "swifttunnel-logo",
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                ))
             }
             Err(e) => {
                 log::warn!("Failed to load logo image: {}", e);
@@ -650,8 +701,14 @@ impl BoosterApp {
         self.settings_dirty = true;
     }
 
+    fn mark_boost_changes_pending(&mut self) {
+        self.boost_changes_pending = true;
+        self.mark_dirty();
+    }
+
     fn save_if_needed(&mut self, ctx: &egui::Context) {
-        if !self.settings_dirty || self.last_save_time.elapsed() < std::time::Duration::from_secs(2) {
+        if !self.settings_dirty || self.last_save_time.elapsed() < std::time::Duration::from_secs(2)
+        {
             return;
         }
 
@@ -659,10 +716,13 @@ impl BoosterApp {
             let rect = i.viewport().outer_rect;
             let maximized = i.viewport().maximized.unwrap_or(false);
             rect.map(|r| WindowState {
-                x: Some(r.min.x), y: Some(r.min.y),
-                width: r.width().max(400.0), height: r.height().max(500.0),
+                x: Some(r.min.x),
+                y: Some(r.min.y),
+                width: r.width().max(400.0),
+                height: r.height().max(500.0),
                 maximized,
-            }).unwrap_or_default()
+            })
+            .unwrap_or_default()
         });
 
         let settings = AppSettings {
@@ -673,19 +733,29 @@ impl BoosterApp {
             selected_region: self.selected_region.clone(),
             selected_server: self.selected_server.clone(),
             current_tab: match self.current_tab {
-                Tab::Connect => "connect", Tab::Boost => "boost", Tab::Network => "network", Tab::Settings => "settings",
-            }.to_string(),
+                Tab::Connect => "connect",
+                Tab::Boost => "boost",
+                Tab::Network => "network",
+                Tab::Settings => "settings",
+            }
+            .to_string(),
             update_settings: self.update_settings.clone(),
+            update_channel: self.update_channel,
             minimize_to_tray: self.minimize_to_tray,
             last_connected_region: self.last_connected_region.clone(),
             expanded_boost_info: self.expanded_boost_info.iter().cloned().collect(),
             // Convert HashSet<GamePreset> to Vec<String> for storage
-            selected_game_presets: self.selected_game_presets.iter()
-                .map(|p| match p {
-                    GamePreset::Roblox => "roblox",
-                    GamePreset::Valorant => "valorant",
-                    GamePreset::Fortnite => "fortnite",
-                }.to_string())
+            selected_game_presets: self
+                .selected_game_presets
+                .iter()
+                .map(|p| {
+                    match p {
+                        GamePreset::Roblox => "roblox",
+                        GamePreset::Valorant => "valorant",
+                        GamePreset::Fortnite => "fortnite",
+                    }
+                    .to_string()
+                })
                 .collect(),
             // Save network test results
             network_test_results: crate::network_analyzer::NetworkTestResultsCache {
@@ -737,7 +807,8 @@ async fn ping_region_fast(servers: &[(String, String)]) -> Option<(String, u32)>
                     .args(["-n", "1", "-w", "1500", &ip])
                     .output()
             }
-        }).await;
+        })
+        .await;
 
         let latency = match ping_result {
             Ok(Ok(output)) if output.status.success() => {
@@ -771,7 +842,7 @@ async fn ping_region_fast(servers: &[(String, String)]) -> Option<(String, u32)>
 async fn tcp_ping_fast(ip: &str, port: u16) -> Option<u32> {
     use std::net::SocketAddr;
     use tokio::net::TcpStream;
-    use tokio::time::{timeout, Duration, Instant};
+    use tokio::time::{Duration, Instant, timeout};
 
     let addr: SocketAddr = format!("{}:{}", ip, port).parse().ok()?;
     let start = Instant::now();
@@ -808,7 +879,8 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
                         .args(["-n", "1", "-w", "2000", &ip])
                         .output()
                 }
-            }).await;
+            })
+            .await;
 
             // Handle spawn_blocking result
             let output = match ping_result {
@@ -818,7 +890,12 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
                     None
                 }
                 Err(e) => {
-                    log::warn!("  Ping {} to {}: spawn_blocking failed: {}", ping_num + 1, server_ip, e);
+                    log::warn!(
+                        "  Ping {} to {}: spawn_blocking failed: {}",
+                        ping_num + 1,
+                        server_ip,
+                        e
+                    );
                     None
                 }
             };
@@ -828,7 +905,12 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
                 let stderr = String::from_utf8_lossy(&output.stderr);
 
                 if !output.status.success() {
-                    log::debug!("  Ping {} failed: status={}, stderr={}", ping_num + 1, output.status, stderr.trim());
+                    log::debug!(
+                        "  Ping {} failed: status={}, stderr={}",
+                        ping_num + 1,
+                        output.status,
+                        stderr.trim()
+                    );
                     continue;
                 }
 
@@ -837,7 +919,12 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
                     total += ms;
                     count += 1;
                 } else {
-                    log::warn!("  Ping {} to {}: failed to parse output: '{}'", ping_num + 1, server_ip, stdout.lines().next().unwrap_or("(empty)"));
+                    log::warn!(
+                        "  Ping {} to {}: failed to parse output: '{}'",
+                        ping_num + 1,
+                        server_ip,
+                        stdout.lines().next().unwrap_or("(empty)")
+                    );
                 }
             }
 
@@ -847,7 +934,10 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
 
         // If ICMP failed, try TCP fallback on port 8082 (WebSocket echo port)
         if count == 0 {
-            log::info!("  ICMP failed for {}, trying TCP fallback on port 8082", server_ip);
+            log::info!(
+                "  ICMP failed for {}, trying TCP fallback on port 8082",
+                server_ip
+            );
             if let Some(tcp_ms) = tcp_ping(server_ip, 8082).await {
                 log::info!("  TCP ping to {}: {}ms", server_ip, tcp_ms);
                 total = tcp_ms;
@@ -857,7 +947,12 @@ async fn ping_region_async(servers: &[(String, String)]) -> Option<(String, u32)
 
         if count > 0 {
             let avg = total / count;
-            log::info!("  Server {} latency: {}ms ({} pings)", server_id, avg, count);
+            log::info!(
+                "  Server {} latency: {}ms ({} pings)",
+                server_id,
+                avg,
+                count
+            );
             let is_better = match &best_result {
                 None => true,
                 Some((_, best_latency)) => avg < *best_latency,
@@ -896,7 +991,7 @@ fn parse_ping_output(stdout: &str) -> Option<u32> {
 async fn tcp_ping(ip: &str, port: u16) -> Option<u32> {
     use std::net::SocketAddr;
     use tokio::net::TcpStream;
-    use tokio::time::{timeout, Duration, Instant};
+    use tokio::time::{Duration, Instant, timeout};
 
     let addr: SocketAddr = format!("{}:{}", ip, port).parse().ok()?;
     let start = Instant::now();
@@ -927,12 +1022,20 @@ impl eframe::App for BoosterApp {
         // Handle keyboard shortcuts first
         let switch_to_tab = ctx.input(|i| {
             if i.modifiers.ctrl {
-                if i.key_pressed(egui::Key::Num1) { Some(Tab::Connect) }
-                else if i.key_pressed(egui::Key::Num2) { Some(Tab::Boost) }
-                else if i.key_pressed(egui::Key::Num3) { Some(Tab::Network) }
-                else if i.key_pressed(egui::Key::Num4) { Some(Tab::Settings) }
-                else { None }
-            } else { None }
+                if i.key_pressed(egui::Key::Num1) {
+                    Some(Tab::Connect)
+                } else if i.key_pressed(egui::Key::Num2) {
+                    Some(Tab::Boost)
+                } else if i.key_pressed(egui::Key::Num3) {
+                    Some(Tab::Network)
+                } else if i.key_pressed(egui::Key::Num4) {
+                    Some(Tab::Settings)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         });
         if let Some(tab) = switch_to_tab {
             if matches!(self.auth_state, AuthState::LoggedIn(_)) {
@@ -942,7 +1045,8 @@ impl eframe::App for BoosterApp {
         }
 
         // Ctrl+Shift+C for quick connect/disconnect
-        let quick_toggle = ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::C));
+        let quick_toggle =
+            ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::C));
         if quick_toggle && matches!(self.auth_state, AuthState::LoggedIn(_)) {
             if self.vpn_state.is_connected() || self.vpn_state.is_connecting() {
                 self.disconnect_vpn();
@@ -982,7 +1086,8 @@ impl eframe::App for BoosterApp {
                 if is_logged_in && servers_loaded && is_disconnected {
                     log::info!(
                         "Auto-connecting from elevation: region={}, server={}",
-                        pending.region, pending.server
+                        pending.region,
+                        pending.server
                     );
 
                     // Apply pending connection settings
@@ -994,20 +1099,24 @@ impl eframe::App for BoosterApp {
                     for app in &pending.apps {
                         match app.to_lowercase().as_str() {
                             "robloxplayerbeta.exe" | "robloxplayerlauncher.exe" => {
-                                self.selected_game_presets.insert(crate::vpn::GamePreset::Roblox);
+                                self.selected_game_presets
+                                    .insert(crate::vpn::GamePreset::Roblox);
                             }
                             "valorant.exe" | "valorant-win64-shipping.exe" => {
-                                self.selected_game_presets.insert(crate::vpn::GamePreset::Valorant);
+                                self.selected_game_presets
+                                    .insert(crate::vpn::GamePreset::Valorant);
                             }
                             "fortnite.exe" | "fortniteclient-win64-shipping.exe" => {
-                                self.selected_game_presets.insert(crate::vpn::GamePreset::Fortnite);
+                                self.selected_game_presets
+                                    .insert(crate::vpn::GamePreset::Fortnite);
                             }
                             _ => {}
                         }
                     }
                     // If no presets were matched, default to Roblox
                     if self.selected_game_presets.is_empty() {
-                        self.selected_game_presets.insert(crate::vpn::GamePreset::Roblox);
+                        self.selected_game_presets
+                            .insert(crate::vpn::GamePreset::Roblox);
                     }
 
                     // Mark as consumed before connecting to prevent loop
@@ -1026,14 +1135,27 @@ impl eframe::App for BoosterApp {
             || self.connecting_initiated.is_some(); // Include instant connect feedback
         let is_logging_in = matches!(self.auth_state, AuthState::LoggingIn);
         let is_awaiting_oauth_here = matches!(self.auth_state, AuthState::AwaitingOAuthCallback(_));
-        let is_updating = self.update_state.lock().map(|s| s.is_downloading()).unwrap_or(false);
+        let is_updating = self
+            .update_state
+            .lock()
+            .map(|s| s.is_downloading())
+            .unwrap_or(false);
         let has_animations = self.animations.has_active_animations();
-        let is_connected = self.vpn_state.is_connected();  // For pulse animation
-        let is_network_testing = self.network_analyzer_state.stability.running || self.network_analyzer_state.speed.running;
-        let has_pending_latency = self.pending_latency.is_some();  // For countdown display
-        let is_smart_selecting = self.smart_selection.is_some();  // For smart server selection animation
+        let is_connected = self.vpn_state.is_connected(); // For pulse animation
+        let is_network_testing = self.network_analyzer_state.stability.running
+            || self.network_analyzer_state.speed.running;
+        let has_pending_latency = self.pending_latency.is_some(); // For countdown display
+        let is_smart_selecting = self.smart_selection.is_some(); // For smart server selection animation
 
-        if is_loading || is_vpn_transitioning || is_logging_in || is_awaiting_oauth_here || is_updating || has_animations || is_network_testing || is_smart_selecting {
+        if is_loading
+            || is_vpn_transitioning
+            || is_logging_in
+            || is_awaiting_oauth_here
+            || is_updating
+            || has_animations
+            || is_network_testing
+            || is_smart_selecting
+        {
             // Fast repaint for animations (60 FPS target)
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         } else if has_pending_latency {
@@ -1049,14 +1171,17 @@ impl eframe::App for BoosterApp {
 
         // Handle tray events
         let (toggle_opt, quit, show_window) = if let Some(ref tray) = self.system_tray {
-            (tray.check_toggle_optimizations(), tray.check_quit_requested(), tray.check_show_window())
+            (
+                tray.check_toggle_optimizations(),
+                tray.check_quit_requested(),
+                tray.check_show_window(),
+            )
         } else {
             (false, false, false)
         };
 
         if toggle_opt {
-            self.state.optimizations_active = !self.state.optimizations_active;
-            self.mark_dirty();
+            self.toggle_optimizations();
         }
 
         // Show window when tray icon clicked or "Show" menu item clicked
@@ -1067,7 +1192,7 @@ impl eframe::App for BoosterApp {
             #[cfg(target_os = "windows")]
             {
                 use windows::Win32::UI::WindowsAndMessaging::{
-                    ShowWindow, SetForegroundWindow, FindWindowW, SW_RESTORE, SW_SHOW,
+                    FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
                 };
                 use windows::core::PCWSTR;
 
@@ -1129,7 +1254,11 @@ impl eframe::App for BoosterApp {
         // Handle close button - minimize to tray instead of closing if enabled
         // BUT only if we're not force quitting from the tray menu
         let close_requested = ctx.input(|i| i.viewport().close_requested());
-        if close_requested && !self.force_quit && self.minimize_to_tray && self.system_tray.is_some() {
+        if close_requested
+            && !self.force_quit
+            && self.minimize_to_tray
+            && self.system_tray.is_some()
+        {
             // Cancel the close and minimize to tray instead
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -1143,10 +1272,18 @@ impl eframe::App for BoosterApp {
             // Sync auth error from AuthState::Error for display
             if let AuthState::Error(ref msg) = new_state {
                 let user_friendly = match msg.as_str() {
-                    m if m.contains("Invalid login credentials") => "Invalid email or password. Please try again.".to_string(),
-                    m if m.contains("Email not confirmed") => "Please verify your email address before signing in.".to_string(),
-                    m if m.contains("Network error") => "Unable to connect. Please check your internet connection.".to_string(),
-                    m if m.contains("timeout") || m.contains("Timeout") => "Connection timed out. Please try again.".to_string(),
+                    m if m.contains("Invalid login credentials") => {
+                        "Invalid email or password. Please try again.".to_string()
+                    }
+                    m if m.contains("Email not confirmed") => {
+                        "Please verify your email address before signing in.".to_string()
+                    }
+                    m if m.contains("Network error") => {
+                        "Unable to connect. Please check your internet connection.".to_string()
+                    }
+                    m if m.contains("timeout") || m.contains("Timeout") => {
+                        "Connection timed out. Please try again.".to_string()
+                    }
                     _ => msg.clone(),
                 };
                 self.auth_error = Some(user_friendly);
@@ -1164,7 +1301,10 @@ impl eframe::App for BoosterApp {
         while let Ok(progress) = self.stability_progress_rx.try_recv() {
             match progress {
                 StabilityTestProgress::PingSample(sample) => {
-                    self.network_analyzer_state.stability.ping_samples.push(sample);
+                    self.network_analyzer_state
+                        .stability
+                        .ping_samples
+                        .push(sample);
                 }
                 StabilityTestProgress::Progress(p) => {
                     self.network_analyzer_state.stability.progress = p;
@@ -1186,7 +1326,8 @@ impl eframe::App for BoosterApp {
         while let Ok(progress) = self.speed_progress_rx.try_recv() {
             match progress {
                 SpeedTestProgress::DownloadStarted => {
-                    self.network_analyzer_state.speed.phase = crate::network_analyzer::SpeedTestPhase::Download;
+                    self.network_analyzer_state.speed.phase =
+                        crate::network_analyzer::SpeedTestPhase::Download;
                     self.network_analyzer_state.speed.phase_progress = 0.0;
                 }
                 SpeedTestProgress::DownloadProgress(speed, p) => {
@@ -1196,7 +1337,7 @@ impl eframe::App for BoosterApp {
                     self.download_gauge_animation = Some(Animation::new(
                         self.network_analyzer_state.speed.download_speed.min(speed),
                         speed,
-                        0.3
+                        0.3,
                     ));
                 }
                 SpeedTestProgress::DownloadComplete(speed) => {
@@ -1204,7 +1345,8 @@ impl eframe::App for BoosterApp {
                     self.network_analyzer_state.speed.phase_progress = 1.0;
                 }
                 SpeedTestProgress::UploadStarted => {
-                    self.network_analyzer_state.speed.phase = crate::network_analyzer::SpeedTestPhase::Upload;
+                    self.network_analyzer_state.speed.phase =
+                        crate::network_analyzer::SpeedTestPhase::Upload;
                     self.network_analyzer_state.speed.phase_progress = 0.0;
                 }
                 SpeedTestProgress::UploadProgress(speed, p) => {
@@ -1214,7 +1356,7 @@ impl eframe::App for BoosterApp {
                     self.upload_gauge_animation = Some(Animation::new(
                         self.network_analyzer_state.speed.upload_speed.min(speed),
                         speed,
-                        0.3
+                        0.3,
                     ));
                 }
                 SpeedTestProgress::UploadComplete(speed) => {
@@ -1223,14 +1365,16 @@ impl eframe::App for BoosterApp {
                 }
                 SpeedTestProgress::Completed(results) => {
                     self.network_analyzer_state.speed.running = false;
-                    self.network_analyzer_state.speed.phase = crate::network_analyzer::SpeedTestPhase::Complete;
+                    self.network_analyzer_state.speed.phase =
+                        crate::network_analyzer::SpeedTestPhase::Complete;
                     self.network_analyzer_state.speed.results = Some(results);
                     self.mark_dirty(); // Save results
                 }
                 SpeedTestProgress::Error(msg) => {
                     log::error!("Speed test error: {}", msg);
                     self.network_analyzer_state.speed.running = false;
-                    self.network_analyzer_state.speed.phase = crate::network_analyzer::SpeedTestPhase::Idle;
+                    self.network_analyzer_state.speed.phase =
+                        crate::network_analyzer::SpeedTestPhase::Idle;
                 }
             }
         }
@@ -1278,7 +1422,8 @@ impl eframe::App for BoosterApp {
 
             // Check for timeout (10 seconds max) or completion
             let should_connect = if let Some(ref selection) = self.smart_selection {
-                selection.completed || selection.started_at.elapsed() > std::time::Duration::from_secs(10)
+                selection.completed
+                    || selection.started_at.elapsed() > std::time::Duration::from_secs(10)
             } else {
                 false
             };
@@ -1289,13 +1434,17 @@ impl eframe::App for BoosterApp {
                     if let Some((best_server_id, best_latency)) = selection.best_server {
                         log::info!(
                             "Smart selection finished: connecting to {} ({}ms)",
-                            best_server_id, best_latency
+                            best_server_id,
+                            best_latency
                         );
                         // Override selected server with the best one found
                         self.selected_server = best_server_id.clone();
                         // Update region latencies cache with our result
                         if let Ok(mut lat) = self.region_latencies.try_lock() {
-                            lat.insert(selection.region_id.clone(), (best_server_id.clone(), best_latency));
+                            lat.insert(
+                                selection.region_id.clone(),
+                                (best_server_id.clone(), best_latency),
+                            );
                         }
                         // Now actually connect
                         self.connect_vpn_immediate();
@@ -1323,7 +1472,9 @@ impl eframe::App for BoosterApp {
                 // This ensures the optimistic animation stops once the real state takes over
                 if self.connecting_initiated.is_some() {
                     let was_disconnected = matches!(self.vpn_state, ConnectionState::Disconnected);
-                    let is_transitioning = new_state.is_connecting() || new_state.is_connected() || matches!(new_state, ConnectionState::Error(_));
+                    let is_transitioning = new_state.is_connecting()
+                        || new_state.is_connected()
+                        || matches!(new_state, ConnectionState::Error(_));
                     if was_disconnected && is_transitioning {
                         log::debug!("VPN state changed, clearing connecting_initiated");
                         self.connecting_initiated = None;
@@ -1349,7 +1500,10 @@ impl eframe::App for BoosterApp {
                 }
 
                 // Process detection notifications - check for new tunneled processes
-                if let ConnectionState::Connected { tunneled_processes, .. } = &new_state {
+                if let ConnectionState::Connected {
+                    tunneled_processes, ..
+                } = &new_state
+                {
                     for process in tunneled_processes {
                         if !self.previously_tunneled.contains(process) {
                             // New process detected - show notification
@@ -1382,15 +1536,24 @@ impl eframe::App for BoosterApp {
                     self.throughput_stats = vpn.get_throughput_stats();
                     self.throughput_history.clear();
                     self.last_throughput_bytes = None;
-                    log::info!("Throughput stats tracking: {:?}", self.throughput_stats.is_some());
+                    log::info!(
+                        "Throughput stats tracking: {:?}",
+                        self.throughput_stats.is_some()
+                    );
 
                     // Store config ID for latency updates
                     self.current_config_id = vpn.get_config_id();
-                    log::info!("Config ID for latency updates: {:?}", self.current_config_id);
+                    log::info!(
+                        "Config ID for latency updates: {:?}",
+                        self.current_config_id
+                    );
 
                     // Apply artificial latency if configured (deferred until lock is released)
                     if self.artificial_latency_ms > 0 && self.current_config_id.is_some() {
-                        log::info!("Will apply artificial latency: +{}ms", self.artificial_latency_ms);
+                        log::info!(
+                            "Will apply artificial latency: +{}ms",
+                            self.artificial_latency_ms
+                        );
                         should_apply_latency = true;
                     }
                 }
@@ -1405,11 +1568,18 @@ impl eframe::App for BoosterApp {
                     ConnectionState::Connecting { .. } => {
                         self.discord_manager.set_connecting(&self.selected_region);
                     }
-                    ConnectionState::Connected { server_region, tunneled_processes, .. } => {
+                    ConnectionState::Connected {
+                        server_region,
+                        tunneled_processes,
+                        ..
+                    } => {
                         // Check if any games are running (single pass with find_map)
                         let detected_game = tunneled_processes.iter().find_map(|p| {
                             let lower = p.to_lowercase();
-                            if lower.contains("roblox") || lower.contains("valorant") || lower.contains("fortnite") {
+                            if lower.contains("roblox")
+                                || lower.contains("valorant")
+                                || lower.contains("fortnite")
+                            {
                                 Some(p.as_str())
                             } else {
                                 None
@@ -1467,10 +1637,18 @@ impl eframe::App for BoosterApp {
                 if let AuthState::Error(ref msg) = new_state {
                     // Format user-friendly error messages
                     let user_friendly = match msg.as_str() {
-                        m if m.contains("Invalid login credentials") => "Invalid email or password. Please try again.".to_string(),
-                        m if m.contains("Email not confirmed") => "Please verify your email address before signing in.".to_string(),
-                        m if m.contains("Network error") => "Unable to connect. Please check your internet connection.".to_string(),
-                        m if m.contains("timeout") || m.contains("Timeout") => "Connection timed out. Please try again.".to_string(),
+                        m if m.contains("Invalid login credentials") => {
+                            "Invalid email or password. Please try again.".to_string()
+                        }
+                        m if m.contains("Email not confirmed") => {
+                            "Please verify your email address before signing in.".to_string()
+                        }
+                        m if m.contains("Network error") => {
+                            "Unable to connect. Please check your internet connection.".to_string()
+                        }
+                        m if m.contains("timeout") || m.contains("Timeout") => {
+                            "Connection timed out. Please try again.".to_string()
+                        }
                         _ => msg.clone(),
                     };
                     self.auth_error = Some(user_friendly);
@@ -1519,11 +1697,16 @@ impl eframe::App for BoosterApp {
 
         // Check if WinPkFilter driver is installed (once on startup, after 1 second)
         if self.driver_installed.is_none() {
-            static DRIVER_CHECK_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            static DRIVER_CHECK_TIME: std::sync::OnceLock<std::time::Instant> =
+                std::sync::OnceLock::new();
             let start = DRIVER_CHECK_TIME.get_or_init(std::time::Instant::now);
             if start.elapsed() >= std::time::Duration::from_secs(1) {
-                let available = crate::vpn::split_tunnel::SplitTunnelDriver::check_driver_available();
-                log::info!("Driver availability check: {}", if available { "installed" } else { "not found" });
+                let available =
+                    crate::vpn::split_tunnel::SplitTunnelDriver::check_driver_available();
+                log::info!(
+                    "Driver availability check: {}",
+                    if available { "installed" } else { "not found" }
+                );
                 self.driver_installed = Some(available);
             }
         }
@@ -1537,12 +1720,13 @@ impl eframe::App for BoosterApp {
                     if success {
                         log::info!("Driver installed successfully, re-checking availability");
                         self.driver_installed = Some(
-                            crate::vpn::split_tunnel::SplitTunnelDriver::check_driver_available()
+                            crate::vpn::split_tunnel::SplitTunnelDriver::check_driver_available(),
                         );
                     } else {
                         log::warn!("Driver installation failed or was cancelled");
                         self.status_message = Some((
-                            "Driver installation failed. You may need to restart your PC.".to_string(),
+                            "Driver installation failed. You may need to restart your PC."
+                                .to_string(),
                             STATUS_ERROR,
                             std::time::Instant::now(),
                         ));
@@ -1561,7 +1745,9 @@ impl eframe::App for BoosterApp {
                         // Async ipinfo.io lookup for accurate region detection
                         let ip_owned = *ip;
                         self.runtime.spawn(async move {
-                            if let Some((_region, location)) = crate::geolocation::lookup_game_server_region(ip_owned).await {
+                            if let Some((_region, location)) =
+                                crate::geolocation::lookup_game_server_region(ip_owned).await
+                            {
                                 log::info!("Game server {} detected: {}", ip_owned, location);
                                 show_server_location(&location);
                             }
@@ -1581,8 +1767,14 @@ impl eframe::App for BoosterApp {
                                 self.detected_game_servers.insert(ip);
                                 // Async ipinfo.io lookup for accurate region detection
                                 self.runtime.spawn(async move {
-                                    if let Some((_region, location)) = crate::geolocation::lookup_game_server_region(ip).await {
-                                        log::info!("Roblox game server detected (log watcher): {} ({})", ip, location);
+                                    if let Some((_region, location)) =
+                                        crate::geolocation::lookup_game_server_region(ip).await
+                                    {
+                                        log::info!(
+                                            "Roblox game server detected (log watcher): {} ({})",
+                                            ip,
+                                            location
+                                        );
                                         show_server_location(&location);
                                     }
                                 });
@@ -1637,10 +1829,12 @@ impl BoosterApp {
                                 color: egui::Color32::from_black_alpha((40.0 * alpha) as u8),
                             })
                             .show(ui, |ui| {
-                                ui.label(egui::RichText::new(msg)
-                                    .color(egui::Color32::WHITE.gamma_multiply(alpha))
-                                    .size(14.0)
-                                    .strong());
+                                ui.label(
+                                    egui::RichText::new(msg)
+                                        .color(egui::Color32::WHITE.gamma_multiply(alpha))
+                                        .size(14.0)
+                                        .strong(),
+                                );
                             });
                     });
 
@@ -1655,12 +1849,14 @@ impl BoosterApp {
 
     fn render_header(&self, ui: &mut egui::Ui) {
         // Header with subtle gradient background
-        let header_rect = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::hover()).0;
+        let header_rect = ui
+            .allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::hover())
+            .0;
 
         // Subtle gradient line at bottom
         let line_rect = egui::Rect::from_min_size(
             egui::pos2(header_rect.min.x, header_rect.max.y - 1.0),
-            egui::vec2(header_rect.width(), 1.0)
+            egui::vec2(header_rect.width(), 1.0),
         );
         ui.painter().rect_filled(line_rect, 0.0, BG_ELEVATED);
 
@@ -1679,8 +1875,12 @@ impl BoosterApp {
                     ui.add(image);
                 } else {
                     // Fallback: simple colored circle if texture failed to load
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), logo_size * 0.45, ACCENT_CYAN);
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(logo_size, logo_size),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter()
+                        .circle_filled(rect.center(), logo_size * 0.45, ACCENT_CYAN);
                 }
 
                 ui.add_space(12.0);
@@ -1688,15 +1888,19 @@ impl BoosterApp {
                 // App name with subtle gradient text effect (approximated)
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(egui::RichText::new("SwiftTunnel")
-                        .size(20.0)
-                        .color(TEXT_PRIMARY)
-                        .strong());
+                    ui.label(
+                        egui::RichText::new("SwiftTunnel")
+                            .size(20.0)
+                            .color(TEXT_PRIMARY)
+                            .strong(),
+                    );
 
                     // Subtitle
-                    ui.label(egui::RichText::new("Game Booster")
-                        .size(10.0)
-                        .color(TEXT_DIMMED));
+                    ui.label(
+                        egui::RichText::new("Game Booster")
+                            .size(10.0)
+                            .color(TEXT_DIMMED),
+                    );
                 });
 
                 // Show boost count badge when on Connect or Settings tabs (not on Boost tab)
@@ -1713,10 +1917,12 @@ impl BoosterApp {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
                                     ui.label(egui::RichText::new(">").size(10.0));
-                                    ui.label(egui::RichText::new(format!("{} boosts", active_count))
-                                        .size(11.0)
-                                        .color(ACCENT_PRIMARY)
-                                        .strong());
+                                    ui.label(
+                                        egui::RichText::new(format!("{} boosts", active_count))
+                                            .size(11.0)
+                                            .color(ACCENT_PRIMARY)
+                                            .strong(),
+                                    );
                                 });
                             });
                     }
@@ -1763,17 +1969,32 @@ impl BoosterApp {
 
                                 // Animated indicator
                                 let indicator_size = 8.0;
-                                let (indicator_rect, _) = ui.allocate_exact_size(egui::vec2(indicator_size, indicator_size), egui::Sense::hover());
+                                let (indicator_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(indicator_size, indicator_size),
+                                    egui::Sense::hover(),
+                                );
 
                                 if show_pulse {
                                     // Breathing pulse animation
                                     let elapsed = self.app_start_time.elapsed().as_secs_f32();
-                                    let pulse = ((elapsed * std::f32::consts::PI / PULSE_ANIMATION_DURATION).sin() + 1.0) / 2.0;
+                                    let pulse = ((elapsed * std::f32::consts::PI
+                                        / PULSE_ANIMATION_DURATION)
+                                        .sin()
+                                        + 1.0)
+                                        / 2.0;
                                     let glow_radius = 3.0 + pulse * 2.0;
                                     let glow_alpha = 0.4 + pulse * 0.3;
 
-                                    ui.painter().circle_filled(indicator_rect.center(), glow_radius, status_color.gamma_multiply(glow_alpha));
-                                    ui.painter().circle_filled(indicator_rect.center(), 3.0, status_color);
+                                    ui.painter().circle_filled(
+                                        indicator_rect.center(),
+                                        glow_radius,
+                                        status_color.gamma_multiply(glow_alpha),
+                                    );
+                                    ui.painter().circle_filled(
+                                        indicator_rect.center(),
+                                        3.0,
+                                        status_color,
+                                    );
                                 } else if is_connecting {
                                     // Spinning indicator for connecting
                                     let elapsed = self.app_start_time.elapsed().as_secs_f32();
@@ -1783,23 +2004,34 @@ impl BoosterApp {
                                         let r = 3.0;
                                         let pos = egui::pos2(
                                             indicator_rect.center().x + a.cos() * r,
-                                            indicator_rect.center().y + a.sin() * r
+                                            indicator_rect.center().y + a.sin() * r,
                                         );
                                         let alpha = 0.3 + (1.0 - i as f32 / 3.0) * 0.7;
-                                        ui.painter().circle_filled(pos, 1.5, status_color.gamma_multiply(alpha));
+                                        ui.painter().circle_filled(
+                                            pos,
+                                            1.5,
+                                            status_color.gamma_multiply(alpha),
+                                        );
                                     }
                                 } else {
-                                    ui.painter().circle_filled(indicator_rect.center(), 3.0, status_color);
+                                    ui.painter().circle_filled(
+                                        indicator_rect.center(),
+                                        3.0,
+                                        status_color,
+                                    );
                                 }
 
-                                ui.label(egui::RichText::new(status_text)
-                                    .size(11.0)
-                                    .color(status_color)
-                                    .strong());
+                                ui.label(
+                                    egui::RichText::new(status_text)
+                                        .size(11.0)
+                                        .color(status_color)
+                                        .strong(),
+                                );
                             });
                         });
                 });
-            }).response
+            })
+            .response
         });
     }
 
@@ -1808,13 +2040,27 @@ impl BoosterApp {
         let sys = &self.state.config.system_optimization;
         let net = &self.state.config.network_settings;
         let mut count = 0;
-        if sys.set_high_priority { count += 1; }
-        if sys.timer_resolution_1ms { count += 1; }
-        if sys.mmcss_gaming_profile { count += 1; }
-        if sys.game_mode_enabled { count += 1; }
-        if net.disable_nagle { count += 1; }
-        if net.disable_network_throttling { count += 1; }
-        if net.optimize_mtu { count += 1; }
+        if sys.set_high_priority {
+            count += 1;
+        }
+        if sys.timer_resolution_1ms {
+            count += 1;
+        }
+        if sys.mmcss_gaming_profile {
+            count += 1;
+        }
+        if sys.game_mode_enabled {
+            count += 1;
+        }
+        if net.disable_nagle {
+            count += 1;
+        }
+        if net.disable_network_throttling {
+            count += 1;
+        }
+        if net.optimize_mtu {
+            count += 1;
+        }
         count
     }
 
@@ -1844,7 +2090,8 @@ impl BoosterApp {
                         let (bg, text_color, _icon_color) = if is_active {
                             (ACCENT_PRIMARY, TEXT_PRIMARY, TEXT_PRIMARY)
                         } else {
-                            let hover_bg = lerp_color(egui::Color32::TRANSPARENT, BG_ELEVATED, hover_val);
+                            let hover_bg =
+                                lerp_color(egui::Color32::TRANSPARENT, BG_ELEVATED, hover_val);
                             let hover_text = lerp_color(TEXT_SECONDARY, TEXT_PRIMARY, hover_val);
                             (hover_bg, hover_text, TEXT_MUTED)
                         };
@@ -1853,7 +2100,7 @@ impl BoosterApp {
                             egui::Button::new(
                                 egui::RichText::new(format!("{} {}", icon, label))
                                     .size(13.0)
-                                    .color(text_color)
+                                    .color(text_color),
                             )
                             .fill(bg)
                             .stroke(if is_active {
@@ -1862,11 +2109,12 @@ impl BoosterApp {
                                 egui::Stroke::new(0.0, egui::Color32::TRANSPARENT)
                             })
                             .rounding(10.0)
-                            .min_size(egui::vec2(95.0, 38.0))
+                            .min_size(egui::vec2(95.0, 38.0)),
                         );
 
                         // Handle hover for animation
-                        self.animations.animate_hover(&tab_id, response.hovered(), hover_val);
+                        self.animations
+                            .animate_hover(&tab_id, response.hovered(), hover_val);
 
                         if response.clicked() {
                             self.current_tab = tab;
@@ -2009,10 +2257,12 @@ impl BoosterApp {
                 .collect();
 
             // Determine which server to use
-            let server = if let Some(forced_server) = self.forced_servers.get(&self.selected_region) {
+            let server = if let Some(forced_server) = self.forced_servers.get(&self.selected_region)
+            {
                 forced_server.clone()
             } else if let Ok(latencies) = self.region_latencies.try_lock() {
-                latencies.get(&self.selected_region)
+                latencies
+                    .get(&self.selected_region)
                     .map(|(id, _)| id.clone())
                     .unwrap_or_else(|| self.selected_server.clone())
             } else {
@@ -2082,8 +2332,7 @@ impl BoosterApp {
             let list = self.dynamic_server_list.try_lock().ok()?;
 
             // Get servers for the selected region
-            let region_info = list.regions.iter()
-                .find(|r| r.id == self.selected_region)?;
+            let region_info = list.regions.iter().find(|r| r.id == self.selected_region)?;
 
             let server_ids: Vec<String> = region_info.servers.clone();
             if server_ids.is_empty() {
@@ -2091,9 +2340,11 @@ impl BoosterApp {
             }
 
             // Build (server_id, ip) pairs for ping threads
-            let ips: Vec<(String, String)> = server_ids.iter()
+            let ips: Vec<(String, String)> = server_ids
+                .iter()
                 .filter_map(|id: &String| {
-                    list.servers.iter()
+                    list.servers
+                        .iter()
                         .find(|s| &s.region == id)
                         .map(|s| (id.clone(), s.ip.clone()))
                 })
@@ -2114,7 +2365,11 @@ impl BoosterApp {
         };
 
         // Initialize smart selection state
-        log::info!("Starting smart server selection for region '{}' with {} servers", self.selected_region, servers.len());
+        log::info!(
+            "Starting smart server selection for region '{}' with {} servers",
+            self.selected_region,
+            servers.len()
+        );
         self.smart_selection = Some(SmartServerSelection {
             started_at: std::time::Instant::now(),
             region_id: self.selected_region.clone(),
@@ -2143,7 +2398,8 @@ impl BoosterApp {
                                 .args(["-n", "1", "-w", "1500", &ping_ip])
                                 .output()
                         }
-                    }).await;
+                    })
+                    .await;
 
                     let latency = match ping_result {
                         Ok(Ok(output)) if output.status.success() => {
@@ -2176,7 +2432,9 @@ impl BoosterApp {
                     // This will refresh if expired/expiring
                     auth.get_access_token().await
                 } else {
-                    Err(crate::auth::types::AuthError::ApiError("Lock failed".to_string()))
+                    Err(crate::auth::types::AuthError::ApiError(
+                        "Lock failed".to_string(),
+                    ))
                 }
             });
 
@@ -2203,20 +2461,24 @@ impl BoosterApp {
         let region = if let Some(forced_server) = self.forced_servers.get(&self.selected_region) {
             log::info!(
                 "Using forced server '{}' for region '{}' (user override)",
-                forced_server, self.selected_region
+                forced_server,
+                self.selected_region
             );
             forced_server.clone()
         } else if let Ok(latencies) = self.region_latencies.try_lock() {
             if let Some((best_server_id, latency)) = latencies.get(&self.selected_region) {
                 log::info!(
                     "Using best server '{}' ({}ms) for region '{}'",
-                    best_server_id, latency, self.selected_region
+                    best_server_id,
+                    latency,
+                    self.selected_region
                 );
                 best_server_id.clone()
             } else {
                 log::info!(
                     "No latency data for region '{}', using default server '{}'",
-                    self.selected_region, self.selected_server
+                    self.selected_region,
+                    self.selected_server
                 );
                 self.selected_server.clone()
             }
@@ -2227,30 +2489,43 @@ impl BoosterApp {
 
         // Get apps from selected game presets
         let apps = get_apps_for_preset_set(&self.selected_game_presets);
-        log::info!("Connecting to server '{}' with split tunnel apps: {:?}", region, apps);
+        log::info!(
+            "Connecting to server '{}' with split tunnel apps: {:?}",
+            region,
+            apps
+        );
 
         let vpn = Arc::clone(&self.vpn_connection);
         let rt = Arc::clone(&self.runtime);
         // Custom relay server (only used with tester + experimental mode enabled)
-        let is_tester = self.user_info.as_ref().map(|u| u.is_tester).unwrap_or(false);
-        let custom_relay = if is_tester && self.experimental_mode && !self.custom_relay_server.is_empty() {
-            Some(self.custom_relay_server.clone())
-        } else {
-            None
-        };
+        let is_tester = self
+            .user_info
+            .as_ref()
+            .map(|u| u.is_tester)
+            .unwrap_or(false);
+        let custom_relay =
+            if is_tester && self.experimental_mode && !self.custom_relay_server.is_empty() {
+                Some(self.custom_relay_server.clone())
+            } else {
+                None
+            };
 
         // Build available servers list for auto-routing with cached latency data.
         // Latency is used to pick the best server when multiple match a region.
         // NOTE: Use port 51821 (V3 relay port), NOT s.port (51820 = WireGuard endpoint port)
-        let available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)> = if let Ok(list) = self.dynamic_server_list.lock() {
-            list.servers().iter().filter_map(|s| {
-                let addr: std::net::SocketAddr = format!("{}:51821", s.ip).parse().ok()?;
-                let latency = list.get_latency(&s.region);
-                Some((s.region.clone(), addr, latency))
-            }).collect()
-        } else {
-            Vec::new()
-        };
+        let available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)> =
+            if let Ok(list) = self.dynamic_server_list.lock() {
+                list.servers()
+                    .iter()
+                    .filter_map(|s| {
+                        let addr: std::net::SocketAddr = format!("{}:51821", s.ip).parse().ok()?;
+                        let latency = list.get_latency(&s.region);
+                        Some((s.region.clone(), addr, latency))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         let auto_routing_enabled = is_tester && self.experimental_mode && self.auto_routing_enabled;
         let whitelisted_regions: Vec<String> = self.whitelisted_regions.iter().cloned().collect();
@@ -2261,7 +2536,18 @@ impl BoosterApp {
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps, custom_relay, auto_routing_enabled, available_servers, whitelisted_regions).await {
+                    if let Err(e) = connection
+                        .connect(
+                            &access_token,
+                            &region,
+                            apps,
+                            custom_relay,
+                            auto_routing_enabled,
+                            available_servers,
+                            whitelisted_regions,
+                        )
+                        .await
+                    {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }
@@ -2303,9 +2589,12 @@ impl BoosterApp {
                 if let Ok(mut connection) = vpn.lock() {
                     connection.disconnect().await
                 } else {
-                    Err(crate::vpn::VpnError::Connection("Failed to acquire VPN lock".to_string()))
+                    Err(crate::vpn::VpnError::Connection(
+                        "Failed to acquire VPN lock".to_string(),
+                    ))
                 }
-            }).await
+            })
+            .await
         });
 
         match disconnect_result {
@@ -2342,25 +2631,48 @@ impl BoosterApp {
                         // Re-measure latencies
                         finding_clone.store(true, Ordering::SeqCst);
                         for region in &regions {
-                            let server_ips: Vec<(String, String)> = region.servers.iter()
+                            let server_ips: Vec<(String, String)> = region
+                                .servers
+                                .iter()
                                 .filter_map(|server_id| {
-                                    servers.iter()
+                                    servers
+                                        .iter()
                                         .find(|s| &s.region == server_id)
                                         .map(|s| (server_id.clone(), s.ip.clone()))
                                 })
                                 .collect();
 
-                            log::info!("Re-pinging region '{}' with {} servers", region.id, server_ips.len());
+                            log::info!(
+                                "Re-pinging region '{}' with {} servers",
+                                region.id,
+                                server_ips.len()
+                            );
 
-                            if let Some((best_server_id, latency)) = ping_region_async(&server_ips).await {
+                            if let Some((best_server_id, latency)) =
+                                ping_region_async(&server_ips).await
+                            {
                                 if let Ok(mut lat) = latencies_clone.lock() {
-                                    lat.insert(region.id.clone(), (best_server_id.clone(), latency));
-                                    log::info!("Region {} best server: {} ({}ms)", region.id, best_server_id, latency);
+                                    lat.insert(
+                                        region.id.clone(),
+                                        (best_server_id.clone(), latency),
+                                    );
+                                    log::info!(
+                                        "Region {} best server: {} ({}ms)",
+                                        region.id,
+                                        best_server_id,
+                                        latency
+                                    );
                                 } else {
-                                    log::error!("Region '{}' failed to store latency - mutex poisoned", region.id);
+                                    log::error!(
+                                        "Region '{}' failed to store latency - mutex poisoned",
+                                        region.id
+                                    );
                                 }
                             } else {
-                                log::warn!("Region '{}' re-ping failed - no servers responded", region.id);
+                                log::warn!(
+                                    "Region '{}' re-ping failed - no servers responded",
+                                    region.id
+                                );
                             }
                         }
                         finding_clone.store(false, Ordering::SeqCst);
@@ -2409,45 +2721,102 @@ impl BoosterApp {
             self.state.config.system_optimization.mmcss_gaming_profile = false;
             self.state.config.system_optimization.game_mode_enabled = false;
             self.state.config.network_settings.disable_nagle = false;
-            self.state.config.network_settings.disable_network_throttling = false;
+            self.state
+                .config
+                .network_settings
+                .disable_network_throttling = false;
             self.state.config.network_settings.optimize_mtu = false;
 
             self.state.optimizations_active = false;
+            self.boost_changes_pending = false;
             self.set_status("All optimizations disabled", STATUS_WARNING);
             log::info!("All optimizations disabled and toggles reset");
         } else {
-            // Enabling optimizations - apply all enabled boosts
-            log::info!("Enabling optimizations...");
-            let mut errors: Vec<String> = Vec::new();
+            self.apply_boost_changes();
+        }
+        self.mark_dirty();
+    }
 
-            // Apply Roblox settings
-            if let Err(e) = self.roblox_optimizer.apply_optimizations(&self.state.config.roblox_settings) {
-                errors.push(format!("Roblox: {}", e));
-            }
+    pub(crate) fn apply_boost_changes(&mut self) {
+        log::info!("Applying boost changes...");
 
-            // Apply system optimizations (use process ID 0 for global settings)
-            if let Err(e) = self.system_optimizer.apply_optimizations(&self.state.config.system_optimization, 0) {
-                errors.push(format!("System: {}", e));
-            }
+        let mut errors: Vec<String> = Vec::new();
+        let roblox_running =
+            self.state.metrics.roblox_running || self.roblox_optimizer.is_roblox_running();
+        let mut roblox_restarted = false;
 
-            // Apply network optimizations
-            if let Err(e) = self.network_booster.apply_optimizations(&self.state.config.network_settings) {
-                errors.push(format!("Network: {}", e));
-            }
-
-            if errors.is_empty() {
-                self.state.optimizations_active = true;
-                let active_count = self.count_active_boosts();
-                self.set_status(&format!("{} boosts enabled!", active_count), STATUS_CONNECTED);
-                log::info!("All optimizations enabled successfully ({} boosts)", active_count);
-            } else {
-                // Still mark as active even with some errors (partial success)
-                self.state.optimizations_active = true;
-                let error_msg = errors.join(", ");
-                self.set_status(&format!("Enabled with warnings: {}", error_msg), STATUS_WARNING);
-                log::warn!("Optimizations enabled with errors: {}", error_msg);
+        if roblox_running {
+            match self.roblox_optimizer.close_running_instances() {
+                Ok(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }
+                Err(e) => {
+                    errors.push(format!("Roblox close: {}", e));
+                }
             }
         }
+
+        if let Err(e) = self
+            .roblox_optimizer
+            .apply_optimizations(&self.state.config.roblox_settings)
+        {
+            errors.push(format!("Roblox: {}", e));
+        }
+
+        if roblox_running {
+            match self.roblox_optimizer.reopen_client() {
+                Ok(_) => {
+                    roblox_restarted = true;
+                }
+                Err(e) => {
+                    errors.push(format!("Roblox reopen: {}", e));
+                }
+            }
+        }
+
+        // Apply system optimizations (prefer live PID when available for priority changes)
+        let process_id = self.state.metrics.process_id.unwrap_or(0);
+        if let Err(e) = self
+            .system_optimizer
+            .apply_optimizations(&self.state.config.system_optimization, process_id)
+        {
+            errors.push(format!("System: {}", e));
+        }
+
+        if let Err(e) = self
+            .network_booster
+            .apply_optimizations(&self.state.config.network_settings)
+        {
+            errors.push(format!("Network: {}", e));
+        }
+
+        self.state.optimizations_active = true;
+
+        if errors.is_empty() {
+            self.boost_changes_pending = false;
+            let active_count = self.count_active_boosts();
+            if roblox_restarted {
+                self.set_status(
+                    &format!("Applied {} boosts and restarted Roblox", active_count),
+                    STATUS_CONNECTED,
+                );
+            } else {
+                self.set_status(
+                    &format!("Applied {} boosts", active_count),
+                    STATUS_CONNECTED,
+                );
+            }
+            log::info!("Boost changes applied successfully");
+        } else {
+            self.boost_changes_pending = true;
+            let error_msg = errors.join(", ");
+            self.set_status(
+                &format!("Apply finished with warnings: {}", error_msg),
+                STATUS_WARNING,
+            );
+            log::warn!("Boost apply completed with warnings: {}", error_msg);
+        }
+
         self.mark_dirty();
     }
 
@@ -2499,7 +2868,8 @@ impl BoosterApp {
                     return;
                 }
 
-                self.network_boost_in_progress.store(true, Ordering::Relaxed);
+                self.network_boost_in_progress
+                    .store(true, Ordering::Relaxed);
                 let config = self.state.config.network_settings.clone();
                 let tx = self.network_boost_result_tx.clone();
                 let in_progress = self.network_boost_in_progress.clone();
@@ -2562,7 +2932,10 @@ impl BoosterApp {
     /// Check if the update banner will be shown (for spacing purposes)
     pub(crate) fn has_update_banner(&self) -> bool {
         if let Ok(state) = self.update_state.lock() {
-            !matches!(&*state, UpdateState::Idle | UpdateState::UpToDate | UpdateState::Checking)
+            !matches!(
+                &*state,
+                UpdateState::Idle | UpdateState::UpToDate | UpdateState::Checking
+            )
         } else {
             false
         }
@@ -2588,8 +2961,11 @@ impl BoosterApp {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("!").size(14.0).color(STATUS_ERROR));
                             ui.add_space(8.0);
-                            ui.label(egui::RichText::new(format!("Update failed: {}", msg))
-                                .size(13.0).color(TEXT_PRIMARY));
+                            ui.label(
+                                egui::RichText::new(format!("Update failed: {}", msg))
+                                    .size(13.0)
+                                    .color(TEXT_PRIMARY),
+                            );
                         });
                     });
             }
@@ -2607,21 +2983,46 @@ impl BoosterApp {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("+").size(14.0).color(ACCENT_PRIMARY));
                             ui.add_space(8.0);
-                            ui.label(egui::RichText::new(format!("Update v{} available", info.version))
-                                .size(13.0).color(TEXT_PRIMARY).strong());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new("x").size(12.0).color(TEXT_MUTED)
-                                ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
-                                    self.dismiss_update(&info.version.clone());
-                                }
-                                ui.add_space(8.0);
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new("Update Now").size(11.0).color(TEXT_PRIMARY)
-                                ).fill(ACCENT_PRIMARY).rounding(4.0)).clicked() {
-                                    self.start_update_download(info.clone());
-                                }
-                            });
+                            ui.label(
+                                egui::RichText::new(format!("Update v{} available", info.version))
+                                    .size(13.0)
+                                    .color(TEXT_PRIMARY)
+                                    .strong(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new("x")
+                                                    .size(12.0)
+                                                    .color(TEXT_MUTED),
+                                            )
+                                            .fill(egui::Color32::TRANSPARENT)
+                                            .stroke(egui::Stroke::NONE),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.dismiss_update(&info.version.clone());
+                                    }
+                                    ui.add_space(8.0);
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new("Update Now")
+                                                    .size(11.0)
+                                                    .color(TEXT_PRIMARY),
+                                            )
+                                            .fill(ACCENT_PRIMARY)
+                                            .rounding(4.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.start_update_download(info.clone());
+                                    }
+                                },
+                            );
                         });
                     });
             }
@@ -2635,10 +3036,15 @@ impl BoosterApp {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.add_space(8.0);
-                            ui.label(egui::RichText::new(format!(
-                                "Downloading v{}... {:.0}%",
-                                info.version, progress * 100.0
-                            )).size(13.0).color(TEXT_PRIMARY));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Downloading v{}... {:.0}%",
+                                    info.version,
+                                    progress * 100.0
+                                ))
+                                .size(13.0)
+                                .color(TEXT_PRIMARY),
+                            );
                         });
                     });
             }
@@ -2654,7 +3060,7 @@ impl BoosterApp {
         }
 
         let update_state = Arc::clone(&self.update_state);
-        check_for_updates_background(update_state);
+        check_for_updates_background(update_state, self.update_channel);
     }
 
     /// Start downloading and applying an update via Velopack
@@ -2663,7 +3069,7 @@ impl BoosterApp {
         self.disconnect_vpn_sync();
 
         let update_state = Arc::clone(&self.update_state);
-        download_and_apply_update(update_state, info.version);
+        download_and_apply_update(update_state, info.version, self.update_channel);
     }
 
     /// Dismiss the update banner for a specific version
@@ -2694,8 +3100,11 @@ impl BoosterApp {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Installing network driver...")
-                            .size(13.0).color(TEXT_PRIMARY));
+                        ui.label(
+                            egui::RichText::new("Installing network driver...")
+                                .size(13.0)
+                                .color(TEXT_PRIMARY),
+                        );
                     });
                 });
             ui.add_space(12.0);
@@ -2716,21 +3125,46 @@ impl BoosterApp {
                     ui.label(egui::RichText::new("!").size(14.0).color(STATUS_WARNING));
                     ui.add_space(8.0);
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new("Network driver required")
-                            .size(13.0).color(TEXT_PRIMARY).strong());
-                        ui.label(egui::RichText::new("Install the packet filter driver to enable game optimization.")
-                            .size(11.0).color(TEXT_MUTED));
+                        ui.label(
+                            egui::RichText::new("Network driver required")
+                                .size(13.0)
+                                .color(TEXT_PRIMARY)
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Install the packet filter driver to enable game optimization.",
+                            )
+                            .size(11.0)
+                            .color(TEXT_MUTED),
+                        );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new(
-                            egui::RichText::new("x").size(12.0).color(TEXT_MUTED)
-                        ).fill(egui::Color32::TRANSPARENT).stroke(egui::Stroke::NONE)).clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("x").size(12.0).color(TEXT_MUTED),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
                             self.driver_install_dismissed = true;
                         }
                         ui.add_space(8.0);
-                        if ui.add(egui::Button::new(
-                            egui::RichText::new("Install Driver").size(11.0).color(TEXT_PRIMARY)
-                        ).fill(STATUS_WARNING.gamma_multiply(0.8)).rounding(4.0)).clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Install Driver")
+                                        .size(11.0)
+                                        .color(TEXT_PRIMARY),
+                                )
+                                .fill(STATUS_WARNING.gamma_multiply(0.8))
+                                .rounding(4.0),
+                            )
+                            .clicked()
+                        {
                             self.launch_driver_installer();
                         }
                     });
@@ -2745,7 +3179,8 @@ impl BoosterApp {
 
         // Find driver-installer.exe next to our own exe
         let installer_path = match std::env::current_exe() {
-            Ok(exe) => exe.parent()
+            Ok(exe) => exe
+                .parent()
                 .map(|dir| dir.join("driver-installer.exe"))
                 .unwrap_or_default(),
             Err(e) => {
@@ -2756,7 +3191,10 @@ impl BoosterApp {
         };
 
         if !installer_path.exists() {
-            log::error!("driver-installer.exe not found at: {}", installer_path.display());
+            log::error!(
+                "driver-installer.exe not found at: {}",
+                installer_path.display()
+            );
             self.driver_installing = false;
             self.status_message = Some((
                 "Driver installer not found. Please reinstall SwiftTunnel.".to_string(),
@@ -2796,7 +3234,10 @@ impl BoosterApp {
 
     /// Update server with current latency setting
     pub(crate) fn update_server_latency(&mut self) {
-        log::info!("update_server_latency() called, latency_ms={}", self.artificial_latency_ms);
+        log::info!(
+            "update_server_latency() called, latency_ms={}",
+            self.artificial_latency_ms
+        );
 
         // Need config ID and access token
         let config_id = match &self.current_config_id {
@@ -2828,7 +3269,11 @@ impl BoosterApp {
         self.updating_latency = true;
 
         // Spawn async task to update latency
-        log::info!("Spawning latency update task: config_id={}, latency_ms={}", config_id, latency_ms);
+        log::info!(
+            "Spawning latency update task: config_id={}, latency_ms={}",
+            config_id,
+            latency_ms
+        );
         std::thread::spawn(move || {
             rt.block_on(async {
                 log::info!("Calling update_latency API...");

@@ -20,14 +20,15 @@ use tokio::runtime::Runtime;
 
 // Import from main crate
 use swifttunnel_fps_booster::auth::AuthManager;
-use swifttunnel_fps_booster::vpn::split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_preset_set};
-use swifttunnel_fps_booster::vpn::{WireguardContext, VpnEncryptContext};
+use swifttunnel_fps_booster::auth::types::AuthState;
 use swifttunnel_fps_booster::vpn::adapter::WintunAdapter;
-use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
 use swifttunnel_fps_booster::vpn::config::fetch_vpn_config;
 use swifttunnel_fps_booster::vpn::routes::{RouteManager, get_internet_interface_ip};
-use swifttunnel_fps_booster::auth::types::AuthState;
-
+use swifttunnel_fps_booster::vpn::split_tunnel::{
+    GamePreset, SplitTunnelConfig, SplitTunnelDriver, get_apps_for_preset_set,
+};
+use swifttunnel_fps_booster::vpn::tunnel::WireguardTunnel;
+use swifttunnel_fps_booster::vpn::{VpnEncryptContext, WireguardContext};
 
 /// Testbench credentials
 const TESTBENCH_EMAIL: &str = "testbench@swifttunnel.net";
@@ -155,9 +156,7 @@ fn get_public_ip() -> Option<String> {
     };
 
     for service in services {
-        let result = rt.block_on(async {
-            client.get(service).send().await?.text().await
-        });
+        let result = rt.block_on(async { client.get(service).send().await?.text().await });
 
         if let Ok(ip) = result {
             let ip = ip.trim().to_string();
@@ -201,7 +200,10 @@ fn verify_traffic_routing() {
 
     let access_token = rt.block_on(async {
         // Sign in
-        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+        if let Err(e) = auth_manager
+            .sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD)
+            .await
+        {
             println!("   ❌ Sign in failed: {}", e);
             return None;
         }
@@ -223,7 +225,10 @@ fn verify_traffic_routing() {
     };
 
     // Step 3: Fetch VPN config
-    println!("\nStep 3: Fetching VPN config for region '{}'...", TEST_REGION);
+    println!(
+        "\nStep 3: Fetching VPN config for region '{}'...",
+        TEST_REGION
+    );
     let vpn_config = rt.block_on(async {
         match fetch_vpn_config(&access_token, TEST_REGION).await {
             Ok(config) => {
@@ -306,7 +311,10 @@ fn verify_traffic_routing() {
     println!("\nStep 6: Getting internet IP (BEFORE routes change default gateway)...");
     let original_internet_ip = match get_internet_interface_ip() {
         Ok(ip) => {
-            println!("   ✅ Internet interface IP: {} (will use for split tunnel)", ip);
+            println!(
+                "   ✅ Internet interface IP: {} (will use for split tunnel)",
+                ip
+            );
             ip.to_string()
         }
         Err(e) => {
@@ -319,7 +327,8 @@ fn verify_traffic_routing() {
 
     // Step 7: Setup routes (split tunnel mode - no default VPN route)
     println!("\nStep 7: Setting up routes (SPLIT TUNNEL MODE)...");
-    let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
+    let server_ip: std::net::Ipv4Addr = vpn_config
+        .endpoint
         .split(':')
         .next()
         .unwrap_or("0.0.0.0")
@@ -347,9 +356,15 @@ fn verify_traffic_routing() {
         Some(ip) => {
             println!("   Current IP: {}", ip);
             if ip == original_ip {
-                println!("   ✅ IP unchanged ({}) - split tunnel mode working (traffic bypasses VPN)", ip);
+                println!(
+                    "   ✅ IP unchanged ({}) - split tunnel mode working (traffic bypasses VPN)",
+                    ip
+                );
             } else {
-                println!("   ⚠ IP changed to {} - unexpected (split tunnel mode should bypass VPN)", ip);
+                println!(
+                    "   ⚠ IP changed to {} - unexpected (split tunnel mode should bypass VPN)",
+                    ip
+                );
             }
             ip
         }
@@ -415,7 +430,10 @@ fn verify_traffic_routing() {
     println!("   Everything else (including testbench.exe) will BYPASS VPN");
 
     // Use the internet IP we captured BEFORE routes were applied
-    println!("   Using saved internet IP: {} (captured before VPN routes)", original_internet_ip);
+    println!(
+        "   Using saved internet IP: {} (captured before VPN routes)",
+        original_internet_ip
+    );
 
     let split_config = SplitTunnelConfig::new(
         tunnel_apps,
@@ -508,10 +526,13 @@ fn get_interface_index(name: &str) -> Result<u32, String> {
     use std::process::Command;
 
     let output = Command::new("powershell")
-        .args(["-Command", &format!(
-            "(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex",
-            name
-        )])
+        .args([
+            "-Command",
+            &format!(
+                "(Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue).ifIndex",
+                name
+            ),
+        ])
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -770,10 +791,7 @@ fn show_system_info() {
 
     // Check for Wintun
     println!("Wintun DLL:");
-    let wintun_paths = [
-        r"C:\Program Files\SwiftTunnel\wintun.dll",
-        r".\wintun.dll",
-    ];
+    let wintun_paths = [r"C:\Program Files\SwiftTunnel\wintun.dll", r".\wintun.dll"];
     let mut found = false;
     for path in wintun_paths {
         if std::path::Path::new(path).exists() {
@@ -792,7 +810,9 @@ fn show_system_info() {
 fn is_elevated() -> bool {
     use std::mem;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
@@ -830,7 +850,12 @@ fn test_ping_functionality() {
     println!("Step 1: Fetching server list from API...");
     let (servers, regions, source) = match rt.block_on(load_server_list()) {
         Ok(data) => {
-            println!("   ✅ Loaded {} servers, {} regions from {}", data.0.len(), data.1.len(), data.2);
+            println!(
+                "   ✅ Loaded {} servers, {} regions from {}",
+                data.0.len(),
+                data.1.len(),
+                data.2
+            );
             data
         }
         Err(e) => {
@@ -853,7 +878,14 @@ fn test_ping_functionality() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             println!("   Status: {:?}", output.status);
-            println!("   Stdout: {}", stdout.lines().take(5).collect::<Vec<_>>().join("\n          "));
+            println!(
+                "   Stdout: {}",
+                stdout
+                    .lines()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .join("\n          ")
+            );
             if !stderr.is_empty() {
                 println!("   Stderr: {}", stderr.trim());
             }
@@ -876,9 +908,12 @@ fn test_ping_functionality() {
         println!("\n   Region '{}' ({}):", region.id, region.name);
         println!("   Server IDs in region: {:?}", region.servers);
 
-        let server_ips: Vec<(String, String)> = region.servers.iter()
+        let server_ips: Vec<(String, String)> = region
+            .servers
+            .iter()
             .filter_map(|server_id| {
-                servers.iter()
+                servers
+                    .iter()
                     .find(|s| &s.region == server_id)
                     .map(|s| (server_id.clone(), s.ip.clone()))
             })
@@ -896,9 +931,12 @@ fn test_ping_functionality() {
     if let Some(region) = regions.first() {
         println!("   Region: {} ({})", region.id, region.name);
 
-        let server_ips: Vec<(String, String)> = region.servers.iter()
+        let server_ips: Vec<(String, String)> = region
+            .servers
+            .iter()
             .filter_map(|server_id| {
-                servers.iter()
+                servers
+                    .iter()
                     .find(|s| &s.region == server_id)
                     .map(|s| (server_id.clone(), s.ip.clone()))
             })
@@ -927,10 +965,17 @@ fn test_ping_functionality() {
                                 count += 1;
                             } else {
                                 println!("      Ping {}: success but parse failed", ping_num + 1);
-                                println!("         Output: {}", stdout.lines().next().unwrap_or("(empty)"));
+                                println!(
+                                    "         Output: {}",
+                                    stdout.lines().next().unwrap_or("(empty)")
+                                );
                             }
                         } else {
-                            println!("      Ping {}: command failed (status: {})", ping_num + 1, out.status);
+                            println!(
+                                "      Ping {}: command failed (status: {})",
+                                ping_num + 1,
+                                out.status
+                            );
                         }
                     }
                     Err(e) => {
@@ -1039,7 +1084,10 @@ fn test_split_tunnel_two_apps() {
     };
 
     let access_token = rt.block_on(async {
-        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+        if let Err(e) = auth_manager
+            .sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD)
+            .await
+        {
             println!("   ❌ Sign in failed: {}", e);
             return None;
         }
@@ -1062,7 +1110,10 @@ fn test_split_tunnel_two_apps() {
     let vpn_config = rt.block_on(async {
         match fetch_vpn_config(&access_token, TEST_REGION).await {
             Ok(config) => {
-                println!("   ✅ Region: {}, Endpoint: {}", TEST_REGION, config.endpoint);
+                println!(
+                    "   ✅ Region: {}, Endpoint: {}",
+                    TEST_REGION, config.endpoint
+                );
                 Some(config)
             }
             Err(e) => {
@@ -1145,7 +1196,8 @@ fn test_split_tunnel_two_apps() {
 
     // Step 7: Setup routes (split tunnel mode)
     println!("\nStep 7: Setting up routes (SPLIT TUNNEL MODE)...");
-    let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
+    let server_ip: std::net::Ipv4Addr = vpn_config
+        .endpoint
         .split(':')
         .next()
         .unwrap_or("0.0.0.0")
@@ -1319,19 +1371,31 @@ fn test_split_tunnel_two_apps() {
         }
     } else if !testbench_bypassed {
         println!("   ⚠ PARTIAL: Bypass not working");
-        println!("      - testbench.exe should show original IP but shows: {}", testbench_ip);
+        println!(
+            "      - testbench.exe should show original IP but shows: {}",
+            testbench_ip
+        );
         println!("      - ip_checker.exe correctly tunneled");
     } else if !ipchecker_tunneled {
         println!("   ⚠ PARTIAL: Tunnel not working");
         println!("      - testbench.exe correctly bypassed");
-        println!("      - ip_checker.exe should show VPN IP but shows: {}", ipchecker_ip);
+        println!(
+            "      - ip_checker.exe should show VPN IP but shows: {}",
+            ipchecker_ip
+        );
     }
 
     // Show throughput stats
     if let Some(stats) = driver.get_throughput_stats() {
         println!("\n   Throughput stats:");
-        println!("      TX (to VPN): {} bytes", stats.bytes_tx.load(std::sync::atomic::Ordering::Relaxed));
-        println!("      RX (from VPN): {} bytes", stats.bytes_rx.load(std::sync::atomic::Ordering::Relaxed));
+        println!(
+            "      TX (to VPN): {} bytes",
+            stats.bytes_tx.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        println!(
+            "      RX (from VPN): {} bytes",
+            stats.bytes_rx.load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 
     // Cleanup
@@ -1392,7 +1456,10 @@ fn run_vpn_benchmark() {
     };
 
     let access_token = rt.block_on(async {
-        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+        if let Err(e) = auth_manager
+            .sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD)
+            .await
+        {
             println!("   ❌ Sign in failed: {}", e);
             return None;
         }
@@ -1415,7 +1482,10 @@ fn run_vpn_benchmark() {
     let vpn_config = rt.block_on(async {
         match fetch_vpn_config(&access_token, TEST_REGION).await {
             Ok(config) => {
-                println!("   ✅ Region: {}, Endpoint: {}", TEST_REGION, config.endpoint);
+                println!(
+                    "   ✅ Region: {}, Endpoint: {}",
+                    TEST_REGION, config.endpoint
+                );
                 Some(config)
             }
             Err(e) => {
@@ -1498,7 +1568,8 @@ fn run_vpn_benchmark() {
 
     // Step 7: Setup routes (FULL VPN mode first - for Pure WireGuard test)
     println!("Setting up routes (Full VPN mode)...");
-    let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
+    let server_ip: std::net::Ipv4Addr = vpn_config
+        .endpoint
         .split(':')
         .next()
         .unwrap_or("0.0.0.0")
@@ -1648,26 +1719,50 @@ fn run_vpn_benchmark() {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║                    BENCHMARK RESULTS                           ║");
     println!("╠═══════════════════════════════════════════════════════════════╣");
-    println!("║  Baseline (No VPN):     {:>8.2} Mbps                         ║", baseline_mbps);
-    println!("║  Pure WireGuard:        {:>8.2} Mbps                         ║", pure_wg_mbps);
-    println!("║  Split Tunnel:          {:>8.2} Mbps                         ║", vpn_mbps);
+    println!(
+        "║  Baseline (No VPN):     {:>8.2} Mbps                         ║",
+        baseline_mbps
+    );
+    println!(
+        "║  Pure WireGuard:        {:>8.2} Mbps                         ║",
+        pure_wg_mbps
+    );
+    println!(
+        "║  Split Tunnel:          {:>8.2} Mbps                         ║",
+        vpn_mbps
+    );
     println!("╠═══════════════════════════════════════════════════════════════╣");
     if baseline_mbps > 0.0 && pure_wg_mbps > 0.0 {
         let wg_overhead = ((baseline_mbps - pure_wg_mbps) / baseline_mbps * 100.0).max(0.0);
-        println!("║  WireGuard Overhead:    {:>8.1}%                           ║", wg_overhead);
+        println!(
+            "║  WireGuard Overhead:    {:>8.1}%                           ║",
+            wg_overhead
+        );
     }
     if baseline_mbps > 0.0 && vpn_mbps > 0.0 {
         let total_overhead = ((baseline_mbps - vpn_mbps) / baseline_mbps * 100.0).max(0.0);
-        println!("║  Split Tunnel Overhead: {:>8.1}%                           ║", total_overhead);
+        println!(
+            "║  Split Tunnel Overhead: {:>8.1}%                           ║",
+            total_overhead
+        );
     }
     if pure_wg_mbps > 0.0 && vpn_mbps > 0.0 {
         let split_overhead = ((pure_wg_mbps - vpn_mbps) / pure_wg_mbps * 100.0).max(0.0);
-        println!("║  Split vs Pure WG:      {:>8.1}%                           ║", split_overhead);
+        println!(
+            "║  Split vs Pure WG:      {:>8.1}%                           ║",
+            split_overhead
+        );
     }
     if let Some(s) = stats {
         println!("╠═══════════════════════════════════════════════════════════════╣");
-        println!("║  TX (to VPN):           {:>8} bytes                       ║", s.bytes_tx.load(std::sync::atomic::Ordering::Relaxed));
-        println!("║  RX (from VPN):         {:>8} bytes                       ║", s.bytes_rx.load(std::sync::atomic::Ordering::Relaxed));
+        println!(
+            "║  TX (to VPN):           {:>8} bytes                       ║",
+            s.bytes_tx.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        println!(
+            "║  RX (from VPN):         {:>8} bytes                       ║",
+            s.bytes_rx.load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
     println!("╚═══════════════════════════════════════════════════════════════╝");
 
@@ -1684,10 +1779,7 @@ fn run_vpn_benchmark() {
 fn run_ip_checker_speedtest(path: &std::path::Path) -> Option<(String, f64)> {
     use std::process::Command;
 
-    let output = Command::new(path)
-        .arg("--speedtest")
-        .output()
-        .ok()?;
+    let output = Command::new(path).arg("--speedtest").output().ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -1744,9 +1836,7 @@ fn find_ip_checker_exe() -> Option<std::path::PathBuf> {
 fn run_ip_checker(path: &std::path::Path) -> Option<String> {
     use std::process::Command;
 
-    let output = Command::new(path)
-        .output()
-        .ok()?;
+    let output = Command::new(path).output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -1788,7 +1878,10 @@ fn export_wireguard_config() {
     };
 
     let access_token = rt.block_on(async {
-        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+        if let Err(e) = auth_manager
+            .sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD)
+            .await
+        {
             println!("   ❌ Sign in failed: {}", e);
             return None;
         }
@@ -1811,7 +1904,10 @@ fn export_wireguard_config() {
     let vpn_config = rt.block_on(async {
         match fetch_vpn_config(&access_token, TEST_REGION).await {
             Ok(config) => {
-                println!("   ✅ Region: {}, Endpoint: {}", TEST_REGION, config.endpoint);
+                println!(
+                    "   ✅ Region: {}, Endpoint: {}",
+                    TEST_REGION, config.endpoint
+                );
                 Some(config)
             }
             Err(e) => {
@@ -1854,7 +1950,10 @@ PersistentKeepalive = 25
             println!("{}", wg_config);
             println!("--- End Config ---\n");
             println!("To use with WireSock:");
-            println!("  \"C:\\Program Files\\WireSock Secure Connect\\bin\\wiresock-client.exe\" run -config \"{}\" -log-level info", config_path.display());
+            println!(
+                "  \"C:\\Program Files\\WireSock Secure Connect\\bin\\wiresock-client.exe\" run -config \"{}\" -log-level info",
+                config_path.display()
+            );
         }
         Err(e) => {
             println!("   ❌ Failed to write config: {}", e);
@@ -1890,7 +1989,10 @@ fn run_latency_test() {
     };
 
     let access_token = rt.block_on(async {
-        if let Err(e) = auth_manager.sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD).await {
+        if let Err(e) = auth_manager
+            .sign_in(TESTBENCH_EMAIL, TESTBENCH_PASSWORD)
+            .await
+        {
             println!("   ❌ Sign in failed: {}", e);
             return None;
         }
@@ -1913,7 +2015,10 @@ fn run_latency_test() {
     let vpn_config = rt.block_on(async {
         match fetch_vpn_config(&access_token, TEST_REGION).await {
             Ok(config) => {
-                println!("   ✅ Region: {}, Endpoint: {}", TEST_REGION, config.endpoint);
+                println!(
+                    "   ✅ Region: {}, Endpoint: {}",
+                    TEST_REGION, config.endpoint
+                );
                 Some(config)
             }
             Err(e) => {
@@ -1995,7 +2100,8 @@ fn run_latency_test() {
 
     // Step 6: Setup routes (split tunnel mode)
     println!("Setting up routes...");
-    let server_ip: std::net::Ipv4Addr = vpn_config.endpoint
+    let server_ip: std::net::Ipv4Addr = vpn_config
+        .endpoint
         .split(':')
         .next()
         .unwrap_or("0.0.0.0")
@@ -2122,8 +2228,12 @@ fn run_ping(target: &str, count: u32) {
             let stdout = String::from_utf8_lossy(&out.stdout);
             // Print just the summary lines
             for line in stdout.lines() {
-                if line.contains("Minimum") || line.contains("Average") || line.contains("Maximum")
-                   || line.contains("Packets:") || line.contains("Lost") {
+                if line.contains("Minimum")
+                    || line.contains("Average")
+                    || line.contains("Maximum")
+                    || line.contains("Packets:")
+                    || line.contains("Lost")
+                {
                     println!("   {}", line.trim());
                 }
             }

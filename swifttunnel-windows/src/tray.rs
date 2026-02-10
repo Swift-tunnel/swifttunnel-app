@@ -3,8 +3,8 @@
 //! Allows the app to run in the background with a system tray icon
 
 use log::info;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -122,12 +122,19 @@ impl SystemTray {
                 if let Ok(event) = receiver.recv_timeout(Duration::from_millis(500)) {
                     // Show window on double-click (or single click on Windows)
                     match event {
-                        TrayIconEvent::Click { button: tray_icon::MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } => {
+                        TrayIconEvent::Click {
+                            button: tray_icon::MouseButton::Left,
+                            button_state: tray_icon::MouseButtonState::Up,
+                            ..
+                        } => {
                             info!("Tray: Icon clicked, showing window");
                             show_click_clone.store(true, Ordering::SeqCst);
                             restore_window();
                         }
-                        TrayIconEvent::DoubleClick { button: tray_icon::MouseButton::Left, .. } => {
+                        TrayIconEvent::DoubleClick {
+                            button: tray_icon::MouseButton::Left,
+                            ..
+                        } => {
                             info!("Tray: Icon double-clicked, showing window");
                             show_click_clone.store(true, Ordering::SeqCst);
                             restore_window();
@@ -199,7 +206,7 @@ impl Drop for SystemTray {
 #[cfg(target_os = "windows")]
 fn restore_window() {
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+        FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
     };
     use windows::core::PCWSTR;
 

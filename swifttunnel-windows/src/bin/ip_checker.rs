@@ -79,13 +79,18 @@ fn run_speed_test() {
     }
 }
 
-fn download_speed_test(host: &str, path: &str, expected_size: usize) -> Result<(usize, u128), String> {
+fn download_speed_test(
+    host: &str,
+    path: &str,
+    expected_size: usize,
+) -> Result<(usize, u128), String> {
     use std::net::ToSocketAddrs;
     use std::time::Instant;
 
     // Resolve hostname
     let addr_str = format!("{}:443", host);
-    let addr = addr_str.to_socket_addrs()
+    let addr = addr_str
+        .to_socket_addrs()
         .map_err(|e| format!("DNS failed: {}", e))?
         .next()
         .ok_or_else(|| "No addresses".to_string())?;
@@ -95,7 +100,8 @@ fn download_speed_test(host: &str, path: &str, expected_size: usize) -> Result<(
     let host = "speedtest.tele2.net";
     let path = "/10MB.zip";
     let addr_str = format!("{}:80", host);
-    let addr = addr_str.to_socket_addrs()
+    let addr = addr_str
+        .to_socket_addrs()
         .map_err(|e| format!("DNS failed: {}", e))?
         .next()
         .ok_or_else(|| "No addresses".to_string())?;
@@ -105,7 +111,8 @@ fn download_speed_test(host: &str, path: &str, expected_size: usize) -> Result<(
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| format!("Connect failed: {}", e))?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(60)))
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
         .map_err(|e| format!("Set timeout failed: {}", e))?;
 
     let mut stream = stream;
@@ -115,7 +122,8 @@ fn download_speed_test(host: &str, path: &str, expected_size: usize) -> Result<(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: SwiftTunnel-SpeedTest/1.0\r\n\r\n",
         path, host
     );
-    stream.write_all(request.as_bytes())
+    stream
+        .write_all(request.as_bytes())
         .map_err(|e| format!("Write failed: {}", e))?;
 
     // Read response headers first
@@ -124,9 +132,12 @@ fn download_speed_test(host: &str, path: &str, expected_size: usize) -> Result<(
     let mut total_header_read = 0;
 
     loop {
-        let n = stream.read(&mut header_buf[total_header_read..])
+        let n = stream
+            .read(&mut header_buf[total_header_read..])
             .map_err(|e| format!("Read headers failed: {}", e))?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         total_header_read += n;
 
         // Look for end of headers
@@ -171,7 +182,7 @@ fn download_speed_test(host: &str, path: &str, expected_size: usize) -> Result<(
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
     for i in 0..buf.len().saturating_sub(3) {
-        if buf[i] == b'\r' && buf[i+1] == b'\n' && buf[i+2] == b'\r' && buf[i+3] == b'\n' {
+        if buf[i] == b'\r' && buf[i + 1] == b'\n' && buf[i + 2] == b'\r' && buf[i + 3] == b'\n' {
             return Some(i + 4);
         }
     }
@@ -183,7 +194,8 @@ fn check_ip(host: &str, path: &str) -> Result<String, String> {
 
     // Resolve hostname to IP address
     let addr_str = format!("{}:80", host);
-    let addr = addr_str.to_socket_addrs()
+    let addr = addr_str
+        .to_socket_addrs()
         .map_err(|e| format!("DNS resolution failed: {}", e))?
         .next()
         .ok_or_else(|| "No addresses found".to_string())?;
@@ -192,9 +204,11 @@ fn check_ip(host: &str, path: &str) -> Result<String, String> {
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         .map_err(|e| format!("Connect failed: {}", e))?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(5)))
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| format!("Set timeout failed: {}", e))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| format!("Set timeout failed: {}", e))?;
 
     let mut stream = stream;
@@ -204,12 +218,14 @@ fn check_ip(host: &str, path: &str) -> Result<String, String> {
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: SwiftTunnel-IPChecker/1.0\r\n\r\n",
         path, host
     );
-    stream.write_all(request.as_bytes())
+    stream
+        .write_all(request.as_bytes())
         .map_err(|e| format!("Write failed: {}", e))?;
 
     // Read response
     let mut response = String::new();
-    stream.read_to_string(&mut response)
+    stream
+        .read_to_string(&mut response)
         .map_err(|e| format!("Read failed: {}", e))?;
 
     // Parse response - find body after \r\n\r\n

@@ -14,8 +14,8 @@ const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.GameBooster";
 fn is_aumid_registered() -> bool {
     // Check for Start menu shortcut that registers our AUMID
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        let shortcut = Path::new(&appdata)
-            .join(r"Microsoft\Windows\Start Menu\Programs\SwiftTunnel.lnk");
+        let shortcut =
+            Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs\SwiftTunnel.lnk");
         if shortcut.exists() {
             return true;
         }
@@ -100,7 +100,10 @@ pub fn show_notification(title: &str, message: &str) {
 pub fn show_relay_switch(from_region: &str, to_region: &str, game_location: &str) {
     show_notification(
         "Auto Routing: Relay switched",
-        &format!("{} → {} (game server: {})", from_region, to_region, game_location),
+        &format!(
+            "{} → {} (game server: {})",
+            from_region, to_region, game_location
+        ),
     );
 }
 
@@ -109,10 +112,7 @@ pub fn show_relay_switch(from_region: &str, to_region: &str, game_location: &str
 /// # Arguments
 /// * `location` - The server location (e.g., "Singapore, SG")
 pub fn show_server_location(location: &str) {
-    show_notification(
-        "Connected to server",
-        &format!("Location: {}", location),
-    );
+    show_notification("Connected to server", &format!("Location: {}", location));
 }
 
 #[cfg(test)]

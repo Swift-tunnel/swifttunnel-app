@@ -5,11 +5,11 @@
 //!
 //! Requires: Administrator privileges, wintun.dll in working directory
 
+use boringtun::noise::{Tunn, TunnResult};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use boringtun::noise::{Tunn, TunnResult};
 
 #[tokio::main]
 async fn main() {
@@ -74,11 +74,11 @@ async fn main() {
 
 fn is_admin() -> bool {
     unsafe {
+        use windows::Win32::Foundation::CloseHandle;
         use windows::Win32::Security::{
-            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
         };
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-        use windows::Win32::Foundation::CloseHandle;
 
         let mut token_handle = windows::Win32::Foundation::HANDLE::default();
 
@@ -150,12 +150,14 @@ fn test_adapter_creation() -> Result<(), String> {
 
     // Set IP address
     let ip: Ipv4Addr = "10.0.99.1".parse().unwrap();
-    adapter.set_address(ip)
+    adapter
+        .set_address(ip)
         .map_err(|e| format!("Failed to set IP address: {:?}", e))?;
     println!("    Set IP address: {}", ip);
 
     // Create session
-    let session = adapter.start_session(0x400000) // 4MB ring buffer
+    let session = adapter
+        .start_session(0x400000) // 4MB ring buffer
         .map_err(|e| format!("Failed to start session: {:?}", e))?;
     println!("    Session started with 4MB ring buffer");
 
@@ -199,20 +201,30 @@ async fn test_wireguard_handshake(config_path: &str) -> Result<(), String> {
     println!("    Assigned IP: {}", config.assigned_ip);
 
     // Parse endpoint
-    let endpoint: SocketAddr = config.endpoint.parse()
+    let endpoint: SocketAddr = config
+        .endpoint
+        .parse()
         .map_err(|e| format!("Invalid endpoint: {}", e))?;
 
     // Parse keys
-    let private_key_bytes = STANDARD.decode(&config.private_key)
+    let private_key_bytes = STANDARD
+        .decode(&config.private_key)
         .map_err(|e| format!("Invalid private key: {}", e))?;
-    let peer_public_key_bytes = STANDARD.decode(&config.server_public_key)
+    let peer_public_key_bytes = STANDARD
+        .decode(&config.server_public_key)
         .map_err(|e| format!("Invalid server public key: {}", e))?;
 
     if private_key_bytes.len() != 32 {
-        return Err(format!("Private key must be 32 bytes, got {}", private_key_bytes.len()));
+        return Err(format!(
+            "Private key must be 32 bytes, got {}",
+            private_key_bytes.len()
+        ));
     }
     if peer_public_key_bytes.len() != 32 {
-        return Err(format!("Public key must be 32 bytes, got {}", peer_public_key_bytes.len()));
+        return Err(format!(
+            "Public key must be 32 bytes, got {}",
+            peer_public_key_bytes.len()
+        ));
     }
 
     let mut private_key: [u8; 32] = [0; 32];
@@ -226,11 +238,12 @@ async fn test_wireguard_handshake(config_path: &str) -> Result<(), String> {
     let tunn = Tunn::new(
         private_key.into(),
         peer_public_key.into(),
-        None, // No preshared key
+        None,     // No preshared key
         Some(25), // 25s keepalive
-        0, // Tunnel index
-        None, // No rate limiter
-    ).map_err(|e| format!("Failed to create Tunn: {:?}", e))?;
+        0,        // Tunnel index
+        None,     // No rate limiter
+    )
+    .map_err(|e| format!("Failed to create Tunn: {:?}", e))?;
 
     let tunn = Arc::new(std::sync::Mutex::new(tunn));
     println!("    BoringTun instance created");
@@ -240,7 +253,8 @@ async fn test_wireguard_handshake(config_path: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
 
-    socket.connect(endpoint)
+    socket
+        .connect(endpoint)
         .await
         .map_err(|e| format!("Failed to connect to endpoint: {}", e))?;
 
@@ -256,7 +270,8 @@ async fn test_wireguard_handshake(config_path: &str) -> Result<(), String> {
     match handshake_init {
         TunnResult::WriteToNetwork(data) => {
             println!("    Sending handshake initiation ({} bytes)...", data.len());
-            socket.send(data)
+            socket
+                .send(data)
                 .await
                 .map_err(|e| format!("Failed to send handshake: {}", e))?;
         }

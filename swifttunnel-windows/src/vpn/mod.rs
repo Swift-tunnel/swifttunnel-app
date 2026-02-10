@@ -22,42 +22,44 @@
 //! - connection.rs: Connection state machine and lifecycle management
 //! - servers.rs: Server list and latency measurement
 
-pub mod config;
 pub mod adapter;
-pub mod tunnel;
-pub mod process_tracker;
-pub mod process_cache;
-pub mod process_watcher;
-pub mod wfp_block;
+pub mod auto_routing;
+pub mod config;
+pub mod connection;
+pub mod error_messages;
 pub mod packet_interceptor;
 pub mod parallel_interceptor;
-pub mod split_tunnel;
+pub mod process_cache;
+pub mod process_tracker;
+pub mod process_watcher;
 pub mod routes;
-pub mod connection;
 pub mod servers;
-pub mod error_messages;
-pub mod udp_relay;
+pub mod split_tunnel;
 pub mod tso_recovery;
-pub mod auto_routing;
+pub mod tunnel;
+pub mod udp_relay;
+pub mod wfp_block;
 
-pub use config::{fetch_vpn_config, update_latency, VpnConfigRequest};
-pub use tso_recovery::{recover_tso_on_startup, emergency_tso_restore};
 pub use adapter::WintunAdapter;
-pub use tunnel::{WireguardTunnel, InboundHandler};
-pub use packet_interceptor::WireguardContext;
-pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
-pub use process_watcher::{ProcessWatcher, ProcessStartEvent};
-pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
-pub use udp_relay::{UdpRelay, RelayContext};
-pub use split_tunnel::{SplitTunnelDriver, SplitTunnelConfig, GamePreset, get_apps_for_presets, get_apps_for_preset_set, get_tunnel_apps_for_presets};
-pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
-pub use connection::{VpnConnection, ConnectionState};
-pub use servers::{
-    DynamicServerList, DynamicServerInfo, DynamicGamingRegion,
-    load_server_list, ServerListSource,
-};
-pub use error_messages::{user_friendly_error, short_error};
 pub use auto_routing::{AutoRouter, AutoRoutingAction, AutoRoutingEvent};
+pub use config::{VpnConfigRequest, fetch_vpn_config, update_latency};
+pub use connection::{ConnectionState, VpnConnection};
+pub use error_messages::{short_error, user_friendly_error};
+pub use packet_interceptor::WireguardContext;
+pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
+pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
+pub use process_watcher::{ProcessStartEvent, ProcessWatcher};
+pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
+pub use servers::{
+    DynamicGamingRegion, DynamicServerInfo, DynamicServerList, ServerListSource, load_server_list,
+};
+pub use split_tunnel::{
+    GamePreset, SplitTunnelConfig, SplitTunnelDriver, get_apps_for_preset_set,
+    get_apps_for_presets, get_tunnel_apps_for_presets,
+};
+pub use tso_recovery::{emergency_tso_restore, recover_tso_on_startup};
+pub use tunnel::{InboundHandler, WireguardTunnel};
+pub use udp_relay::{RelayContext, UdpRelay};
 
 /// VPN-related errors
 #[derive(Debug, thiserror::Error)]
@@ -123,13 +125,19 @@ mod tests {
     #[test]
     fn test_vpn_error_display_adapter_create() {
         let err = VpnError::AdapterCreate("driver missing".to_string());
-        assert_eq!(err.to_string(), "Failed to create Wintun adapter: driver missing");
+        assert_eq!(
+            err.to_string(),
+            "Failed to create Wintun adapter: driver missing"
+        );
     }
 
     #[test]
     fn test_vpn_error_display_tunnel_init() {
         let err = VpnError::TunnelInit("bad key".to_string());
-        assert_eq!(err.to_string(), "Failed to initialize WireGuard tunnel: bad key");
+        assert_eq!(
+            err.to_string(),
+            "Failed to initialize WireGuard tunnel: bad key"
+        );
     }
 
     #[test]

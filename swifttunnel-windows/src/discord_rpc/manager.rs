@@ -3,12 +3,15 @@
 //! Runs a background thread that maintains the Discord IPC connection
 //! and updates presence based on VPN state.
 
-use super::state::{DiscordActivity, DiscordState, region_display_name, region_flag_key, game_display_name, game_icon_key};
-use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
-use std::sync::mpsc::{self, Sender, Receiver};
+use super::state::{
+    DiscordActivity, DiscordState, game_display_name, game_icon_key, region_display_name,
+    region_flag_key,
+};
+use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
+use log::{debug, error, info, warn};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use log::{debug, error, info, warn};
 
 /// Discord Application ID (create at https://discord.com/developers)
 /// This should be replaced with the actual SwiftTunnel application ID
@@ -137,7 +140,8 @@ impl DiscordManager {
         let mut client = DiscordIpcClient::new(DISCORD_APP_ID)
             .map_err(|e| format!("Failed to create Discord client: {}", e))?;
 
-        client.connect()
+        client
+            .connect()
             .map_err(|e| format!("Failed to connect to Discord: {}", e))?;
 
         Ok(client)
@@ -163,10 +167,11 @@ impl DiscordManager {
                     .assets(
                         activity::Assets::new()
                             .large_image("swifttunnel")
-                            .large_text("SwiftTunnel")
+                            .large_text("SwiftTunnel"),
                     )
                     .buttons(Self::create_buttons());
-                client.set_activity(payload)
+                client
+                    .set_activity(payload)
                     .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
             DiscordState::Connecting { region } => {
@@ -180,13 +185,17 @@ impl DiscordManager {
                             .large_image("swifttunnel")
                             .large_text("SwiftTunnel")
                             .small_image(region_flag_key(region))
-                            .small_text(region_name)
+                            .small_text(region_name),
                     )
                     .buttons(Self::create_buttons());
-                client.set_activity(payload)
+                client
+                    .set_activity(payload)
                     .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
-            DiscordState::Connected { region, connected_at } => {
+            DiscordState::Connected {
+                region,
+                connected_at,
+            } => {
                 let region_name = region_display_name(region);
                 let elapsed_secs = connected_at.elapsed().as_secs();
                 // Use Unix timestamp for Discord's elapsed time display
@@ -204,17 +213,19 @@ impl DiscordManager {
                             .large_image("swifttunnel")
                             .large_text("SwiftTunnel")
                             .small_image(region_flag_key(region))
-                            .small_text(region_name)
+                            .small_text(region_name),
                     )
-                    .timestamps(
-                        activity::Timestamps::new()
-                            .start(start_timestamp)
-                    )
+                    .timestamps(activity::Timestamps::new().start(start_timestamp))
                     .buttons(Self::create_buttons());
-                client.set_activity(payload)
+                client
+                    .set_activity(payload)
                     .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
-            DiscordState::PlayingGame { game_name, region, connected_at } => {
+            DiscordState::PlayingGame {
+                game_name,
+                region,
+                connected_at,
+            } => {
                 let region_name = region_display_name(region);
                 let display_name = game_display_name(game_name);
                 let elapsed_secs = connected_at.elapsed().as_secs();
@@ -233,14 +244,12 @@ impl DiscordManager {
                             .large_image(game_icon_key(game_name))
                             .large_text(display_name)
                             .small_image("swifttunnel")
-                            .small_text("SwiftTunnel VPN")
+                            .small_text("SwiftTunnel VPN"),
                     )
-                    .timestamps(
-                        activity::Timestamps::new()
-                            .start(start_timestamp)
-                    )
+                    .timestamps(activity::Timestamps::new().start(start_timestamp))
                     .buttons(Self::create_buttons());
-                client.set_activity(payload)
+                client
+                    .set_activity(payload)
                     .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
         }
@@ -258,8 +267,8 @@ impl DiscordManager {
 
         // Track connected_at for elapsed time calculation
         match &state {
-            DiscordState::Connected { connected_at, .. } |
-            DiscordState::PlayingGame { connected_at, .. } => {
+            DiscordState::Connected { connected_at, .. }
+            | DiscordState::PlayingGame { connected_at, .. } => {
                 if self.connected_at.is_none() {
                     self.connected_at = Some(*connected_at);
                 }

@@ -32,15 +32,21 @@ impl SecureStorage {
         // Get data directory
         let data_dir = dirs::data_local_dir()
             .map(|d| d.join("SwiftTunnel"))
-            .ok_or_else(|| AuthError::StorageError("Could not determine data directory".to_string()))?;
+            .ok_or_else(|| {
+                AuthError::StorageError("Could not determine data directory".to_string())
+            })?;
 
         // Ensure directory exists
-        std::fs::create_dir_all(&data_dir)
-            .map_err(|e| AuthError::StorageError(format!("Failed to create data directory: {}", e)))?;
+        std::fs::create_dir_all(&data_dir).map_err(|e| {
+            AuthError::StorageError(format!("Failed to create data directory: {}", e))
+        })?;
 
         info!("SecureStorage initialized:");
         info!("  Data directory: {}", data_dir.display());
-        info!("  Auth file: {}", data_dir.join(AUTH_SESSION_FILE).display());
+        info!(
+            "  Auth file: {}",
+            data_dir.join(AUTH_SESSION_FILE).display()
+        );
 
         // Try to create keyring entry, but don't fail if it doesn't work
         let keyring_entry = match Entry::new(SERVICE_NAME, SESSION_KEY) {
@@ -85,16 +91,18 @@ impl SecureStorage {
         let obfuscated = Self::obfuscate(json.as_bytes());
         let encoded = BASE64.encode(&obfuscated);
 
-        std::fs::write(&path, &encoded)
-            .map_err(|e| {
-                error!("Failed to write session file: {}", e);
-                AuthError::StorageError(format!("Failed to write session file: {}", e))
-            })?;
+        std::fs::write(&path, &encoded).map_err(|e| {
+            error!("Failed to write session file: {}", e);
+            AuthError::StorageError(format!("Failed to write session file: {}", e))
+        })?;
 
         // Verify by reading back
         match std::fs::read_to_string(&path) {
             Ok(read_back) if read_back == encoded => {
-                info!("Session stored and verified in file ({} bytes)", encoded.len());
+                info!(
+                    "Session stored and verified in file ({} bytes)",
+                    encoded.len()
+                );
             }
             Ok(_) => {
                 warn!("Session stored but file verification mismatch");
@@ -166,8 +174,9 @@ impl SecureStorage {
     fn clear_from_file(&self) -> Result<(), AuthError> {
         let path = self.session_file_path();
         if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| AuthError::StorageError(format!("Failed to delete session file: {}", e)))?;
+            std::fs::remove_file(&path).map_err(|e| {
+                AuthError::StorageError(format!("Failed to delete session file: {}", e))
+            })?;
             info!("Cleared session file");
         }
         Ok(())
@@ -192,7 +201,10 @@ impl SecureStorage {
                 Ok(())
             }
             Err(e) => {
-                warn!("Failed to store in keyring (file storage still works): {}", e);
+                warn!(
+                    "Failed to store in keyring (file storage still works): {}",
+                    e
+                );
                 Ok(()) // Don't fail - file storage is primary
             }
         }
@@ -309,8 +321,12 @@ impl SecureStorage {
 
     /// Check if a session exists (in either storage)
     pub fn has_session(&self) -> bool {
-        self.session_file_path().exists() ||
-        self.keyring_entry.as_ref().map(|e| e.get_password().is_ok()).unwrap_or(false)
+        self.session_file_path().exists()
+            || self
+                .keyring_entry
+                .as_ref()
+                .map(|e| e.get_password().is_ok())
+                .unwrap_or(false)
     }
 
     /// Get the OAuth state file path
@@ -322,8 +338,9 @@ impl SecureStorage {
     pub fn save_oauth_state(&self, state: &OAuthPendingState) -> Result<(), AuthError> {
         let path = self.oauth_state_path();
 
-        let json = serde_json::to_string(state)
-            .map_err(|e| AuthError::StorageError(format!("Failed to serialize OAuth state: {}", e)))?;
+        let json = serde_json::to_string(state).map_err(|e| {
+            AuthError::StorageError(format!("Failed to serialize OAuth state: {}", e))
+        })?;
 
         std::fs::write(&path, json)
             .map_err(|e| AuthError::StorageError(format!("Failed to write OAuth state: {}", e)))?;
@@ -344,8 +361,9 @@ impl SecureStorage {
         let json = std::fs::read_to_string(&path)
             .map_err(|e| AuthError::StorageError(format!("Failed to read OAuth state: {}", e)))?;
 
-        let state: OAuthPendingState = serde_json::from_str(&json)
-            .map_err(|e| AuthError::StorageError(format!("Failed to deserialize OAuth state: {}", e)))?;
+        let state: OAuthPendingState = serde_json::from_str(&json).map_err(|e| {
+            AuthError::StorageError(format!("Failed to deserialize OAuth state: {}", e))
+        })?;
 
         info!("Loaded OAuth pending state from disk");
         Ok(Some(state))
@@ -356,8 +374,9 @@ impl SecureStorage {
         let path = self.oauth_state_path();
 
         if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| AuthError::StorageError(format!("Failed to remove OAuth state: {}", e)))?;
+            std::fs::remove_file(&path).map_err(|e| {
+                AuthError::StorageError(format!("Failed to remove OAuth state: {}", e))
+            })?;
             info!("Cleared OAuth pending state file");
         }
 

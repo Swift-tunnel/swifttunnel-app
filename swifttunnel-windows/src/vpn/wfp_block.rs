@@ -11,10 +11,10 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::*;
 use windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT;
+use windows::core::{GUID, PCWSTR, PWSTR};
 
 /// GUID for our sublayer (random, unique to SwiftTunnel)
 const SWIFTTUNNEL_SUBLAYER_GUID: GUID = GUID::from_u128(0x8a9b3c4d_5e6f_7a8b_9c0d_1e2f3a4b5c6d);
@@ -36,7 +36,9 @@ unsafe impl Send for WfpBlockState {}
 
 /// Initialize WFP engine for temporary block filters
 pub fn init() -> Result<(), String> {
-    let mut state = WFP_STATE.lock().map_err(|e| format!("Lock failed: {}", e))?;
+    let mut state = WFP_STATE
+        .lock()
+        .map_err(|e| format!("Lock failed: {}", e))?;
 
     if state.is_some() {
         return Ok(()); // Already initialized
@@ -60,7 +62,9 @@ pub fn init() -> Result<(), String> {
         // Create wide strings for display data
         // We need to keep these alive for the duration of the call
         let name: Vec<u16> = "SwiftTunnel Temporary Blocks\0".encode_utf16().collect();
-        let desc: Vec<u16> = "Holds game packets during split tunnel setup\0".encode_utf16().collect();
+        let desc: Vec<u16> = "Holds game packets during split tunnel setup\0"
+            .encode_utf16()
+            .collect();
 
         // Add our sublayer (if it doesn't exist)
         let sublayer = FWPM_SUBLAYER0 {
@@ -104,16 +108,16 @@ fn build_drive_mapping() -> HashMap<String, char> {
     // Check all possible drive letters A-Z
     for drive_char in 'A'..='Z' {
         // Create drive string like "C:"
-        let drive_name: Vec<u16> = format!("{}:", drive_char).encode_utf16().chain(std::iter::once(0)).collect();
+        let drive_name: Vec<u16> = format!("{}:", drive_char)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         // Buffer to receive device path
         let mut buffer = [0u16; 512];
 
         unsafe {
-            let len = QueryDosDeviceW(
-                PCWSTR::from_raw(drive_name.as_ptr()),
-                Some(&mut buffer),
-            );
+            let len = QueryDosDeviceW(PCWSTR::from_raw(drive_name.as_ptr()), Some(&mut buffer));
 
             if len > 0 {
                 // QueryDosDevice returns null-separated strings, take the first one
@@ -197,7 +201,9 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
         return Err("Empty image path".to_string());
     }
 
-    let mut state_guard = WFP_STATE.lock().map_err(|e| format!("Lock failed: {}", e))?;
+    let mut state_guard = WFP_STATE
+        .lock()
+        .map_err(|e| format!("Lock failed: {}", e))?;
     let state = state_guard.as_mut().ok_or("WFP not initialized")?;
 
     let key = image_path.to_lowercase();
@@ -209,9 +215,8 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
     }
 
     // Convert NT path to DOS path for WFP
-    let dos_path = nt_to_dos_path(image_path).ok_or_else(|| {
-        format!("Could not convert NT path to DOS path: {}", image_path)
-    })?;
+    let dos_path = nt_to_dos_path(image_path)
+        .ok_or_else(|| format!("Could not convert NT path to DOS path: {}", image_path))?;
 
     log::info!("WFP blocking process: {} (DOS: {})", image_path, dos_path);
 
@@ -220,10 +225,8 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
         let dos_path_wide: Vec<u16> = dos_path.encode_utf16().chain(std::iter::once(0)).collect();
         let mut app_id: *mut FWP_BYTE_BLOB = std::ptr::null_mut();
 
-        let result = FwpmGetAppIdFromFileName0(
-            PCWSTR::from_raw(dos_path_wide.as_ptr()),
-            &mut app_id,
-        );
+        let result =
+            FwpmGetAppIdFromFileName0(PCWSTR::from_raw(dos_path_wide.as_ptr()), &mut app_id);
 
         if result != 0 {
             return Err(format!(
@@ -242,21 +245,21 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
             matchType: FWP_MATCH_EQUAL,
             conditionValue: FWP_CONDITION_VALUE0 {
                 r#type: FWP_BYTE_BLOB_TYPE,
-                Anonymous: FWP_CONDITION_VALUE0_0 {
-                    byteBlob: app_id,
-                },
+                Anonymous: FWP_CONDITION_VALUE0_0 { byteBlob: app_id },
             },
         };
 
         // Generate unique filter GUID
         state.filter_counter += 1;
         let filter_guid = GUID::from_u128(
-            0x1234_5678_9abc_def0_1234_5678_0000_0000u128 | (state.filter_counter as u128)
+            0x1234_5678_9abc_def0_1234_5678_0000_0000u128 | (state.filter_counter as u128),
         );
 
         // Create wide strings for display data
         let filter_name: Vec<u16> = "SwiftTunnel Process Block\0".encode_utf16().collect();
-        let filter_desc: Vec<u16> = "Temporary block during split tunnel setup\0".encode_utf16().collect();
+        let filter_desc: Vec<u16> = "Temporary block during split tunnel setup\0"
+            .encode_utf16()
+            .collect();
 
         // Create the block filter at ALE_AUTH_CONNECT layer
         // This blocks ALL new outbound connections from this process
@@ -274,7 +277,9 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
             },
             action: FWPM_ACTION0 {
                 r#type: FWP_ACTION_BLOCK,
-                Anonymous: FWPM_ACTION0_0 { filterType: GUID::zeroed() },
+                Anonymous: FWPM_ACTION0_0 {
+                    filterType: GUID::zeroed(),
+                },
             },
             numFilterConditions: 1,
             filterCondition: &condition as *const _ as *mut _,
@@ -282,12 +287,7 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
         };
 
         let mut filter_id: u64 = 0;
-        let add_result = FwpmFilterAdd0(
-            state.engine_handle,
-            &filter,
-            None,
-            Some(&mut filter_id),
-        );
+        let add_result = FwpmFilterAdd0(state.engine_handle, &filter, None, Some(&mut filter_id));
 
         // Free the app ID blob
         FwpmFreeMemory0(&mut (app_id as *mut std::ffi::c_void));
@@ -297,7 +297,11 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
         }
 
         state.active_filters.insert(key, filter_id);
-        log::info!("WFP block filter added for {} (filter_id={})", image_path, filter_id);
+        log::info!(
+            "WFP block filter added for {} (filter_id={})",
+            image_path,
+            filter_id
+        );
 
         Ok(())
     }
@@ -305,7 +309,9 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
 
 /// Remove the block filter for a process
 pub fn unblock_process_by_path(image_path: &str) -> Result<(), String> {
-    let mut state_guard = WFP_STATE.lock().map_err(|e| format!("Lock failed: {}", e))?;
+    let mut state_guard = WFP_STATE
+        .lock()
+        .map_err(|e| format!("Lock failed: {}", e))?;
     let state = state_guard.as_mut().ok_or("WFP not initialized")?;
 
     let key = image_path.to_lowercase();
@@ -320,7 +326,11 @@ pub fn unblock_process_by_path(image_path: &str) -> Result<(), String> {
                     result
                 );
             } else {
-                log::info!("WFP block filter removed for {} (filter_id={})", image_path, filter_id);
+                log::info!(
+                    "WFP block filter removed for {} (filter_id={})",
+                    image_path,
+                    filter_id
+                );
             }
         }
     }

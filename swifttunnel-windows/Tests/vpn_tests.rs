@@ -148,7 +148,11 @@ mod connection_state_tests {
         ];
 
         for state in states {
-            assert!(state.is_connecting(), "State {:?} should be connecting", state);
+            assert!(
+                state.is_connecting(),
+                "State {:?} should be connecting",
+                state
+            );
             assert!(!state.is_connected());
         }
     }
@@ -173,13 +177,34 @@ mod connection_state_tests {
     fn test_valid_state_transitions() {
         // Test that valid state transitions are possible
         let transitions = vec![
-            (MockConnectionState::Disconnected, MockConnectionState::FetchingConfig),
-            (MockConnectionState::FetchingConfig, MockConnectionState::CreatingAdapter),
-            (MockConnectionState::CreatingAdapter, MockConnectionState::Connecting),
-            (MockConnectionState::Connecting, MockConnectionState::ConfiguringSplitTunnel),
-            (MockConnectionState::ConfiguringSplitTunnel, MockConnectionState::Connected),
-            (MockConnectionState::Connected, MockConnectionState::Disconnecting),
-            (MockConnectionState::Disconnecting, MockConnectionState::Disconnected),
+            (
+                MockConnectionState::Disconnected,
+                MockConnectionState::FetchingConfig,
+            ),
+            (
+                MockConnectionState::FetchingConfig,
+                MockConnectionState::CreatingAdapter,
+            ),
+            (
+                MockConnectionState::CreatingAdapter,
+                MockConnectionState::Connecting,
+            ),
+            (
+                MockConnectionState::Connecting,
+                MockConnectionState::ConfiguringSplitTunnel,
+            ),
+            (
+                MockConnectionState::ConfiguringSplitTunnel,
+                MockConnectionState::Connected,
+            ),
+            (
+                MockConnectionState::Connected,
+                MockConnectionState::Disconnecting,
+            ),
+            (
+                MockConnectionState::Disconnecting,
+                MockConnectionState::Disconnected,
+            ),
         ];
 
         for (from, to) in transitions {
@@ -467,7 +492,8 @@ mod api_response_tests {
                 "dns": ["1.1.1.1", "8.8.8.8"],
                 "phantunEnabled": true
             }
-        }"#.to_string()
+        }"#
+        .to_string()
     }
 
     #[test]
@@ -561,9 +587,8 @@ mod network_analyzer_tests {
         assert!((avg - 50.0).abs() < 1.0);
 
         // Calculate jitter (average absolute deviation)
-        let jitter: f64 = latencies.iter()
-            .map(|&l| (l - avg).abs())
-            .sum::<f64>() / latencies.len() as f64;
+        let jitter: f64 =
+            latencies.iter().map(|&l| (l - avg).abs()).sum::<f64>() / latencies.len() as f64;
 
         // Jitter should be reasonable for these values
         assert!(jitter > 0.0);
@@ -795,9 +820,11 @@ mod oauth_tests {
 
         let auth_url = format!(
             "{}/authorize?client_id={}&redirect_uri={}&response_type=code&state={}&code_challenge={}&code_challenge_method=S256",
-            base_url, client_id,
+            base_url,
+            client_id,
             percent_encode_test(redirect_uri),
-            state, code_challenge
+            state,
+            code_challenge
         );
 
         assert!(auth_url.contains("client_id="));
@@ -824,7 +851,9 @@ mod process_tracking_tests {
         let target_apps: HashSet<String> = vec![
             "RobloxPlayerBeta.exe".to_string(),
             "RobloxStudioBeta.exe".to_string(),
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
 
         assert!(target_apps.contains("RobloxPlayerBeta.exe"));
         assert!(!target_apps.contains("chrome.exe"));
@@ -870,10 +899,7 @@ mod route_tests {
     #[test]
     fn test_roblox_ip_ranges() {
         // Known Roblox IP ranges (examples)
-        let roblox_ranges = vec![
-            ("128.116.0.0", 16),
-            ("128.79.0.0", 16),
-        ];
+        let roblox_ranges = vec![("128.116.0.0", 16), ("128.79.0.0", 16)];
 
         for (ip_str, cidr) in roblox_ranges {
             let ip: Result<Ipv4Addr, _> = ip_str.parse();
@@ -885,12 +911,7 @@ mod route_tests {
     #[test]
     fn test_default_gateway_detection() {
         // Default gateway is typically a private IP
-        let common_gateways = vec![
-            "192.168.1.1",
-            "192.168.0.1",
-            "10.0.0.1",
-            "172.16.0.1",
-        ];
+        let common_gateways = vec!["192.168.1.1", "192.168.0.1", "10.0.0.1", "172.16.0.1"];
 
         for gw in common_gateways {
             let ip: Result<Ipv4Addr, _> = gw.parse();
@@ -989,7 +1010,7 @@ mod performance_tests {
     #[test]
     fn test_memory_usage_calculation() {
         let total_mb: u64 = 16384; // 16 GB
-        let used_mb: u64 = 8192;   // 8 GB
+        let used_mb: u64 = 8192; // 8 GB
         let percent = (used_mb as f64 / total_mb as f64) * 100.0;
 
         assert!((percent - 50.0).abs() < 0.01);
@@ -1007,12 +1028,7 @@ mod performance_tests {
 mod tray_tests {
     #[test]
     fn test_tray_menu_items() {
-        let menu_items = vec![
-            "Show",
-            "Connect",
-            "Disconnect",
-            "Exit",
-        ];
+        let menu_items = vec!["Show", "Connect", "Disconnect", "Exit"];
 
         assert!(!menu_items.is_empty());
         assert!(menu_items.contains(&"Exit"));
@@ -1051,9 +1067,9 @@ mod notification_tests {
 
 /// Integration tests for auth + storage flow
 mod auth_integration_tests {
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct MockTokens {
@@ -1151,11 +1167,15 @@ mod auth_integration_tests {
         // Simulate combined storage
         let mut storage: HashMap<String, String> = HashMap::new();
         storage.insert("user".to_string(), serde_json::to_string(&user).unwrap());
-        storage.insert("tokens".to_string(), serde_json::to_string(&tokens).unwrap());
+        storage.insert(
+            "tokens".to_string(),
+            serde_json::to_string(&tokens).unwrap(),
+        );
 
         // Verify both can be restored
         let restored_user: MockUser = serde_json::from_str(storage.get("user").unwrap()).unwrap();
-        let restored_tokens: MockTokens = serde_json::from_str(storage.get("tokens").unwrap()).unwrap();
+        let restored_tokens: MockTokens =
+            serde_json::from_str(storage.get("tokens").unwrap()).unwrap();
 
         assert_eq!(restored_user.email, "test@example.com");
         assert!(!restored_tokens.access_token.is_empty());
@@ -1302,8 +1322,8 @@ mod settings_integration_tests {
 
 /// Integration tests for VPN config + server selection
 mod vpn_config_integration_tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use base64::{Engine, engine::general_purpose::STANDARD};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[derive(Debug, Clone)]
     struct MockVpnConfig {
@@ -1390,7 +1410,8 @@ mod vpn_config_integration_tests {
         ];
 
         // Find best server (lowest ping)
-        let best = servers.iter()
+        let best = servers
+            .iter()
             .filter(|s| s.ping_ms.is_some())
             .min_by_key(|s| s.ping_ms.unwrap())
             .unwrap();
@@ -1420,9 +1441,7 @@ mod vpn_config_integration_tests {
         ];
 
         // Filter to only Phantun-capable servers
-        let phantun_servers: Vec<_> = servers.iter()
-            .filter(|s| s.has_phantun)
-            .collect();
+        let phantun_servers: Vec<_> = servers.iter().filter(|s| s.has_phantun).collect();
 
         assert_eq!(phantun_servers.len(), 1);
         assert_eq!(phantun_servers[0].region, "singapore");
@@ -1452,8 +1471,8 @@ mod vpn_config_integration_tests {
 
 /// Integration tests for split tunnel + route management
 mod split_tunnel_integration_tests {
-    use std::net::Ipv4Addr;
     use std::collections::HashSet;
+    use std::net::Ipv4Addr;
 
     #[derive(Debug, Clone)]
     struct MockRoute {
@@ -1529,9 +1548,9 @@ mod split_tunnel_integration_tests {
         ];
 
         let test_ips = vec![
-            (Ipv4Addr::new(128, 116, 10, 5), true),   // Roblox server
-            (Ipv4Addr::new(128, 79, 200, 1), true),   // Roblox server
-            (Ipv4Addr::new(8, 8, 8, 8), false),       // Google DNS
+            (Ipv4Addr::new(128, 116, 10, 5), true),    // Roblox server
+            (Ipv4Addr::new(128, 79, 200, 1), true),    // Roblox server
+            (Ipv4Addr::new(8, 8, 8, 8), false),        // Google DNS
             (Ipv4Addr::new(142, 250, 185, 14), false), // Google
         ];
 
@@ -1540,7 +1559,11 @@ mod split_tunnel_integration_tests {
             let mut matches_vpn = false;
 
             for (range_start, cidr) in &vpn_ranges {
-                let mask = if *cidr == 0 { 0 } else { !((1u32 << (32 - cidr)) - 1) };
+                let mask = if *cidr == 0 {
+                    0
+                } else {
+                    !((1u32 << (32 - cidr)) - 1)
+                };
                 if (ip_u32 & mask) == (*range_start & mask) {
                     matches_vpn = true;
                     break;
@@ -1554,10 +1577,9 @@ mod split_tunnel_integration_tests {
     /// Tests process-based split tunnel decision
     #[test]
     fn test_process_based_split_decision() {
-        let tunnel_apps: HashSet<&str> = vec![
-            "RobloxPlayerBeta.exe",
-            "RobloxStudioBeta.exe",
-        ].into_iter().collect();
+        let tunnel_apps: HashSet<&str> = vec!["RobloxPlayerBeta.exe", "RobloxStudioBeta.exe"]
+            .into_iter()
+            .collect();
 
         // Simulated connections
         let connections = vec![
@@ -1585,7 +1607,7 @@ mod split_tunnel_integration_tests {
 /// Integration tests for updater + version management
 mod updater_integration_tests {
     use semver::Version;
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     #[derive(Debug, Clone)]
     struct MockRelease {
@@ -1605,9 +1627,7 @@ mod updater_integration_tests {
             Version::parse("0.9.19").unwrap(),
         ];
 
-        let newer: Vec<_> = releases.iter()
-            .filter(|v| **v > current)
-            .collect();
+        let newer: Vec<_> = releases.iter().filter(|v| **v > current).collect();
 
         assert_eq!(newer.len(), 1);
         assert_eq!(*newer[0], Version::parse("0.9.21").unwrap());
@@ -1646,7 +1666,10 @@ mod updater_integration_tests {
 
         // Download complete: create marker
         markers.insert("update_pending".to_string(), "0.9.21".to_string());
-        markers.insert("installer_path".to_string(), "C:\\temp\\SwiftTunnel.msi".to_string());
+        markers.insert(
+            "installer_path".to_string(),
+            "C:\\temp\\SwiftTunnel.msi".to_string(),
+        );
 
         // Verify marker exists
         assert!(markers.get("update_pending").is_some());
@@ -1696,11 +1719,31 @@ mod network_analyzer_integration_tests {
     #[test]
     fn test_stability_analysis() {
         let pings = vec![
-            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 20.0, success: true },
-            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 22.0, success: true },
-            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 19.0, success: true },
-            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 150.0, success: true }, // Spike
-            MockPingResult { target: "1.1.1.1".to_string(), latency_ms: 21.0, success: true },
+            MockPingResult {
+                target: "1.1.1.1".to_string(),
+                latency_ms: 20.0,
+                success: true,
+            },
+            MockPingResult {
+                target: "1.1.1.1".to_string(),
+                latency_ms: 22.0,
+                success: true,
+            },
+            MockPingResult {
+                target: "1.1.1.1".to_string(),
+                latency_ms: 19.0,
+                success: true,
+            },
+            MockPingResult {
+                target: "1.1.1.1".to_string(),
+                latency_ms: 150.0,
+                success: true,
+            }, // Spike
+            MockPingResult {
+                target: "1.1.1.1".to_string(),
+                latency_ms: 21.0,
+                success: true,
+            },
         ];
 
         // Calculate stats
@@ -1712,9 +1755,8 @@ mod network_analyzer_integration_tests {
         let max = latencies.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
         // Calculate jitter (average deviation from mean)
-        let jitter: f64 = latencies.iter()
-            .map(|&l| (l - avg).abs())
-            .sum::<f64>() / latencies.len() as f64;
+        let jitter: f64 =
+            latencies.iter().map(|&l| (l - avg).abs()).sum::<f64>() / latencies.len() as f64;
 
         assert!(min < avg);
         assert!(max > avg);
@@ -1730,9 +1772,21 @@ mod network_analyzer_integration_tests {
     #[test]
     fn test_speed_result_aggregation() {
         let results = vec![
-            MockSpeedResult { download_mbps: 95.5, upload_mbps: 45.2, test_duration: Duration::from_secs(10) },
-            MockSpeedResult { download_mbps: 98.3, upload_mbps: 47.1, test_duration: Duration::from_secs(10) },
-            MockSpeedResult { download_mbps: 94.8, upload_mbps: 44.9, test_duration: Duration::from_secs(10) },
+            MockSpeedResult {
+                download_mbps: 95.5,
+                upload_mbps: 45.2,
+                test_duration: Duration::from_secs(10),
+            },
+            MockSpeedResult {
+                download_mbps: 98.3,
+                upload_mbps: 47.1,
+                test_duration: Duration::from_secs(10),
+            },
+            MockSpeedResult {
+                download_mbps: 94.8,
+                upload_mbps: 44.9,
+                test_duration: Duration::from_secs(10),
+            },
         ];
 
         let avg_down = results.iter().map(|r| r.download_mbps).sum::<f64>() / results.len() as f64;

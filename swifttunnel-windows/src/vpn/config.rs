@@ -3,10 +3,10 @@
 //! Handles fetching VPN configuration from the SwiftTunnel API,
 //! including WireGuard keys, server endpoints, and assigned IPs.
 
+use super::{VpnError, VpnResult};
 use crate::auth::types::VpnConfig;
 use crate::dns::CloudflareDns;
 use serde::{Deserialize, Serialize};
-use super::{VpnError, VpnResult};
 
 /// API base URL for SwiftTunnel
 const API_BASE_URL: &str = "https://swifttunnel.net";
@@ -51,10 +51,7 @@ struct ApiResponse<T> {
 ///
 /// # Returns
 /// * `VpnConfig` containing all necessary connection parameters
-pub async fn fetch_vpn_config(
-    access_token: &str,
-    region: &str,
-) -> VpnResult<VpnConfig> {
+pub async fn fetch_vpn_config(access_token: &str, region: &str) -> VpnResult<VpnConfig> {
     let client = http_client();
     let url = format!("{}/api/vpn/generate-config", API_BASE_URL);
 
@@ -95,7 +92,9 @@ pub async fn fetch_vpn_config(
             Ok(config)
         }
         None => {
-            let error = api_response.error.unwrap_or_else(|| "Unknown error".to_string());
+            let error = api_response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string());
             Err(VpnError::ConfigFetch(error))
         }
     }
@@ -105,9 +104,9 @@ pub async fn fetch_vpn_config(
 ///
 /// The private key stays on the device, only public key is sent to server.
 pub fn generate_keypair() -> (String, String) {
-    use x25519_dalek::{StaticSecret, PublicKey};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use rand::rngs::OsRng;
+    use x25519_dalek::{PublicKey, StaticSecret};
 
     let private_key = StaticSecret::random_from_rng(OsRng);
     let public_key = PublicKey::from(&private_key);
@@ -184,7 +183,11 @@ pub async fn update_latency(
     let client = http_client();
     let url = format!("{}/api/vpn/latency", API_BASE_URL);
 
-    log::info!("Updating latency to {}ms for config {}", latency_ms, config_id);
+    log::info!(
+        "Updating latency to {}ms for config {}",
+        latency_ms,
+        config_id
+    );
 
     let response = client
         .patch(&url)

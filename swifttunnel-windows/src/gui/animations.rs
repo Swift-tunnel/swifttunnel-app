@@ -4,12 +4,12 @@ use eframe::egui;
 use std::collections::HashMap;
 
 // Animation timing constants
-pub const TOGGLE_ANIMATION_DURATION: f32 = 0.15;   // 150ms for toggle switches
-pub const PULSE_ANIMATION_DURATION: f32 = 2.0;      // 2s breathing cycle for connected pulse
-pub const HOVER_ANIMATION_DURATION: f32 = 0.1;      // 100ms for hover effects
-pub const SHIMMER_ANIMATION_DURATION: f32 = 1.5;    // 1.5s for skeleton shimmer
-pub const CARD_TRANSITION_DURATION: f32 = 0.2;      // 200ms for card state changes
-pub const BUTTON_PRESS_DURATION: f32 = 0.08;        // 80ms for button press feedback
+pub const TOGGLE_ANIMATION_DURATION: f32 = 0.15; // 150ms for toggle switches
+pub const PULSE_ANIMATION_DURATION: f32 = 2.0; // 2s breathing cycle for connected pulse
+pub const HOVER_ANIMATION_DURATION: f32 = 0.1; // 100ms for hover effects
+pub const SHIMMER_ANIMATION_DURATION: f32 = 1.5; // 1.5s for skeleton shimmer
+pub const CARD_TRANSITION_DURATION: f32 = 0.2; // 200ms for card state changes
+pub const BUTTON_PRESS_DURATION: f32 = 0.08; // 80ms for button press feedback
 
 /// Ease-out-cubic interpolation for smooth animations
 pub fn ease_out_cubic(t: f32) -> f32 {
@@ -85,7 +85,7 @@ impl AnimationManager {
         }
         self.toggle_animations.insert(
             id.to_string(),
-            Animation::new(current, target_val, TOGGLE_ANIMATION_DURATION)
+            Animation::new(current, target_val, TOGGLE_ANIMATION_DURATION),
         );
     }
 
@@ -106,7 +106,7 @@ impl AnimationManager {
         }
         self.hover_animations.insert(
             id.to_string(),
-            Animation::new(current, target_val, HOVER_ANIMATION_DURATION)
+            Animation::new(current, target_val, HOVER_ANIMATION_DURATION),
         );
     }
 
@@ -119,16 +119,18 @@ impl AnimationManager {
     }
 
     pub fn has_active_animations(&self) -> bool {
-        self.toggle_animations.values().any(|a| !a.is_complete()) ||
-        self.hover_animations.values().any(|a| !a.is_complete())
+        self.toggle_animations.values().any(|a| !a.is_complete())
+            || self.hover_animations.values().any(|a| !a.is_complete())
     }
 
     pub fn cleanup_completed(&mut self) {
         // Only clean up toggle animations that have completed AND returned to "off" state
-        self.toggle_animations.retain(|_, a| !a.is_complete() || a.to > 0.5);
+        self.toggle_animations
+            .retain(|_, a| !a.is_complete() || a.to > 0.5);
         // Only clean up hover animations that have completed AND returned to "not hovered" state
         // This prevents flickering when continuously hovering (animation completes at 1.0)
-        self.hover_animations.retain(|_, a| !a.is_complete() || a.to > 0.5);
+        self.hover_animations
+            .retain(|_, a| !a.is_complete() || a.to > 0.5);
     }
 }
 

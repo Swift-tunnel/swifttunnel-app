@@ -15,13 +15,13 @@
 //! - No lock contention between packet workers
 //! - No WFP complexity (callouts, filters, sublayers, providers)
 
-use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use super::packet_interceptor::{PacketInterceptor, WireguardContext};
 use super::parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
 use super::{VpnError, VpnResult};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  GAME PRESETS
@@ -36,7 +36,11 @@ pub enum GamePreset {
 
 impl GamePreset {
     pub fn all() -> &'static [GamePreset] {
-        &[GamePreset::Roblox, GamePreset::Valorant, GamePreset::Fortnite]
+        &[
+            GamePreset::Roblox,
+            GamePreset::Valorant,
+            GamePreset::Fortnite,
+        ]
     }
 
     /// Process names that should use VPN
@@ -45,13 +49,13 @@ impl GamePreset {
             GamePreset::Roblox => &[
                 // Main game client (most common)
                 "robloxplayerbeta.exe",
-                "robloxplayer.exe",           // Some users don't have "beta" suffix
-                "windows10universal.exe",      // Microsoft Store version
+                "robloxplayer.exe",       // Some users don't have "beta" suffix
+                "windows10universal.exe", // Microsoft Store version
                 // Launchers
                 "robloxplayerlauncher.exe",
                 // Studio
                 "robloxstudiobeta.exe",
-                "robloxstudio.exe",           // Some users don't have "beta" suffix
+                "robloxstudio.exe", // Some users don't have "beta" suffix
                 "robloxstudiolauncherbeta.exe",
                 "robloxstudiolauncher.exe",
             ],
@@ -296,7 +300,9 @@ impl SplitTunnelDriver {
     /// Get the V3 UDP relay context if set
     pub fn get_relay_context(&self) -> Option<std::sync::Arc<super::udp_relay::UdpRelay>> {
         if self.use_parallel {
-            self.parallel_interceptor.as_ref().and_then(|p| p.get_relay_context())
+            self.parallel_interceptor
+                .as_ref()
+                .and_then(|p| p.get_relay_context())
         } else {
             None
         }
@@ -368,11 +374,14 @@ impl SplitTunnelDriver {
         // Look for bundled MSI in common locations
         let msi_paths = [
             // Same directory as exe (for portable/dev)
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))),
+            std::env::current_exe().ok().and_then(|p| {
+                p.parent()
+                    .map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))
+            }),
             // Program Files installation
-            Some(PathBuf::from(r"C:\Program Files\SwiftTunnel\drivers\WinpkFilter-x64.msi")),
+            Some(PathBuf::from(
+                r"C:\Program Files\SwiftTunnel\drivers\WinpkFilter-x64.msi",
+            )),
         ];
 
         let mut msi_path = None;
@@ -396,7 +405,7 @@ impl SplitTunnelDriver {
             .args([
                 "/i",
                 &msi_path.to_string_lossy(),
-                "/qn",      // Quiet, no UI
+                "/qn", // Quiet, no UI
                 "/norestart",
             ])
             .output()
@@ -454,8 +463,8 @@ impl SplitTunnelDriver {
     ///
     /// Requires administrator privileges to create or start the driver service.
     fn ensure_driver_service() -> Result<(), String> {
-        use windows::core::PCWSTR;
         use windows::Win32::System::Services::*;
+        use windows::core::PCWSTR;
 
         const SERVICE_NAME: &str = "NDISRD";
 
@@ -463,7 +472,8 @@ impl SplitTunnelDriver {
         if !crate::utils::is_administrator() {
             return Err(
                 "Administrator privileges required to manage driver service. \
-                Please run SwiftTunnel as Administrator.".to_string()
+                Please run SwiftTunnel as Administrator."
+                    .to_string(),
             );
         }
 
@@ -475,8 +485,10 @@ impl SplitTunnelDriver {
             let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
                 .map_err(|e| format!("Failed to open SCM: {}", e))?;
 
-            let service_name_wide: Vec<u16> =
-                SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+            let service_name_wide: Vec<u16> = SERVICE_NAME
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
 
             // Try to open existing service
             match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_ALL_ACCESS) {
@@ -513,7 +525,10 @@ impl SplitTunnelDriver {
 
                     // Only try to create if we have the driver file
                     if let Some(driver_path) = driver_path {
-                        log::info!("Creating NDISRD service with driver: {}", driver_path.display());
+                        log::info!(
+                            "Creating NDISRD service with driver: {}",
+                            driver_path.display()
+                        );
 
                         let display_name_wide: Vec<u16> = "Windows Packet Filter"
                             .encode_utf16()
@@ -564,8 +579,8 @@ impl SplitTunnelDriver {
 
     /// Stop the driver service
     pub fn stop_driver_service() -> Result<(), String> {
-        use windows::core::PCWSTR;
         use windows::Win32::System::Services::*;
+        use windows::core::PCWSTR;
 
         const SERVICE_NAME: &str = "NDISRD";
 
@@ -573,8 +588,10 @@ impl SplitTunnelDriver {
             let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
                 .map_err(|e| format!("Failed to open SCM: {}", e))?;
 
-            let service_name_wide: Vec<u16> =
-                SERVICE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+            let service_name_wide: Vec<u16> = SERVICE_NAME
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
 
             match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_STOP) {
                 Ok(service) => {
@@ -616,7 +633,10 @@ impl SplitTunnelDriver {
             return Ok(());
         }
 
-        log::info!("Opening split tunnel driver (ndisapi, parallel={})...", self.use_parallel);
+        log::info!(
+            "Opening split tunnel driver (ndisapi, parallel={})...",
+            self.use_parallel
+        );
 
         // Create packet interceptor
         let tunnel_apps: Vec<String> = self
@@ -644,14 +664,16 @@ impl SplitTunnelDriver {
         log::info!("Initializing split tunnel driver...");
 
         if self.use_parallel {
-            let interceptor = self.parallel_interceptor.as_mut().ok_or_else(|| {
-                VpnError::SplitTunnel("Driver not open".to_string())
-            })?;
+            let interceptor = self
+                .parallel_interceptor
+                .as_mut()
+                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
             interceptor.initialize()?;
         } else {
-            let interceptor = self.interceptor.as_mut().ok_or_else(|| {
-                VpnError::SplitTunnel("Driver not open".to_string())
-            })?;
+            let interceptor = self
+                .interceptor
+                .as_mut()
+                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
             interceptor.initialize()?;
         }
 
@@ -666,12 +688,15 @@ impl SplitTunnelDriver {
             // For parallel mode, get from snapshot
             if let Some(ref interceptor) = self.parallel_interceptor {
                 let snapshot = interceptor.get_snapshot();
-                snapshot.pid_names.values()
+                snapshot
+                    .pid_names
+                    .values()
                     .filter(|name| {
                         let name_lower = name.to_lowercase();
-                        snapshot.tunnel_apps.iter().any(|app| {
-                            name_lower.contains(app.trim_end_matches(".exe"))
-                        })
+                        snapshot
+                            .tunnel_apps
+                            .iter()
+                            .any(|app| name_lower.contains(app.trim_end_matches(".exe")))
                     })
                     .cloned()
                     .collect()
@@ -705,9 +730,10 @@ impl SplitTunnelDriver {
         log::debug!("Tunnel apps: {:?}", config.tunnel_apps);
 
         if self.use_parallel {
-            let interceptor = self.parallel_interceptor.as_mut().ok_or_else(|| {
-                VpnError::SplitTunnel("Driver not open".to_string())
-            })?;
+            let interceptor = self
+                .parallel_interceptor
+                .as_mut()
+                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
 
             // Configure the interceptor
             // Pass the LUID for reliable adapter identification even when
@@ -726,15 +752,18 @@ impl SplitTunnelDriver {
                 interceptor.set_wintun_session(Arc::clone(session));
                 log::info!("Wintun session passed to parallel interceptor - VPN routing enabled");
             } else {
-                log::warn!("No Wintun session - tunnel app packets will be logged but NOT routed through VPN");
+                log::warn!(
+                    "No Wintun session - tunnel app packets will be logged but NOT routed through VPN"
+                );
             }
 
             // Start packet interception
             interceptor.start()?;
         } else {
-            let interceptor = self.interceptor.as_mut().ok_or_else(|| {
-                VpnError::SplitTunnel("Driver not open".to_string())
-            })?;
+            let interceptor = self
+                .interceptor
+                .as_mut()
+                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
 
             // Configure the interceptor
             interceptor.configure(
@@ -748,7 +777,9 @@ impl SplitTunnelDriver {
                 interceptor.set_wireguard_context(Arc::clone(ctx));
                 log::info!("WireGuard context passed to packet interceptor - VPN routing enabled");
             } else {
-                log::warn!("No WireGuard context - tunnel app packets will be logged but NOT routed through VPN");
+                log::warn!(
+                    "No WireGuard context - tunnel app packets will be logged but NOT routed through VPN"
+                );
             }
 
             // Start packet interception
@@ -770,9 +801,10 @@ impl SplitTunnelDriver {
             let running = !self.get_running_tunnel_apps().is_empty();
             Ok(running)
         } else {
-            let interceptor = self.interceptor.as_mut().ok_or_else(|| {
-                VpnError::SplitTunnel("Driver not open".to_string())
-            })?;
+            let interceptor = self
+                .interceptor
+                .as_mut()
+                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
             interceptor.refresh()
         }
     }
@@ -843,7 +875,9 @@ impl SplitTunnelDriver {
     /// Returns None if interceptor is not active.
     pub fn get_throughput_stats(&self) -> Option<ThroughputStats> {
         if self.use_parallel {
-            self.parallel_interceptor.as_ref().map(|p| p.get_throughput_stats())
+            self.parallel_interceptor
+                .as_ref()
+                .map(|p| p.get_throughput_stats())
         } else {
             self.interceptor.as_ref().map(|p| p.get_throughput_stats())
         }
@@ -858,7 +892,9 @@ impl SplitTunnelDriver {
     /// - packets_bypassed: Total packets that bypassed VPN (non-game apps)
     pub fn get_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
         if self.use_parallel {
-            self.parallel_interceptor.as_ref().map(|p| p.get_diagnostics())
+            self.parallel_interceptor
+                .as_ref()
+                .map(|p| p.get_diagnostics())
         } else {
             // Legacy mode - return minimal info
             Some((None, false, 0, 0))
@@ -897,7 +933,9 @@ impl SplitTunnelDriver {
     /// Returns None if split tunnel is not active in parallel mode.
     pub fn create_inbound_handler(&self) -> Option<super::tunnel::InboundHandler> {
         if self.use_parallel {
-            self.parallel_interceptor.as_ref().and_then(|p| p.create_inbound_handler())
+            self.parallel_interceptor
+                .as_ref()
+                .and_then(|p| p.create_inbound_handler())
         } else {
             // Legacy mode doesn't support inbound injection yet
             None
@@ -927,7 +965,10 @@ impl SplitTunnelDriver {
         } else {
             // Legacy mode doesn't support instant registration
             // Process will be detected on next 50ms poll
-            log::debug!("Legacy mode: process {} will be detected on next poll", name);
+            log::debug!(
+                "Legacy mode: process {} will be detected on next poll",
+                name
+            );
         }
     }
 
@@ -943,7 +984,9 @@ impl SplitTunnelDriver {
 
     /// Get current relay address (proxy to ParallelInterceptor)
     pub fn current_relay_addr(&self) -> Option<std::net::SocketAddr> {
-        self.parallel_interceptor.as_ref().and_then(|p| p.current_relay_addr())
+        self.parallel_interceptor
+            .as_ref()
+            .and_then(|p| p.current_relay_addr())
     }
 
     /// Trigger immediate cache refresh (called by ETW when game process detected)

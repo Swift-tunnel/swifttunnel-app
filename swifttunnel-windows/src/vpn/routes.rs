@@ -20,7 +20,6 @@ use super::{VpnError, VpnResult};
 use crate::hidden_command;
 use std::net::Ipv4Addr;
 
-
 /// Get the local IP address of the internet interface (default gateway interface)
 ///
 /// This is needed for split tunneling - the driver needs to know the real
@@ -58,7 +57,9 @@ fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
         let _ = GetIpForwardTable(None, &mut size, false);
 
         if size == 0 {
-            return Err(VpnError::Route("GetIpForwardTable returned size 0".to_string()));
+            return Err(VpnError::Route(
+                "GetIpForwardTable returned size 0".to_string(),
+            ));
         }
 
         let mut buffer: Vec<u8> = vec![0u8; size as usize];
@@ -66,16 +67,19 @@ fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
 
         let result = GetIpForwardTable(Some(table), &mut size, false);
         if result != 0 {
-            return Err(VpnError::Route(format!("GetIpForwardTable failed: {}", result)));
+            return Err(VpnError::Route(format!(
+                "GetIpForwardTable failed: {}",
+                result
+            )));
         }
 
         let num_entries = (*table).dwNumEntries as usize;
         let entries = std::slice::from_raw_parts((*table).table.as_ptr(), num_entries);
 
         // Find the default route (destination 0.0.0.0 with non-zero next hop)
-        let default_route = entries.iter().find(|row| {
-            row.dwForwardDest == 0 && row.dwForwardNextHop != 0
-        });
+        let default_route = entries
+            .iter()
+            .find(|row| row.dwForwardDest == 0 && row.dwForwardNextHop != 0);
 
         let interface_index = match default_route {
             Some(row) => row.dwForwardIfIndex,
@@ -89,7 +93,9 @@ fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
         let _ = GetIpAddrTable(None, &mut addr_size, false);
 
         if addr_size == 0 {
-            return Err(VpnError::Route("GetIpAddrTable returned size 0".to_string()));
+            return Err(VpnError::Route(
+                "GetIpAddrTable returned size 0".to_string(),
+            ));
         }
 
         let mut addr_buffer: Vec<u8> = vec![0u8; addr_size as usize];
@@ -97,7 +103,10 @@ fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
 
         let result = GetIpAddrTable(Some(addr_table), &mut addr_size, false);
         if result != 0 {
-            return Err(VpnError::Route(format!("GetIpAddrTable failed: {}", result)));
+            return Err(VpnError::Route(format!(
+                "GetIpAddrTable failed: {}",
+                result
+            )));
         }
 
         let num_addrs = (*addr_table).dwNumEntries as usize;
@@ -124,7 +133,9 @@ fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
 
 #[cfg(not(windows))]
 fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
-    Err(VpnError::Route("Native API not available on non-Windows".to_string()))
+    Err(VpnError::Route(
+        "Native API not available on non-Windows".to_string(),
+    ))
 }
 
 /// PowerShell fallback for older Windows versions
@@ -165,7 +176,6 @@ fn get_internet_interface_ip_powershell() -> VpnResult<Ipv4Addr> {
     log::info!("Internet interface IP (PowerShell): {}", ip);
     Ok(ip)
 }
-
 
 /// Route manager for VPN traffic routing
 ///
@@ -224,7 +234,9 @@ impl RouteManager {
             let _ = GetIpForwardTable(None, &mut size, false);
 
             if size == 0 {
-                return Err(VpnError::Route("GetIpForwardTable returned size 0".to_string()));
+                return Err(VpnError::Route(
+                    "GetIpForwardTable returned size 0".to_string(),
+                ));
             }
 
             let mut buffer: Vec<u8> = vec![0u8; size as usize];
@@ -232,7 +244,10 @@ impl RouteManager {
 
             let result = GetIpForwardTable(Some(table), &mut size, false);
             if result != 0 {
-                return Err(VpnError::Route(format!("GetIpForwardTable failed: {}", result)));
+                return Err(VpnError::Route(format!(
+                    "GetIpForwardTable failed: {}",
+                    result
+                )));
             }
 
             let num_entries = (*table).dwNumEntries as usize;
@@ -260,7 +275,9 @@ impl RouteManager {
 
     #[cfg(not(windows))]
     fn get_default_gateway_native() -> VpnResult<Ipv4Addr> {
-        Err(VpnError::Route("Native API not available on non-Windows".to_string()))
+        Err(VpnError::Route(
+            "Native API not available on non-Windows".to_string(),
+        ))
     }
 
     /// PowerShell fallback for older Windows versions
@@ -370,10 +387,7 @@ impl RouteManager {
 
         // Remove VPN server specific route
         let remove_server = hidden_command("route")
-            .args([
-                "delete",
-                &self.vpn_server_ip.to_string(),
-            ])
+            .args(["delete", &self.vpn_server_ip.to_string()])
             .output();
 
         match remove_server {

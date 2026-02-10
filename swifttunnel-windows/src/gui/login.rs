@@ -1,7 +1,7 @@
 //! Login screen rendering
 
-use super::*;
 use super::theme::*;
+use super::*;
 
 impl BoosterApp {
     /// Render the full login screen with email/password and Google OAuth options
@@ -42,41 +42,60 @@ impl BoosterApp {
                                         .rounding(egui::CornerRadius::same(6));
                                     ui.add(image);
                                 } else {
-                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(logo_size, logo_size), egui::Sense::hover());
-                                    ui.painter().circle_filled(rect.center(), logo_size * 0.45, ACCENT_CYAN);
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(logo_size, logo_size),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().circle_filled(
+                                        rect.center(),
+                                        logo_size * 0.45,
+                                        ACCENT_CYAN,
+                                    );
                                 }
 
                                 ui.add_space(8.0);
-                                ui.label(egui::RichText::new("SwiftTunnel")
-                                    .size(20.0)
-                                    .color(TEXT_PRIMARY)
-                                    .strong());
+                                ui.label(
+                                    egui::RichText::new("SwiftTunnel")
+                                        .size(20.0)
+                                        .color(TEXT_PRIMARY)
+                                        .strong(),
+                                );
                             });
 
                             ui.add_space(SPACING_XL);
 
                             // ── WELCOME SECTION ──
-                            ui.label(egui::RichText::new("Welcome back")
-                                .size(13.0)
-                                .color(ACCENT_PRIMARY));
+                            ui.label(
+                                egui::RichText::new("Welcome back")
+                                    .size(13.0)
+                                    .color(ACCENT_PRIMARY),
+                            );
 
                             ui.add_space(6.0);
-                            ui.label(egui::RichText::new("Sign in to your account")
-                                .size(24.0)
-                                .color(TEXT_PRIMARY)
-                                .strong());
+                            ui.label(
+                                egui::RichText::new("Sign in to your account")
+                                    .size(24.0)
+                                    .color(TEXT_PRIMARY)
+                                    .strong(),
+                            );
 
                             ui.add_space(6.0);
-                            ui.label(egui::RichText::new("Enter your credentials to access your dashboard")
+                            ui.label(
+                                egui::RichText::new(
+                                    "Enter your credentials to access your dashboard",
+                                )
                                 .size(13.0)
-                                .color(TEXT_SECONDARY));
+                                .color(TEXT_SECONDARY),
+                            );
 
                             ui.add_space(SPACING_LG);
 
                             // ── EMAIL FIELD ──
-                            ui.label(egui::RichText::new("Email address")
-                                .size(12.0)
-                                .color(TEXT_SECONDARY));
+                            ui.label(
+                                egui::RichText::new("Email address")
+                                    .size(12.0)
+                                    .color(TEXT_SECONDARY),
+                            );
                             ui.add_space(6.0);
 
                             egui::Frame::NONE
@@ -86,16 +105,20 @@ impl BoosterApp {
                                 .inner_margin(egui::Margin::symmetric(14, 12))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("@")
-                                            .size(14.0)
-                                            .color(TEXT_MUTED));
+                                        ui.label(
+                                            egui::RichText::new("@").size(14.0).color(TEXT_MUTED),
+                                        );
                                         ui.add_space(10.0);
 
-                                        let email_edit = egui::TextEdit::singleline(&mut self.login_email)
-                                            .hint_text(egui::RichText::new("your.email@example.com").color(TEXT_MUTED))
-                                            .desired_width(f32::INFINITY)
-                                            .frame(false)
-                                            .text_color(TEXT_PRIMARY);
+                                        let email_edit =
+                                            egui::TextEdit::singleline(&mut self.login_email)
+                                                .hint_text(
+                                                    egui::RichText::new("your.email@example.com")
+                                                        .color(TEXT_MUTED),
+                                                )
+                                                .desired_width(f32::INFINITY)
+                                                .frame(false)
+                                                .text_color(TEXT_PRIMARY);
                                         ui.add(email_edit);
                                     });
                                 });
@@ -104,21 +127,30 @@ impl BoosterApp {
 
                             // ── PASSWORD FIELD ──
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Password")
-                                    .size(12.0)
-                                    .color(TEXT_SECONDARY));
+                                ui.label(
+                                    egui::RichText::new("Password")
+                                        .size(12.0)
+                                        .color(TEXT_SECONDARY),
+                                );
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new("Forgot password?")
-                                                .size(12.0)
-                                                .color(ACCENT_PRIMARY)
-                                        ).sense(egui::Sense::click())
-                                    ).clicked() {
-                                        open_forgot_password = true;
-                                    }
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Label::new(
+                                                    egui::RichText::new("Forgot password?")
+                                                        .size(12.0)
+                                                        .color(ACCENT_PRIMARY),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            )
+                                            .clicked()
+                                        {
+                                            open_forgot_password = true;
+                                        }
+                                    },
+                                );
                             });
                             ui.add_space(6.0);
 
@@ -129,17 +161,23 @@ impl BoosterApp {
                                 .inner_margin(egui::Margin::symmetric(14, 12))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("\u{2022}")
-                                            .size(14.0)
-                                            .color(TEXT_MUTED));
+                                        ui.label(
+                                            egui::RichText::new("\u{2022}")
+                                                .size(14.0)
+                                                .color(TEXT_MUTED),
+                                        );
                                         ui.add_space(10.0);
 
-                                        let password_edit = egui::TextEdit::singleline(&mut self.login_password)
-                                            .hint_text(egui::RichText::new("Enter your password").color(TEXT_MUTED))
-                                            .password(true)
-                                            .desired_width(f32::INFINITY)
-                                            .frame(false)
-                                            .text_color(TEXT_PRIMARY);
+                                        let password_edit =
+                                            egui::TextEdit::singleline(&mut self.login_password)
+                                                .hint_text(
+                                                    egui::RichText::new("Enter your password")
+                                                        .color(TEXT_MUTED),
+                                                )
+                                                .password(true)
+                                                .desired_width(f32::INFINITY)
+                                                .frame(false)
+                                                .text_color(TEXT_PRIMARY);
                                         ui.add(password_edit);
                                     });
                                 });
@@ -147,18 +185,26 @@ impl BoosterApp {
                             ui.add_space(SPACING_LG);
 
                             // ── SIGN IN BUTTON ──
-                            let btn_color = if can_login { ACCENT_PRIMARY } else { ACCENT_PRIMARY.gamma_multiply(0.4) };
+                            let btn_color = if can_login {
+                                ACCENT_PRIMARY
+                            } else {
+                                ACCENT_PRIMARY.gamma_multiply(0.4)
+                            };
 
                             let response = ui.add_sized(
                                 egui::vec2(ui.available_width(), 44.0),
                                 egui::Button::new(
                                     egui::RichText::new("Sign in")
                                         .size(14.0)
-                                        .color(if can_login { egui::Color32::WHITE } else { egui::Color32::from_white_alpha(120) })
-                                        .strong()
+                                        .color(if can_login {
+                                            egui::Color32::WHITE
+                                        } else {
+                                            egui::Color32::from_white_alpha(120)
+                                        })
+                                        .strong(),
                                 )
                                 .fill(btn_color)
-                                .rounding(8.0)
+                                .rounding(8.0),
                             );
 
                             if response.clicked() && can_login {
@@ -174,16 +220,18 @@ impl BoosterApp {
 
                                 ui.add_sized(
                                     egui::vec2(line_width, 1.0),
-                                    egui::Separator::default().horizontal()
+                                    egui::Separator::default().horizontal(),
                                 );
                                 ui.add_space(8.0);
-                                ui.label(egui::RichText::new("or continue with")
-                                    .size(11.0)
-                                    .color(TEXT_MUTED));
+                                ui.label(
+                                    egui::RichText::new("or continue with")
+                                        .size(11.0)
+                                        .color(TEXT_MUTED),
+                                );
                                 ui.add_space(8.0);
                                 ui.add_sized(
                                     egui::vec2(line_width, 1.0),
-                                    egui::Separator::default().horizontal()
+                                    egui::Separator::default().horizontal(),
                                 );
                             });
 
@@ -195,11 +243,11 @@ impl BoosterApp {
                                 egui::Button::new(
                                     egui::RichText::new("Sign in with Google")
                                         .size(13.0)
-                                        .color(TEXT_PRIMARY)
+                                        .color(TEXT_PRIMARY),
                                 )
                                 .fill(BG_ELEVATED)
                                 .stroke(egui::Stroke::new(1.0, BORDER_DEFAULT))
-                                .rounding(8.0)
+                                .rounding(8.0),
                             );
 
                             if google_response.clicked() {
@@ -211,17 +259,23 @@ impl BoosterApp {
                             // ── SIGN UP LINK ──
                             ui.vertical_centered(|ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Don't have an account?")
-                                        .size(12.0)
-                                        .color(TEXT_SECONDARY));
+                                    ui.label(
+                                        egui::RichText::new("Don't have an account?")
+                                            .size(12.0)
+                                            .color(TEXT_SECONDARY),
+                                    );
                                     ui.add_space(4.0);
-                                    if ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new("Sign up")
-                                                .size(12.0)
-                                                .color(ACCENT_PRIMARY)
-                                        ).sense(egui::Sense::click())
-                                    ).clicked() {
+                                    if ui
+                                        .add(
+                                            egui::Label::new(
+                                                egui::RichText::new("Sign up")
+                                                    .size(12.0)
+                                                    .color(ACCENT_PRIMARY),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .clicked()
+                                    {
                                         open_signup = true;
                                     }
                                 });
@@ -232,30 +286,43 @@ impl BoosterApp {
                                 ui.add_space(SPACING_MD);
                                 egui::Frame::NONE
                                     .fill(STATUS_ERROR.gamma_multiply(0.1))
-                                    .stroke(egui::Stroke::new(1.0, STATUS_ERROR.gamma_multiply(0.2)))
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        STATUS_ERROR.gamma_multiply(0.2),
+                                    ))
                                     .rounding(8.0)
                                     .inner_margin(12)
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new("!")
-                                                .size(13.0)
-                                                .color(STATUS_ERROR)
-                                                .strong());
+                                            ui.label(
+                                                egui::RichText::new("!")
+                                                    .size(13.0)
+                                                    .color(STATUS_ERROR)
+                                                    .strong(),
+                                            );
                                             ui.add_space(8.0);
-                                            ui.label(egui::RichText::new(error)
-                                                .size(12.0)
-                                                .color(STATUS_ERROR));
+                                            ui.label(
+                                                egui::RichText::new(error)
+                                                    .size(12.0)
+                                                    .color(STATUS_ERROR),
+                                            );
                                         });
                                     });
                             }
                         });
-                }
+                },
             );
         });
 
-        if do_login { self.start_login(); }
-        if open_signup { crate::utils::open_url("https://swifttunnel.net/signup"); }
-        if open_forgot_password { crate::utils::open_url("https://swifttunnel.net/forgot-password"); }
+        if do_login {
+            self.start_login();
+        }
+        if open_signup {
+            crate::utils::open_url("https://swifttunnel.net/signup");
+        }
+        if open_forgot_password {
+            crate::utils::open_url("https://swifttunnel.net/forgot-password");
+        }
     }
 
     /// Render the login pending spinner
@@ -283,18 +350,22 @@ impl BoosterApp {
                                 ui.add_space(SPACING_MD);
                                 ui.spinner();
                                 ui.add_space(SPACING_MD);
-                                ui.label(egui::RichText::new("Signing in...")
-                                    .size(16.0)
-                                    .color(TEXT_PRIMARY)
-                                    .strong());
+                                ui.label(
+                                    egui::RichText::new("Signing in...")
+                                        .size(16.0)
+                                        .color(TEXT_PRIMARY)
+                                        .strong(),
+                                );
                                 ui.add_space(6.0);
-                                ui.label(egui::RichText::new("Please wait")
-                                    .size(13.0)
-                                    .color(TEXT_SECONDARY));
+                                ui.label(
+                                    egui::RichText::new("Please wait")
+                                        .size(13.0)
+                                        .color(TEXT_SECONDARY),
+                                );
                                 ui.add_space(SPACING_MD);
                             });
                         });
-                }
+                },
             );
         });
     }
@@ -322,26 +393,43 @@ impl BoosterApp {
                         .show(ui, |ui| {
                             ui.vertical_centered(|ui| {
                                 // Browser indicator
-                                let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
-                                ui.painter().circle_filled(icon_rect.center(), 20.0, ACCENT_PRIMARY.gamma_multiply(0.1));
-                                ui.painter().circle_stroke(icon_rect.center(), 14.0, egui::Stroke::new(2.0, ACCENT_PRIMARY.gamma_multiply(0.4)));
+                                let (icon_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(40.0, 40.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    icon_rect.center(),
+                                    20.0,
+                                    ACCENT_PRIMARY.gamma_multiply(0.1),
+                                );
+                                ui.painter().circle_stroke(
+                                    icon_rect.center(),
+                                    14.0,
+                                    egui::Stroke::new(2.0, ACCENT_PRIMARY.gamma_multiply(0.4)),
+                                );
 
                                 ui.add_space(SPACING_LG);
 
-                                ui.label(egui::RichText::new("Complete sign in")
-                                    .size(20.0)
-                                    .color(TEXT_PRIMARY)
-                                    .strong());
+                                ui.label(
+                                    egui::RichText::new("Complete sign in")
+                                        .size(20.0)
+                                        .color(TEXT_PRIMARY)
+                                        .strong(),
+                                );
 
                                 ui.add_space(SPACING_SM);
 
-                                ui.label(egui::RichText::new("A browser window has opened.")
-                                    .size(13.0)
-                                    .color(TEXT_SECONDARY));
+                                ui.label(
+                                    egui::RichText::new("A browser window has opened.")
+                                        .size(13.0)
+                                        .color(TEXT_SECONDARY),
+                                );
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Please sign in with Google to continue.")
-                                    .size(13.0)
-                                    .color(TEXT_SECONDARY));
+                                ui.label(
+                                    egui::RichText::new("Please sign in with Google to continue.")
+                                        .size(13.0)
+                                        .color(TEXT_SECONDARY),
+                                );
 
                                 ui.add_space(SPACING_LG);
 
@@ -350,29 +438,34 @@ impl BoosterApp {
 
                                 ui.add_space(6.0);
 
-                                ui.label(egui::RichText::new("Waiting for authentication...")
-                                    .size(12.0)
-                                    .color(TEXT_MUTED));
+                                ui.label(
+                                    egui::RichText::new("Waiting for authentication...")
+                                        .size(12.0)
+                                        .color(TEXT_MUTED),
+                                );
 
                                 ui.add_space(SPACING_LG);
 
                                 // Cancel button
-                                if ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Cancel")
-                                            .size(13.0)
-                                            .color(TEXT_SECONDARY)
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("Cancel")
+                                                .size(13.0)
+                                                .color(TEXT_SECONDARY),
+                                        )
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(1.0, BORDER_DEFAULT))
+                                        .rounding(8.0)
+                                        .min_size(egui::vec2(100.0, 34.0)),
                                     )
-                                    .fill(egui::Color32::TRANSPARENT)
-                                    .stroke(egui::Stroke::new(1.0, BORDER_DEFAULT))
-                                    .rounding(8.0)
-                                    .min_size(egui::vec2(100.0, 34.0))
-                                ).clicked() {
+                                    .clicked()
+                                {
                                     do_cancel = true;
                                 }
                             });
                         });
-                }
+                },
             );
         });
 

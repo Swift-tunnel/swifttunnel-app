@@ -1,14 +1,18 @@
-use crate::structs::*;
 use crate::hidden_command;
+use crate::structs::*;
 use log::{info, warn};
 use std::process::Command;
 use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::System::Threading::*;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
+use windows::Win32::System::Threading::*;
 
 // NtSetTimerResolution from ntdll.dll for sub-millisecond timer resolution (0.5ms)
 unsafe extern "system" {
-    fn NtSetTimerResolution(DesiredResolution: u32, SetResolution: u8, CurrentResolution: *mut u32) -> i32;
+    fn NtSetTimerResolution(
+        DesiredResolution: u32,
+        SetResolution: u8,
+        CurrentResolution: *mut u32,
+    ) -> i32;
 }
 
 pub struct SystemOptimizer {
@@ -25,8 +29,15 @@ impl SystemOptimizer {
     }
 
     /// Apply all system optimizations
-    pub fn apply_optimizations(&mut self, config: &SystemOptimizationConfig, process_id: u32) -> Result<()> {
-        info!("Applying system optimizations for process ID: {}", process_id);
+    pub fn apply_optimizations(
+        &mut self,
+        config: &SystemOptimizationConfig,
+        process_id: u32,
+    ) -> Result<()> {
+        info!(
+            "Applying system optimizations for process ID: {}",
+            process_id
+        );
 
         if config.set_high_priority {
             self.set_process_priority(process_id)?;
@@ -71,7 +82,11 @@ impl SystemOptimizer {
         info!("Setting process priority to high for PID: {}", process_id);
 
         unsafe {
-            let handle = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, false, process_id)?;
+            let handle = OpenProcess(
+                PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
+                false,
+                process_id,
+            )?;
 
             if handle.is_invalid() {
                 return Err(anyhow::anyhow!("Failed to open process"));
@@ -99,10 +114,17 @@ impl SystemOptimizer {
 
     /// Set CPU affinity for Roblox process
     fn set_cpu_affinity(&mut self, process_id: u32, cores: &[usize]) -> Result<()> {
-        info!("Setting CPU affinity for PID: {} to cores: {:?}", process_id, cores);
+        info!(
+            "Setting CPU affinity for PID: {} to cores: {:?}",
+            process_id, cores
+        );
 
         unsafe {
-            let handle = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, false, process_id)?;
+            let handle = OpenProcess(
+                PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
+                false,
+                process_id,
+            )?;
 
             if handle.is_invalid() {
                 return Err(anyhow::anyhow!("Failed to open process"));
@@ -134,7 +156,7 @@ impl SystemOptimizer {
         let output = hidden_command("powershell")
             .args([
                 "-Command",
-                "Clear-Variable * -EA SilentlyContinue; [System.GC]::Collect()"
+                "Clear-Variable * -EA SilentlyContinue; [System.GC]::Collect()",
             ])
             .output();
 
@@ -164,7 +186,7 @@ impl SystemOptimizer {
                 "REG_DWORD",
                 "/d",
                 "0",
-                "/f"
+                "/f",
             ])
             .output();
 
@@ -196,7 +218,7 @@ impl SystemOptimizer {
                 "REG_DWORD",
                 "/d",
                 "2",
-                "/f"
+                "/f",
             ])
             .output();
 
@@ -255,12 +277,19 @@ impl SystemOptimizer {
                 // Try NtSetTimerResolution for 0.5ms (5000 * 100ns = 0.5ms)
                 let mut current: u32 = 0;
                 let status = NtSetTimerResolution(5000, 1, &mut current);
-                if status == 0 { // STATUS_SUCCESS
+                if status == 0 {
+                    // STATUS_SUCCESS
                     self.timer_resolution_active = true;
-                    info!("Timer resolution set to 0.5ms via NtSetTimerResolution (actual: {:.3}ms)", current as f64 / 10000.0);
+                    info!(
+                        "Timer resolution set to 0.5ms via NtSetTimerResolution (actual: {:.3}ms)",
+                        current as f64 / 10000.0
+                    );
                 } else {
                     // Fallback to timeBeginPeriod(1) for 1ms
-                    warn!("NtSetTimerResolution failed (0x{:08X}), falling back to 1ms", status);
+                    warn!(
+                        "NtSetTimerResolution failed (0x{:08X}), falling back to 1ms",
+                        status
+                    );
                     let result = timeBeginPeriod(1);
                     if result == 0 {
                         self.timer_resolution_active = true;
@@ -291,23 +320,27 @@ impl SystemOptimizer {
 
         // Set MMCSS gaming profile registry keys
         let mmcss_keys = [
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Scheduling Category", "High"),
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "SFIO Priority", "High"),
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Background Only", "False"),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "Scheduling Category",
+                "High",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "SFIO Priority",
+                "High",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "Background Only",
+                "False",
+            ),
         ];
 
         for (key_path, value_name, value_data) in mmcss_keys.iter() {
             let output = hidden_command("reg")
                 .args([
-                    "add",
-                    key_path,
-                    "/v",
-                    value_name,
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    value_data,
-                    "/f"
+                    "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value_data, "/f",
                 ])
                 .output();
 
@@ -318,9 +351,21 @@ impl SystemOptimizer {
 
         // Set DWORD values separately
         let dword_keys = [
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Priority", "6"),
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Clock Rate", "10000"),
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile", "SystemResponsiveness", "0"),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "Priority",
+                "6",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "Clock Rate",
+                "10000",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
+                "SystemResponsiveness",
+                "0",
+            ),
         ];
 
         for (key_path, value_name, value_data) in dword_keys.iter() {
@@ -334,7 +379,7 @@ impl SystemOptimizer {
                     "REG_DWORD",
                     "/d",
                     value_data,
-                    "/f"
+                    "/f",
                 ])
                 .output();
 
@@ -353,23 +398,27 @@ impl SystemOptimizer {
 
         // Restore default MMCSS string values
         let mmcss_keys = [
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Scheduling Category", "Medium"),
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "SFIO Priority", "Normal"),
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Background Only", "True"),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "Scheduling Category",
+                "Medium",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "SFIO Priority",
+                "Normal",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "Background Only",
+                "True",
+            ),
         ];
 
         for (key_path, value_name, value_data) in mmcss_keys.iter() {
             let output = hidden_command("reg")
                 .args([
-                    "add",
-                    key_path,
-                    "/v",
-                    value_name,
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    value_data,
-                    "/f"
+                    "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value_data, "/f",
                 ])
                 .output();
 
@@ -380,9 +429,21 @@ impl SystemOptimizer {
 
         // Restore default DWORD values
         let dword_keys = [
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Priority", "2"),
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games", "Clock Rate", "10000"),
-            (r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile", "SystemResponsiveness", "20"),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "Priority",
+                "2",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
+                "Clock Rate",
+                "10000",
+            ),
+            (
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
+                "SystemResponsiveness",
+                "20",
+            ),
         ];
 
         for (key_path, value_name, value_data) in dword_keys.iter() {
@@ -396,7 +457,7 @@ impl SystemOptimizer {
                     "REG_DWORD",
                     "/d",
                     value_data,
-                    "/f"
+                    "/f",
                 ])
                 .output();
 
@@ -415,7 +476,11 @@ impl SystemOptimizer {
 
         let game_mode_keys = [
             (r"HKCU\Software\Microsoft\GameBar", "AllowAutoGameMode", "1"),
-            (r"HKCU\Software\Microsoft\GameBar", "AutoGameModeEnabled", "1"),
+            (
+                r"HKCU\Software\Microsoft\GameBar",
+                "AutoGameModeEnabled",
+                "1",
+            ),
         ];
 
         for (key_path, value_name, value_data) in game_mode_keys.iter() {
@@ -429,7 +494,7 @@ impl SystemOptimizer {
                     "REG_DWORD",
                     "/d",
                     value_data,
-                    "/f"
+                    "/f",
                 ])
                 .output();
 
@@ -451,7 +516,11 @@ impl SystemOptimizer {
 
         let game_mode_keys = [
             (r"HKCU\Software\Microsoft\GameBar", "AllowAutoGameMode", "0"),
-            (r"HKCU\Software\Microsoft\GameBar", "AutoGameModeEnabled", "0"),
+            (
+                r"HKCU\Software\Microsoft\GameBar",
+                "AutoGameModeEnabled",
+                "0",
+            ),
         ];
 
         for (key_path, value_name, value_data) in game_mode_keys.iter() {
@@ -465,7 +534,7 @@ impl SystemOptimizer {
                     "REG_DWORD",
                     "/d",
                     value_data,
-                    "/f"
+                    "/f",
                 ])
                 .output();
 
@@ -492,7 +561,7 @@ impl SystemOptimizer {
         let enable_output = hidden_command("powershell")
             .args([
                 "-Command",
-                "Enable-ComputerRestore -Drive 'C:\\' -ErrorAction SilentlyContinue"
+                "Enable-ComputerRestore -Drive 'C:\\' -ErrorAction SilentlyContinue",
             ])
             .output();
 
@@ -525,7 +594,10 @@ impl SystemOptimizer {
                         Ok(format!("{} (throttled by Windows)", description))
                     } else {
                         warn!("Failed to create restore point: {}", stderr);
-                        Err(anyhow::anyhow!("Failed to create restore point: {}", stderr))
+                        Err(anyhow::anyhow!(
+                            "Failed to create restore point: {}",
+                            stderr
+                        ))
                     }
                 }
             }
@@ -540,8 +612,7 @@ impl SystemOptimizer {
     pub fn open_system_restore() -> Result<()> {
         info!("Opening Windows System Restore");
 
-        let output = Command::new("rstrui.exe")
-            .spawn();
+        let output = Command::new("rstrui.exe").spawn();
 
         match output {
             Ok(_) => {
