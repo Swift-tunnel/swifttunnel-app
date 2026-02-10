@@ -109,6 +109,10 @@ pub struct AppSettings {
     /// Enable auto-routing: automatically switch relay server when game server region changes
     #[serde(default = "default_auto_routing")]
     pub auto_routing_enabled: bool,
+    /// Whitelisted game regions where VPN should be bypassed during auto-routing
+    /// Stored as RobloxRegion display names (e.g., "Singapore", "Tokyo", "US East")
+    #[serde(default)]
+    pub whitelisted_regions: Vec<String>,
 }
 
 fn default_discord_rpc() -> bool {
@@ -158,6 +162,7 @@ impl Default for AppSettings {
             custom_relay_server: String::new(),
             enable_discord_rpc: default_discord_rpc(),
             auto_routing_enabled: default_auto_routing(),
+            whitelisted_regions: Vec::new(),
         }
     }
 }
@@ -274,6 +279,27 @@ mod tests {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!loaded.auto_routing_enabled);
+    }
+
+    #[test]
+    fn test_settings_whitelisted_regions_default() {
+        // Settings without whitelisted_regions should default to empty vec
+        let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
+        let loaded: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(loaded.whitelisted_regions.is_empty());
+    }
+
+    #[test]
+    fn test_settings_whitelisted_regions_roundtrip() {
+        let mut settings = AppSettings::default();
+        settings.whitelisted_regions = vec!["Singapore".to_string(), "US East".to_string()];
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.whitelisted_regions.len(), 2);
+        assert!(loaded.whitelisted_regions.contains(&"Singapore".to_string()));
+        assert!(loaded.whitelisted_regions.contains(&"US East".to_string()));
     }
 
     #[test]

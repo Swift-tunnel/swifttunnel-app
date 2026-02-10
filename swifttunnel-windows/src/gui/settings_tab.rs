@@ -3,6 +3,7 @@
 use super::*;
 use super::theme::*;
 use crate::auth::AuthState;
+use crate::geolocation::RobloxRegion;
 use crate::updater::UpdateState;
 
 /// Helper: render a toggle switch with consistent styling
@@ -396,6 +397,38 @@ impl BoosterApp {
                             .show(ui, |ui| {
                                 ui.label(egui::RichText::new("When you teleport to a server in a different region, SwiftTunnel will automatically switch to the nearest relay for optimal latency.").size(10.0).color(ACCENT_PRIMARY));
                             });
+
+                        // Region whitelist section
+                        ui.add_space(SPACING_MD);
+                        ui.add(egui::Separator::default().spacing(0.0));
+                        ui.add_space(SPACING_MD);
+
+                        ui.label(egui::RichText::new("Bypass VPN for these regions").size(13.0).color(TEXT_PRIMARY));
+                        ui.label(egui::RichText::new("When auto-routing detects these game regions, traffic will use your direct connection instead of VPN.").size(11.0).color(TEXT_SECONDARY));
+                        ui.add_space(SPACING_SM);
+
+                        for region in RobloxRegion::all_regions() {
+                            let name = region.display_name();
+                            let is_whitelisted = self.whitelisted_regions.contains(name);
+                            let mut checked = is_whitelisted;
+                            if ui.checkbox(&mut checked, egui::RichText::new(name).size(12.0).color(TEXT_PRIMARY)).changed() {
+                                if checked {
+                                    self.whitelisted_regions.insert(name.to_string());
+                                } else {
+                                    self.whitelisted_regions.remove(name);
+                                }
+                                self.mark_dirty();
+
+                                // Update auto-router in real-time if connected
+                                if let Ok(conn) = self.vpn_connection.try_lock() {
+                                    if let Some(router) = conn.auto_router() {
+                                        router.set_whitelisted_regions(
+                                            self.whitelisted_regions.iter().cloned().collect()
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         ui.label(egui::RichText::new("Auto-routing is disabled. You'll stay on your selected server.").size(10.0).color(TEXT_MUTED));
                     }

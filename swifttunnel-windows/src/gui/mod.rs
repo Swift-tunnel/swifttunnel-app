@@ -25,7 +25,6 @@ pub use animations::*;
 
 use crate::auth::{AuthManager, AuthState, UserInfo};
 use crate::discord_rpc::DiscordManager;
-use crate::geolocation::roblox_ip_to_region;
 use crate::hidden_command;
 use swifttunnel_fps_booster::notification::show_server_location;
 use swifttunnel_fps_booster::roblox_watcher::{RobloxWatcher, RobloxEvent};
@@ -230,6 +229,9 @@ pub struct BoosterApp {
     custom_relay_server: String,
     /// Enable auto-routing: automatically switch relay when game server region changes
     auto_routing_enabled: bool,
+    /// Whitelisted game regions where VPN should be bypassed during auto-routing
+    /// Stored as RobloxRegion display names (e.g., "Singapore", "Tokyo", "US East")
+    whitelisted_regions: std::collections::HashSet<String>,
     /// Logo texture handle (loaded from embedded PNG)
     logo_texture: Option<egui::TextureHandle>,
     /// Pending auto-connect from elevation (--resume-connect flag)
@@ -303,6 +305,27 @@ impl BoosterApp {
         });
         let auth_state = auth_manager.get_state();
         let user_info = auth_manager.get_user();
+        let auth_manager = Arc::new(Mutex::new(auth_manager));
+
+        // Refresh user profile on startup to pick up admin changes (e.g., tester access)
+        if matches!(auth_state, AuthState::LoggedIn(_)) {
+            let auth_clone = Arc::clone(&auth_manager);
+            let rt_clone = Arc::clone(&runtime);
+            let tx = auth_update_tx.clone();
+            std::thread::spawn(move || {
+                rt_clone.block_on(async {
+                    if let Ok(auth) = auth_clone.lock() {
+                        match auth.refresh_profile().await {
+                            Ok(()) => {
+                                let new_state = auth.get_state();
+                                let _ = tx.send(new_state);
+                            }
+                            Err(e) => log::warn!("Startup profile refresh failed (non-fatal): {}", e),
+                        }
+                    }
+                });
+            });
+        }
 
         let mut app_state = AppState::default();
         app_state.config = saved_settings.config.clone();
@@ -407,7 +430,7 @@ impl BoosterApp {
             system_optimizer: SystemOptimizer::new(),
             network_booster: NetworkBooster::new(),
             status_message: None,
-            auth_manager: Arc::new(Mutex::new(auth_manager)),
+            auth_manager,
             auth_state,
             user_info,
             auth_error: None,
@@ -525,6 +548,8 @@ impl BoosterApp {
             custom_relay_server: saved_settings.custom_relay_server.clone(),
             // Auto-routing setting
             auto_routing_enabled: saved_settings.auto_routing_enabled,
+            // Whitelisted regions for auto-routing bypass
+            whitelisted_regions: saved_settings.whitelisted_regions.iter().cloned().collect(),
             // Logo texture (loaded from embedded PNG)
             logo_texture: Self::load_logo_texture(&cc.egui_ctx),
             // Auto-connect from elevation (take from static if --resume-connect was used)
@@ -680,6 +705,8 @@ impl BoosterApp {
             enable_discord_rpc: self.enable_discord_rpc,
             // Save auto-routing setting
             auto_routing_enabled: self.auto_routing_enabled,
+            // Save whitelisted regions
+            whitelisted_regions: self.whitelisted_regions.iter().cloned().collect(),
         };
 
         let _ = save_settings(&settings);
@@ -1524,18 +1551,21 @@ impl eframe::App for BoosterApp {
             }
         }
 
-        // Check for new game server detections via split tunnel (instant, no API needed)
+        // Check for new game server detections via split tunnel
         if self.vpn_state.is_connected() {
             if let Ok(vpn) = self.vpn_connection.try_lock() {
                 let current_servers = vpn.get_detected_game_servers();
                 for ip in &current_servers {
                     if !self.detected_game_servers.contains(ip) {
                         self.detected_game_servers.insert(*ip);
-                        let region = roblox_ip_to_region(*ip);
-                        if region != crate::geolocation::RobloxRegion::Unknown {
-                            log::info!("Game server {} detected: {}", ip, region.display_name());
-                            show_server_location(region.display_name());
-                        }
+                        // Async ipinfo.io lookup for accurate region detection
+                        let ip_owned = *ip;
+                        self.runtime.spawn(async move {
+                            if let Some((_region, location)) = crate::geolocation::lookup_game_server_region(ip_owned).await {
+                                log::info!("Game server {} detected: {}", ip_owned, location);
+                                show_server_location(&location);
+                            }
+                        });
                     }
                 }
             }
@@ -1548,12 +1578,14 @@ impl eframe::App for BoosterApp {
                     match event {
                         RobloxEvent::GameServerDetected { ip } => {
                             if !self.detected_game_servers.contains(&ip) {
-                                let region = roblox_ip_to_region(ip);
-                                if region != crate::geolocation::RobloxRegion::Unknown {
-                                    log::info!("Roblox game server detected (log watcher): {} ({})", ip, region.display_name());
-                                    self.detected_game_servers.insert(ip);
-                                    show_server_location(region.display_name());
-                                }
+                                self.detected_game_servers.insert(ip);
+                                // Async ipinfo.io lookup for accurate region detection
+                                self.runtime.spawn(async move {
+                                    if let Some((_region, location)) = crate::geolocation::lookup_game_server_region(ip).await {
+                                        log::info!("Roblox game server detected (log watcher): {} ({})", ip, location);
+                                        show_server_location(&location);
+                                    }
+                                });
                             }
                         }
                     }
@@ -2207,17 +2239,21 @@ impl BoosterApp {
             None
         };
 
-        // Build available servers list for auto-routing
-        let available_servers: Vec<(String, std::net::SocketAddr)> = if let Ok(list) = self.dynamic_server_list.lock() {
+        // Build available servers list for auto-routing with cached latency data.
+        // Latency is used to pick the best server when multiple match a region.
+        // NOTE: Use port 51821 (V3 relay port), NOT s.port (51820 = WireGuard endpoint port)
+        let available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)> = if let Ok(list) = self.dynamic_server_list.lock() {
             list.servers().iter().filter_map(|s| {
-                let addr: std::net::SocketAddr = format!("{}:{}", s.ip, s.port).parse().ok()?;
-                Some((s.region.clone(), addr))
+                let addr: std::net::SocketAddr = format!("{}:51821", s.ip).parse().ok()?;
+                let latency = list.get_latency(&s.region);
+                Some((s.region.clone(), addr, latency))
             }).collect()
         } else {
             Vec::new()
         };
 
         let auto_routing_enabled = is_tester && self.experimental_mode && self.auto_routing_enabled;
+        let whitelisted_regions: Vec<String> = self.whitelisted_regions.iter().cloned().collect();
 
         // Clear previously tunneled set when starting a new connection
         self.previously_tunneled.clear();
@@ -2225,7 +2261,7 @@ impl BoosterApp {
         std::thread::spawn(move || {
             rt.block_on(async {
                 if let Ok(mut connection) = vpn.lock() {
-                    if let Err(e) = connection.connect(&access_token, &region, apps, custom_relay, auto_routing_enabled, available_servers).await {
+                    if let Err(e) = connection.connect(&access_token, &region, apps, custom_relay, auto_routing_enabled, available_servers, whitelisted_regions).await {
                         log::error!("VPN connection failed: {}", e);
                     }
                 }

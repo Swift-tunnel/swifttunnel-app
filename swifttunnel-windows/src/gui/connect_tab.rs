@@ -486,11 +486,22 @@ impl BoosterApp {
 
                         // Auto Routing badge (only when tester + experimental mode + auto routing enabled)
                         if is_tester_badge && self.experimental_mode && self.auto_routing_enabled {
-                            let game_region_name = self.vpn_connection.try_lock().ok()
-                                .and_then(|conn| conn.auto_router().and_then(|r| r.current_game_region()).map(|r| r.display_name().to_string()));
+                            let (game_region_name, is_bypassed) = self.vpn_connection.try_lock().ok()
+                                .and_then(|conn| {
+                                    conn.auto_router().map(|r| {
+                                        let region = r.current_game_region().map(|rg| rg.display_name().to_string());
+                                        let bypassed = r.is_bypassed();
+                                        (region, bypassed)
+                                    })
+                                })
+                                .unwrap_or((None, false));
 
-                            let (badge_text, badge_color) = if let Some(region) = game_region_name {
-                                (format!("Game: {}", region), STATUS_CONNECTED)
+                            let (badge_text, badge_color) = if let Some(ref region) = game_region_name {
+                                if is_bypassed {
+                                    (format!("Bypassed: {} (whitelisted)", region), STATUS_WARNING)
+                                } else {
+                                    (format!("Game: {}", region), STATUS_CONNECTED)
+                                }
                             } else {
                                 ("Monitoring...".to_string(), TEXT_MUTED)
                             };

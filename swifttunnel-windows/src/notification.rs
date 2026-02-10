@@ -94,6 +94,16 @@ pub fn show_notification(title: &str, message: &str) {
     });
 }
 
+/// Show a relay switch notification (auto-routing)
+///
+/// Only fires when the relay server ACTUALLY switches, not just on game server detection.
+pub fn show_relay_switch(from_region: &str, to_region: &str, game_location: &str) {
+    show_notification(
+        "Auto Routing: Relay switched",
+        &format!("{} → {} (game server: {})", from_region, to_region, game_location),
+    );
+}
+
 /// Show a server location notification (Bloxstrap-style)
 ///
 /// # Arguments

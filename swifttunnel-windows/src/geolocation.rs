@@ -167,23 +167,42 @@ pub enum RobloxRegion {
 }
 
 impl RobloxRegion {
+    /// All game-server regions (excluding Unknown) for UI display
+    pub fn all_regions() -> &'static [RobloxRegion] {
+        &[
+            RobloxRegion::Singapore,
+            RobloxRegion::Tokyo,
+            RobloxRegion::Mumbai,
+            RobloxRegion::Sydney,
+            RobloxRegion::London,
+            RobloxRegion::Amsterdam,
+            RobloxRegion::Paris,
+            RobloxRegion::Frankfurt,
+            RobloxRegion::Warsaw,
+            RobloxRegion::UsEast,
+            RobloxRegion::UsCentral,
+            RobloxRegion::UsWest,
+            RobloxRegion::Brazil,
+        ]
+    }
+
     /// Get the best SwiftTunnel gaming region for this Roblox region
-    pub fn best_swifttunnel_region(&self) -> &'static str {
+    pub fn best_swifttunnel_region(&self) -> Option<&'static str> {
         match self {
-            RobloxRegion::Singapore => "singapore",
-            RobloxRegion::Tokyo => "tokyo",
-            RobloxRegion::Mumbai => "mumbai",
-            RobloxRegion::Sydney => "sydney",
-            RobloxRegion::London => "london",
-            RobloxRegion::Amsterdam => "amsterdam",
-            RobloxRegion::Paris => "paris",
-            RobloxRegion::Frankfurt => "germany",
-            RobloxRegion::Warsaw => "germany",  // Closest SwiftTunnel region
-            RobloxRegion::UsEast => "america",
-            RobloxRegion::UsCentral => "america",
-            RobloxRegion::UsWest => "america",
-            RobloxRegion::Brazil => "brazil",
-            RobloxRegion::Unknown => "singapore",  // Fallback
+            RobloxRegion::Unknown => None,
+            RobloxRegion::Singapore => Some("singapore"),
+            RobloxRegion::Tokyo => Some("tokyo"),
+            RobloxRegion::Mumbai => Some("mumbai"),
+            RobloxRegion::Sydney => Some("sydney"),
+            RobloxRegion::London => Some("london"),
+            RobloxRegion::Amsterdam => Some("amsterdam"),
+            RobloxRegion::Paris => Some("paris"),
+            RobloxRegion::Frankfurt => Some("germany"),
+            RobloxRegion::Warsaw => Some("germany"),  // Closest SwiftTunnel region
+            RobloxRegion::UsEast => Some("america"),
+            RobloxRegion::UsCentral => Some("america"),
+            RobloxRegion::UsWest => Some("america"),
+            RobloxRegion::Brazil => Some("brazil"),
         }
     }
 
@@ -213,13 +232,101 @@ impl std::fmt::Display for RobloxRegion {
     }
 }
 
+/// Determine Roblox game server region from ipinfo.io city/country fields.
+///
+/// This is the runtime counterpart to the hardcoded `roblox_ip_to_region()` table.
+/// Used by auto-routing and toast notifications for accurate region detection.
+pub fn ipinfo_to_roblox_region(city: &str, country: &str) -> RobloxRegion {
+    match country {
+        "SG" => RobloxRegion::Singapore,
+        "JP" => RobloxRegion::Tokyo,
+        "IN" => RobloxRegion::Mumbai,
+        "AU" => RobloxRegion::Sydney,
+        "BR" => RobloxRegion::Brazil,
+        "GB" => RobloxRegion::London,
+        "NL" => RobloxRegion::Amsterdam,
+        "FR" => RobloxRegion::Paris,
+        "PL" => RobloxRegion::Warsaw,
+        "DE" => RobloxRegion::Frankfurt,
+        "US" => {
+            // Determine US sub-region from city name
+            let city_lower = city.to_lowercase();
+            if city_lower.contains("chicago") || city_lower.contains("elk grove")
+                || city_lower.contains("dallas") || city_lower.contains("houston")
+            {
+                RobloxRegion::UsCentral
+            } else if city_lower.contains("ashburn") || city_lower.contains("leesburg")
+                || city_lower.contains("sterling") || city_lower.contains("reston")
+                || city_lower.contains("new york") || city_lower.contains("secaucus")
+                || city_lower.contains("newark") || city_lower.contains("atlanta")
+                || city_lower.contains("miami") || city_lower.contains("jacksonville")
+                || city_lower.contains("fort lauderdale")
+            {
+                RobloxRegion::UsEast
+            } else {
+                // Default US to West (LA, San Jose, Seattle, San Mateo all West Coast)
+                RobloxRegion::UsWest
+            }
+        }
+        _ => RobloxRegion::Unknown,
+    }
+}
+
+/// Look up a game server IP's region via ipinfo.io (async).
+///
+/// Returns `(RobloxRegion, location_string)` where location_string is like "Singapore, SG".
+/// Used by auto-routing for accurate runtime region detection.
+pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
+    let _permit = get_semaphore().acquire().await.ok()?;
+
+    // Check cache first
+    let cached_location = {
+        let cache = get_cache();
+        cache.lock().ok().and_then(|c| c.get(&ip).cloned())
+    };
+
+    let (city, country, location) = if let Some(loc) = cached_location {
+        // Parse cached "City, Country" or "City, Region, Country" string
+        let parts: Vec<&str> = loc.split(", ").collect();
+        let city = parts.first().unwrap_or(&"").to_string();
+        let country = parts.last().unwrap_or(&"").to_string();
+        (city, country, loc)
+    } else {
+        let url = format!("https://ipinfo.io/{}/json", ip);
+        let client = geo_http_client();
+        let response = client.get(&url).send().await.ok()?;
+        if !response.status().is_success() {
+            log::warn!("ipinfo.io returned status {} for {}", response.status(), ip);
+            return None;
+        }
+        let info: IpInfoResponse = response.json().await.ok()?;
+        let city = info.city.clone().unwrap_or_default();
+        let country = info.country.clone().unwrap_or_default();
+        let location = format_location(&info)?;
+
+        // Cache the result
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(ip, location.clone());
+        }
+
+        (city, country, location)
+    };
+
+    let region = ipinfo_to_roblox_region(&city, &country);
+    log::info!("Geo lookup: {} -> {} ({})", ip, location, region.display_name());
+    Some((region, location))
+}
+
 /// Map a Roblox game server IP to its geographic region.
 ///
 /// Uses hard-coded /24 subnet mappings based on Roblox's AS22697 infrastructure.
-/// This is more reliable than generic geolocation APIs for Roblox's self-hosted servers.
+/// Primary source: BTRoblox extension (most widely-used, community-validated).
+/// Cross-referenced with ipinfo.io geolocation and DevForum posts.
 ///
 /// Sources:
+/// - BTRoblox extension (background.js) - complete 0-127 octet mapping
 /// - https://devforum.roblox.com/t/roblox-server-region-a-list-of-roblox-ip-ranges/3094401
+/// - ipinfo.io AS22697 geolocation lookups
 pub fn roblox_ip_to_region(ip: Ipv4Addr) -> RobloxRegion {
     let octets = ip.octets();
 
@@ -230,32 +337,47 @@ pub fn roblox_ip_to_region(ip: Ipv4Addr) -> RobloxRegion {
 
     // Map by third octet (/24 blocks)
     match octets[2] {
-        // Asia-Pacific
-        50 | 97 => RobloxRegion::Singapore,
-        55 | 120 => RobloxRegion::Tokyo,
-        104 => RobloxRegion::Mumbai,
+        // ── Asia-Pacific ──────────────────────────────────────────────
+        50 | 79 | 97 => RobloxRegion::Singapore,
+        6 | 55 | 58 | 59 | 60 | 82 | 83 | 120 => RobloxRegion::Tokyo,
+        7 | 9 | 104 => RobloxRegion::Mumbai,
         51 => RobloxRegion::Sydney,
 
-        // Europe
-        33 | 119 => RobloxRegion::London,
-        21 => RobloxRegion::Amsterdam,
-        4 | 122 => RobloxRegion::Paris,
-        5 | 44 | 123 => RobloxRegion::Frankfurt,
-        31 | 124 => RobloxRegion::Warsaw,
+        // ── Europe ────────────────────────────────────────────────────
+        33 | 35 | 36 | 72 | 73 | 89 | 119 => RobloxRegion::London,
+        13 | 21 | 54 | 121 => RobloxRegion::Amsterdam,
+        4 | 19 | 20 | 26 | 122 => RobloxRegion::Paris,
+        5 | 8 | 39 | 40 | 41 | 42 | 43 | 44 | 123 => RobloxRegion::Frankfurt,
+        2 | 3 | 31 | 124 => RobloxRegion::Warsaw,
 
-        // North America - East
-        102 | 53 => RobloxRegion::UsEast,     // Ashburn, VA
-        32 => RobloxRegion::UsEast,            // NYC
-        22 | 99 => RobloxRegion::UsEast,       // Atlanta
-        45 | 127 => RobloxRegion::UsEast,      // Miami
+        // ── US East ──────────────────────────────────────────────────
+        // Ashburn / Virginia
+        10 | 11 | 52 | 53 | 56 | 70 | 71 | 74 | 75 | 76 | 77 | 78
+        | 80 | 87 | 96 | 102 | 114 => RobloxRegion::UsEast,
+        // NYC / Secaucus NJ
+        15 | 16 | 17 | 23 | 32 | 65 | 66 | 126 => RobloxRegion::UsEast,
+        // Atlanta
+        22 | 24 | 25 | 99 => RobloxRegion::UsEast,
+        // Miami
+        18 | 37 | 38 | 45 | 85 | 127 => RobloxRegion::UsEast,
 
-        // North America - Central
-        101 | 48 => RobloxRegion::UsCentral,   // Chicago
-        95 => RobloxRegion::UsCentral,         // Dallas
+        // ── US Central ───────────────────────────────────────────────
+        // Chicago / Elk Grove Village
+        27 | 28 | 29 | 34 | 46 | 47 | 48 | 84 | 88 | 101 | 112 | 113
+            => RobloxRegion::UsCentral,
+        // Dallas
+        95 => RobloxRegion::UsCentral,
 
-        // North America - West
-        116 | 1 | 63 => RobloxRegion::UsWest,  // Los Angeles
-        115 => RobloxRegion::UsWest,           // Seattle
+        // ── US West ──────────────────────────────────────────────────
+        // Los Angeles
+        1 | 49 | 63 | 116 => RobloxRegion::UsWest,
+        // Seattle
+        62 | 115 => RobloxRegion::UsWest,
+        // San Jose / Santa Clara
+        57 | 67 | 68 | 69 | 81 | 105 | 117 => RobloxRegion::UsWest,
+        // San Mateo (Roblox HQ area - may be infra but in Bay Area)
+        12 | 61 | 64 | 86 | 90 | 91 | 92 | 93 | 94 | 98 | 100 | 103
+        | 106 | 107 | 108 | 109 | 110 | 111 | 125 => RobloxRegion::UsWest,
 
         _ => RobloxRegion::Unknown,
     }
@@ -298,25 +420,86 @@ mod tests {
     #[test]
     fn test_roblox_ip_to_region_singapore() {
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 50, 100)), RobloxRegion::Singapore);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 79, 50)), RobloxRegion::Singapore);
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 97, 50)), RobloxRegion::Singapore);
     }
 
     #[test]
+    fn test_roblox_ip_to_region_tokyo() {
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 6, 1)), RobloxRegion::Tokyo);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 55, 1)), RobloxRegion::Tokyo);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 82, 1)), RobloxRegion::Tokyo);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 120, 1)), RobloxRegion::Tokyo);
+    }
+
+    #[test]
+    fn test_roblox_ip_to_region_europe() {
+        // London
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 33, 1)), RobloxRegion::London);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 35, 1)), RobloxRegion::London);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 119, 1)), RobloxRegion::London);
+        // Amsterdam
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 21, 1)), RobloxRegion::Amsterdam);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 54, 1)), RobloxRegion::Amsterdam);
+        // Frankfurt
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 5, 1)), RobloxRegion::Frankfurt);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 44, 1)), RobloxRegion::Frankfurt);
+        // Warsaw
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 31, 1)), RobloxRegion::Warsaw);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 124, 1)), RobloxRegion::Warsaw);
+    }
+
+    #[test]
     fn test_roblox_ip_to_region_us_east() {
+        // Ashburn
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 102, 1)), RobloxRegion::UsEast);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 80, 1)), RobloxRegion::UsEast);
+        // NYC
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 32, 200)), RobloxRegion::UsEast);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 65, 1)), RobloxRegion::UsEast);
+        // Atlanta
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 22, 1)), RobloxRegion::UsEast);
+        // Miami
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 45, 1)), RobloxRegion::UsEast);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 127, 1)), RobloxRegion::UsEast);
+    }
+
+    #[test]
+    fn test_roblox_ip_to_region_us_central() {
+        // Chicago
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 48, 1)), RobloxRegion::UsCentral);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 101, 1)), RobloxRegion::UsCentral);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 84, 1)), RobloxRegion::UsCentral);
+        // Dallas
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 95, 1)), RobloxRegion::UsCentral);
+    }
+
+    #[test]
+    fn test_roblox_ip_to_region_us_west() {
+        // LA
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 1, 1)), RobloxRegion::UsWest);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 63, 1)), RobloxRegion::UsWest);
+        // Seattle
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 115, 1)), RobloxRegion::UsWest);
+        // San Jose
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 57, 1)), RobloxRegion::UsWest);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 105, 1)), RobloxRegion::UsWest);
     }
 
     #[test]
     fn test_roblox_ip_to_region_unknown() {
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(1, 1, 1, 1)), RobloxRegion::Unknown);
         assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 200, 1)), RobloxRegion::Unknown);
+        // Decommissioned Hong Kong ranges → Unknown
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 0, 1)), RobloxRegion::Unknown);
+        assert_eq!(roblox_ip_to_region(Ipv4Addr::new(128, 116, 14, 1)), RobloxRegion::Unknown);
     }
 
     #[test]
     fn test_roblox_region_best_swifttunnel() {
-        assert_eq!(RobloxRegion::Singapore.best_swifttunnel_region(), "singapore");
-        assert_eq!(RobloxRegion::UsEast.best_swifttunnel_region(), "america");
-        assert_eq!(RobloxRegion::Frankfurt.best_swifttunnel_region(), "germany");
+        assert_eq!(RobloxRegion::Singapore.best_swifttunnel_region(), Some("singapore"));
+        assert_eq!(RobloxRegion::UsEast.best_swifttunnel_region(), Some("america"));
+        assert_eq!(RobloxRegion::Frankfurt.best_swifttunnel_region(), Some("germany"));
+        assert_eq!(RobloxRegion::Unknown.best_swifttunnel_region(), None);
     }
 }

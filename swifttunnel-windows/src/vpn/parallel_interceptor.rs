@@ -2556,7 +2556,28 @@ fn run_packet_worker(
                 );
             }
 
-            if should_tunnel {
+            // Auto-routing whitelist bypass: if the current game region is whitelisted,
+            // game packets that would normally be tunneled are passed through to the
+            // real adapter instead. Lock-free AtomicBool check (<1ns overhead).
+            let auto_routing_bypass = should_tunnel
+                && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
+
+            // When bypassing, still run game server detection + auto-routing evaluation
+            // so we can detect teleports to non-whitelisted regions and resume tunneling.
+            if auto_routing_bypass && work.data.len() > 14 + 20 {
+                let ip_start = 14;
+                let dst_ip = Ipv4Addr::new(
+                    work.data[ip_start + 16], work.data[ip_start + 17],
+                    work.data[ip_start + 18], work.data[ip_start + 19]
+                );
+                if is_roblox_game_server_ip(dst_ip) {
+                    if let Some(ref ar) = auto_router {
+                        ar.evaluate_game_server(dst_ip);
+                    }
+                }
+            }
+
+            if should_tunnel && !auto_routing_bypass {
                 stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
                 stats.bytes_tunneled.fetch_add(packet_len, Ordering::Relaxed);
                 throughput.add_tx(packet_len);
@@ -2584,19 +2605,10 @@ fn run_packet_worker(
                         }
 
                         // === AUTO ROUTING ===
+                        // Notify auto-router of new game server IPs (triggers async region lookup).
+                        // The actual relay switch happens asynchronously via handle_region_lookup().
                         if let Some(ref auto_router) = auto_router {
-                            match auto_router.evaluate_game_server(dst_ip) {
-                                super::auto_routing::AutoRoutingAction::SwitchRelay { new_addr, new_region, game_region } => {
-                                    if let Some(ref relay) = relay_ctx {
-                                        relay.switch_relay(new_addr);
-                                        log::info!(
-                                            "Auto-routing: Worker {} switched relay to {} ({}) for game region {}",
-                                            worker_id, new_addr, new_region, game_region
-                                        );
-                                    }
-                                }
-                                super::auto_routing::AutoRoutingAction::NoAction => {}
-                            }
+                            auto_router.evaluate_game_server(dst_ip);
                         }
                     }
                 }
@@ -2665,10 +2677,38 @@ fn run_packet_worker(
                 // from NAT_BUFFER (thread-local, valid for duration of this function)
                 let packet_to_send = unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
 
+                // === PACKET HOLD: Drop packets while auto-routing lookup is pending ===
+                // When a new game server IP is detected, we hold (drop) packets to it
+                // until the ipinfo.io lookup completes and the relay switches. This
+                // prevents the game server from seeing traffic from the old relay IP,
+                // which causes Roblox Error 2/277. RakNet will retransmit the held packets.
+                if ip_packet.len() >= 20 {
+                    let dst_ip = Ipv4Addr::new(
+                        ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]
+                    );
+                    if let Some(ref auto_router) = auto_router {
+                        if auto_router.is_lookup_pending(dst_ip) {
+                            // Skip this packet — RakNet will retransmit after relay switch
+                            continue;
+                        }
+                    }
+                }
+
                 // === V3: UDP RELAY (NO ENCRYPTION) ===
                 // Forward packets directly to relay server without encryption
                 // This provides lowest latency and CPU usage (like ExitLag)
                 if let Some(ref relay) = relay_ctx {
+                    // Log relay destination for first few packets (auto-routing debug)
+                    if direct_encrypt_success + direct_encrypt_fail < 10 {
+                        log::info!(
+                            "Worker {}: Forwarding to relay {} (pkt #{}, dst={})",
+                            worker_id, relay.relay_addr(),
+                            direct_encrypt_success + direct_encrypt_fail + 1,
+                            if ip_packet.len() >= 20 {
+                                format!("{}.{}.{}.{}", ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19])
+                            } else { "?".to_string() }
+                        );
+                    }
                     match relay.forward_outbound(packet_to_send) {
                         Ok(sent) => {
                             direct_encrypt_success += 1;  // Reuse counter for relay

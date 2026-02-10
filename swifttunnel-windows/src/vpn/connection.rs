@@ -26,6 +26,53 @@ use crossbeam_channel::Receiver;
 /// 500ms balances detection speed with CPU usage
 const REFRESH_INTERVAL_MS: u64 = 500;
 
+/// Quick-ping candidate relay servers and return the best one.
+/// Pings all candidates in parallel using ICMP (same as GUI latency measurement).
+/// Returns (region_name, addr, latency_ms) for the fastest responder.
+async fn ping_and_select_best(candidates: &[(String, SocketAddr)]) -> Option<(String, SocketAddr, u32)> {
+    use crate::vpn::servers::measure_latency_icmp;
+
+    let mut tasks = Vec::new();
+    for (region, addr) in candidates {
+        let region = region.clone();
+        let addr = *addr;
+        tasks.push(tokio::spawn(async move {
+            let ip = addr.ip().to_string();
+            // Use ICMP ping — reliable for all server types.
+            // The previous UDP probe ([0u8; 1] to relay port 51821) never got responses
+            // because relay servers only respond to valid session ID packets.
+            let result = tokio::task::spawn_blocking(move || {
+                measure_latency_icmp(&ip)
+            }).await;
+
+            match result {
+                Ok(Some(ms)) => {
+                    log::info!("Auto-routing ping: {} ({}) = {}ms", region, addr, ms);
+                    Some((region, addr, ms))
+                }
+                _ => {
+                    log::info!("Auto-routing ping: {} ({}) = timeout", region, addr);
+                    None
+                }
+            }
+        }));
+    }
+
+    let mut best: Option<(String, SocketAddr, u32)> = None;
+    for task in tasks {
+        if let Ok(Some((region, addr, ms))) = task.await {
+            if best.as_ref().map_or(true, |(_, _, best_ms)| ms < *best_ms) {
+                best = Some((region, addr, ms));
+            }
+        }
+    }
+
+    if let Some((ref region, ref addr, ms)) = best {
+        log::info!("Auto-routing: Best candidate: {} ({}) at {}ms", region, addr, ms);
+    }
+    best
+}
+
 /// VPN connection state
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
@@ -197,6 +244,9 @@ impl VpnConnection {
         region: &str,
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
+        auto_routing_enabled: bool,
+        available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
+        whitelisted_regions: Vec<String>,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -243,7 +293,7 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel).await;
 
         let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
-            match self.setup_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server).await {
+            match self.setup_split_tunnel(&config, tunnel_apps.clone(), custom_relay_server, auto_routing_enabled, available_servers, whitelisted_regions).await {
                 Ok(processes) => {
                     log::info!("V3 split tunnel setup succeeded");
                     (processes, true)
@@ -293,6 +343,9 @@ impl VpnConnection {
         config: &VpnConfig,
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
+        auto_routing_enabled: bool,
+        available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
+        whitelisted_regions: Vec<String>,
     ) -> VpnResult<Vec<String>> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -390,15 +443,89 @@ impl VpnConnection {
             }
         };
 
+        let relay_for_lookup = Arc::clone(&relay);
         driver.set_relay_context(relay);
         log::info!("V3: UDP relay context set");
 
         // Set up auto-routing
-        let auto_router = Arc::new(super::auto_routing::AutoRouter::new(true, &config.region));
+        let auto_router = Arc::new(super::auto_routing::AutoRouter::new(auto_routing_enabled, &config.region));
         auto_router.set_current_relay(relay_addr, &config.region);
+        auto_router.set_available_servers(available_servers);
+        if !whitelisted_regions.is_empty() {
+            auto_router.set_whitelisted_regions(whitelisted_regions);
+        }
+
+        // Spawn background task for async ipinfo.io region lookups
+        if auto_routing_enabled {
+            let (lookup_tx, mut lookup_rx) = tokio::sync::mpsc::unbounded_channel::<std::net::Ipv4Addr>();
+            auto_router.set_lookup_channel(lookup_tx);
+
+            let router_for_lookup = Arc::clone(&auto_router);
+            tokio::spawn(async move {
+                while let Some(ip) = lookup_rx.recv().await {
+                    match crate::geolocation::lookup_game_server_region(ip).await {
+                        Some((region, location)) => {
+                            log::info!("Auto-routing: {} resolved to {} ({})", ip, location, region.display_name());
+                            let old_region = router_for_lookup.current_region();
+
+                            // Step 1: Get candidate servers for the target region
+                            let candidates = router_for_lookup.get_candidates_for_region(&region);
+
+                            if let Some(candidates) = candidates {
+                                // Step 2: Quick-ping each candidate to find the best one
+                                let best = ping_and_select_best(&candidates).await;
+
+                                if let Some((selected_region, selected_addr, latency_ms)) = best {
+                                    // Step 3: Commit the switch with the best server
+                                    if let Some((new_addr, new_region)) = router_for_lookup.commit_switch(region, selected_region, selected_addr) {
+                                        log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {}, ping: {}ms)",
+                                            old_region, new_region, new_addr, latency_ms);
+                                        relay_for_lookup.switch_relay(new_addr);
+                                        // Send burst of keepalives to new relay to:
+                                        // 1. Establish session on new relay ASAP
+                                        // 2. Punch through NAT/firewall quickly (3 packets at 50ms intervals)
+                                        if let Err(e) = relay_for_lookup.send_keepalive_burst() {
+                                            log::warn!("Auto-routing: Failed to send keepalive burst to new relay: {}", e);
+                                        }
+                                        log::info!("Auto-routing: Relay addr is now {}", relay_for_lookup.relay_addr());
+                                        crate::notification::show_relay_switch(&old_region, &new_region, &location);
+                                    }
+                                } else {
+                                    log::warn!("Auto-routing: All candidate pings failed, using first candidate");
+                                    // Fallback: use first candidate without ping
+                                    let (fallback_region, fallback_addr) = candidates[0].clone();
+                                    if let Some((new_addr, new_region)) = router_for_lookup.commit_switch(region, fallback_region, fallback_addr) {
+                                        log::info!("Auto-routing: SWITCHING relay {} -> {} (addr: {}, no ping data)",
+                                            old_region, new_region, new_addr);
+                                        relay_for_lookup.switch_relay(new_addr);
+                                        if let Err(e) = relay_for_lookup.send_keepalive_burst() {
+                                            log::warn!("Auto-routing: Failed to send keepalive burst: {}", e);
+                                        }
+                                        crate::notification::show_relay_switch(&old_region, &new_region, &location);
+                                    }
+                                }
+                            } else {
+                                log::info!("Auto-routing: No switch needed (already on best region for {})", location);
+                            }
+                            // Release held packets — lookup is done, relay is now correct
+                            router_for_lookup.clear_pending_lookup(ip);
+                        }
+                        None => {
+                            log::warn!("Auto-routing: ipinfo.io lookup failed for {}, releasing packets on current relay", ip);
+                            // Release packets even on failure — better to route through
+                            // wrong relay than hold packets forever
+                            router_for_lookup.clear_pending_lookup(ip);
+                        }
+                    }
+                }
+                log::debug!("Auto-routing: Lookup task exiting (channel closed)");
+            });
+            log::info!("V3: Auto-routing lookup task spawned");
+        }
+
         driver.set_auto_router(Arc::clone(&auto_router));
         self.auto_router = Some(Arc::clone(&auto_router));
-        log::info!("V3: Auto-router initialized for region {}", config.region);
+        log::info!("V3: Auto-router initialized for region {} (enabled: {})", config.region, auto_routing_enabled);
 
         // Configure split tunnel driver
         // tunnel_interface_luid = 0 (no Wintun), tunnel_ip = internet_ip (no NAT needed for UDP relay)
@@ -454,6 +581,7 @@ impl VpnConnection {
         self.process_monitor_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
+        let auto_router_for_monitor = self.auto_router.clone();
 
         tokio::spawn(async move {
             log::info!("V3: Process monitor started");
@@ -597,6 +725,21 @@ impl VpnConnection {
                         log::warn!("V3: Exclusion refresh error: {}", e);
                     }
                 }
+
+                // Sync auto-routing state to connection state
+                if let Some(ref auto_router) = auto_router_for_monitor {
+                    let current_auto_region = auto_router.current_region();
+                    let mut state = state_handle.lock().await;
+                    if let ConnectionState::Connected {
+                        ref mut server_region,
+                        ..
+                    } = *state {
+                        if *server_region != current_auto_region && !current_auto_region.is_empty() {
+                            log::info!("Auto-routing: Syncing UI state to region '{}'", current_auto_region);
+                            *server_region = current_auto_region;
+                        }
+                    }
+                }
             }
 
             log::info!("V3: Process monitor stopped");
@@ -655,6 +798,10 @@ impl VpnConnection {
     /// This atomically swaps the relay address used by all packet workers.
     /// The split tunnel (ndisapi), process cache, and all worker threads
     /// stay running. Only the relay destination changes.
+    ///
+    /// NOTE: Currently unused - auto-routing switches happen directly in worker
+    /// threads via relay.switch_relay(). This method is kept for future GUI-initiated
+    /// manual server switching, as it correctly updates ConnectionState.
     ///
     /// Returns Ok(()) if the switch was successful.
     pub async fn switch_server(
