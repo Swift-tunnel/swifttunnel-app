@@ -468,7 +468,11 @@ fn main() -> eframe::Result<()> {
         let mut optimizations_applied = false;
 
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // When the boost tab isn't visible and no optimizations are applied,
+            // slow down polling to reduce CPU usage (5s instead of 1s)
+            let active = structs::PERF_MONITOR_ACTIVE.load(std::sync::atomic::Ordering::Relaxed);
+            let sleep_secs = if active || optimizations_applied { 1 } else { 5 };
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
 
             let mut state = state_clone.lock().unwrap();
 

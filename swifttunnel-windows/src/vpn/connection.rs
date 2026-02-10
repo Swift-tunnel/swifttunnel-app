@@ -459,41 +459,78 @@ impl VpnConnection {
             log::info!("V3: Process monitor started");
 
             let mut last_refresh = std::time::Instant::now();
-            const ETW_POLL_INTERVAL_MS: u64 = 100;
 
             loop {
                 if stop_flag.load(Ordering::SeqCst) {
                     break;
                 }
 
-                // Poll ETW events (instant detection) - runs every 5ms
-                // This handles processes that started since last iteration
+                // Wait for ETW events (event-driven) or timeout for periodic work.
+                // Instead of polling try_recv() on a timer, we block-wait on the
+                // crossbeam receiver so we wake immediately when a process starts.
+                let first_event = if let Some(ref receiver) = etw_receiver {
+                    let rx = receiver.clone();
+                    tokio::select! {
+                        result = tokio::task::spawn_blocking(move || {
+                            rx.recv_timeout(Duration::from_millis(100))
+                        }) => {
+                            match result {
+                                Ok(Ok(event)) => Some(event),
+                                _ => None,
+                            }
+                        }
+                        _ = async {
+                            // Also break out if stop flag is set
+                            loop {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                if stop_flag.load(Ordering::SeqCst) { break; }
+                            }
+                        } => { None }
+                    }
+                } else {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    None
+                };
+
+                if stop_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+
                 let mut etw_events_received = false;
                 let mut blocked_paths: Vec<String> = Vec::new();
 
+                // Process the first event (if any) and drain remaining queued events
+                let mut pending_events: Vec<ProcessStartEvent> = Vec::new();
+                if let Some(event) = first_event {
+                    pending_events.push(event);
+                }
                 if let Some(ref receiver) = etw_receiver {
                     while let Ok(event) = receiver.try_recv() {
-                        log::info!(
-                            "V3 ETW: Detected {} (PID: {}) - blocking and registering",
-                            event.name, event.pid
-                        );
-
-                        // STEP 1: IMMEDIATELY block the process with WFP filter
-                        // This prevents ANY packets (including STUN) from escaping before we're ready
-                        if !event.image_path.is_empty() {
-                            if let Err(e) = super::wfp_block::block_process_by_path(&event.image_path) {
-                                log::warn!("V3: WFP block failed for {}: {} (using speculative tunneling)", event.name, e);
-                            } else {
-                                blocked_paths.push(event.image_path.clone());
-                            }
-                        }
-
-                        // STEP 2: Register with the driver's process cache
-                        let driver_guard = driver.lock().await;
-                        driver_guard.register_process_immediate(event.pid, event.name.clone());
-                        drop(driver_guard);
-                        etw_events_received = true;
+                        pending_events.push(event);
                     }
+                }
+
+                for event in pending_events {
+                    log::info!(
+                        "V3 ETW: Detected {} (PID: {}) - blocking and registering",
+                        event.name, event.pid
+                    );
+
+                    // STEP 1: IMMEDIATELY block the process with WFP filter
+                    // This prevents ANY packets (including STUN) from escaping before we're ready
+                    if !event.image_path.is_empty() {
+                        if let Err(e) = super::wfp_block::block_process_by_path(&event.image_path) {
+                            log::warn!("V3: WFP block failed for {}: {} (using speculative tunneling)", event.name, e);
+                        } else {
+                            blocked_paths.push(event.image_path.clone());
+                        }
+                    }
+
+                    // STEP 2: Register with the driver's process cache
+                    let driver_guard = driver.lock().await;
+                    driver_guard.register_process_immediate(event.pid, event.name.clone());
+                    drop(driver_guard);
+                    etw_events_received = true;
                 }
 
                 // CRITICAL: If we received ETW events, IMMEDIATELY refresh connection tables
@@ -524,8 +561,6 @@ impl VpnConnection {
                     // Reset refresh timer since we just did a full refresh
                     last_refresh = std::time::Instant::now();
                 }
-
-                tokio::time::sleep(Duration::from_millis(ETW_POLL_INTERVAL_MS)).await;
 
                 if stop_flag.load(Ordering::SeqCst) {
                     break;

@@ -140,6 +140,13 @@ impl BoosterApp {
 
                                             ui.add_space(SPACING_MD);
 
+                                            // Signal the background perf monitor whether boost tab is visible
+                                            use swifttunnel_fps_booster::structs::PERF_MONITOR_ACTIVE;
+                                            PERF_MONITOR_ACTIVE.store(
+                                                self.current_tab == Tab::Boost,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+
                                             match self.current_tab {
                                                 Tab::Connect => self.render_connect_tab(ui),
                                                 Tab::Boost => self.render_boost_tab(ui),

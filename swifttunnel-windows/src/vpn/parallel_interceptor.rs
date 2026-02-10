@@ -288,6 +288,8 @@ pub struct ParallelInterceptor {
     /// Flag to trigger immediate cache refresh (set by ETW when game process detected)
     /// This enables instant detection without polling - ExitLag-style efficiency
     refresh_now_flag: Arc<AtomicBool>,
+    /// Condvar to wake the cache refresher thread instead of 50ms polling
+    refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     /// Auto-router for automatic relay switching based on game server region
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
 }
@@ -339,6 +341,7 @@ impl ParallelInterceptor {
             inbound_receiver_handle: None,
             detected_game_servers: Arc::new(parking_lot::RwLock::new(std::collections::HashSet::new())),
             refresh_now_flag: Arc::new(AtomicBool::new(false)),
+            refresh_condvar: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
             auto_router: None,
         }
     }
@@ -347,6 +350,12 @@ impl ParallelInterceptor {
     /// This is the key to instant detection without polling
     pub fn trigger_refresh(&self) {
         self.refresh_now_flag.store(true, Ordering::Release);
+        // Wake the cache refresher thread via Condvar
+        let (lock, cvar) = &*self.refresh_condvar;
+        if let Ok(mut signaled) = lock.lock() {
+            *signaled = true;
+            cvar.notify_one();
+        }
     }
 
     /// Get list of detected game server IPs (for notifications)
@@ -1141,8 +1150,9 @@ impl ParallelInterceptor {
         let refresher_stop = Arc::clone(&self.stop_flag);
         let refresher_cache = Arc::clone(&self.process_cache);
         let refresh_now = Arc::clone(&self.refresh_now_flag);
+        let refresh_condvar = Arc::clone(&self.refresh_condvar);
         self.refresher_handle = Some(thread::spawn(move || {
-            run_cache_refresher(refresher_cache, refresher_stop, refresh_now);
+            run_cache_refresher(refresher_cache, refresher_stop, refresh_now, refresh_condvar);
         }));
 
         // Reset throughput stats on start
@@ -1806,11 +1816,12 @@ fn run_inbound_receiver(
     const NO_TRAFFIC_WARNING_SECS: u64 = 10; // Warn if no traffic after 10s from start
     const TRAFFIC_STOPPED_WARNING_SECS: u64 = 30; // Warn if traffic stops for 30s
 
-    // For keepalive timer - call update_timers() every 50ms
+    // For keepalive timer - call update_timers() every 1s
     // This is critical because tunnel's keepalive task is disabled when split tunnel is active
     // to avoid endpoint confusion. We must send keepalives from THIS socket.
+    // WireGuard keepalive is 25s, so 1s resolution is plenty.
     let mut last_timer_check = std::time::Instant::now();
-    const TIMER_INTERVAL_MS: u64 = 50;
+    const TIMER_INTERVAL_MS: u64 = 1000;
 
     log::info!("Inbound receiver: entering main loop, waiting for VPN traffic...");
 
@@ -1872,7 +1883,7 @@ fn run_inbound_receiver(
             );
         }
 
-        // === KEEPALIVE TIMER (every 50ms) ===
+        // === KEEPALIVE TIMER (every 1s) ===
         if now.duration_since(last_timer_check).as_millis() >= TIMER_INTERVAL_MS as u128 {
             last_timer_check = now;
 
@@ -2464,10 +2475,10 @@ fn run_packet_worker(
 
         // Adaptive timeout based on recent activity:
         // - 5ms when recently active (gaming latency acceptable)
-        // - 50ms after 10 consecutive timeouts (idle, save CPU)
+        // - 150ms after 10 consecutive timeouts (idle, save CPU)
         // The reader thread has the event-driven wakeup, workers just need
         // to process what the reader dispatches to them
-        let timeout_ms = if consecutive_timeouts > 10 { 50 } else { 5 };
+        let timeout_ms = if consecutive_timeouts > 10 { 150 } else { 5 };
 
         let work = match receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
             Ok(w) => {
@@ -2879,6 +2890,7 @@ fn run_cache_refresher(
     cache: Arc<LockFreeProcessCache>,
     stop_flag: Arc<AtomicBool>,
     refresh_now: Arc<AtomicBool>,
+    refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 ) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
@@ -2915,30 +2927,37 @@ fn run_cache_refresher(
             first_run = false;
             log::info!("Cache refresher: Performing initial refresh immediately");
         } else {
-            // EVENT-DRIVEN REFRESH: Sleep in short bursts, wake on ETW trigger
-            // This is the key optimization - instead of polling at 50Hz (20ms),
-            // we sleep for 2 seconds total but check every 50ms if ETW triggered
-            //
-            // Result: 0.5 Hz idle polling vs 50 Hz before = 100x reduction
-            // But instant response when game launches (ETW sets refresh_now flag)
-            let mut slept_ms = 0u32;
-            const SLEEP_CHUNK_MS: u32 = 50;
-            const MAX_SLEEP_MS: u32 = 2000; // 2 second fallback
+            // EVENT-DRIVEN REFRESH: Block on Condvar until ETW signals or 2s timeout
+            // Zero CPU when idle, instant wakeup when game launches
+            let tunnel_apps = cache.tunnel_apps();
+            let wait_timeout = if tunnel_apps.is_empty() {
+                // No apps to tunnel - sleep longer (5s) since nothing to track
+                Duration::from_secs(5)
+            } else {
+                // Normal: 2 second fallback
+                Duration::from_secs(2)
+            };
 
-            while slept_ms < MAX_SLEEP_MS {
-                // Check if ETW triggered immediate refresh
-                if refresh_now.swap(false, Ordering::AcqRel) {
-                    log::info!("Cache refresher: ETW triggered immediate refresh");
-                    break;
+            let (lock, cvar) = &*refresh_condvar;
+            if let Ok(mut signaled) = lock.lock() {
+                // Wait until signaled or timeout
+                let result = cvar.wait_timeout_while(
+                    signaled,
+                    wait_timeout,
+                    |s| !*s && !stop_flag.load(Ordering::Relaxed),
+                );
+                if let Ok((mut guard, _)) = result {
+                    *guard = false; // Reset signal
                 }
+            }
 
-                // Check stop flag
-                if stop_flag.load(Ordering::Relaxed) {
-                    return;
-                }
+            // Check if ETW triggered (also reset the atomic flag)
+            if refresh_now.swap(false, Ordering::AcqRel) {
+                log::info!("Cache refresher: ETW triggered immediate refresh");
+            }
 
-                std::thread::sleep(std::time::Duration::from_millis(SLEEP_CHUNK_MS as u64));
-                slept_ms += SLEEP_CHUNK_MS;
+            if stop_flag.load(Ordering::Relaxed) {
+                return;
             }
         }
 

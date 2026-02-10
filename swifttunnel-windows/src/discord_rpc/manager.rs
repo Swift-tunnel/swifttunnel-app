@@ -73,23 +73,23 @@ impl DiscordManager {
         let mut last_connect_attempt = Instant::now() - RECONNECT_INTERVAL;
 
         loop {
-            // Try to connect if not connected and enough time has passed
-            if client.is_none() && last_connect_attempt.elapsed() >= RECONNECT_INTERVAL {
-                last_connect_attempt = Instant::now();
-                match Self::try_connect() {
-                    Ok(c) => {
-                        info!("Connected to Discord IPC");
-                        client = Some(c);
-                    }
-                    Err(e) => {
-                        debug!("Discord not available: {}", e);
-                    }
-                }
-            }
-
-            // Check for activity updates with timeout
-            match rx.recv_timeout(Duration::from_millis(500)) {
+            // Block until an activity message arrives (no polling)
+            match rx.recv() {
                 Ok(activity) => {
+                    // Try to connect if not connected and enough time has passed
+                    if client.is_none() && last_connect_attempt.elapsed() >= RECONNECT_INTERVAL {
+                        last_connect_attempt = Instant::now();
+                        match Self::try_connect() {
+                            Ok(c) => {
+                                info!("Connected to Discord IPC");
+                                client = Some(c);
+                            }
+                            Err(e) => {
+                                debug!("Discord not available: {}", e);
+                            }
+                        }
+                    }
+
                     match activity {
                         DiscordActivity::Shutdown => {
                             info!("Discord RPC thread shutting down");
@@ -105,7 +105,6 @@ impl DiscordManager {
                                     Ok(_) => debug!("Discord presence cleared"),
                                     Err(e) => {
                                         warn!("Failed to clear Discord presence: {}", e);
-                                        // Connection may be broken, reset
                                         client = None;
                                     }
                                 }
@@ -115,17 +114,13 @@ impl DiscordManager {
                             if let Some(ref mut c) = client {
                                 if let Err(e) = Self::set_activity(c, &state) {
                                     warn!("Failed to set Discord activity: {}", e);
-                                    // Connection may be broken, try to reconnect
                                     client = None;
                                 }
                             }
                         }
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Normal timeout, continue loop
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(mpsc::RecvError) => {
                     info!("Discord RPC channel closed, shutting down");
                     if let Some(ref mut c) = client {
                         let _ = c.clear_activity();

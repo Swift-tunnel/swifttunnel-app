@@ -1013,12 +1013,11 @@ impl eframe::App for BoosterApp {
             // 10 FPS for latency countdown display
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         } else if is_connected {
-            // 5 FPS for idle pulse animation (saves ~2-5% GPU on integrated graphics)
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            // 1 FPS for connected idle state (pulse animation doesn't need more)
+            ctx.request_repaint_after(std::time::Duration::from_millis(1000));
         } else if self.system_tray.is_some() {
-            // Must keep polling to process tray events (show, quit, toggle)
-            // even when the window is hidden/minimized to tray
-            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            // Slow poll for tray events (show, quit, toggle) when minimized
+            ctx.request_repaint_after(std::time::Duration::from_millis(2000));
         }
 
         // Handle tray events
