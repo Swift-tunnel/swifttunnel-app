@@ -2337,7 +2337,7 @@ fn inject_inbound_packet(
         if protocol == 6 && packet.len() >= transport_offset + 18 {
             // TCP: checksum at offset 16 within TCP header
             update_transport_checksum(
-                &mut packet,
+                packet,
                 transport_offset + 16,
                 &dst_ip.octets(),
                 &new_dst.octets(),
@@ -2348,7 +2348,7 @@ fn inject_inbound_packet(
                 u16::from_be_bytes([packet[transport_offset + 6], packet[transport_offset + 7]]);
             if udp_checksum != 0 {
                 update_transport_checksum(
-                    &mut packet,
+                    packet,
                     transport_offset + 6,
                     &dst_ip.octets(),
                     &new_dst.octets(),
