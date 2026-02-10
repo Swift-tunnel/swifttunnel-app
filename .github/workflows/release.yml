@@ -42,7 +42,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "v${{ steps.version.outputs.VERSION }}"
-          gh release view $tag 2>$null
+          $PSNativeCommandUseErrorActionPreference = $false
+          gh release view $tag 2>&1 | Out-Null
           if ($LASTEXITCODE -eq 0) {
             echo "SKIP=true" >> $env:GITHUB_OUTPUT
             echo "::notice::Release $tag already exists — skipping"
@@ -50,6 +51,7 @@ jobs:
             echo "SKIP=false" >> $env:GITHUB_OUTPUT
             echo "No existing release for $tag — proceeding with build"
           }
+          exit 0
 
       - name: Setup Rust
         if: steps.check.outputs.SKIP != 'true'
