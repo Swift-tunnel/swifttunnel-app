@@ -112,7 +112,7 @@ jobs:
           if (-not (Test-Path $driverMsi)) {
             New-Item -ItemType Directory -Path "dist\drivers" -Force | Out-Null
             $url = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/WinpkFilter-x64.msi"
-            Invoke-WebRequest -Uri $url -OutFile $driverMsi -UseBasicParsing
+            curl.exe -L -o $driverMsi $url
             $size = (Get-Item $driverMsi).Length
             if ($size -lt 1000000) {
               throw "Downloaded WinpkFilter MSI is suspiciously small ($size bytes) — download may have failed"
