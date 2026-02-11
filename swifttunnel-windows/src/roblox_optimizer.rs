@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::os::windows::fs::MetadataExt;
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
-    SetFileAttributesW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, SetFileAttributesW,
 };
 
 /// Current Roblox settings read from the XML file
@@ -42,6 +42,38 @@ impl RobloxOptimizer {
 
     /// Find the GlobalBasicSettings XML file
     fn find_settings_file(roblox_dir: &PathBuf) -> PathBuf {
+        // Prefer any discovered GlobalBasicSettings_*.xml file and pick the highest index.
+        let mut latest_indexed: Option<(u32, PathBuf)> = None;
+        if let Ok(entries) = fs::read_dir(roblox_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+
+                let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+
+                let Some(index) = Self::parse_settings_file_index(file_name) else {
+                    continue;
+                };
+
+                if latest_indexed
+                    .as_ref()
+                    .map(|(best, _)| index > *best)
+                    .unwrap_or(true)
+                {
+                    latest_indexed = Some((index, path));
+                }
+            }
+        }
+
+        if let Some((_, path)) = latest_indexed {
+            info!("Found Roblox settings at: {:?}", path);
+            return path;
+        }
+
         // Try to find GlobalBasicSettings files with different numbers
         for i in (1..=20).rev() {
             let path = roblox_dir.join(format!("GlobalBasicSettings_{}.xml", i));
@@ -57,6 +89,27 @@ impl RobloxOptimizer {
         standard_path
     }
 
+    fn parse_settings_file_index(file_name: &str) -> Option<u32> {
+        let prefix = "GlobalBasicSettings_";
+        let suffix = ".xml";
+        if !file_name.starts_with(prefix) || !file_name.ends_with(suffix) {
+            return None;
+        }
+
+        let number_part = &file_name[prefix.len()..file_name.len() - suffix.len()];
+        number_part.parse::<u32>().ok()
+    }
+
+    fn resolve_settings_path(&self) -> PathBuf {
+        if self.settings_path.exists() {
+            return self.settings_path.clone();
+        }
+
+        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let roblox_dir = PathBuf::from(&local_app_data).join("Roblox");
+        Self::find_settings_file(&roblox_dir)
+    }
+
     /// Get the path to the settings file
     pub fn get_settings_path(&self) -> &PathBuf {
         &self.settings_path
@@ -64,11 +117,12 @@ impl RobloxOptimizer {
 
     /// Read current Roblox settings from the XML file
     pub fn read_current_settings(&self) -> Result<CurrentRobloxSettings> {
-        if !self.settings_path.exists() {
+        let settings_path = self.resolve_settings_path();
+        if !settings_path.exists() {
             return Err(anyhow::anyhow!("Roblox settings file not found"));
         }
 
-        let content = fs::read_to_string(&self.settings_path)?;
+        let content = fs::read_to_string(&settings_path)?;
 
         // Parse FPS cap
         let fps_cap = Self::extract_int_value(&content, "FramerateCap").unwrap_or(60);
@@ -130,10 +184,15 @@ impl RobloxOptimizer {
     /// Remove read-only attribute from a file (Windows only)
     #[cfg(windows)]
     fn remove_readonly(&self) -> Result<()> {
+        Self::remove_readonly_path(&self.settings_path)
+    }
+
+    #[cfg(windows)]
+    fn remove_readonly_path(path: &PathBuf) -> Result<()> {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
 
-        let path_wide: Vec<u16> = OsStr::new(&self.settings_path)
+        let path_wide: Vec<u16> = OsStr::new(path)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -152,10 +211,15 @@ impl RobloxOptimizer {
     /// Set read-only attribute on a file (Windows only)
     #[cfg(windows)]
     fn set_readonly(&self) -> Result<()> {
+        Self::set_readonly_path(&self.settings_path)
+    }
+
+    #[cfg(windows)]
+    fn set_readonly_path(path: &PathBuf) -> Result<()> {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
 
-        let path_wide: Vec<u16> = OsStr::new(&self.settings_path)
+        let path_wide: Vec<u16> = OsStr::new(path)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -174,7 +238,12 @@ impl RobloxOptimizer {
     /// Check if file is read-only (Windows only)
     #[cfg(windows)]
     fn is_readonly(&self) -> bool {
-        if let Ok(metadata) = fs::metadata(&self.settings_path) {
+        Self::is_readonly_path(&self.settings_path)
+    }
+
+    #[cfg(windows)]
+    fn is_readonly_path(path: &PathBuf) -> bool {
+        if let Ok(metadata) = fs::metadata(path) {
             // FILE_ATTRIBUTE_READONLY = 0x1
             (metadata.file_attributes() & 0x1) != 0
         } else {
@@ -184,26 +253,41 @@ impl RobloxOptimizer {
 
     #[cfg(not(windows))]
     fn remove_readonly(&self) -> Result<()> {
+        Self::remove_readonly_path(&self.settings_path)
+    }
+
+    #[cfg(not(windows))]
+    fn remove_readonly_path(path: &PathBuf) -> Result<()> {
         // On non-Windows, use permissions
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&self.settings_path)?.permissions();
+        let mut perms = fs::metadata(path)?.permissions();
         perms.set_mode(0o644); // rw-r--r--
-        fs::set_permissions(&self.settings_path, perms)?;
+        fs::set_permissions(path, perms)?;
         Ok(())
     }
 
     #[cfg(not(windows))]
     fn set_readonly(&self) -> Result<()> {
+        Self::set_readonly_path(&self.settings_path)
+    }
+
+    #[cfg(not(windows))]
+    fn set_readonly_path(path: &PathBuf) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&self.settings_path)?.permissions();
+        let mut perms = fs::metadata(path)?.permissions();
         perms.set_mode(0o444); // r--r--r--
-        fs::set_permissions(&self.settings_path, perms)?;
+        fs::set_permissions(path, perms)?;
         Ok(())
     }
 
     #[cfg(not(windows))]
     fn is_readonly(&self) -> bool {
-        if let Ok(metadata) = fs::metadata(&self.settings_path) {
+        Self::is_readonly_path(&self.settings_path)
+    }
+
+    #[cfg(not(windows))]
+    fn is_readonly_path(path: &PathBuf) -> bool {
+        if let Ok(metadata) = fs::metadata(path) {
             metadata.permissions().readonly()
         } else {
             false
@@ -213,17 +297,18 @@ impl RobloxOptimizer {
     /// Apply Roblox-specific optimizations
     pub fn apply_optimizations(&self, config: &RobloxSettingsConfig) -> Result<()> {
         info!("Applying Roblox optimizations via GlobalBasicSettings");
+        let settings_path = self.resolve_settings_path();
 
-        if !self.settings_path.exists() {
+        if !settings_path.exists() {
             return Err(anyhow::anyhow!(
                 "Roblox settings file not found. Please ensure Roblox is installed and has been run at least once."
             ));
         }
 
         // Remove read-only if it was set (so we can write)
-        if self.is_readonly() {
+        if Self::is_readonly_path(&settings_path) {
             info!("Settings file is read-only, removing attribute to apply changes...");
-            if let Err(e) = self.remove_readonly() {
+            if let Err(e) = Self::remove_readonly_path(&settings_path) {
                 error!("Failed to remove read-only attribute: {}", e);
                 return Err(anyhow::anyhow!(
                     "Cannot modify settings: file is read-only and we couldn't remove the attribute. Error: {}",
@@ -233,10 +318,10 @@ impl RobloxOptimizer {
         }
 
         // Backup current settings first
-        self.backup_settings()?;
+        self.backup_settings_for(&settings_path)?;
 
         // Read current content
-        let mut content = fs::read_to_string(&self.settings_path)?;
+        let mut content = fs::read_to_string(&settings_path)?;
 
         // Apply FPS cap
         if config.unlock_fps {
@@ -256,7 +341,7 @@ impl RobloxOptimizer {
         }
 
         // Write updated content back
-        fs::write(&self.settings_path, &content)?;
+        fs::write(&settings_path, &content)?;
 
         // Note: We no longer set the file to read-only. Setting it read-only
         // caused Roblox to fail with "Failed to apply critical settings" because
@@ -344,9 +429,13 @@ impl RobloxOptimizer {
 
     /// Backup current Roblox settings
     fn backup_settings(&self) -> Result<()> {
-        if self.settings_path.exists() {
+        self.backup_settings_for(&self.settings_path)
+    }
+
+    fn backup_settings_for(&self, settings_path: &PathBuf) -> Result<()> {
+        if settings_path.exists() {
             info!("Creating backup of Roblox settings");
-            fs::copy(&self.settings_path, &self.backup_path)?;
+            fs::copy(settings_path, &self.backup_path)?;
             info!("Backup created at: {:?}", self.backup_path);
         }
         Ok(())
@@ -361,12 +450,14 @@ impl RobloxOptimizer {
             return Ok(());
         }
 
+        let settings_path = self.resolve_settings_path();
+
         // Remove read-only if set (so we can restore)
-        if self.is_readonly() {
-            let _ = self.remove_readonly();
+        if Self::is_readonly_path(&settings_path) {
+            let _ = Self::remove_readonly_path(&settings_path);
         }
 
-        fs::copy(&self.backup_path, &self.settings_path)?;
+        fs::copy(&self.backup_path, &settings_path)?;
 
         // Also remove dynamic render optimization when restoring
         if let Err(e) = self.remove_dynamic_render_optimization() {
@@ -383,7 +474,7 @@ impl RobloxOptimizer {
 
     /// Check if Roblox is installed (settings file exists)
     pub fn is_roblox_installed(&self) -> bool {
-        self.settings_path.exists()
+        self.resolve_settings_path().exists()
     }
 
     /// Check whether a Roblox client process is currently running.
