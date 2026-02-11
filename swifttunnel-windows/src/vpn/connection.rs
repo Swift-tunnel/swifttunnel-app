@@ -1,12 +1,11 @@
 //! VPN Connection Manager
 //!
 //! Manages the lifecycle of VPN connections, coordinating:
-//! - Configuration fetching
+//! - Relay endpoint resolution
 //! - Split tunneling via ndisapi (process-based per-app routing)
 //! - UDP relay for game traffic forwarding
 //! - Connection state tracking
 
-use super::config::fetch_vpn_config;
 use super::parallel_interceptor::ThroughputStats;
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
 use super::routes::get_internet_interface_ip;
@@ -130,7 +129,7 @@ impl ConnectionState {
     pub fn status_text(&self) -> &'static str {
         match self {
             ConnectionState::Disconnected => "Disconnected",
-            ConnectionState::FetchingConfig => "Fetching configuration...",
+            ConnectionState::FetchingConfig => "Resolving relay endpoint...",
             ConnectionState::CreatingAdapter => "Creating network adapter...",
             ConnectionState::Connecting => "Connecting to server...",
             ConnectionState::ConfiguringSplitTunnel => "Configuring split tunnel...",
@@ -249,12 +248,12 @@ impl VpnConnection {
     /// No Wintun adapter, no WireGuard encryption — lowest latency.
     ///
     /// # Arguments
-    /// * `access_token` - Bearer token for API authentication
+    /// * `_access_token` - Reserved for future authenticated relay/session APIs
     /// * `region` - Server region to connect to
     /// * `tunnel_apps` - Apps that SHOULD use VPN (games). Everything else bypasses.
     pub async fn connect(
         &mut self,
-        access_token: &str,
+        _access_token: &str,
         region: &str,
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
@@ -284,18 +283,35 @@ impl VpnConnection {
         log::info!("  - Direct UDP relay to game servers");
         log::info!("========================================");
 
-        // Step 1: Fetch configuration (we still need server endpoint)
+        // Step 1: Resolve initial relay endpoint from available servers
         self.set_state(ConnectionState::FetchingConfig).await;
-        let config = match fetch_vpn_config(access_token, region).await {
-            Ok(c) => c,
-            Err(e) => {
-                self.set_state(ConnectionState::Error(e.to_string())).await;
-                return Err(e);
+        let selected_relay_addr = match available_servers
+            .iter()
+            .find(|(server_region, _, _)| server_region == region)
+            .map(|(_, addr, _)| *addr)
+        {
+            Some(addr) => addr,
+            None => {
+                let error = VpnError::ConfigFetch(format!(
+                    "Selected region '{}' is unavailable in server list",
+                    region
+                ));
+                self.set_state(ConnectionState::Error(error.to_string()))
+                    .await;
+                return Err(error);
             }
         };
 
+        let config = VpnConfig {
+            // In V3 we only need region + endpoint for relay bootstrap.
+            region: region.to_string(),
+            endpoint: selected_relay_addr.to_string(),
+            ..Default::default()
+        };
+
         log::info!("V3: Server endpoint: {}", config.endpoint);
-        self.config = Some(config.clone());
+        // V3 no longer creates/stores vpn_configs records via generate-config.
+        self.config = None;
 
         // Initialize WFP block filter engine (for instant process blocking)
         if let Err(e) = super::wfp_block::init() {
@@ -451,15 +467,24 @@ impl VpnConnection {
                 }
             }
         } else {
-            // No custom relay = auto mode (use VPN server IP with default port 51821)
-            let vpn_ip = config
-                .endpoint
-                .split(':')
-                .next()
-                .unwrap_or(&config.endpoint);
-            format!("{}:51821", vpn_ip).parse().map_err(|e| {
-                VpnError::SplitTunnelSetupFailed(format!("Invalid VPN server IP for relay: {}", e))
-            })?
+            // No custom relay = use resolved server endpoint, forcing relay port 51821.
+            if let Ok(addr) = config.endpoint.parse::<SocketAddr>() {
+                SocketAddr::new(addr.ip(), 51821)
+            } else if let Ok(ip) = config.endpoint.parse::<std::net::IpAddr>() {
+                SocketAddr::new(ip, 51821)
+            } else {
+                let vpn_ip = config
+                    .endpoint
+                    .split(':')
+                    .next()
+                    .unwrap_or(&config.endpoint);
+                format!("{}:51821", vpn_ip).parse().map_err(|e| {
+                    VpnError::SplitTunnelSetupFailed(format!(
+                        "Invalid VPN server IP for relay: {}",
+                        e
+                    ))
+                })?
+            }
         };
 
         log::info!("V3: Creating UDP relay to {}", relay_addr);
@@ -1129,7 +1154,7 @@ mod tests {
         assert_eq!(ConnectionState::Disconnected.status_text(), "Disconnected");
         assert_eq!(
             ConnectionState::FetchingConfig.status_text(),
-            "Fetching configuration..."
+            "Resolving relay endpoint..."
         );
         assert_eq!(
             ConnectionState::CreatingAdapter.status_text(),
