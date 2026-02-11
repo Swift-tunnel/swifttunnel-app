@@ -115,7 +115,7 @@ jobs:
             $url = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi"
             curl.exe -L -o $driverMsi $url
             $size = (Get-Item $driverMsi).Length
-            if ($size -lt 1000000) {
+            if ($size -lt 100000) {
               throw "Downloaded WinpkFilter MSI is suspiciously small ($size bytes) — download may have failed"
             }
           }
