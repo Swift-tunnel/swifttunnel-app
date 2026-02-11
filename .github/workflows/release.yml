@@ -112,7 +112,7 @@ jobs:
           $driverMsi = "dist\drivers\WinpkFilter-x64.msi"
           if (-not (Test-Path $driverMsi)) {
             New-Item -ItemType Directory -Path "dist\drivers" -Force | Out-Null
-            $url = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/WinpkFilter-x64.msi"
+            $url = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi"
             curl.exe -L -o $driverMsi $url
             $size = (Get-Item $driverMsi).Length
             if ($size -lt 1000000) {
