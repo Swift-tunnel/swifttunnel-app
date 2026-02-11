@@ -3428,13 +3428,11 @@ fn run_cache_refresher(
 
         // Also log connections owned by tunnel apps
         if refresh_count < 10 && !tunnel_pids_found.is_empty() {
-            for ((key, &pid), (tunnel_pid, _name)) in
-                connections.iter().flat_map(|c| {
-                    tunnel_pids_found
-                        .iter()
-                        .filter_map(move |tp| if *c.1 == tp.0 { Some((c, tp)) } else { None })
-                })
-            {
+            for ((key, &pid), (tunnel_pid, _name)) in connections.iter().flat_map(|c| {
+                tunnel_pids_found
+                    .iter()
+                    .filter_map(move |tp| if *c.1 == tp.0 { Some((c, tp)) } else { None })
+            }) {
                 log::info!(
                     "Cache refresher: Tunnel app connection {}:{} ({:?}) owned by PID {}",
                     key.local_ip,

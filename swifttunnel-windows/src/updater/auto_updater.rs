@@ -11,13 +11,21 @@ use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// GitHub Releases base URL for update feed
-/// Velopack expects releases.{channel}.json at this URL
-const RELEASES_URL: &str =
-    "https://github.com/Swift-tunnel/swifttunnel-app/releases/latest/download";
+/// GitHub repo path for constructing release download URLs
+const GITHUB_REPO: &str = "Swift-tunnel/swifttunnel-app";
 const GITHUB_RELEASES_API_URL: &str =
     "https://api.github.com/repos/Swift-tunnel/swifttunnel-app/releases";
 const UPDATE_HTTP_USER_AGENT: &str = "SwiftTunnel-Updater";
+
+/// Build a direct download URL for a specific release version's assets.
+/// This avoids GitHub's /releases/latest/download redirect which can point
+/// to the wrong release when drafts are published out of order.
+fn releases_url_for_version(version: &Version) -> String {
+    format!(
+        "https://github.com/{}/releases/download/v{version}",
+        GITHUB_REPO
+    )
+}
 
 #[derive(Debug, Deserialize)]
 struct GitHubRelease {
@@ -57,7 +65,7 @@ pub fn run_auto_updater(channel: UpdateChannel) -> AutoUpdateResult {
     };
 
     // Try to create UpdateManager - will fail if not installed via Velopack
-    let um = match create_update_manager(channel) {
+    let um = match create_update_manager(channel, &expected_version) {
         Some(um) => um,
         None => {
             info!("Not installed via Velopack (dev mode), skipping update check");
@@ -118,9 +126,15 @@ pub fn run_auto_updater(channel: UpdateChannel) -> AutoUpdateResult {
     }
 }
 
-/// Create a Velopack UpdateManager, returning None if not installed via Velopack
-fn create_update_manager(channel: UpdateChannel) -> Option<velopack::UpdateManager> {
-    let source = velopack::sources::HttpSource::new(RELEASES_URL);
+/// Create a Velopack UpdateManager, returning None if not installed via Velopack.
+/// Uses a direct URL to the target version's release assets to avoid GitHub's
+/// /releases/latest redirect pointing to the wrong release.
+fn create_update_manager(
+    channel: UpdateChannel,
+    target_version: &Version,
+) -> Option<velopack::UpdateManager> {
+    let url = releases_url_for_version(target_version);
+    let source = velopack::sources::HttpSource::new(&url);
     let options = velopack::UpdateOptions {
         ExplicitChannel: Some(channel.velopack_channel().to_string()),
         ..Default::default()
@@ -228,7 +242,7 @@ pub fn check_for_updates_background(update_state: Arc<Mutex<UpdateState>>, chann
             }
         };
 
-        let um = match create_update_manager(channel) {
+        let um = match create_update_manager(channel, &expected_version) {
             Some(um) => um,
             None => {
                 // Not installed via Velopack (dev mode) — stay idle, no error
@@ -292,7 +306,7 @@ pub fn download_and_apply_update(
             }
         };
 
-        let um = match create_update_manager(channel) {
+        let um = match create_update_manager(channel, &expected_version) {
             Some(um) => um,
             None => {
                 // Not installed via Velopack — silently reset to idle

@@ -40,11 +40,27 @@ impl SystemOptimizer {
         );
 
         if config.set_high_priority {
-            self.set_process_priority(process_id)?;
+            if process_id == 0 {
+                info!("Skipping process priority boost: no active game process detected yet");
+            } else if let Err(e) = self.set_process_priority(process_id) {
+                // Process-specific boosts can legitimately fail during restart flows.
+                // Keep applying all other boosts; priority will be retried by runtime monitors.
+                warn!(
+                    "Could not set process priority for PID {} (will retry later): {}",
+                    process_id, e
+                );
+            }
         }
 
         if config.set_cpu_affinity && !config.cpu_cores.is_empty() {
-            self.set_cpu_affinity(process_id, &config.cpu_cores)?;
+            if process_id == 0 {
+                info!("Skipping CPU affinity boost: no active game process detected yet");
+            } else if let Err(e) = self.set_cpu_affinity(process_id, &config.cpu_cores) {
+                warn!(
+                    "Could not set CPU affinity for PID {} (will retry later): {}",
+                    process_id, e
+                );
+            }
         }
 
         if config.clear_standby_memory {

@@ -2774,6 +2774,20 @@ impl BoosterApp {
             }
         }
 
+        // If we restarted Roblox, wait briefly for the new process so
+        // process-specific boosts (priority/affinity) can be applied immediately.
+        if roblox_restarted {
+            if let Some(pid) = self.wait_for_roblox_pid(std::time::Duration::from_secs(5)) {
+                self.state.metrics.roblox_running = true;
+                self.state.metrics.process_id = Some(pid);
+                log::info!("Detected restarted Roblox process with PID {}", pid);
+            } else {
+                log::info!(
+                    "Roblox restarted but PID was not detected yet; process boosts will apply on next refresh"
+                );
+            }
+        }
+
         // Apply system optimizations (prefer live PID when available for priority changes)
         let process_id = self.state.metrics.process_id.unwrap_or(0);
         if let Err(e) = self
@@ -2792,8 +2806,11 @@ impl BoosterApp {
 
         self.state.optimizations_active = true;
 
+        // "Pending" should only represent unapplied UI changes.
+        // Once Apply is pressed, clear pending even if some boosts reported warnings.
+        self.boost_changes_pending = false;
+
         if errors.is_empty() {
-            self.boost_changes_pending = false;
             let active_count = self.count_active_boosts();
             if roblox_restarted {
                 self.set_status(
@@ -2808,7 +2825,6 @@ impl BoosterApp {
             }
             log::info!("Boost changes applied successfully");
         } else {
-            self.boost_changes_pending = true;
             let error_msg = errors.join(", ");
             self.set_status(
                 &format!("Apply finished with warnings: {}", error_msg),
@@ -2818,6 +2834,54 @@ impl BoosterApp {
         }
 
         self.mark_dirty();
+    }
+
+    fn wait_for_roblox_pid(&self, timeout: std::time::Duration) -> Option<u32> {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if let Some(pid) = self.find_roblox_pid() {
+                return Some(pid);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        None
+    }
+
+    fn find_roblox_pid(&self) -> Option<u32> {
+        for process_name in ["RobloxPlayerBeta.exe", "Windows10Universal.exe"] {
+            let output = match hidden_command("tasklist")
+                .args([
+                    "/FO",
+                    "CSV",
+                    "/NH",
+                    "/FI",
+                    &format!("IMAGENAME eq {}", process_name),
+                ])
+                .output()
+            {
+                Ok(output) => output,
+                Err(e) => {
+                    log::warn!("Failed to query tasklist for {}: {}", process_name, e);
+                    continue;
+                }
+            };
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.contains("No tasks are running") {
+                    continue;
+                }
+
+                if let Some(pid_field) = line.split("\",\"").nth(1) {
+                    let pid_str = pid_field.trim_matches('"').replace(',', "");
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        return Some(pid);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Apply a single boost immediately (called when individual toggle is changed while main is active)
