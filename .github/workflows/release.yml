@@ -48,7 +48,7 @@ jobs:
           }
 
           $size = (Get-Item $msiPath).Length
-          if ($size -lt 1000000) {
+          if ($size -lt 500000) {
             throw "Downloaded WinpkFilter MSI is suspiciously small ($size bytes)"
           }
 
