@@ -43,7 +43,8 @@ jobs:
 
           $msiPath = Join-Path $driversDir "WinpkFilter-x64.msi"
           if (-not (Test-Path $msiPath)) {
-            gh release download v3.6.2 --repo wiresock/ndisapi --pattern "WinpkFilter-x64.msi" --dir $driversDir
+            gh release download v3.6.2 --repo wiresock/ndisapi --pattern "Windows.Packet.Filter.3.6.2.1.x64.msi" --dir $driversDir
+            Rename-Item (Join-Path $driversDir "Windows.Packet.Filter.3.6.2.1.x64.msi") "WinpkFilter-x64.msi"
           }
 
           $size = (Get-Item $msiPath).Length
