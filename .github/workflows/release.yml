@@ -35,14 +35,15 @@ jobs:
 
       - name: Prepare bundled driver payloads
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $driversDir = "swifttunnel-desktop/src-tauri/resources/drivers"
           New-Item -ItemType Directory -Path $driversDir -Force | Out-Null
 
           $msiPath = Join-Path $driversDir "WinpkFilter-x64.msi"
           if (-not (Test-Path $msiPath)) {
-            $url = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/WinpkFilter-x64.msi"
-            Invoke-WebRequest -Uri $url -OutFile $msiPath -UseBasicParsing
+            gh release download v3.6.2 --repo wiresock/ndisapi --pattern "WinpkFilter-x64.msi" --dir $driversDir
           }
 
           $size = (Get-Item $msiPath).Length
