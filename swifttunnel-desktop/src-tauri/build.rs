@@ -4,7 +4,7 @@ fn main() {
     {
         // Embed manifest requesting asInvoker (no UAC prompt)
         let manifest = embed_manifest::new_manifest("SwiftTunnel")
-            .requested_execution_level(embed_manifest::ExecutionLevel::AsInvoker);
+            .requested_execution_level(embed_manifest::manifest::ExecutionLevel::AsInvoker);
         embed_manifest::embed_manifest(manifest).expect("Failed to embed manifest");
 
         // Embed icon and version info

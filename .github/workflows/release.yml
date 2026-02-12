@@ -79,7 +79,7 @@ jobs:
           $config | ConvertTo-Json -Depth 32 | Set-Content -Path $confPath -Encoding utf8
 
       - name: Build and publish release
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
