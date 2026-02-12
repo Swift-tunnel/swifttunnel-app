@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use log::info;
 use state::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(windows)]
 fn sync_runtime_assets(app: &tauri::App) {

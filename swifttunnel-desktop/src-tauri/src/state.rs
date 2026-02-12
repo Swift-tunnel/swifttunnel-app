@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use swifttunnel_core::auth::manager::AuthManager;
-use swifttunnel_core::discord_rpc::manager::DiscordManager;
+use swifttunnel_core::auth::AuthManager;
+use swifttunnel_core::discord_rpc::DiscordManager;
 use swifttunnel_core::network_booster::NetworkBooster;
 use swifttunnel_core::performance_monitor::PerformanceMonitor;
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
