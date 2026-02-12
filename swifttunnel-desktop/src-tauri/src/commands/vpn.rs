@@ -1,7 +1,7 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::events::{SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent};
 use crate::state::AppState;
@@ -110,6 +110,21 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
     }
 }
 
+fn parse_game_presets(game_presets: &[String]) -> HashSet<swifttunnel_core::vpn::GamePreset> {
+    game_presets
+        .iter()
+        .filter_map(|preset| {
+            let normalized = preset.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "roblox" => Some(swifttunnel_core::vpn::GamePreset::Roblox),
+                "valorant" => Some(swifttunnel_core::vpn::GamePreset::Valorant),
+                "fortnite" => Some(swifttunnel_core::vpn::GamePreset::Fortnite),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 async fn emit_vpn_state(app: &AppHandle, state: &AppState) {
     let vpn = state.vpn_connection.lock().await;
     let conn_state = vpn.state().await;
@@ -159,7 +174,8 @@ pub async fn vpn_connect(
         )
     };
 
-    let tunnel_apps = swifttunnel_core::vpn::get_apps_for_preset_set(&game_presets);
+    let preset_set = parse_game_presets(&game_presets);
+    let tunnel_apps = swifttunnel_core::vpn::get_apps_for_preset_set(&preset_set);
 
     // Build available_servers list from the dynamic server list
     let available_servers: Vec<(String, SocketAddr, Option<u32>)> = {
@@ -331,7 +347,7 @@ pub struct LatencyEntry {
 }
 
 #[tauri::command]
-pub async fn server_get_latencies(state: State<'_, AppState>) -> Vec<LatencyEntry> {
+pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<LatencyEntry>, String> {
     let probes: Vec<(String, String, u16, String)> = {
         let sl = state.server_list.lock();
         sl.regions()
@@ -371,13 +387,14 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Vec<LatencyEntr
         sl.set_latency(&server_id, latency);
     }
 
-    sl.regions()
+    Ok(sl
+        .regions()
         .iter()
         .map(|r| LatencyEntry {
             region: r.id.clone(),
             latency_ms: sl.get_region_best_latency(&r.id),
         })
-        .collect()
+        .collect())
 }
 
 #[tauri::command]

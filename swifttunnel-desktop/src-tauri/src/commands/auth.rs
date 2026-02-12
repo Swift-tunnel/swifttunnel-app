@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::events::{AUTH_STATE_CHANGED, AuthStateEvent};
 use crate::state::AppState;
