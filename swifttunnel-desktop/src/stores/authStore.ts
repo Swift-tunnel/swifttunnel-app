@@ -55,10 +55,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   startOAuth: async () => {
     try {
       set({ state: "awaiting_oauth", error: null });
-      const authUrl = await authStartOAuth();
-      // Tauri will open the URL in the default browser
-      const { open } = await import("@tauri-apps/plugin-shell");
-      await open(authUrl);
+      // Native auth command already opens the browser and tracks pending state.
+      await authStartOAuth();
     } catch (e) {
       set({ state: "logged_out", error: String(e) });
     }
