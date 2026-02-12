@@ -5,7 +5,8 @@
   "identifier": "net.swifttunnel.desktop",
   "build": {
     "devUrl": "http://localhost:1420",
-    "frontendDist": "../dist"
+    "frontendDist": "../dist",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "withGlobalTauri": true,

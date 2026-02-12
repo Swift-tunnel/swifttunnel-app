@@ -94,5 +94,5 @@ jobs:
           releaseDraft: false
           prerelease: true
           generateReleaseNotes: true
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           updaterJsonPreferNsis: true
