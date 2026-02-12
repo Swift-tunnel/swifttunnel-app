@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+/* SwiftTunnel Design System v8 - Clean Dark Pro */
+
+@theme {
+  /* Backgrounds */
+  --color-bg-base: #0e0e12;
+  --color-bg-sidebar: #121217;
+  --color-bg-card: #18181e;
+  --color-bg-elevated: #202028;
+  --color-bg-hover: #282832;
+  --color-bg-active: #30303a;
+  --color-bg-input: #121216;
+  --color-bg-glass: #14141a;
+
+  /* Accents */
+  --color-accent-primary: #3c82f6;
+  --color-accent-secondary: #60a5ff;
+  --color-accent-cyan: #3898ff;
+  --color-accent-purple: #9664ff;
+  --color-accent-lime: #82dc3c;
+  --color-accent-primary-glow: #64a5ff;
+  --color-accent-primary-soft-8: rgba(60, 130, 246, 0.08);
+  --color-accent-primary-soft-10: rgba(60, 130, 246, 0.1);
+  --color-accent-primary-soft-12: rgba(60, 130, 246, 0.12);
+  --color-accent-primary-soft-15: rgba(60, 130, 246, 0.15);
+  --color-accent-primary-soft-20: rgba(60, 130, 246, 0.2);
+  --color-accent-lime-soft-10: rgba(130, 220, 60, 0.1);
+
+  /* Status */
+  --color-status-connected: #28d296;
+  --color-status-connected-glow: #64f0c8;
+  --color-status-warning: #f5b428;
+  --color-status-error: #f05a5a;
+  --color-status-inactive: #50505f;
+  --color-status-warning-soft-10: rgba(245, 180, 40, 0.1);
+  --color-status-error-soft-10: rgba(240, 90, 90, 0.1);
+  --color-status-error-soft-20: rgba(240, 90, 90, 0.2);
+
+  /* Text */
+  --color-text-primary: #ebebf0;
+  --color-text-secondary: #9b9baa;
+  --color-text-muted: #696978;
+  --color-text-dimmed: #464655;
+
+  /* Borders */
+  --color-border-default: #262630;
+  --color-border-subtle: #1c1c24;
+  --color-border-focus: #3c82f6;
+  --color-border-hover: #373744;
+
+  /* Latency */
+  --color-latency-excellent: #28d296;
+  --color-latency-good: #82dc3c;
+  --color-latency-fair: #f5b428;
+  --color-latency-poor: #f08c32;
+  --color-latency-bad: #f05a5a;
+
+  /* Spacing */
+  --spacing-sidebar: 64px;
+  --spacing-content: 28px;
+  --spacing-card-gap: 14px;
+
+  /* Radius */
+  --radius-card: 10px;
+  --radius-button: 8px;
+  --radius-sm: 6px;
+}
+
+body {
+  background-color: var(--color-bg-base);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-default);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-hover);
+}
+
+/* Drag region for Tauri window */
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}
+[data-tauri-drag-region] button,
+[data-tauri-drag-region] a {
+  -webkit-app-region: no-drag;
+}

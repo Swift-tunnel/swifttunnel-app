@@ -28,6 +28,12 @@ swifttunnel-windows/dist/drivers/
 swifttunnel-windows/dist/license.rtf
 swifttunnel-windows/dist/swifttunnel.ico
 
+# Tauri build artifacts
+swifttunnel-desktop/src-tauri/target/
+swifttunnel-desktop/node_modules/
+swifttunnel-desktop/dist/
+swifttunnel-desktop/src-tauri/resources/drivers/WinpkFilter-x64.msi
+
 # Documentation (private)
 CLAUDE.md
 PC-BOOSTS.md

@@ -68,7 +68,8 @@ impl BoosterApp {
                     }
 
                     // Main content area
-                    let content_width = total_size.x - if is_logged_in { SIDEBAR_WIDTH } else { 0.0 };
+                    let content_width =
+                        total_size.x - if is_logged_in { SIDEBAR_WIDTH } else { 0.0 };
 
                     ui.vertical(|ui| {
                         ui.set_min_width(content_width);
@@ -80,7 +81,8 @@ impl BoosterApp {
                         }
 
                         // Content area height
-                        let content_height = total_size.y - if is_logged_in { TOP_BAR_HEIGHT } else { 0.0 };
+                        let content_height =
+                            total_size.y - if is_logged_in { TOP_BAR_HEIGHT } else { 0.0 };
                         // Account for scrollbar width (12px) and extra safety margin
                         let inner_content_width = content_width - CONTENT_PADDING * 2.0 - 16.0;
 
@@ -92,7 +94,7 @@ impl BoosterApp {
                                 egui::Layout::top_down(egui::Align::LEFT),
                                 |ui| {
                                     self.render_full_login_screen(ui);
-                                }
+                                },
                             );
                         } else if is_logging_in {
                             ui.allocate_ui_with_layout(
@@ -100,7 +102,7 @@ impl BoosterApp {
                                 egui::Layout::top_down(egui::Align::LEFT),
                                 |ui| {
                                     self.render_login_pending(ui);
-                                }
+                                },
                             );
                         } else if is_awaiting_oauth {
                             ui.allocate_ui_with_layout(
@@ -108,7 +110,7 @@ impl BoosterApp {
                                 egui::Layout::top_down(egui::Align::LEFT),
                                 |ui| {
                                     self.render_awaiting_oauth_callback(ui);
-                                }
+                                },
                             );
                         } else {
                             // Logged in content with scroll
@@ -141,7 +143,7 @@ impl BoosterApp {
                                             ui.add_space(SPACING_MD);
 
                                             // Signal the background perf monitor whether boost tab is visible
-                                            use swifttunnel_fps_booster::structs::PERF_MONITOR_ACTIVE;
+                                            use swifttunnel_core::structs::PERF_MONITOR_ACTIVE;
                                             PERF_MONITOR_ACTIVE.store(
                                                 self.current_tab == Tab::Boost,
                                                 std::sync::atomic::Ordering::Relaxed,

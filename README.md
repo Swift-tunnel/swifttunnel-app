@@ -75,7 +75,7 @@ Automatically detects which game server you're connecting to and routes through 
 - Administrator privileges (for network optimization)
 
 **Installation:**
-1. Download the `.msi` installer from [Releases](https://github.com/Swift-tunnel/swifttunnel-app/releases/latest)
+1. Download the Windows installer (`*.exe`) from [Releases](https://github.com/Swift-tunnel/swifttunnel-app/releases/latest)
 2. Run the installer
 3. SwiftTunnel launches automatically after installation
 4. Sign in with your SwiftTunnel account
@@ -108,31 +108,59 @@ SwiftTunnel intercepts game traffic at the network layer. Only packets from your
 
 ### Prerequisites
 - [Rust](https://rustup.rs/) 1.70 or later
-- Windows 10/11 SDK
+- [Node.js](https://nodejs.org/) 20 or later
+- Windows 10/11 SDK (for native builds)
 - Visual Studio Build Tools (MSVC)
 
-### Build from Source
+### Build Desktop App (Tauri + React)
 
 ```bash
 # Clone the repo
 git clone https://github.com/Swift-tunnel/swifttunnel-app.git
-cd swifttunnel-app/swifttunnel-windows
+cd swifttunnel-app/swifttunnel-desktop
 
-# Build release binary
-cargo build --release
+# Install frontend + Tauri CLI dependencies
+npm ci
 
-# Output: target/release/swifttunnel-fps-booster.exe
+# Frontend production build
+npm run build
+
+# Desktop dev mode
+npm run tauri:dev
 ```
 
-### Create Installer (MSI)
+### Build NSIS Installer
 
-Requires [WiX Toolset v3.14](https://github.com/wixtoolset/wix3/releases).
-
-```powershell
-cd installer
-& 'C:\Program Files (x86)\WiX Toolset v3.14\bin\candle.exe' -arch x64 -dSourceDir='../dist' -out './output/SwiftTunnel.wixobj' 'SwiftTunnel.wxs'
-& 'C:\Program Files (x86)\WiX Toolset v3.14\bin\light.exe' -ext WixUIExtension -ext WixUtilExtension -out './output/SwiftTunnel.msi' './output/SwiftTunnel.wixobj'
+```bash
+cd swifttunnel-desktop
+npm run tauri:build
 ```
+
+Installer output:
+- `swifttunnel-desktop/src-tauri/target/release/bundle/nsis/*.exe`
+- Updater artifacts and signatures are generated when signing keys are configured.
+
+### Release Pipeline (GitHub Actions)
+
+The release workflow uses `tauri-apps/tauri-action` and requires these repository secrets:
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+- `TAURI_UPDATER_PUBLIC_KEY`
+
+Notes:
+- `TAURI_UPDATER_PUBLIC_KEY` is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
+- `WinpkFilter-x64.msi` is fetched in CI and bundled into NSIS resources.
+- `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
+
+### Installer Validation Checklist (Clean Windows 10/11)
+
+1. Install using the generated NSIS installer on a clean VM.
+2. Launch app and confirm login flow works.
+3. Confirm `%APPDATA%\SwiftTunnel\settings.json` is read/written correctly.
+4. Connect/disconnect VPN at least once (ensures `wintun.dll` staging and driver checks are healthy).
+5. Run in-app updater check from Settings.
+
+Settings migration status: no schema migration required. The Tauri app continues using `%APPDATA%\SwiftTunnel\settings.json`.
 
 ---
 
@@ -140,11 +168,11 @@ cd installer
 
 | Component | Technology |
 |-----------|------------|
-| GUI | [egui](https://github.com/emilk/egui) / eframe |
+| GUI | [Tauri v2](https://tauri.app/) + [React 19](https://react.dev/) + TypeScript |
 | Tunnel | [BoringTun](https://github.com/cloudflare/boringtun) (WireGuard) |
 | Network Adapter | [Wintun](https://www.wintun.net/) |
 | Split Tunnel | ndisapi (Windows Packet Filter) |
-| Installer | WiX Toolset |
+| Installer | NSIS (Tauri bundler) |
 
 ---
 

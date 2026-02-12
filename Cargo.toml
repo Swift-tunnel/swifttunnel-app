@@ -1,0 +1,10 @@
+[workspace]
+members = ["swifttunnel-core", "swifttunnel-windows", "swifttunnel-desktop/src-tauri"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+panic = "unwind"

@@ -1,0 +1,35 @@
+@import url('https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500;600&family=Figtree:wght@400;500;600;700&display=swap');
+
+.connect-tab {
+  font-family: 'Figtree', sans-serif;
+}
+
+.connect-data {
+  font-family: 'Azeret Mono', monospace;
+}
+
+/* ── Ring animations ── */
+
+@keyframes orbit-cw {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes orbit-ccw {
+  to { transform: rotate(-360deg); }
+}
+
+@keyframes broadcast-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+@keyframes glow-breathe {
+  0%, 100% { opacity: 0.12; }
+  50% { opacity: 0.4; }
+}
