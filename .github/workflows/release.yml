@@ -133,6 +133,15 @@ jobs:
           New-Item -ItemType Directory -Path releases -Force | Out-Null
           vpk pack -u SwiftTunnel -v $version -p _velopack_staging -e swifttunnel-fps-booster.exe --icon assets\swifttunnel.ico -o releases
 
+          # Copy releases.win.json as releases.stable.json and releases.live.json
+          # so older clients with ExplicitChannel set to "stable"/"live" can find updates
+          $winJson = "releases\releases.win.json"
+          if (Test-Path $winJson) {
+            Copy-Item $winJson "releases\releases.stable.json"
+            Copy-Item $winJson "releases\releases.live.json"
+            echo "Created channel aliases: releases.stable.json, releases.live.json"
+          }
+
       - name: Create GitHub Release
         if: steps.check.outputs.SKIP != 'true'
         shell: pwsh
