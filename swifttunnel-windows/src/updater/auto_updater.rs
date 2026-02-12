@@ -129,17 +129,18 @@ pub fn run_auto_updater(channel: UpdateChannel) -> AutoUpdateResult {
 /// Create a Velopack UpdateManager, returning None if not installed via Velopack.
 /// Uses a direct URL to the target version's release assets to avoid GitHub's
 /// /releases/latest redirect pointing to the wrong release.
+///
+/// Channel filtering is handled upstream by the GitHub API query (stable skips
+/// prereleases, live includes them), so we don't set ExplicitChannel here —
+/// letting Velopack use its default platform channel ("win") which matches the
+/// `releases.win.json` produced by `vpk pack`.
 fn create_update_manager(
-    channel: UpdateChannel,
+    _channel: UpdateChannel,
     target_version: &Version,
 ) -> Option<velopack::UpdateManager> {
     let url = releases_url_for_version(target_version);
     let source = velopack::sources::HttpSource::new(&url);
-    let options = velopack::UpdateOptions {
-        ExplicitChannel: Some(channel.velopack_channel().to_string()),
-        ..Default::default()
-    };
-    match velopack::UpdateManager::new(source, Some(options), None) {
+    match velopack::UpdateManager::new(source, None, None) {
         Ok(um) => Some(um),
         Err(e) => {
             info!(
