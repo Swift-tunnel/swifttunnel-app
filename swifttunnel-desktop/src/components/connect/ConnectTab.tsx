@@ -43,7 +43,6 @@ function stateLabel(state: string): string {
 export function ConnectTab() {
   const vpnState = useVpnStore((s) => s.state);
   const vpnRegion = useVpnStore((s) => s.region);
-  const vpnEndpoint = useVpnStore((s) => s.serverEndpoint);
   const splitActive = useVpnStore((s) => s.splitTunnelActive);
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
   const vpnError = useVpnStore((s) => s.error);
