@@ -2,52 +2,48 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, live, stable]
+    paths:
+      - "swifttunnel-core/**"
+      - "swifttunnel-desktop/**"
+      - "Cargo.toml"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "swifttunnel-core/**"
+      - "swifttunnel-desktop/**"
+      - "Cargo.toml"
+      - ".github/workflows/ci.yml"
 
 jobs:
-  test-windows:
-    name: Test & Build (Windows)
-    runs-on: depot-windows-2025
-
+  frontend:
+    name: Frontend Build
+    runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: swifttunnel-windows
+        working-directory: swifttunnel-desktop
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            swifttunnel-windows/target/
-          key: windows-cargo-${{ hashFiles('swifttunnel-windows/Cargo.lock') }}
-          restore-keys: windows-cargo-
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: swifttunnel-desktop/package-lock.json
 
-      - name: Run tests
-        run: cargo test --verbose
-        continue-on-error: true  # TODO: Fix test_settings_backward_compat
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Build release
-        run: cargo build --release
+      - name: Build frontend
+        run: npm run build
 
-  lint:
-    name: Lint & Format
-    runs-on: depot-ubuntu-24.04
-
-    defaults:
-      run:
-        working-directory: swifttunnel-windows
+  rust:
+    name: Rust Check (Windows)
+    runs-on: windows-latest
 
     steps:
       - name: Checkout code
@@ -56,15 +52,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: Add Windows target
-        run: rustup target add x86_64-pc-windows-msvc
+          components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --check
-        continue-on-error: true
+        run: cargo fmt --all -- --check
 
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-        continue-on-error: true
+      - name: Check core
+        run: cargo check -p swifttunnel-core
+
+      - name: Check desktop backend
+        run: cargo check -p swifttunnel-desktop

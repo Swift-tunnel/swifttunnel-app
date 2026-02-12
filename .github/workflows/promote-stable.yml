@@ -4,7 +4,7 @@ on:
   push:
     branches: [stable]
     paths:
-      - 'swifttunnel-windows/Cargo.toml'
+      - "swifttunnel-desktop/src-tauri/Cargo.toml"
 
 permissions:
   contents: write
@@ -18,12 +18,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Extract version from Cargo.toml
+      - name: Extract version from Tauri Cargo.toml
         id: version
         run: |
-          VERSION=$(grep -m1 '^version' swifttunnel-windows/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep -m1 '^version' swifttunnel-desktop/src-tauri/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
           if [ -z "$VERSION" ]; then
-            echo "::error::Could not extract version from Cargo.toml"
+            echo "::error::Could not extract version from swifttunnel-desktop/src-tauri/Cargo.toml"
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"

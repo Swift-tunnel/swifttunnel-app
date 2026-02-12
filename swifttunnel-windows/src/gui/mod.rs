@@ -49,9 +49,9 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use swifttunnel_fps_booster::notification::show_server_location;
-use swifttunnel_fps_booster::roblox_watcher::{RobloxEvent, RobloxWatcher};
-use swifttunnel_fps_booster::utils::{
+use swifttunnel_core::notification::show_server_location;
+use swifttunnel_core::roblox_watcher::{RobloxEvent, RobloxWatcher};
+use swifttunnel_core::utils::{
     PendingConnection, is_administrator, pending_connection_path, relaunch_elevated,
     save_pending_connection,
 };

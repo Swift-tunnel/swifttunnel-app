@@ -5,23 +5,23 @@
 mod gui;
 mod tray;
 
-// Use modules from the library crate
-use swifttunnel_fps_booster::auth;
-use swifttunnel_fps_booster::discord_rpc;
-use swifttunnel_fps_booster::geolocation;
-use swifttunnel_fps_booster::network_analyzer;
-use swifttunnel_fps_booster::network_booster;
-use swifttunnel_fps_booster::performance_monitor;
-use swifttunnel_fps_booster::roblox_optimizer;
-use swifttunnel_fps_booster::settings;
-use swifttunnel_fps_booster::structs;
-use swifttunnel_fps_booster::system_optimizer;
-use swifttunnel_fps_booster::updater;
-use swifttunnel_fps_booster::utils;
-use swifttunnel_fps_booster::vpn;
+// Use modules from the core library crate
+use swifttunnel_core::auth;
+use swifttunnel_core::discord_rpc;
+use swifttunnel_core::geolocation;
+use swifttunnel_core::network_analyzer;
+use swifttunnel_core::network_booster;
+use swifttunnel_core::performance_monitor;
+use swifttunnel_core::roblox_optimizer;
+use swifttunnel_core::settings;
+use swifttunnel_core::structs;
+use swifttunnel_core::system_optimizer;
+use swifttunnel_core::updater;
+use swifttunnel_core::utils;
+use swifttunnel_core::vpn;
 
 // Re-export hidden_command for use in other modules
-pub use swifttunnel_fps_booster::hidden_command;
+pub use swifttunnel_core::hidden_command;
 
 use crate::gui::BoosterApp; // Local module
 use crate::gui::set_auto_connect_pending;

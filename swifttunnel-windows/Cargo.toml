@@ -7,145 +7,39 @@ description = "SwiftTunnel - Gaming VPN with PC Optimizations"
 default-run = "swifttunnel-fps-booster"
 
 [dependencies]
+# Core library with all backend modules (VPN, auth, optimization, etc.)
+swifttunnel-core = { path = "../swifttunnel-core", features = ["velopack-updater"] }
+
 # GUI Framework - egui 0.33 with glow (OpenGL) renderer for maximum compatibility
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
 egui = "0.33"
 
-
-# Windows API - version 0.62 to match ndisapi dependency
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    "Win32_System_Threading",
-    "Win32_System_ProcessStatus",
-    "Win32_System_Registry",
-    "Win32_System_SystemInformation",
-    "Win32_System_Performance",
-    "Win32_Security",
-    "Win32_System_Memory",
-    # VPN/Network features
-    "Win32_System_IO",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock",
-    # Windows Filtering Platform (WFP) for split tunneling
-    "Win32_NetworkManagement_WindowsFilteringPlatform",
-    # Split tunnel driver communication
-    "Win32_Storage_FileSystem",
-    "Win32_System_Ioctl",
-    # COM/RPC for WFP
-    "Win32_System_Rpc",
-    # Timer APIs for 1ms resolution (PC Boosts)
-    "Win32_Media",
-    # Service Control Manager for BFE auto-start
-    "Win32_System_Services",
-    # GetSystemMetrics for RDP session detection
-    "Win32_UI_WindowsAndMessaging",
-    # ShellExecuteW for UAC elevation (auto-elevate on connect)
-    "Win32_UI_Shell",
-    # ETW (Event Tracing for Windows) for instant process detection
-    "Win32_System_Diagnostics_Etw",
-    # Required for ETW trace APIs (OpenTraceW, EVENT_TRACE_LOGFILEW)
-    "Win32_System_Time",
-] }
-
-# System utilities
-sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-winreg = "0.52"
-
-# Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "fs", "io-util", "macros"] }
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Logging
-log = "0.4"
-env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
-
-# Error handling
-anyhow = "1.0"
-thiserror = "1.0"
-
-# Home directory detection
-dirs = "5.0"
-
-# HTTP client for API calls
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-
-# DNS resolver using Cloudflare 1.1.1.1 (bypasses system DNS that may block GitHub)
-hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime"] }
-
-# VPN Core - WireGuard userspace implementation
-boringtun = "0.6"
-
-# Wintun virtual network adapter for Windows
-wintun = "0.5"
-
-# Windows Packet Filter (ndisapi) for packet-level split tunneling
-# Replaces Mullvad WFP driver with simpler NDIS-based approach
-ndisapi = "0.6"
-
-# Curve25519 key exchange - MUST match boringtun's version exactly
-x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
-
-# Additional async utilities for VPN packet handling
-futures-util = "0.3"
-
-
-# Semantic versioning comparison for updates
-semver = "1.0"
-
-# Regular expressions for error message simplification
-regex-lite = "0.1"
-
-# Secure credential storage (DPAPI on Windows)
-keyring = "3"
-
-# Cryptography for PKCE
-sha2 = "0.10"
-base64 = "0.22"
-rand = "0.8"
-
-# URL handling
-url = "2"
-
-# Date/time handling
-chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
-
-
-# Lightweight HTTP server for OAuth callback
-tiny_http = "0.12"
-
 # System tray support
 tray-icon = "0.19"
-
-# Windows toast notifications (native Windows 10/11 style)
-winrt-notification = "0.5"
 
 # Image loading for tray icon
 image = { version = "0.25", default-features = false, features = ["png"] }
 
-
-# Fast mutex for CLI testbench
-parking_lot = "0.12"
-
-# Per-CPU parallel packet processing
-crossbeam-channel = "0.5"
-
-# Lock-free Arc swapping for BSOD-safe RCU pattern
-arc-swap = "1.7"
-
-num_cpus = "1.16"
-
-# Stack-allocated buffers for zero-alloc packet processing
-arrayvec = "0.7"
-
-# Discord Rich Presence for activity status
-discord-rich-presence = "0.2"
-
-# Velopack installer/updater framework (replaces WiX MSI)
+# Velopack installer/updater framework (lifecycle hooks in main.rs)
 velopack = "0.0"
+
+# These are also in swifttunnel-core but needed directly by GUI code
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+dirs = "5.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+winreg = "0.52"
+parking_lot = "0.12"
+anyhow = "1.0"
 
 # Test configuration
 [[test]]
@@ -177,17 +71,9 @@ path = "src/bin/testbench/main.rs"
 name = "driver-installer"
 path = "src/bin/driver_installer.rs"
 
-
 [dev-dependencies]
 # Already have serde_json in dependencies
 
 [build-dependencies]
 embed-manifest = "1.4"
 winres = "0.1"
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-strip = "debuginfo"
-panic = "unwind"
