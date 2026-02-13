@@ -2,9 +2,10 @@ name: Release
 
 on:
   push:
-    branches: [live]
+    branches: [main, live]
     paths:
-      - "swifttunnel-desktop/src-tauri/Cargo.toml"
+      - "swifttunnel-desktop/**"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
 
 permissions:
