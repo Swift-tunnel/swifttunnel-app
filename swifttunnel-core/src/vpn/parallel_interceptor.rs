@@ -3569,10 +3569,13 @@ fn should_route_to_vpn_with_inline_cache(
     let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
 
     // Phase 1: Check snapshot cache (fast path, O(1))
-    // Use V2 routing if enabled (checks destination IP + protocol)
-    if snapshot.should_tunnel_v2(src_ip, src_port, protocol, dst_ip, dst_port) {
+    //
+    // IMPORTANT: This is process-based only. Destination-based speculative tunneling
+    // is handled below so we can seed the inline cache for game-server hits.
+    if snapshot.should_tunnel(src_ip, src_port, protocol) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
-        return true;
+        // Tunnel all UDP from tunnel apps; TCP is intentionally never tunneled.
+        return super::process_cache::is_likely_game_traffic(dst_port, protocol);
     }
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
