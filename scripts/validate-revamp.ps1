@@ -29,12 +29,22 @@ try {
         cargo fmt --all -- --check
     }
 
-    Run-Step -Name "Core Region Resolver Tests" -Action {
-        cargo test -p swifttunnel-core test_resolve_relay_server -- --nocapture
+    Run-Step -Name "Core Tests" -Action {
+        cargo test -p swifttunnel-core -- --nocapture
     }
 
-    Run-Step -Name "Updater Channel/Security Tests" -Action {
-        cargo test -p swifttunnel-desktop updater::tests:: -- --nocapture
+    Run-Step -Name "Desktop Backend Tests" -Action {
+        cargo test -p swifttunnel-desktop -- --nocapture
+    }
+
+    Run-Step -Name "Frontend Tests" -Action {
+        Push-Location (Join-Path $WorkspaceRoot "swifttunnel-desktop")
+        try {
+            npm test
+        }
+        finally {
+            Pop-Location
+        }
     }
 
     Run-Step -Name "Frontend Build" -Action {

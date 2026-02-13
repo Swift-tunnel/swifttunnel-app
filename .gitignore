@@ -1,7 +1,10 @@
 # Rust build artifacts
 target/
 **/target/
-Cargo.lock
+
+# Release/output artifacts
+releases/
+*.msi
 
 # IDE
 .idea/
@@ -17,16 +20,10 @@ Thumbs.db
 # Backup files
 *.backup
 roblox_settings_backup.xml
-*.exe
 .claude/
 
-# Build artifacts
-swifttunnel-windows/installer/output/
-swifttunnel-windows/releases/
-swifttunnel-windows/_velopack_staging/
-swifttunnel-windows/dist/drivers/
-swifttunnel-windows/dist/license.rtf
-swifttunnel-windows/dist/swifttunnel.ico
+# Binaries (except Windows-testbench)
+*.exe
 
 # Tauri build artifacts
 swifttunnel-desktop/src-tauri/target/
@@ -34,15 +31,14 @@ swifttunnel-desktop/node_modules/
 swifttunnel-desktop/dist/
 swifttunnel-desktop/src-tauri/resources/drivers/WinpkFilter-x64.msi
 
-# Documentation (private)
+# Preview build artifacts (if generated locally)
+.next/
+ui-preview/
+
+# Documentation (private, local-only; may contain secrets)
+AGENTS.md
 CLAUDE.md
 PC-BOOSTS.md
-*.md
-!README.md
-!V3-ROUTING.md
-!ARCHITECTURE.md
-!DATAFLOW.md
-!ROADMAP.md
 
 # Allow Windows-testbench folder contents
 !Windows-testbench/

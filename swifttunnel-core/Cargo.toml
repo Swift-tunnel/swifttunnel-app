@@ -5,10 +5,6 @@ edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel core library - VPN, auth, optimization, and networking modules"
 
-[features]
-default = []
-velopack-updater = ["dep:velopack"]
-
 [dependencies]
 # Windows API - version 0.62 to match ndisapi dependency
 windows = { version = "0.62", features = [
@@ -131,6 +127,3 @@ arrayvec = "0.7"
 
 # Discord Rich Presence for activity status
 discord-rich-presence = "0.2"
-
-# Velopack installer/updater framework (optional - only needed by legacy egui app)
-velopack = { version = "0.0", optional = true }

@@ -179,14 +179,6 @@ On Windows test environments, run:
 
 This runs formatter checks, region resolver tests, updater channel/security tests, and frontend build validation.
 
-### Legacy Archive
-
-The legacy egui app code is kept as `swifttunnel-old/` for reference only.
-
-- It is not part of the Cargo workspace.
-- It is not built by CI.
-- It is not used in release publishing.
-
 ---
 
 ## Tech Stack

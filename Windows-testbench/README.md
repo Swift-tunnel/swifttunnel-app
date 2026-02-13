@@ -87,11 +87,6 @@ shutdown /r /t 0
 ### WFP setup fails
 Make sure you're running as Administrator.
 
-## Building from Source
+## Source
 
-```bash
-cd swifttunnel-old
-cargo build --release --bin split_tunnel_integration_test --bin split_tunnel_test --bin ip_checker
-```
-
-Copy binaries and wintun.dll to the same directory.
+These binaries are kept precompiled for convenience. The legacy egui app source they were originally built from has been removed from this repo.

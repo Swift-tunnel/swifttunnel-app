@@ -66,8 +66,8 @@ pub enum UpdateChannel {
 }
 
 impl UpdateChannel {
-    /// Channel name used by Velopack feeds (`releases.<channel>.json`).
-    pub fn velopack_channel(&self) -> &'static str {
+    /// Lowercase channel class used for release classification/manifests.
+    pub fn channel_class(&self) -> &'static str {
         match self {
             UpdateChannel::Live => "live",
             UpdateChannel::Stable => "stable",
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn test_update_channel_defaults_to_stable() {
         assert_eq!(UpdateChannel::default(), UpdateChannel::Stable);
-        assert_eq!(UpdateChannel::Stable.velopack_channel(), "stable");
-        assert_eq!(UpdateChannel::Live.velopack_channel(), "live");
+        assert_eq!(UpdateChannel::Stable.channel_class(), "stable");
+        assert_eq!(UpdateChannel::Live.channel_class(), "live");
     }
 }
