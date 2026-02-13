@@ -127,9 +127,30 @@ jobs:
           gh release download v3.6.2 `
             --repo wiresock/ndisapi `
             --pattern "Windows.Packet.Filter.3.6.2.1.x64.msi" `
-            --dir $driverSourceDir
+            --dir $driverSourceDir `
+            --clobber
 
           $downloadedMsi = Join-Path $driverSourceDir "Windows.Packet.Filter.3.6.2.1.x64.msi"
+          if (-not (Test-Path $downloadedMsi)) {
+            $downloaded = $false
+            for ($attempt = 1; $attempt -le 4; $attempt++) {
+              Write-Host "Retrying driver download (attempt $attempt/4)..."
+              Start-Sleep -Seconds (5 * $attempt)
+              gh release download v3.6.2 `
+                --repo wiresock/ndisapi `
+                --pattern "Windows.Packet.Filter.3.6.2.1.x64.msi" `
+                --dir $driverSourceDir `
+                --clobber
+              if (Test-Path $downloadedMsi) {
+                $downloaded = $true
+                break
+              }
+            }
+            if (-not $downloaded) {
+              throw "Failed to download Windows.Packet.Filter.3.6.2.1.x64.msi after retries"
+            }
+          }
+
           if (-not (Test-Path $downloadedMsi)) {
             throw "Failed to download Windows.Packet.Filter.3.6.2.1.x64.msi"
           }
