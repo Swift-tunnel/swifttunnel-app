@@ -56,12 +56,10 @@ jobs:
         run: |
           $cargoPath = "swifttunnel-windows/Cargo.toml"
           $content = Get-Content $cargoPath -Raw
-          $updated = [regex]::Replace(
-            $content,
-            '(?m)^(version\s*=\s*")([^"]+)(")',
-            "`$1$env:VERSION`$3",
-            1
-          )
+          $updated = [regex]::Replace($content, '(?m)^(version\s*=\s*")([^"]+)(")', {
+            param($m)
+            return "$($m.Groups[1].Value)$env:VERSION$($m.Groups[3].Value)"
+          }, 1)
           if ($updated -eq $content) {
             throw "Failed to update swifttunnel-windows/Cargo.toml version"
           }
