@@ -14,6 +14,9 @@ import type {
   BufferbloatResultResponse,
   AdminCheckResponse,
   DriverCheckResponse,
+  UpdaterCheckResponse,
+  UpdaterInstallResponse,
+  UpdateChannel,
 } from "./types";
 
 // ── Auth ──
@@ -107,6 +110,20 @@ export const settingsLoad = () =>
 
 export const settingsSave = (settingsJson: string) =>
   invoke<void>("settings_save", { settingsJson });
+
+// ── Updater ──
+
+export const updaterCheckChannel = (channel: UpdateChannel) =>
+  invoke<UpdaterCheckResponse>("updater_check_channel", { channel });
+
+export const updaterInstallChannel = (
+  channel: UpdateChannel,
+  expectedVersion: string,
+) =>
+  invoke<UpdaterInstallResponse>("updater_install_channel", {
+    channel,
+    expectedVersion,
+  });
 
 // ── System ──
 

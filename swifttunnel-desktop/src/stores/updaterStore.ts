@@ -1,7 +1,6 @@
 import { create } from "zustand";
-import type { Update } from "@tauri-apps/plugin-updater";
-import { check } from "@tauri-apps/plugin-updater";
 import { notify } from "../lib/notifications";
+import { updaterCheckChannel, updaterInstallChannel } from "../lib/commands";
 import { useSettingsStore } from "./settingsStore";
 
 declare const __APP_VERSION__: string;
@@ -14,9 +13,11 @@ type UpdaterStatus =
   | "installing"
   | "error";
 
-let pendingUpdate: Update | null = null;
-let totalBytes: number | undefined;
-let downloadedBytes = 0;
+interface PendingUpdate {
+  version: string;
+}
+
+let pendingUpdate: PendingUpdate | null = null;
 
 interface UpdaterStore {
   status: UpdaterStatus;
@@ -42,10 +43,11 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
     try {
       set({ status: "checking", error: null });
 
-      const update = await check();
+      const settingsStore = useSettingsStore.getState();
+      const channel = settingsStore.settings.update_channel;
+      const update = await updaterCheckChannel(channel);
       const checkedAt = Math.floor(Date.now() / 1000);
 
-      const settingsStore = useSettingsStore.getState();
       settingsStore.update({
         update_settings: {
           ...settingsStore.settings.update_settings,
@@ -54,11 +56,11 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
       });
       void settingsStore.save();
 
-      if (!update) {
+      if (!update.available_version) {
         pendingUpdate = null;
         set((prev) => ({
           status: "up_to_date",
-          currentVersion: prev.currentVersion,
+          currentVersion: update.current_version || prev.currentVersion,
           availableVersion: null,
           progressPercent: 0,
           lastChecked: checkedAt,
@@ -69,17 +71,22 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
         return;
       }
 
-      pendingUpdate = update;
+      pendingUpdate = {
+        version: update.available_version,
+      };
       set({
         status: "update_available",
-        currentVersion: update.currentVersion,
-        availableVersion: update.version,
+        currentVersion: update.current_version,
+        availableVersion: update.available_version,
         progressPercent: 0,
         lastChecked: checkedAt,
       });
 
       if (manual) {
-        await notify("Update Available", `Version ${update.version} is ready.`);
+        await notify(
+          "Update Available",
+          `Version ${update.available_version} is ready.`,
+        );
       }
     } catch (e) {
       set({
@@ -93,33 +100,11 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
     if (!pendingUpdate) return;
 
     try {
-      totalBytes = undefined;
-      downloadedBytes = 0;
       set({ status: "installing", progressPercent: 0, error: null });
 
-      await pendingUpdate.downloadAndInstall((event) => {
-        if (event.event === "Started") {
-          totalBytes = event.data.contentLength;
-          downloadedBytes = 0;
-          set({ progressPercent: 0 });
-          return;
-        }
-
-        if (event.event === "Progress") {
-          downloadedBytes += event.data.chunkLength;
-          if (totalBytes && totalBytes > 0) {
-            set({
-              progressPercent: Math.min(
-                100,
-                Math.round((downloadedBytes / totalBytes) * 100),
-              ),
-            });
-          }
-          return;
-        }
-
-        set({ progressPercent: 100 });
-      });
+      const settingsStore = useSettingsStore.getState();
+      const channel = settingsStore.settings.update_channel;
+      await updaterInstallChannel(channel, pendingUpdate.version);
 
       pendingUpdate = null;
       set({

@@ -2,11 +2,8 @@ name: Release
 
 on:
   push:
-    branches: [main, live]
-    paths:
-      - "swifttunnel-desktop/**"
-      - ".github/workflows/release.yml"
-  workflow_dispatch:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -19,6 +16,59 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".Trim()
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?$') {
+            throw "Tag '$tag' is not valid semver with v-prefix"
+          }
+
+          $version = $tag.Substring(1)
+          $isPrerelease = if ($version.Contains("-")) { "true" } else { "false" }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "prerelease=$isPrerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "channel_class=$(if ($isPrerelease -eq 'true') { 'live' } else { 'stable' })" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Ensure tag commit is on main history
+        shell: bash
+        run: |
+          git fetch origin main --depth=1
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
+            echo "::error::Tag commit is not on origin/main history"
+            exit 1
+          fi
+
+      - name: Enforce version consistency
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $cargoPath = "swifttunnel-desktop/src-tauri/Cargo.toml"
+          $tauriPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
+
+          $cargoContent = Get-Content $cargoPath -Raw
+          $cargoMatch = [regex]::Match($cargoContent, '(?m)^version\s*=\s*"([^"]+)"')
+          if (-not $cargoMatch.Success) {
+            throw "Could not read version from $cargoPath"
+          }
+          $cargoVersion = $cargoMatch.Groups[1].Value
+
+          $tauriConfig = Get-Content $tauriPath -Raw | ConvertFrom-Json
+          $tauriVersion = [string]$tauriConfig.version
+
+          if ($cargoVersion -ne $env:EXPECTED_VERSION) {
+            throw "Version mismatch: tag=$env:EXPECTED_VERSION cargo=$cargoVersion"
+          }
+          if ($tauriVersion -ne $env:EXPECTED_VERSION) {
+            throw "Version mismatch: tag=$env:EXPECTED_VERSION tauri.conf=$tauriVersion"
+          }
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -53,22 +103,25 @@ jobs:
             throw "Downloaded WinpkFilter MSI is suspiciously small ($size bytes)"
           }
 
-          echo "Bundled driver payloads:"
-          Get-ChildItem $driversDir -File | ForEach-Object {
-            echo "  $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
-          }
-
       - name: Verify updater signing secrets
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+          SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY }}
+          SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
             throw "Missing required secret: TAURI_SIGNING_PRIVATE_KEY"
           }
           if ([string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_PUBLIC_KEY)) {
             throw "Missing required secret: TAURI_UPDATER_PUBLIC_KEY"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY)) {
+            throw "Missing required secret: SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64)) {
+            throw "Missing required secret: SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64"
           }
 
       - name: Inject updater public key
@@ -87,13 +140,55 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
         with:
           projectPath: swifttunnel-desktop
-          tagName: v__VERSION__
-          releaseName: SwiftTunnel v__VERSION__
+          tagName: ${{ steps.meta.outputs.tag }}
+          releaseName: SwiftTunnel v${{ steps.meta.outputs.version }}
           releaseBody: See release assets to download this version.
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           generateReleaseNotes: true
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
+
+      - name: Generate and upload signed release manifest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHANNEL_CLASS: ${{ steps.meta.outputs.channel_class }}
+          SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY }}
+        run: |
+          $outDir = Join-Path $env:RUNNER_TEMP "swifttunnel_manifest"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --pattern "latest.json" --dir $outDir --clobber
+
+          $latestPath = Join-Path $outDir "latest.json"
+          if (-not (Test-Path $latestPath)) {
+            throw "latest.json was not found in release assets for $env:TAG"
+          }
+
+          $latestSha = (Get-FileHash -Path $latestPath -Algorithm SHA256).Hash.ToLower()
+          $latestUrl = "https://github.com/Swift-tunnel/swifttunnel-app/releases/download/$env:TAG/latest.json"
+
+          $manifestPath = Join-Path $outDir "swifttunnel-update-manifest.json"
+          $signaturePath = Join-Path $outDir "swifttunnel-update-manifest.sig"
+
+          $manifest = [ordered]@{
+            version = $env:VERSION
+            tag = $env:TAG
+            channel_class = $env:CHANNEL_CLASS
+            latest_json_url = $latestUrl
+            latest_json_sha256 = $latestSha
+          } | ConvertTo-Json -Depth 8
+
+          Set-Content -Path $manifestPath -Value $manifest -Encoding utf8NoBOM
+
+          $env:MANIFEST_PATH = $manifestPath
+          $env:SIGNATURE_PATH = $signaturePath
+          node -e "const fs=require('fs');const crypto=require('crypto');const manifest=fs.readFileSync(process.env.MANIFEST_PATH);const signature=crypto.sign(null,manifest,process.env.SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY).toString('base64');fs.writeFileSync(process.env.SIGNATURE_PATH,signature+'\n');"
+
+          gh release upload $env:TAG $manifestPath $signaturePath --repo $env:GITHUB_REPOSITORY --clobber

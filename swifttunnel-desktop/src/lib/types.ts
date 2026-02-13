@@ -210,6 +210,18 @@ export interface WindowState {
   maximized: boolean;
 }
 
+export interface UpdaterCheckResponse {
+  current_version: string;
+  available_version: string | null;
+  release_tag: string | null;
+  channel: UpdateChannel;
+}
+
+export interface UpdaterInstallResponse {
+  installed_version: string;
+  release_tag: string;
+}
+
 export interface AppSettings {
   theme: string;
   config: Config;

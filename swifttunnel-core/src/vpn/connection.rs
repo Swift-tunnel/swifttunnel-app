@@ -25,6 +25,33 @@ use tokio::sync::Mutex;
 /// 500ms balances detection speed with CPU usage
 const REFRESH_INTERVAL_MS: u64 = 500;
 
+fn pick_lowest_latency_server<'a>(
+    candidates: impl Iterator<Item = &'a (String, SocketAddr, Option<u32>)>,
+) -> Option<&'a (String, SocketAddr, Option<u32>)> {
+    candidates.min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
+}
+
+fn resolve_relay_server_for_region(
+    selected_region: &str,
+    available_servers: &[(String, SocketAddr, Option<u32>)],
+) -> Option<(String, SocketAddr)> {
+    if let Some((server_region, relay_addr, _)) = pick_lowest_latency_server(
+        available_servers
+            .iter()
+            .filter(|(server_region, _, _)| server_region == selected_region),
+    ) {
+        return Some((server_region.clone(), *relay_addr));
+    }
+
+    let prefix = format!("{selected_region}-");
+    pick_lowest_latency_server(
+        available_servers
+            .iter()
+            .filter(|(server_region, _, _)| server_region.starts_with(&prefix)),
+    )
+    .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
+}
+
 /// Quick-ping candidate relay servers and return the best one.
 /// Pings all candidates in parallel using ICMP (same as GUI latency measurement).
 /// Returns (region_name, addr, latency_ms) for the fastest responder.
@@ -285,22 +312,27 @@ impl VpnConnection {
 
         // Step 1: Resolve initial relay endpoint from available servers
         self.set_state(ConnectionState::FetchingConfig).await;
-        let selected_relay_addr = match available_servers
-            .iter()
-            .find(|(server_region, _, _)| server_region == region)
-            .map(|(_, addr, _)| *addr)
-        {
-            Some(addr) => addr,
-            None => {
-                let error = VpnError::ConfigFetch(format!(
-                    "Selected region '{}' is unavailable in server list",
-                    region
-                ));
-                self.set_state(ConnectionState::Error(error.to_string()))
-                    .await;
-                return Err(error);
-            }
-        };
+        let (resolved_server_region, selected_relay_addr) =
+            match resolve_relay_server_for_region(region, &available_servers) {
+                Some((server_region, relay_addr)) => (server_region, relay_addr),
+                None => {
+                    let error = VpnError::ConfigFetch(format!(
+                        "Selected region '{}' is unavailable in server list",
+                        region
+                    ));
+                    self.set_state(ConnectionState::Error(error.to_string()))
+                        .await;
+                    return Err(error);
+                }
+            };
+
+        if resolved_server_region != region {
+            log::info!(
+                "Resolved selected region '{}' to relay server '{}'",
+                region,
+                resolved_server_region
+            );
+        }
 
         let config = VpnConfig {
             // In V3 we only need region + endpoint for relay bootstrap.
@@ -309,7 +341,11 @@ impl VpnConnection {
             ..Default::default()
         };
 
-        log::info!("V3: Server endpoint: {}", config.endpoint);
+        log::info!(
+            "V3: Server endpoint: {} (resolved via server '{}')",
+            config.endpoint,
+            resolved_server_region
+        );
         // V3 no longer creates/stores vpn_configs records via generate-config.
         self.config = None;
 
@@ -1221,5 +1257,95 @@ mod tests {
     fn test_vpn_connection_split_tunnel_not_active_initially() {
         let conn = VpnConnection::new();
         assert!(!conn.is_split_tunnel_active());
+    }
+
+    fn parse_addr(addr: &str) -> SocketAddr {
+        addr.parse().expect("invalid test socket addr")
+    }
+
+    #[test]
+    fn test_resolve_relay_server_exact_match() {
+        let available_servers = vec![
+            (
+                "germany".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(30),
+            ),
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                Some(8),
+            ),
+        ];
+
+        let resolved = resolve_relay_server_for_region("germany", &available_servers);
+        assert_eq!(
+            resolved,
+            Some(("germany".to_string(), parse_addr("10.0.0.1:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_prefix_fallback() {
+        let available_servers = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.11:51821"),
+                Some(8),
+            ),
+            (
+                "germany-03".to_string(),
+                parse_addr("10.0.0.13:51821"),
+                Some(12),
+            ),
+        ];
+
+        let resolved = resolve_relay_server_for_region("germany", &available_servers);
+        assert_eq!(
+            resolved,
+            Some(("germany-01".to_string(), parse_addr("10.0.0.11:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_returns_none_when_unavailable() {
+        let available_servers = vec![
+            (
+                "tokyo-01".to_string(),
+                parse_addr("10.0.1.1:51821"),
+                Some(20),
+            ),
+            (
+                "paris-03".to_string(),
+                parse_addr("10.0.1.2:51821"),
+                Some(14),
+            ),
+        ];
+
+        let resolved = resolve_relay_server_for_region("germany", &available_servers);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn test_resolve_relay_server_prefers_lowest_known_latency() {
+        let available_servers = vec![
+            ("paris-02".to_string(), parse_addr("10.0.2.2:51821"), None),
+            (
+                "paris-01".to_string(),
+                parse_addr("10.0.2.1:51821"),
+                Some(17),
+            ),
+            (
+                "paris-03".to_string(),
+                parse_addr("10.0.2.3:51821"),
+                Some(9),
+            ),
+        ];
+
+        let resolved = resolve_relay_server_for_region("paris", &available_servers);
+        assert_eq!(
+            resolved,
+            Some(("paris-03".to_string(), parse_addr("10.0.2.3:51821")))
+        );
     }
 }

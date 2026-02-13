@@ -219,6 +219,26 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   settings_load: () => ({ json: JSON.stringify(MOCK_SETTINGS) }),
   settings_save: () => {},
 
+  updater_check_channel: (args: unknown) => {
+    const channel =
+      typeof args === "object" &&
+      args !== null &&
+      "channel" in args &&
+      (args as { channel?: string }).channel
+        ? (args as { channel: string }).channel
+        : "Stable";
+    return {
+      current_version: "1.0.45",
+      available_version: null,
+      release_tag: null,
+      channel,
+    };
+  },
+  updater_install_channel: () => ({
+    installed_version: "1.0.45",
+    release_tag: "v1.0.45",
+  }),
+
   system_is_admin: () => ({ is_admin: true }),
   system_check_driver: () => ({ installed: true, version: "3.4.1" }),
   system_install_driver: () => {},

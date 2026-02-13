@@ -162,6 +162,9 @@ pub fn run() {
             // Settings
             commands::settings::settings_load,
             commands::settings::settings_save,
+            // Updater
+            commands::updater::updater_check_channel,
+            commands::updater::updater_install_channel,
             // System
             commands::system::system_is_admin,
             commands::system::system_check_driver,

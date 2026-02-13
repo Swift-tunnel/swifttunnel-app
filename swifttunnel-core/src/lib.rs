@@ -1,7 +1,7 @@
 //! SwiftTunnel Core Library
 //!
 //! Core functionality for VPN, authentication, system optimization,
-//! and networking. Shared between the egui desktop app and the Tauri app.
+//! and networking. Used by the Tauri desktop app.
 
 pub mod auth;
 pub mod discord_rpc;

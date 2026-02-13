@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop, live, stable]
+    branches: [main]
     paths:
       - "swifttunnel-core/**"
       - "swifttunnel-desktop/**"
@@ -62,3 +62,9 @@ jobs:
 
       - name: Check desktop backend
         run: cargo check -p swifttunnel-desktop
+
+      - name: Test region resolver hotfix
+        run: cargo test -p swifttunnel-core test_resolve_relay_server -- --nocapture
+
+      - name: Test updater channel and security logic
+        run: "cargo test -p swifttunnel-desktop updater::tests:: -- --nocapture"

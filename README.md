@@ -146,11 +146,18 @@ The release workflow uses `tauri-apps/tauri-action` and requires these repositor
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 - `TAURI_UPDATER_PUBLIC_KEY`
+- `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY`
+- `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64`
 
 Notes:
+- Releases are tag-driven from `main` only (`v*` tags).
+- `vX.Y.Z-*` publishes as prerelease (`Live` channel).
+- `vX.Y.Z` publishes as stable release (`Stable` channel).
 - `TAURI_UPDATER_PUBLIC_KEY` is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
 - `WinpkFilter-x64.msi` is fetched in CI and bundled into NSIS resources.
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
+- `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
+- `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
 
 ### Installer Validation Checklist (Clean Windows 10/11)
 
@@ -161,6 +168,24 @@ Notes:
 5. Run in-app updater check from Settings.
 
 Settings migration status: no schema migration required. The Tauri app continues using `%APPDATA%\SwiftTunnel\settings.json`.
+
+### Automated Validation
+
+On Windows test environments, run:
+
+```powershell
+.\scripts\validate-revamp.ps1
+```
+
+This runs formatter checks, region resolver tests, updater channel/security tests, and frontend build validation.
+
+### Legacy Archive
+
+The legacy egui app code is kept as `swifttunnel-old/` for reference only.
+
+- It is not part of the Cargo workspace.
+- It is not built by CI.
+- It is not used in release publishing.
 
 ---
 

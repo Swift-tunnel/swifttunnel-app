@@ -1,5 +1,5 @@
 [workspace]
-members = ["swifttunnel-core", "swifttunnel-windows", "swifttunnel-desktop/src-tauri"]
+members = ["swifttunnel-core", "swifttunnel-desktop/src-tauri"]
 resolver = "2"
 
 [profile.release]

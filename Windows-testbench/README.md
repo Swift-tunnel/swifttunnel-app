@@ -90,7 +90,7 @@ Make sure you're running as Administrator.
 ## Building from Source
 
 ```bash
-cd swifttunnel-windows
+cd swifttunnel-old
 cargo build --release --bin split_tunnel_integration_test --bin split_tunnel_test --bin ip_checker
 ```
 
