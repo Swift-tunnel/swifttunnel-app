@@ -376,6 +376,8 @@ pub struct ProcessSnapshot {
     pub pid_names: HashMap<u32, String>,
     /// Apps that should be tunneled (lowercase)
     pub tunnel_apps: HashSet<String>,
+    /// PIDs that belong to a tunnel app (precomputed from `pid_names` + `tunnel_apps`)
+    pub tunnel_pids: HashSet<u32>,
     /// Snapshot version (monotonically increasing)
     pub version: u64,
     /// Timestamp when snapshot was created
@@ -383,12 +385,40 @@ pub struct ProcessSnapshot {
 }
 
 impl ProcessSnapshot {
+    fn compute_tunnel_pids(
+        pid_names: &HashMap<u32, String>,
+        tunnel_apps: &HashSet<String>,
+    ) -> HashSet<u32> {
+        let mut tunnel_pids = HashSet::new();
+
+        for (&pid, name) in pid_names {
+            // Exact match - O(1) HashSet lookup
+            if tunnel_apps.contains(name) {
+                tunnel_pids.insert(pid);
+                continue;
+            }
+
+            // Partial match (for cases like "robloxplayerbeta" matching "roblox")
+            let name_stem = name.trim_end_matches(".exe");
+            for app in tunnel_apps {
+                let app_stem = app.trim_end_matches(".exe");
+                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
+                    tunnel_pids.insert(pid);
+                    break;
+                }
+            }
+        }
+
+        tunnel_pids
+    }
+
     /// Create empty snapshot
     pub fn empty(tunnel_apps: HashSet<String>) -> Self {
         Self {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
             tunnel_apps,
+            tunnel_pids: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         }
@@ -492,24 +522,7 @@ impl ProcessSnapshot {
     /// Implementation of PID tunnel check
     #[inline(always)]
     fn is_tunnel_pid_impl(&self, pid: u32) -> bool {
-        if let Some(name) = self.pid_names.get(&pid) {
-            // Names are already lowercase (done at insertion time)
-
-            // Exact match - O(1) HashSet lookup
-            if self.tunnel_apps.contains(name) {
-                return true;
-            }
-
-            // Partial match (for cases like "robloxplayerbeta" matching "roblox")
-            let name_stem = name.trim_end_matches(".exe");
-            for app in &self.tunnel_apps {
-                let app_stem = app.trim_end_matches(".exe");
-                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
-                    return true;
-                }
-            }
-        }
-        false
+        self.tunnel_pids.contains(&pid)
     }
 
     /// Get PID for connection (for debugging)
@@ -614,10 +627,13 @@ impl LockFreeProcessCache {
             .map(|(k, v)| (k, v.to_lowercase()))
             .collect();
 
+        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names_lower, &self.tunnel_apps);
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections,
             pid_names: pid_names_lower,
             tunnel_apps: self.tunnel_apps.clone(),
+            tunnel_pids,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -639,10 +655,14 @@ impl LockFreeProcessCache {
 
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
+        let tunnel_pids =
+            ProcessSnapshot::compute_tunnel_pids(&old_snap.pid_names, &self.tunnel_apps);
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections: old_snap.connections.clone(),
             pid_names: old_snap.pid_names.clone(),
             tunnel_apps: self.tunnel_apps.clone(), // Use NEW tunnel_apps
+            tunnel_pids,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -687,10 +707,13 @@ impl LockFreeProcessCache {
         let mut pid_names = old_snap.pid_names.clone();
         pid_names.insert(pid, name.to_lowercase());
 
+        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names, &self.tunnel_apps);
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections: old_snap.connections.clone(),
             pid_names,
             tunnel_apps: self.tunnel_apps.clone(),
+            tunnel_pids,
             version,
             created_at: std::time::Instant::now(),
         });

@@ -123,11 +123,11 @@ fn default_discord_rpc() -> bool {
 }
 
 fn default_auto_routing() -> bool {
-    false // Off by default, opt-in via experimental mode
+    false // Off by default (public option in Connect tab)
 }
 
 fn default_minimize_to_tray() -> bool {
-    true
+    false
 }
 
 fn default_region() -> String {
@@ -154,7 +154,7 @@ impl Default for AppSettings {
             current_tab: "connect".to_string(),
             update_settings: UpdateSettings::default(),
             update_channel: UpdateChannel::Stable,
-            minimize_to_tray: true,
+            minimize_to_tray: false,
             last_connected_region: None,
             expanded_boost_info: Vec::new(),
             selected_game_presets: default_game_presets(),

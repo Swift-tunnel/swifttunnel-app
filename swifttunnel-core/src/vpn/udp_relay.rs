@@ -28,8 +28,9 @@ const MAX_PAYLOAD_SIZE: usize = 1500;
 /// Keepalive interval to maintain NAT bindings - 15s is safer for strict NATs
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
-/// Read timeout - shorter for tighter packet pickup loop
-const READ_TIMEOUT: Duration = Duration::from_millis(10);
+/// Read timeout - only affects idle wakeups (packets wake the socket immediately).
+/// Higher values reduce CPU usage when idle without adding latency when active.
+const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Grace period after relay switch: accept packets from BOTH old and new relay.
 /// This eliminates the inbound blackout while the new relay establishes session.

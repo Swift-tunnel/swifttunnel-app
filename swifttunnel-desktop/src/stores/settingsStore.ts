@@ -48,7 +48,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   current_tab: "connect",
   update_settings: { auto_check: true, last_check: null },
   update_channel: "Stable",
-  minimize_to_tray: true,
+  minimize_to_tray: false,
   last_connected_region: null,
   expanded_boost_info: [],
   selected_game_presets: ["roblox"],
