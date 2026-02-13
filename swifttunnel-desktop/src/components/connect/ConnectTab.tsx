@@ -662,7 +662,7 @@ function RegionCard({
       transition={{ delay: 0.04 + index * 0.025, duration: 0.28 }}
       onClick={onSelect}
       disabled={disabled}
-      className="relative overflow-hidden rounded-[var(--radius-card)] border text-left transition-all disabled:opacity-50"
+      className="relative rounded-[var(--radius-card)] border text-left transition-all disabled:opacity-50"
       style={{
         backgroundColor: selected
           ? "var(--color-accent-primary-soft-8)"
