@@ -4,6 +4,7 @@ import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
 import { countryFlag, getLatencyColor, formatBytes } from "../../lib/utils";
+import { systemCheckDriver, systemInstallDriver } from "../../lib/commands";
 import type { ServerRegion } from "../../lib/types";
 import "./connect.css";
 
@@ -124,6 +125,74 @@ export function ConnectTab() {
 
   const ringSpeed = isTransitioning ? 3.5 : 55;
   const innerSpeed = isTransitioning ? 2.8 : 38;
+
+  const [driverInstallState, setDriverInstallState] = useState<
+    "idle" | "installing" | "installed" | "error"
+  >("idle");
+  const [driverInstallError, setDriverInstallError] = useState<string | null>(
+    null,
+  );
+
+  const driverMissing =
+    !!vpnError &&
+    vpnError.toLowerCase().includes("split tunnel driver not available") &&
+    vpnError.toLowerCase().includes("windows packet filter driver");
+
+  async function handleInstallDriver() {
+    try {
+      setDriverInstallState("installing");
+      setDriverInstallError(null);
+      await systemInstallDriver();
+      const check = await systemCheckDriver();
+      if (!check.installed) {
+        throw new Error(
+          "Driver installation completed, but the driver is still not detected.",
+        );
+      }
+      setDriverInstallState("installed");
+    } catch (e) {
+      setDriverInstallState("error");
+      setDriverInstallError(String(e));
+    }
+  }
+
+  function renderStatusLine() {
+    if (driverInstallState === "installing") {
+      return "Installing Windows Packet Filter driver\u2026";
+    }
+
+    if (driverInstallState === "installed") {
+      return "Driver installed. Click Connect to retry.";
+    }
+
+    if (driverInstallState === "error") {
+      return driverInstallError || "Driver install failed.";
+    }
+
+    if (driverMissing) {
+      return (
+        <span className="inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
+          <span>Split tunnel driver not available. Install</span>
+          <button
+            type="button"
+            onClick={() => void handleInstallDriver()}
+            disabled={isTransitioning}
+            className="rounded-full px-2 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-60"
+            style={{
+              backgroundColor: "rgba(60,130,246,0.18)",
+              color: "var(--color-accent-secondary)",
+              border: "1px solid rgba(60,130,246,0.35)",
+            }}
+            title="Install Windows Packet Filter (WinpkFilter) driver"
+          >
+            Windows Packet Filter driver
+          </button>
+        </span>
+      );
+    }
+
+    return vpnError || stateLabel(vpnState);
+  }
 
   return (
     <div className="connect-tab mx-auto flex w-full max-w-[640px] flex-col gap-5 pb-4">
@@ -336,18 +405,20 @@ export function ConnectTab() {
             )}
           </div>
 
-          <p
+          <div
             className="text-xs"
             style={{
               color: isConnected
                 ? "var(--color-status-connected)"
-                : vpnError
-                  ? "var(--color-status-error)"
-                  : "var(--color-text-muted)",
+                : driverInstallState === "installed"
+                  ? "var(--color-status-connected)"
+                  : vpnError || driverInstallState === "error"
+                    ? "var(--color-status-error)"
+                    : "var(--color-text-muted)",
             }}
           >
-            {vpnError || stateLabel(vpnState)}
-          </p>
+            {renderStatusLine()}
+          </div>
         </div>
       </section>
 

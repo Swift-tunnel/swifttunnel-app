@@ -341,6 +341,16 @@ impl SplitTunnelDriver {
             return true;
         }
 
+        // Starting/creating services and installing drivers requires elevation.
+        // If we're not elevated, fail fast so the UI can guide the user through
+        // an explicit UAC install flow.
+        if !crate::utils::is_administrator() {
+            log::warn!(
+                "Windows Packet Filter driver not available and process is not elevated; skipping service start / MSI install"
+            );
+            return false;
+        }
+
         // Try to start the driver service
         if let Err(e) = Self::ensure_driver_service() {
             log::error!("Failed to ensure driver service: {}", e);
@@ -378,9 +388,24 @@ impl SplitTunnelDriver {
                 p.parent()
                     .map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))
             }),
+            // Tauri bundles assets under a sibling `resources/` directory.
+            std::env::current_exe().ok().and_then(|p| {
+                p.parent().map(|d| {
+                    d.join("resources")
+                        .join("drivers")
+                        .join("WinpkFilter-x64.msi")
+                })
+            }),
+            std::env::current_exe().ok().and_then(|p| {
+                p.parent()
+                    .map(|d| d.join("resources").join("WinpkFilter-x64.msi"))
+            }),
             // Program Files installation
             Some(PathBuf::from(
                 r"C:\Program Files\SwiftTunnel\drivers\WinpkFilter-x64.msi",
+            )),
+            Some(PathBuf::from(
+                r"C:\Program Files\SwiftTunnel\resources\drivers\WinpkFilter-x64.msi",
             )),
         ];
 

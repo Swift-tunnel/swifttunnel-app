@@ -465,6 +465,7 @@ mod tests {
             user: super::super::types::UserInfo {
                 id: "test_user_id".to_string(),
                 email: "test@example.com".to_string(),
+                is_tester: false,
             },
         };
 
