@@ -4717,6 +4717,33 @@ fn run_v3_inbound_receiver(
 mod tests {
     use super::*;
 
+    fn build_ipv4_frame(
+        protocol: u8,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        // Minimal Ethernet + IPv4 + (UDP/TCP) frame. Routing decisions only need:
+        // - EtherType
+        // - IPv4 header with src/dst/protocol
+        // - First 4 bytes of transport header (ports)
+        let mut frame = vec![0u8; 14 + 20 + 8];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4 EtherType
+
+        let ip_start = 14;
+        frame[ip_start] = 0x45; // IPv4, IHL=5
+        frame[ip_start + 9] = protocol; // TCP=6, UDP=17
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+
+        let transport_start = ip_start + 20;
+        frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+
+        frame
+    }
+
     #[test]
     fn test_parse_ports() {
         // Create minimal Ethernet + IP + TCP frame
@@ -4733,5 +4760,158 @@ mod tests {
         let (src, dst) = parse_ports(&frame).unwrap();
         assert_eq!(src, 1234);
         assert_eq!(dst, 80);
+    }
+
+    #[test]
+    fn test_should_route_snapshot_tunnels_udp() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50000;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(
+            inline_cache.is_empty(),
+            "Snapshot hit should not mutate cache"
+        );
+    }
+
+    #[test]
+    fn test_should_route_snapshot_does_not_tunnel_tcp() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 50001;
+        let dst_port = 55000;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(6, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_should_route_inline_cache_hit_tunnels_udp() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 40000;
+        let dst_port = 53;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, src_port, Protocol::Udp), true);
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+    }
+
+    #[test]
+    fn test_should_route_speculative_game_server_caches_and_tunnels() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 40001;
+        let dst_port = 55000;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(
+            inline_cache.contains_key(&(src_ip, src_port, Protocol::Udp)),
+            "Speculative tunnel should seed the inline cache"
+        );
+    }
+
+    #[test]
+    fn test_should_route_non_game_does_not_cache() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 40002;
+        let dst_port = 55000;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
     }
 }

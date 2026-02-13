@@ -930,4 +930,76 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_compute_tunnel_pids_exact_and_partial_match() {
+        let mut pid_names = HashMap::new();
+        pid_names.insert(1, "robloxplayerbeta.exe".to_string());
+        pid_names.insert(2, "robloxapp.exe".to_string());
+        pid_names.insert(3, "chrome.exe".to_string());
+
+        let tunnel_apps: HashSet<String> =
+            ["roblox".to_string(), "robloxplayerbeta.exe".to_string()]
+                .into_iter()
+                .collect();
+
+        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names, &tunnel_apps);
+
+        assert!(tunnel_pids.contains(&1), "Exact match should be tunneled");
+        assert!(
+            tunnel_pids.contains(&2),
+            "Stem contains match should be tunneled"
+        );
+        assert!(
+            !tunnel_pids.contains(&3),
+            "Non-matching process should not be tunneled"
+        );
+    }
+
+    #[test]
+    fn test_set_tunnel_apps_recomputes_tunnel_pids() {
+        let mut cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let src_port = 50000;
+        let pid = 1111;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let mut pid_names = HashMap::new();
+        pid_names.insert(pid, "RobloxPlayerBeta.exe".to_string());
+
+        cache.update(connections, pid_names);
+        let snap = cache.get_snapshot();
+        assert!(snap.is_tunnel_pid_public(pid));
+        assert!(snap.tunnel_pids.contains(&pid));
+
+        // Remove tunnel apps; tunnel_pids should be recomputed to empty.
+        cache.set_tunnel_apps(vec![]);
+
+        let snap2 = cache.get_snapshot();
+        assert!(!snap2.is_tunnel_pid_public(pid));
+        assert!(!snap2.tunnel_pids.contains(&pid));
+    }
+
+    #[test]
+    fn test_register_process_immediate_populates_tunnel_pids() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+        let pid = 2222;
+
+        let snap0 = cache.get_snapshot();
+        assert!(!snap0.is_tunnel_pid_public(pid));
+        assert!(!snap0.tunnel_pids.contains(&pid));
+
+        cache.register_process_immediate(pid, "RobloxPlayerBeta.exe".to_string());
+
+        let snap1 = cache.get_snapshot();
+        assert_eq!(
+            snap1.pid_names.get(&pid).map(|s| s.as_str()),
+            Some("robloxplayerbeta.exe")
+        );
+        assert!(snap1.is_tunnel_pid_public(pid));
+        assert!(snap1.tunnel_pids.contains(&pid));
+    }
 }
