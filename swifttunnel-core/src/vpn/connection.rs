@@ -724,7 +724,35 @@ impl VpnConnection {
                 }
             };
 
-        // Start process monitor (same as V1/V2)
+        // Bridge ETW (crossbeam) receiver into a tokio channel so the async monitor can
+        // `select!` without repeatedly spawning blocking tasks.
+        let mut etw_tokio_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ProcessStartEvent>> =
+            None;
+        if let Some(receiver) = etw_receiver {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ProcessStartEvent>();
+            match std::thread::Builder::new()
+                .name("v3-etw-forwarder".to_string())
+                .spawn(move || {
+                    while let Ok(event) = receiver.recv() {
+                        if tx.send(event).is_err() {
+                            break;
+                        }
+                    }
+                    log::debug!("V3 ETW: Forwarder thread exiting");
+                }) {
+                Ok(_handle) => {
+                    etw_tokio_rx = Some(rx);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "V3: Failed to spawn ETW forwarder thread (continuing with polling): {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        // Start process monitor (event-driven ETW + periodic refresh)
         self.process_monitor_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
@@ -732,172 +760,161 @@ impl VpnConnection {
 
         tokio::spawn(async move {
             log::info!("V3: Process monitor started");
-
-            let mut last_refresh = std::time::Instant::now();
+            // Match previous behavior: first periodic refresh occurs after the interval.
+            let first_tick =
+                tokio::time::Instant::now() + Duration::from_millis(REFRESH_INTERVAL_MS);
+            let mut refresh_tick =
+                tokio::time::interval_at(first_tick, Duration::from_millis(REFRESH_INTERVAL_MS));
+            let mut stop_tick = tokio::time::interval(Duration::from_millis(100));
+            let mut etw_rx = etw_tokio_rx;
 
             loop {
                 if stop_flag.load(Ordering::SeqCst) {
                     break;
                 }
-
-                // Wait for ETW events (event-driven) or timeout for periodic work.
-                // Instead of polling try_recv() on a timer, we block-wait on the
-                // crossbeam receiver so we wake immediately when a process starts.
-                let first_event = if let Some(ref receiver) = etw_receiver {
-                    let rx = receiver.clone();
-                    tokio::select! {
-                        result = tokio::task::spawn_blocking(move || {
-                            rx.recv_timeout(Duration::from_millis(100))
-                        }) => {
-                            match result {
-                                Ok(Ok(event)) => Some(event),
-                                _ => None,
-                            }
+                tokio::select! {
+                    // ETW event-driven path
+                    event = async {
+                        match etw_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending::<Option<ProcessStartEvent>>().await,
                         }
-                        _ = async {
-                            // Also break out if stop flag is set
-                            loop {
-                                tokio::time::sleep(Duration::from_millis(50)).await;
-                                if stop_flag.load(Ordering::SeqCst) { break; }
-                            }
-                        } => { None }
-                    }
-                } else {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    None
-                };
+                    } => {
+                        match event {
+                            Some(first_event) => {
+                                let mut etw_events_received = false;
+                                let mut blocked_paths: Vec<String> = Vec::new();
 
-                if stop_flag.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                let mut etw_events_received = false;
-                let mut blocked_paths: Vec<String> = Vec::new();
-
-                // Process the first event (if any) and drain remaining queued events
-                let mut pending_events: Vec<ProcessStartEvent> = Vec::new();
-                if let Some(event) = first_event {
-                    pending_events.push(event);
-                }
-                if let Some(ref receiver) = etw_receiver {
-                    while let Ok(event) = receiver.try_recv() {
-                        pending_events.push(event);
-                    }
-                }
-
-                for event in pending_events {
-                    log::info!(
-                        "V3 ETW: Detected {} (PID: {}) - blocking and registering",
-                        event.name,
-                        event.pid
-                    );
-
-                    // STEP 1: IMMEDIATELY block the process with WFP filter
-                    // This prevents ANY packets (including STUN) from escaping before we're ready
-                    if !event.image_path.is_empty() {
-                        if let Err(e) = super::wfp_block::block_process_by_path(&event.image_path) {
-                            log::warn!(
-                                "V3: WFP block failed for {}: {} (using speculative tunneling)",
-                                event.name,
-                                e
-                            );
-                        } else {
-                            blocked_paths.push(event.image_path.clone());
-                        }
-                    }
-
-                    // STEP 2: Register with the driver's process cache
-                    let driver_guard = driver.lock().await;
-                    driver_guard.register_process_immediate(event.pid, event.name.clone());
-                    drop(driver_guard);
-                    etw_events_received = true;
-                }
-
-                // CRITICAL: If we received ETW events, IMMEDIATELY refresh connection tables
-                // This ensures first-packet tunneling (including STUN on port 3478)
-                // by populating connection→PID mappings before the WFP block is released
-                if etw_events_received {
-                    let mut driver_guard = driver.lock().await;
-                    if let Err(e) = driver_guard.refresh_exclusions() {
-                        log::warn!("V3: Immediate refresh after ETW failed: {}", e);
-                    } else {
-                        log::info!("V3 ETW: Immediate connection table refresh completed");
-                    }
-                    drop(driver_guard);
-
-                    // Short sleep to allow process to initialize sockets, then refresh again
-                    tokio::time::sleep(Duration::from_millis(2)).await;
-                    let mut driver_guard = driver.lock().await;
-                    let _ = driver_guard.refresh_exclusions();
-                    drop(driver_guard);
-
-                    // STEP 3: Remove WFP block filters - packets now flow through VPN relay
-                    for path in blocked_paths {
-                        if let Err(e) = super::wfp_block::unblock_process_by_path(&path) {
-                            log::warn!("V3: WFP unblock failed for {}: {}", path, e);
-                        }
-                    }
-
-                    // Reset refresh timer since we just did a full refresh
-                    last_refresh = std::time::Instant::now();
-                }
-
-                if stop_flag.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                // Periodic refresh
-                if last_refresh.elapsed().as_millis() < REFRESH_INTERVAL_MS as u128 {
-                    continue;
-                }
-                last_refresh = std::time::Instant::now();
-
-                let mut driver_guard = driver.lock().await;
-                match driver_guard.refresh_exclusions() {
-                    Ok(_) => {
-                        let running_names = driver_guard.get_running_tunnel_apps();
-                        drop(driver_guard);
-
-                        let mut state = state_handle.lock().await;
-                        if let ConnectionState::Connected {
-                            ref mut tunneled_processes,
-                            ..
-                        } = *state
-                        {
-                            if *tunneled_processes != running_names {
-                                if !running_names.is_empty() && tunneled_processes.is_empty() {
-                                    log::info!("V3: Game detected, relaying: {:?}", running_names);
-                                } else if running_names.is_empty() && !tunneled_processes.is_empty()
-                                {
-                                    log::info!("V3: All games exited");
+                                // Process the first event (if any) and drain remaining queued events.
+                                let mut pending_events: Vec<ProcessStartEvent> = Vec::new();
+                                pending_events.push(first_event);
+                                if let Some(ref mut rx) = etw_rx {
+                                    while let Ok(event) = rx.try_recv() {
+                                        pending_events.push(event);
+                                    }
                                 }
-                                *tunneled_processes = running_names;
+
+                                for event in pending_events {
+                                    log::info!(
+                                        "V3 ETW: Detected {} (PID: {}) - blocking and registering",
+                                        event.name,
+                                        event.pid
+                                    );
+
+                                    // STEP 1: IMMEDIATELY block the process with WFP filter
+                                    // This prevents ANY packets (including STUN) from escaping before we're ready
+                                    if !event.image_path.is_empty() {
+                                        if let Err(e) = super::wfp_block::block_process_by_path(&event.image_path) {
+                                            log::warn!(
+                                                "V3: WFP block failed for {}: {} (using speculative tunneling)",
+                                                event.name,
+                                                e
+                                            );
+                                        } else {
+                                            blocked_paths.push(event.image_path.clone());
+                                        }
+                                    }
+
+                                    // STEP 2: Register with the driver's process cache (also wakes cache refresher)
+                                    let driver_guard = driver.lock().await;
+                                    driver_guard.register_process_immediate(event.pid, event.name.clone());
+                                    drop(driver_guard);
+                                    etw_events_received = true;
+                                }
+
+                                // CRITICAL: If we received ETW events, IMMEDIATELY refresh connection tables
+                                // before releasing the WFP block, to guarantee first-packet tunneling.
+                                if etw_events_received {
+                                    let mut driver_guard = driver.lock().await;
+                                    let refresh_ok = driver_guard.refresh_exclusions().is_ok();
+                                    let running_names = driver_guard.get_running_tunnel_apps();
+                                    drop(driver_guard);
+
+                                    if refresh_ok {
+                                        log::info!("V3 ETW: Immediate connection table refresh completed");
+                                    } else {
+                                        log::warn!("V3: Immediate refresh after ETW failed");
+                                    }
+
+                                    // Short sleep to allow process to initialize sockets, then refresh again
+                                    tokio::time::sleep(Duration::from_millis(2)).await;
+                                    let mut driver_guard = driver.lock().await;
+                                    let _ = driver_guard.refresh_exclusions();
+                                    drop(driver_guard);
+
+                                    // Update UI state promptly when games start/stop
+                                    let mut state = state_handle.lock().await;
+                                    if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
+                                        if *tunneled_processes != running_names {
+                                            if !running_names.is_empty() && tunneled_processes.is_empty() {
+                                                log::info!("V3: Game detected, relaying: {:?}", running_names);
+                                            } else if running_names.is_empty() && !tunneled_processes.is_empty() {
+                                                log::info!("V3: All games exited");
+                                            }
+                                            *tunneled_processes = running_names;
+                                        }
+                                    }
+                                    drop(state);
+
+                                    // STEP 3: Remove WFP block filters - packets now flow through VPN relay
+                                    for path in blocked_paths {
+                                        if let Err(e) = super::wfp_block::unblock_process_by_path(&path) {
+                                            log::warn!("V3: WFP unblock failed for {}: {}", path, e);
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                // ETW channel closed (watcher stopped or failed). Fall back to polling only.
+                                etw_rx = None;
+                                log::warn!("V3: ETW process watcher channel closed (falling back to polling)");
                             }
                         }
                     }
-                    Err(e) => {
-                        log::warn!("V3: Exclusion refresh error: {}", e);
-                    }
-                }
 
-                // Sync auto-routing state to connection state
-                if let Some(ref auto_router) = auto_router_for_monitor {
-                    let current_auto_region = auto_router.current_region();
-                    let mut state = state_handle.lock().await;
-                    if let ConnectionState::Connected {
-                        ref mut server_region,
-                        ..
-                    } = *state
-                    {
-                        if *server_region != current_auto_region && !current_auto_region.is_empty()
-                        {
-                            log::info!(
-                                "Auto-routing: Syncing UI state to region '{}'",
-                                current_auto_region
-                            );
-                            *server_region = current_auto_region;
+                    // Periodic refresh path
+                    _ = refresh_tick.tick() => {
+                        let mut driver_guard = driver.lock().await;
+                        match driver_guard.refresh_exclusions() {
+                            Ok(_) => {
+                                let running_names = driver_guard.get_running_tunnel_apps();
+                                drop(driver_guard);
+
+                                let mut state = state_handle.lock().await;
+                                if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
+                                    if *tunneled_processes != running_names {
+                                        if !running_names.is_empty() && tunneled_processes.is_empty() {
+                                            log::info!("V3: Game detected, relaying: {:?}", running_names);
+                                        } else if running_names.is_empty() && !tunneled_processes.is_empty() {
+                                            log::info!("V3: All games exited");
+                                        }
+                                        *tunneled_processes = running_names;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("V3: Exclusion refresh error: {}", e);
+                            }
+                        }
+
+                        // Sync auto-routing state to connection state
+                        if let Some(ref auto_router) = auto_router_for_monitor {
+                            let current_auto_region = auto_router.current_region();
+                            let mut state = state_handle.lock().await;
+                            if let ConnectionState::Connected { ref mut server_region, .. } = *state {
+                                if *server_region != current_auto_region && !current_auto_region.is_empty() {
+                                    log::info!(
+                                        "Auto-routing: Syncing UI state to region '{}'",
+                                        current_auto_region
+                                    );
+                                    *server_region = current_auto_region;
+                                }
+                            }
                         }
                     }
+
+                    // Wake periodically to check stop_flag promptly without spawning tasks.
+                    _ = stop_tick.tick() => {}
                 }
             }
 

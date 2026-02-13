@@ -123,11 +123,11 @@ fn default_discord_rpc() -> bool {
 }
 
 fn default_auto_routing() -> bool {
-    false // Off by default, opt-in via experimental mode
+    false // Off by default (public option in Connect tab)
 }
 
 fn default_minimize_to_tray() -> bool {
-    true
+    false
 }
 
 fn default_region() -> String {
@@ -154,7 +154,7 @@ impl Default for AppSettings {
             current_tab: "connect".to_string(),
             update_settings: UpdateSettings::default(),
             update_channel: UpdateChannel::Stable,
-            minimize_to_tray: true,
+            minimize_to_tray: false,
             last_connected_region: None,
             expanded_boost_info: Vec::new(),
             selected_game_presets: default_game_presets(),
@@ -257,6 +257,10 @@ mod tests {
         assert_eq!(settings.selected_region, "singapore");
         assert_eq!(settings.selected_server, "singapore");
         assert_eq!(settings.update_channel, UpdateChannel::Stable);
+        assert!(
+            !settings.minimize_to_tray,
+            "Default should allow closing via X; tray behavior is opt-in"
+        );
     }
 
     #[test]
@@ -280,10 +284,18 @@ mod tests {
 
     #[test]
     fn test_settings_auto_routing_default() {
-        // Settings without auto_routing_enabled should default to false (opt-in via experimental)
+        // Settings without auto_routing_enabled should default to false (public option, default OFF)
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!loaded.auto_routing_enabled);
+    }
+
+    #[test]
+    fn test_settings_minimize_to_tray_default() {
+        // Settings without minimize_to_tray should default to false (quit on X).
+        let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
+        let loaded: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!loaded.minimize_to_tray);
     }
 
     #[test]

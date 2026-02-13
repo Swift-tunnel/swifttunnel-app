@@ -117,6 +117,9 @@ struct PacketWork {
     /// Physical adapter internal name (GUID) - shared across all work items
     /// Using Arc to avoid copying the string for every packet
     physical_adapter_name: Arc<String>,
+    /// Routing decision computed in the reader thread.
+    /// When true, the worker should tunnel/relay this packet (unless auto-routing bypass is active).
+    should_tunnel: bool,
 }
 
 /// Per-worker statistics
@@ -1240,7 +1243,6 @@ impl ParallelInterceptor {
         // Start worker threads
         for (worker_id, receiver) in receivers.into_iter().enumerate() {
             let stop_flag = Arc::clone(&self.stop_flag);
-            let process_cache = Arc::clone(&self.process_cache);
             let wintun_session = self.wintun_session.clone();
             let stats = Arc::clone(&self.worker_stats[worker_id]);
             let throughput = self.throughput_stats.clone();
@@ -1258,7 +1260,6 @@ impl ParallelInterceptor {
                 run_packet_worker(
                     worker_id,
                     receiver,
-                    process_cache,
                     wintun_session,
                     stats,
                     throughput,
@@ -1278,6 +1279,9 @@ impl ParallelInterceptor {
         // Start packet reader/dispatcher thread
         let reader_stop = Arc::clone(&self.stop_flag);
         let num_workers = self.num_workers;
+        let reader_cache = Arc::clone(&self.process_cache);
+        let reader_worker_stats = self.worker_stats.clone();
+        let reader_auto_router = self.auto_router.clone();
         let physical_name =
             Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
                 VpnError::SplitTunnel("Physical adapter name not set".to_string())
@@ -1288,6 +1292,9 @@ impl ParallelInterceptor {
                 physical_idx,
                 physical_name,
                 senders,
+                reader_cache,
+                reader_worker_stats,
+                reader_auto_router,
                 reader_stop,
                 num_workers,
             ) {
@@ -2401,6 +2408,9 @@ fn run_packet_reader(
     physical_idx: usize,
     physical_name: Arc<String>,
     senders: Vec<crossbeam_channel::Sender<PacketWork>>,
+    process_cache: Arc<LockFreeProcessCache>,
+    worker_stats: Vec<Arc<WorkerStats>>,
+    auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     stop_flag: Arc<AtomicBool>,
     num_workers: usize,
 ) -> VpnResult<()> {
@@ -2414,6 +2424,11 @@ fn run_packet_reader(
         physical_name,
         num_workers
     );
+
+    // Routing decisions are made here (reader thread) so bypass traffic never hits workers.
+    let mut snapshot = process_cache.get_snapshot();
+    let mut snapshot_version = snapshot.version;
+    let mut inline_cache: InlineCache = std::collections::HashMap::with_capacity(1024);
 
     let driver = ndisapi::Ndisapi::new("NDISRD")
         .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
@@ -2494,6 +2509,15 @@ fn run_packet_reader(
             continue;
         }
 
+        // Refresh process snapshot once per batch (cheap atomic load) so routing decisions
+        // track new processes/connection tables without per-packet ArcSwap loads.
+        let new_snapshot = process_cache.get_snapshot();
+        if new_snapshot.version != snapshot_version {
+            snapshot_version = new_snapshot.version;
+            inline_cache.clear();
+        }
+        snapshot = new_snapshot;
+
         // Prepare passthrough queues
         passthrough_to_adapter = EthMRequest::new(physical_handle);
         passthrough_to_mstcp = EthMRequest::new(physical_handle);
@@ -2505,8 +2529,8 @@ fn run_packet_reader(
             let data = packets[i].get_data();
 
             if is_outbound {
-                // Parse to get source port for hashing
-                if let Some((src_port, _)) = parse_ports(data) {
+                // Parse to get source port for hashing (and ensure TCP/UDP IPv4)
+                if let Some((src_port, _dst_port)) = parse_ports(data) {
                     // Hash by source port to select worker
                     // DEFENSIVE: Prevent division by zero (should never happen with num_workers >= 1)
                     let worker_id = if num_workers > 0 {
@@ -2516,10 +2540,51 @@ fn run_packet_reader(
                         0
                     };
 
-                    // Try to send to worker (non-blocking)
+                    let packet_len = data.len() as u64;
+
+                    // Decide routing here to keep bypass traffic out of the workers.
+                    let should_tunnel =
+                        should_route_to_vpn_with_inline_cache(data, &snapshot, &mut inline_cache);
+
+                    // Auto-routing whitelist bypass: if bypass is active, tunnel-eligible packets
+                    // should be passed through to the physical adapter instead.
+                    let auto_routing_bypass =
+                        should_tunnel && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
+
+                    if !should_tunnel || auto_routing_bypass {
+                        // When bypassing due to auto-routing whitelist, still run game server
+                        // detection + evaluation so teleports to non-whitelisted regions resume tunneling.
+                        if auto_routing_bypass && data.len() >= 14 + 20 {
+                            let ip_start = 14;
+                            let dst_ip = Ipv4Addr::new(
+                                data[ip_start + 16],
+                                data[ip_start + 17],
+                                data[ip_start + 18],
+                                data[ip_start + 19],
+                            );
+                            if is_roblox_game_server_ip(dst_ip) {
+                                if let Some(ref ar) = auto_router {
+                                    ar.evaluate_game_server(dst_ip);
+                                }
+                            }
+                        }
+
+                        // Batch passthrough (much cheaper than per-packet bypass reinjection).
+                        let _ = passthrough_to_adapter.push(&packets[i]);
+
+                        // Keep diagnostics accurate (bypass packets won't reach workers anymore).
+                        if let Some(stats) = worker_stats.get(worker_id) {
+                            stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .bytes_bypassed
+                                .fetch_add(packet_len, Ordering::Relaxed);
+                        }
+                        continue;
+                    }
+
+                    // Tunnel packet: dispatch to worker. (Copy only when tunneling.)
                     // Use ArrayVec for stack allocation - avoids heap alloc per packet
                     let mut packet_data: ArrayVec<u8, MAX_PACKET_SIZE> = ArrayVec::new();
-                    // Truncate if packet is larger than our buffer (shouldn't happen with MTU 1500)
                     let copy_len = data.len().min(MAX_PACKET_SIZE);
                     packet_data.try_extend_from_slice(&data[..copy_len]).ok();
 
@@ -2527,11 +2592,18 @@ fn run_packet_reader(
                         data: packet_data,
                         is_outbound: true,
                         physical_adapter_name: Arc::clone(&physical_name),
+                        should_tunnel: true,
                     };
 
-                    // If worker queue is full, send as passthrough
+                    // If worker queue is full, fall back to passthrough and count as bypass.
                     if senders[worker_id].try_send(work).is_err() {
                         let _ = passthrough_to_adapter.push(&packets[i]);
+                        if let Some(stats) = worker_stats.get(worker_id) {
+                            stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .bytes_bypassed
+                                .fetch_add(packet_len, Ordering::Relaxed);
+                        }
                     }
                 } else {
                     // Non-TCP/UDP packet - passthrough
@@ -2571,7 +2643,6 @@ fn run_packet_reader(
 fn run_packet_worker(
     worker_id: usize,
     receiver: crossbeam_channel::Receiver<PacketWork>,
-    process_cache: Arc<LockFreeProcessCache>,
     wintun_session: Option<Arc<wintun::Session>>,
     stats: Arc<WorkerStats>,
     throughput: ThroughputStats,
@@ -2585,16 +2656,6 @@ fn run_packet_worker(
 ) {
     log::info!("Worker {} started", worker_id);
 
-    // Get initial snapshot
-    let mut snapshot = process_cache.get_snapshot();
-    let mut snapshot_version = snapshot.version;
-    let mut snapshot_check_counter = 0u32;
-
-    // Per-worker inline cache for connection lookups
-    // This caches inline_connection_lookup results to avoid repeated syscalls
-    // First packet of new connection: ~500μs, subsequent packets: <1μs
-    let mut inline_cache: InlineCache = std::collections::HashMap::with_capacity(1024);
-
     // Diagnostic logging
     let mut diagnostic_counter = 0u64;
     let mut wintun_inject_success = 0u64;
@@ -2603,19 +2664,9 @@ fn run_packet_worker(
 
     // Performance timing (v0.5.57 - measure hot path latency)
     // Sample every 128th packet to reduce per-packet overhead
-    let mut total_lookup_ns = 0u64;
     let mut total_encrypt_ns = 0u64;
-    let mut lookup_count = 0u64;
     let mut encrypt_count = 0u64;
     let mut timing_sample_counter = 0u64;
-
-    // Log initial tunnel apps
-    if worker_id == 0 {
-        log::info!(
-            "Worker 0: Initial tunnel_apps = {:?}",
-            snapshot.tunnel_apps.iter().collect::<Vec<_>>()
-        );
-    }
 
     // Open driver for this worker (each worker needs own handle for sending bypass packets)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
@@ -2685,53 +2736,17 @@ fn run_packet_worker(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
-        // Periodically refresh snapshot (every 10 packets for faster detection)
-        // Reduced from 100 to catch newly registered processes quicker
-        snapshot_check_counter += 1;
-        if snapshot_check_counter >= 10 {
-            snapshot_check_counter = 0;
-            let old_apps_count = snapshot.tunnel_apps.len();
-            let new_snapshot = process_cache.get_snapshot();
-
-            // Clear inline cache if snapshot version changed (connections may have changed)
-            if new_snapshot.version != snapshot_version {
-                snapshot_version = new_snapshot.version;
-                inline_cache.clear();
-            }
-
-            snapshot = new_snapshot;
-
-            // Log if tunnel apps changed (only worker 0)
-            if worker_id == 0 && snapshot.tunnel_apps.len() != old_apps_count {
-                log::info!(
-                    "Worker 0: tunnel_apps updated, now {} apps",
-                    snapshot.tunnel_apps.len()
-                );
-            }
-        }
-
         // Process packet
         stats.packets_processed.fetch_add(1, Ordering::Relaxed);
         let packet_len = work.data.len() as u64;
         diagnostic_counter += 1;
 
         if work.is_outbound {
-            // Check if should tunnel (timed for performance measurement)
-            // Uses hybrid approach: snapshot cache (fast) + per-worker inline cache (for misses)
-            // Sample timing every 128th packet to reduce overhead
+            // Routing decision is computed in the reader thread so bypass traffic
+            // can be batch-passed-through without ever hitting the workers.
             timing_sample_counter += 1;
             let should_sample = (timing_sample_counter & 127) == 0;
-            let lookup_start = if should_sample {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            let should_tunnel =
-                should_route_to_vpn_with_inline_cache(&work.data, &snapshot, &mut inline_cache);
-            if let Some(start) = lookup_start {
-                total_lookup_ns += start.elapsed().as_nanos() as u64;
-                lookup_count += 1;
-            }
+            let should_tunnel = work.should_tunnel;
 
             // Periodic diagnostic logging (every 500 packets on worker 0)
             if worker_id == 0 && diagnostic_counter % 500 == 0 {
@@ -2744,12 +2759,7 @@ fn run_packet_worker(
                     0.0
                 };
 
-                // Calculate average latencies
-                let avg_lookup_ns = if lookup_count > 0 {
-                    total_lookup_ns / lookup_count
-                } else {
-                    0
-                };
+                // Calculate average latencies (when applicable)
                 let avg_encrypt_ns = if encrypt_count > 0 {
                     total_encrypt_ns / encrypt_count
                 } else {
@@ -2757,8 +2767,7 @@ fn run_packet_worker(
                 };
 
                 log::info!(
-                    "Worker 0 PERF: lookup={:.1}μs encrypt={:.1}μs | {} tunneled, {} bypassed ({:.1}%), direct: {}/{}, Wintun: {}/{}/{}",
-                    avg_lookup_ns as f64 / 1000.0,
+                    "Worker 0 PERF: encrypt={:.1}μs | {} tunneled, {} bypassed ({:.1}%), direct: {}/{}, Wintun: {}/{}/{}",
                     avg_encrypt_ns as f64 / 1000.0,
                     tunneled,
                     bypassed,
@@ -3061,62 +3070,6 @@ fn run_packet_worker(
                 stats
                     .bytes_bypassed
                     .fetch_add(packet_len, Ordering::Relaxed);
-
-                // DIAGNOSTIC LOGGING (v1.0.8): Log first 20 bypassed UDP packets to help debug
-                // "Tunneled: 0" issues where Roblox traffic isn't being detected
-                if worker_id == 0 {
-                    thread_local! {
-                        static BYPASS_LOG_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-                    }
-                    let log_count = BYPASS_LOG_COUNT.with(|c| {
-                        let n = c.get();
-                        if n < 20 {
-                            c.set(n + 1);
-                        }
-                        n
-                    });
-
-                    // Only log first 20 UDP packets (UDP is what we care about for games)
-                    if log_count < 20 && work.data.len() > 14 + 20 + 4 {
-                        let ip_start = 14;
-                        let protocol_num = work.data[ip_start + 9];
-                        if protocol_num == 17 {
-                            // UDP only
-                            let src_ip = Ipv4Addr::new(
-                                work.data[ip_start + 12],
-                                work.data[ip_start + 13],
-                                work.data[ip_start + 14],
-                                work.data[ip_start + 15],
-                            );
-                            let dst_ip = Ipv4Addr::new(
-                                work.data[ip_start + 16],
-                                work.data[ip_start + 17],
-                                work.data[ip_start + 18],
-                                work.data[ip_start + 19],
-                            );
-                            let ihl = ((work.data[ip_start] & 0xF) as usize) * 4;
-                            let transport_start = ip_start + ihl;
-                            let src_port = u16::from_be_bytes([
-                                work.data[transport_start],
-                                work.data[transport_start + 1],
-                            ]);
-                            let dst_port = u16::from_be_bytes([
-                                work.data[transport_start + 2],
-                                work.data[transport_start + 3],
-                            ]);
-
-                            log::info!(
-                                "BYPASS #{}: UDP {}:{} -> {}:{} | tunnel_apps={:?}",
-                                log_count + 1,
-                                src_ip,
-                                src_port,
-                                dst_ip,
-                                dst_port,
-                                snapshot.tunnel_apps.iter().take(3).collect::<Vec<_>>()
-                            );
-                        }
-                    }
-                }
 
                 // CRITICAL FIX: Forward bypass packets to adapter
                 // Previously this was missing, causing all non-tunnel traffic to be dropped!
@@ -4764,6 +4717,33 @@ fn run_v3_inbound_receiver(
 mod tests {
     use super::*;
 
+    fn build_ipv4_frame(
+        protocol: u8,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        // Minimal Ethernet + IPv4 + (UDP/TCP) frame. Routing decisions only need:
+        // - EtherType
+        // - IPv4 header with src/dst/protocol
+        // - First 4 bytes of transport header (ports)
+        let mut frame = vec![0u8; 14 + 20 + 8];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4 EtherType
+
+        let ip_start = 14;
+        frame[ip_start] = 0x45; // IPv4, IHL=5
+        frame[ip_start + 9] = protocol; // TCP=6, UDP=17
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+
+        let transport_start = ip_start + 20;
+        frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+
+        frame
+    }
+
     #[test]
     fn test_parse_ports() {
         // Create minimal Ethernet + IP + TCP frame
@@ -4780,5 +4760,158 @@ mod tests {
         let (src, dst) = parse_ports(&frame).unwrap();
         assert_eq!(src, 1234);
         assert_eq!(dst, 80);
+    }
+
+    #[test]
+    fn test_should_route_snapshot_tunnels_udp() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50000;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(
+            inline_cache.is_empty(),
+            "Snapshot hit should not mutate cache"
+        );
+    }
+
+    #[test]
+    fn test_should_route_snapshot_does_not_tunnel_tcp() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 50001;
+        let dst_port = 55000;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(6, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_should_route_inline_cache_hit_tunnels_udp() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 40000;
+        let dst_port = 53;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, src_port, Protocol::Udp), true);
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+    }
+
+    #[test]
+    fn test_should_route_speculative_game_server_caches_and_tunnels() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 40001;
+        let dst_port = 55000;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(
+            inline_cache.contains_key(&(src_ip, src_port, Protocol::Udp)),
+            "Speculative tunnel should seed the inline cache"
+        );
+    }
+
+    #[test]
+    fn test_should_route_non_game_does_not_cache() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 40002;
+        let dst_port = 55000;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
     }
 }

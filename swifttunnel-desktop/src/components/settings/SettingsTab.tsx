@@ -1,7 +1,6 @@
 import { type ReactNode } from "react";
 import { useAuthStore } from "../../stores/authStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { useServerStore } from "../../stores/serverStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
 import { Toggle } from "../common/Toggle";
 import { systemOpenUrl } from "../../lib/commands";
@@ -18,7 +17,6 @@ export function SettingsTab() {
   const update = useSettingsStore((s) => s.update);
   const save = useSettingsStore((s) => s.save);
 
-  const regions = useServerStore((s) => s.regions);
   const updaterStatus = useUpdaterStore((s) => s.status);
   const updaterVersion = useUpdaterStore((s) => s.availableVersion);
   const updaterProgress = useUpdaterStore((s) => s.progressPercent);
@@ -234,45 +232,6 @@ export function SettingsTab() {
               }}
             />
           </Row>
-          <Row label="Auto Routing" desc="Switch relay when game server changes">
-            <Toggle
-              enabled={settings.auto_routing_enabled}
-              onChange={(v) => set({ auto_routing_enabled: v })}
-            />
-          </Row>
-          {settings.auto_routing_enabled && (
-            <Row label="Region Whitelist" desc="Bypass VPN in these game regions">
-              <div className="flex flex-wrap gap-1.5">
-                {regions.map((r) => {
-                  const active = settings.whitelisted_regions.includes(r.name);
-                  return (
-                    <button
-                      key={r.id}
-                      onClick={() => {
-                        const next = active
-                          ? settings.whitelisted_regions.filter(
-                              (n) => n !== r.name,
-                            )
-                          : [...settings.whitelisted_regions, r.name];
-                        set({ whitelisted_regions: next });
-                      }}
-                      className="rounded px-2 py-1 text-xs transition-colors"
-                      style={{
-                        backgroundColor: active
-                          ? "var(--color-accent-primary-soft-15)"
-                          : "var(--color-bg-hover)",
-                        color: active
-                          ? "var(--color-accent-secondary)"
-                          : "var(--color-text-muted)",
-                      }}
-                    >
-                      {r.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </Row>
-          )}
         </Section>
       )}
 

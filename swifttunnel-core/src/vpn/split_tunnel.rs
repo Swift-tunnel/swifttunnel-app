@@ -714,15 +714,9 @@ impl SplitTunnelDriver {
             if let Some(ref interceptor) = self.parallel_interceptor {
                 let snapshot = interceptor.get_snapshot();
                 snapshot
-                    .pid_names
-                    .values()
-                    .filter(|name| {
-                        let name_lower = name.to_lowercase();
-                        snapshot
-                            .tunnel_apps
-                            .iter()
-                            .any(|app| name_lower.contains(app.trim_end_matches(".exe")))
-                    })
+                    .tunnel_pids
+                    .iter()
+                    .filter_map(|pid| snapshot.pid_names.get(pid))
                     .cloned()
                     .collect()
             } else {

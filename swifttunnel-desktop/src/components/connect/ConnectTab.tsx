@@ -6,6 +6,7 @@ import { useServerStore } from "../../stores/serverStore";
 import { countryFlag, getLatencyColor, formatBytes } from "../../lib/utils";
 import { systemCheckDriver, systemInstallDriver } from "../../lib/commands";
 import type { ServerRegion } from "../../lib/types";
+import { Toggle } from "../common/Toggle";
 import "./connect.css";
 
 const GAMES = [
@@ -524,6 +525,72 @@ export function ConnectTab() {
             );
           })}
         </div>
+      </section>
+
+      {/* ── Auto Routing ── */}
+      <section>
+        <div className="mb-3 flex items-center justify-between">
+          <SectionHeader noMargin>Auto Routing</SectionHeader>
+          <Toggle
+            enabled={settings.auto_routing_enabled}
+            disabled={isConnected}
+            onChange={(v) => {
+              update({ auto_routing_enabled: v });
+              save();
+            }}
+          />
+        </div>
+
+        <p className="text-xs text-text-muted">
+          Switch relay automatically when the Roblox game server region changes.
+          {isConnected ? " Applies on next connect." : ""}
+        </p>
+
+        {settings.auto_routing_enabled && (
+          <div className="mt-3 rounded-[var(--radius-card)] border border-border-subtle bg-bg-card p-4">
+            <div
+              className="text-[10px] font-medium uppercase text-text-muted"
+              style={{ letterSpacing: "0.08em" }}
+            >
+              Region Whitelist
+            </div>
+            <div className="mt-1 text-xs text-text-muted">
+              Bypass VPN in these game regions.
+            </div>
+
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {regions.map((r) => {
+                const active = settings.whitelisted_regions.includes(r.name);
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    disabled={isConnected}
+                    onClick={() => {
+                      const next = active
+                        ? settings.whitelisted_regions.filter((n) => n !== r.name)
+                        : [...settings.whitelisted_regions, r.name];
+                      update({ whitelisted_regions: next });
+                      save();
+                    }}
+                    className="rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                    style={{
+                      backgroundColor: active
+                        ? "var(--color-accent-primary-soft-15)"
+                        : "var(--color-bg-hover)",
+                      color: active
+                        ? "var(--color-accent-secondary)"
+                        : "var(--color-text-muted)",
+                    }}
+                    title={isConnected ? "Disconnect to edit" : undefined}
+                  >
+                    {r.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ── Region Selector ── */}

@@ -46,7 +46,7 @@ const MOCK_SETTINGS = {
   current_tab: "connect",
   update_settings: { auto_check: true, last_check: 1739350000 },
   update_channel: "Stable",
-  minimize_to_tray: true,
+  minimize_to_tray: false,
   last_connected_region: "singapore",
   expanded_boost_info: [],
   selected_game_presets: ["roblox", "valorant"],

@@ -56,6 +56,16 @@ describe("stores/settingsStore", () => {
     expect(useSettingsStore.getState().activeTab).toBe("boost");
   });
 
+  it("defaults minimize_to_tray to false when load fails", async () => {
+    settingsLoad.mockRejectedValue(new Error("boom"));
+
+    const useSettingsStore = await loadStore();
+    await useSettingsStore.getState().load();
+
+    expect(useSettingsStore.getState().isLoaded).toBe(true);
+    expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(false);
+  });
+
   it("save persists activeTab into current_tab", async () => {
     const useSettingsStore = await loadStore();
 
@@ -74,4 +84,3 @@ describe("stores/settingsStore", () => {
     expect(parsed.theme).toBe("dark");
   });
 });
-

@@ -376,6 +376,8 @@ pub struct ProcessSnapshot {
     pub pid_names: HashMap<u32, String>,
     /// Apps that should be tunneled (lowercase)
     pub tunnel_apps: HashSet<String>,
+    /// PIDs that belong to a tunnel app (precomputed from `pid_names` + `tunnel_apps`)
+    pub tunnel_pids: HashSet<u32>,
     /// Snapshot version (monotonically increasing)
     pub version: u64,
     /// Timestamp when snapshot was created
@@ -383,12 +385,40 @@ pub struct ProcessSnapshot {
 }
 
 impl ProcessSnapshot {
+    fn compute_tunnel_pids(
+        pid_names: &HashMap<u32, String>,
+        tunnel_apps: &HashSet<String>,
+    ) -> HashSet<u32> {
+        let mut tunnel_pids = HashSet::new();
+
+        for (&pid, name) in pid_names {
+            // Exact match - O(1) HashSet lookup
+            if tunnel_apps.contains(name) {
+                tunnel_pids.insert(pid);
+                continue;
+            }
+
+            // Partial match (for cases like "robloxplayerbeta" matching "roblox")
+            let name_stem = name.trim_end_matches(".exe");
+            for app in tunnel_apps {
+                let app_stem = app.trim_end_matches(".exe");
+                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
+                    tunnel_pids.insert(pid);
+                    break;
+                }
+            }
+        }
+
+        tunnel_pids
+    }
+
     /// Create empty snapshot
     pub fn empty(tunnel_apps: HashSet<String>) -> Self {
         Self {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
             tunnel_apps,
+            tunnel_pids: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         }
@@ -492,24 +522,7 @@ impl ProcessSnapshot {
     /// Implementation of PID tunnel check
     #[inline(always)]
     fn is_tunnel_pid_impl(&self, pid: u32) -> bool {
-        if let Some(name) = self.pid_names.get(&pid) {
-            // Names are already lowercase (done at insertion time)
-
-            // Exact match - O(1) HashSet lookup
-            if self.tunnel_apps.contains(name) {
-                return true;
-            }
-
-            // Partial match (for cases like "robloxplayerbeta" matching "roblox")
-            let name_stem = name.trim_end_matches(".exe");
-            for app in &self.tunnel_apps {
-                let app_stem = app.trim_end_matches(".exe");
-                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
-                    return true;
-                }
-            }
-        }
-        false
+        self.tunnel_pids.contains(&pid)
     }
 
     /// Get PID for connection (for debugging)
@@ -614,10 +627,13 @@ impl LockFreeProcessCache {
             .map(|(k, v)| (k, v.to_lowercase()))
             .collect();
 
+        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names_lower, &self.tunnel_apps);
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections,
             pid_names: pid_names_lower,
             tunnel_apps: self.tunnel_apps.clone(),
+            tunnel_pids,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -639,10 +655,14 @@ impl LockFreeProcessCache {
 
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
+        let tunnel_pids =
+            ProcessSnapshot::compute_tunnel_pids(&old_snap.pid_names, &self.tunnel_apps);
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections: old_snap.connections.clone(),
             pid_names: old_snap.pid_names.clone(),
             tunnel_apps: self.tunnel_apps.clone(), // Use NEW tunnel_apps
+            tunnel_pids,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -687,10 +707,13 @@ impl LockFreeProcessCache {
         let mut pid_names = old_snap.pid_names.clone();
         pid_names.insert(pid, name.to_lowercase());
 
+        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names, &self.tunnel_apps);
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections: old_snap.connections.clone(),
             pid_names,
             tunnel_apps: self.tunnel_apps.clone(),
+            tunnel_pids,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -906,5 +929,77 @@ mod tests {
                 name, expected, matched
             );
         }
+    }
+
+    #[test]
+    fn test_compute_tunnel_pids_exact_and_partial_match() {
+        let mut pid_names = HashMap::new();
+        pid_names.insert(1, "robloxplayerbeta.exe".to_string());
+        pid_names.insert(2, "robloxapp.exe".to_string());
+        pid_names.insert(3, "chrome.exe".to_string());
+
+        let tunnel_apps: HashSet<String> =
+            ["roblox".to_string(), "robloxplayerbeta.exe".to_string()]
+                .into_iter()
+                .collect();
+
+        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names, &tunnel_apps);
+
+        assert!(tunnel_pids.contains(&1), "Exact match should be tunneled");
+        assert!(
+            tunnel_pids.contains(&2),
+            "Stem contains match should be tunneled"
+        );
+        assert!(
+            !tunnel_pids.contains(&3),
+            "Non-matching process should not be tunneled"
+        );
+    }
+
+    #[test]
+    fn test_set_tunnel_apps_recomputes_tunnel_pids() {
+        let mut cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let src_port = 50000;
+        let pid = 1111;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let mut pid_names = HashMap::new();
+        pid_names.insert(pid, "RobloxPlayerBeta.exe".to_string());
+
+        cache.update(connections, pid_names);
+        let snap = cache.get_snapshot();
+        assert!(snap.is_tunnel_pid_public(pid));
+        assert!(snap.tunnel_pids.contains(&pid));
+
+        // Remove tunnel apps; tunnel_pids should be recomputed to empty.
+        cache.set_tunnel_apps(vec![]);
+
+        let snap2 = cache.get_snapshot();
+        assert!(!snap2.is_tunnel_pid_public(pid));
+        assert!(!snap2.tunnel_pids.contains(&pid));
+    }
+
+    #[test]
+    fn test_register_process_immediate_populates_tunnel_pids() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+        let pid = 2222;
+
+        let snap0 = cache.get_snapshot();
+        assert!(!snap0.is_tunnel_pid_public(pid));
+        assert!(!snap0.tunnel_pids.contains(&pid));
+
+        cache.register_process_immediate(pid, "RobloxPlayerBeta.exe".to_string());
+
+        let snap1 = cache.get_snapshot();
+        assert_eq!(
+            snap1.pid_names.get(&pid).map(|s| s.as_str()),
+            Some("robloxplayerbeta.exe")
+        );
+        assert!(snap1.is_tunnel_pid_public(pid));
+        assert!(snap1.tunnel_pids.contains(&pid));
     }
 }
