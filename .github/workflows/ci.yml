@@ -38,6 +38,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run frontend tests
+        run: npm test
+
       - name: Build frontend
         run: npm run build
 
@@ -63,8 +66,8 @@ jobs:
       - name: Check desktop backend
         run: cargo check -p swifttunnel-desktop
 
-      - name: Test region resolver hotfix
-        run: cargo test -p swifttunnel-core test_resolve_relay_server -- --nocapture
+      - name: Test core
+        run: cargo test -p swifttunnel-core -- --nocapture
 
-      - name: Test updater channel and security logic
-        run: "cargo test -p swifttunnel-desktop updater::tests:: -- --nocapture"
+      - name: Test desktop backend
+        run: cargo test -p swifttunnel-desktop -- --nocapture
