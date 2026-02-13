@@ -33,6 +33,13 @@ struct GitHubRelease {
     prerelease: bool,
     #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAsset {
+    name: String,
 }
 
 /// Result of the auto-update check
@@ -161,6 +168,19 @@ fn parse_release_version(tag_name: &str) -> Option<Version> {
     Version::parse(normalized).ok()
 }
 
+fn has_velopack_assets(release: &GitHubRelease) -> bool {
+    let has_feed = release
+        .assets
+        .iter()
+        .any(|asset| asset.name.eq_ignore_ascii_case("releases.win.json"));
+    let has_package = release
+        .assets
+        .iter()
+        .any(|asset| asset.name.ends_with(".nupkg"));
+
+    has_feed && has_package
+}
+
 fn fetch_latest_eligible_release_version(
     channel: UpdateChannel,
 ) -> Result<Option<Version>, String> {
@@ -202,6 +222,9 @@ fn fetch_latest_eligible_release_version(
             if channel == UpdateChannel::Stable && release.prerelease {
                 continue;
             }
+            if !has_velopack_assets(&release) {
+                continue;
+            }
             let Some(version) = parse_release_version(&release.tag_name) else {
                 continue;
             };
@@ -212,6 +235,49 @@ fn fetch_latest_eligible_release_version(
 
         Ok(latest)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_has_velopack_assets_requires_feed_and_package() {
+        let good = GitHubRelease {
+            tag_name: "v1.0.40".to_string(),
+            prerelease: false,
+            draft: false,
+            assets: vec![
+                GitHubAsset {
+                    name: "releases.win.json".to_string(),
+                },
+                GitHubAsset {
+                    name: "SwiftTunnel-1.0.40-full.nupkg".to_string(),
+                },
+            ],
+        };
+        assert!(has_velopack_assets(&good));
+
+        let missing_feed = GitHubRelease {
+            tag_name: "v1.0.42".to_string(),
+            prerelease: true,
+            draft: false,
+            assets: vec![GitHubAsset {
+                name: "latest.json".to_string(),
+            }],
+        };
+        assert!(!has_velopack_assets(&missing_feed));
+
+        let missing_pkg = GitHubRelease {
+            tag_name: "v1.0.43".to_string(),
+            prerelease: true,
+            draft: false,
+            assets: vec![GitHubAsset {
+                name: "releases.win.json".to_string(),
+            }],
+        };
+        assert!(!has_velopack_assets(&missing_pkg));
+    }
 }
 
 fn find_latest_newer_version(channel: UpdateChannel) -> Result<Option<Version>, String> {
