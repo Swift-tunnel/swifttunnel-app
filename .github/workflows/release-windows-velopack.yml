@@ -101,6 +101,7 @@ jobs:
         id: pack
         shell: pwsh
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           $releaseDir = "target\x86_64-pc-windows-msvc\release"
@@ -119,10 +120,22 @@ jobs:
           }
           Copy-Item "swifttunnel-windows\dist\wintun.dll" (Join-Path $stagingDir "wintun.dll") -Force
 
+          $driverSourceDir = Join-Path $env:RUNNER_TEMP "ndisapi_driver"
+          if (Test-Path $driverSourceDir) { Remove-Item $driverSourceDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $driverSourceDir | Out-Null
+
+          gh release download v3.6.2 `
+            --repo wiresock/ndisapi `
+            --pattern "Windows.Packet.Filter.3.6.2.1.x64.msi" `
+            --dir $driverSourceDir
+
+          $downloadedMsi = Join-Path $driverSourceDir "Windows.Packet.Filter.3.6.2.1.x64.msi"
+          if (-not (Test-Path $downloadedMsi)) {
+            throw "Failed to download Windows.Packet.Filter.3.6.2.1.x64.msi"
+          }
+
           $driverMsi = Join-Path $stagingDir "drivers\WinpkFilter-x64.msi"
-          Invoke-WebRequest `
-            -Uri "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/WinpkFilter-x64.msi" `
-            -OutFile $driverMsi
+          Copy-Item $downloadedMsi $driverMsi -Force
           $driverSize = (Get-Item $driverMsi).Length
           if ($driverSize -lt 1000000) {
             throw "Downloaded WinpkFilter-x64.msi is suspiciously small ($driverSize bytes)"
