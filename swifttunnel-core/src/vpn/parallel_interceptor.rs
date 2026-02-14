@@ -2926,10 +2926,14 @@ fn run_packet_worker(
                 if ip_packet.len() >= 20 {
                     let dst_ip =
                         Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
-                    if let Some(ref auto_router) = auto_router {
-                        if auto_router.is_lookup_pending(dst_ip) {
-                            // Skip this packet — RakNet will retransmit after relay switch
-                            continue;
+                    // Only Roblox game server IPs participate in auto-routing lookups.
+                    // Avoid taking the pending-lookups lock for non-Roblox traffic.
+                    if is_roblox_game_server_ip(dst_ip) {
+                        if let Some(ref auto_router) = auto_router {
+                            if auto_router.is_lookup_pending(dst_ip) {
+                                // Skip this packet — RakNet will retransmit after relay switch
+                                continue;
+                            }
                         }
                     }
                 }
