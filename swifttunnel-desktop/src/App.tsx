@@ -180,9 +180,13 @@ function App() {
           if (disposed) return;
           const current = useSettingsStore.getState().settings;
           if (!current.minimize_to_tray) return;
-          event.preventDefault();
           await persistWindowState();
-          await appWindow.hide();
+          try {
+            await appWindow.hide();
+            event.preventDefault();
+          } catch {
+            // If we can't hide to tray, allow the window to close normally.
+          }
         }),
       );
     };
