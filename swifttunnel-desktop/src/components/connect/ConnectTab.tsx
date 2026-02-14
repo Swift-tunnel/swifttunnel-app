@@ -555,7 +555,7 @@ export function ConnectTab() {
               Direct Connect
             </div>
             <div className="mt-1 text-xs text-text-muted">
-              Go direct in these regions — no VPN, lower latency.
+              Skip the VPN tunnel in these regions.
             </div>
 
             <div className="mt-2 flex flex-wrap gap-1.5">

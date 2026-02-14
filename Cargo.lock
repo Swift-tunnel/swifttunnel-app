@@ -4531,7 +4531,7 @@ dependencies = [
 
 [[package]]
 name = "swifttunnel-desktop"
-version = "1.5.4"
+version = "1.5.5"
 dependencies = [
  "base64 0.22.1",
  "env_logger",
