@@ -9,6 +9,8 @@ use log::info;
 use state::AppState;
 use tauri::{Emitter, Manager};
 
+const APP_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/icon.png");
+
 #[cfg(windows)]
 fn sync_runtime_assets(app: &tauri::App) {
     use std::fs;
@@ -120,6 +122,10 @@ fn sync_runtime_assets(_app: &tauri::App) {}
 pub fn run() {
     env_logger::init();
 
+    let mut ctx = tauri::generate_context!();
+    ctx.set_default_window_icon(Some(APP_ICON.clone()));
+    ctx.set_tray_icon(Some(APP_ICON.clone()));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Focus existing window when second instance launches
@@ -175,6 +181,10 @@ pub fn run() {
             info!("SwiftTunnel desktop app starting up");
             sync_runtime_assets(app);
 
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_icon(APP_ICON.clone());
+            }
+
             let runtime =
                 Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
 
@@ -226,6 +236,6 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(ctx)
         .expect("error while running tauri application");
 }

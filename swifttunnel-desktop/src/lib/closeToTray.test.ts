@@ -1,0 +1,91 @@
+import { describe, expect, it, vi } from "vitest";
+import { createCloseToTrayHandler } from "./closeToTray";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("createCloseToTrayHandler", () => {
+  it("does nothing when minimize-to-tray is disabled", async () => {
+    const preventDefault = vi.fn();
+    const persistWindowState = vi.fn(async () => {});
+    const hide = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+
+    const handler = createCloseToTrayHandler({
+      getMinimizeToTray: () => false,
+      persistWindowState,
+      hide,
+      close,
+    });
+
+    await handler({ preventDefault });
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(persistWindowState).not.toHaveBeenCalled();
+    expect(hide).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("prevents close synchronously and hides to tray on success", async () => {
+    const preventDefault = vi.fn();
+    const persistGate = deferred<void>();
+    const hide = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+
+    const handler = createCloseToTrayHandler({
+      getMinimizeToTray: () => true,
+      persistWindowState: () => persistGate.promise,
+      hide,
+      close,
+    });
+
+    const p = handler({ preventDefault });
+
+    // Before any awaits resolve, preventDefault must already have been called.
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(hide).not.toHaveBeenCalled();
+
+    persistGate.resolve();
+    await p;
+
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a real close if hide fails (without recursion)", async () => {
+    const preventDefault = vi.fn();
+    const persistWindowState = vi.fn(async () => {});
+
+    const hide = vi.fn(async () => {
+      throw new Error("hide failed");
+    });
+
+    let handler: ReturnType<typeof createCloseToTrayHandler> | null = null;
+    const close = vi.fn(async () => {
+      // Simulate Tauri triggering onCloseRequested again from programmatic close.
+      await handler?.({ preventDefault });
+    });
+
+    handler = createCloseToTrayHandler({
+      getMinimizeToTray: () => true,
+      persistWindowState,
+      hide,
+      close,
+    });
+
+    await handler({ preventDefault });
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(persistWindowState).toHaveBeenCalledTimes(1);
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+});
+

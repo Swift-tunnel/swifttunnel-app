@@ -14,6 +14,7 @@ import { useBoostStore } from "./stores/boostStore";
 import { useVpnStore } from "./stores/vpnStore";
 import { useUpdaterStore } from "./stores/updaterStore";
 import { cleanupEventListeners, initEventListeners } from "./lib/events";
+import { createCloseToTrayHandler } from "./lib/closeToTray";
 
 function TabContent() {
   const activeTab = useSettingsStore((s) => s.activeTab);
@@ -176,14 +177,16 @@ function App() {
       addUnlistener(await appWindow.onMoved(() => schedulePersist()));
       addUnlistener(await appWindow.onResized(() => schedulePersist()));
       addUnlistener(
-        await appWindow.onCloseRequested(async (event) => {
-          if (disposed) return;
-          const current = useSettingsStore.getState().settings;
-          if (!current.minimize_to_tray) return;
-          event.preventDefault();
-          await persistWindowState();
-          await appWindow.hide();
-        }),
+        await appWindow.onCloseRequested(
+          createCloseToTrayHandler({
+            getMinimizeToTray: () =>
+              useSettingsStore.getState().settings.minimize_to_tray,
+            persistWindowState,
+            hide: () => appWindow.hide(),
+            close: () => appWindow.close(),
+            isDisposed: () => disposed,
+          }),
+        ),
       );
     };
 
