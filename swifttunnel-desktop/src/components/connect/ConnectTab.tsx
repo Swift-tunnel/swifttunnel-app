@@ -5,8 +5,8 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
 import { countryFlag, getLatencyColor, formatBytes } from "../../lib/utils";
 import { systemCheckDriver, systemInstallDriver } from "../../lib/commands";
+import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import type { ServerRegion } from "../../lib/types";
-import { Toggle } from "../common/Toggle";
 import "./connect.css";
 
 const GAMES = [
@@ -53,6 +53,7 @@ export function ConnectTab() {
   const connect = useVpnStore((s) => s.connect);
   const disconnect = useVpnStore((s) => s.disconnect);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
+  const fetchVpnState = useVpnStore((s) => s.fetchState);
 
   const settings = useSettingsStore((s) => s.settings);
   const update = useSettingsStore((s) => s.update);
@@ -71,15 +72,23 @@ export function ConnectTab() {
 
   const selectedRegion = regions.find((r) => r.id === settings.selected_region);
   const selectedLatency = getLatency(settings.selected_region);
-  const connectedRegionObj = regions.find(
-    (r) => r.name.toLowerCase() === vpnRegion?.toLowerCase(),
-  );
+  const connectedRegion = findRegionForVpnRegion(regions, vpnRegion);
+  const connectedLatency = connectedRegion
+    ? getLatency(connectedRegion.id)
+    : null;
 
   useEffect(() => {
     if (!isConnected) return;
     const id = setInterval(fetchThroughput, 1000);
     return () => clearInterval(id);
   }, [isConnected, fetchThroughput]);
+
+  // Poll VPN state while connected so auto-routing region switches show up
+  useEffect(() => {
+    if (!isConnected) return;
+    const id = setInterval(fetchVpnState, 2000);
+    return () => clearInterval(id);
+  }, [isConnected, fetchVpnState]);
 
   useEffect(() => {
     void fetchLatencies();
@@ -103,7 +112,12 @@ export function ConnectTab() {
   }
 
   function selectRegion(regionId: string) {
-    update({ selected_region: regionId });
+    update({ selected_region: regionId, auto_routing_enabled: false });
+    save();
+  }
+
+  function selectAutoRoute() {
+    update({ auto_routing_enabled: true });
     save();
   }
 
@@ -366,8 +380,8 @@ export function ConnectTab() {
             {isConnected ? (
               <>
                 <span className="text-base">
-                  {connectedRegionObj
-                    ? countryFlag(connectedRegionObj.country_code)
+                  {connectedRegion
+                    ? countryFlag(connectedRegion.country_code)
                     : "\u{1F310}"}
                 </span>
                 <span className="font-medium text-text-primary">
@@ -438,7 +452,13 @@ export function ConnectTab() {
             >
               <div className="grid grid-cols-3 gap-px">
                 <HudCell label="Mode" value="V3 Relay" accent />
-                <HudCell label="Relay" value={vpnRegion || "\u2014"} />
+                <HudCell
+                  label="Ping"
+                  value={
+                    connectedLatency !== null ? `${connectedLatency}ms` : "\u2014"
+                  }
+                  mono
+                />
                 <HudCell
                   label="Split Tunnel"
                   value={splitActive ? "Active" : "Inactive"}
@@ -527,99 +547,6 @@ export function ConnectTab() {
         </div>
       </section>
 
-      {/* ── Auto Routing ── */}
-      <section>
-        <div className="mb-3 flex items-center justify-between">
-          <SectionHeader noMargin>Auto Routing</SectionHeader>
-          <Toggle
-            enabled={settings.auto_routing_enabled}
-            disabled={isConnected}
-            onChange={(v) => {
-              update({ auto_routing_enabled: v });
-              save();
-            }}
-          />
-        </div>
-
-        <p className="text-xs text-text-muted">
-          Auto-switch to the best server when your game region changes.
-          {isConnected ? " Applies on next connect." : ""}
-        </p>
-
-        {settings.auto_routing_enabled && (
-          <div className="mt-3 rounded-[var(--radius-card)] border border-border-subtle bg-bg-card p-4">
-            <div
-              className="text-[10px] font-medium uppercase text-text-muted"
-              style={{ letterSpacing: "0.08em" }}
-            >
-              Direct Connect
-            </div>
-            <div className="mt-1 text-xs text-text-muted">
-              Skip the VPN tunnel in these regions.
-            </div>
-
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {regions.map((r) => {
-                const active = settings.whitelisted_regions.includes(r.name);
-                return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    disabled={isConnected}
-                    onClick={() => {
-                      const next = active
-                        ? settings.whitelisted_regions.filter((n) => n !== r.name)
-                        : [...settings.whitelisted_regions, r.name];
-                      update({ whitelisted_regions: next });
-                      save();
-                    }}
-                    className="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60"
-                    style={{
-                      backgroundColor: active
-                        ? "var(--color-accent-primary-soft-15)"
-                        : "var(--color-bg-hover)",
-                      color: active
-                        ? "var(--color-accent-secondary)"
-                        : "var(--color-text-muted)",
-                    }}
-                    title={isConnected ? "Disconnect to edit" : undefined}
-                  >
-                    {active ? (
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                      </svg>
-                    ) : (
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                      </svg>
-                    )}
-                    {r.name}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </section>
-
       {/* ── Region Selector ── */}
       <section>
         <div className="mb-3 flex items-center justify-between">
@@ -653,12 +580,65 @@ export function ConnectTab() {
             )}
           </div>
         ) : (
+          <>
           <div className="grid grid-cols-2 gap-2">
+            {/* Auto Route option */}
+            <motion.button
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.04, duration: 0.28 }}
+              onClick={selectAutoRoute}
+              disabled={isConnected}
+              className="col-span-2 relative rounded-[var(--radius-card)] border text-left transition-all disabled:opacity-50"
+              style={{
+                backgroundColor: settings.auto_routing_enabled
+                  ? "var(--color-accent-primary-soft-8)"
+                  : "var(--color-bg-card)",
+                borderColor: settings.auto_routing_enabled
+                  ? "var(--color-accent-primary)"
+                  : "var(--color-border-subtle)",
+                borderLeftWidth: settings.auto_routing_enabled ? 3 : 1,
+                padding: settings.auto_routing_enabled
+                  ? "12px 14px 12px 12px"
+                  : "12px 14px",
+              }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <polyline points="16 3 21 3 21 8" />
+                    <line x1="4" y1="20" x2="21" y2="3" />
+                    <polyline points="21 16 21 21 16 21" />
+                    <line x1="15" y1="15" x2="21" y2="21" />
+                    <line x1="4" y1="4" x2="9" y2="9" />
+                  </svg>
+                  <span className="text-[13px] font-medium text-text-primary">
+                    Auto Route
+                  </span>
+                </span>
+                <span className="text-[11px] text-text-muted">
+                  Auto-switches to the best server for you
+                </span>
+              </div>
+            </motion.button>
+
             {regions.map((r, i) => (
               <RegionCard
                 key={r.id}
                 region={r}
-                selected={settings.selected_region === r.id}
+                selected={
+                  !settings.auto_routing_enabled &&
+                  settings.selected_region === r.id
+                }
                 lastUsed={settings.last_connected_region === r.id}
                 latency={getLatency(r.id)}
                 disabled={isConnected}
@@ -669,6 +649,83 @@ export function ConnectTab() {
               />
             ))}
           </div>
+
+          {/* Don't-tunnel panel (visible when auto routing is active) */}
+          {settings.auto_routing_enabled && (
+            <div className="mt-3 rounded-[var(--radius-card)] border border-border-subtle bg-bg-card p-4">
+              <div
+                className="text-[10px] font-medium uppercase text-text-muted"
+                style={{ letterSpacing: "0.08em" }}
+              >
+                Direct Connect
+              </div>
+              <div className="mt-1 text-xs text-text-muted">
+                {"Don't tunnel for these regions during Auto Routing."}
+              </div>
+
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {regions.map((r) => {
+                  const active = settings.whitelisted_regions.includes(r.name);
+                  return (
+                    <button
+                      key={r.id}
+                      type="button"
+                      disabled={isConnected}
+                      onClick={() => {
+                        const next = active
+                          ? settings.whitelisted_regions.filter(
+                              (n) => n !== r.name,
+                            )
+                          : [...settings.whitelisted_regions, r.name];
+                        update({ whitelisted_regions: next });
+                        save();
+                      }}
+                      className="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                      style={{
+                        backgroundColor: active
+                          ? "var(--color-accent-primary-soft-15)"
+                          : "var(--color-bg-hover)",
+                        color: active
+                          ? "var(--color-accent-secondary)"
+                          : "var(--color-text-muted)",
+                      }}
+                      title={isConnected ? "Disconnect to edit" : undefined}
+                    >
+                      {active ? (
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                        </svg>
+                      ) : (
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                        </svg>
+                      )}
+                      {r.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          </>
         )}
       </section>
     </div>

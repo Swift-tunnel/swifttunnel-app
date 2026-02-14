@@ -22,6 +22,14 @@ pub struct SpeedResultResponse {
     pub server: String,
 }
 
+#[derive(Serialize)]
+pub struct BufferbloatResultResponse {
+    pub idle_latency: u32,
+    pub loaded_latency: u32,
+    pub bufferbloat_ms: u32,
+    pub grade: String,
+}
+
 #[tauri::command]
 pub async fn network_start_stability_test(
     state: State<'_, AppState>,
@@ -72,5 +80,29 @@ pub async fn network_start_speed_test(
         download_mbps: result.download_mbps,
         upload_mbps: result.upload_mbps,
         server: result.server,
+    })
+}
+
+#[tauri::command]
+pub async fn network_start_bufferbloat_test(
+    state: State<'_, AppState>,
+) -> Result<BufferbloatResultResponse, String> {
+    // Core API expects a channel for symmetry with other tests; UI doesn't stream yet.
+    let (tx, rx) = mpsc::channel();
+
+    let result = state
+        .runtime
+        .spawn(async move { swifttunnel_core::network_analyzer::run_bufferbloat_test(tx).await })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
+        .map_err(|e| e.to_string())?;
+
+    drop(rx);
+
+    Ok(BufferbloatResultResponse {
+        idle_latency: result.idle_latency,
+        loaded_latency: result.loaded_latency,
+        bufferbloat_ms: result.bufferbloat_ms,
+        grade: result.grade.label().to_string(),
     })
 }

@@ -336,7 +336,8 @@ impl VpnConnection {
 
         let config = VpnConfig {
             // In V3 we only need region + endpoint for relay bootstrap.
-            region: region.to_string(),
+            // Use the resolved server id (e.g. "america-01") so UI can show the exact server.
+            region: resolved_server_region.clone(),
             endpoint: selected_relay_addr.to_string(),
             ..Default::default()
         };
