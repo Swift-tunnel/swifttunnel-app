@@ -44,6 +44,10 @@ pub struct AutoRouter {
     /// IPs currently being looked up — packets to these are held (dropped) until
     /// the lookup completes, preventing the game server from seeing a relay IP change.
     pending_lookups: RwLock<HashSet<Ipv4Addr>>,
+    /// Fast-path hint: whether `pending_lookups` is non-empty.
+    ///
+    /// This avoids taking a lock for the common case where there are no pending lookups.
+    pending_any: AtomicBool,
     /// Game regions where VPN should be bypassed (user's regular internet used instead).
     /// Stored as RobloxRegion display names (e.g., "Singapore", "Tokyo").
     whitelisted_regions: RwLock<HashSet<String>>,
@@ -83,6 +87,7 @@ impl AutoRouter {
             event_log: RwLock::new(VecDeque::new()),
             lookup_sender: RwLock::new(None),
             pending_lookups: RwLock::new(HashSet::new()),
+            pending_any: AtomicBool::new(false),
             whitelisted_regions: RwLock::new(HashSet::new()),
             auto_routing_bypassed: AtomicBool::new(false),
         }
@@ -181,9 +186,19 @@ impl AutoRouter {
             return AutoRoutingAction::NoAction;
         }
 
-        // Check if this is a new game server IP (teleport detection).
-        // Use try_write() to avoid blocking the hot path — if the lock is
-        // contended, fall through to NoAction and retry on the next packet.
+        // Fast path: bail if we've already seen this IP.
+        // Use try_read() to avoid blocking the hot path. If contended, retry on a
+        // later packet (RakNet is chatty, we'll see it again quickly).
+        match self.seen_game_servers.try_read() {
+            Some(seen) => {
+                if seen.contains(&game_server_ip) {
+                    return AutoRoutingAction::NoAction;
+                }
+            }
+            None => return AutoRoutingAction::NoAction,
+        }
+
+        // New IP candidate — insert under try_write() for dedupe.
         let is_new_ip = match self.seen_game_servers.try_write() {
             Some(mut seen) => seen.insert(game_server_ip),
             None => return AutoRoutingAction::NoAction,
@@ -193,24 +208,40 @@ impl AutoRouter {
             return AutoRoutingAction::NoAction;
         }
 
+        let sender = match self.lookup_sender.read().as_ref() {
+            Some(s) => s.clone(),
+            None => {
+                log::warn!(
+                    "Auto-routing: Lookup channel not set (auto-routing task not running) — ignoring game server {}",
+                    game_server_ip
+                );
+                return AutoRoutingAction::NoAction;
+            }
+        };
+
         // New IP detected — add to pending set and send to background lookup task.
         // While pending, packets to this IP will be held (dropped) by the interceptor
         // so the game server only ever sees traffic from the correct relay.
-        if let Some(mut pending) = self.pending_lookups.try_write() {
+        {
+            // Blocking write lock is OK here: this runs only once per new game server,
+            // and the correctness requirement (holding packets) outweighs the tiny cost.
+            let mut pending = self.pending_lookups.write();
             pending.insert(game_server_ip);
-        } else {
+            self.pending_any.store(true, Ordering::Release);
+        }
+
+        if sender.send(game_server_ip).is_err() {
             log::warn!(
-                "Auto-routing: Failed to acquire pending_lookups write lock for {} — packets may leak to wrong relay during lookup",
+                "Auto-routing: Lookup channel closed — releasing packets for {} and disabling holding behavior",
                 game_server_ip
             );
+            self.clear_pending_lookup(game_server_ip);
+            return AutoRoutingAction::NoAction;
         }
-        if let Some(sender) = self.lookup_sender.read().as_ref() {
-            let _ = sender.send(game_server_ip);
-            log::info!(
-                "Auto-routing: New game server {} detected, holding packets while looking up region...",
-                game_server_ip
-            );
-        }
+        log::info!(
+            "Auto-routing: New game server {} detected, holding packets while looking up region...",
+            game_server_ip
+        );
 
         AutoRoutingAction::NoAction
     }
@@ -219,6 +250,9 @@ impl AutoRouter {
     /// Packets to pending IPs should be held (dropped) to prevent the game server
     /// from seeing traffic from a relay that's about to change.
     pub fn is_lookup_pending(&self, ip: Ipv4Addr) -> bool {
+        if !self.pending_any.load(Ordering::Acquire) {
+            return false;
+        }
         self.pending_lookups.read().contains(&ip)
     }
 
@@ -227,7 +261,10 @@ impl AutoRouter {
     /// not the packet processing hot path. Must not fail silently or packets
     /// to this IP would be dropped forever.
     pub fn clear_pending_lookup(&self, ip: Ipv4Addr) {
-        self.pending_lookups.write().remove(&ip);
+        let mut pending = self.pending_lookups.write();
+        pending.remove(&ip);
+        self.pending_any
+            .store(!pending.is_empty(), Ordering::Release);
         log::info!(
             "Auto-routing: Lookup complete for {}, releasing packets",
             ip
@@ -427,6 +464,7 @@ impl AutoRouter {
         *self.current_relay_addr.write() = None;
         self.seen_game_servers.write().clear();
         self.pending_lookups.write().clear();
+        self.pending_any.store(false, Ordering::Release);
         self.auto_routing_bypassed.store(false, Ordering::Release);
     }
 }
@@ -571,6 +609,29 @@ mod tests {
         // Second call with same IP should NOT send again
         router.evaluate_game_server(ip);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_pending_lookup_marked_and_cleared() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.evaluate_game_server(ip);
+        assert!(router.is_lookup_pending(ip));
+
+        router.clear_pending_lookup(ip);
+        assert!(!router.is_lookup_pending(ip));
+    }
+
+    #[test]
+    fn test_evaluate_without_lookup_channel_does_not_hold_packets() {
+        let router = AutoRouter::new(true, "singapore");
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+
+        router.evaluate_game_server(ip);
+        assert!(!router.is_lookup_pending(ip));
     }
 
     #[test]
