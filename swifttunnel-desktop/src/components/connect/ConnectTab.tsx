@@ -542,7 +542,7 @@ export function ConnectTab() {
         </div>
 
         <p className="text-xs text-text-muted">
-          Switch relay automatically when the Roblox game server region changes.
+          Auto-switch to the best server when your game region changes.
           {isConnected ? " Applies on next connect." : ""}
         </p>
 
@@ -552,10 +552,10 @@ export function ConnectTab() {
               className="text-[10px] font-medium uppercase text-text-muted"
               style={{ letterSpacing: "0.08em" }}
             >
-              Region Whitelist
+              Direct Connect
             </div>
             <div className="mt-1 text-xs text-text-muted">
-              Bypass VPN in these game regions.
+              Go direct in these regions — no VPN, lower latency.
             </div>
 
             <div className="mt-2 flex flex-wrap gap-1.5">
@@ -573,7 +573,7 @@ export function ConnectTab() {
                       update({ whitelisted_regions: next });
                       save();
                     }}
-                    className="rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                    className="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60"
                     style={{
                       backgroundColor: active
                         ? "var(--color-accent-primary-soft-15)"
@@ -584,6 +584,33 @@ export function ConnectTab() {
                     }}
                     title={isConnected ? "Disconnect to edit" : undefined}
                   >
+                    {active ? (
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                      </svg>
+                    ) : (
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                      </svg>
+                    )}
                     {r.name}
                   </button>
                 );
