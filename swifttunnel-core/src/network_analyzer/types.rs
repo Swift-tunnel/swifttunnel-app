@@ -213,6 +213,61 @@ pub enum SpeedTestProgress {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  BUFFERBLOAT TEST TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Bufferbloat grade (latency increase under load)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BufferbloatGrade {
+    APlus,
+    A,
+    B,
+    C,
+    D,
+    F,
+}
+
+impl BufferbloatGrade {
+    /// Determine grade from measured bufferbloat (loaded - idle).
+    pub fn from_bufferbloat_ms(bufferbloat_ms: u32) -> Self {
+        match bufferbloat_ms {
+            0..=5 => BufferbloatGrade::APlus,
+            6..=15 => BufferbloatGrade::A,
+            16..=30 => BufferbloatGrade::B,
+            31..=50 => BufferbloatGrade::C,
+            51..=100 => BufferbloatGrade::D,
+            _ => BufferbloatGrade::F,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            BufferbloatGrade::APlus => "A+",
+            BufferbloatGrade::A => "A",
+            BufferbloatGrade::B => "B",
+            BufferbloatGrade::C => "C",
+            BufferbloatGrade::D => "D",
+            BufferbloatGrade::F => "F",
+        }
+    }
+}
+
+/// Results from a completed bufferbloat test
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BufferbloatTestResults {
+    /// Median idle ping in milliseconds
+    pub idle_latency: u32,
+    /// Median ping while load is active in milliseconds
+    pub loaded_latency: u32,
+    /// Loaded - idle (ms)
+    pub bufferbloat_ms: u32,
+    /// Grade derived from bufferbloat_ms
+    pub grade: BufferbloatGrade,
+    /// Timestamp when test completed
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  PERSISTENCE
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -365,5 +420,69 @@ mod tests {
         let state = NetworkAnalyzerState::default();
         assert!(!state.stability.running);
         assert!(!state.speed.running);
+    }
+
+    // ── BufferbloatGrade ──
+
+    #[test]
+    fn test_bufferbloat_grade_labels() {
+        assert_eq!(BufferbloatGrade::APlus.label(), "A+");
+        assert_eq!(BufferbloatGrade::A.label(), "A");
+        assert_eq!(BufferbloatGrade::B.label(), "B");
+        assert_eq!(BufferbloatGrade::C.label(), "C");
+        assert_eq!(BufferbloatGrade::D.label(), "D");
+        assert_eq!(BufferbloatGrade::F.label(), "F");
+    }
+
+    #[test]
+    fn test_bufferbloat_grade_thresholds() {
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(0),
+            BufferbloatGrade::APlus
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(5),
+            BufferbloatGrade::APlus
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(6),
+            BufferbloatGrade::A
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(15),
+            BufferbloatGrade::A
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(16),
+            BufferbloatGrade::B
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(30),
+            BufferbloatGrade::B
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(31),
+            BufferbloatGrade::C
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(50),
+            BufferbloatGrade::C
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(51),
+            BufferbloatGrade::D
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(100),
+            BufferbloatGrade::D
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(101),
+            BufferbloatGrade::F
+        );
+        assert_eq!(
+            BufferbloatGrade::from_bufferbloat_ms(500),
+            BufferbloatGrade::F
+        );
     }
 }
