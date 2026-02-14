@@ -9,10 +9,12 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .expect("default window icon must be set");
+    let icon = app.default_window_icon().cloned().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "default window icon must be set before tray setup",
+        )
+    })?;
 
     let _tray = TrayIconBuilder::new()
         .icon(icon)
