@@ -4,16 +4,33 @@ use log::{info, warn};
 use std::process::Command;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
+use windows::Win32::Security::{
+    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+};
 use windows::Win32::System::Threading::*;
 
-// NtSetTimerResolution from ntdll.dll for sub-millisecond timer resolution (0.5ms)
+// ntdll.dll functions for low-level system control
 unsafe extern "system" {
+    // Sub-millisecond timer resolution (0.5ms)
     fn NtSetTimerResolution(
         DesiredResolution: u32,
         SetResolution: u8,
         CurrentResolution: *mut u32,
     ) -> i32;
+
+    // Standby memory purge (actual RAM clearing)
+    fn NtSetSystemInformation(
+        SystemInformationClass: u32,
+        SystemInformation: *const std::ffi::c_void,
+        SystemInformationLength: u32,
+    ) -> i32;
 }
+
+/// SystemMemoryListInformation class for NtSetSystemInformation
+const SYSTEM_MEMORY_LIST_INFORMATION: u32 = 80;
+/// Command to purge the standby list (free cached RAM)
+const MEMORY_PURGE_STANDBY_LIST: u32 = 4;
 
 pub struct SystemOptimizer {
     original_priority: Option<u32>,
@@ -165,27 +182,72 @@ impl SystemOptimizer {
     }
 
     /// Clear standby memory to free up RAM
+    ///
+    /// Uses NtSetSystemInformation with MemoryPurgeStandbyList to actually
+    /// release cached pages back to the free list. Requires admin privileges
+    /// (SeProfileSingleProcessPrivilege).
     fn clear_standby_memory(&self) -> Result<()> {
-        info!("Clearing standby memory");
+        info!("Clearing standby memory via NtSetSystemInformation");
 
-        // Use Windows API to clear standby list
-        let output = hidden_command("powershell")
-            .args([
-                "-Command",
-                "Clear-Variable * -EA SilentlyContinue; [System.GC]::Collect()",
-            ])
-            .output();
-
-        match output {
-            Ok(_) => {
-                info!("Standby memory cleared successfully");
-                Ok(())
+        unsafe {
+            // Enable SeProfileSingleProcessPrivilege (required for standby purge)
+            if let Err(e) = Self::enable_privilege("SeProfileSingleProcessPrivilege") {
+                warn!("Could not enable memory privilege (not admin?): {}", e);
+                return Ok(()); // Non-critical, continue with other boosts
             }
-            Err(e) => {
-                warn!("Failed to clear standby memory: {}", e);
-                Ok(()) // Non-critical, continue
+
+            let command: u32 = MEMORY_PURGE_STANDBY_LIST;
+            let status = NtSetSystemInformation(
+                SYSTEM_MEMORY_LIST_INFORMATION,
+                &command as *const u32 as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+
+            if status == 0 {
+                info!("Standby memory purged successfully");
+            } else {
+                warn!(
+                    "NtSetSystemInformation failed (0x{:08X}) — requires admin privileges",
+                    status as u32
+                );
             }
         }
+
+        Ok(())
+    }
+
+    /// Enable a Windows privilege by name (e.g. "SeProfileSingleProcessPrivilege")
+    unsafe fn enable_privilege(privilege_name: &str) -> Result<()> {
+        use windows::core::PCWSTR;
+
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )?;
+
+        // Convert privilege name to wide string
+        let wide_name: Vec<u16> = privilege_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut luid = windows::Win32::Foundation::LUID::default();
+        LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide_name.as_ptr()), &mut luid)?;
+
+        let tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+
+        AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None)?;
+        let _ = CloseHandle(token);
+
+        Ok(())
     }
 
     /// Disable Windows Game Bar

@@ -342,7 +342,7 @@ pub mod boost_info {
         long_desc: "Enables Windows Multimedia Class Scheduler Service for gaming. This prioritizes game threads over background tasks for more consistent CPU time allocation. Built into Windows, fully reversible.",
         impact: "More stable frame times",
         risk_level: RiskLevel::Safe,
-        requires_admin: false,
+        requires_admin: true,
     };
 
     pub const GAME_MODE: BoostInfo = BoostInfo {
@@ -363,7 +363,7 @@ pub mod boost_info {
         long_desc: "Nagle's algorithm batches small packets together to reduce network overhead. Disabling it sends packets immediately, reducing latency for real-time games. This is a registry tweak that's easily reversible.",
         impact: "-5-15ms latency reduction",
         risk_level: RiskLevel::Safe,
-        requires_admin: false,
+        requires_admin: true,
     };
 
     pub const NETWORK_THROTTLING: BoostInfo = BoostInfo {
@@ -373,7 +373,7 @@ pub mod boost_info {
         long_desc: "Windows throttles network throughput for multimedia applications by default. Disabling this allows games to use full network bandwidth without artificial limits. Registry change, easily reversible.",
         impact: "Reduced network latency spikes",
         risk_level: RiskLevel::Safe,
-        requires_admin: false,
+        requires_admin: true,
     };
 
     pub const OPTIMIZE_MTU: BoostInfo = BoostInfo {
@@ -617,5 +617,53 @@ mod tests {
     #[test]
     fn test_roblox_boosts_count() {
         assert_eq!(boost_info::roblox_boosts().len(), 1);
+    }
+
+    // ── boost_info requires_admin ──
+
+    #[test]
+    fn test_hklm_boosts_require_admin() {
+        // All boosts that write to HKLM must report requires_admin: true
+        assert!(
+            boost_info::MMCSS.requires_admin,
+            "MMCSS writes to HKLM, must require admin"
+        );
+        assert!(
+            boost_info::DISABLE_NAGLE.requires_admin,
+            "Nagle writes to HKLM, must require admin"
+        );
+        assert!(
+            boost_info::NETWORK_THROTTLING.requires_admin,
+            "Network throttling writes to HKLM, must require admin"
+        );
+        assert!(
+            boost_info::OPTIMIZE_MTU.requires_admin,
+            "MTU optimization requires admin"
+        );
+        assert!(
+            boost_info::GAMING_QOS.requires_admin,
+            "QoS writes to HKLM, must require admin"
+        );
+    }
+
+    #[test]
+    fn test_hkcu_boosts_no_admin() {
+        // Boosts that only write to HKCU don't need admin
+        assert!(
+            !boost_info::HIGH_PRIORITY.requires_admin,
+            "High priority uses process handle, no admin needed"
+        );
+        assert!(
+            !boost_info::TIMER_RESOLUTION.requires_admin,
+            "Timer resolution uses ntdll, no admin needed"
+        );
+        assert!(
+            !boost_info::GAME_MODE.requires_admin,
+            "Game mode writes to HKCU, no admin needed"
+        );
+        assert!(
+            !boost_info::DYNAMIC_RENDER.requires_admin,
+            "Dynamic render writes to user files, no admin needed"
+        );
     }
 }

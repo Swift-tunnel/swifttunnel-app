@@ -35,36 +35,54 @@ pub fn boost_get_metrics(state: State<'_, AppState>) -> PerformanceMetricsRespon
 pub fn boost_toggle(state: State<'_, AppState>, enable: bool) -> Result<(), String> {
     let settings = state.settings.lock().clone();
 
+    // Resolve Roblox PID from performance monitor (needed for process-specific boosts)
+    let roblox_pid = {
+        let mut monitor = state.performance_monitor.lock();
+        monitor.get_roblox_pid().unwrap_or(0)
+    };
+
     if enable {
-        // Apply system optimizations
-        let mut sys_opt = state.system_optimizer.lock();
-        sys_opt
-            .apply_optimizations(&settings.config.system_optimization, 0)
+        // Apply system optimizations (with real PID for priority/affinity)
+        state
+            .system_optimizer
+            .lock()
+            .apply_optimizations(&settings.config.system_optimization, roblox_pid)
             .map_err(|e| e.to_string())?;
 
         // Apply network optimizations
-        let mut net_boost = state.network_booster.lock();
-        net_boost
+        state
+            .network_booster
+            .lock()
             .apply_optimizations(&settings.config.network_settings)
             .map_err(|e| e.to_string())?;
 
         // Apply roblox optimizations
-        let roblox_opt = state.roblox_optimizer.lock();
-        roblox_opt
+        state
+            .roblox_optimizer
+            .lock()
             .apply_optimizations(&settings.config.roblox_settings)
             .map_err(|e| e.to_string())?;
     } else {
         // Revert system optimizations
-        let mut sys_opt = state.system_optimizer.lock();
-        sys_opt.restore(0).map_err(|e| e.to_string())?;
+        state
+            .system_optimizer
+            .lock()
+            .restore(roblox_pid)
+            .map_err(|e| e.to_string())?;
 
         // Revert network optimizations
-        let mut net_boost = state.network_booster.lock();
-        net_boost.restore().map_err(|e| e.to_string())?;
+        state
+            .network_booster
+            .lock()
+            .restore()
+            .map_err(|e| e.to_string())?;
 
         // Revert roblox optimizations
-        let roblox_opt = state.roblox_optimizer.lock();
-        roblox_opt.restore_settings().map_err(|e| e.to_string())?;
+        state
+            .roblox_optimizer
+            .lock()
+            .restore_settings()
+            .map_err(|e| e.to_string())?;
     }
 
     // Update settings
@@ -82,9 +100,40 @@ pub fn boost_update_config(state: State<'_, AppState>, config_json: String) -> R
     let config: swifttunnel_core::structs::Config =
         serde_json::from_str(&config_json).map_err(|e| format!("Invalid config: {}", e))?;
 
-    let mut settings = state.settings.lock();
-    settings.config = config;
-    swifttunnel_core::settings::save_settings(&settings).map_err(|e| e.to_string())?;
+    let optimizations_active;
+    {
+        let mut settings = state.settings.lock();
+        settings.config = config;
+        optimizations_active = settings.optimizations_active;
+        swifttunnel_core::settings::save_settings(&settings).map_err(|e| e.to_string())?;
+    }
+
+    // If boosts are currently active, re-apply with the updated config
+    if optimizations_active {
+        let settings = state.settings.lock().clone();
+        let roblox_pid = {
+            let mut monitor = state.performance_monitor.lock();
+            monitor.get_roblox_pid().unwrap_or(0)
+        };
+
+        state
+            .system_optimizer
+            .lock()
+            .apply_optimizations(&settings.config.system_optimization, roblox_pid)
+            .map_err(|e| e.to_string())?;
+
+        state
+            .network_booster
+            .lock()
+            .apply_optimizations(&settings.config.network_settings)
+            .map_err(|e| e.to_string())?;
+
+        state
+            .roblox_optimizer
+            .lock()
+            .apply_optimizations(&settings.config.roblox_settings)
+            .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }
