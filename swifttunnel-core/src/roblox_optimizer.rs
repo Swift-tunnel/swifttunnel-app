@@ -455,10 +455,7 @@ impl RobloxOptimizer {
 
         // Remove all FFlag optimizations when restoring
         if let Err(e) = self.remove_all_fflags() {
-            warn!(
-                "Could not remove FFlag optimizations during restore: {}",
-                e
-            );
+            warn!("Could not remove FFlag optimizations during restore: {}", e);
         }
 
         // Don't set read-only after restore - user is disabling optimizations
@@ -663,10 +660,7 @@ impl RobloxOptimizer {
 
         // Disable post-processing effects via FFlags
         if config.disable_post_processing {
-            settings.insert(
-                "FFlagDisablePostFx".to_string(),
-                serde_json::json!("true"),
-            );
+            settings.insert("FFlagDisablePostFx".to_string(), serde_json::json!("true"));
         } else {
             settings.remove("FFlagDisablePostFx");
         }
