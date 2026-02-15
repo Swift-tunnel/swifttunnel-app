@@ -200,9 +200,9 @@ impl RobloxRegion {
             RobloxRegion::Paris => Some("paris"),
             RobloxRegion::Frankfurt => Some("germany"),
             RobloxRegion::Warsaw => Some("germany"), // Closest SwiftTunnel region
-            RobloxRegion::UsEast => Some("america"),
-            RobloxRegion::UsCentral => Some("america"),
-            RobloxRegion::UsWest => Some("america"),
+            RobloxRegion::UsEast => Some("us-east"),
+            RobloxRegion::UsCentral => Some("us-central"),
+            RobloxRegion::UsWest => Some("us-west"),
             RobloxRegion::Brazil => Some("brazil"),
         }
     }
@@ -627,7 +627,15 @@ mod tests {
         );
         assert_eq!(
             RobloxRegion::UsEast.best_swifttunnel_region(),
-            Some("america")
+            Some("us-east")
+        );
+        assert_eq!(
+            RobloxRegion::UsCentral.best_swifttunnel_region(),
+            Some("us-central")
+        );
+        assert_eq!(
+            RobloxRegion::UsWest.best_swifttunnel_region(),
+            Some("us-west")
         );
         assert_eq!(
             RobloxRegion::Frankfurt.best_swifttunnel_region(),

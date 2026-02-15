@@ -42,6 +42,7 @@ pub enum DiscordActivity {
 
 /// Get region display name for Discord
 pub fn region_display_name(region_id: &str) -> &'static str {
+    // Server IDs like "us-east-nj" should match their region prefix "us-east"
     match region_id {
         "singapore" => "Singapore",
         "mumbai" => "Mumbai",
@@ -49,8 +50,25 @@ pub fn region_display_name(region_id: &str) -> &'static str {
         "sydney" => "Sydney",
         "germany" | "frankfurt" => "Germany",
         "paris" => "Paris",
-        "america" | "us-east" | "us-west" => "America",
+        "london" => "London",
+        "amsterdam" => "Amsterdam",
+        "korea" => "Korea",
         "brazil" | "sao-paulo" => "Brazil",
+        _ if region_id.starts_with("singapore-") => "Singapore",
+        _ if region_id.starts_with("mumbai-") => "Mumbai",
+        _ if region_id.starts_with("tokyo-") => "Tokyo",
+        _ if region_id.starts_with("sydney-") => "Sydney",
+        _ if region_id.starts_with("germany-") => "Germany",
+        _ if region_id.starts_with("paris-") => "Paris",
+        _ if region_id.starts_with("london-") => "London",
+        _ if region_id.starts_with("amsterdam-") => "Amsterdam",
+        _ if region_id.starts_with("korea-") => "Korea",
+        _ if region_id.starts_with("brazil-") => "Brazil",
+        // US regions are multi-segment ("us-east", "us-west", "us-central") and servers append
+        // a location suffix ("us-east-nj"). Require a "-" boundary to avoid false positives.
+        _ if region_id == "us-east" || region_id.starts_with("us-east-") => "US East",
+        _ if region_id == "us-west" || region_id.starts_with("us-west-") => "US West",
+        _ if region_id == "us-central" || region_id.starts_with("us-central-") => "US Central",
         _ => "Unknown Region",
     }
 }
@@ -64,8 +82,21 @@ pub fn region_flag_key(region_id: &str) -> &'static str {
         "sydney" => "flag_au",
         "germany" | "frankfurt" => "flag_de",
         "paris" => "flag_fr",
-        "america" | "us-east" | "us-west" => "flag_us",
+        "london" => "flag_gb",
+        "amsterdam" => "flag_nl",
+        "korea" => "flag_kr",
         "brazil" | "sao-paulo" => "flag_br",
+        _ if region_id.starts_with("singapore-") => "flag_sg",
+        _ if region_id.starts_with("mumbai-") => "flag_in",
+        _ if region_id.starts_with("tokyo-") => "flag_jp",
+        _ if region_id.starts_with("sydney-") => "flag_au",
+        _ if region_id.starts_with("germany-") => "flag_de",
+        _ if region_id.starts_with("paris-") => "flag_fr",
+        _ if region_id.starts_with("london-") => "flag_gb",
+        _ if region_id.starts_with("amsterdam-") => "flag_nl",
+        _ if region_id.starts_with("korea-") => "flag_kr",
+        _ if region_id.starts_with("brazil-") => "flag_br",
+        _ if region_id.starts_with("us-") => "flag_us",
         _ => "flag_us",
     }
 }
@@ -99,6 +130,11 @@ mod tests {
         assert_eq!(region_display_name("singapore"), "Singapore");
         assert_eq!(region_display_name("mumbai"), "Mumbai");
         assert_eq!(region_display_name("germany"), "Germany");
+        assert_eq!(region_display_name("us-east"), "US East");
+        assert_eq!(region_display_name("us-east-nj"), "US East");
+        assert_eq!(region_display_name("us-west-la"), "US West");
+        assert_eq!(region_display_name("us-central-dallas"), "US Central");
+        assert_eq!(region_display_name("us-east2"), "Unknown Region"); // no "-" boundary
         assert_eq!(region_display_name("unknown"), "Unknown Region");
     }
 
