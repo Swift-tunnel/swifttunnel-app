@@ -30,7 +30,7 @@ fn pick_lowest_latency_server<'a>(
     candidates.min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
 }
 
-fn resolve_relay_server_for_region(
+pub(crate) fn resolve_relay_server_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
     forced_server: Option<&str>,
@@ -357,7 +357,7 @@ impl VpnConnection {
 
         let config = VpnConfig {
             // In V3 we only need region + endpoint for relay bootstrap.
-            // Use the resolved server id (e.g. "america-01") so UI can show the exact server.
+            // Use the resolved server id (e.g. "us-east-nj") so UI can show the exact server.
             region: resolved_server_region.clone(),
             endpoint: selected_relay_addr.to_string(),
             ..Default::default()
@@ -591,6 +591,7 @@ impl VpnConnection {
             auto_router.set_lookup_channel(lookup_tx);
 
             let router_for_lookup = Arc::clone(&auto_router);
+            let state_for_lookup = Arc::clone(&self.state);
             tokio::spawn(async move {
                 while let Some(ip) = lookup_rx.recv().await {
                     match crate::geolocation::lookup_game_server_region(ip).await {
@@ -603,73 +604,53 @@ impl VpnConnection {
                             );
                             let old_region = router_for_lookup.current_region();
 
-                            // Step 1: Get candidate servers for the target region
-                            let candidates = router_for_lookup.get_candidates_for_region(&region);
-
-                            if let Some(candidates) = candidates {
-                                // Step 2: Quick-ping each candidate to find the best one
-                                let best = ping_and_select_best(&candidates).await;
-
-                                if let Some((selected_region, selected_addr, latency_ms)) = best {
-                                    // Step 3: Commit the switch with the best server
-                                    if let Some((new_addr, new_region)) = router_for_lookup
-                                        .commit_switch(region, selected_region, selected_addr)
-                                    {
-                                        log::info!(
-                                            "Auto-routing: SWITCHING relay {} -> {} (addr: {}, ping: {}ms)",
-                                            old_region,
-                                            new_region,
-                                            new_addr,
-                                            latency_ms
-                                        );
-                                        relay_for_lookup.switch_relay(new_addr);
-                                        // Send burst of keepalives to new relay to:
-                                        // 1. Establish session on new relay ASAP
-                                        // 2. Punch through NAT/firewall quickly (3 packets at 50ms intervals)
-                                        if let Err(e) = relay_for_lookup.send_keepalive_burst() {
-                                            log::warn!(
-                                                "Auto-routing: Failed to send keepalive burst to new relay: {}",
-                                                e
-                                            );
-                                        }
-                                        log::info!(
-                                            "Auto-routing: Relay addr is now {}",
-                                            relay_for_lookup.relay_addr()
-                                        );
-                                        crate::notification::show_relay_switch(
-                                            &old_region,
-                                            &new_region,
-                                            &location,
-                                        );
-                                    }
-                                } else {
-                                    log::warn!(
-                                        "Auto-routing: All candidate pings failed, using first candidate"
+                            // Step 1: Resolve the best relay server for this region (same
+                            // selection logic as manual region connect).
+                            if let Some((selected_region, selected_addr)) =
+                                router_for_lookup.get_best_server_for_region(&region)
+                            {
+                                // Step 2: Commit the switch
+                                if let Some((new_addr, new_region)) = router_for_lookup
+                                    .commit_switch(region, selected_region, selected_addr)
+                                {
+                                    log::info!(
+                                        "Auto-routing: SWITCHING relay {} -> {} (addr: {})",
+                                        old_region,
+                                        new_region,
+                                        new_addr
                                     );
-                                    // Fallback: use first candidate without ping
-                                    let (fallback_region, fallback_addr) = candidates[0].clone();
-                                    if let Some((new_addr, new_region)) = router_for_lookup
-                                        .commit_switch(region, fallback_region, fallback_addr)
+                                    relay_for_lookup.switch_relay(new_addr);
+                                    // Keep UI state in sync (shows the actual server id and endpoint).
                                     {
-                                        log::info!(
-                                            "Auto-routing: SWITCHING relay {} -> {} (addr: {}, no ping data)",
-                                            old_region,
-                                            new_region,
-                                            new_addr
-                                        );
-                                        relay_for_lookup.switch_relay(new_addr);
-                                        if let Err(e) = relay_for_lookup.send_keepalive_burst() {
-                                            log::warn!(
-                                                "Auto-routing: Failed to send keepalive burst: {}",
-                                                e
-                                            );
+                                        let mut state = state_for_lookup.lock().await;
+                                        if let ConnectionState::Connected {
+                                            ref mut server_region,
+                                            ref mut server_endpoint,
+                                            ..
+                                        } = *state
+                                        {
+                                            *server_region = new_region.clone();
+                                            *server_endpoint = new_addr.to_string();
                                         }
-                                        crate::notification::show_relay_switch(
-                                            &old_region,
-                                            &new_region,
-                                            &location,
+                                    }
+                                    // Send burst of keepalives to new relay to:
+                                    // 1. Establish session on new relay ASAP
+                                    // 2. Punch through NAT/firewall quickly (3 packets at 50ms intervals)
+                                    if let Err(e) = relay_for_lookup.send_keepalive_burst() {
+                                        log::warn!(
+                                            "Auto-routing: Failed to send keepalive burst to new relay: {}",
+                                            e
                                         );
                                     }
+                                    log::info!(
+                                        "Auto-routing: Relay addr is now {}",
+                                        relay_for_lookup.relay_addr()
+                                    );
+                                    crate::notification::show_relay_switch(
+                                        &old_region,
+                                        &new_region,
+                                        &location,
+                                    );
                                 }
                             } else {
                                 log::info!(
@@ -1450,5 +1431,72 @@ mod tests {
             resolved,
             Some(("germany-01".to_string(), parse_addr("10.0.0.1:51821")))
         );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_us_region_prefix_matching() {
+        // Regression test: US servers use "us-east-nj", "us-west-la" naming.
+        // The gaming region IDs are "us-east", "us-west", "us-central".
+        // Prefix matching "us-east-" must find "us-east-nj".
+        let available_servers = vec![
+            (
+                "us-east-nj".to_string(),
+                parse_addr("108.61.7.6:51821"),
+                Some(30),
+            ),
+            (
+                "us-west-la".to_string(),
+                parse_addr("45.63.55.139:51821"),
+                Some(45),
+            ),
+            (
+                "us-central-dallas".to_string(),
+                parse_addr("108.61.205.6:51821"),
+                Some(40),
+            ),
+        ];
+
+        // "us-east" has no exact match -> falls to prefix "us-east-" -> finds "us-east-nj"
+        let resolved = resolve_relay_server_for_region("us-east", &available_servers, None);
+        assert_eq!(
+            resolved,
+            Some(("us-east-nj".to_string(), parse_addr("108.61.7.6:51821")))
+        );
+
+        let resolved = resolve_relay_server_for_region("us-west", &available_servers, None);
+        assert_eq!(
+            resolved,
+            Some(("us-west-la".to_string(), parse_addr("45.63.55.139:51821")))
+        );
+
+        let resolved = resolve_relay_server_for_region("us-central", &available_servers, None);
+        assert_eq!(
+            resolved,
+            Some((
+                "us-central-dallas".to_string(),
+                parse_addr("108.61.205.6:51821")
+            ))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_legacy_america_finds_nothing() {
+        // Documents the bug: "america" as a region name finds no servers
+        // in the current API naming scheme.
+        let available_servers = vec![
+            (
+                "us-east-nj".to_string(),
+                parse_addr("108.61.7.6:51821"),
+                Some(30),
+            ),
+            (
+                "us-west-la".to_string(),
+                parse_addr("45.63.55.139:51821"),
+                Some(45),
+            ),
+        ];
+
+        let resolved = resolve_relay_server_for_region("america", &available_servers, None);
+        assert_eq!(resolved, None);
     }
 }

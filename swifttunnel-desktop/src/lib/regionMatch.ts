@@ -5,7 +5,7 @@ import type { ServerRegion } from "./types";
  *
  * `vpnRegion` can be:
  * - a region id (e.g. "singapore")
- * - a server id (e.g. "america-01") after auto-routing switches relays
+ * - a server id (e.g. "us-east-nj") after auto-routing switches relays
  * - a display name (e.g. "Singapore") depending on backend/older builds
  */
 export function findRegionForVpnRegion(
@@ -19,7 +19,7 @@ export function findRegionForVpnRegion(
   const byId = regions.find((r) => r.id.toLowerCase() === normalized);
   if (byId) return byId;
 
-  // 2) Server id match (auto-routing may report "america-01", etc).
+  // 2) Server id match (auto-routing may report "us-east-nj", etc).
   const byServerId = regions.find((r) =>
     r.servers.some((id) => id.toLowerCase() === normalized),
   );
@@ -29,8 +29,16 @@ export function findRegionForVpnRegion(
   const byName = regions.find((r) => r.name.toLowerCase() === normalized);
   if (byName) return byName;
 
-  // 4) Prefix fallback: "america-01" -> "america"
-  const prefix = normalized.split("-")[0];
-  return regions.find((r) => r.id.toLowerCase() === prefix);
+  // 4) Prefix fallback: try progressively shorter prefixes by stripping
+  //    the last "-segment" each time. This handles multi-segment names
+  //    like "us-east-nj" -> try "us-east" -> try "us".
+  const parts = normalized.split("-");
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const prefix = parts.slice(0, i).join("-");
+    const byPrefix = regions.find((r) => r.id.toLowerCase() === prefix);
+    if (byPrefix) return byPrefix;
+  }
+
+  return undefined;
 }
 

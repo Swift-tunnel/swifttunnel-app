@@ -282,15 +282,17 @@ impl AutoRouter {
         );
     }
 
-    /// Get candidate relay servers for a game region.
+    /// Resolve the best relay server for a game region.
     ///
-    /// Returns `None` if already on the correct region or no candidates exist.
-    /// Returns `Some((candidates, game_region))` where candidates are (region_name, addr)
-    /// pairs that should be pinged to find the best one.
-    pub fn get_candidates_for_region(
+    /// Returns `None` if:
+    /// - the region is unknown,
+    /// - the region is whitelisted (VPN bypass),
+    /// - already on the desired server,
+    /// - or no matching server exists.
+    pub fn get_best_server_for_region(
         &self,
         game_region: &RobloxRegion,
-    ) -> Option<Vec<(String, SocketAddr)>> {
+    ) -> Option<(String, SocketAddr)> {
         if *game_region == RobloxRegion::Unknown {
             return None;
         }
@@ -329,88 +331,36 @@ impl AutoRouter {
         let best_st_region = game_region.best_swifttunnel_region()?;
         let current_st_region = self.current_st_region.read().clone();
 
-        // Check if we're already on the best region
-        if current_st_region == best_st_region
-            || current_st_region.starts_with(&format!("{}-", best_st_region))
-        {
+        // Check if the user has pinned a specific server for this region.
+        // Clone so we don't hold the lock while resolving.
+        let pinned_server = self.forced_servers.read().get(best_st_region).cloned();
+        let pinned_server = pinned_server.as_deref();
+
+        let servers = self.available_servers.read();
+        let (resolved_region, resolved_addr) =
+            match super::connection::resolve_relay_server_for_region(
+                best_st_region,
+                &servers,
+                pinned_server,
+            ) {
+                Some(v) => v,
+                None => {
+                    log::warn!(
+                        "Auto-routing: No server found for region '{}' (game region: {})",
+                        best_st_region,
+                        game_region
+                    );
+                    return None;
+                }
+            };
+
+        // Check if we're already on the resolved best server
+        if current_st_region == resolved_region {
             *self.current_game_region.write() = Some(game_region.clone());
             return None;
         }
 
-        let servers = self.available_servers.read();
-
-        // Check if the user has pinned a specific server for this region
-        let forced = self.forced_servers.read();
-        let pinned_server = forced.get(best_st_region);
-
-        let mut candidates_with_latency: Vec<&(String, SocketAddr, Option<u32>)> =
-            if let Some(pinned) = pinned_server {
-                // Only return the pinned server as the sole candidate
-                servers
-                    .iter()
-                    .filter(|(region, _, _)| region == pinned)
-                    .collect()
-            } else {
-                servers
-                    .iter()
-                    .filter(|(region, _, _)| {
-                        region == best_st_region
-                            || region.starts_with(&format!("{}-", best_st_region))
-                    })
-                    .collect()
-            };
-
-        if let Some(pinned) = pinned_server {
-            if candidates_with_latency.is_empty() {
-                log::warn!(
-                    "Auto-routing: Pinned server '{}' not found for region '{}', falling back to all candidates",
-                    pinned,
-                    best_st_region
-                );
-                // Fallback to all candidates for the region
-                candidates_with_latency = servers
-                    .iter()
-                    .filter(|(region, _, _)| {
-                        region == best_st_region
-                            || region.starts_with(&format!("{}-", best_st_region))
-                    })
-                    .collect();
-            } else {
-                log::info!(
-                    "Auto-routing: Using pinned server '{}' for region '{}'",
-                    pinned,
-                    best_st_region
-                );
-            }
-        }
-
-        // Sort by cached latency (lowest first) so fallback picks best cached server
-        candidates_with_latency.sort_by_key(|(_, _, latency)| latency.unwrap_or(u32::MAX));
-
-        let candidates: Vec<(String, SocketAddr)> = candidates_with_latency
-            .into_iter()
-            .map(|(region, addr, _)| (region.clone(), *addr))
-            .collect();
-
-        if candidates.is_empty() {
-            log::warn!(
-                "Auto-routing: No server found for region '{}' (game region: {})",
-                best_st_region,
-                game_region
-            );
-            None
-        } else {
-            log::info!(
-                "Auto-routing: {} candidates for region '{}': {:?}",
-                candidates.len(),
-                best_st_region,
-                candidates
-                    .iter()
-                    .map(|(r, a)| format!("{} ({})", r, a))
-                    .collect::<Vec<_>>()
-            );
-            Some(candidates)
-        }
+        Some((resolved_region, resolved_addr))
     }
 
     /// Commit a relay switch after the best server has been selected (called from background task).
@@ -542,8 +492,18 @@ mod tests {
                 None,
             ),
             (
-                "america-01".to_string(),
-                "54.225.245.114:51821".parse().unwrap(),
+                "us-east-nj".to_string(),
+                "108.61.7.6:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "us-west-la".to_string(),
+                "45.63.55.139:51821".parse().unwrap(),
+                None,
+            ),
+            (
+                "us-central-dallas".to_string(),
+                "108.61.205.6:51821".parse().unwrap(),
                 None,
             ),
             (
@@ -596,52 +556,89 @@ mod tests {
     }
 
     #[test]
-    fn test_get_candidates_switches_relay() {
+    fn test_get_best_server_switches_relay() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
         router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
 
-        // Game server in US East — should return america candidates
-        let candidates = router.get_candidates_for_region(&RobloxRegion::UsEast);
-        assert!(candidates.is_some());
-        let candidates = candidates.unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].0, "america-01");
-        assert_eq!(
-            candidates[0].1,
-            "54.225.245.114:51821".parse::<SocketAddr>().unwrap()
-        );
+        // Game server in US East — should resolve to us-east-nj
+        let best = router.get_best_server_for_region(&RobloxRegion::UsEast);
+        assert!(best.is_some());
+        let (region, addr) = best.unwrap();
+        assert_eq!(region, "us-east-nj");
+        assert_eq!(addr, "108.61.7.6:51821".parse::<SocketAddr>().unwrap());
 
         // Commit the switch
-        let result = router.commit_switch(
-            RobloxRegion::UsEast,
-            candidates[0].0.clone(),
-            candidates[0].1,
-        );
+        let result = router.commit_switch(RobloxRegion::UsEast, region, addr);
         assert!(result.is_some());
         let (addr, region) = result.unwrap();
-        assert_eq!(region, "america-01");
-        assert_eq!(addr, "54.225.245.114:51821".parse::<SocketAddr>().unwrap());
+        assert_eq!(region, "us-east-nj");
+        assert_eq!(addr, "108.61.7.6:51821".parse::<SocketAddr>().unwrap());
     }
 
     #[test]
-    fn test_get_candidates_same_region_no_switch() {
+    fn test_get_best_server_same_region_no_switch() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
         router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
 
         // Already on Singapore — should return None (no candidates needed)
-        let candidates = router.get_candidates_for_region(&RobloxRegion::Singapore);
-        assert!(candidates.is_none());
+        let best = router.get_best_server_for_region(&RobloxRegion::Singapore);
+        assert!(best.is_none());
     }
 
     #[test]
-    fn test_get_candidates_unknown_no_switch() {
+    fn test_get_best_server_same_region_switches_to_manual_resolved_server() {
+        // Regression test: previously we treated "already on best region" as "already on any
+        // server with prefix {region}-", which prevented switching to the region's preferred
+        // server (and ignored forced servers). Auto-routing should resolve the same server
+        // as manual region connect and switch if we aren't already on it.
+        let router = AutoRouter::new(true, "singapore-02");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("51.79.128.67:51821".parse().unwrap(), "singapore-02");
+
+        // Manual resolution prefers the exact "singapore" server id when it exists.
+        let best = router.get_best_server_for_region(&RobloxRegion::Singapore);
+        assert_eq!(
+            best,
+            Some((
+                "singapore".to_string(),
+                "54.255.205.216:51821".parse::<SocketAddr>().unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_forced_server_overrides_within_region() {
+        use std::collections::HashMap;
+
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        // Force singapore -> singapore-02 (even though we're in the right region)
+        router.set_forced_servers(HashMap::from([(
+            "singapore".to_string(),
+            "singapore-02".to_string(),
+        )]));
+
+        let best = router.get_best_server_for_region(&RobloxRegion::Singapore);
+        assert_eq!(
+            best,
+            Some((
+                "singapore-02".to_string(),
+                "51.79.128.67:51821".parse::<SocketAddr>().unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_get_best_server_unknown_no_switch() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
 
-        let candidates = router.get_candidates_for_region(&RobloxRegion::Unknown);
-        assert!(candidates.is_none());
+        let best = router.get_best_server_for_region(&RobloxRegion::Unknown);
+        assert!(best.is_none());
     }
 
     #[test]
@@ -694,8 +691,8 @@ mod tests {
         router.set_whitelisted_regions(vec!["US East".to_string()]);
 
         // Game server in US East — should bypass (return None) and set bypassed flag
-        let candidates = router.get_candidates_for_region(&RobloxRegion::UsEast);
-        assert!(candidates.is_none());
+        let best = router.get_best_server_for_region(&RobloxRegion::UsEast);
+        assert!(best.is_none());
         assert!(router.is_bypassed());
 
         // Game region should still be tracked
@@ -711,9 +708,9 @@ mod tests {
         // Whitelist Singapore only
         router.set_whitelisted_regions(vec!["Singapore".to_string()]);
 
-        // Game server in US East — should NOT bypass, should return candidates
-        let candidates = router.get_candidates_for_region(&RobloxRegion::UsEast);
-        assert!(candidates.is_some());
+        // Game server in US East — should NOT bypass, should resolve a best server
+        let best = router.get_best_server_for_region(&RobloxRegion::UsEast);
+        assert!(best.is_some());
         assert!(!router.is_bypassed());
     }
 
@@ -726,11 +723,11 @@ mod tests {
         router.set_whitelisted_regions(vec!["US East".to_string()]);
 
         // First: whitelisted region → bypassed
-        router.get_candidates_for_region(&RobloxRegion::UsEast);
+        router.get_best_server_for_region(&RobloxRegion::UsEast);
         assert!(router.is_bypassed());
 
         // Then: non-whitelisted region → bypass cleared
-        router.get_candidates_for_region(&RobloxRegion::Tokyo);
+        router.get_best_server_for_region(&RobloxRegion::Tokyo);
         assert!(!router.is_bypassed());
     }
 
@@ -741,7 +738,7 @@ mod tests {
         router.set_available_servers(make_servers());
         router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
 
-        router.get_candidates_for_region(&RobloxRegion::UsEast);
+        router.get_best_server_for_region(&RobloxRegion::UsEast);
         assert!(router.is_bypassed());
 
         router.reset();
@@ -750,19 +747,66 @@ mod tests {
 
     #[test]
     fn test_region_matching_no_false_prefix_matches() {
-        let region = "america";
+        let region = "us-east";
 
         let matches_region = |candidate: &str| -> bool {
             candidate == region || candidate.starts_with(&format!("{}-", region))
         };
 
-        assert!(matches_region("america"));
-        assert!(matches_region("america-01"));
-        assert!(matches_region("america-west"));
-        assert!(!matches_region("americano"));
-        assert!(!matches_region("americas"));
-        assert!(!matches_region("american"));
+        assert!(matches_region("us-east"));
+        assert!(matches_region("us-east-nj"));
+        assert!(matches_region("us-east-va"));
+        assert!(!matches_region("us-east2")); // no dash separator
+        assert!(!matches_region("us-central-dallas"));
+        assert!(!matches_region("us-west-la"));
         assert!(!matches_region("singapore"));
         assert!(!matches_region("tokyo-02"));
+    }
+
+    #[test]
+    fn test_us_regions_route_to_distinct_servers() {
+        // Regression test: US regions must map to separate API region IDs
+        // (previously all mapped to "america" which no longer exists in API)
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        // US East -> us-east-nj
+        let east = router.get_best_server_for_region(&RobloxRegion::UsEast);
+        assert!(east.is_some(), "UsEast should resolve a best server");
+        let (region, _addr) = east.unwrap();
+        assert_eq!(region, "us-east-nj");
+
+        // US West -> us-west-la
+        let west = router.get_best_server_for_region(&RobloxRegion::UsWest);
+        assert!(west.is_some(), "UsWest should resolve a best server");
+        let (region, _addr) = west.unwrap();
+        assert_eq!(region, "us-west-la");
+
+        // US Central -> us-central-dallas
+        let central = router.get_best_server_for_region(&RobloxRegion::UsCentral);
+        assert!(central.is_some(), "UsCentral should resolve a best server");
+        let (region, _addr) = central.unwrap();
+        assert_eq!(region, "us-central-dallas");
+    }
+
+    #[test]
+    fn test_legacy_america_name_finds_no_candidates() {
+        // Documents the bug: "america" as a region base name no longer matches
+        // any server in the current API. This test proves the fix is necessary.
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        // No server in make_servers() has region "america" or "america-*"
+        let servers = router.available_servers.read();
+        let legacy_candidates: Vec<_> = servers
+            .iter()
+            .filter(|(region, _, _)| region == "america" || region.starts_with("america-"))
+            .collect();
+        assert!(
+            legacy_candidates.is_empty(),
+            "No servers should match the legacy 'america' region name"
+        );
     }
 }
