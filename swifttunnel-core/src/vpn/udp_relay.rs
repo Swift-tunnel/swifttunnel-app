@@ -159,19 +159,42 @@ impl UdpRelay {
         packet[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
         packet[SESSION_ID_LEN..total_len].copy_from_slice(payload);
 
-        // Try to send, retry once on WouldBlock
+        // Try to send with exponential backoff retry on WouldBlock
+        // STABILITY FIX: Single retry was insufficient under high load, causing packet drops
+        // Now retries up to 3 times with 50μs, 100μs, 200μs delays (total max ~350μs)
         let current_addr = **self.relay_addr.load();
-        let sent = match self.socket.send_to(&packet[..total_len], current_addr) {
-            Ok(sent) => sent,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Retry once after tiny delay
-                std::thread::sleep(Duration::from_micros(50));
-                self.socket
-                    .send_to(&packet[..total_len], current_addr)
-                    .context("Retry send failed")?
+        let mut retry_delay_us = 50u64;
+        let mut last_error = None;
+        let mut sent = 0usize;
+
+        for attempt in 0..4 {
+            match self.socket.send_to(&packet[..total_len], current_addr) {
+                Ok(n) => {
+                    sent = n;
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if attempt == 3 {
+                        // Final attempt failed - log and return error
+                        log::warn!(
+                            "UDP Relay: Send failed after 4 attempts (WouldBlock), packet dropped"
+                        );
+                        return Err(e.into());
+                    }
+                    last_error = Some(e);
+                    std::thread::sleep(Duration::from_micros(retry_delay_us));
+                    retry_delay_us *= 2; // Exponential backoff
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
-        };
+        }
+
+        // If we exited the loop without sending, report the last error
+        if sent == 0 {
+            if let Some(e) = last_error {
+                return Err(e.into());
+            }
+        }
 
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = self.last_activity.lock() {

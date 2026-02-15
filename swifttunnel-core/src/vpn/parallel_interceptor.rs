@@ -2708,8 +2708,10 @@ fn run_packet_worker(
     let mut direct_encrypt_success = 0u64;
     let mut direct_encrypt_fail = 0u64;
 
-    // Adaptive timeout: short when active, longer when idle to save CPU
-    // This is the key optimization - avoid 1000Hz polling when no packets
+    // LATENCY FIX: Gradual adaptive timeout instead of binary jump
+    // Previous: 5ms -> 150ms after 10 timeouts caused latency spikes on bursty traffic
+    // Now: 2ms -> 5ms -> 10ms -> 20ms -> 50ms (smooth ramp, max 50ms)
+    // This reduces worst-case latency from 150ms to 50ms while still saving CPU
     let mut consecutive_timeouts = 0u32;
 
     loop {
@@ -2717,12 +2719,17 @@ fn run_packet_worker(
             break;
         }
 
-        // Adaptive timeout based on recent activity:
-        // - 5ms when recently active (gaming latency acceptable)
-        // - 150ms after 10 consecutive timeouts (idle, save CPU)
-        // The reader thread has the event-driven wakeup, workers just need
-        // to process what the reader dispatches to them
-        let timeout_ms = if consecutive_timeouts > 10 { 150 } else { 5 };
+        // Gradual adaptive timeout based on recent activity:
+        // - 2ms when active (low latency for gaming)
+        // - Gradually increases: 2ms -> 5ms -> 10ms -> 20ms -> 50ms
+        // - Max 50ms (was 150ms) to reduce latency spikes on traffic bursts
+        let timeout_ms = match consecutive_timeouts {
+            0..=5 => 2,    // Active: 2ms for lowest latency
+            6..=15 => 5,   // Light idle: 5ms
+            16..=30 => 10, // Moderate idle: 10ms
+            31..=50 => 20, // Extended idle: 20ms
+            _ => 50,       // Deep idle: 50ms max (was 150ms)
+        };
 
         let work = match receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
             Ok(w) => {
@@ -3007,19 +3014,30 @@ fn run_packet_worker(
                             TunnResult::WriteToNetwork(data) => {
                                 // Send encrypted packet directly via UDP
                                 // CRITICAL: Use send() not send_to() because socket is connected
-                                match ctx.socket.send(data) {
-                                    Ok(_) => (true, data.len()),
-                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                        // STABILITY FIX: Retry once on WouldBlock (socket buffer full)
-                                        // This prevents packet drops during traffic bursts
-                                        std::thread::sleep(std::time::Duration::from_micros(50));
-                                        match ctx.socket.send(data) {
-                                            Ok(_) => (true, data.len()),
-                                            Err(_) => (false, 0),
+                                // STABILITY FIX: Exponential backoff retry (50μs, 100μs, 200μs)
+                                // Single retry was insufficient under high load
+                                let mut retry_delay_us = 50u64;
+                                let mut send_success = false;
+                                let mut final_len = 0usize;
+
+                                for attempt in 0..4 {
+                                    match ctx.socket.send(data) {
+                                        Ok(n) => {
+                                            send_success = true;
+                                            final_len = n;
+                                            break;
                                         }
+                                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                            if attempt == 3 {
+                                                break; // Give up after 4 attempts
+                                            }
+                                            std::thread::sleep(std::time::Duration::from_micros(retry_delay_us));
+                                            retry_delay_us *= 2;
+                                        }
+                                        Err(_) => break,
                                     }
-                                    Err(_) => (false, 0),
                                 }
+                                (send_success, final_len)
                             }
                             TunnResult::Done => {
                                 // Packet was queued internally (handshake in progress)
@@ -4623,7 +4641,7 @@ fn run_v3_inbound_receiver(
             );
         }
 
-        // === KEEPALIVE (every 20 seconds) ===
+        // === KEEPALIVE (every 15 seconds - matches udp_relay::KEEPALIVE_INTERVAL) ===
         if now.duration_since(last_keepalive).as_secs() >= KEEPALIVE_INTERVAL_SECS {
             last_keepalive = now;
             if let Err(e) = relay.send_keepalive() {

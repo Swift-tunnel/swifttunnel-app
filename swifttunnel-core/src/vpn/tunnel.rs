@@ -280,6 +280,42 @@ impl WireguardTunnel {
             .connect(self.endpoint)
             .map_err(|e| VpnError::Network(format!("Failed to connect to endpoint: {}", e)))?;
 
+        // STABILITY FIX: Increase socket buffers to 256KB to prevent packet drops under load
+        // Default Windows SO_SNDBUF is only 8KB which causes WouldBlock during traffic bursts
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawSocket;
+            let raw = std_socket.as_raw_socket();
+            let buf_size: i32 = 256 * 1024;
+            let sock = windows::Win32::Networking::WinSock::SOCKET(raw as usize);
+
+            unsafe {
+                let buf_bytes = std::slice::from_raw_parts(&buf_size as *const i32 as *const u8, 4);
+
+                let result = windows::Win32::Networking::WinSock::setsockopt(
+                    sock,
+                    windows::Win32::Networking::WinSock::SOL_SOCKET,
+                    windows::Win32::Networking::WinSock::SO_RCVBUF,
+                    Some(buf_bytes),
+                );
+                if result != 0 {
+                    log::warn!("VPN socket: Failed to set SO_RCVBUF to 256KB");
+                }
+
+                let result = windows::Win32::Networking::WinSock::setsockopt(
+                    sock,
+                    windows::Win32::Networking::WinSock::SOL_SOCKET,
+                    windows::Win32::Networking::WinSock::SO_SNDBUF,
+                    Some(buf_bytes),
+                );
+                if result != 0 {
+                    log::warn!("VPN socket: Failed to set SO_SNDBUF to 256KB");
+                } else {
+                    log::info!("VPN socket: Buffer sizes increased to 256KB");
+                }
+            }
+        }
+
         // Clone the socket BEFORE converting to Tokio - this clone will be used by split tunnel
         // Both sockets share the same underlying file descriptor/port
         let socket_for_split_tunnel = std_socket.try_clone().map_err(|e| {
