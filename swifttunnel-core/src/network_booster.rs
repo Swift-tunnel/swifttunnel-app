@@ -1,7 +1,6 @@
 use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
-use std::process::Command;
 
 pub struct NetworkBooster {
     original_mtu: Option<u32>,
@@ -22,11 +21,6 @@ impl NetworkBooster {
 
         if config.prioritize_roblox_traffic {
             self.prioritize_game_traffic()?;
-        }
-
-        // Hook for external network booster integration
-        if config.enable_network_boost {
-            self.enable_external_network_boost()?;
         }
 
         // Tier 1 (Safe) Network Boosts
@@ -85,14 +79,6 @@ impl NetworkBooster {
             warn!("Failed to create QoS policy (may already exist or need admin)");
         }
 
-        Ok(())
-    }
-
-    /// Enable external network boost (integration point for SwiftTunnel)
-    fn enable_external_network_boost(&self) -> Result<()> {
-        info!("Enabling external network boost integration");
-        // Integration point - connect your network booster here
-        info!("Network boost integration point - connect your SwiftTunnel here");
         Ok(())
     }
 

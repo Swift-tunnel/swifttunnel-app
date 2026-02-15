@@ -335,11 +335,6 @@ impl RobloxOptimizer {
         content = self.set_xml_token_value(&content, "SavedQualityLevel", quality_value);
         info!("Set graphics quality to level: {}", quality_value);
 
-        // Apply reduced motion if reducing quality
-        if config.reduce_texture_quality {
-            content = self.set_xml_bool_value(&content, "ReducedMotion", true);
-        }
-
         // Write updated content back
         fs::write(&settings_path, &content)?;
 
@@ -349,10 +344,9 @@ impl RobloxOptimizer {
         // The FPS settings may be reset by Roblox, but the background monitor
         // will re-detect and re-apply them when needed.
 
-        // Apply dynamic render optimization
-        if let Err(e) = self.apply_dynamic_render_optimization(&config.dynamic_render_optimization)
-        {
-            warn!("Could not apply dynamic render optimization: {}", e);
+        // Apply FFlag optimizations (shadows, post-processing, texture quality, dynamic render)
+        if let Err(e) = self.apply_client_fflags(config) {
+            warn!("Could not apply FFlag optimizations: {}", e);
         }
 
         info!("Roblox optimizations applied successfully");
@@ -459,12 +453,9 @@ impl RobloxOptimizer {
 
         fs::copy(&self.backup_path, &settings_path)?;
 
-        // Also remove dynamic render optimization when restoring
-        if let Err(e) = self.remove_dynamic_render_optimization() {
-            warn!(
-                "Could not remove dynamic render optimization during restore: {}",
-                e
-            );
+        // Remove all FFlag optimizations when restoring
+        if let Err(e) = self.remove_all_fflags() {
+            warn!("Could not remove FFlag optimizations during restore: {}", e);
         }
 
         // Don't set read-only after restore - user is disabling optimizations
@@ -622,6 +613,121 @@ impl RobloxOptimizer {
         }
 
         Some(client_settings)
+    }
+
+    /// Apply all FFlag optimizations to ClientAppSettings.json
+    /// Handles: dynamic render, shadows, post-processing, texture quality
+    fn apply_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<()> {
+        let client_settings = Self::get_client_settings_path()
+            .ok_or_else(|| anyhow::anyhow!("Could not find Roblox version folder"))?;
+
+        let settings_path = client_settings.join("ClientAppSettings.json");
+
+        // Read existing settings if file exists
+        let mut settings: HashMap<String, serde_json::Value> = if settings_path.exists() {
+            fs::read_to_string(&settings_path)
+                .ok()
+                .and_then(|content| serde_json::from_str(&content).ok())
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
+        // Dynamic render optimization
+        if let Some(render_value) = config.dynamic_render_optimization.render_value() {
+            settings.insert(
+                "DFIntDebugDynamicRenderKiloPixels".to_string(),
+                serde_json::json!(render_value),
+            );
+        } else {
+            settings.remove("DFIntDebugDynamicRenderKiloPixels");
+        }
+
+        // Disable shadows via FFlags
+        if config.disable_shadows {
+            settings.insert(
+                "FIntRenderShadowIntensity".to_string(),
+                serde_json::json!(0),
+            );
+            settings.insert(
+                "DFFlagDebugPauseVoxelizer".to_string(),
+                serde_json::json!("true"),
+            );
+        } else {
+            settings.remove("FIntRenderShadowIntensity");
+            settings.remove("DFFlagDebugPauseVoxelizer");
+        }
+
+        // Disable post-processing effects via FFlags
+        if config.disable_post_processing {
+            settings.insert("FFlagDisablePostFx".to_string(), serde_json::json!("true"));
+        } else {
+            settings.remove("FFlagDisablePostFx");
+        }
+
+        // Reduce texture quality via FFlags (skip mip levels = lower quality textures)
+        if config.reduce_texture_quality {
+            settings.insert(
+                "FIntDebugTextureManagerSkipMips".to_string(),
+                serde_json::json!(3),
+            );
+        } else {
+            settings.remove("FIntDebugTextureManagerSkipMips");
+        }
+
+        // Write or delete the file
+        if settings.is_empty() {
+            if settings_path.exists() {
+                fs::remove_file(&settings_path)?;
+            }
+        } else {
+            let json = serde_json::to_string_pretty(&settings)?;
+            fs::write(&settings_path, json)?;
+        }
+
+        info!("FFlag optimizations applied to ClientAppSettings.json");
+        Ok(())
+    }
+
+    /// Remove all SwiftTunnel FFlag settings from ClientAppSettings.json
+    fn remove_all_fflags(&self) -> Result<()> {
+        let client_settings = match Self::get_client_settings_path() {
+            Some(path) => path,
+            None => {
+                info!("No Roblox version folder found, skipping FFlag cleanup");
+                return Ok(());
+            }
+        };
+
+        let settings_path = client_settings.join("ClientAppSettings.json");
+
+        if settings_path.exists() {
+            let content = fs::read_to_string(&settings_path)?;
+            let mut settings: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&content).unwrap_or_default();
+
+            // Remove all our FFlags
+            let our_keys = [
+                "DFIntDebugDynamicRenderKiloPixels",
+                "FIntRenderShadowIntensity",
+                "DFFlagDebugPauseVoxelizer",
+                "FFlagDisablePostFx",
+                "FIntDebugTextureManagerSkipMips",
+            ];
+            for key in our_keys {
+                settings.remove(key);
+            }
+
+            if settings.is_empty() {
+                fs::remove_file(&settings_path)?;
+            } else {
+                let json = serde_json::to_string_pretty(&settings)?;
+                fs::write(&settings_path, json)?;
+            }
+            info!("FFlag optimizations removed from ClientAppSettings.json");
+        }
+
+        Ok(())
     }
 
     /// Apply dynamic render optimization
