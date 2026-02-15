@@ -202,10 +202,7 @@ impl GraphicsQuality {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     pub enable_network_boost: bool,
-    pub optimize_dns: bool,
     pub prioritize_roblox_traffic: bool,
-    pub custom_dns_primary: Option<String>,
-    pub custom_dns_secondary: Option<String>,
     // Tier 1 (Safe) Network Boosts
     #[serde(default = "default_true")]
     pub disable_nagle: bool,
@@ -222,10 +219,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             enable_network_boost: true,
-            optimize_dns: true,
             prioritize_roblox_traffic: true,
-            custom_dns_primary: Some("1.1.1.1".to_string()), // Cloudflare
-            custom_dns_secondary: Some("8.8.8.8".to_string()), // Google
             // Tier 1 network boosts enabled by default
             disable_nagle: true,
             disable_network_throttling: true,
@@ -515,10 +509,7 @@ mod tests {
     fn test_network_config_default() {
         let cfg = NetworkConfig::default();
         assert!(cfg.enable_network_boost);
-        assert!(cfg.optimize_dns);
         assert!(cfg.prioritize_roblox_traffic);
-        assert_eq!(cfg.custom_dns_primary, Some("1.1.1.1".to_string()));
-        assert_eq!(cfg.custom_dns_secondary, Some("8.8.8.8".to_string()));
         assert!(cfg.disable_nagle);
         assert!(cfg.disable_network_throttling);
         assert!(!cfg.optimize_mtu);

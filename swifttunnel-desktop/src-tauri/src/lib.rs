@@ -151,6 +151,7 @@ pub fn run() {
             commands::vpn::vpn_connect,
             commands::vpn::vpn_disconnect,
             commands::vpn::vpn_get_throughput,
+            commands::vpn::vpn_get_ping,
             commands::vpn::vpn_get_diagnostics,
             // Servers
             commands::vpn::server_get_list,

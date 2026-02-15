@@ -67,9 +67,6 @@ dirs = "5.0"
 # HTTP client for API calls
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
-# DNS resolver using Cloudflare 1.1.1.1 (bypasses system DNS that may block GitHub)
-hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime"] }
-
 # VPN Core - WireGuard userspace implementation
 boringtun = "0.6"
 

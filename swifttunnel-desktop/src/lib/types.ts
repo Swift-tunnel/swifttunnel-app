@@ -148,10 +148,7 @@ export interface RobloxSettingsConfig {
 
 export interface NetworkConfig {
   enable_network_boost: boolean;
-  optimize_dns: boolean;
   prioritize_roblox_traffic: boolean;
-  custom_dns_primary: string | null;
-  custom_dns_secondary: string | null;
   disable_nagle: boolean;
   disable_network_throttling: boolean;
   optimize_mtu: boolean;

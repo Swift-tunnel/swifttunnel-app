@@ -52,7 +52,9 @@ export function ConnectTab() {
   const bytesDown = useVpnStore((s) => s.bytesDown);
   const connect = useVpnStore((s) => s.connect);
   const disconnect = useVpnStore((s) => s.disconnect);
+  const ping = useVpnStore((s) => s.ping);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
+  const fetchPing = useVpnStore((s) => s.fetchPing);
   const fetchVpnState = useVpnStore((s) => s.fetchState);
 
   const settings = useSettingsStore((s) => s.settings);
@@ -73,15 +75,20 @@ export function ConnectTab() {
   const selectedRegion = regions.find((r) => r.id === settings.selected_region);
   const selectedLatency = getLatency(settings.selected_region);
   const connectedRegion = findRegionForVpnRegion(regions, vpnRegion);
-  const connectedLatency = connectedRegion
-    ? getLatency(connectedRegion.id)
-    : null;
 
   useEffect(() => {
     if (!isConnected) return;
     const id = setInterval(fetchThroughput, 1000);
     return () => clearInterval(id);
   }, [isConnected, fetchThroughput]);
+
+  // Real-time ICMP ping to the actual relay server
+  useEffect(() => {
+    if (!isConnected) return;
+    void fetchPing();
+    const id = setInterval(() => void fetchPing(), 3000);
+    return () => clearInterval(id);
+  }, [isConnected, fetchPing]);
 
   // Poll VPN state while connected so auto-routing region switches show up
   useEffect(() => {
@@ -92,7 +99,7 @@ export function ConnectTab() {
 
   useEffect(() => {
     void fetchLatencies();
-    const id = setInterval(() => void fetchLatencies(), 30000);
+    const id = setInterval(() => void fetchLatencies(), 15000);
     return () => clearInterval(id);
   }, [fetchLatencies]);
 
@@ -455,7 +462,7 @@ export function ConnectTab() {
                 <HudCell
                   label="Ping"
                   value={
-                    connectedLatency !== null ? `${connectedLatency}ms` : "\u2014"
+                    ping !== null ? `${ping}ms` : "\u2014"
                   }
                   mono
                 />

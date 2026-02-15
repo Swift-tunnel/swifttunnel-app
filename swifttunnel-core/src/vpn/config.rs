@@ -5,7 +5,6 @@
 
 use super::{VpnError, VpnResult};
 use crate::auth::types::VpnConfig;
-use crate::dns::CloudflareDns;
 use serde::{Deserialize, Serialize};
 
 /// API base URL for SwiftTunnel
@@ -17,7 +16,6 @@ fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .dns_resolver(CloudflareDns::shared())
             .build()
             .expect("Failed to build VPN HTTP client")
     })

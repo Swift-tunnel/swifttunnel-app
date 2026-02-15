@@ -56,6 +56,9 @@ export const vpnDisconnect = () =>
 export const vpnGetThroughput = () =>
   invoke<ThroughputResponse | null>("vpn_get_throughput");
 
+export const vpnGetPing = () =>
+  invoke<number | null>("vpn_get_ping");
+
 export const vpnGetDiagnostics = () =>
   invoke<DiagnosticsResponse | null>("vpn_get_diagnostics");
 

@@ -27,10 +27,7 @@ const MOCK_SETTINGS = {
     },
     network_settings: {
       enable_network_boost: true,
-      optimize_dns: true,
       prioritize_roblox_traffic: true,
-      custom_dns_primary: "1.1.1.1",
-      custom_dns_secondary: "8.8.8.8",
       disable_nagle: true,
       disable_network_throttling: true,
       optimize_mtu: false,
@@ -116,6 +113,9 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
           packets_bypassed: Math.floor(Math.random() * 50000),
         }
       : null,
+
+  vpn_get_ping: () =>
+    mockVpnConnected ? 12 + Math.floor(Math.random() * 10) : null,
 
   vpn_get_diagnostics: () =>
     mockVpnConnected

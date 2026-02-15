@@ -161,7 +161,7 @@ pub async fn vpn_connect(
     }
 
     // Gather needed data from settings and server list before locking vpn
-    let (custom_relay, auto_routing, whitelisted_regions) = {
+    let (custom_relay, auto_routing, whitelisted_regions, forced_servers) = {
         let settings = state.settings.lock();
         (
             if settings.custom_relay_server.is_empty() {
@@ -171,6 +171,7 @@ pub async fn vpn_connect(
             },
             settings.auto_routing_enabled,
             settings.whitelisted_regions.clone(),
+            settings.forced_servers.clone(),
         )
     };
 
@@ -206,6 +207,7 @@ pub async fn vpn_connect(
             auto_routing,
             available_servers,
             whitelisted_regions,
+            forced_servers,
         )
         .await
         .map_err(|e| e.to_string());
@@ -237,6 +239,27 @@ pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Resul
 
     emit_vpn_state(&app, &state).await;
     result
+}
+
+#[tauri::command]
+pub async fn vpn_get_ping(state: State<'_, AppState>) -> Result<Option<u32>, String> {
+    let vpn = state.vpn_connection.lock().await;
+    let relay_addr = vpn.current_relay_addr();
+    drop(vpn);
+
+    let addr = match relay_addr {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+
+    let ip = addr.ip().to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        swifttunnel_core::vpn::servers::measure_latency_icmp(&ip)
+    })
+    .await
+    .map_err(|e| format!("Ping task failed: {}", e))?;
+
+    Ok(result)
 }
 
 #[derive(Serialize)]
@@ -353,10 +376,6 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
         sl.regions()
             .iter()
             .filter_map(|region| {
-                if sl.get_region_best_latency(&region.id).is_some() {
-                    return None;
-                }
-
                 let server_id = region.servers.first()?.clone();
                 let server = sl.get_server(&server_id)?;
                 Some((region.id.clone(), server.ip.clone(), server.port, server_id))

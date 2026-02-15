@@ -1,7 +1,6 @@
 //! HTTP client for SwiftTunnel API
 
 use super::types::{AuthError, ExchangeTokenResponse, SupabaseAuthResponse, VpnConfig};
-use crate::dns::CloudflareDns;
 use log::{debug, error, info};
 use reqwest::Client;
 use serde_json::json;
@@ -35,7 +34,6 @@ impl AuthClient {
         let client = Client::builder()
             .user_agent("SwiftTunnel-Desktop/0.1.0")
             .timeout(std::time::Duration::from_secs(30))
-            .dns_resolver(CloudflareDns::shared())
             .build()
             .expect("Failed to create HTTP client");
 

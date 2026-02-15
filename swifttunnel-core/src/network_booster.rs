@@ -4,7 +4,6 @@ use log::{info, warn};
 use std::process::Command;
 
 pub struct NetworkBooster {
-    original_dns: Option<(String, String)>,
     original_mtu: Option<u32>,
     qos_enabled: bool,
 }
@@ -12,7 +11,6 @@ pub struct NetworkBooster {
 impl NetworkBooster {
     pub fn new() -> Self {
         Self {
-            original_dns: None,
             original_mtu: None,
             qos_enabled: false,
         }
@@ -21,10 +19,6 @@ impl NetworkBooster {
     /// Apply network optimizations
     pub fn apply_optimizations(&mut self, config: &NetworkConfig) -> Result<()> {
         info!("Applying network optimizations");
-
-        if config.optimize_dns {
-            self.optimize_dns(config)?;
-        }
 
         if config.prioritize_roblox_traffic {
             self.prioritize_game_traffic()?;
@@ -55,25 +49,6 @@ impl NetworkBooster {
         Ok(())
     }
 
-    /// Optimize DNS settings
-    fn optimize_dns(&mut self, config: &NetworkConfig) -> Result<()> {
-        info!("Optimizing DNS settings");
-
-        let interface_name = self.get_active_network_interface()?;
-
-        // Backup current DNS
-        self.backup_dns_settings(&interface_name)?;
-
-        // Set custom DNS
-        if let (Some(primary), Some(secondary)) =
-            (&config.custom_dns_primary, &config.custom_dns_secondary)
-        {
-            self.set_dns(&interface_name, primary, secondary)?;
-        }
-
-        Ok(())
-    }
-
     /// Get active network interface name
     fn get_active_network_interface(&self) -> Result<String> {
         let output = hidden_command("powershell")
@@ -90,51 +65,6 @@ impl NetworkBooster {
         }
 
         Ok(interface)
-    }
-
-    /// Backup current DNS settings
-    fn backup_dns_settings(&mut self, interface: &str) -> Result<()> {
-        let output = hidden_command("powershell")
-            .args(&[
-                "-Command",
-                &format!(
-                    "Get-DnsClientServerAddress -InterfaceAlias '{}' -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses",
-                    interface
-                )
-            ])
-            .output()?;
-
-        let dns_servers = String::from_utf8_lossy(&output.stdout);
-        let servers: Vec<&str> = dns_servers.lines().collect();
-
-        if servers.len() >= 2 {
-            self.original_dns = Some((servers[0].to_string(), servers[1].to_string()));
-        }
-
-        Ok(())
-    }
-
-    /// Set DNS servers
-    fn set_dns(&self, interface: &str, primary: &str, secondary: &str) -> Result<()> {
-        info!("Setting DNS to {} and {}", primary, secondary);
-
-        let output = hidden_command("powershell")
-            .args(&[
-                "-Command",
-                &format!(
-                    "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses ('{}','{}')",
-                    interface, primary, secondary
-                ),
-            ])
-            .output()?;
-
-        if output.status.success() {
-            info!("DNS updated successfully");
-            Ok(())
-        } else {
-            warn!("Failed to update DNS (may require admin privileges)");
-            Ok(())
-        }
     }
 
     /// Prioritize game traffic using QoS
@@ -164,20 +94,6 @@ impl NetworkBooster {
         // Integration point - connect your network booster here
         info!("Network boost integration point - connect your SwiftTunnel here");
         Ok(())
-    }
-
-    /// Flush DNS cache
-    pub fn flush_dns_cache(&self) -> Result<()> {
-        info!("Flushing DNS cache");
-
-        let output = hidden_command("ipconfig").arg("/flushdns").output()?;
-
-        if output.status.success() {
-            info!("DNS cache flushed successfully");
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Failed to flush DNS cache"))
-        }
     }
 
     /// Test network latency to Roblox servers
@@ -754,11 +670,6 @@ impl NetworkBooster {
     /// Restore original DNS settings
     pub fn restore(&mut self) -> Result<()> {
         info!("Restoring original network settings");
-
-        if let Some((primary, secondary)) = &self.original_dns {
-            let interface_name = self.get_active_network_interface()?;
-            self.set_dns(&interface_name, primary, secondary)?;
-        }
 
         // Restore original MTU
         let _ = self.restore_mtu();

@@ -8,7 +8,6 @@
 //! 4) Compute delta + grade
 
 use super::types::{BufferbloatGrade, BufferbloatTestResults};
-use crate::dns::CloudflareDns;
 use crate::hidden_command;
 use log::{debug, info, warn};
 use reqwest::Client;
@@ -52,7 +51,6 @@ pub async fn run_bufferbloat_test(
 
     let client = Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .dns_resolver(CloudflareDns::shared())
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 

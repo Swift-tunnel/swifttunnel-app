@@ -3,7 +3,6 @@
 //! Uses ipinfo.io to get location information for game server IPs.
 //! Similar to Bloxstrap's server location feature.
 
-use crate::dns::CloudflareDns;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -16,7 +15,6 @@ fn geo_http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
-            .dns_resolver(CloudflareDns::shared())
             .build()
             .expect("Failed to build geolocation HTTP client")
     })

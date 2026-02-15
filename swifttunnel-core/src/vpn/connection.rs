@@ -12,7 +12,6 @@ use super::routes::get_internet_interface_ip;
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
 use super::{VpnError, VpnResult};
 use crate::auth::types::VpnConfig;
-use crate::dns::CloudflareDns;
 use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -34,7 +33,27 @@ fn pick_lowest_latency_server<'a>(
 fn resolve_relay_server_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
+    forced_server: Option<&str>,
 ) -> Option<(String, SocketAddr)> {
+    // If a specific server is pinned for this region, use it directly
+    if let Some(pinned) = forced_server {
+        if let Some((server_region, relay_addr, _)) = available_servers
+            .iter()
+            .find(|(server_region, _, _)| server_region == pinned)
+        {
+            log::info!(
+                "Using pinned server '{}' for region '{}'",
+                pinned,
+                selected_region
+            );
+            return Some((server_region.clone(), *relay_addr));
+        }
+        log::warn!(
+            "Pinned server '{}' not found in server list, falling back to best latency",
+            pinned
+        );
+    }
+
     if let Some((server_region, relay_addr, _)) = pick_lowest_latency_server(
         available_servers
             .iter()
@@ -287,6 +306,7 @@ impl VpnConnection {
         auto_routing_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
+        forced_servers: std::collections::HashMap<String, String>,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -312,8 +332,9 @@ impl VpnConnection {
 
         // Step 1: Resolve initial relay endpoint from available servers
         self.set_state(ConnectionState::FetchingConfig).await;
+        let forced_for_region = forced_servers.get(region).map(|s| s.as_str());
         let (resolved_server_region, selected_relay_addr) =
-            match resolve_relay_server_for_region(region, &available_servers) {
+            match resolve_relay_server_for_region(region, &available_servers, forced_for_region) {
                 Some((server_region, relay_addr)) => (server_region, relay_addr),
                 None => {
                     let error = VpnError::ConfigFetch(format!(
@@ -372,6 +393,7 @@ impl VpnConnection {
                     auto_routing_enabled,
                     available_servers,
                     whitelisted_regions,
+                    forced_servers,
                 )
                 .await
             {
@@ -429,6 +451,7 @@ impl VpnConnection {
         auto_routing_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
+        forced_servers: std::collections::HashMap<String, String>,
     ) -> VpnResult<Vec<String>> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -486,13 +509,19 @@ impl VpnConnection {
                 log::info!("V3: Custom relay is IP address: {}", addr);
                 addr
             } else {
-                // Resolve hostname via Cloudflare DNS
-                let dns = CloudflareDns::shared();
-                match dns.resolve_host(host, port).await {
-                    Ok(addrs) => {
-                        let addr = addrs[0];
-                        log::info!("V3: Resolved custom relay to {}", addr);
-                        addr
+                // Resolve hostname via system DNS
+                match tokio::net::lookup_host(format!("{}:{}", host, port)).await {
+                    Ok(mut addrs) => {
+                        if let Some(addr) = addrs.next() {
+                            log::info!("V3: Resolved custom relay to {}", addr);
+                            addr
+                        } else {
+                            let _ = driver.close();
+                            return Err(VpnError::SplitTunnelSetupFailed(format!(
+                                "DNS resolution returned no addresses for '{}'",
+                                custom
+                            )));
+                        }
                     }
                     Err(e) => {
                         let _ = driver.close();
@@ -550,6 +579,9 @@ impl VpnConnection {
         auto_router.set_available_servers(available_servers);
         if !whitelisted_regions.is_empty() {
             auto_router.set_whitelisted_regions(whitelisted_regions);
+        }
+        if !forced_servers.is_empty() {
+            auto_router.set_forced_servers(forced_servers);
         }
 
         // Spawn background task for async ipinfo.io region lookups
@@ -1296,7 +1328,7 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("germany", &available_servers);
+        let resolved = resolve_relay_server_for_region("germany", &available_servers, None);
         assert_eq!(
             resolved,
             Some(("germany".to_string(), parse_addr("10.0.0.1:51821")))
@@ -1318,7 +1350,7 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("germany", &available_servers);
+        let resolved = resolve_relay_server_for_region("germany", &available_servers, None);
         assert_eq!(
             resolved,
             Some(("germany-01".to_string(), parse_addr("10.0.0.11:51821")))
@@ -1340,7 +1372,7 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("germany", &available_servers);
+        let resolved = resolve_relay_server_for_region("germany", &available_servers, None);
         assert_eq!(resolved, None);
     }
 
@@ -1360,10 +1392,63 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("paris", &available_servers);
+        let resolved = resolve_relay_server_for_region("paris", &available_servers, None);
         assert_eq!(
             resolved,
             Some(("paris-03".to_string(), parse_addr("10.0.2.3:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_forced_server_used() {
+        let available_servers = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(5),
+            ),
+            (
+                "germany-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                Some(20),
+            ),
+            (
+                "germany-03".to_string(),
+                parse_addr("10.0.0.3:51821"),
+                Some(50),
+            ),
+        ];
+
+        // Force germany-03 even though it has the worst latency
+        let resolved =
+            resolve_relay_server_for_region("germany", &available_servers, Some("germany-03"));
+        assert_eq!(
+            resolved,
+            Some(("germany-03".to_string(), parse_addr("10.0.0.3:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_forced_server_not_found_falls_back() {
+        let available_servers = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(5),
+            ),
+            (
+                "germany-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                Some(20),
+            ),
+        ];
+
+        // Force a server that doesn't exist — should fall back to best latency
+        let resolved =
+            resolve_relay_server_for_region("germany", &available_servers, Some("germany-99"));
+        assert_eq!(
+            resolved,
+            Some(("germany-01".to_string(), parse_addr("10.0.0.1:51821")))
         );
     }
 }

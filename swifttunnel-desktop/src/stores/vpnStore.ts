@@ -10,6 +10,7 @@ import {
   vpnConnect,
   vpnDisconnect,
   vpnGetThroughput,
+  vpnGetPing,
   vpnGetDiagnostics,
 } from "../lib/commands";
 import { notify } from "../lib/notifications";
@@ -29,6 +30,9 @@ interface VpnStore {
   packetsTunneled: number;
   packetsBypassed: number;
 
+  // Ping (real-time ICMP to relay)
+  ping: number | null;
+
   // Diagnostics
   diagnostics: DiagnosticsResponse | null;
 
@@ -37,6 +41,7 @@ interface VpnStore {
   connect: (region: string, gamePresets: string[]) => Promise<void>;
   disconnect: () => Promise<void>;
   fetchThroughput: () => Promise<void>;
+  fetchPing: () => Promise<void>;
   fetchDiagnostics: () => Promise<void>;
   handleStateEvent: (event: VpnStateEvent) => void;
   handleThroughputEvent: (event: ThroughputEvent) => void;
@@ -54,6 +59,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   bytesDown: 0,
   packetsTunneled: 0,
   packetsBypassed: 0,
+  ping: null,
   diagnostics: null,
 
   fetchState: async () => {
@@ -102,6 +108,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         bytesDown: 0,
         packetsTunneled: 0,
         packetsBypassed: 0,
+        ping: null,
         diagnostics: null,
       });
       await notify("SwiftTunnel", "VPN disconnected.");
@@ -123,6 +130,15 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       }
     } catch {
       // Silently ignore throughput fetch errors
+    }
+  },
+
+  fetchPing: async () => {
+    try {
+      const ms = await vpnGetPing();
+      set({ ping: ms });
+    } catch {
+      // Silently ignore ping errors
     }
   },
 

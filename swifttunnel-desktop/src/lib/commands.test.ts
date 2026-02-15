@@ -12,6 +12,7 @@ import {
   systemInstallDriver,
   updaterCheckChannel,
   updaterInstallChannel,
+  vpnGetPing,
 } from "./commands";
 
 describe("lib/commands", () => {
@@ -50,5 +51,10 @@ describe("lib/commands", () => {
     await expect(systemInstallDriver()).resolves.toBeUndefined();
     expect(invoke).toHaveBeenCalledWith("system_install_driver");
   });
-});
 
+  it("vpnGetPing invokes backend with expected args", async () => {
+    invoke.mockResolvedValue(42);
+    await expect(vpnGetPing()).resolves.toEqual(42);
+    expect(invoke).toHaveBeenCalledWith("vpn_get_ping");
+  });
+});

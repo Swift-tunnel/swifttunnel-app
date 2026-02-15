@@ -8,7 +8,7 @@
 
 use crate::geolocation::RobloxRegion;
 use parking_lot::RwLock;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -54,6 +54,9 @@ pub struct AutoRouter {
     /// Whether auto-routing has bypassed VPN for the current game region.
     /// Read by the packet interceptor (AtomicBool for lock-free hot path check).
     auto_routing_bypassed: AtomicBool,
+    /// Pinned server per region (region_id -> server_id).
+    /// When set, auto-routing will only use the pinned server for that region.
+    forced_servers: RwLock<HashMap<String, String>>,
 }
 
 /// An auto-routing event for the UI log
@@ -90,6 +93,7 @@ impl AutoRouter {
             pending_any: AtomicBool::new(false),
             whitelisted_regions: RwLock::new(HashSet::new()),
             auto_routing_bypassed: AtomicBool::new(false),
+            forced_servers: RwLock::new(HashMap::new()),
         }
     }
 
@@ -116,6 +120,13 @@ impl AutoRouter {
     pub fn set_whitelisted_regions(&self, regions: Vec<String>) {
         log::info!("Auto-routing: Whitelisted regions updated: {:?}", regions);
         *self.whitelisted_regions.write() = regions.into_iter().collect();
+    }
+
+    /// Set forced servers (region_id -> server_id).
+    /// When a region has a forced server, auto-routing will only use that server.
+    pub fn set_forced_servers(&self, servers: HashMap<String, String>) {
+        log::info!("Auto-routing: Forced servers updated: {:?}", servers);
+        *self.forced_servers.write() = servers;
     }
 
     /// Check whether VPN is currently bypassed due to a whitelisted game region.
@@ -327,12 +338,51 @@ impl AutoRouter {
         }
 
         let servers = self.available_servers.read();
-        let mut candidates_with_latency: Vec<&(String, SocketAddr, Option<u32>)> = servers
-            .iter()
-            .filter(|(region, _, _)| {
-                region == best_st_region || region.starts_with(&format!("{}-", best_st_region))
-            })
-            .collect();
+
+        // Check if the user has pinned a specific server for this region
+        let forced = self.forced_servers.read();
+        let pinned_server = forced.get(best_st_region);
+
+        let mut candidates_with_latency: Vec<&(String, SocketAddr, Option<u32>)> =
+            if let Some(pinned) = pinned_server {
+                // Only return the pinned server as the sole candidate
+                servers
+                    .iter()
+                    .filter(|(region, _, _)| region == pinned)
+                    .collect()
+            } else {
+                servers
+                    .iter()
+                    .filter(|(region, _, _)| {
+                        region == best_st_region
+                            || region.starts_with(&format!("{}-", best_st_region))
+                    })
+                    .collect()
+            };
+
+        if let Some(pinned) = pinned_server {
+            if candidates_with_latency.is_empty() {
+                log::warn!(
+                    "Auto-routing: Pinned server '{}' not found for region '{}', falling back to all candidates",
+                    pinned,
+                    best_st_region
+                );
+                // Fallback to all candidates for the region
+                candidates_with_latency = servers
+                    .iter()
+                    .filter(|(region, _, _)| {
+                        region == best_st_region
+                            || region.starts_with(&format!("{}-", best_st_region))
+                    })
+                    .collect();
+            } else {
+                log::info!(
+                    "Auto-routing: Using pinned server '{}' for region '{}'",
+                    pinned,
+                    best_st_region
+                );
+            }
+        }
 
         // Sort by cached latency (lowest first) so fallback picks best cached server
         candidates_with_latency.sort_by_key(|(_, _, latency)| latency.unwrap_or(u32::MAX));
