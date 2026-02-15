@@ -106,3 +106,45 @@ pub fn boost_get_system_info() -> SystemInfoResponse {
             .unwrap_or(1),
     }
 }
+
+#[tauri::command]
+pub async fn boost_restart_roblox(state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let roblox_optimizer = state.roblox_optimizer.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let roblox = roblox_optimizer.lock();
+
+            roblox
+                .close_running_instances()
+                .map_err(|e| format!("Failed to close Roblox: {}", e))?;
+
+            // Give Roblox a moment to fully exit before relaunching.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if !roblox.is_roblox_running() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+
+            if roblox.is_roblox_running() {
+                return Err("Roblox did not exit in time. Please try again.".to_string());
+            }
+
+            roblox
+                .reopen_client()
+                .map_err(|e| format!("Failed to relaunch Roblox: {}", e))?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("Roblox restart task failed: {}", e))?
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        Err("Roblox restart is only supported on Windows".to_string())
+    }
+}

@@ -162,6 +162,7 @@ pub fn run() {
             commands::optimizer::boost_toggle,
             commands::optimizer::boost_update_config,
             commands::optimizer::boost_get_system_info,
+            commands::optimizer::boost_restart_roblox,
             // Network
             commands::network::network_start_stability_test,
             commands::network::network_start_speed_test,

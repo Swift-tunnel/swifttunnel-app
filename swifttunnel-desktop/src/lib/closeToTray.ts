@@ -3,7 +3,6 @@ export type CloseRequestedEvent = {
 };
 
 type CloseToTrayDeps = {
-  getMinimizeToTray: () => boolean;
   persistWindowState: () => Promise<void>;
   hide: () => Promise<void>;
   close: () => Promise<void>;
@@ -11,7 +10,7 @@ type CloseToTrayDeps = {
 };
 
 // Creates an onCloseRequested handler that:
-// - Prevents close synchronously when minimize-to-tray is enabled (avoids race with async work)
+// - Prevents close synchronously (avoids race with async work)
 // - Hides to tray on success
 // - Falls back to a real close if hide fails (without infinite recursion)
 export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
@@ -19,7 +18,6 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
 
   return async (event: CloseRequestedEvent) => {
     if (deps.isDisposed?.()) return;
-    if (!deps.getMinimizeToTray()) return;
 
     // If we're already in a programmatic close, allow it through.
     if (closing) return;
@@ -47,4 +45,3 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
     }
   };
 }
-

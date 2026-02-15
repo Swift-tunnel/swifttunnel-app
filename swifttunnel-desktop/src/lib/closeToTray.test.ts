@@ -12,27 +12,6 @@ function deferred<T>() {
 }
 
 describe("createCloseToTrayHandler", () => {
-  it("does nothing when minimize-to-tray is disabled", async () => {
-    const preventDefault = vi.fn();
-    const persistWindowState = vi.fn(async () => {});
-    const hide = vi.fn(async () => {});
-    const close = vi.fn(async () => {});
-
-    const handler = createCloseToTrayHandler({
-      getMinimizeToTray: () => false,
-      persistWindowState,
-      hide,
-      close,
-    });
-
-    await handler({ preventDefault });
-
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(persistWindowState).not.toHaveBeenCalled();
-    expect(hide).not.toHaveBeenCalled();
-    expect(close).not.toHaveBeenCalled();
-  });
-
   it("prevents close synchronously and hides to tray on success", async () => {
     const preventDefault = vi.fn();
     const persistGate = deferred<void>();
@@ -40,7 +19,6 @@ describe("createCloseToTrayHandler", () => {
     const close = vi.fn(async () => {});
 
     const handler = createCloseToTrayHandler({
-      getMinimizeToTray: () => true,
       persistWindowState: () => persistGate.promise,
       hide,
       close,
@@ -51,6 +29,7 @@ describe("createCloseToTrayHandler", () => {
     // Before any awaits resolve, preventDefault must already have been called.
     expect(preventDefault).toHaveBeenCalledTimes(1);
     expect(hide).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
 
     persistGate.resolve();
     await p;
@@ -74,7 +53,6 @@ describe("createCloseToTrayHandler", () => {
     });
 
     handler = createCloseToTrayHandler({
-      getMinimizeToTray: () => true,
       persistWindowState,
       hide,
       close,
@@ -88,4 +66,3 @@ describe("createCloseToTrayHandler", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 });
-

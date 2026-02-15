@@ -179,8 +179,6 @@ function App() {
       addUnlistener(
         await appWindow.onCloseRequested(
           createCloseToTrayHandler({
-            getMinimizeToTray: () =>
-              useSettingsStore.getState().settings.minimize_to_tray,
             persistWindowState,
             hide: () => appWindow.hide(),
             close: () => appWindow.close(),
