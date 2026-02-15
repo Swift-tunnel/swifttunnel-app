@@ -8,6 +8,7 @@ import {
   boostRestartRoblox,
 } from "../lib/commands";
 import { notify } from "../lib/notifications";
+import { useSettingsStore } from "./settingsStore";
 
 interface BoostStore {
   // Metrics
@@ -77,6 +78,10 @@ export const useBoostStore = create<BoostStore>((set) => ({
       set({ isToggling: true, error: null });
       await boostToggle(enable);
       set({ isActive: enable, isToggling: false });
+      // Sync to settingsStore so state persists across page navigation
+      const { update, save } = useSettingsStore.getState();
+      update({ optimizations_active: enable });
+      void save();
     } catch (e) {
       const message = String(e);
       set({ isToggling: false, error: message });
