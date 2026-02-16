@@ -41,6 +41,15 @@ impl Default for StabilityTestState {
     }
 }
 
+/// A single ping sample with its timestamp relative to test start
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PingSample {
+    /// Seconds elapsed since test start
+    pub elapsed_secs: f32,
+    /// Latency in ms, or None if the ping timed out (packet loss)
+    pub latency_ms: Option<u32>,
+}
+
 /// Results from a completed stability test
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StabilityTestResults {
@@ -54,10 +63,16 @@ pub struct StabilityTestResults {
     pub jitter: f32,
     /// Packet loss percentage (0.0 - 100.0)
     pub packet_loss: f32,
+    /// Ping spread (max - min) in milliseconds
+    #[serde(default)]
+    pub ping_spread: f32,
     /// Quality rating based on results
     pub quality: ConnectionQuality,
     /// Number of samples collected
     pub sample_count: usize,
+    /// Individual ping samples with elapsed timestamps
+    #[serde(default)]
+    pub ping_samples: Vec<PingSample>,
     /// Timestamp when test completed
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
@@ -65,23 +80,23 @@ pub struct StabilityTestResults {
 /// Connection quality rating
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionQuality {
-    Excellent, // < 30ms avg, < 1% loss, < 5ms jitter
-    Good,      // < 50ms avg, < 2% loss, < 10ms jitter
-    Fair,      // < 80ms avg, < 5% loss, < 20ms jitter
-    Poor,      // < 120ms avg, < 10% loss, < 40ms jitter
+    Excellent, // < 20ms avg, < 0.5% loss, < 2ms jitter, < 10ms spread
+    Good,      // < 40ms avg, < 1% loss, < 5ms jitter, < 25ms spread
+    Fair,      // < 70ms avg, < 3% loss, < 15ms jitter, < 50ms spread
+    Poor,      // < 120ms avg, < 7% loss, < 30ms jitter, < 80ms spread
     Bad,       // Everything else
 }
 
 impl ConnectionQuality {
     /// Determine quality from test metrics
-    pub fn from_metrics(avg_ping: f32, packet_loss: f32, jitter: f32) -> Self {
-        if avg_ping < 30.0 && packet_loss < 1.0 && jitter < 5.0 {
+    pub fn from_metrics(avg_ping: f32, packet_loss: f32, jitter: f32, ping_spread: f32) -> Self {
+        if avg_ping < 20.0 && packet_loss < 0.5 && jitter < 2.0 && ping_spread < 10.0 {
             ConnectionQuality::Excellent
-        } else if avg_ping < 50.0 && packet_loss < 2.0 && jitter < 10.0 {
+        } else if avg_ping < 40.0 && packet_loss < 1.0 && jitter < 5.0 && ping_spread < 25.0 {
             ConnectionQuality::Good
-        } else if avg_ping < 80.0 && packet_loss < 5.0 && jitter < 20.0 {
+        } else if avg_ping < 70.0 && packet_loss < 3.0 && jitter < 15.0 && ping_spread < 50.0 {
             ConnectionQuality::Fair
-        } else if avg_ping < 120.0 && packet_loss < 10.0 && jitter < 40.0 {
+        } else if avg_ping < 120.0 && packet_loss < 7.0 && jitter < 30.0 && ping_spread < 80.0 {
             ConnectionQuality::Poor
         } else {
             ConnectionQuality::Bad
@@ -290,11 +305,11 @@ mod tests {
     fn test_connection_quality_excellent() {
         // All metrics below excellent thresholds
         assert_eq!(
-            ConnectionQuality::from_metrics(29.9, 0.9, 4.9),
+            ConnectionQuality::from_metrics(19.9, 0.4, 1.9, 9.9),
             ConnectionQuality::Excellent
         );
         assert_eq!(
-            ConnectionQuality::from_metrics(0.0, 0.0, 0.0),
+            ConnectionQuality::from_metrics(0.0, 0.0, 0.0, 0.0),
             ConnectionQuality::Excellent
         );
     }
@@ -303,20 +318,24 @@ mod tests {
     fn test_connection_quality_good() {
         // At excellent boundary -> falls to Good
         assert_eq!(
-            ConnectionQuality::from_metrics(30.0, 0.0, 0.0),
+            ConnectionQuality::from_metrics(20.0, 0.0, 0.0, 0.0),
             ConnectionQuality::Good
         );
         assert_eq!(
-            ConnectionQuality::from_metrics(0.0, 1.0, 0.0),
+            ConnectionQuality::from_metrics(0.0, 0.5, 0.0, 0.0),
             ConnectionQuality::Good
         );
         assert_eq!(
-            ConnectionQuality::from_metrics(0.0, 0.0, 5.0),
+            ConnectionQuality::from_metrics(0.0, 0.0, 2.0, 0.0),
+            ConnectionQuality::Good
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(0.0, 0.0, 0.0, 10.0),
             ConnectionQuality::Good
         );
         // Just below Good thresholds
         assert_eq!(
-            ConnectionQuality::from_metrics(49.9, 1.9, 9.9),
+            ConnectionQuality::from_metrics(39.9, 0.9, 4.9, 24.9),
             ConnectionQuality::Good
         );
     }
@@ -324,11 +343,11 @@ mod tests {
     #[test]
     fn test_connection_quality_fair() {
         assert_eq!(
-            ConnectionQuality::from_metrics(50.0, 0.0, 0.0),
+            ConnectionQuality::from_metrics(40.0, 0.0, 0.0, 0.0),
             ConnectionQuality::Fair
         );
         assert_eq!(
-            ConnectionQuality::from_metrics(79.9, 4.9, 19.9),
+            ConnectionQuality::from_metrics(69.9, 2.9, 14.9, 49.9),
             ConnectionQuality::Fair
         );
     }
@@ -336,11 +355,11 @@ mod tests {
     #[test]
     fn test_connection_quality_poor() {
         assert_eq!(
-            ConnectionQuality::from_metrics(80.0, 0.0, 0.0),
+            ConnectionQuality::from_metrics(70.0, 0.0, 0.0, 0.0),
             ConnectionQuality::Poor
         );
         assert_eq!(
-            ConnectionQuality::from_metrics(119.9, 9.9, 39.9),
+            ConnectionQuality::from_metrics(119.9, 6.9, 29.9, 79.9),
             ConnectionQuality::Poor
         );
     }
@@ -348,19 +367,23 @@ mod tests {
     #[test]
     fn test_connection_quality_bad() {
         assert_eq!(
-            ConnectionQuality::from_metrics(120.0, 0.0, 0.0),
+            ConnectionQuality::from_metrics(120.0, 0.0, 0.0, 0.0),
             ConnectionQuality::Bad
         );
         assert_eq!(
-            ConnectionQuality::from_metrics(0.0, 10.0, 0.0),
+            ConnectionQuality::from_metrics(0.0, 7.0, 0.0, 0.0),
             ConnectionQuality::Bad
         );
         assert_eq!(
-            ConnectionQuality::from_metrics(0.0, 0.0, 40.0),
+            ConnectionQuality::from_metrics(0.0, 0.0, 30.0, 0.0),
             ConnectionQuality::Bad
         );
         assert_eq!(
-            ConnectionQuality::from_metrics(200.0, 50.0, 100.0),
+            ConnectionQuality::from_metrics(0.0, 0.0, 0.0, 80.0),
+            ConnectionQuality::Bad
+        );
+        assert_eq!(
+            ConnectionQuality::from_metrics(200.0, 50.0, 100.0, 200.0),
             ConnectionQuality::Bad
         );
     }

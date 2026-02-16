@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from "react";
+import { useState, useMemo, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useNetworkStore } from "../../stores/networkStore";
+import type { PingSample } from "../../lib/types";
 import "../connect/connect.css";
 
-const DURATIONS = [5, 10, 30] as const;
+const DURATIONS = [5, 10, 30, 300] as const;
 
 type TestStatus = "idle" | "running" | "complete" | "error";
 
@@ -121,7 +122,7 @@ export function NetworkTab() {
                     duration === d ? "white" : "var(--color-text-muted)",
                 }}
               >
-                {d}s
+                {d >= 60 ? `${d / 60}min` : `${d}s`}
               </button>
             ))}
           </div>
@@ -200,6 +201,11 @@ export function NetworkTab() {
                     {net.stabilityResult.packet_loss.toFixed(1)}%
                   </span>
                 </div>
+
+                {/* Ping timeline chart */}
+                {net.stabilityResult.ping_samples.length > 0 && (
+                  <PingTimeline samples={net.stabilityResult.ping_samples} />
+                )}
               </div>
             </motion.div>
           )
@@ -439,6 +445,148 @@ function TestCard({
 
       {/* Results (animated) */}
       <AnimatePresence>{result}</AnimatePresence>
+    </div>
+  );
+}
+
+function PingTimeline({ samples }: { samples: PingSample[] }) {
+  const { maxTime, maxPing, yTicks, points, lossPoints } = useMemo(() => {
+    const maxT = samples[samples.length - 1]?.elapsed_secs ?? 1;
+    let maxP = 0;
+    const pts: { x: number; y: number }[] = [];
+    const loss: { x: number }[] = [];
+
+    for (const s of samples) {
+      if (s.latency_ms != null) {
+        if (s.latency_ms > maxP) maxP = s.latency_ms;
+        pts.push({ x: s.elapsed_secs, y: s.latency_ms });
+      } else {
+        loss.push({ x: s.elapsed_secs });
+      }
+    }
+
+    // Add 20% headroom and round to a nice number
+    const raw = Math.max(maxP * 1.2, 10);
+    const ceil = raw <= 50 ? Math.ceil(raw / 10) * 10 : Math.ceil(raw / 25) * 25;
+
+    // Generate 3-4 y-axis ticks
+    const step = ceil <= 30 ? 10 : ceil <= 100 ? 25 : 50;
+    const ticks: number[] = [];
+    for (let v = 0; v <= ceil; v += step) ticks.push(v);
+
+    return { maxTime: maxT, maxPing: ceil, yTicks: ticks, points: pts, lossPoints: loss };
+  }, [samples]);
+
+  const W = 560;
+  const H = 120;
+  const PAD_L = 36;
+  const PAD_R = 8;
+  const PAD_T = 8;
+  const PAD_B = 20;
+  const plotW = W - PAD_L - PAD_R;
+  const plotH = H - PAD_T - PAD_B;
+
+  const toX = (t: number) => PAD_L + (t / maxTime) * plotW;
+  const toY = (ms: number) => PAD_T + plotH - (ms / maxPing) * plotH;
+
+  const linePath =
+    points.length > 1
+      ? points
+          .map((p, i) => `${i === 0 ? "M" : "L"}${toX(p.x).toFixed(1)},${toY(p.y).toFixed(1)}`)
+          .join(" ")
+      : "";
+
+  // X-axis tick labels (evenly spaced time markers)
+  const xTickCount = maxTime > 60 ? 5 : maxTime > 15 ? 4 : 3;
+  const xTicks: number[] = [];
+  for (let i = 0; i <= xTickCount; i++) {
+    xTicks.push((i / xTickCount) * maxTime);
+  }
+
+  function formatTime(secs: number): string {
+    if (secs >= 60) {
+      const m = Math.floor(secs / 60);
+      const s = Math.round(secs % 60);
+      return s > 0 ? `${m}m${s}s` : `${m}m`;
+    }
+    return `${Math.round(secs)}s`;
+  }
+
+  return (
+    <div className="mt-3">
+      <div
+        className="text-[10px] font-medium uppercase text-text-muted mb-1.5"
+        style={{ letterSpacing: "0.06em" }}
+      >
+        Ping Timeline
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        width="100%"
+        style={{ display: "block", overflow: "visible" }}
+      >
+        {/* Grid lines + Y labels */}
+        {yTicks.map((v) => (
+          <g key={v}>
+            <line
+              x1={PAD_L}
+              x2={W - PAD_R}
+              y1={toY(v)}
+              y2={toY(v)}
+              stroke="var(--color-border-subtle)"
+              strokeWidth={0.5}
+            />
+            <text
+              x={PAD_L - 4}
+              y={toY(v) + 3}
+              textAnchor="end"
+              fill="var(--color-text-muted)"
+              fontSize={9}
+              fontFamily="inherit"
+            >
+              {v}
+            </text>
+          </g>
+        ))}
+
+        {/* X labels */}
+        {xTicks.map((t) => (
+          <text
+            key={t}
+            x={toX(t)}
+            y={H - 2}
+            textAnchor="middle"
+            fill="var(--color-text-muted)"
+            fontSize={9}
+            fontFamily="inherit"
+          >
+            {formatTime(t)}
+          </text>
+        ))}
+
+        {/* Ping line */}
+        {linePath && (
+          <path
+            d={linePath}
+            fill="none"
+            stroke="var(--color-accent-primary)"
+            strokeWidth={1.5}
+            strokeLinejoin="round"
+          />
+        )}
+
+        {/* Packet loss markers (red dots at top) */}
+        {lossPoints.map((p, i) => (
+          <circle
+            key={`loss-${i}`}
+            cx={toX(p.x)}
+            cy={PAD_T + 3}
+            r={3}
+            fill="var(--color-latency-bad)"
+            opacity={0.8}
+          />
+        ))}
+      </svg>
     </div>
   );
 }
