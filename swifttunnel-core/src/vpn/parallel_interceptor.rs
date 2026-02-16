@@ -9,10 +9,10 @@
 //!
 //! Target: <0.5ms added latency for split tunnel routing decisions
 //!
-//! Optimizations (v0.5.55):
-//! - Thread-local NAT and encryption buffers (eliminates per-packet heap allocs)
+//! Optimizations:
+//! - Thread-local packet buffers (eliminates per-packet heap allocs)
 //! - ArrayVec for stack-allocated packet work items
-//! - Reduced channel timeout from 10ms to 1ms
+//! - Adaptive channel timeout (5ms active, 150ms idle)
 //!
 //! ```text
 //!                    ┌─────────────────────────────────────┐
@@ -37,14 +37,14 @@
 //!               ┌────────────────────┴────────────────────┐
 //!               ▼                                         ▼
 //!       ┌──────────────┐                         ┌──────────────┐
-//!       │  VPN Tunnel  │                         │  Passthrough │
-//!       │  (Wintun)    │                         │  (Adapter)   │
+//!       │  V3 UDP Relay│                         │  Passthrough │
+//!       │  (Server)    │                         │  (Adapter)   │
 //!       └──────────────┘                         └──────────────┘
 //! ```
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::Ipv4Addr;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::sync::Arc;
@@ -54,29 +54,11 @@ use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
 
-use boringtun::noise::{Tunn, TunnResult};
-
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
 use super::tso_recovery::{delete_tso_marker, write_tso_marker};
-use super::tunnel::FastMutex;
 use super::{VpnError, VpnResult};
 use crate::geolocation::is_roblox_game_server_ip;
-
-/// Context for direct WireGuard encryption (bypasses OS routing)
-///
-/// Uses parking_lot::Mutex (FastMutex) for the Tunn instance to minimize
-/// contention when multiple worker threads encrypt packets simultaneously.
-/// This provides ~10x less lock overhead compared to std::sync::Mutex.
-#[derive(Clone)]
-pub struct VpnEncryptContext {
-    /// WireGuard tunnel for encryption (FastMutex for low-contention locking)
-    pub tunn: Arc<FastMutex<Tunn>>,
-    /// UDP socket for sending encrypted packets
-    pub socket: Arc<UdpSocket>,
-    /// VPN server address
-    pub server_addr: SocketAddr,
-}
 
 // ============================================================================
 // ZERO-ALLOCATION BUFFER MANAGEMENT
@@ -85,20 +67,11 @@ pub struct VpnEncryptContext {
 /// Maximum Ethernet frame size (MTU 1500 + headers)
 const MAX_PACKET_SIZE: usize = 1600;
 
-/// Maximum WireGuard overhead (header + auth tag)
-const WIREGUARD_OVERHEAD: usize = 80;
-
-/// Pre-allocated buffer size for encryption output
-const ENCRYPT_BUFFER_SIZE: usize = MAX_PACKET_SIZE + WIREGUARD_OVERHEAD;
-
-/// Thread-local pre-allocated buffers to eliminate per-packet heap allocations
-/// These are used for NAT rewriting and encryption operations
+/// Thread-local pre-allocated buffer to eliminate per-packet heap allocations
+/// Used for checksum fixup on tunneled packets
 thread_local! {
-    /// Buffer for NAT-rewritten packets (source IP rewriting)
-    static NAT_BUFFER: RefCell<[u8; MAX_PACKET_SIZE]> = RefCell::new([0u8; MAX_PACKET_SIZE]);
-
-    /// Buffer for WireGuard encryption output
-    static ENCRYPT_BUFFER: RefCell<[u8; ENCRYPT_BUFFER_SIZE]> = RefCell::new([0u8; ENCRYPT_BUFFER_SIZE]);
+    /// Buffer for packet processing (checksum offload fix)
+    static PACKET_BUFFER: RefCell<[u8; MAX_PACKET_SIZE]> = RefCell::new([0u8; MAX_PACKET_SIZE]);
 }
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -261,8 +234,6 @@ pub struct ParallelInterceptor {
     default_route_if_index: Option<u32>,
     /// VPN adapter index
     vpn_adapter_idx: Option<usize>,
-    /// Wintun session for VPN injection
-    wintun_session: Option<Arc<wintun::Session>>,
     /// Whether interceptor is active
     active: bool,
     /// Per-worker stats
@@ -273,18 +244,9 @@ pub struct ParallelInterceptor {
     total_injected: AtomicU64,
     /// Shared throughput stats for GUI
     throughput_stats: ThroughputStats,
-    /// VPN tunnel IP (for NAT rewriting on inbound packets)
-    tunnel_ip: Option<std::net::Ipv4Addr>,
-    /// Physical adapter IP (for NAT rewriting on inbound packets)
-    internet_ip: Option<std::net::Ipv4Addr>,
-    /// Context for direct WireGuard encryption (bypasses Wintun for outbound)
-    /// Used for V1 and V2 routing modes
-    vpn_encrypt_ctx: Option<VpnEncryptContext>,
     /// Context for V3 UDP relay (unencrypted, lowest latency)
     relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
-    /// Inbound handler for decrypted packets (does NAT and injects to MSTCP)
-    inbound_handler: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
-    /// Inbound receiver thread handle (reads from VpnEncryptContext socket)
+    /// Inbound receiver thread handle (reads from UdpRelay)
     inbound_receiver_handle: Option<JoinHandle<()>>,
     /// Detected game server IPs (for notification purposes)
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
@@ -330,18 +292,13 @@ impl ParallelInterceptor {
             ipv6_was_disabled: false,
             default_route_if_index: None,
             vpn_adapter_idx: None,
-            wintun_session: None,
             active: false,
             worker_stats,
             total_packets: AtomicU64::new(0),
             total_tunneled: AtomicU64::new(0),
             total_injected: AtomicU64::new(0),
             throughput_stats: ThroughputStats::default(),
-            tunnel_ip: None,
-            internet_ip: None,
-            vpn_encrypt_ctx: None,
             relay_ctx: None,
-            inbound_handler: None,
             inbound_receiver_handle: None,
             detected_game_servers: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashSet::new(),
@@ -410,42 +367,6 @@ impl ParallelInterceptor {
         (adapter_name, has_default_route, tunneled, bypassed)
     }
 
-    /// Set Wintun session for VPN packet injection
-    pub fn set_wintun_session(&mut self, session: Arc<wintun::Session>) {
-        self.wintun_session = Some(session);
-    }
-
-    /// Set NAT IPs for inbound packet rewriting
-    ///
-    /// When inbound VPN packets arrive with destination = tunnel_ip,
-    /// the inbound handler rewrites it to internet_ip so the original
-    /// app socket can receive the response.
-    pub fn set_nat_ips(&mut self, tunnel_ip: &str, internet_ip: &str) {
-        if let Ok(tun_ip) = tunnel_ip
-            .split('/')
-            .next()
-            .unwrap_or(tunnel_ip)
-            .parse::<std::net::Ipv4Addr>()
-        {
-            self.tunnel_ip = Some(tun_ip);
-            log::info!("Set NAT tunnel IP: {}", tun_ip);
-        }
-        if let Ok(int_ip) = internet_ip.parse::<std::net::Ipv4Addr>() {
-            self.internet_ip = Some(int_ip);
-            log::info!("Set NAT internet IP: {}", int_ip);
-        }
-    }
-
-    /// Set VPN encryption context for direct WireGuard encryption
-    ///
-    /// This allows workers to encrypt packets directly and send via UDP,
-    /// bypassing Wintun for outbound tunnel traffic. This is faster because
-    /// it eliminates the Wintun buffer copy and context switch.
-    pub fn set_vpn_encrypt_context(&mut self, ctx: VpnEncryptContext) {
-        log::info!("Set VPN encrypt context: server={}", ctx.server_addr);
-        self.vpn_encrypt_ctx = Some(ctx);
-    }
-
     /// Set UDP relay context for V3 mode (unencrypted relay)
     ///
     /// This allows workers to forward packets directly via UDP relay
@@ -485,16 +406,6 @@ impl ParallelInterceptor {
     /// Set the auto-router for automatic relay switching based on game server region
     pub fn set_auto_router(&mut self, router: Arc<super::auto_routing::AutoRouter>) {
         self.auto_router = Some(router);
-    }
-
-    /// Set inbound handler for decrypted packets
-    ///
-    /// This handler is called for each decrypted packet received on the
-    /// VpnEncryptContext socket. It performs NAT rewriting and injects
-    /// the packet to MSTCP so the original app can receive the response.
-    pub fn set_inbound_handler(&mut self, handler: Arc<dyn Fn(&[u8]) + Send + Sync>) {
-        log::info!("Set inbound handler for VPN responses");
-        self.inbound_handler = Some(handler);
     }
 
     /// Check if driver is available
@@ -1243,12 +1154,8 @@ impl ParallelInterceptor {
         // Start worker threads
         for (worker_id, receiver) in receivers.into_iter().enumerate() {
             let stop_flag = Arc::clone(&self.stop_flag);
-            let wintun_session = self.wintun_session.clone();
             let stats = Arc::clone(&self.worker_stats[worker_id]);
             let throughput = self.throughput_stats.clone();
-            let tunnel_ip = self.tunnel_ip;
-            let internet_ip = self.internet_ip;
-            let vpn_encrypt_ctx = self.vpn_encrypt_ctx.clone();
             let relay_ctx = self.relay_ctx.clone();
             let detected_game_servers = Arc::clone(&self.detected_game_servers);
             let auto_router = self.auto_router.clone();
@@ -1260,13 +1167,9 @@ impl ParallelInterceptor {
                 run_packet_worker(
                     worker_id,
                     receiver,
-                    wintun_session,
                     stats,
                     throughput,
                     stop_flag,
-                    tunnel_ip,
-                    internet_ip,
-                    vpn_encrypt_ctx,
                     relay_ctx,
                     detected_game_servers,
                     auto_router,
@@ -1302,37 +1205,8 @@ impl ParallelInterceptor {
             }
         }));
 
-        // Start inbound receiver thread
-        // V1/V2: reads encrypted responses from VpnEncryptContext socket, decrypts with boringtun
-        // V3: reads unencrypted responses from UdpRelay, no decryption needed
-        if let Some(ref vpn_ctx) = self.vpn_encrypt_ctx {
-            // V1/V2: WireGuard encryption - create InboundConfig with all necessary parameters
-            let inbound_config = self.create_inbound_config();
-
-            if let Some(config) = inbound_config {
-                let ctx = vpn_ctx.clone();
-                let inbound_stop = Arc::clone(&self.stop_flag);
-                let throughput = self.throughput_stats.clone();
-
-                // Set socket to non-blocking for clean shutdown
-                if let Err(e) = ctx
-                    .socket
-                    .set_read_timeout(Some(std::time::Duration::from_millis(100)))
-                {
-                    log::warn!("Failed to set socket read timeout: {}", e);
-                }
-
-                self.inbound_receiver_handle = Some(thread::spawn(move || {
-                    run_inbound_receiver(ctx, config, inbound_stop, throughput);
-                }));
-                log::info!("V1/V2 inbound receiver thread started (WireGuard decryption)");
-            } else {
-                log::warn!(
-                    "Inbound receiver NOT started (failed to create config - physical_adapter_name not set?)"
-                );
-            }
-        } else if let Some(ref relay_ctx) = self.relay_ctx {
-            // V3: Unencrypted UDP relay - no decryption needed, just NAT rewrite and inject
+        // Start V3 inbound receiver thread (reads from UdpRelay, injects to MSTCP)
+        if let Some(ref relay_ctx) = self.relay_ctx {
             let inbound_config = self.create_inbound_config();
 
             if let Some(config) = inbound_config {
@@ -1343,12 +1217,12 @@ impl ParallelInterceptor {
                 self.inbound_receiver_handle = Some(thread::spawn(move || {
                     run_v3_inbound_receiver(relay, config, inbound_stop, throughput);
                 }));
-                log::info!("V3 inbound receiver thread started (UDP relay, no decryption)");
+                log::info!("V3 inbound receiver thread started (UDP relay)");
             } else {
                 log::warn!("V3 inbound receiver NOT started (failed to create config)");
             }
         } else {
-            log::info!("Inbound receiver NOT started (no vpn_encrypt_ctx or relay_ctx)");
+            log::info!("Inbound receiver NOT started (no relay_ctx)");
         }
 
         log::info!("Parallel interceptor started");
@@ -1431,100 +1305,6 @@ impl ParallelInterceptor {
         self.process_cache.register_process_immediate(pid, name);
     }
 
-    /// Inject an inbound IP packet to the physical adapter's MSTCP stack
-    ///
-    /// This is called by the WireGuard tunnel inbound task when split tunnel is active.
-    /// The packet is a decrypted IP packet that should be delivered to the original app.
-    pub fn inject_inbound(&self, ip_packet: &[u8]) {
-        use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
-
-        let physical_name = match &self.physical_adapter_name {
-            Some(name) => name,
-            None => {
-                log::warn!("inject_inbound: no physical adapter configured");
-                return;
-            }
-        };
-
-        // Open driver
-        let driver = match ndisapi::Ndisapi::new("NDISRD") {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("inject_inbound: failed to open driver: {}", e);
-                return;
-            }
-        };
-
-        let adapters = match driver.get_tcpip_bound_adapters_info() {
-            Ok(a) => a,
-            Err(e) => {
-                log::warn!("inject_inbound: failed to get adapters: {}", e);
-                return;
-            }
-        };
-
-        let adapter = match adapters.iter().find(|a| a.get_name() == physical_name) {
-            Some(a) => a,
-            None => {
-                log::warn!(
-                    "inject_inbound: physical adapter '{}' not found",
-                    physical_name
-                );
-                return;
-            }
-        };
-
-        let adapter_handle = adapter.get_handle();
-
-        // Create Ethernet frame with IP packet payload
-        // We need to wrap the IP packet in an Ethernet frame for injection
-        const MAX_ETHER_FRAME: usize = 1522;
-        let frame_len = 14 + ip_packet.len();
-
-        // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
-        if frame_len > MAX_ETHER_FRAME {
-            log::warn!(
-                "inject_inbound: packet too large ({} bytes), dropping",
-                frame_len
-            );
-            return;
-        }
-
-        let mut ethernet_frame = vec![0u8; frame_len];
-
-        // Ethernet header:
-        // - Destination MAC (6 bytes): Local adapter's MAC (will be filled by stack)
-        // - Source MAC (6 bytes): Use zeros (will be filled by stack)
-        // - EtherType (2 bytes): 0x0800 for IPv4
-
-        // Get adapter MAC for destination
-        let _medium = adapter.get_medium();
-        // For now, use a broadcast-like approach - the stack will handle it
-        ethernet_frame[0..6].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]); // Broadcast
-        ethernet_frame[6..12].copy_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Source zeros
-        ethernet_frame[12] = 0x08; // EtherType: IPv4
-        ethernet_frame[13] = 0x00;
-        ethernet_frame[14..].copy_from_slice(ip_packet);
-
-        // Create IntermediateBuffer with the Ethernet frame
-        let mut buffer = IntermediateBuffer::default();
-        // CRITICAL: Set direction flag to RECEIVE - we're injecting as if it came from the network
-        buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
-        buffer.length = ethernet_frame.len() as u32;
-        buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(&ethernet_frame);
-
-        // Send to MSTCP (inject into the receive path so the app gets it)
-        let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
-        if to_mstcp.push(&buffer).is_ok() {
-            if let Err(e) = driver.send_packets_to_mstcp::<1>(&to_mstcp) {
-                log::warn!("inject_inbound: send_packets_to_mstcp failed: {:?}", e);
-            } else {
-                // Update RX stats
-                self.throughput_stats.add_rx(ip_packet.len() as u64);
-            }
-        }
-    }
-
     /// Create InboundConfig for the optimized inbound receiver
     ///
     /// Returns None if physical adapter cannot be found
@@ -1560,7 +1340,7 @@ impl ParallelInterceptor {
         };
 
         log::info!(
-            "create_inbound_config: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, NAT: {:?} -> {:?}",
+            "create_inbound_config: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             physical_name,
             adapter_mac[0],
             adapter_mac[1],
@@ -1568,276 +1348,12 @@ impl ParallelInterceptor {
             adapter_mac[3],
             adapter_mac[4],
             adapter_mac[5],
-            self.tunnel_ip,
-            self.internet_ip
         );
 
         Some(InboundConfig {
             physical_adapter_name: physical_name,
             adapter_mac,
-            tunnel_ip: self.tunnel_ip,
-            internet_ip: self.internet_ip,
         })
-    }
-
-    /// Get a closure that can be used as an inbound handler for the WireGuard tunnel
-    /// (Legacy - kept for compatibility, prefer using create_inbound_config with run_inbound_receiver)
-    ///
-    /// This creates a handler that injects packets to the physical adapter.
-    /// If NAT IPs are configured, it rewrites destination IP from tunnel_ip to internet_ip.
-    pub fn create_inbound_handler(&self) -> Option<std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>> {
-        let physical_name = self.physical_adapter_name.clone()?;
-        let throughput_stats = self.throughput_stats.clone();
-        let tunnel_ip = self.tunnel_ip;
-        let internet_ip = self.internet_ip;
-
-        // Pre-open driver and get adapter info for efficiency
-        let driver = match ndisapi::Ndisapi::new("NDISRD") {
-            Ok(d) => d,
-            Err(e) => {
-                log::error!("create_inbound_handler: failed to open driver: {}", e);
-                return None;
-            }
-        };
-
-        let adapters = match driver.get_tcpip_bound_adapters_info() {
-            Ok(a) => a,
-            Err(e) => {
-                log::error!("create_inbound_handler: failed to get adapters: {}", e);
-                return None;
-            }
-        };
-
-        // Get adapter MAC address (copy, so it's Send + Sync)
-        // Note: adapter_handle is NOT Send/Sync, so we look it up fresh in each call
-        let adapter_mac: [u8; 6] = match adapters.iter().find(|a| a.get_name() == &physical_name) {
-            Some(a) => a.get_hw_address()[0..6].try_into().unwrap_or([0; 6]),
-            None => {
-                log::error!(
-                    "create_inbound_handler: physical adapter '{}' not found",
-                    physical_name
-                );
-                return None;
-            }
-        };
-
-        log::info!(
-            "create_inbound_handler: adapter={}, MAC={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            physical_name,
-            adapter_mac[0],
-            adapter_mac[1],
-            adapter_mac[2],
-            adapter_mac[3],
-            adapter_mac[4],
-            adapter_mac[5]
-        );
-
-        // Track packets for logging (use atomic counter)
-        let packet_count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        Some(std::sync::Arc::new(move |ip_packet: &[u8]| {
-            use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
-
-            if ip_packet.len() < 20 {
-                log::warn!(
-                    "inbound_handler: packet too short ({} bytes)",
-                    ip_packet.len()
-                );
-                return;
-            }
-
-            // Parse IP header
-            let src_ip =
-                std::net::Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
-            let dst_ip =
-                std::net::Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
-            let protocol = ip_packet[9];
-
-            // Parse ICMP error packets for diagnostics
-            if protocol == 1 && ip_packet.len() >= 28 {
-                let icmp_type = ip_packet[20];
-                let icmp_code = ip_packet[21];
-
-                // ICMP error types that indicate routing problems
-                let error_desc = match (icmp_type, icmp_code) {
-                    (3, 0) => Some("Network Unreachable"),
-                    (3, 1) => Some("Host Unreachable"),
-                    (3, 2) => Some("Protocol Unreachable"),
-                    (3, 3) => Some("Port Unreachable"),
-                    (3, 4) => Some("Fragmentation Needed"),
-                    (3, 5) => Some("Source Route Failed"),
-                    (3, 6) => Some("Destination Network Unknown"),
-                    (3, 7) => Some("Destination Host Unknown"),
-                    (3, 9) => Some("Network Administratively Prohibited"),
-                    (3, 10) => Some("Host Administratively Prohibited"),
-                    (3, 13) => Some("Communication Administratively Prohibited"),
-                    (11, 0) => Some("TTL Expired in Transit"),
-                    (11, 1) => Some("Fragment Reassembly Time Exceeded"),
-                    _ => None,
-                };
-
-                if let Some(desc) = error_desc {
-                    // Extract original destination from embedded IP header (at offset 28)
-                    if ip_packet.len() >= 48 {
-                        let orig_dst = std::net::Ipv4Addr::new(
-                            ip_packet[44],
-                            ip_packet[45],
-                            ip_packet[46],
-                            ip_packet[47],
-                        );
-                        log::warn!(
-                            "inbound_handler: ICMP Error - {} (type={}, code={}) for packet to {}",
-                            desc,
-                            icmp_type,
-                            icmp_code,
-                            orig_dst
-                        );
-                    } else {
-                        log::warn!(
-                            "inbound_handler: ICMP Error - {} (type={}, code={})",
-                            desc,
-                            icmp_type,
-                            icmp_code
-                        );
-                    }
-                }
-            }
-
-            // Check if we need to do NAT (rewrite destination IP)
-            let needs_nat =
-                tunnel_ip.is_some() && internet_ip.is_some() && Some(dst_ip) == tunnel_ip;
-
-            // Make a mutable copy for NAT rewriting
-            let mut packet = ip_packet.to_vec();
-
-            if needs_nat {
-                let new_dst = internet_ip.unwrap();
-                // Rewrite destination IP (bytes 16-19)
-                packet[16] = new_dst.octets()[0];
-                packet[17] = new_dst.octets()[1];
-                packet[18] = new_dst.octets()[2];
-                packet[19] = new_dst.octets()[3];
-
-                // Recalculate IP header checksum
-                // Clear existing checksum
-                packet[10] = 0;
-                packet[11] = 0;
-                // Calculate new checksum
-                let ihl = ((packet[0] & 0x0F) as usize) * 4;
-                let checksum = calculate_ip_checksum(&packet[..ihl]);
-                packet[10] = (checksum >> 8) as u8;
-                packet[11] = (checksum & 0xFF) as u8;
-
-                // Update TCP/UDP checksum (pseudo-header includes destination IP)
-                let transport_offset = ihl;
-                if protocol == 6 && packet.len() >= transport_offset + 18 {
-                    // TCP: checksum at offset 16 within TCP header
-                    update_transport_checksum(
-                        &mut packet,
-                        transport_offset + 16,
-                        &dst_ip.octets(),
-                        &new_dst.octets(),
-                    );
-                } else if protocol == 17 && packet.len() >= transport_offset + 8 {
-                    // UDP: checksum at offset 6 within UDP header
-                    let udp_checksum = u16::from_be_bytes([
-                        packet[transport_offset + 6],
-                        packet[transport_offset + 7],
-                    ]);
-                    if udp_checksum != 0 {
-                        update_transport_checksum(
-                            &mut packet,
-                            transport_offset + 6,
-                            &dst_ip.octets(),
-                            &new_dst.octets(),
-                        );
-                    }
-                }
-            }
-
-            // Create Ethernet frame with IP packet payload
-            // Use physical adapter's MAC as destination (packet is being "received" by this adapter)
-            // Use a dummy but valid-looking source MAC (simulating upstream router)
-            const MAX_ETHER_FRAME: usize = 1522; // Max Ethernet frame size with VLAN tag
-            let frame_len = 14 + packet.len();
-
-            // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
-            if frame_len > MAX_ETHER_FRAME {
-                log::warn!(
-                    "inbound_handler: packet too large ({} bytes), dropping",
-                    frame_len
-                );
-                return;
-            }
-
-            let mut ethernet_frame = vec![0u8; frame_len];
-            ethernet_frame[0..6].copy_from_slice(&adapter_mac); // Destination = physical adapter
-            ethernet_frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // Locally administered src MAC
-            ethernet_frame[12] = 0x08; // EtherType: IPv4
-            ethernet_frame[13] = 0x00;
-            ethernet_frame[14..].copy_from_slice(&packet);
-
-            // Create IntermediateBuffer
-            let mut buffer = IntermediateBuffer::default();
-            buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
-            buffer.length = ethernet_frame.len() as u32;
-            buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(&ethernet_frame);
-
-            // Open driver and get adapter handle (must be done per-call since HANDLE isn't Send)
-            let driver = match ndisapi::Ndisapi::new("NDISRD") {
-                Ok(d) => d,
-                Err(e) => {
-                    log::warn!("inbound_handler: failed to open driver: {}", e);
-                    return;
-                }
-            };
-
-            let adapters = match driver.get_tcpip_bound_adapters_info() {
-                Ok(a) => a,
-                Err(e) => {
-                    log::warn!("inbound_handler: failed to get adapters: {}", e);
-                    return;
-                }
-            };
-
-            let adapter = match adapters.iter().find(|a| a.get_name() == &physical_name) {
-                Some(a) => a,
-                None => {
-                    log::warn!("inbound_handler: adapter not found");
-                    return;
-                }
-            };
-
-            let adapter_handle = adapter.get_handle();
-
-            // Inject to MSTCP
-            let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
-            if to_mstcp.push(&buffer).is_ok() {
-                if let Err(e) = driver.send_packets_to_mstcp::<1>(&to_mstcp) {
-                    log::warn!("inbound_handler: send_packets_to_mstcp failed: {:?}", e);
-                } else {
-                    throughput_stats.add_rx(packet.len() as u64);
-
-                    let count = packet_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // Log first 5 packets and then every 100th
-                    if count < 5 || count % 100 == 0 {
-                        log::info!(
-                            "inbound_handler: injected {} byte packet #{} (proto={}, {} -> {}{})",
-                            packet.len(),
-                            count + 1,
-                            protocol,
-                            src_ip,
-                            dst_ip,
-                            if needs_nat {
-                                format!(" [NAT -> {}]", internet_ip.unwrap())
-                            } else {
-                                String::new()
-                            }
-                        );
-                    }
-                }
-            }
-        }))
     }
 }
 
@@ -1861,394 +1377,9 @@ fn set_thread_affinity(core_id: usize) {
 struct InboundConfig {
     physical_adapter_name: String,
     adapter_mac: [u8; 6],
-    tunnel_ip: Option<std::net::Ipv4Addr>,
-    internet_ip: Option<std::net::Ipv4Addr>,
 }
 
-/// Inbound receiver thread - reads encrypted packets from VpnEncryptContext socket,
-/// decrypts them, and injects to MSTCP (opens driver ONCE for performance)
-fn run_inbound_receiver(
-    ctx: VpnEncryptContext,
-    config: InboundConfig,
-    stop_flag: Arc<AtomicBool>,
-    throughput: ThroughputStats,
-) {
-    log::info!("========================================");
-    log::info!("INBOUND RECEIVER STARTING");
-    log::info!("========================================");
-    log::info!("  Socket: {:?}", ctx.socket.local_addr());
-    log::info!("  Server: {}", ctx.server_addr);
-    log::info!("  Adapter: {}", config.physical_adapter_name);
-    log::info!("  NAT: {:?} -> {:?}", config.tunnel_ip, config.internet_ip);
-
-    // Open driver ONCE at thread start (not per-packet!)
-    let driver = match ndisapi::Ndisapi::new("NDISRD") {
-        Ok(d) => {
-            log::info!("Inbound receiver: ndisapi driver opened successfully");
-            d
-        }
-        Err(e) => {
-            log::error!("========================================");
-            log::error!("INBOUND RECEIVER FATAL ERROR");
-            log::error!("Failed to open ndisapi driver: {}", e);
-            log::error!("Inbound traffic will NOT work!");
-            log::error!("========================================");
-            return;
-        }
-    };
-
-    let adapters = match driver.get_tcpip_bound_adapters_info() {
-        Ok(a) => a,
-        Err(e) => {
-            log::error!("========================================");
-            log::error!("INBOUND RECEIVER FATAL ERROR");
-            log::error!("Failed to get adapters: {}", e);
-            log::error!("Inbound traffic will NOT work!");
-            log::error!("========================================");
-            return;
-        }
-    };
-
-    let adapter = match adapters
-        .iter()
-        .find(|a| a.get_name() == &config.physical_adapter_name)
-    {
-        Some(a) => a,
-        None => {
-            log::error!("========================================");
-            log::error!("INBOUND RECEIVER FATAL ERROR");
-            log::error!(
-                "Physical adapter '{}' not found!",
-                config.physical_adapter_name
-            );
-            log::error!("Available adapters:");
-            for a in adapters.iter() {
-                log::error!("  - {}", a.get_name());
-            }
-            log::error!("Inbound traffic will NOT work!");
-            log::error!("========================================");
-            return;
-        }
-    };
-
-    let adapter_handle = adapter.get_handle();
-    log::info!("Inbound receiver: adapter handle acquired, ready to inject packets");
-
-    let mut recv_buf = vec![0u8; 2048]; // Max WireGuard packet size
-    let mut decrypt_buf = vec![0u8; 2048];
-    let mut timer_buf = vec![0u8; 256]; // For keepalive packets
-    let mut packets_received = 0u64;
-    let mut packets_decrypted = 0u64;
-    let mut packets_injected = 0u64;
-    let mut inject_errors = 0u64;
-    let mut keepalives_sent = 0u64;
-    let mut decrypt_errors = 0u64;
-
-    // Health monitoring timestamps
-    let start_time = std::time::Instant::now();
-    let mut last_packet_time: Option<std::time::Instant> = None;
-    let mut last_health_check = std::time::Instant::now();
-    let mut no_traffic_warning_logged = false;
-    let mut traffic_stopped_warning_logged = false;
-
-    // Health check constants
-    const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
-    const NO_TRAFFIC_WARNING_SECS: u64 = 10; // Warn if no traffic after 10s from start
-    const TRAFFIC_STOPPED_WARNING_SECS: u64 = 30; // Warn if traffic stops for 30s
-
-    // For keepalive timer - call update_timers() every 1s
-    // This is critical because tunnel's keepalive task is disabled when split tunnel is active
-    // to avoid endpoint confusion. We must send keepalives from THIS socket.
-    // WireGuard keepalive is 25s, so 1s resolution is plenty.
-    let mut last_timer_check = std::time::Instant::now();
-    const TIMER_INTERVAL_MS: u64 = 1000;
-
-    log::info!("Inbound receiver: entering main loop, waiting for VPN traffic...");
-
-    loop {
-        if stop_flag.load(Ordering::Relaxed) {
-            log::info!("Inbound receiver: stop flag set, exiting loop");
-            break;
-        }
-
-        let now = std::time::Instant::now();
-
-        // === HEALTH CHECK (every 5 seconds) ===
-        if now.duration_since(last_health_check).as_secs() >= HEALTH_CHECK_INTERVAL_SECS {
-            last_health_check = now;
-            let uptime_secs = now.duration_since(start_time).as_secs();
-
-            // Check for "no traffic ever received" condition
-            if packets_decrypted == 0
-                && uptime_secs >= NO_TRAFFIC_WARNING_SECS
-                && !no_traffic_warning_logged
-            {
-                no_traffic_warning_logged = true;
-                log::error!("========================================");
-                log::error!("WARNING: NO INBOUND TRAFFIC DETECTED!");
-                log::error!("========================================");
-                log::error!("  Uptime: {}s", uptime_secs);
-                log::error!("  Packets received (encrypted): {}", packets_received);
-                log::error!("  Packets decrypted: 0");
-                log::error!("  Keepalives sent: {}", keepalives_sent);
-                log::error!("");
-                log::error!("This may indicate:");
-                log::error!("  1. VPN server not sending responses");
-                log::error!("  2. Socket handoff race condition");
-                log::error!("  3. Firewall blocking UDP traffic");
-                log::error!("  4. Wrong socket being used");
-                log::error!("");
-                log::error!("Socket local addr: {:?}", ctx.socket.local_addr());
-                log::error!("========================================");
-            }
-
-            // Check for "traffic stopped" condition
-            if let Some(last_pkt) = last_packet_time {
-                let secs_since_packet = now.duration_since(last_pkt).as_secs();
-                if secs_since_packet >= TRAFFIC_STOPPED_WARNING_SECS
-                    && !traffic_stopped_warning_logged
-                {
-                    traffic_stopped_warning_logged = true;
-                    log::warn!("========================================");
-                    log::warn!("WARNING: INBOUND TRAFFIC STOPPED!");
-                    log::warn!("========================================");
-                    log::warn!("  Last packet: {}s ago", secs_since_packet);
-                    log::warn!("  Total decrypted: {}", packets_decrypted);
-                    log::warn!("  Connection may have dropped");
-                    log::warn!("========================================");
-                }
-            }
-
-            // Periodic health log (every 5 seconds at INFO level)
-            let rx_bytes = throughput.bytes_rx.load(Ordering::Relaxed);
-            let rx_rate = if uptime_secs > 0 {
-                rx_bytes / uptime_secs
-            } else {
-                0
-            };
-            log::info!(
-                "Inbound health: {}s uptime, {} recv, {} decrypted, {} injected, {} B/s avg, {} errors",
-                uptime_secs,
-                packets_received,
-                packets_decrypted,
-                packets_injected,
-                rx_rate,
-                inject_errors + decrypt_errors
-            );
-        }
-
-        // === KEEPALIVE TIMER (every 1s) ===
-        if now.duration_since(last_timer_check).as_millis() >= TIMER_INTERVAL_MS as u128 {
-            last_timer_check = now;
-
-            let timer_result = {
-                let mut tunn = ctx.tunn.lock();
-                tunn.update_timers(&mut timer_buf)
-            };
-
-            match timer_result {
-                TunnResult::WriteToNetwork(data) => {
-                    // Send keepalive from this socket (the correct one!)
-                    match ctx.socket.send(data) {
-                        Ok(sent) => {
-                            keepalives_sent += 1;
-                            // Log first 5 and then every 50th
-                            if keepalives_sent <= 5 || keepalives_sent % 50 == 0 {
-                                log::info!(
-                                    "Inbound receiver: sent keepalive #{} ({} bytes)",
-                                    keepalives_sent,
-                                    sent
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "Inbound receiver: FAILED to send keepalive: {} (kind={:?})",
-                                e,
-                                e.kind()
-                            );
-                            log::error!("  This may cause VPN connection to drop!");
-                        }
-                    }
-                }
-                TunnResult::Err(e) => {
-                    log::warn!("Inbound receiver: timer error: {:?}", e);
-                }
-                TunnResult::Done => {
-                    // No keepalive needed this tick - this is normal
-                }
-                other => {
-                    log::warn!(
-                        "Inbound receiver: unexpected timer result: {:?}",
-                        match other {
-                            TunnResult::WriteToTunnelV4(_, _) => "WriteToTunnelV4",
-                            TunnResult::WriteToTunnelV6(_, _) => "WriteToTunnelV6",
-                            _ => "Unknown",
-                        }
-                    );
-                }
-            }
-        }
-
-        // === RECEIVE PACKET ===
-        let n = match ctx.socket.recv(&mut recv_buf) {
-            Ok(n) => n,
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                continue;
-            }
-            Err(e) => {
-                log::warn!(
-                    "Inbound receiver: socket recv error: {} (kind={:?})",
-                    e,
-                    e.kind()
-                );
-                std::thread::sleep(std::time::Duration::from_millis(2));
-                continue;
-            }
-        };
-
-        if n == 0 {
-            continue;
-        }
-
-        packets_received += 1;
-
-        // Log first 10 received packets at INFO level to confirm traffic is flowing
-        if packets_received <= 10 {
-            log::info!(
-                "Inbound: received packet #{} ({} bytes encrypted)",
-                packets_received,
-                n
-            );
-        }
-
-        // === DECRYPT PACKET ===
-        let result = {
-            let mut tunn = ctx.tunn.lock();
-            tunn.decapsulate(None, &recv_buf[..n], &mut decrypt_buf)
-        };
-
-        match result {
-            TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
-                packets_decrypted += 1;
-                last_packet_time = Some(now);
-                traffic_stopped_warning_logged = false; // Reset warning if we get traffic
-                throughput.add_rx(data.len() as u64);
-
-                // Log first 10 decrypted packets with details
-                if packets_decrypted <= 10 && data.len() >= 20 {
-                    let proto = data[9];
-                    let proto_name = match proto {
-                        1 => "ICMP",
-                        6 => "TCP",
-                        17 => "UDP",
-                        _ => "Other",
-                    };
-                    let src_ip = std::net::Ipv4Addr::new(data[12], data[13], data[14], data[15]);
-                    let dst_ip = std::net::Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-                    log::info!(
-                        "Inbound: decrypted #{} - {} bytes {} {} -> {}",
-                        packets_decrypted,
-                        data.len(),
-                        proto_name,
-                        src_ip,
-                        dst_ip
-                    );
-                }
-
-                // Do NAT and inject to MSTCP
-                if let Some(injected) =
-                    inject_inbound_packet(data, &config, adapter_handle, &driver, packets_injected)
-                {
-                    if injected {
-                        packets_injected += 1;
-                        // Log first 5 successful injections
-                        if packets_injected <= 5 {
-                            log::info!("Inbound: injected packet #{} to MSTCP", packets_injected);
-                        }
-                    } else {
-                        inject_errors += 1;
-                        if inject_errors <= 10 {
-                            log::error!("Inbound: FAILED to inject packet #{}", packets_decrypted);
-                        }
-                    }
-                }
-            }
-            TunnResult::WriteToNetwork(data) => {
-                // Protocol message (handshake, etc.) - send back to VPN server
-                log::info!(
-                    "Inbound: protocol message ({} bytes) - sending to server",
-                    data.len()
-                );
-                if let Err(e) = ctx.socket.send(data) {
-                    log::error!("Inbound: FAILED to send protocol message: {}", e);
-                }
-            }
-            TunnResult::Done => {
-                // No plaintext output (e.g., keepalive received)
-                if packets_received <= 10 {
-                    log::debug!(
-                        "Inbound: packet #{} -> Done (keepalive response)",
-                        packets_received
-                    );
-                }
-            }
-            TunnResult::Err(e) => {
-                decrypt_errors += 1;
-                // Log ALL decrypt errors since this is critical
-                log::error!(
-                    "Inbound: DECRYPT ERROR on packet #{} ({} bytes): {:?}",
-                    packets_received,
-                    n,
-                    e
-                );
-                if decrypt_errors == 1 {
-                    log::error!(
-                        "  First decrypt error - may indicate wrong encryption key or corrupted data"
-                    );
-                }
-            }
-        }
-    }
-
-    // === FINAL STATS ===
-    let total_uptime = start_time.elapsed().as_secs();
-    log::info!("========================================");
-    log::info!("INBOUND RECEIVER STOPPED");
-    log::info!("========================================");
-    log::info!("  Uptime: {}s", total_uptime);
-    log::info!("  Packets received (encrypted): {}", packets_received);
-    log::info!("  Packets decrypted: {}", packets_decrypted);
-    log::info!("  Packets injected: {}", packets_injected);
-    log::info!("  Inject errors: {}", inject_errors);
-    log::info!("  Decrypt errors: {}", decrypt_errors);
-    log::info!("  Keepalives sent: {}", keepalives_sent);
-    log::info!(
-        "  Total RX bytes: {}",
-        throughput.bytes_rx.load(Ordering::Relaxed)
-    );
-
-    // Final health assessment
-    if packets_decrypted == 0 && total_uptime > NO_TRAFFIC_WARNING_SECS {
-        log::error!("========================================");
-        log::error!("CRITICAL: Session ended with ZERO inbound traffic!");
-        log::error!("This indicates a socket handoff or routing issue.");
-        log::error!("========================================");
-    } else if inject_errors > packets_injected / 10 && packets_injected > 0 {
-        log::warn!(
-            "High injection error rate: {}/{} ({:.1}%)",
-            inject_errors,
-            packets_decrypted,
-            (inject_errors as f64 / packets_decrypted as f64) * 100.0
-        );
-    }
-    log::info!("========================================");
-}
-
-/// Inject a decrypted inbound packet to MSTCP after NAT rewriting
+/// Inject an inbound packet to MSTCP
 /// Returns Some(true) on success, Some(false) on error, None if packet should be skipped
 fn inject_inbound_packet(
     ip_packet: &[u8],
@@ -2267,106 +1398,25 @@ fn inject_inbound_packet(
         return None;
     }
 
-    // Parse IP header
-    let src_ip =
-        std::net::Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
-    let dst_ip =
-        std::net::Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
-    let protocol = ip_packet[9];
-
-    // Log every packet for debugging (first 10) - DEBUG level
+    // Log first 10 packets for debugging
     if packet_count < 10 {
+        let src_ip =
+            std::net::Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
+        let dst_ip =
+            std::net::Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
         log::debug!(
-            "inject_inbound_packet #{}: {} -> {}, proto={}, {} bytes, config.tunnel_ip={:?}, config.internet_ip={:?}",
+            "inject_inbound_packet #{}: {} -> {}, proto={}, {} bytes",
             packet_count,
             src_ip,
             dst_ip,
-            protocol,
+            ip_packet[9],
             ip_packet.len(),
-            config.tunnel_ip,
-            config.internet_ip
         );
-    }
-
-    // Check if we need to do NAT (rewrite destination IP from tunnel_ip to internet_ip)
-    let needs_nat = config.tunnel_ip.is_some()
-        && config.internet_ip.is_some()
-        && Some(dst_ip) == config.tunnel_ip;
-
-    // Log NAT decision for debugging (first 10 packets) - DEBUG level
-    if packet_count < 10 {
-        log::debug!(
-            "inject_inbound_packet #{}: needs_nat={} (dst={}, tunnel_ip={:?})",
-            packet_count,
-            needs_nat,
-            dst_ip,
-            config.tunnel_ip
-        );
-    }
-
-    // Stack-allocated buffer for NAT rewriting (zero allocation)
-    let mut packet_buf = [0u8; 1600];
-    let packet_len = ip_packet.len().min(1600);
-    packet_buf[..packet_len].copy_from_slice(&ip_packet[..packet_len]);
-    let packet = &mut packet_buf[..packet_len];
-
-    if needs_nat {
-        let new_dst = config.internet_ip.unwrap();
-
-        // Log NAT rewrites (first 10) - DEBUG level
-        if packet_count < 10 {
-            log::debug!(
-                "Inbound NAT #{}: {} -> {}, proto={}, {} bytes",
-                packet_count,
-                dst_ip,
-                new_dst,
-                protocol,
-                packet.len()
-            );
-        }
-
-        // Rewrite destination IP (bytes 16-19)
-        packet[16] = new_dst.octets()[0];
-        packet[17] = new_dst.octets()[1];
-        packet[18] = new_dst.octets()[2];
-        packet[19] = new_dst.octets()[3];
-
-        // Recalculate IP header checksum
-        packet[10] = 0;
-        packet[11] = 0;
-        let ihl = ((packet[0] & 0x0F) as usize) * 4;
-        let checksum = calculate_ip_checksum(&packet[..ihl]);
-        packet[10] = (checksum >> 8) as u8;
-        packet[11] = (checksum & 0xFF) as u8;
-
-        // Update TCP/UDP checksum
-        let transport_offset = ihl;
-        if protocol == 6 && packet.len() >= transport_offset + 18 {
-            // TCP: checksum at offset 16 within TCP header
-            update_transport_checksum(
-                packet,
-                transport_offset + 16,
-                &dst_ip.octets(),
-                &new_dst.octets(),
-            );
-        } else if protocol == 17 && packet.len() >= transport_offset + 8 {
-            // UDP: checksum at offset 6 within UDP header
-            let udp_checksum =
-                u16::from_be_bytes([packet[transport_offset + 6], packet[transport_offset + 7]]);
-            if udp_checksum != 0 {
-                update_transport_checksum(
-                    packet,
-                    transport_offset + 6,
-                    &dst_ip.octets(),
-                    &new_dst.octets(),
-                );
-            }
-        }
     }
 
     // Create Ethernet frame (stack-allocated buffer)
     const MAX_ETHER_FRAME: usize = 1622; // 14 header + 1600 payload + 8 padding
-    let frame_len = 14 + packet.len();
+    let frame_len = 14 + ip_packet.len();
 
     if frame_len > MAX_ETHER_FRAME {
         log::warn!("Inbound: packet too large ({} bytes), dropping", frame_len);
@@ -2379,13 +1429,13 @@ fn inject_inbound_packet(
     ethernet_frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // Locally administered src MAC
     ethernet_frame[12] = 0x08; // EtherType: IPv4
     ethernet_frame[13] = 0x00;
-    ethernet_frame[14..].copy_from_slice(&packet);
+    ethernet_frame[14..].copy_from_slice(ip_packet);
 
     // Create IntermediateBuffer and inject
     let mut buffer = IntermediateBuffer::default();
     buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
     buffer.length = ethernet_frame.len() as u32;
-    buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(&ethernet_frame);
+    buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(ethernet_frame);
 
     let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
     if to_mstcp.push(&buffer).is_err() {
@@ -2643,13 +1693,9 @@ fn run_packet_reader(
 fn run_packet_worker(
     worker_id: usize,
     receiver: crossbeam_channel::Receiver<PacketWork>,
-    wintun_session: Option<Arc<wintun::Session>>,
     stats: Arc<WorkerStats>,
     throughput: ThroughputStats,
     stop_flag: Arc<AtomicBool>,
-    tunnel_ip: Option<std::net::Ipv4Addr>,
-    internet_ip: Option<std::net::Ipv4Addr>,
-    vpn_encrypt_ctx: Option<VpnEncryptContext>,
     relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
@@ -2658,15 +1704,6 @@ fn run_packet_worker(
 
     // Diagnostic logging
     let mut diagnostic_counter = 0u64;
-    let mut wintun_inject_success = 0u64;
-    let mut wintun_inject_fail = 0u64;
-    let mut no_wintun_session = 0u64;
-
-    // Performance timing (v0.5.57 - measure hot path latency)
-    // Sample every 128th packet to reduce per-packet overhead
-    let mut total_encrypt_ns = 0u64;
-    let mut encrypt_count = 0u64;
-    let mut timing_sample_counter = 0u64;
 
     // Open driver for this worker (each worker needs own handle for sending bypass packets)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
@@ -2686,27 +1723,18 @@ fn run_packet_worker(
         }
     };
 
-    // Log VPN encryption context availability
-    if vpn_encrypt_ctx.is_some() {
-        log::info!(
-            "Worker {}: VPN encryption context AVAILABLE - direct encryption enabled",
-            worker_id
-        );
-    } else if wintun_session.is_some() {
-        log::info!(
-            "Worker {}: Wintun session AVAILABLE - tunnel routing enabled (fallback mode)",
-            worker_id
-        );
+    if relay_ctx.is_some() {
+        log::info!("Worker {}: V3 relay context AVAILABLE", worker_id);
     } else {
         log::warn!(
-            "Worker {}: NO VPN context - tunnel packets will be bypassed!",
+            "Worker {}: NO relay context - tunnel packets will be bypassed!",
             worker_id
         );
     }
 
-    // Track direct encryption stats
-    let mut direct_encrypt_success = 0u64;
-    let mut direct_encrypt_fail = 0u64;
+    // Track relay stats
+    let mut relay_success = 0u64;
+    let mut relay_fail = 0u64;
 
     // Adaptive timeout: short when active, longer when idle to save CPU
     // This is the key optimization - avoid 1000Hz polling when no packets
@@ -2744,8 +1772,6 @@ fn run_packet_worker(
         if work.is_outbound {
             // Routing decision is computed in the reader thread so bypass traffic
             // can be batch-passed-through without ever hitting the workers.
-            timing_sample_counter += 1;
-            let should_sample = (timing_sample_counter & 127) == 0;
             let should_tunnel = work.should_tunnel;
 
             // Periodic diagnostic logging (every 500 packets on worker 0)
@@ -2759,24 +1785,13 @@ fn run_packet_worker(
                     0.0
                 };
 
-                // Calculate average latencies (when applicable)
-                let avg_encrypt_ns = if encrypt_count > 0 {
-                    total_encrypt_ns / encrypt_count
-                } else {
-                    0
-                };
-
                 log::info!(
-                    "Worker 0 PERF: encrypt={:.1}μs | {} tunneled, {} bypassed ({:.1}%), direct: {}/{}, Wintun: {}/{}/{}",
-                    avg_encrypt_ns as f64 / 1000.0,
+                    "Worker 0 PERF: {} tunneled, {} bypassed ({:.1}%), relay: {}/{}",
                     tunneled,
                     bypassed,
                     tunnel_pct,
-                    direct_encrypt_success,
-                    direct_encrypt_fail,
-                    wintun_inject_success,
-                    wintun_inject_fail,
-                    no_wintun_session
+                    relay_success,
+                    relay_fail,
                 );
             }
 
@@ -2843,63 +1858,13 @@ fn run_packet_worker(
                     }
                 }
 
-                // === ZERO-ALLOCATION NAT REWRITING ===
-                // Use thread-local buffer instead of heap allocation for NAT
-                // This eliminates ~200-500ns per packet from malloc/free overhead
-                let (packet_to_send_ptr, packet_to_send_len): (*const u8, usize) = if ip_packet
-                    .len()
-                    >= 20
-                {
-                    let src_ip = std::net::Ipv4Addr::new(
-                        ip_packet[12],
-                        ip_packet[13],
-                        ip_packet[14],
-                        ip_packet[15],
-                    );
-
-                    // Check if we need source NAT
-                    if tunnel_ip.is_some() && internet_ip.is_some() && Some(src_ip) == internet_ip {
-                        let new_src = tunnel_ip.unwrap();
-
-                        // Use thread-local NAT buffer (zero allocation!)
-                        NAT_BUFFER.with(|buf| {
-                            let mut nat_buf = buf.borrow_mut();
-                            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
-                            nat_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
-
-                            // Rewrite source IP (bytes 12-15)
-                            nat_buf[12] = new_src.octets()[0];
-                            nat_buf[13] = new_src.octets()[1];
-                            nat_buf[14] = new_src.octets()[2];
-                            nat_buf[15] = new_src.octets()[3];
-
-                            // CHECKSUM OFFLOAD FIX: Recalculate all checksums from scratch
-                            // This handles both:
-                            // 1. IP checksum update after NAT rewrite
-                            // 2. TCP/UDP checksums that may be placeholders (0x0000) from hardware offload
-                            fix_packet_checksums(&mut nat_buf[..pkt_len]);
-
-                            // Log first few NAT operations
-                            let protocol = nat_buf[9];
-                            if direct_encrypt_success + wintun_inject_success < 5 {
-                                log::info!(
-                                    "Worker {}: Source NAT {} -> {}, {} bytes, proto={}",
-                                    worker_id,
-                                    src_ip,
-                                    new_src,
-                                    pkt_len,
-                                    protocol
-                                );
-                            }
-
-                            // Return pointer and length (buffer is valid for this scope)
-                            (nat_buf.as_ptr(), pkt_len)
-                        })
-                    } else {
-                        // CHECKSUM OFFLOAD FIX: Always recalculate checksums for tunneled packets
-                        // Modern NICs use hardware checksum offload - we intercept packets BEFORE
-                        // the NIC computes checksums, so they have placeholder values (0x0000)
-                        NAT_BUFFER.with(|buf| {
+                // === CHECKSUM OFFLOAD FIX ===
+                // Modern NICs use hardware checksum offload — we intercept packets BEFORE
+                // the NIC computes checksums, so they have placeholder values (0x0000).
+                // Use thread-local buffer to avoid per-packet heap allocation.
+                let (packet_to_send_ptr, packet_to_send_len): (*const u8, usize) =
+                    if ip_packet.len() >= 20 {
+                        PACKET_BUFFER.with(|buf| {
                             let mut fix_buf = buf.borrow_mut();
                             let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
                             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
@@ -2908,13 +1873,12 @@ fn run_packet_worker(
 
                             (fix_buf.as_ptr(), pkt_len)
                         })
-                    }
-                } else {
-                    (ip_packet.as_ptr(), ip_packet.len())
-                };
+                    } else {
+                        (ip_packet.as_ptr(), ip_packet.len())
+                    };
 
                 // SAFETY: The pointer is either from ip_packet (still in scope) or
-                // from NAT_BUFFER (thread-local, valid for duration of this function)
+                // from PACKET_BUFFER (thread-local, valid for duration of this function)
                 let packet_to_send =
                     unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
 
@@ -2940,15 +1904,15 @@ fn run_packet_worker(
 
                 // === V3: UDP RELAY (NO ENCRYPTION) ===
                 // Forward packets directly to relay server without encryption
-                // This provides lowest latency and CPU usage (like ExitLag)
+                // This provides lowest latency and CPU usage
                 if let Some(ref relay) = relay_ctx {
                     // Log relay destination for first few packets (auto-routing debug)
-                    if direct_encrypt_success + direct_encrypt_fail < 10 {
+                    if relay_success + relay_fail < 10 {
                         log::info!(
                             "Worker {}: Forwarding to relay {} (pkt #{}, dst={})",
                             worker_id,
                             relay.relay_addr(),
-                            direct_encrypt_success + direct_encrypt_fail + 1,
+                            relay_success + relay_fail + 1,
                             if ip_packet.len() >= 20 {
                                 format!(
                                     "{}.{}.{}.{}",
@@ -2961,8 +1925,8 @@ fn run_packet_worker(
                     }
                     match relay.forward_outbound(packet_to_send) {
                         Ok(sent) => {
-                            direct_encrypt_success += 1; // Reuse counter for relay
-                            if direct_encrypt_success <= 5 && sent > 0 {
+                            relay_success += 1;
+                            if relay_success <= 5 && sent > 0 {
                                 log::info!(
                                     "Worker {}: V3 relay forward OK - {} bytes",
                                     worker_id,
@@ -2971,102 +1935,21 @@ fn run_packet_worker(
                             }
                         }
                         Err(e) => {
-                            direct_encrypt_fail += 1;
+                            relay_fail += 1;
                             // Log first 10 failures, then every 100th to avoid log spam
                             // but keep visibility into persistent relay issues (Error 277)
-                            if direct_encrypt_fail <= 10 || direct_encrypt_fail % 100 == 0 {
+                            if relay_fail <= 10 || relay_fail % 100 == 0 {
                                 log::warn!(
                                     "Worker {}: V3 relay forward failed ({} total): {}",
                                     worker_id,
-                                    direct_encrypt_fail,
+                                    relay_fail,
                                     e
                                 );
                             }
                         }
                     }
-                }
-                // === V1/V2: WIREGUARD ENCRYPTION ===
-                // Use thread-local buffer instead of heap allocation
-                // All work (encrypt + send) must happen inside the thread-local scope
-                else if let Some(ref ctx) = vpn_encrypt_ctx {
-                    // Encrypt and send within thread-local scope (zero allocation!)
-                    // Sample timing every 128th packet to reduce overhead
-                    let encrypt_start = if should_sample {
-                        Some(std::time::Instant::now())
-                    } else {
-                        None
-                    };
-                    let (success, encrypted_len) = ENCRYPT_BUFFER.with(|buf| {
-                        let mut encrypt_buf = buf.borrow_mut();
-                        let result = {
-                            let mut tunn = ctx.tunn.lock();
-                            tunn.encapsulate(packet_to_send, &mut encrypt_buf[..])
-                        };
-
-                        match result {
-                            TunnResult::WriteToNetwork(data) => {
-                                // Send encrypted packet directly via UDP
-                                // CRITICAL: Use send() not send_to() because socket is connected
-                                match ctx.socket.send(data) {
-                                    Ok(_) => (true, data.len()),
-                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                        // STABILITY FIX: Retry once on WouldBlock (socket buffer full)
-                                        // This prevents packet drops during traffic bursts
-                                        std::thread::sleep(std::time::Duration::from_micros(50));
-                                        match ctx.socket.send(data) {
-                                            Ok(_) => (true, data.len()),
-                                            Err(_) => (false, 0),
-                                        }
-                                    }
-                                    Err(_) => (false, 0),
-                                }
-                            }
-                            TunnResult::Done => {
-                                // Packet was queued internally (handshake in progress)
-                                (true, 0)
-                            }
-                            TunnResult::Err(_) | _ => (false, 0),
-                        }
-                    });
-                    if let Some(start) = encrypt_start {
-                        total_encrypt_ns += start.elapsed().as_nanos() as u64;
-                        encrypt_count += 1;
-                    }
-
-                    if success {
-                        direct_encrypt_success += 1;
-                        if direct_encrypt_success <= 5 && encrypted_len > 0 {
-                            log::info!(
-                                "Worker {}: Direct encrypt OK - {} bytes -> {} bytes",
-                                worker_id,
-                                packet_to_send_len,
-                                encrypted_len
-                            );
-                        }
-                    } else {
-                        direct_encrypt_fail += 1;
-                        if direct_encrypt_fail <= 10 {
-                            log::warn!("Worker {}: Encrypt/send failed", worker_id);
-                        }
-                    }
-                }
-                // FALLBACK: Wintun injection (if no encryption context)
-                else if let Some(ref session) = wintun_session {
-                    match session.allocate_send_packet(packet_to_send.len() as u16) {
-                        Ok(mut packet) => {
-                            packet.bytes_mut().copy_from_slice(packet_to_send);
-                            session.send_packet(packet);
-                            wintun_inject_success += 1;
-                        }
-                        Err(_) => {
-                            wintun_inject_fail += 1;
-                            // Wintun allocation failed - forward to adapter as fallback
-                            send_bypass_packet(&driver, &adapters, &work);
-                        }
-                    }
                 } else {
-                    no_wintun_session += 1;
-                    // No VPN context at all - forward to adapter (bypass)
+                    // No relay context — forward to adapter (bypass)
                     send_bypass_packet(&driver, &adapters, &work);
                 }
             } else {
@@ -4266,48 +3149,6 @@ fn check_adapter_matches_luid(internal_name: &str, target_luid: u64) -> bool {
     false
 }
 
-/// Update transport (TCP/UDP) checksum after NAT IP change
-/// Uses incremental checksum update per RFC 1624:
-/// HC' = ~(~HC + ~m + m')
-/// Where HC is old checksum, m is old value, m' is new value
-fn update_transport_checksum(
-    packet: &mut [u8],
-    checksum_offset: usize,
-    old_ip: &[u8; 4],
-    new_ip: &[u8; 4],
-) {
-    // Read old checksum
-    let old_checksum = u16::from_be_bytes([packet[checksum_offset], packet[checksum_offset + 1]]);
-
-    // RFC 1624 formula: HC' = ~(~HC + ~m + m')
-    // ~HC: one's complement of old checksum
-    // ~m: one's complement of old IP (both 16-bit words)
-    // m': new IP (both 16-bit words)
-    let mut sum: u32 = (!old_checksum) as u32;
-
-    // Add one's complement of old IP words (~m)
-    let old_ip_hi = u16::from_be_bytes([old_ip[0], old_ip[1]]);
-    let old_ip_lo = u16::from_be_bytes([old_ip[2], old_ip[3]]);
-    sum += (!old_ip_hi) as u32;
-    sum += (!old_ip_lo) as u32;
-
-    // Add new IP words (m')
-    let new_ip_hi = u16::from_be_bytes([new_ip[0], new_ip[1]]);
-    let new_ip_lo = u16::from_be_bytes([new_ip[2], new_ip[3]]);
-    sum += new_ip_hi as u32;
-    sum += new_ip_lo as u32;
-
-    // Fold 32-bit sum to 16 bits
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    // One's complement of result
-    let new_checksum = !(sum as u16);
-    packet[checksum_offset] = (new_checksum >> 8) as u8;
-    packet[checksum_offset + 1] = (new_checksum & 0xFF) as u8;
-}
-
 /// Calculate IP header checksum (RFC 1071)
 fn calculate_ip_checksum(header: &[u8]) -> u16 {
     let mut sum: u32 = 0;
@@ -4476,15 +3317,11 @@ fn fix_packet_checksums(packet: &mut [u8]) -> bool {
     true
 }
 
-/// V3 Inbound receiver thread - reads unencrypted packets from UDP relay,
-/// does NAT rewriting, and injects to MSTCP (no decryption needed)
+/// V3 Inbound receiver thread - reads unencrypted packets from UDP relay
+/// and injects to MSTCP
 ///
-/// This is the V3 equivalent of run_inbound_receiver but much simpler:
 /// - Receives packets from UdpRelay (already stripped of session ID)
-/// - Does NAT rewriting (tunnel_ip -> internet_ip)
 /// - Injects to MSTCP
-///
-/// No WireGuard keepalives needed since we don't use WireGuard in V3 mode.
 fn run_v3_inbound_receiver(
     relay: Arc<super::udp_relay::UdpRelay>,
     config: InboundConfig,
@@ -4497,8 +3334,6 @@ fn run_v3_inbound_receiver(
     log::info!("  Relay: {}", relay.relay_addr());
     log::info!("  Session ID: {:016x}", relay.session_id_u64());
     log::info!("  Adapter: {}", config.physical_adapter_name);
-    log::info!("  NAT: {:?} -> {:?}", config.tunnel_ip, config.internet_ip);
-
     // Open driver ONCE at thread start (not per-packet!)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
         Ok(d) => {
@@ -4652,7 +3487,7 @@ fn run_v3_inbound_receiver(
                 // The payload is already plain IP packet (relay strips session ID)
                 let ip_packet = &recv_buf[..len];
 
-                // Inject to MSTCP with NAT rewriting
+                // Inject to MSTCP
                 match inject_inbound_packet(
                     ip_packet,
                     &config,

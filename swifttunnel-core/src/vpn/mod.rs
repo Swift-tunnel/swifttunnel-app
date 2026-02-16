@@ -1,6 +1,6 @@
 //! VPN Module for SwiftTunnel
 //!
-//! This module provides WireGuard-based VPN tunneling with process-based split tunneling.
+//! This module provides V3 UDP relay tunneling with process-based split tunneling.
 //!
 //! ## Split Tunnel
 //!
@@ -11,23 +11,18 @@
 //! ## Architecture
 //!
 //! - config.rs: VPN configuration types and API fetching
-//! - adapter.rs: Wintun virtual network adapter management
-//! - tunnel.rs: WireGuard tunnel using BoringTun
-//! - routes.rs: Route management for VPN server
+//! - routes.rs: Internet interface IP detection
 //! - process_tracker.rs: Maps network connections to PIDs via IP Helper APIs
 //! - process_cache.rs: Lock-free RCU-style process cache for <0.1ms lookups
-//! - packet_interceptor.rs: ndisapi-based packet interception
 //! - parallel_interceptor.rs: Per-CPU parallel packet processing
 //! - split_tunnel.rs: Per-process routing coordination
 //! - connection.rs: Connection state machine and lifecycle management
 //! - servers.rs: Server list and latency measurement
 
-pub mod adapter;
 pub mod auto_routing;
 pub mod config;
 pub mod connection;
 pub mod error_messages;
-pub mod packet_interceptor;
 pub mod parallel_interceptor;
 pub mod process_cache;
 pub mod process_tracker;
@@ -36,20 +31,16 @@ pub mod routes;
 pub mod servers;
 pub mod split_tunnel;
 pub mod tso_recovery;
-pub mod tunnel;
 pub mod udp_relay;
 pub mod wfp_block;
 
-pub use adapter::WintunAdapter;
 pub use auto_routing::{AutoRouter, AutoRoutingAction, AutoRoutingEvent};
 pub use config::{VpnConfigRequest, fetch_vpn_config, update_latency};
 pub use connection::{ConnectionState, VpnConnection};
 pub use error_messages::{short_error, user_friendly_error};
-pub use packet_interceptor::WireguardContext;
-pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
+pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats};
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
 pub use process_watcher::{ProcessStartEvent, ProcessWatcher};
-pub use routes::{RouteManager, get_interface_index, get_internet_interface_ip};
 pub use servers::{
     DynamicGamingRegion, DynamicServerInfo, DynamicServerList, ServerListSource, load_server_list,
 };
@@ -58,7 +49,6 @@ pub use split_tunnel::{
     get_apps_for_presets, get_tunnel_apps_for_presets,
 };
 pub use tso_recovery::{emergency_tso_restore, recover_tso_on_startup};
-pub use tunnel::{InboundHandler, WireguardTunnel};
 pub use udp_relay::{RelayContext, UdpRelay};
 
 /// VPN-related errors
@@ -66,15 +56,6 @@ pub use udp_relay::{RelayContext, UdpRelay};
 pub enum VpnError {
     #[error("Failed to fetch VPN config: {0}")]
     ConfigFetch(String),
-
-    #[error("Failed to create Wintun adapter: {0}")]
-    AdapterCreate(String),
-
-    #[error("Failed to initialize WireGuard tunnel: {0}")]
-    TunnelInit(String),
-
-    #[error("WireGuard handshake failed: {0}")]
-    HandshakeFailed(String),
 
     #[error("Split tunnel driver error: {0}")]
     SplitTunnel(String),
@@ -120,30 +101,6 @@ mod tests {
     fn test_vpn_error_display_config_fetch() {
         let err = VpnError::ConfigFetch("timeout".to_string());
         assert_eq!(err.to_string(), "Failed to fetch VPN config: timeout");
-    }
-
-    #[test]
-    fn test_vpn_error_display_adapter_create() {
-        let err = VpnError::AdapterCreate("driver missing".to_string());
-        assert_eq!(
-            err.to_string(),
-            "Failed to create Wintun adapter: driver missing"
-        );
-    }
-
-    #[test]
-    fn test_vpn_error_display_tunnel_init() {
-        let err = VpnError::TunnelInit("bad key".to_string());
-        assert_eq!(
-            err.to_string(),
-            "Failed to initialize WireGuard tunnel: bad key"
-        );
-    }
-
-    #[test]
-    fn test_vpn_error_display_handshake_failed() {
-        let err = VpnError::HandshakeFailed("timeout".to_string());
-        assert_eq!(err.to_string(), "WireGuard handshake failed: timeout");
     }
 
     #[test]

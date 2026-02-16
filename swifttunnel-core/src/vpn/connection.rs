@@ -8,7 +8,6 @@
 
 use super::parallel_interceptor::ThroughputStats;
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
-use super::routes::get_internet_interface_ip;
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
 use super::{VpnError, VpnResult};
 use crate::auth::types::VpnConfig;
@@ -128,11 +127,7 @@ async fn ping_and_select_best(
 pub enum ConnectionState {
     Disconnected,
     FetchingConfig,
-    CreatingAdapter,
-    Connecting,
     ConfiguringSplitTunnel,
-    /// Adding routes through VPN interface
-    ConfiguringRoutes,
     Connected {
         since: Instant,
         server_region: String,
@@ -153,11 +148,7 @@ impl ConnectionState {
     pub fn is_connecting(&self) -> bool {
         matches!(
             self,
-            ConnectionState::FetchingConfig
-                | ConnectionState::CreatingAdapter
-                | ConnectionState::Connecting
-                | ConnectionState::ConfiguringSplitTunnel
-                | ConnectionState::ConfiguringRoutes
+            ConnectionState::FetchingConfig | ConnectionState::ConfiguringSplitTunnel
         )
     }
 
@@ -176,10 +167,7 @@ impl ConnectionState {
         match self {
             ConnectionState::Disconnected => "Disconnected",
             ConnectionState::FetchingConfig => "Resolving relay endpoint...",
-            ConnectionState::CreatingAdapter => "Creating network adapter...",
-            ConnectionState::Connecting => "Connecting to server...",
             ConnectionState::ConfiguringSplitTunnel => "Configuring split tunnel...",
-            ConnectionState::ConfiguringRoutes => "Setting up routes...",
             ConnectionState::Connected { .. } => "Connected",
             ConnectionState::Disconnecting => "Disconnecting...",
             ConnectionState::Error(_) => "Error",
@@ -455,12 +443,6 @@ impl VpnConnection {
     ) -> VpnResult<Vec<String>> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
-        // Get internet interface IP for NAT rewriting on inbound packets
-        let internet_ip = get_internet_interface_ip().map_err(|e| {
-            VpnError::SplitTunnelSetupFailed(format!("Failed to get internet interface IP: {}", e))
-        })?;
-        log::info!("V3: Internet interface IP: {}", internet_ip);
-
         // Check if driver is available
         if !SplitTunnelDriver::check_driver_available() {
             return Err(VpnError::SplitTunnelNotAvailable);
@@ -685,14 +667,8 @@ impl VpnConnection {
             auto_routing_enabled
         );
 
-        // Configure split tunnel driver
-        // tunnel_interface_luid = 0 (no Wintun), tunnel_ip = internet_ip (no NAT needed for UDP relay)
-        let split_config = SplitTunnelConfig::new(
-            tunnel_apps.clone(),
-            internet_ip.to_string(), // Use internet IP as "tunnel IP" (no NAT rewriting)
-            internet_ip.to_string(),
-            0, // No Wintun LUID needed for UDP relay
-        );
+        // Configure split tunnel driver (no Wintun LUID needed for UDP relay)
+        let split_config = SplitTunnelConfig::new(tunnel_apps.clone(), 0);
 
         driver.configure(split_config).map_err(|e| {
             let _ = driver.close();
@@ -1151,10 +1127,7 @@ mod tests {
     fn test_is_connected_false_for_other_states() {
         assert!(!ConnectionState::Disconnected.is_connected());
         assert!(!ConnectionState::FetchingConfig.is_connected());
-        assert!(!ConnectionState::CreatingAdapter.is_connected());
-        assert!(!ConnectionState::Connecting.is_connected());
         assert!(!ConnectionState::ConfiguringSplitTunnel.is_connected());
-        assert!(!ConnectionState::ConfiguringRoutes.is_connected());
         assert!(!ConnectionState::Disconnecting.is_connected());
         assert!(!ConnectionState::Error("err".to_string()).is_connected());
     }
@@ -1162,10 +1135,7 @@ mod tests {
     #[test]
     fn test_is_connecting_true_for_connecting_states() {
         assert!(ConnectionState::FetchingConfig.is_connecting());
-        assert!(ConnectionState::CreatingAdapter.is_connecting());
-        assert!(ConnectionState::Connecting.is_connecting());
         assert!(ConnectionState::ConfiguringSplitTunnel.is_connecting());
-        assert!(ConnectionState::ConfiguringRoutes.is_connecting());
     }
 
     #[test]
@@ -1189,7 +1159,7 @@ mod tests {
     fn test_is_error() {
         assert!(ConnectionState::Error("something broke".to_string()).is_error());
         assert!(!ConnectionState::Disconnected.is_error());
-        assert!(!ConnectionState::Connecting.is_error());
+        assert!(!ConnectionState::FetchingConfig.is_error());
     }
 
     #[test]
@@ -1202,7 +1172,10 @@ mod tests {
     fn test_error_message_none_for_other_states() {
         assert_eq!(ConnectionState::Disconnected.error_message(), None);
         assert_eq!(ConnectionState::FetchingConfig.error_message(), None);
-        assert_eq!(ConnectionState::Connecting.error_message(), None);
+        assert_eq!(
+            ConnectionState::ConfiguringSplitTunnel.error_message(),
+            None
+        );
         assert_eq!(ConnectionState::Disconnecting.error_message(), None);
 
         let connected = ConnectionState::Connected {
@@ -1224,20 +1197,8 @@ mod tests {
             "Resolving relay endpoint..."
         );
         assert_eq!(
-            ConnectionState::CreatingAdapter.status_text(),
-            "Creating network adapter..."
-        );
-        assert_eq!(
-            ConnectionState::Connecting.status_text(),
-            "Connecting to server..."
-        );
-        assert_eq!(
             ConnectionState::ConfiguringSplitTunnel.status_text(),
             "Configuring split tunnel..."
-        );
-        assert_eq!(
-            ConnectionState::ConfiguringRoutes.status_text(),
-            "Setting up routes..."
         );
         assert_eq!(
             ConnectionState::Disconnecting.status_text(),

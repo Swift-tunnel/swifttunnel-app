@@ -15,8 +15,7 @@
 //! - No lock contention between packet workers
 //! - No WFP complexity (callouts, filters, sublayers, providers)
 
-use super::packet_interceptor::{PacketInterceptor, WireguardContext};
-use super::parallel_interceptor::{ParallelInterceptor, ThroughputStats, VpnEncryptContext};
+use super::parallel_interceptor::{ParallelInterceptor, ThroughputStats};
 use super::{VpnError, VpnResult};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -134,25 +133,14 @@ pub fn get_apps_for_preset_set(presets: &HashSet<GamePreset>) -> Vec<String> {
 pub struct SplitTunnelConfig {
     /// Apps that SHOULD use VPN
     pub tunnel_apps: HashSet<String>,
-    /// VPN tunnel IP address (assigned by VPN server)
-    pub tunnel_ip: String,
-    /// Real internet IP address (from default gateway interface)
-    pub internet_ip: String,
     /// VPN interface LUID (for adapter identification)
     pub tunnel_interface_luid: u64,
 }
 
 impl SplitTunnelConfig {
-    pub fn new(
-        tunnel_apps: Vec<String>,
-        tunnel_ip: String,
-        internet_ip: String,
-        tunnel_interface_luid: u64,
-    ) -> Self {
+    pub fn new(tunnel_apps: Vec<String>, tunnel_interface_luid: u64) -> Self {
         Self {
             tunnel_apps: tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect(),
-            tunnel_ip,
-            internet_ip,
             tunnel_interface_luid,
         }
     }
@@ -182,25 +170,16 @@ pub enum DriverState {
 
 /// Split tunnel driver using Windows Packet Filter (ndisapi)
 ///
-/// v2: Uses ParallelInterceptor for per-CPU packet processing with <0.1ms latency.
-/// Maintains API compatibility with the old implementation.
+/// Uses ParallelInterceptor for per-CPU packet processing with <0.1ms latency.
 pub struct SplitTunnelDriver {
     /// Parallel packet interceptor (per-CPU workers)
     parallel_interceptor: Option<ParallelInterceptor>,
-    /// Legacy packet interceptor (fallback)
-    interceptor: Option<PacketInterceptor>,
-    /// Whether to use parallel mode (default: true)
-    use_parallel: bool,
     /// Current configuration
     pub config: Option<SplitTunnelConfig>,
     /// Current state
     state: DriverState,
     /// Stop flag for background tasks
     stop_flag: Arc<AtomicBool>,
-    /// WireGuard context for packet encapsulation
-    wireguard_ctx: Option<Arc<WireguardContext>>,
-    /// Wintun session for parallel interceptor
-    wintun_session: Option<Arc<wintun::Session>>,
 }
 
 unsafe impl Send for SplitTunnelDriver {}
@@ -208,123 +187,43 @@ unsafe impl Sync for SplitTunnelDriver {}
 
 impl SplitTunnelDriver {
     pub fn new() -> Self {
-        // Check SWIFTTUNNEL_PARALLEL env var for mode selection
-        let use_parallel = std::env::var("SWIFTTUNNEL_PARALLEL")
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(true); // Default to parallel mode
-
-        if use_parallel {
-            log::info!("Split tunnel: Using parallel mode (per-CPU workers, <0.1ms latency)");
-        } else {
-            log::info!("Split tunnel: Using legacy single-threaded mode");
-        }
+        log::info!("Split tunnel: Using parallel mode (per-CPU workers, <0.1ms latency)");
 
         Self {
             parallel_interceptor: None,
-            interceptor: None,
-            use_parallel,
             config: None,
             state: DriverState::NotAvailable,
             stop_flag: Arc::new(AtomicBool::new(false)),
-            wireguard_ctx: None,
-            wintun_session: None,
-        }
-    }
-
-    /// Set the WireGuard context for packet injection
-    ///
-    /// This enables VPN routing for tunnel app packets by injecting them into Wintun.
-    /// The tunnel.rs outbound loop will then pick them up, encapsulate, and send to VPN.
-    /// Must be called before configure() for packets to be routed through VPN.
-    pub fn set_wireguard_context(&mut self, ctx: Arc<WireguardContext>) {
-        log::info!("Setting Wintun injection context for split tunnel");
-        // Extract session from context for parallel interceptor
-        self.wintun_session = Some(Arc::clone(&ctx.session));
-        self.wireguard_ctx = Some(ctx);
-    }
-
-    /// Create a WireGuard context from a Wintun session
-    pub fn create_wireguard_context(session: Arc<wintun::Session>) -> Arc<WireguardContext> {
-        Arc::new(WireguardContext {
-            session,
-            packets_injected: std::sync::atomic::AtomicU64::new(0),
-        })
-    }
-
-    /// Set the VPN encryption context for direct WireGuard encryption
-    ///
-    /// This enables faster outbound path: workers encrypt directly and send via UDP,
-    /// bypassing Wintun. Only applies to parallel mode.
-    pub fn set_vpn_encrypt_context(&mut self, ctx: VpnEncryptContext) {
-        if self.use_parallel {
-            if let Some(ref mut interceptor) = self.parallel_interceptor {
-                interceptor.set_vpn_encrypt_context(ctx);
-            } else {
-                log::warn!("Cannot set VPN encrypt context: parallel interceptor not created yet");
-            }
-        } else {
-            log::info!("VPN encrypt context not used in legacy mode");
         }
     }
 
     /// Set the auto-router for automatic relay switching based on game server region
     pub fn set_auto_router(&mut self, router: std::sync::Arc<super::auto_routing::AutoRouter>) {
-        if self.use_parallel {
-            if let Some(ref mut interceptor) = self.parallel_interceptor {
-                interceptor.set_auto_router(router);
-            } else {
-                log::warn!("Cannot set auto router: parallel interceptor not created yet");
-            }
+        if let Some(ref mut interceptor) = self.parallel_interceptor {
+            interceptor.set_auto_router(router);
         } else {
-            log::info!("Auto router not used in legacy mode");
+            log::warn!("Cannot set auto router: parallel interceptor not created yet");
         }
     }
 
     /// Set the V3 UDP relay context for unencrypted game traffic relay
     ///
     /// This enables lowest-latency mode: workers forward packets directly to relay
-    /// server without WireGuard encryption. Only applies to parallel mode.
+    /// server without encryption.
     pub fn set_relay_context(&mut self, relay: std::sync::Arc<super::udp_relay::UdpRelay>) {
-        if self.use_parallel {
-            if let Some(ref mut interceptor) = self.parallel_interceptor {
-                interceptor.set_relay_context(relay);
-                log::info!("V3 relay context set for unencrypted UDP forwarding");
-            } else {
-                log::warn!("Cannot set relay context: parallel interceptor not created yet");
-            }
+        if let Some(ref mut interceptor) = self.parallel_interceptor {
+            interceptor.set_relay_context(relay);
+            log::info!("V3 relay context set for unencrypted UDP forwarding");
         } else {
-            log::info!("V3 relay context not used in legacy mode");
+            log::warn!("Cannot set relay context: parallel interceptor not created yet");
         }
     }
 
     /// Get the V3 UDP relay context if set
     pub fn get_relay_context(&self) -> Option<std::sync::Arc<super::udp_relay::UdpRelay>> {
-        if self.use_parallel {
-            self.parallel_interceptor
-                .as_ref()
-                .and_then(|p| p.get_relay_context())
-        } else {
-            None
-        }
-    }
-
-    /// Set inbound handler for decrypted VPN responses
-    ///
-    /// This handler is called for each decrypted packet received on the
-    /// VpnEncryptContext socket. It performs NAT rewriting and injects
-    /// the packet to MSTCP so the original app can receive the response.
-    ///
-    /// IMPORTANT: Must be called BEFORE configure() since threads start during configure.
-    pub fn set_inbound_handler(&mut self, handler: std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>) {
-        if self.use_parallel {
-            if let Some(ref mut interceptor) = self.parallel_interceptor {
-                interceptor.set_inbound_handler(handler);
-            } else {
-                log::warn!("Cannot set inbound handler: parallel interceptor not created yet");
-            }
-        } else {
-            log::info!("Inbound handler not used in legacy mode");
-        }
+        self.parallel_interceptor
+            .as_ref()
+            .and_then(|p| p.get_relay_context())
     }
 
     /// Check if driver is available (can open device)
@@ -356,7 +255,7 @@ impl SplitTunnelDriver {
             log::error!("Failed to ensure driver service: {}", e);
         } else {
             // Check again after service start
-            if PacketInterceptor::check_driver_available() {
+            if ParallelInterceptor::check_driver_available() {
                 log::info!("Windows Packet Filter driver available after service start");
                 return true;
             }
@@ -369,7 +268,7 @@ impl SplitTunnelDriver {
         } else {
             // Check again after MSI install
             std::thread::sleep(std::time::Duration::from_secs(2));
-            if PacketInterceptor::check_driver_available() {
+            if ParallelInterceptor::check_driver_available() {
                 log::info!("Windows Packet Filter driver available after MSI install");
                 return true;
             }
@@ -653,30 +552,21 @@ impl SplitTunnelDriver {
 
     /// Open the driver
     pub fn open(&mut self) -> VpnResult<()> {
-        if self.parallel_interceptor.is_some() || self.interceptor.is_some() {
+        if self.parallel_interceptor.is_some() {
             log::warn!("Split tunnel already open");
             return Ok(());
         }
 
-        log::info!(
-            "Opening split tunnel driver (ndisapi, parallel={})...",
-            self.use_parallel
-        );
+        log::info!("Opening split tunnel driver (ndisapi, parallel)...");
 
-        // Create packet interceptor
         let tunnel_apps: Vec<String> = self
             .config
             .as_ref()
             .map(|c| c.tunnel_apps.iter().cloned().collect())
             .unwrap_or_default();
 
-        if self.use_parallel {
-            let interceptor = ParallelInterceptor::new(tunnel_apps);
-            self.parallel_interceptor = Some(interceptor);
-        } else {
-            let interceptor = PacketInterceptor::new(tunnel_apps);
-            self.interceptor = Some(interceptor);
-        }
+        let interceptor = ParallelInterceptor::new(tunnel_apps);
+        self.parallel_interceptor = Some(interceptor);
 
         self.state = DriverState::NotConfigured;
 
@@ -688,19 +578,11 @@ impl SplitTunnelDriver {
     pub fn initialize(&mut self) -> VpnResult<()> {
         log::info!("Initializing split tunnel driver...");
 
-        if self.use_parallel {
-            let interceptor = self
-                .parallel_interceptor
-                .as_mut()
-                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
-            interceptor.initialize()?;
-        } else {
-            let interceptor = self
-                .interceptor
-                .as_mut()
-                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
-            interceptor.initialize()?;
-        }
+        let interceptor = self
+            .parallel_interceptor
+            .as_mut()
+            .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
+        interceptor.initialize()?;
 
         self.state = DriverState::Initialized;
         log::info!("Split tunnel driver initialized");
@@ -709,24 +591,16 @@ impl SplitTunnelDriver {
 
     /// Get running tunnel app names
     pub fn get_running_tunnel_apps(&mut self) -> Vec<String> {
-        if self.use_parallel {
-            // For parallel mode, get from snapshot
-            if let Some(ref interceptor) = self.parallel_interceptor {
-                let snapshot = interceptor.get_snapshot();
-                snapshot
-                    .tunnel_pids
-                    .iter()
-                    .filter_map(|pid| snapshot.pid_names.get(pid))
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            }
+        if let Some(ref interceptor) = self.parallel_interceptor {
+            let snapshot = interceptor.get_snapshot();
+            snapshot
+                .tunnel_pids
+                .iter()
+                .filter_map(|pid| snapshot.pid_names.get(pid))
+                .cloned()
+                .collect()
         } else {
-            match &mut self.interceptor {
-                Some(interceptor) => interceptor.get_running_tunnel_apps(),
-                None => Vec::new(),
-            }
+            Vec::new()
         }
     }
 
@@ -742,68 +616,27 @@ impl SplitTunnelDriver {
         }
 
         log::info!(
-            "Configuring split tunnel (parallel={}): {} apps to tunnel",
-            self.use_parallel,
+            "Configuring split tunnel: {} apps to tunnel",
             config.tunnel_apps.len()
         );
         log::debug!("Tunnel apps: {:?}", config.tunnel_apps);
 
-        if self.use_parallel {
-            let interceptor = self
-                .parallel_interceptor
-                .as_mut()
-                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
+        let interceptor = self
+            .parallel_interceptor
+            .as_mut()
+            .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
 
-            // Configure the interceptor
-            // Pass the LUID for reliable adapter identification even when
-            // Windows API friendly name lookup fails (issue after v0.9.11)
-            interceptor.configure(
-                "SwiftTunnel", // VPN adapter name
-                config.tunnel_apps.iter().cloned().collect(),
-                config.tunnel_interface_luid, // LUID for reliable detection
-            )?;
+        // Configure the interceptor
+        // Pass the LUID for reliable adapter identification even when
+        // Windows API friendly name lookup fails (issue after v0.9.11)
+        interceptor.configure(
+            "SwiftTunnel", // VPN adapter name
+            config.tunnel_apps.iter().cloned().collect(),
+            config.tunnel_interface_luid, // LUID for reliable detection
+        )?;
 
-            // Set NAT IPs for inbound packet rewriting
-            interceptor.set_nat_ips(&config.tunnel_ip, &config.internet_ip);
-
-            // Pass Wintun session if available
-            if let Some(ref session) = self.wintun_session {
-                interceptor.set_wintun_session(Arc::clone(session));
-                log::info!("Wintun session passed to parallel interceptor - VPN routing enabled");
-            } else {
-                log::warn!(
-                    "No Wintun session - tunnel app packets will be logged but NOT routed through VPN"
-                );
-            }
-
-            // Start packet interception
-            interceptor.start()?;
-        } else {
-            let interceptor = self
-                .interceptor
-                .as_mut()
-                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
-
-            // Configure the interceptor
-            interceptor.configure(
-                "SwiftTunnel", // VPN adapter name
-                config.tunnel_apps.iter().cloned().collect(),
-                config.tunnel_interface_luid, // LUID for reliable detection
-            )?;
-
-            // Pass WireGuard context to interceptor if available
-            if let Some(ref ctx) = self.wireguard_ctx {
-                interceptor.set_wireguard_context(Arc::clone(ctx));
-                log::info!("WireGuard context passed to packet interceptor - VPN routing enabled");
-            } else {
-                log::warn!(
-                    "No WireGuard context - tunnel app packets will be logged but NOT routed through VPN"
-                );
-            }
-
-            // Start packet interception
-            interceptor.start()?;
-        }
+        // Start packet interception
+        interceptor.start()?;
 
         self.config = Some(config);
         self.state = DriverState::Active;
@@ -814,18 +647,10 @@ impl SplitTunnelDriver {
 
     /// Refresh process exclusions
     pub fn refresh_exclusions(&mut self) -> VpnResult<bool> {
-        if self.use_parallel {
-            // Parallel mode: cache refresher runs automatically in background
-            // Just check if tunnel apps are running
-            let running = !self.get_running_tunnel_apps().is_empty();
-            Ok(running)
-        } else {
-            let interceptor = self
-                .interceptor
-                .as_mut()
-                .ok_or_else(|| VpnError::SplitTunnel("Driver not open".to_string()))?;
-            interceptor.refresh()
-        }
+        // Cache refresher runs automatically in background
+        // Just check if tunnel apps are running
+        let running = !self.get_running_tunnel_apps().is_empty();
+        Ok(running)
     }
 
     /// Refresh processes (alias for refresh_exclusions)
@@ -849,9 +674,6 @@ impl SplitTunnelDriver {
         if let Some(interceptor) = &mut self.parallel_interceptor {
             interceptor.stop();
         }
-        if let Some(interceptor) = &mut self.interceptor {
-            interceptor.stop();
-        }
         self.config = None;
         self.state = DriverState::NotConfigured;
         log::info!("Split tunnel configuration cleared");
@@ -865,14 +687,10 @@ impl SplitTunnelDriver {
         if let Some(mut interceptor) = self.parallel_interceptor.take() {
             interceptor.stop();
         }
-        if let Some(mut interceptor) = self.interceptor.take() {
-            interceptor.stop();
-        }
 
         self.config = None;
         self.state = DriverState::NotAvailable;
         self.stop_flag.store(true, Ordering::SeqCst);
-        self.wintun_session = None;
 
         log::info!("Split tunnel driver closed");
         Ok(())
@@ -893,71 +711,32 @@ impl SplitTunnelDriver {
     /// Returns a clonable ThroughputStats that tracks bytes sent/received through the VPN tunnel.
     /// Returns None if interceptor is not active.
     pub fn get_throughput_stats(&self) -> Option<ThroughputStats> {
-        if self.use_parallel {
-            self.parallel_interceptor
-                .as_ref()
-                .map(|p| p.get_throughput_stats())
-        } else {
-            self.interceptor.as_ref().map(|p| p.get_throughput_stats())
-        }
+        self.parallel_interceptor
+            .as_ref()
+            .map(|p| p.get_throughput_stats())
     }
 
     /// Get diagnostic info for UI display
     ///
     /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
-    /// - adapter_name: The physical network adapter being intercepted
-    /// - has_default_route: Whether this adapter has the default internet route
-    /// - packets_tunneled: Total packets sent through VPN
-    /// - packets_bypassed: Total packets that bypassed VPN (non-game apps)
     pub fn get_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
-        if self.use_parallel {
-            self.parallel_interceptor
-                .as_ref()
-                .map(|p| p.get_diagnostics())
-        } else {
-            // Legacy mode - return minimal info
-            Some((None, false, 0, 0))
-        }
+        self.parallel_interceptor
+            .as_ref()
+            .map(|p| p.get_diagnostics())
     }
 
     /// Get detected game server IPs for notifications (Bloxstrap-style)
-    ///
-    /// Returns a list of Roblox game server IPs that were detected during tunneling.
-    /// Used to show "Connected to server in {location}" notifications.
     pub fn get_detected_game_servers(&self) -> Vec<std::net::Ipv4Addr> {
-        if self.use_parallel {
-            self.parallel_interceptor
-                .as_ref()
-                .map(|p| p.get_detected_game_servers())
-                .unwrap_or_default()
-        } else {
-            // Legacy mode doesn't support game server detection
-            Vec::new()
-        }
+        self.parallel_interceptor
+            .as_ref()
+            .map(|p| p.get_detected_game_servers())
+            .unwrap_or_default()
     }
 
     /// Clear detected game servers (call on disconnect)
     pub fn clear_detected_game_servers(&self) {
-        if self.use_parallel {
-            if let Some(ref p) = self.parallel_interceptor {
-                p.clear_detected_game_servers();
-            }
-        }
-    }
-
-    /// Create an inbound handler for the WireGuard tunnel
-    ///
-    /// This handler receives decrypted packets from the tunnel and injects them
-    /// to the physical adapter's MSTCP stack so the app receives them.
-    /// Returns None if split tunnel is not active in parallel mode.
-    pub fn create_inbound_handler(&self) -> Option<super::tunnel::InboundHandler> {
-        if self.use_parallel {
-            self.parallel_interceptor
-                .as_ref()
-                .and_then(|p| p.create_inbound_handler())
-        } else {
-            // Legacy mode doesn't support inbound injection yet
-            None
+        if let Some(ref p) = self.parallel_interceptor {
+            p.clear_detected_game_servers();
         }
     }
 
@@ -973,21 +752,12 @@ impl SplitTunnelDriver {
     /// - We register the process here
     /// - First packet arrives → process is already in cache → TUNNELED!
     pub fn register_process_immediate(&self, pid: u32, name: String) {
-        if self.use_parallel {
-            if let Some(ref interceptor) = self.parallel_interceptor {
-                interceptor.register_process_immediate(pid, name);
-                // Also trigger immediate cache refresh for connection table
-                interceptor.trigger_refresh();
-            } else {
-                log::warn!("Cannot register process: parallel interceptor not active");
-            }
+        if let Some(ref interceptor) = self.parallel_interceptor {
+            interceptor.register_process_immediate(pid, name);
+            // Also trigger immediate cache refresh for connection table
+            interceptor.trigger_refresh();
         } else {
-            // Legacy mode doesn't support instant registration
-            // Process will be detected on next 50ms poll
-            log::debug!(
-                "Legacy mode: process {} will be detected on next poll",
-                name
-            );
+            log::warn!("Cannot register process: parallel interceptor not active");
         }
     }
 
@@ -1011,10 +781,8 @@ impl SplitTunnelDriver {
     /// Trigger immediate cache refresh (called by ETW when game process detected)
     /// This wakes up the cache refresher from its 2-second sleep
     pub fn trigger_cache_refresh(&self) {
-        if self.use_parallel {
-            if let Some(ref interceptor) = self.parallel_interceptor {
-                interceptor.trigger_refresh();
-            }
+        if let Some(ref interceptor) = self.parallel_interceptor {
+            interceptor.trigger_refresh();
         }
     }
 }
@@ -1044,12 +812,7 @@ mod tests {
 
     #[test]
     fn test_config_creation() {
-        let config = SplitTunnelConfig::new(
-            vec!["robloxplayerbeta.exe".to_string()],
-            "10.0.0.2".to_string(),
-            "192.168.1.100".to_string(),
-            12345,
-        );
+        let config = SplitTunnelConfig::new(vec!["robloxplayerbeta.exe".to_string()], 12345);
         assert!(config.tunnel_apps.contains("robloxplayerbeta.exe"));
     }
 

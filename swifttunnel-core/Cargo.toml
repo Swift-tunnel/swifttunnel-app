@@ -67,16 +67,10 @@ dirs = "5.0"
 # HTTP client for API calls
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
-# VPN Core - WireGuard userspace implementation
-boringtun = "0.6"
-
-# Wintun virtual network adapter for Windows
-wintun = "0.5"
-
 # Windows Packet Filter (ndisapi) for packet-level split tunneling
 ndisapi = "0.6"
 
-# Curve25519 key exchange - MUST match boringtun's version exactly
+# Curve25519 key exchange for WireGuard key generation (used by server API)
 x25519-dalek = { version = "=2.0.0-rc.3", features = ["static_secrets"] }
 
 # Additional async utilities for VPN packet handling
