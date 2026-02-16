@@ -37,19 +37,6 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             "Split tunnel driver not initialized.\n\nPlease try reconnecting.".to_string()
         }
 
-        // Adapter issues
-        VpnError::AdapterCreate(msg) => {
-            if msg.contains("Administrator") || msg.contains("privileges") {
-                "Administrator privileges required.\n\nPlease run SwiftTunnel as Administrator.".to_string()
-            } else if msg.contains("wintun.dll") {
-                "Wintun driver not found.\n\nPlease reinstall SwiftTunnel to restore the driver.".to_string()
-            } else if msg.contains("Failed to set IP") {
-                "Failed to configure network adapter.\n\nTry disconnecting other network software and restarting your computer.".to_string()
-            } else {
-                format!("Failed to create network adapter.\n\n{}", simplify_message(msg))
-            }
-        }
-
         // Route issues
         VpnError::Route(msg) => {
             if msg.contains("No default gateway") || msg.contains("no gateway") {
@@ -98,19 +85,6 @@ pub fn user_friendly_error(error: &VpnError) -> String {
 
         VpnError::InvalidConfig(msg) => {
             format!("Invalid configuration.\n\n{}", simplify_message(msg))
-        }
-
-        // Tunnel issues
-        VpnError::TunnelInit(msg) => {
-            format!("Failed to initialize connection.\n\n{}", simplify_message(msg))
-        }
-
-        VpnError::HandshakeFailed(msg) => {
-            if msg.contains("timeout") {
-                "Connection timed out.\n\nThe server may be overloaded. Try a different server.".to_string()
-            } else {
-                "Connection handshake failed.\n\nPlease try connecting to a different server.".to_string()
-            }
         }
 
         // Auth issues
@@ -162,14 +136,11 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::SplitTunnelSetupFailed(_) => "Split tunnel failed",
         VpnError::DriverNotOpen => "Driver not open",
         VpnError::DriverNotInitialized => "Driver not initialized",
-        VpnError::AdapterCreate(_) => "Adapter creation failed",
         VpnError::Route(_) => "Route setup failed",
         VpnError::Connection(_) => "Connection failed",
         VpnError::Network(_) => "Network error",
         VpnError::ConfigFetch(_) => "Config fetch failed",
         VpnError::InvalidConfig(_) => "Invalid config",
-        VpnError::TunnelInit(_) => "Tunnel init failed",
-        VpnError::HandshakeFailed(_) => "Handshake failed",
         VpnError::NotAuthenticated => "Not authenticated",
         VpnError::SplitTunnel(_) => "Split tunnel error",
         VpnError::Io(_) => "System error",
@@ -192,13 +163,6 @@ mod tests {
         let error = VpnError::SplitTunnelSetupFailed("Driver timed out".to_string());
         let msg = user_friendly_error(&error);
         assert!(msg.contains("restart your computer"));
-    }
-
-    #[test]
-    fn test_user_friendly_admin() {
-        let error = VpnError::AdapterCreate("Administrator privileges required".to_string());
-        let msg = user_friendly_error(&error);
-        assert!(msg.contains("Administrator"));
     }
 
     #[test]

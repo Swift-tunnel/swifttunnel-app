@@ -3,21 +3,9 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,27 +19,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get PR diff
-        id: diff
-        run: |
-          git fetch origin ${{ github.base_ref }}
-          echo "diff<<DIFF_EOF" >> $GITHUB_OUTPUT
-          git diff origin/${{ github.base_ref }}...HEAD >> $GITHUB_OUTPUT
-          echo "DIFF_EOF" >> $GITHUB_OUTPUT
-
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            Review this PR. Here is the diff:
+            Review this pull request thoroughly.
 
-            ```diff
-            ${{ steps.diff.outputs.diff }}
-            ```
-
-            You are a senior code reviewer. Perform a THOROUGH code review.
+            Use `gh pr diff ${{ github.event.pull_request.number }}` to read the diff.
 
             For EACH file changed, analyze:
             1. **Security** - injection risks, leaks, unsafe operations
@@ -74,5 +50,4 @@ jobs:
 
             If code is good, explain WHY with specific examples.
             Always provide actionable feedback.
-          claude_args: '--model claude-opus-4-5-20251101 --max-turns 5'
-
+          claude_args: '--model claude-opus-4-6 --max-turns 5'

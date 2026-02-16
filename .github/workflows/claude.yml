@@ -40,7 +40,7 @@ jobs:
           additional_permissions: |
             actions: read
 
-          # Use Claude Opus 4.5 for highest quality responses
+          # Use Claude Opus 4.6 for highest quality responses
           # Read CLAUDE.md for project context and guidelines
-          claude_args: '--model claude-opus-4-5-20251101 --append-system-prompt "Follow Kiss Dry Code principals"'
+          claude_args: '--model claude-opus-4-6 --append-system-prompt "Follow Kiss Dry Code principals"'
 
