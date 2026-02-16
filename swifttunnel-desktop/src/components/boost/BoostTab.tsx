@@ -44,10 +44,7 @@ function getPresetConfig(profile: OptimizationProfile, current: Config): Config 
           graphics_quality: "Level1",
           unlock_fps: true,
           target_fps: 360,
-          disable_shadows: true,
-          reduce_texture_quality: true,
-          disable_post_processing: true,
-          dynamic_render_optimization: "High",
+          ultraboost: true,
         },
         network_settings: {
           ...current.network_settings,
@@ -76,10 +73,7 @@ function getPresetConfig(profile: OptimizationProfile, current: Config): Config 
           graphics_quality: "Manual",
           unlock_fps: true,
           target_fps: 144,
-          disable_shadows: false,
-          reduce_texture_quality: false,
-          disable_post_processing: false,
-          dynamic_render_optimization: "Off",
+          ultraboost: false,
         },
         network_settings: {
           ...current.network_settings,
@@ -108,10 +102,7 @@ function getPresetConfig(profile: OptimizationProfile, current: Config): Config 
           graphics_quality: "Level8",
           unlock_fps: true,
           target_fps: 60,
-          disable_shadows: false,
-          reduce_texture_quality: false,
-          disable_post_processing: false,
-          dynamic_render_optimization: "Off",
+          ultraboost: false,
         },
         network_settings: {
           ...current.network_settings,
@@ -125,10 +116,6 @@ function getPresetConfig(profile: OptimizationProfile, current: Config): Config 
       return base;
   }
 }
-
-// ── Dynamic render options ──
-
-const RENDER_MODES = ["Off", "Low", "Medium", "High"] as const;
 
 // ── Helpers ──
 
@@ -385,45 +372,13 @@ export function BoostTab() {
           </div>
         )}
 
-        <div className="rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-4 py-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-sm font-medium text-text-primary">
-                Dynamic Render
-              </div>
-              <div className="text-xs text-text-muted">
-                Adaptive render resolution
-              </div>
-            </div>
-            <div className="flex gap-1">
-              {RENDER_MODES.map((mode) => (
-                <button
-                  key={mode}
-                  onClick={() =>
-                    updateRblxOpt({
-                      dynamic_render_optimization: mode,
-                    })
-                  }
-                  className="rounded px-2.5 py-1 text-xs transition-colors"
-                  style={{
-                    backgroundColor:
-                      draft.roblox_settings.dynamic_render_optimization ===
-                      mode
-                        ? "var(--color-accent-primary)"
-                        : "var(--color-bg-hover)",
-                    color:
-                      draft.roblox_settings.dynamic_render_optimization ===
-                      mode
-                        ? "white"
-                        : "var(--color-text-secondary)",
-                  }}
-                >
-                  {mode}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
+        <BoostCard
+          title="Ultraboost"
+          desc="All allowlisted performance FFlags for max FPS"
+          impact="+20-40% FPS"
+          enabled={draft.roblox_settings.ultraboost}
+          onChange={(v) => updateRblxOpt({ ultraboost: v })}
+        />
       </Section>
 
       {/* ── Sticky Apply Bar ── */}

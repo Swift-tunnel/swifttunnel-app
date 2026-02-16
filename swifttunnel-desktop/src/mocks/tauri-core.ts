@@ -20,10 +20,7 @@ const MOCK_SETTINGS = {
       graphics_quality: "Manual",
       unlock_fps: true,
       target_fps: 144,
-      disable_shadows: false,
-      reduce_texture_quality: false,
-      disable_post_processing: false,
-      dynamic_render_optimization: "Off",
+      ultraboost: false,
     },
     network_settings: {
       enable_network_boost: true,

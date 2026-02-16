@@ -344,7 +344,7 @@ impl RobloxOptimizer {
         // The FPS settings may be reset by Roblox, but the background monitor
         // will re-detect and re-apply them when needed.
 
-        // Apply FFlag optimizations (shadows, post-processing, texture quality, dynamic render)
+        // Apply FFlag optimizations (ultraboost)
         if let Err(e) = self.apply_client_fflags(config) {
             warn!("Could not apply FFlag optimizations: {}", e);
         }
@@ -554,8 +554,32 @@ impl RobloxOptimizer {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    //  DYNAMIC RENDER OPTIMIZATION
+    //  ULTRABOOST FFLAGS
     // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// All allowlisted performance FFlags applied by Ultraboost
+    const ULTRABOOST_FFLAGS: &[(&str, &str)] = &[
+        ("FFlagHandleAltEnterFullscreenManually", "False"),
+        ("FFlagDebugGraphicsPreferD3D11", "True"),
+        ("FIntDebugForceMSAASamples", "1"),
+        ("DFFlagTextureQualityOverrideEnabled", "True"),
+        ("DFIntTextureQualityOverride", "0"),
+        ("DFIntDebugFRMQualityLevelOverride", "1"),
+        ("FFlagDebugSkyGray", "True"),
+        ("FIntFRMMinGrassDistance", "0"),
+        ("FIntFRMMaxGrassDistance", "0"),
+        ("FIntGrassMovementReducedMotionFactor", "0"),
+        ("DFFlagDisableDPIScale", "True"),
+    ];
+
+    /// Old blocked FFlags that must be cleaned up from previous versions
+    const LEGACY_BLOCKED_FFLAGS: &[&str] = &[
+        "DFIntDebugDynamicRenderKiloPixels",
+        "FIntRenderShadowIntensity",
+        "DFFlagDebugPauseVoxelizer",
+        "FFlagDisablePostFx",
+        "FIntDebugTextureManagerSkipMips",
+    ];
 
     /// Find the current Roblox version folder
     /// Returns the path to the latest version-* directory
@@ -615,8 +639,9 @@ impl RobloxOptimizer {
         Some(client_settings)
     }
 
-    /// Apply all FFlag optimizations to ClientAppSettings.json
-    /// Handles: dynamic render, shadows, post-processing, texture quality
+    /// Apply FFlag optimizations to ClientAppSettings.json
+    /// When ultraboost is enabled, writes all allowlisted performance FFlags.
+    /// Always cleans up old blocked FFlags from previous versions.
     fn apply_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<()> {
         let client_settings = Self::get_client_settings_path()
             .ok_or_else(|| anyhow::anyhow!("Could not find Roblox version folder"))?;
@@ -633,46 +658,22 @@ impl RobloxOptimizer {
             HashMap::new()
         };
 
-        // Dynamic render optimization
-        if let Some(render_value) = config.dynamic_render_optimization.render_value() {
-            settings.insert(
-                "DFIntDebugDynamicRenderKiloPixels".to_string(),
-                serde_json::json!(render_value),
-            );
-        } else {
-            settings.remove("DFIntDebugDynamicRenderKiloPixels");
+        // Always clean up old blocked FFlags from previous versions
+        for key in Self::LEGACY_BLOCKED_FFLAGS {
+            settings.remove(*key);
         }
 
-        // Disable shadows via FFlags
-        if config.disable_shadows {
-            settings.insert(
-                "FIntRenderShadowIntensity".to_string(),
-                serde_json::json!(0),
-            );
-            settings.insert(
-                "DFFlagDebugPauseVoxelizer".to_string(),
-                serde_json::json!("true"),
-            );
+        if config.ultraboost {
+            // Insert all ultraboost FFlags
+            for (key, value) in Self::ULTRABOOST_FFLAGS {
+                settings.insert(key.to_string(), serde_json::json!(value));
+            }
+            info!("Ultraboost FFlags applied");
         } else {
-            settings.remove("FIntRenderShadowIntensity");
-            settings.remove("DFFlagDebugPauseVoxelizer");
-        }
-
-        // Disable post-processing effects via FFlags
-        if config.disable_post_processing {
-            settings.insert("FFlagDisablePostFx".to_string(), serde_json::json!("true"));
-        } else {
-            settings.remove("FFlagDisablePostFx");
-        }
-
-        // Reduce texture quality via FFlags (skip mip levels = lower quality textures)
-        if config.reduce_texture_quality {
-            settings.insert(
-                "FIntDebugTextureManagerSkipMips".to_string(),
-                serde_json::json!(3),
-            );
-        } else {
-            settings.remove("FIntDebugTextureManagerSkipMips");
+            // Remove all ultraboost FFlags
+            for (key, _) in Self::ULTRABOOST_FFLAGS {
+                settings.remove(*key);
+            }
         }
 
         // Write or delete the file
@@ -706,16 +707,14 @@ impl RobloxOptimizer {
             let mut settings: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&content).unwrap_or_default();
 
-            // Remove all our FFlags
-            let our_keys = [
-                "DFIntDebugDynamicRenderKiloPixels",
-                "FIntRenderShadowIntensity",
-                "DFFlagDebugPauseVoxelizer",
-                "FFlagDisablePostFx",
-                "FIntDebugTextureManagerSkipMips",
-            ];
-            for key in our_keys {
-                settings.remove(key);
+            // Remove all ultraboost FFlags
+            for (key, _) in Self::ULTRABOOST_FFLAGS {
+                settings.remove(*key);
+            }
+
+            // Remove old blocked FFlags (legacy cleanup)
+            for key in Self::LEGACY_BLOCKED_FFLAGS {
+                settings.remove(*key);
             }
 
             if settings.is_empty() {
@@ -725,85 +724,6 @@ impl RobloxOptimizer {
                 fs::write(&settings_path, json)?;
             }
             info!("FFlag optimizations removed from ClientAppSettings.json");
-        }
-
-        Ok(())
-    }
-
-    /// Apply dynamic render optimization
-    pub fn apply_dynamic_render_optimization(
-        &self,
-        mode: &crate::structs::DynamicRenderMode,
-    ) -> Result<()> {
-        // If mode is Off, remove the setting
-        let render_value = match mode.render_value() {
-            Some(v) => v,
-            None => return self.remove_dynamic_render_optimization(),
-        };
-
-        let client_settings = Self::get_client_settings_path()
-            .ok_or_else(|| anyhow::anyhow!("Could not find Roblox version folder"))?;
-
-        let settings_path = client_settings.join("ClientAppSettings.json");
-
-        // Build settings map
-        let mut settings: HashMap<String, serde_json::Value> = HashMap::new();
-
-        // Read existing settings if file exists
-        if settings_path.exists() {
-            if let Ok(content) = fs::read_to_string(&settings_path) {
-                if let Ok(existing) =
-                    serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
-                {
-                    settings = existing;
-                }
-            }
-        }
-
-        // Dynamic render optimization - reduces render load for better performance
-        // Low=3, Medium=2, High=1 (lower value = more aggressive optimization)
-        settings.insert(
-            "DFIntDebugDynamicRenderKiloPixels".to_string(),
-            serde_json::json!(render_value),
-        );
-
-        // Write settings to file
-        let json = serde_json::to_string_pretty(&settings)?;
-        fs::write(&settings_path, json)?;
-
-        info!("Dynamic render optimization enabled ({:?})", mode);
-
-        Ok(())
-    }
-
-    /// Remove dynamic render optimization settings
-    fn remove_dynamic_render_optimization(&self) -> Result<()> {
-        let client_settings = match Self::get_client_settings_path() {
-            Some(path) => path,
-            None => {
-                info!("No Roblox version folder found, skipping cleanup");
-                return Ok(());
-            }
-        };
-
-        let settings_path = client_settings.join("ClientAppSettings.json");
-
-        if settings_path.exists() {
-            let content = fs::read_to_string(&settings_path)?;
-            let mut settings: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&content).unwrap_or_default();
-
-            // Remove our setting
-            settings.remove("DFIntDebugDynamicRenderKiloPixels");
-
-            if settings.is_empty() {
-                fs::remove_file(&settings_path)?;
-                info!("Dynamic render optimization disabled");
-            } else {
-                let json = serde_json::to_string_pretty(&settings)?;
-                fs::write(&settings_path, json)?;
-                info!("Dynamic render optimization disabled");
-            }
         }
 
         Ok(())
@@ -1030,5 +950,56 @@ mod tests {
     fn read_current_settings_errors_if_file_missing() {
         let opt = optimizer_with_path(PathBuf::from("nonexistent_file.xml"));
         assert!(opt.read_current_settings().is_err());
+    }
+
+    // ── ultraboost FFlag constants ────────────────────────────────────
+
+    #[test]
+    fn ultraboost_fflags_count() {
+        assert_eq!(
+            RobloxOptimizer::ULTRABOOST_FFLAGS.len(),
+            11,
+            "Expected 11 ultraboost FFlags"
+        );
+    }
+
+    #[test]
+    fn legacy_blocked_fflags_count() {
+        assert_eq!(
+            RobloxOptimizer::LEGACY_BLOCKED_FFLAGS.len(),
+            5,
+            "Expected 5 legacy blocked FFlags"
+        );
+    }
+
+    #[test]
+    fn ultraboost_and_legacy_fflags_are_disjoint() {
+        let ultraboost_keys: Vec<&str> = RobloxOptimizer::ULTRABOOST_FFLAGS
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        for legacy_key in RobloxOptimizer::LEGACY_BLOCKED_FFLAGS {
+            assert!(
+                !ultraboost_keys.contains(legacy_key),
+                "Legacy key '{}' should not appear in ultraboost FFlags",
+                legacy_key
+            );
+        }
+    }
+
+    #[test]
+    fn ultraboost_fflags_have_no_duplicate_keys() {
+        let keys: Vec<&str> = RobloxOptimizer::ULTRABOOST_FFLAGS
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        let mut unique = keys.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            keys.len(),
+            unique.len(),
+            "Ultraboost FFlags contain duplicate keys"
+        );
     }
 }
