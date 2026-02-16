@@ -6,11 +6,11 @@
 //! - Jitter (standard deviation)
 //! - Packet loss percentage
 
-use super::types::{ConnectionQuality, StabilityTestProgress, StabilityTestResults};
+use super::types::{ConnectionQuality, PingSample, StabilityTestProgress, StabilityTestResults};
 use crate::hidden_command;
 use log::{debug, error, info};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Target IP for stability testing (Cloudflare DNS - highly reliable)
 const PING_TARGET: &str = "1.1.1.1";
@@ -37,14 +37,23 @@ pub async fn run_stability_test(
 
     let total_pings = (duration_secs as u64 * 1000) / PING_INTERVAL_MS;
     let mut successful_pings: Vec<u32> = Vec::with_capacity(total_pings as usize);
+    let mut all_samples: Vec<PingSample> = Vec::with_capacity(total_pings as usize);
     let mut total_attempts: u32 = 0;
     let mut packet_loss_count: u32 = 0;
+    let test_start = Instant::now();
 
     for i in 0..total_pings {
         total_attempts += 1;
 
         // Perform single ping
         let ping_result = ping_once(PING_TARGET).await;
+        let elapsed_secs = test_start.elapsed().as_secs_f32();
+
+        // Record sample with timestamp
+        all_samples.push(PingSample {
+            elapsed_secs,
+            latency_ms: ping_result,
+        });
 
         // Send sample to UI
         let _ = progress_tx.send(StabilityTestProgress::PingSample(ping_result));
@@ -79,7 +88,7 @@ pub async fn run_stability_test(
         return Err(error_msg);
     }
 
-    let results = calculate_statistics(&successful_pings, total_attempts, packet_loss_count);
+    let results = calculate_statistics(&successful_pings, total_attempts, packet_loss_count, all_samples);
     info!(
         "Stability test complete: avg={}ms, jitter={}ms, loss={:.1}%, quality={:?}",
         results.avg_ping, results.jitter, results.packet_loss, results.quality
@@ -143,6 +152,7 @@ fn calculate_statistics(
     successful_pings: &[u32],
     total_attempts: u32,
     packet_loss_count: u32,
+    ping_samples: Vec<PingSample>,
 ) -> StabilityTestResults {
     let count = successful_pings.len();
 
@@ -153,6 +163,9 @@ fn calculate_statistics(
     // Find min/max
     let min_ping = *successful_pings.iter().min().unwrap_or(&0);
     let max_ping = *successful_pings.iter().max().unwrap_or(&0);
+
+    // Calculate ping spread (max - min)
+    let ping_spread = (max_ping - min_ping) as f32;
 
     // Calculate jitter (standard deviation)
     let variance: f32 = successful_pings
@@ -169,7 +182,7 @@ fn calculate_statistics(
     let packet_loss = (packet_loss_count as f32 / total_attempts as f32) * 100.0;
 
     // Determine quality
-    let quality = ConnectionQuality::from_metrics(avg_ping, packet_loss, jitter);
+    let quality = ConnectionQuality::from_metrics(avg_ping, packet_loss, jitter, ping_spread);
 
     StabilityTestResults {
         avg_ping,
@@ -177,8 +190,10 @@ fn calculate_statistics(
         max_ping,
         jitter,
         packet_loss,
+        ping_spread,
         quality,
         sample_count: count,
+        ping_samples,
         timestamp: chrono::Utc::now(),
     }
 }
@@ -190,69 +205,85 @@ mod tests {
     #[test]
     fn test_calculate_statistics_normal() {
         let pings = vec![20, 25, 30, 22, 28];
-        let results = calculate_statistics(&pings, 5, 0);
+        let results = calculate_statistics(&pings, 5, 0, vec![]);
 
         assert!((results.avg_ping - 25.0).abs() < 0.01);
         assert_eq!(results.min_ping, 20);
         assert_eq!(results.max_ping, 30);
+        assert_eq!(results.ping_spread, 10.0);
         assert!(results.jitter > 0.0);
         assert_eq!(results.packet_loss, 0.0);
-        assert!(matches!(results.quality, ConnectionQuality::Excellent));
+        // avg=25 (>=20), jitter≈3.7 (>=2), spread=10 (>=10) → Good
+        assert!(matches!(results.quality, ConnectionQuality::Good));
     }
 
     #[test]
     fn test_calculate_statistics_with_loss() {
         let pings = vec![50, 60, 55, 58];
-        let results = calculate_statistics(&pings, 5, 1); // 1 lost out of 5
+        let results = calculate_statistics(&pings, 5, 1, vec![]); // 1 lost out of 5
 
         assert_eq!(results.packet_loss, 20.0);
-        // With 20% loss and ~55ms avg, should be Poor or worse
-        assert!(matches!(
-            results.quality,
-            ConnectionQuality::Poor | ConnectionQuality::Bad
-        ));
+        // With 20% loss and ~55ms avg, should be Bad (loss >= 7%)
+        assert!(matches!(results.quality, ConnectionQuality::Bad));
     }
 
     #[test]
     fn test_calculate_statistics_high_jitter() {
         let pings = vec![10, 100, 15, 90, 20, 85]; // High variance
-        let results = calculate_statistics(&pings, 6, 0);
+        let results = calculate_statistics(&pings, 6, 0, vec![]);
 
         // Jitter should be high (>30ms)
         assert!(results.jitter > 30.0);
-        // With high jitter, quality should not be Excellent
+        // Spread = 90, should not be Excellent
         assert!(!matches!(results.quality, ConnectionQuality::Excellent));
     }
 
     #[test]
+    fn test_calculate_statistics_records_ping_samples() {
+        let samples = vec![
+            PingSample { elapsed_secs: 0.0, latency_ms: Some(10) },
+            PingSample { elapsed_secs: 0.5, latency_ms: None },
+            PingSample { elapsed_secs: 1.0, latency_ms: Some(15) },
+        ];
+        let pings = vec![10, 15];
+        let results = calculate_statistics(&pings, 3, 1, samples);
+
+        assert_eq!(results.ping_samples.len(), 3);
+        assert_eq!(results.ping_samples[0].latency_ms, Some(10));
+        assert_eq!(results.ping_samples[1].latency_ms, None);
+        assert_eq!(results.ping_samples[2].latency_ms, Some(15));
+        assert_eq!(results.ping_spread, 5.0);
+    }
+
+    #[test]
     fn test_quality_thresholds() {
-        // Excellent: < 30ms avg, < 1% loss, < 5ms jitter
+        // Excellent: < 20ms avg, < 0.5% loss, < 2ms jitter, < 10ms spread
         assert_eq!(
-            ConnectionQuality::from_metrics(25.0, 0.5, 3.0),
+            ConnectionQuality::from_metrics(15.0, 0.3, 1.0, 5.0),
             ConnectionQuality::Excellent
         );
 
-        // Good: < 50ms avg, < 2% loss, < 10ms jitter
+        // Good: < 40ms avg, < 1% loss, < 5ms jitter, < 25ms spread
         assert_eq!(
-            ConnectionQuality::from_metrics(45.0, 1.5, 8.0),
+            ConnectionQuality::from_metrics(35.0, 0.7, 4.0, 20.0),
             ConnectionQuality::Good
         );
 
-        // Fair: < 80ms avg, < 5% loss, < 20ms jitter
+        // Fair: < 70ms avg, < 3% loss, < 15ms jitter, < 50ms spread
         assert_eq!(
-            ConnectionQuality::from_metrics(70.0, 4.0, 15.0),
+            ConnectionQuality::from_metrics(60.0, 2.0, 10.0, 40.0),
             ConnectionQuality::Fair
         );
 
-        // Poor: < 120ms avg, < 10% loss, < 40ms jitter
+        // Poor: < 120ms avg, < 7% loss, < 30ms jitter, < 80ms spread
         assert_eq!(
-            ConnectionQuality::from_metrics(100.0, 8.0, 35.0),
+            ConnectionQuality::from_metrics(100.0, 5.0, 25.0, 70.0),
             ConnectionQuality::Poor
         );
 
         // Bad: everything else
         assert_eq!(
-            ConnectionQuality::from_metrics(150.0, 15.0, 50.0),
+            ConnectionQuality::from_metrics(150.0, 15.0, 50.0, 100.0),
             ConnectionQuality::Bad
         );
     }

@@ -166,14 +166,21 @@ export interface Config {
 
 // ── Network Tests ──
 
+export interface PingSample {
+  elapsed_secs: number;
+  latency_ms: number | null;
+}
+
 export interface StabilityResultResponse {
   avg_ping: number;
   min_ping: number;
   max_ping: number;
   jitter: number;
   packet_loss: number;
+  ping_spread: number;
   quality: string;
   sample_count: number;
+  ping_samples: PingSample[];
 }
 
 export interface SpeedResultResponse {

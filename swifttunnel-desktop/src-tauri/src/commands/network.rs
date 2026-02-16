@@ -5,14 +5,22 @@ use tauri::State;
 use crate::state::AppState;
 
 #[derive(Serialize)]
+pub struct PingSampleResponse {
+    pub elapsed_secs: f32,
+    pub latency_ms: Option<u32>,
+}
+
+#[derive(Serialize)]
 pub struct StabilityResultResponse {
     pub avg_ping: f32,
     pub min_ping: u32,
     pub max_ping: u32,
     pub jitter: f32,
     pub packet_loss: f32,
+    pub ping_spread: f32,
     pub quality: String,
     pub sample_count: usize,
+    pub ping_samples: Vec<PingSampleResponse>,
 }
 
 #[derive(Serialize)]
@@ -55,8 +63,17 @@ pub async fn network_start_stability_test(
         max_ping: result.max_ping,
         jitter: result.jitter,
         packet_loss: result.packet_loss,
+        ping_spread: result.ping_spread,
         quality: result.quality.label().to_string(),
         sample_count: result.sample_count,
+        ping_samples: result
+            .ping_samples
+            .into_iter()
+            .map(|s| PingSampleResponse {
+                elapsed_secs: s.elapsed_secs,
+                latency_ms: s.latency_ms,
+            })
+            .collect(),
     })
 }
 
