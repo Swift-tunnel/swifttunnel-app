@@ -121,8 +121,6 @@ export type GraphicsQuality =
   | "Level8"
   | "Level9"
   | "Level10";
-export type DynamicRenderMode = "Off" | "Low" | "Medium" | "High";
-
 export interface SystemOptimizationConfig {
   set_high_priority: boolean;
   set_cpu_affinity: boolean;
@@ -140,10 +138,7 @@ export interface RobloxSettingsConfig {
   graphics_quality: GraphicsQuality;
   unlock_fps: boolean;
   target_fps: number;
-  disable_shadows: boolean;
-  reduce_texture_quality: boolean;
-  disable_post_processing: boolean;
-  dynamic_render_optimization: DynamicRenderMode;
+  ultraboost: boolean;
 }
 
 export interface NetworkConfig {

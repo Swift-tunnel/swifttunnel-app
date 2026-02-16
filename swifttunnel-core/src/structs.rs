@@ -95,12 +95,9 @@ pub struct RobloxSettingsConfig {
     pub graphics_quality: GraphicsQuality,
     pub unlock_fps: bool,
     pub target_fps: u32,
-    pub disable_shadows: bool,
-    pub reduce_texture_quality: bool,
-    pub disable_post_processing: bool,
-    /// Dynamic render optimization: reduces render resolution for improved FPS on low-end hardware
+    /// Ultraboost: applies all allowlisted performance FFlags for maximum FPS
     #[serde(default)]
-    pub dynamic_render_optimization: DynamicRenderMode,
+    pub ultraboost: bool,
 }
 
 impl Default for RobloxSettingsConfig {
@@ -109,38 +106,8 @@ impl Default for RobloxSettingsConfig {
             graphics_quality: GraphicsQuality::Manual,
             unlock_fps: true,
             target_fps: 144,
-            disable_shadows: false,
-            reduce_texture_quality: false,
-            disable_post_processing: false,
-            dynamic_render_optimization: DynamicRenderMode::Off, // Disabled by default, user opt-in
+            ultraboost: false,
         }
-    }
-}
-
-/// Dynamic render optimization modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum DynamicRenderMode {
-    #[default]
-    Off,
-    Low,    // Value: 3 - Least aggressive, minimal visual impact
-    Medium, // Value: 2 - Balanced performance/quality
-    High,   // Value: 1 - Most aggressive, maximum FPS gain
-}
-
-impl DynamicRenderMode {
-    /// Get the render value for this mode (lower = more aggressive optimization)
-    pub fn render_value(&self) -> Option<u32> {
-        match self {
-            DynamicRenderMode::Off => None,
-            DynamicRenderMode::Low => Some(3),
-            DynamicRenderMode::Medium => Some(2),
-            DynamicRenderMode::High => Some(1),
-        }
-    }
-
-    /// Check if optimization is enabled
-    pub fn is_enabled(&self) -> bool {
-        !matches!(self, DynamicRenderMode::Off)
     }
 }
 
@@ -397,12 +364,12 @@ pub mod boost_info {
     };
 
     // Roblox Boosts
-    pub const DYNAMIC_RENDER: BoostInfo = BoostInfo {
-        id: "dynamic_render",
-        title: "Dynamic Render Optimization",
-        short_desc: "Adaptive render resolution",
-        long_desc: "Dynamically adjusts render resolution based on performance needs. Choose Low for minimal impact, Medium for balanced performance, or High for maximum FPS gain. Higher settings reduce visual quality but significantly improve frame rates.",
-        impact: "Low: +5-10% FPS | Medium: +10-20% FPS | High: +20-30% FPS",
+    pub const ULTRABOOST: BoostInfo = BoostInfo {
+        id: "ultraboost",
+        title: "Ultraboost",
+        short_desc: "Max performance FFlags",
+        long_desc: "Applies all Roblox-allowlisted performance FFlags for maximum FPS. Disables shadows, post-processing, grass, DPI scaling, and forces D3D11 with lowest texture and render quality. Significant visual reduction for maximum frame rates.",
+        impact: "+20-40% FPS",
         risk_level: RiskLevel::Safe,
         requires_admin: false,
     };
@@ -424,7 +391,7 @@ pub mod boost_info {
 
     /// Get all Roblox boost infos
     pub fn roblox_boosts() -> [&'static BoostInfo; 1] {
-        [&DYNAMIC_RENDER]
+        [&ULTRABOOST]
     }
 }
 
@@ -522,10 +489,7 @@ mod tests {
         assert_eq!(cfg.graphics_quality, GraphicsQuality::Manual);
         assert!(cfg.unlock_fps);
         assert_eq!(cfg.target_fps, 144);
-        assert!(!cfg.disable_shadows);
-        assert!(!cfg.reduce_texture_quality);
-        assert!(!cfg.disable_post_processing);
-        assert_eq!(cfg.dynamic_render_optimization, DynamicRenderMode::Off);
+        assert!(!cfg.ultraboost);
     }
 
     // ── GraphicsQuality ──
@@ -559,24 +523,6 @@ mod tests {
         assert_eq!(GraphicsQuality::from_level(-1), GraphicsQuality::Level5);
         assert_eq!(GraphicsQuality::from_level(11), GraphicsQuality::Level5);
         assert_eq!(GraphicsQuality::from_level(999), GraphicsQuality::Level5);
-    }
-
-    // ── DynamicRenderMode ──
-
-    #[test]
-    fn test_dynamic_render_mode_render_value() {
-        assert_eq!(DynamicRenderMode::Off.render_value(), None);
-        assert_eq!(DynamicRenderMode::Low.render_value(), Some(3));
-        assert_eq!(DynamicRenderMode::Medium.render_value(), Some(2));
-        assert_eq!(DynamicRenderMode::High.render_value(), Some(1));
-    }
-
-    #[test]
-    fn test_dynamic_render_mode_is_enabled() {
-        assert!(!DynamicRenderMode::Off.is_enabled());
-        assert!(DynamicRenderMode::Low.is_enabled());
-        assert!(DynamicRenderMode::Medium.is_enabled());
-        assert!(DynamicRenderMode::High.is_enabled());
     }
 
     // ── RiskLevel ──
@@ -662,8 +608,8 @@ mod tests {
             "Game mode writes to HKCU, no admin needed"
         );
         assert!(
-            !boost_info::DYNAMIC_RENDER.requires_admin,
-            "Dynamic render writes to user files, no admin needed"
+            !boost_info::ULTRABOOST.requires_admin,
+            "Ultraboost writes to user files, no admin needed"
         );
     }
 }
