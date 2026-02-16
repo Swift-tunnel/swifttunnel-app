@@ -42,47 +42,59 @@ pub fn boost_toggle(state: State<'_, AppState>, enable: bool) -> Result<(), Stri
     };
 
     if enable {
+        let mut warnings = Vec::new();
+
         // Apply system optimizations (with real PID for priority/affinity)
-        state
+        if let Err(e) = state
             .system_optimizer
             .lock()
             .apply_optimizations(&settings.config.system_optimization, roblox_pid)
-            .map_err(|e| e.to_string())?;
+        {
+            warnings.push(format!("System optimizer: {}", e));
+        }
 
         // Apply network optimizations
-        state
+        if let Err(e) = state
             .network_booster
             .lock()
             .apply_optimizations(&settings.config.network_settings)
-            .map_err(|e| e.to_string())?;
+        {
+            warnings.push(format!("Network booster: {}", e));
+        }
 
         // Apply roblox optimizations
-        state
+        if let Err(e) = state
             .roblox_optimizer
             .lock()
             .apply_optimizations(&settings.config.roblox_settings)
-            .map_err(|e| e.to_string())?;
+        {
+            warnings.push(format!("Roblox optimizer: {}", e));
+        }
+
+        if !warnings.is_empty() {
+            log::warn!("Boost applied with warnings: {}", warnings.join("; "));
+        }
     } else {
+        let mut warnings = Vec::new();
+
         // Revert system optimizations
-        state
-            .system_optimizer
-            .lock()
-            .restore(roblox_pid)
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
+            warnings.push(format!("System optimizer restore: {}", e));
+        }
 
         // Revert network optimizations
-        state
-            .network_booster
-            .lock()
-            .restore()
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = state.network_booster.lock().restore() {
+            warnings.push(format!("Network booster restore: {}", e));
+        }
 
         // Revert roblox optimizations
-        state
-            .roblox_optimizer
-            .lock()
-            .restore_settings()
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = state.roblox_optimizer.lock().restore_settings() {
+            warnings.push(format!("Roblox optimizer restore: {}", e));
+        }
+
+        if !warnings.is_empty() {
+            log::warn!("Boost disabled with warnings: {}", warnings.join("; "));
+        }
     }
 
     // Update settings
@@ -116,23 +128,35 @@ pub fn boost_update_config(state: State<'_, AppState>, config_json: String) -> R
             monitor.get_roblox_pid().unwrap_or(0)
         };
 
-        state
+        let mut warnings = Vec::new();
+
+        if let Err(e) = state
             .system_optimizer
             .lock()
             .apply_optimizations(&settings.config.system_optimization, roblox_pid)
-            .map_err(|e| e.to_string())?;
+        {
+            warnings.push(format!("System optimizer: {}", e));
+        }
 
-        state
+        if let Err(e) = state
             .network_booster
             .lock()
             .apply_optimizations(&settings.config.network_settings)
-            .map_err(|e| e.to_string())?;
+        {
+            warnings.push(format!("Network booster: {}", e));
+        }
 
-        state
+        if let Err(e) = state
             .roblox_optimizer
             .lock()
             .apply_optimizations(&settings.config.roblox_settings)
-            .map_err(|e| e.to_string())?;
+        {
+            warnings.push(format!("Roblox optimizer: {}", e));
+        }
+
+        if !warnings.is_empty() {
+            log::warn!("Boost re-applied with warnings: {}", warnings.join("; "));
+        }
     }
 
     Ok(())

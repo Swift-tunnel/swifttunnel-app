@@ -16,28 +16,41 @@ impl NetworkBooster {
     }
 
     /// Apply network optimizations
+    ///
+    /// Individual optimizations are non-fatal: if one fails (e.g. no active
+    /// network adapter for MTU), the remaining optimizations still run.
     pub fn apply_optimizations(&mut self, config: &NetworkConfig) -> Result<()> {
         info!("Applying network optimizations");
 
         if config.prioritize_roblox_traffic {
-            self.prioritize_game_traffic()?;
+            if let Err(e) = self.prioritize_game_traffic() {
+                warn!("Could not prioritize game traffic: {}", e);
+            }
         }
 
         // Tier 1 (Safe) Network Boosts
         if config.disable_nagle {
-            self.disable_nagle_algorithm()?;
+            if let Err(e) = self.disable_nagle_algorithm() {
+                warn!("Could not disable Nagle's algorithm: {}", e);
+            }
         }
 
         if config.disable_network_throttling {
-            self.disable_network_throttling()?;
+            if let Err(e) = self.disable_network_throttling() {
+                warn!("Could not disable network throttling: {}", e);
+            }
         }
 
         if config.optimize_mtu {
-            self.optimize_mtu()?;
+            if let Err(e) = self.optimize_mtu() {
+                warn!("Could not optimize MTU: {}", e);
+            }
         }
 
         if config.gaming_qos {
-            self.enable_gaming_qos()?;
+            if let Err(e) = self.enable_gaming_qos() {
+                warn!("Could not enable gaming QoS: {}", e);
+            }
         }
 
         Ok(())
@@ -680,5 +693,52 @@ impl NetworkBooster {
 impl Default for NetworkBooster {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify apply_optimizations returns Ok even when individual optimizations
+    /// fail (e.g. no active network adapter, no PowerShell, non-Windows host).
+    /// Before the fix, a single failure (like optimize_mtu -> "No active network
+    /// interface found") would abort the entire boost toggle via `?`.
+    #[test]
+    fn apply_optimizations_succeeds_despite_individual_failures() {
+        let mut booster = NetworkBooster::new();
+        let config = NetworkConfig {
+            prioritize_roblox_traffic: true,
+            disable_nagle: true,
+            disable_network_throttling: true,
+            optimize_mtu: true,
+            gaming_qos: true,
+            ..Default::default()
+        };
+
+        // On non-Windows (CI) or without admin, every sub-optimization will
+        // fail — but apply_optimizations must still return Ok(()).
+        let result = booster.apply_optimizations(&config);
+        assert!(
+            result.is_ok(),
+            "apply_optimizations should not abort on individual failures: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn apply_optimizations_with_nothing_enabled() {
+        let mut booster = NetworkBooster::new();
+        let config = NetworkConfig {
+            prioritize_roblox_traffic: false,
+            disable_nagle: false,
+            disable_network_throttling: false,
+            optimize_mtu: false,
+            gaming_qos: false,
+            ..Default::default()
+        };
+
+        let result = booster.apply_optimizations(&config);
+        assert!(result.is_ok());
     }
 }
