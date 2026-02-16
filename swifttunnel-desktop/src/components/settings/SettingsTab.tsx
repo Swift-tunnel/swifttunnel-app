@@ -117,10 +117,13 @@ export function SettingsTab() {
           />
         </Row>
         <Row
-          label="Close Behavior"
-          desc="Closing the window sends SwiftTunnel to the tray. Use the tray menu Quit to exit."
+          label="Close to Tray"
+          desc="Minimize to system tray when closing the window instead of quitting"
         >
-          <span className="text-xs text-text-muted">To tray</span>
+          <Toggle
+            enabled={settings.minimize_to_tray}
+            onChange={(v) => set({ minimize_to_tray: v })}
+          />
         </Row>
         <Row label="Discord Rich Presence" desc="Show VPN status in Discord">
           <Toggle
