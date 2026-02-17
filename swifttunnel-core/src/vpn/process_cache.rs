@@ -439,6 +439,20 @@ impl ProcessSnapshot {
         self.is_tunnel_connection(local_ip, local_port, protocol)
     }
 
+    /// Fallback check for tunnel ownership by source port.
+    ///
+    /// This is a miss-path helper used when exact `(ip, port, protocol)` cache lookup
+    /// fails but we still want to recover tunnel routing for packets emitted by a
+    /// known tunnel app that may have shifted local IP representation.
+    #[inline]
+    pub fn should_tunnel_by_port_fallback(&self, local_port: u16, protocol: Protocol) -> bool {
+        self.connections.iter().any(|(key, pid)| {
+            key.protocol == protocol
+                && key.local_port == local_port
+                && self.tunnel_pids.contains(pid)
+        })
+    }
+
     /// Check if connection should be tunneled with destination info
     ///
     /// PERMISSIVE MODE (v0.9.5):
@@ -1001,5 +1015,42 @@ mod tests {
         );
         assert!(snap1.is_tunnel_pid_public(pid));
         assert!(snap1.tunnel_pids.contains(&pid));
+    }
+
+    #[test]
+    fn test_should_tunnel_by_port_fallback_matches_tunnel_pid_port() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 10), 55000, Protocol::Udp),
+            7001,
+        );
+        let mut pid_names = HashMap::new();
+        pid_names.insert(7001, "RobloxPlayerBeta.exe".to_string());
+
+        cache.update(connections, pid_names);
+        let snap = cache.get_snapshot();
+
+        assert!(snap.should_tunnel_by_port_fallback(55000, Protocol::Udp));
+        assert!(!snap.should_tunnel_by_port_fallback(55001, Protocol::Udp));
+    }
+
+    #[test]
+    fn test_should_tunnel_by_port_fallback_ignores_non_tunnel_pid() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 20), 56000, Protocol::Udp),
+            8001,
+        );
+        let mut pid_names = HashMap::new();
+        pid_names.insert(8001, "chrome.exe".to_string());
+
+        cache.update(connections, pid_names);
+        let snap = cache.get_snapshot();
+
+        assert!(!snap.should_tunnel_by_port_fallback(56000, Protocol::Udp));
     }
 }

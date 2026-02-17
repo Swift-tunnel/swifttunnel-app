@@ -2533,6 +2533,7 @@ fn parse_ports(data: &[u8]) -> Option<(u16, u16)> {
 /// This amortizes the expensive GetExtendedTcpTable syscall across multiple packets
 /// from the same connection. First packet: ~500μs, subsequent packets: <1μs
 type InlineCache = std::collections::HashMap<(Ipv4Addr, u16, Protocol), bool>;
+type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
 /// Debug counters for inline cache diagnostics
 struct InlineCacheStats {
@@ -2558,8 +2559,14 @@ fn should_route_to_vpn_with_inline_cache(
     thread_local! {
         static TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static SNAPSHOT_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static SNAPSHOT_MISSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static INLINE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        static SYSCALL_LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static PORT_FALLBACK_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static SPECULATIVE_MISSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static FRAGMENT_CACHE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static FRAGMENT_BYPASS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static FRAGMENT_DECISIONS: std::cell::RefCell<std::collections::HashMap<FragmentKey, bool>>
+            = std::cell::RefCell::new(std::collections::HashMap::new());
         static LAST_LOG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
@@ -2577,10 +2584,6 @@ fn should_route_to_vpn_with_inline_cache(
     // Parse IP header
     let ihl = ((data[ip_start] & 0xF) as usize) * 4;
     if ihl < 20 {
-        return false;
-    }
-
-    if data.len() < ip_start + ihl + 4 {
         return false;
     }
     let protocol_num = data[ip_start + 9];
@@ -2606,6 +2609,33 @@ fn should_route_to_vpn_with_inline_cache(
         data[ip_start + 19],
     );
 
+    let fragment_bits = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
+    let more_fragments = (fragment_bits & 0x2000) != 0;
+    let fragment_offset = fragment_bits & 0x1FFF;
+    let packet_id = u16::from_be_bytes([data[ip_start + 4], data[ip_start + 5]]);
+    let fragment_key = (src_ip, dst_ip, packet_id, protocol);
+
+    // Non-initial UDP fragments do not carry transport ports. Reuse the first
+    // fragment decision when available to keep the whole datagram consistent.
+    if protocol == Protocol::Udp && fragment_offset > 0 {
+        let cached = FRAGMENT_DECISIONS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let decision = cache.get(&fragment_key).copied();
+            if decision.is_some() && !more_fragments {
+                cache.remove(&fragment_key);
+            }
+            decision
+        });
+
+        if let Some(result) = cached {
+            FRAGMENT_CACHE_HITS.with(|c| c.set(c.get() + 1));
+            return result;
+        }
+
+        FRAGMENT_BYPASS.with(|c| c.set(c.get() + 1));
+        return false;
+    }
+
     // Parse transport header
     let transport_start = ip_start + ihl;
     if data.len() < transport_start + 4 {
@@ -2621,23 +2651,46 @@ fn should_route_to_vpn_with_inline_cache(
     // is handled below so we can seed the inline cache for game-server hits.
     if snapshot.should_tunnel(src_ip, src_port, protocol) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
-        // Tunnel all UDP from tunnel apps; TCP is intentionally never tunneled.
-        return super::process_cache::is_likely_game_traffic(dst_port, protocol);
+        let result = super::process_cache::is_likely_game_traffic(dst_port, protocol);
+        if protocol == Protocol::Udp && more_fragments {
+            FRAGMENT_DECISIONS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.len() >= 4096 {
+                    cache.clear();
+                }
+                cache.insert(fragment_key, result);
+            });
+        }
+        return result;
     }
+    SNAPSHOT_MISSES.with(|c| c.set(c.get() + 1));
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
     // Cache ONLY stores TRUE results (v0.9.25) - finding key means it's a tunnel app
     let cache_key = (src_ip, src_port, protocol);
     if inline_cache.contains_key(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        // Process IS a tunnel app - trust it, tunnel all its UDP
-        return super::process_cache::is_likely_game_traffic(dst_port, protocol);
+        let result = super::process_cache::is_likely_game_traffic(dst_port, protocol);
+        if protocol == Protocol::Udp && more_fragments {
+            FRAGMENT_DECISIONS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.len() >= 4096 {
+                    cache.clear();
+                }
+                cache.insert(fragment_key, result);
+            });
+        }
+        return result;
     }
 
-    // Phase 3: Skip inline lookup (expensive GetExtendedTcpTable/UdpTable syscalls
-    // can block and cause system freezes with ndisapi packet interception).
-    // Rely on speculative tunneling (destination IP matching) for first packets.
-    let is_tunnel_app = false;
+    // Phase 3: Port-level fallback for tunnel PIDs.
+    // Handles cache misses caused by local IP representation drift while keeping
+    // routing decision tied to known tunnel-owned ports.
+    let mut is_tunnel_app = false;
+    if protocol == Protocol::Udp && snapshot.should_tunnel_by_port_fallback(src_port, protocol) {
+        is_tunnel_app = true;
+        PORT_FALLBACK_HITS.with(|c| c.set(c.get() + 1));
+    }
 
     // Cache the process check result for subsequent packets from this connection
     // Limit cache size to prevent unbounded growth
@@ -2698,6 +2751,7 @@ fn should_route_to_vpn_with_inline_cache(
 
             true // Speculatively tunnel to game server
         } else {
+            SPECULATIVE_MISSES.with(|c| c.set(c.get() + 1));
             false
         }
     } else {
@@ -2705,20 +2759,38 @@ fn should_route_to_vpn_with_inline_cache(
         super::process_cache::is_likely_game_traffic(dst_port, protocol)
     };
 
+    if protocol == Protocol::Udp && more_fragments {
+        FRAGMENT_DECISIONS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= 4096 {
+                cache.clear();
+            }
+            cache.insert(fragment_key, result);
+        });
+    }
+
     // Log stats periodically
     if total > 0 && total % 200 == 0 {
         let last = LAST_LOG.with(|c| c.get());
         if total > last {
             LAST_LOG.with(|c| c.set(total));
             let snapshot_h = SNAPSHOT_HITS.with(|c| c.get());
+            let snapshot_m = SNAPSHOT_MISSES.with(|c| c.get());
             let inline_h = INLINE_HITS.with(|c| c.get());
-            let syscall_l = SYSCALL_LOOKUPS.with(|c| c.get());
+            let port_fb = PORT_FALLBACK_HITS.with(|c| c.get());
+            let spec_miss = SPECULATIVE_MISSES.with(|c| c.get());
+            let frag_hits = FRAGMENT_CACHE_HITS.with(|c| c.get());
+            let frag_bypass = FRAGMENT_BYPASS.with(|c| c.get());
             log::info!(
-                "Cache stats: total={} snapshot_hits={} inline_hits={} syscall={} | snapshot_apps={} connections={}",
+                "Cache stats: total={} snapshot_hits={} snapshot_miss={} inline_hits={} port_fallback={} speculative_miss={} fragment_hits={} fragment_bypass={} | snapshot_apps={} connections={}",
                 total,
                 snapshot_h,
+                snapshot_m,
                 inline_h,
-                syscall_l,
+                port_fb,
+                spec_miss,
+                frag_hits,
+                frag_bypass,
                 snapshot.tunnel_apps.len(),
                 snapshot.connections.len()
             );
@@ -3863,6 +3935,41 @@ mod tests {
         packet
     }
 
+    fn build_ipv4_udp_fragment_frame(
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        identification: u16,
+        fragment_offset_blocks: u16,
+        more_fragments: bool,
+    ) -> Vec<u8> {
+        let mut frame = vec![0u8; 14 + 20 + 8];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4 EtherType
+
+        let ip_start = 14;
+        frame[ip_start] = 0x45; // IPv4, IHL=5
+        frame[ip_start + 9] = 17; // UDP
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&(28u16).to_be_bytes()); // IPv4 total len
+        frame[ip_start + 4..ip_start + 6].copy_from_slice(&identification.to_be_bytes());
+
+        let fragment_bits =
+            (fragment_offset_blocks & 0x1FFF) | if more_fragments { 0x2000 } else { 0 };
+        frame[ip_start + 6..ip_start + 8].copy_from_slice(&fragment_bits.to_be_bytes());
+
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+
+        if fragment_offset_blocks == 0 {
+            let transport_start = ip_start + 20;
+            frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+            frame[transport_start + 2..transport_start + 4]
+                .copy_from_slice(&dst_port.to_be_bytes());
+        }
+
+        frame
+    }
+
     #[test]
     fn test_select_default_route_interface_index_accepts_zero_gateway_ppp_route() {
         let selected = ParallelInterceptor::select_default_route_interface_index([
@@ -4210,6 +4317,144 @@ mod tests {
             &mut inline_cache
         ));
         assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_should_route_fragmented_udp_reuses_first_fragment_decision() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 120);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 52000;
+        let dst_port = 443;
+        let packet_id = 0x1234;
+        let pid = 2468;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let first_fragment =
+            build_ipv4_udp_fragment_frame(src_ip, dst_ip, src_port, dst_port, packet_id, 0, true);
+        let next_fragment =
+            build_ipv4_udp_fragment_frame(src_ip, dst_ip, src_port, dst_port, packet_id, 1, false);
+
+        let mut inline_cache: InlineCache = HashMap::new();
+        assert!(should_route_to_vpn_with_inline_cache(
+            &first_fragment,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(should_route_to_vpn_with_inline_cache(
+            &next_fragment,
+            &snapshot,
+            &mut inline_cache
+        ));
+    }
+
+    #[test]
+    fn test_should_route_non_initial_fragment_without_first_fragment_bypasses() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 121);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 52010;
+        let dst_port = 443;
+        let packet_id = 0x2234;
+        let pid = 1357;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let next_fragment =
+            build_ipv4_udp_fragment_frame(src_ip, dst_ip, src_port, dst_port, packet_id, 1, false);
+
+        let mut inline_cache: InlineCache = HashMap::new();
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &next_fragment,
+            &snapshot,
+            &mut inline_cache
+        ));
+    }
+
+    #[test]
+    fn test_should_route_port_fallback_tunnels_when_ip_cache_misses() {
+        let cached_ip = Ipv4Addr::new(10, 10, 10, 10);
+        let packet_ip = Ipv4Addr::new(10, 10, 10, 11);
+        let dst_ip = Ipv4Addr::new(203, 0, 113, 10);
+        let src_port = 53000;
+        let dst_port = 41000;
+        let pid = 5555;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(cached_ip, src_port, Protocol::Udp), pid);
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, packet_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.contains_key(&(packet_ip, src_port, Protocol::Udp)));
+    }
+
+    #[test]
+    fn test_should_route_port_fallback_does_not_tunnel_non_tunnel_pid() {
+        let cached_ip = Ipv4Addr::new(10, 20, 30, 40);
+        let packet_ip = Ipv4Addr::new(10, 20, 30, 41);
+        let dst_ip = Ipv4Addr::new(203, 0, 113, 11);
+        let src_port = 53100;
+        let dst_port = 42000;
+        let pid = 9999;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(cached_ip, src_port, Protocol::Udp), pid);
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, packet_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(!inline_cache.contains_key(&(packet_ip, src_port, Protocol::Udp)));
     }
 
     #[test]
