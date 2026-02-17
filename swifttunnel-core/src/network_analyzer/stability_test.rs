@@ -88,7 +88,12 @@ pub async fn run_stability_test(
         return Err(error_msg);
     }
 
-    let results = calculate_statistics(&successful_pings, total_attempts, packet_loss_count, all_samples);
+    let results = calculate_statistics(
+        &successful_pings,
+        total_attempts,
+        packet_loss_count,
+        all_samples,
+    );
     info!(
         "Stability test complete: avg={}ms, jitter={}ms, loss={:.1}%, quality={:?}",
         results.avg_ping, results.jitter, results.packet_loss, results.quality
@@ -241,9 +246,18 @@ mod tests {
     #[test]
     fn test_calculate_statistics_records_ping_samples() {
         let samples = vec![
-            PingSample { elapsed_secs: 0.0, latency_ms: Some(10) },
-            PingSample { elapsed_secs: 0.5, latency_ms: None },
-            PingSample { elapsed_secs: 1.0, latency_ms: Some(15) },
+            PingSample {
+                elapsed_secs: 0.0,
+                latency_ms: Some(10),
+            },
+            PingSample {
+                elapsed_secs: 0.5,
+                latency_ms: None,
+            },
+            PingSample {
+                elapsed_secs: 1.0,
+                latency_ms: Some(15),
+            },
         ];
         let pings = vec![10, 15];
         let results = calculate_statistics(&pings, 3, 1, samples);

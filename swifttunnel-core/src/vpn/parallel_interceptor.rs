@@ -47,8 +47,8 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -1538,7 +1538,7 @@ fn run_packet_reader(
     impl Drop for HandleGuard {
         fn drop(&mut self) {
             // Check for null (0) and INVALID_HANDLE_VALUE (-1 as isize cast to pointer)
-            let raw_handle = self.0 .0 as isize;
+            let raw_handle = self.0.0 as isize;
             if raw_handle != 0 && raw_handle != -1 {
                 unsafe {
                     let _ = CloseHandle(self.0);
@@ -2987,8 +2987,8 @@ fn inline_connection_lookup(
 fn is_pid_tunnel_app(pid: u32, snapshot: &ProcessSnapshot) -> bool {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
 
     // First try snapshot (fast path if PID is already known)
@@ -3103,7 +3103,7 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
 /// all adapters including Wintun TUN adapters that GetAdaptersInfo might miss.
 fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
@@ -3197,7 +3197,7 @@ fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
 /// identification even when friendly name lookup fails.
 fn check_adapter_matches_luid(internal_name: &str, target_luid: u64) -> bool {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
@@ -3402,11 +3402,7 @@ fn calculate_udp_checksum(packet: &[u8], ihl: usize) -> u16 {
 
     let checksum = !(sum as u16);
     // UDP checksum of 0 means "no checksum" - use 0xFFFF instead
-    if checksum == 0 {
-        0xFFFF
-    } else {
-        checksum
-    }
+    if checksum == 0 { 0xFFFF } else { checksum }
 }
 
 /// Fix checksums in an IP packet (modifies packet in place)
@@ -3861,10 +3857,10 @@ mod tests {
         let mut frame = vec![0u8; 54];
         // Ethernet header
         frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4
-                                                                 // IP header
+        // IP header
         frame[14] = 0x45; // IPv4, IHL=5
         frame[23] = 6; // TCP
-                       // TCP header
+        // TCP header
         frame[34..36].copy_from_slice(&1234u16.to_be_bytes()); // src port
         frame[36..38].copy_from_slice(&80u16.to_be_bytes()); // dst port
 
