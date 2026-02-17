@@ -129,6 +129,15 @@ pub struct ExchangeTokenResponse {
     pub user_id: String,
 }
 
+/// Response from relay ticket bootstrap endpoint
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelayTicketResponse {
+    pub token: String,
+    pub expires_at: String,
+    pub auth_required: bool,
+    pub key_id: String,
+}
+
 /// Error types for authentication
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -250,5 +259,20 @@ mod tests {
             AuthError::ApiError("401".to_string()).to_string(),
             "API error: 401"
         );
+    }
+
+    #[test]
+    fn test_relay_ticket_response_deserialize() {
+        let json = r#"{
+            "token": "abc.def",
+            "expires_at": "2026-02-17T12:34:56.000Z",
+            "auth_required": false,
+            "key_id": "relay-ed25519-2026-02"
+        }"#;
+        let resp: RelayTicketResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.token, "abc.def");
+        assert_eq!(resp.expires_at, "2026-02-17T12:34:56.000Z");
+        assert!(!resp.auth_required);
+        assert_eq!(resp.key_id, "relay-ed25519-2026-02");
     }
 }

@@ -1,6 +1,8 @@
 //! HTTP client for SwiftTunnel API
 
-use super::types::{AuthError, ExchangeTokenResponse, SupabaseAuthResponse, VpnConfig};
+use super::types::{
+    AuthError, ExchangeTokenResponse, RelayTicketResponse, SupabaseAuthResponse, VpnConfig,
+};
 use log::{debug, error, info};
 use reqwest::Client;
 use serde_json::json;
@@ -164,6 +166,55 @@ impl AuthClient {
             .map_err(|e| AuthError::ApiError(format!("Failed to parse config: {}", e)))?;
 
         info!("Got VPN config for region {}", region);
+        Ok(data)
+    }
+
+    /// Fetch a short-lived relay auth ticket for a specific session/server pair.
+    pub async fn get_relay_ticket(
+        &self,
+        access_token: &str,
+        server_region: &str,
+        session_id: &str,
+    ) -> Result<RelayTicketResponse, AuthError> {
+        let url = format!("{}/api/vpn/relay-ticket", API_BASE_URL);
+
+        debug!(
+            "Fetching relay ticket for region {} and session {}",
+            server_region, session_id
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "server_region": server_region,
+                "session_id": session_id,
+            }))
+            .send()
+            .await
+            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Relay ticket fetch failed: {} - {}", status, body);
+            return Err(AuthError::ApiError(format!(
+                "Relay ticket fetch failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let data: RelayTicketResponse = response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse relay ticket: {}", e)))?;
+
+        info!(
+            "Received relay ticket (auth_required: {}, key_id: {})",
+            data.auth_required, data.key_id
+        );
         Ok(data)
     }
 
