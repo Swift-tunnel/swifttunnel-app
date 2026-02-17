@@ -382,7 +382,12 @@ impl UdpRelay {
                 }
 
                 // Ignore relay control frames so they never reach packet injection.
-                if payload_len >= 2 && recv_buf[SESSION_ID_LEN] == AUTH_ACK_FRAME_TYPE {
+                if payload_len >= 1
+                    && matches!(
+                        recv_buf[SESSION_ID_LEN],
+                        AUTH_HELLO_FRAME_TYPE | AUTH_ACK_FRAME_TYPE
+                    )
+                {
                     return Ok(None);
                 }
 
