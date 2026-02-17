@@ -22,6 +22,8 @@ use tokio::sync::Mutex;
 /// Lower = faster detection of new processes, slightly higher CPU
 /// 500ms balances detection speed with CPU usage
 const REFRESH_INTERVAL_MS: u64 = 500;
+/// Number of ICMP samples to collect per relay candidate when probing.
+const AUTO_ROUTING_PING_SAMPLES: usize = 5;
 
 fn pick_lowest_latency_server<'a>(
     candidates: impl Iterator<Item = &'a (String, SocketAddr, Option<u32>)>,
@@ -29,14 +31,14 @@ fn pick_lowest_latency_server<'a>(
     candidates.min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
 }
 
-pub(crate) fn resolve_relay_server_for_region(
+pub(crate) fn relay_candidates_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
     forced_server: Option<&str>,
-) -> Option<(String, SocketAddr)> {
+) -> Vec<(String, SocketAddr, Option<u32>)> {
     // If a specific server is pinned for this region, use it directly
     if let Some(pinned) = forced_server {
-        if let Some((server_region, relay_addr, _)) = available_servers
+        if let Some((server_region, relay_addr, latency_ms)) = available_servers
             .iter()
             .find(|(server_region, _, _)| server_region == pinned)
         {
@@ -45,7 +47,7 @@ pub(crate) fn resolve_relay_server_for_region(
                 pinned,
                 selected_region
             );
-            return Some((server_region.clone(), *relay_addr));
+            return vec![(server_region.clone(), *relay_addr, *latency_ms)];
         }
         log::warn!(
             "Pinned server '{}' not found in server list, falling back to best latency",
@@ -53,26 +55,113 @@ pub(crate) fn resolve_relay_server_for_region(
         );
     }
 
-    if let Some((server_region, relay_addr, _)) = pick_lowest_latency_server(
-        available_servers
-            .iter()
-            .filter(|(server_region, _, _)| server_region == selected_region),
-    ) {
-        return Some((server_region.clone(), *relay_addr));
+    let exact: Vec<(String, SocketAddr, Option<u32>)> = available_servers
+        .iter()
+        .filter(|(server_region, _, _)| server_region == selected_region)
+        .map(|(server_region, relay_addr, latency_ms)| {
+            (server_region.clone(), *relay_addr, *latency_ms)
+        })
+        .collect();
+
+    if !exact.is_empty() {
+        return exact;
     }
 
     let prefix = format!("{selected_region}-");
-    pick_lowest_latency_server(
-        available_servers
-            .iter()
-            .filter(|(server_region, _, _)| server_region.starts_with(&prefix)),
-    )
-    .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
+    available_servers
+        .iter()
+        .filter(|(server_region, _, _)| server_region.starts_with(&prefix))
+        .map(|(server_region, relay_addr, latency_ms)| {
+            (server_region.clone(), *relay_addr, *latency_ms)
+        })
+        .collect()
 }
 
-/// Quick-ping candidate relay servers and return the best one.
-/// Pings all candidates in parallel using ICMP (same as GUI latency measurement).
-/// Returns (region_name, addr, latency_ms) for the fastest responder.
+pub(crate) fn resolve_relay_server_for_region(
+    selected_region: &str,
+    available_servers: &[(String, SocketAddr, Option<u32>)],
+    forced_server: Option<&str>,
+) -> Option<(String, SocketAddr)> {
+    let candidates = relay_candidates_for_region(selected_region, available_servers, forced_server);
+    pick_lowest_latency_server(candidates.iter())
+        .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
+}
+
+fn should_probe_candidates(candidates: &[(String, SocketAddr, Option<u32>)]) -> bool {
+    candidates.len() > 1
+        && candidates
+            .iter()
+            .any(|(_, _, latency_ms)| latency_ms.is_none())
+}
+
+fn average_probe_latency(samples: &[u32]) -> Option<u32> {
+    if samples.is_empty() {
+        return None;
+    }
+
+    let total: u64 = samples.iter().map(|v| *v as u64).sum();
+    Some((total / samples.len() as u64) as u32)
+}
+
+fn resolve_relay_server_from_candidates(
+    candidates: &[(String, SocketAddr, Option<u32>)],
+    probe_result: Option<(String, SocketAddr, u32)>,
+) -> Option<(String, SocketAddr)> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    if candidates.len() == 1 {
+        let (server_region, relay_addr, _) = &candidates[0];
+        return Some((server_region.clone(), *relay_addr));
+    }
+
+    if should_probe_candidates(candidates) {
+        if let Some((server_region, relay_addr, latency_ms)) = probe_result {
+            log::info!(
+                "Resolved via active probe to {} ({}ms)",
+                server_region,
+                latency_ms
+            );
+            return Some((server_region, relay_addr));
+        }
+    }
+
+    pick_lowest_latency_server(candidates.iter())
+        .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
+}
+
+async fn resolve_relay_server_for_region_with_probing(
+    selected_region: &str,
+    available_servers: &[(String, SocketAddr, Option<u32>)],
+    forced_server: Option<&str>,
+) -> Option<(String, SocketAddr)> {
+    let candidates = relay_candidates_for_region(selected_region, available_servers, forced_server);
+    let needs_probe = should_probe_candidates(&candidates);
+
+    let probe_result = if needs_probe {
+        let probe_targets: Vec<(String, SocketAddr)> = candidates
+            .iter()
+            .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
+            .collect();
+        ping_and_select_best(&probe_targets).await
+    } else {
+        None
+    };
+
+    if needs_probe && probe_result.is_none() {
+        log::debug!(
+            "Probe for '{}' returned no data, falling back to cached latency/order",
+            selected_region
+        );
+    }
+
+    resolve_relay_server_from_candidates(&candidates, probe_result)
+}
+
+/// Probe candidate relay servers and return the best one.
+/// Pings all candidates in parallel using ICMP and averages 5 samples per candidate.
+/// Returns (region_name, addr, latency_ms) for the fastest average responder.
 async fn ping_and_select_best(
     candidates: &[(String, SocketAddr)],
 ) -> Option<(String, SocketAddr, u32)> {
@@ -87,12 +176,28 @@ async fn ping_and_select_best(
             // Use ICMP ping — reliable for all server types.
             // The previous UDP probe ([0u8; 1] to relay port 51821) never got responses
             // because relay servers only respond to valid session ID packets.
-            let result = tokio::task::spawn_blocking(move || measure_latency_icmp(&ip)).await;
+            let result = tokio::task::spawn_blocking(move || {
+                let mut samples = Vec::with_capacity(AUTO_ROUTING_PING_SAMPLES);
+                for _ in 0..AUTO_ROUTING_PING_SAMPLES {
+                    if let Some(ms) = measure_latency_icmp(&ip) {
+                        samples.push(ms);
+                    }
+                }
+                average_probe_latency(&samples).map(|avg| (avg, samples.len()))
+            })
+            .await;
 
             match result {
-                Ok(Some(ms)) => {
-                    log::info!("Auto-routing ping: {} ({}) = {}ms", region, addr, ms);
-                    Some((region, addr, ms))
+                Ok(Some((avg_ms, successful))) => {
+                    log::info!(
+                        "Auto-routing ping: {} ({}) = {}ms avg ({} of {} samples)",
+                        region,
+                        addr,
+                        avg_ms,
+                        successful,
+                        AUTO_ROUTING_PING_SAMPLES
+                    );
+                    Some((region, addr, avg_ms))
                 }
                 _ => {
                     log::info!("Auto-routing ping: {} ({}) = timeout", region, addr);
@@ -322,7 +427,13 @@ impl VpnConnection {
         self.set_state(ConnectionState::FetchingConfig).await;
         let forced_for_region = forced_servers.get(region).map(|s| s.as_str());
         let (resolved_server_region, selected_relay_addr) =
-            match resolve_relay_server_for_region(region, &available_servers, forced_for_region) {
+            match resolve_relay_server_for_region_with_probing(
+                region,
+                &available_servers,
+                forced_for_region,
+            )
+            .await
+            {
                 Some((server_region, relay_addr)) => (server_region, relay_addr),
                 None => {
                     let error = VpnError::ConfigFetch(format!(
@@ -586,11 +697,43 @@ impl VpnConnection {
                             );
                             let old_region = router_for_lookup.current_region();
 
-                            // Step 1: Resolve the best relay server for this region (same
-                            // selection logic as manual region connect).
-                            if let Some((selected_region, selected_addr)) =
+                            // Step 1: Resolve relay using cached latency and routing policy.
+                            if let Some((mut selected_region, mut selected_addr)) =
                                 router_for_lookup.get_best_server_for_region(&region)
                             {
+                                // Step 1b: If candidate latencies are incomplete, actively probe
+                                // candidates in this region so we don't fall back to list order.
+                                if let Some(target_region) = region.best_swifttunnel_region() {
+                                    let forced_server =
+                                        router_for_lookup.forced_server_for_region(target_region);
+                                    let available_servers =
+                                        router_for_lookup.available_servers_snapshot();
+
+                                    if let Some((probed_region, probed_addr)) =
+                                        resolve_relay_server_for_region_with_probing(
+                                            target_region,
+                                            &available_servers,
+                                            forced_server.as_deref(),
+                                        )
+                                        .await
+                                    {
+                                        if probed_region != selected_region
+                                            || probed_addr != selected_addr
+                                        {
+                                            log::info!(
+                                                "Auto-routing: Probe refined '{}' selection {} ({}) -> {} ({})",
+                                                target_region,
+                                                selected_region,
+                                                selected_addr,
+                                                probed_region,
+                                                probed_addr
+                                            );
+                                            selected_region = probed_region;
+                                            selected_addr = probed_addr;
+                                        }
+                                    }
+                                }
+
                                 // Step 2: Commit the switch
                                 if let Some((new_addr, new_region)) = router_for_lookup
                                     .commit_switch(region, selected_region, selected_addr)
@@ -1459,5 +1602,91 @@ mod tests {
 
         let resolved = resolve_relay_server_for_region("america", &available_servers, None);
         assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn test_resolve_relay_server_with_probe_uses_probe_when_latencies_unknown() {
+        let available_servers = vec![
+            ("germany-01".to_string(), parse_addr("10.0.0.1:51821"), None),
+            ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), None),
+        ];
+        let candidates = relay_candidates_for_region("germany", &available_servers, None);
+        let probe_result = Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821"), 12));
+
+        assert!(should_probe_candidates(&candidates));
+        let resolved = resolve_relay_server_from_candidates(&candidates, probe_result);
+
+        assert_eq!(
+            resolved,
+            Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_with_probe_uses_probe_when_latency_is_incomplete() {
+        let available_servers = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(8),
+            ),
+            ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), None),
+        ];
+        let candidates = relay_candidates_for_region("germany", &available_servers, None);
+        let probe_result = Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821"), 5));
+
+        assert!(should_probe_candidates(&candidates));
+        let resolved = resolve_relay_server_from_candidates(&candidates, probe_result);
+
+        assert_eq!(
+            resolved,
+            Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_with_probe_skips_probe_when_latencies_complete() {
+        let available_servers = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(11),
+            ),
+            (
+                "germany-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                Some(6),
+            ),
+        ];
+        let candidates = relay_candidates_for_region("germany", &available_servers, None);
+        let probe_result = Some(("germany-01".to_string(), parse_addr("10.0.0.1:51821"), 1));
+
+        assert!(!should_probe_candidates(&candidates));
+        let resolved = resolve_relay_server_from_candidates(&candidates, probe_result);
+
+        assert_eq!(
+            resolved,
+            Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821")))
+        );
+    }
+
+    #[test]
+    fn test_auto_routing_probe_sample_count_is_five() {
+        assert_eq!(AUTO_ROUTING_PING_SAMPLES, 5);
+    }
+
+    #[test]
+    fn test_average_probe_latency_returns_none_for_empty_samples() {
+        assert_eq!(average_probe_latency(&[]), None);
+    }
+
+    #[test]
+    fn test_average_probe_latency_computes_integer_average() {
+        assert_eq!(average_probe_latency(&[10, 20, 30, 40, 50]), Some(30));
+    }
+
+    #[test]
+    fn test_average_probe_latency_truncates_fractional_values() {
+        assert_eq!(average_probe_latency(&[1, 2, 2]), Some(1));
     }
 }

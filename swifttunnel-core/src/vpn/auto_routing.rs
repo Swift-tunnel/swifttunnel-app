@@ -161,6 +161,16 @@ impl AutoRouter {
         *self.available_servers.write() = servers;
     }
 
+    /// Snapshot available relay servers for async probing/selection.
+    pub fn available_servers_snapshot(&self) -> Vec<(String, SocketAddr, Option<u32>)> {
+        self.available_servers.read().clone()
+    }
+
+    /// Get a forced server (if configured) for a SwiftTunnel region id.
+    pub fn forced_server_for_region(&self, region_id: &str) -> Option<String> {
+        self.forced_servers.read().get(region_id).cloned()
+    }
+
     /// Set the current relay address (called on connect)
     pub fn set_current_relay(&self, addr: SocketAddr, region: &str) {
         *self.current_relay_addr.write() = Some(addr);
