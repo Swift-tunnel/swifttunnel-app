@@ -152,6 +152,9 @@ pub enum AuthError {
 
     #[error("API error: {0}")]
     ApiError(String),
+
+    #[error("Session expired, please sign in again")]
+    RefreshTokenInvalid,
 }
 
 #[cfg(test)]
@@ -259,6 +262,22 @@ mod tests {
             AuthError::ApiError("401".to_string()).to_string(),
             "API error: 401"
         );
+        assert_eq!(
+            AuthError::RefreshTokenInvalid.to_string(),
+            "Session expired, please sign in again"
+        );
+    }
+
+    #[test]
+    fn test_refresh_token_invalid_is_matchable() {
+        // Ensures the retry-skip logic in manager.rs can pattern-match this variant
+        let err = AuthError::RefreshTokenInvalid;
+        assert!(matches!(err, AuthError::RefreshTokenInvalid));
+        // Transient errors must NOT match
+        let transient = AuthError::NetworkError("timeout".to_string());
+        assert!(!matches!(transient, AuthError::RefreshTokenInvalid));
+        let api_err = AuthError::ApiError("500 internal".to_string());
+        assert!(!matches!(api_err, AuthError::RefreshTokenInvalid));
     }
 
     #[test]
