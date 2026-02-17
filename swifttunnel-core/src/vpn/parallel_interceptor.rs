@@ -2461,6 +2461,8 @@ fn parse_ipv4_header_offset(data: &[u8]) -> Option<usize> {
             // PPP payload may include:
             // - [0x00, 0x21, <IPv4...>] (standard protocol field)
             // - [0x21, <IPv4...>] (protocol field compression/PFC)
+            // Note: Address/Control bytes (0xFF, 0x03) are not valid in PPPoE
+            // per RFC 2516, but the shared parser below tolerates them safely.
             if data.len() < ip_start + 6 {
                 return None;
             }
