@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 
 /// Session ID length in bytes
 const SESSION_ID_LEN: usize = 8;
+const AUTH_HELLO_FRAME_TYPE: u8 = 0xA1;
+const AUTH_ACK_FRAME_TYPE: u8 = 0xA2;
+const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(600);
+const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(150);
+const AUTH_HANDSHAKE_ATTEMPTS: usize = 2;
 
 /// Maximum payload size for relay packets
 /// Allow full IP packets (up to 1500 bytes) to avoid silently dropping large game packets.
@@ -35,6 +40,44 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 /// Grace period after relay switch: accept packets from BOTH old and new relay.
 /// This eliminates the inbound blackout while the new relay establishes session.
 const RELAY_SWITCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayAuthAckStatus {
+    Ok = 0,
+    BadFormat = 1,
+    BadSignature = 2,
+    Expired = 3,
+    SidMismatch = 4,
+    ServerMismatch = 5,
+    AuthDisabled = 6,
+}
+
+impl RelayAuthAckStatus {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Ok),
+            1 => Some(Self::BadFormat),
+            2 => Some(Self::BadSignature),
+            3 => Some(Self::Expired),
+            4 => Some(Self::SidMismatch),
+            5 => Some(Self::ServerMismatch),
+            6 => Some(Self::AuthDisabled),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::BadFormat => "bad_format",
+            Self::BadSignature => "bad_signature",
+            Self::Expired => "expired",
+            Self::SidMismatch => "sid_mismatch",
+            Self::ServerMismatch => "server_mismatch",
+            Self::AuthDisabled => "auth_disabled",
+        }
+    }
+}
 
 /// UDP Relay client for Game Booster mode
 pub struct UdpRelay {
@@ -134,6 +177,125 @@ impl UdpRelay {
         u64::from_be_bytes(self.session_id)
     }
 
+    /// Get the session ID as lower-case hex string.
+    pub fn session_id_hex(&self) -> String {
+        format!("{:016x}", self.session_id_u64())
+    }
+
+    fn is_expected_relay_source(&self, from: SocketAddr) -> bool {
+        let expected_addr = **self.relay_addr.load();
+        if from == expected_addr {
+            return true;
+        }
+
+        if let (Some(prev), Some(switched_at)) = (
+            (**self.previous_relay_addr.load()).as_ref(),
+            (**self.switch_time.load()).as_ref(),
+        ) {
+            return from == *prev && switched_at.elapsed() < RELAY_SWITCH_GRACE_PERIOD;
+        }
+        false
+    }
+
+    /// Send relay auth hello frame:
+    /// [session_id:8][0xA1][token_len:2][token_utf8].
+    pub fn send_auth_hello(&self, token: &str) -> Result<()> {
+        let token_bytes = token.as_bytes();
+        if token_bytes.is_empty() || token_bytes.len() > u16::MAX as usize {
+            anyhow::bail!(
+                "Relay auth token length must be between 1 and {} bytes",
+                u16::MAX
+            );
+        }
+
+        let mut frame = Vec::with_capacity(SESSION_ID_LEN + 3 + token_bytes.len());
+        frame.extend_from_slice(&self.session_id);
+        frame.push(AUTH_HELLO_FRAME_TYPE);
+        frame.extend_from_slice(&(token_bytes.len() as u16).to_be_bytes());
+        frame.extend_from_slice(token_bytes);
+
+        let current_addr = **self.relay_addr.load();
+        self.socket
+            .send_to(&frame, current_addr)
+            .context("Failed to send relay auth hello")?;
+        log::debug!(
+            "UDP Relay: Sent auth hello to {} (session {:016x}, token {} bytes)",
+            current_addr,
+            self.session_id_u64(),
+            token_bytes.len()
+        );
+        Ok(())
+    }
+
+    fn wait_for_auth_ack_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<RelayAuthAckStatus>> {
+        let deadline = Instant::now() + timeout;
+        let mut recv_buf = [0u8; 1600];
+
+        while Instant::now() < deadline {
+            match self.socket.recv_from(&mut recv_buf) {
+                Ok((len, from)) => {
+                    if !self.is_expected_relay_source(from) {
+                        continue;
+                    }
+
+                    if len < SESSION_ID_LEN + 2 {
+                        continue;
+                    }
+                    if &recv_buf[..SESSION_ID_LEN] != &self.session_id {
+                        continue;
+                    }
+                    if recv_buf[SESSION_ID_LEN] != AUTH_ACK_FRAME_TYPE {
+                        continue;
+                    }
+
+                    let status_byte = recv_buf[SESSION_ID_LEN + 1];
+                    let status = RelayAuthAckStatus::from_u8(status_byte)
+                        .unwrap_or(RelayAuthAckStatus::BadFormat);
+                    return Ok(Some(status));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Send relay auth hello and wait for ack.
+    ///
+    /// Attempts: 0ms and +150ms, with a total wait budget of 600ms.
+    pub fn authenticate_with_ticket(&self, token: &str) -> Result<Option<RelayAuthAckStatus>> {
+        let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
+
+        for attempt in 0..AUTH_HANDSHAKE_ATTEMPTS {
+            if attempt > 0 {
+                std::thread::sleep(AUTH_HANDSHAKE_RETRY_DELAY);
+            }
+
+            self.send_auth_hello(token)?;
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            if let Some(status) = self.wait_for_auth_ack_with_timeout(remaining)? {
+                log::info!(
+                    "UDP Relay: Auth ack {} for session {:016x}",
+                    status.as_str(),
+                    self.session_id_u64()
+                );
+                return Ok(Some(status));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Get the stop flag for external control
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stop_flag)
@@ -195,30 +357,9 @@ impl UdpRelay {
         match self.socket.recv_from(&mut recv_buf) {
             Ok((len, from)) => {
                 // Verify it's from our relay server (current or previous during grace period)
-                let expected_addr = **self.relay_addr.load();
-                if from != expected_addr {
-                    // Check if within grace period for previous relay
-                    let in_grace = if let (Some(prev), Some(switched_at)) = (
-                        (**self.previous_relay_addr.load()).as_ref(),
-                        (**self.switch_time.load()).as_ref(),
-                    ) {
-                        from == *prev && switched_at.elapsed() < RELAY_SWITCH_GRACE_PERIOD
-                    } else {
-                        false
-                    };
-
-                    if !in_grace {
-                        log::warn!(
-                            "UDP Relay: Received packet from unexpected source {} (expected {})",
-                            from,
-                            expected_addr
-                        );
-                        return Ok(None);
-                    }
-                    log::trace!(
-                        "UDP Relay: Accepting packet from previous relay {} (grace period)",
-                        from
-                    );
+                if !self.is_expected_relay_source(from) {
+                    log::warn!("UDP Relay: Received packet from unexpected source {}", from);
+                    return Ok(None);
                 }
 
                 // Must have at least session ID
@@ -237,6 +378,16 @@ impl UdpRelay {
                 let payload_len = len - SESSION_ID_LEN;
                 if payload_len > buffer.len() {
                     log::warn!("UDP Relay: Buffer too small for payload");
+                    return Ok(None);
+                }
+
+                // Ignore relay control frames so they never reach packet injection.
+                if payload_len >= 1
+                    && matches!(
+                        recv_buf[SESSION_ID_LEN],
+                        AUTH_HELLO_FRAME_TYPE | AUTH_ACK_FRAME_TYPE
+                    )
+                {
                     return Ok(None);
                 }
 

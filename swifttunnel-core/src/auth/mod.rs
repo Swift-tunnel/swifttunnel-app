@@ -6,7 +6,7 @@
 //! - Secure token storage via Keychain
 //! - Token refresh management
 
-mod http_client;
+pub(crate) mod http_client;
 mod manager;
 pub mod oauth_server;
 mod storage;

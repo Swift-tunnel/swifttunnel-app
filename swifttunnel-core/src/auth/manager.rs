@@ -206,7 +206,6 @@ impl AuthManager {
         }
 
         // Try to refresh with retries
-        let mut last_error = None;
         for attempt in 1..=MAX_REFRESH_RETRIES {
             match self.try_refresh_token(&session).await {
                 Ok(new_session) => {
@@ -228,8 +227,15 @@ impl AuthManager {
                     return Ok(());
                 }
                 Err(e) => {
+                    // Permanent error: token revoked/rotated — retrying won't help
+                    if matches!(e, AuthError::RefreshTokenInvalid) {
+                        warn!("Refresh token is permanently invalid — forcing re-login");
+                        self.storage.reset_refresh_failures();
+                        let _ = self.force_logout();
+                        return Err(e);
+                    }
+
                     warn!("Token refresh attempt {} failed: {}", attempt, e);
-                    last_error = Some(e);
 
                     // Wait before retry (exponential backoff: 1s, 2s, 4s)
                     if attempt < MAX_REFRESH_RETRIES {
@@ -247,12 +253,11 @@ impl AuthManager {
             MAX_REFRESH_RETRIES, failure_count
         );
 
-        // If too many consecutive failures, the refresh token may be invalid
-        // But we don't kick the user out - let them continue with stale data
-        // They'll only be forced to re-login when they try an action that requires valid auth
+        // Too many consecutive transient failures — token may be stale, force re-login
         if failure_count >= 5 {
-            warn!("Too many consecutive refresh failures - refresh token may be invalid");
-            // Don't return error yet - let the user continue until an API call fails
+            warn!("Too many consecutive refresh failures — forcing re-login");
+            let _ = self.force_logout();
+            return Err(AuthError::RefreshTokenInvalid);
         }
 
         // Return OK even though refresh failed - user stays logged in with stale data
@@ -262,11 +267,10 @@ impl AuthManager {
             info!("Refresh failed but token not yet expired - continuing with existing session");
             Ok(())
         } else {
-            // Token is expired - we couldn't refresh it
-            // But we still don't kick the user out immediately
-            // Let the API call that needs auth decide what to do
-            warn!("Token expired and refresh failed - user may need to re-login soon");
-            Err(last_error.unwrap_or(AuthError::ApiError("Token refresh failed".to_string())))
+            // Token is expired and we couldn't refresh — force re-login
+            warn!("Token expired and refresh failed — forcing re-login");
+            let _ = self.force_logout();
+            Err(AuthError::RefreshTokenInvalid)
         }
     }
 
@@ -370,6 +374,19 @@ impl AuthManager {
         }
 
         info!("Logged out successfully");
+        Ok(())
+    }
+
+    /// Force logout due to invalid session (non-fatal on storage errors)
+    fn force_logout(&self) -> Result<(), AuthError> {
+        info!("Force logout: clearing invalid session");
+        if let Err(e) = self.storage.clear_session() {
+            warn!("Failed to clear session during force logout: {}", e);
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            *state = AuthState::LoggedOut;
+        }
         Ok(())
     }
 

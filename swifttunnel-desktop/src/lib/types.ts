@@ -40,6 +40,7 @@ export interface VpnStateResponse {
   region: string | null;
   server_endpoint: string | null;
   assigned_ip: string | null;
+  relay_auth_mode?: string | null;
   split_tunnel_active: boolean;
   tunneled_processes: string[];
   error: string | null;

@@ -49,7 +49,7 @@ pub use split_tunnel::{
     get_apps_for_presets, get_tunnel_apps_for_presets,
 };
 pub use tso_recovery::{emergency_tso_restore, recover_tso_on_startup};
-pub use udp_relay::{RelayContext, UdpRelay};
+pub use udp_relay::{RelayAuthAckStatus, RelayContext, UdpRelay};
 
 /// VPN-related errors
 #[derive(Debug, thiserror::Error)]

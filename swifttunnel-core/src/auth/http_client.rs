@@ -1,6 +1,8 @@
 //! HTTP client for SwiftTunnel API
 
-use super::types::{AuthError, ExchangeTokenResponse, SupabaseAuthResponse, VpnConfig};
+use super::types::{
+    AuthError, ExchangeTokenResponse, RelayTicketResponse, SupabaseAuthResponse, VpnConfig,
+};
 use log::{debug, error, info};
 use reqwest::Client;
 use serde_json::json;
@@ -112,6 +114,12 @@ impl AuthClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             error!("Refresh token failed: {} - {}", status, body);
+
+            // Detect permanently invalid refresh tokens (revoked, rotated, expired)
+            if is_refresh_token_permanently_invalid(&body) {
+                return Err(AuthError::RefreshTokenInvalid);
+            }
+
             return Err(AuthError::ApiError(format!(
                 "Refresh failed: {} - {}",
                 status, body
@@ -164,6 +172,55 @@ impl AuthClient {
             .map_err(|e| AuthError::ApiError(format!("Failed to parse config: {}", e)))?;
 
         info!("Got VPN config for region {}", region);
+        Ok(data)
+    }
+
+    /// Fetch a short-lived relay auth ticket for a specific session/server pair.
+    pub async fn get_relay_ticket(
+        &self,
+        access_token: &str,
+        server_region: &str,
+        session_id: &str,
+    ) -> Result<RelayTicketResponse, AuthError> {
+        let url = format!("{}/api/vpn/relay-ticket", API_BASE_URL);
+
+        debug!(
+            "Fetching relay ticket for region {} and session {}",
+            server_region, session_id
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "server_region": server_region,
+                "session_id": session_id,
+            }))
+            .send()
+            .await
+            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Relay ticket fetch failed: {} - {}", status, body);
+            return Err(AuthError::ApiError(format!(
+                "Relay ticket fetch failed: {} - {}",
+                status, body
+            )));
+        }
+
+        let data: RelayTicketResponse = response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse relay ticket: {}", e)))?;
+
+        info!(
+            "Received relay ticket (auth_required: {}, key_id: {})",
+            data.auth_required, data.key_id
+        );
         Ok(data)
     }
 
@@ -334,5 +391,47 @@ impl AuthClient {
 impl Default for AuthClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Classify a Supabase refresh-token error response body.
+///
+/// Returns `true` if the error indicates a permanently invalid refresh token
+/// (revoked, rotated, or not found). These errors should NOT be retried.
+pub(crate) fn is_refresh_token_permanently_invalid(body: &str) -> bool {
+    body.contains("refresh_token_not_found")
+        || body.contains("Invalid Refresh Token")
+        || body.contains("refresh_token_already_used")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detects_refresh_token_not_found() {
+        let body = r#"{"code":400,"error_code":"refresh_token_not_found","msg":"Invalid Refresh Token: Refresh Token Not Found"}"#;
+        assert!(is_refresh_token_permanently_invalid(body));
+    }
+
+    #[test]
+    fn test_detects_refresh_token_already_used() {
+        let body = r#"{"code":400,"error_code":"refresh_token_already_used","msg":"Refresh token already used"}"#;
+        assert!(is_refresh_token_permanently_invalid(body));
+    }
+
+    #[test]
+    fn test_detects_invalid_refresh_token_message() {
+        let body = "Invalid Refresh Token";
+        assert!(is_refresh_token_permanently_invalid(body));
+    }
+
+    #[test]
+    fn test_transient_errors_are_not_permanent() {
+        assert!(!is_refresh_token_permanently_invalid(
+            "Internal Server Error",
+        ));
+        assert!(!is_refresh_token_permanently_invalid("rate_limit_exceeded"));
+        assert!(!is_refresh_token_permanently_invalid(""));
     }
 }

@@ -10,6 +10,7 @@ use super::parallel_interceptor::ThroughputStats;
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
 use super::{VpnError, VpnResult};
+use crate::auth::http_client::AuthClient;
 use crate::auth::types::VpnConfig;
 use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
@@ -238,6 +239,7 @@ pub enum ConnectionState {
         server_region: String,
         server_endpoint: String,
         assigned_ip: String,
+        relay_auth_mode: String,
         split_tunnel_active: bool,
         tunneled_processes: Vec<String>,
     },
@@ -387,12 +389,12 @@ impl VpnConnection {
     /// No Wintun adapter, no WireGuard encryption — lowest latency.
     ///
     /// # Arguments
-    /// * `_access_token` - Reserved for future authenticated relay/session APIs
+    /// * `access_token` - Bearer token used to fetch relay auth ticket
     /// * `region` - Server region to connect to
     /// * `tunnel_apps` - Apps that SHOULD use VPN (games). Everything else bypasses.
     pub async fn connect(
         &mut self,
-        _access_token: &str,
+        access_token: &str,
         region: &str,
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
@@ -483,9 +485,11 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel)
             .await;
 
-        let (tunneled_processes, split_tunnel_active) = if !tunnel_apps.is_empty() {
+        let (tunneled_processes, split_tunnel_active, relay_auth_mode) = if !tunnel_apps.is_empty()
+        {
             match self
                 .setup_split_tunnel(
+                    access_token,
                     &config,
                     tunnel_apps.clone(),
                     custom_relay_server,
@@ -496,9 +500,9 @@ impl VpnConnection {
                 )
                 .await
             {
-                Ok(processes) => {
+                Ok((processes, auth_mode)) => {
                     log::info!("V3 split tunnel setup succeeded");
-                    (processes, true)
+                    (processes, true, auth_mode)
                 }
                 Err(e) => {
                     log::error!("V3 split tunnel setup FAILED: {}", e);
@@ -513,7 +517,7 @@ impl VpnConnection {
             }
         } else {
             log::warn!("No tunnel apps specified");
-            (Vec::new(), false)
+            (Vec::new(), false, "legacy_fallback".to_string())
         };
 
         // Step 3: Skip routes - V3 doesn't need them
@@ -525,6 +529,7 @@ impl VpnConnection {
             server_region: config.region.clone(),
             server_endpoint: config.endpoint.clone(),
             assigned_ip: "V3-Relay".to_string(), // No VPN IP in V3 mode
+            relay_auth_mode,
             split_tunnel_active,
             tunneled_processes,
         })
@@ -544,6 +549,7 @@ impl VpnConnection {
     /// 5. Start process monitor
     async fn setup_split_tunnel(
         &mut self,
+        access_token: &str,
         config: &VpnConfig,
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
@@ -551,7 +557,7 @@ impl VpnConnection {
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
-    ) -> VpnResult<Vec<String>> {
+    ) -> VpnResult<(Vec<String>, String)> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
         // Check if driver is available
@@ -659,9 +665,85 @@ impl VpnConnection {
             }
         };
 
+        let mut relay_auth_mode = if custom_relay_server.is_some() {
+            "custom_legacy".to_string()
+        } else {
+            "legacy_fallback".to_string()
+        };
+
+        if custom_relay_server.is_some() {
+            log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
+        } else {
+            let auth_client = AuthClient::new();
+            let session_id_hex = relay.session_id_hex();
+            match auth_client
+                .get_relay_ticket(access_token, &config.region, &session_id_hex)
+                .await
+            {
+                Ok(ticket) => match relay.authenticate_with_ticket(&ticket.token) {
+                    Ok(Some(super::udp_relay::RelayAuthAckStatus::Ok)) => {
+                        relay_auth_mode = "authenticated".to_string();
+                        log::info!(
+                            "V3: Relay authenticated (session {}, key_id={})",
+                            session_id_hex,
+                            ticket.key_id
+                        );
+                    }
+                    Ok(Some(status)) => {
+                        if ticket.auth_required {
+                            let _ = driver.close();
+                            return Err(VpnError::Connection(format!(
+                                "Relay authentication required but failed ({})",
+                                status.as_str()
+                            )));
+                        }
+                        log::warn!(
+                            "V3: Relay auth ack '{}' (session {}) - falling back to legacy mode",
+                            status.as_str(),
+                            session_id_hex
+                        );
+                    }
+                    Ok(None) => {
+                        if ticket.auth_required {
+                            let _ = driver.close();
+                            return Err(VpnError::Connection(
+                                "Relay authentication required but relay did not acknowledge auth hello"
+                                    .to_string(),
+                            ));
+                        }
+                        log::warn!(
+                            "V3: Relay auth timed out for session {} - falling back to legacy mode",
+                            session_id_hex
+                        );
+                    }
+                    Err(e) => {
+                        if ticket.auth_required {
+                            let _ = driver.close();
+                            return Err(VpnError::Connection(format!(
+                                "Relay authentication required but handshake failed: {}",
+                                e
+                            )));
+                        }
+                        log::warn!(
+                            "V3: Relay auth handshake failed for session {} ({}), falling back to legacy mode",
+                            session_id_hex,
+                            e
+                        );
+                    }
+                },
+                Err(e) => {
+                    log::warn!(
+                        "V3: Relay ticket unavailable for '{}' ({}), using legacy fallback mode",
+                        config.region,
+                        e
+                    );
+                }
+            }
+        }
+
         let relay_for_lookup = Arc::clone(&relay);
         driver.set_relay_context(relay);
-        log::info!("V3: UDP relay context set");
+        log::info!("V3: UDP relay context set (auth mode: {})", relay_auth_mode);
 
         // Set up auto-routing
         let auto_router = Arc::new(super::auto_routing::AutoRouter::new(
@@ -1055,7 +1137,7 @@ impl VpnConnection {
         });
 
         log::info!("V3 split tunnel configured - game traffic relayed via UDP");
-        Ok(running)
+        Ok((running, relay_auth_mode))
     }
 
     pub async fn disconnect(&mut self) -> VpnResult<()> {
@@ -1260,6 +1342,7 @@ mod tests {
             server_region: "us-east".to_string(),
             server_endpoint: "1.2.3.4:51820".to_string(),
             assigned_ip: "10.0.0.2".to_string(),
+            relay_auth_mode: "authenticated".to_string(),
             split_tunnel_active: true,
             tunneled_processes: vec!["RobloxPlayerBeta.exe".to_string()],
         };
@@ -1292,6 +1375,7 @@ mod tests {
             server_region: "eu-west".to_string(),
             server_endpoint: "5.6.7.8:51820".to_string(),
             assigned_ip: "10.0.0.3".to_string(),
+            relay_auth_mode: "legacy_fallback".to_string(),
             split_tunnel_active: false,
             tunneled_processes: vec![],
         };
@@ -1326,6 +1410,7 @@ mod tests {
             server_region: "us-west".to_string(),
             server_endpoint: "1.2.3.4:51820".to_string(),
             assigned_ip: "10.0.0.2".to_string(),
+            relay_auth_mode: "legacy_fallback".to_string(),
             split_tunnel_active: false,
             tunneled_processes: vec![],
         };
@@ -1357,6 +1442,7 @@ mod tests {
             server_region: "us-east".to_string(),
             server_endpoint: "1.2.3.4:51820".to_string(),
             assigned_ip: "10.0.0.2".to_string(),
+            relay_auth_mode: "authenticated".to_string(),
             split_tunnel_active: true,
             tunneled_processes: vec![],
         };

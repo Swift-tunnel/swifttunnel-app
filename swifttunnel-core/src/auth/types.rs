@@ -129,6 +129,15 @@ pub struct ExchangeTokenResponse {
     pub user_id: String,
 }
 
+/// Response from relay ticket bootstrap endpoint
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelayTicketResponse {
+    pub token: String,
+    pub expires_at: String,
+    pub auth_required: bool,
+    pub key_id: String,
+}
+
 /// Error types for authentication
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -143,6 +152,9 @@ pub enum AuthError {
 
     #[error("API error: {0}")]
     ApiError(String),
+
+    #[error("Session expired, please sign in again")]
+    RefreshTokenInvalid,
 }
 
 #[cfg(test)]
@@ -250,5 +262,36 @@ mod tests {
             AuthError::ApiError("401".to_string()).to_string(),
             "API error: 401"
         );
+        assert_eq!(
+            AuthError::RefreshTokenInvalid.to_string(),
+            "Session expired, please sign in again"
+        );
+    }
+
+    #[test]
+    fn test_refresh_token_invalid_is_matchable() {
+        // Ensures the retry-skip logic in manager.rs can pattern-match this variant
+        let err = AuthError::RefreshTokenInvalid;
+        assert!(matches!(err, AuthError::RefreshTokenInvalid));
+        // Transient errors must NOT match
+        let transient = AuthError::NetworkError("timeout".to_string());
+        assert!(!matches!(transient, AuthError::RefreshTokenInvalid));
+        let api_err = AuthError::ApiError("500 internal".to_string());
+        assert!(!matches!(api_err, AuthError::RefreshTokenInvalid));
+    }
+
+    #[test]
+    fn test_relay_ticket_response_deserialize() {
+        let json = r#"{
+            "token": "abc.def",
+            "expires_at": "2026-02-17T12:34:56.000Z",
+            "auth_required": false,
+            "key_id": "relay-ed25519-2026-02"
+        }"#;
+        let resp: RelayTicketResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.token, "abc.def");
+        assert_eq!(resp.expires_at, "2026-02-17T12:34:56.000Z");
+        assert!(!resp.auth_required);
+        assert_eq!(resp.key_id, "relay-ed25519-2026-02");
     }
 }
