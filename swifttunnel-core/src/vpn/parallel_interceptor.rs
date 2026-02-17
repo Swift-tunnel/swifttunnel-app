@@ -2395,6 +2395,45 @@ fn looks_like_raw_ipv4_packet(data: &[u8]) -> bool {
 }
 
 #[inline(always)]
+fn parse_ppp_ipv4_payload_offset(data: &[u8], start: usize) -> Option<usize> {
+    let mut ip_start = start;
+    if data.len() < ip_start + 1 {
+        return None;
+    }
+
+    // Address/Control bytes can be present (0xFF, 0x03) or compressed away (ACFC).
+    if data.len() >= ip_start + 2 && data[ip_start] == 0xFF && data[ip_start + 1] == 0x03 {
+        ip_start += 2;
+        if data.len() < ip_start + 1 {
+            return None;
+        }
+    }
+
+    // Protocol field may be 2 bytes (0x0021 for IPv4) or compressed to 1 byte (0x21, PFC).
+    if (data[ip_start] & 0x01) == 0x01 {
+        if data[ip_start] != 0x21 {
+            return None;
+        }
+        ip_start += 1;
+    } else {
+        if data.len() < ip_start + 2 {
+            return None;
+        }
+        let ppp_protocol = u16::from_be_bytes([data[ip_start], data[ip_start + 1]]);
+        if ppp_protocol != 0x0021 {
+            return None;
+        }
+        ip_start += 2;
+    }
+
+    if is_valid_ipv4_header_offset(data, ip_start) {
+        Some(ip_start)
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
 fn parse_ipv4_header_offset(data: &[u8]) -> Option<usize> {
     if data.len() >= 14 {
         let mut ip_start = 14usize;
@@ -2418,16 +2457,14 @@ fn parse_ipv4_header_offset(data: &[u8]) -> Option<usize> {
 
         if ethertype == 0x8864 {
             // PPPoE session frame:
-            // [PPPoE header: 6 bytes][PPP protocol: 2 bytes][payload...]
-            // We only tunnel IPv4 payload (PPP protocol 0x0021).
-            if data.len() < ip_start + 8 {
+            // [PPPoE header: 6 bytes][PPP payload...]
+            // PPP payload may include:
+            // - [0x00, 0x21, <IPv4...>] (standard protocol field)
+            // - [0x21, <IPv4...>] (protocol field compression/PFC)
+            if data.len() < ip_start + 6 {
                 return None;
             }
-            let ppp_protocol = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
-            if ppp_protocol != 0x0021 {
-                return None;
-            }
-            ip_start += 8;
+            return parse_ppp_ipv4_payload_offset(data, ip_start + 6);
         } else if ethertype != 0x0800 {
             ip_start = usize::MAX;
         }
@@ -2439,22 +2476,10 @@ fn parse_ipv4_header_offset(data: &[u8]) -> Option<usize> {
 
     // PPP frame formats seen on WAN miniport adapters:
     //  - [0x00, 0x21, <IPv4...>] (protocol field only)
-    //  - [0xFF, 0x03, 0x00, 0x21, <IPv4...>] (address/control + protocol)
-    if data.len() >= 22
-        && data[0] == 0x00
-        && data[1] == 0x21
-        && is_valid_ipv4_header_offset(data, 2)
-    {
-        return Some(2);
-    }
-    if data.len() >= 24
-        && data[0] == 0xFF
-        && data[1] == 0x03
-        && data[2] == 0x00
-        && data[3] == 0x21
-        && is_valid_ipv4_header_offset(data, 4)
-    {
-        return Some(4);
+    //  - [0x21, <IPv4...>] (protocol field compression/PFC)
+    //  - [0xFF, 0x03, ...] with/without protocol field compression.
+    if let Some(ip_start) = parse_ppp_ipv4_payload_offset(data, 0) {
+        return Some(ip_start);
     }
 
     if looks_like_raw_ipv4_packet(data) {
@@ -3746,6 +3771,7 @@ mod tests {
     }
 
     fn build_pppoe_ipv4_frame(
+        protocol_field_compressed: bool,
         protocol: u8,
         src_ip: Ipv4Addr,
         dst_ip: Ipv4Addr,
@@ -3753,17 +3779,24 @@ mod tests {
         dst_port: u16,
     ) -> Vec<u8> {
         // Ethernet + PPPoE session + PPP protocol + IPv4 + transport
-        let mut frame = vec![0u8; 14 + 6 + 2 + 20 + 8];
+        let ppp_protocol_len = if protocol_field_compressed { 1 } else { 2 };
+        let mut frame = vec![0u8; 14 + 6 + ppp_protocol_len + 20 + 8];
         frame[12..14].copy_from_slice(&0x8864u16.to_be_bytes()); // PPPoE Session EtherType
 
         let pppoe_start = 14;
         frame[pppoe_start] = 0x11; // Version=1, Type=1
         frame[pppoe_start + 1] = 0x00; // Code=Session Data
         frame[pppoe_start + 2..pppoe_start + 4].copy_from_slice(&0x0001u16.to_be_bytes()); // Session ID
-        frame[pppoe_start + 4..pppoe_start + 6].copy_from_slice(&0x001Eu16.to_be_bytes()); // Length: PPP(2) + IPv4(20) + L4(8)
-        frame[pppoe_start + 6..pppoe_start + 8].copy_from_slice(&0x0021u16.to_be_bytes()); // PPP protocol: IPv4
+        let payload_len = (ppp_protocol_len + 20 + 8) as u16;
+        frame[pppoe_start + 4..pppoe_start + 6].copy_from_slice(&payload_len.to_be_bytes());
 
-        let ip_start = pppoe_start + 8;
+        if protocol_field_compressed {
+            frame[pppoe_start + 6] = 0x21; // PPP protocol (PFC-compressed): IPv4
+        } else {
+            frame[pppoe_start + 6..pppoe_start + 8].copy_from_slice(&0x0021u16.to_be_bytes()); // PPP protocol: IPv4
+        }
+
+        let ip_start = pppoe_start + 6 + ppp_protocol_len;
         frame[ip_start] = 0x45; // IPv4, IHL=5
         frame[ip_start + 9] = protocol; // TCP=6, UDP=17
         frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
@@ -3800,6 +3833,7 @@ mod tests {
 
     fn build_ppp_ipv4_packet(
         with_address_control: bool,
+        protocol_field_compressed: bool,
         protocol: u8,
         src_ip: Ipv4Addr,
         dst_ip: Ipv4Addr,
@@ -3807,15 +3841,24 @@ mod tests {
         dst_port: u16,
     ) -> Vec<u8> {
         let raw_ip = build_raw_ipv4_packet(protocol, src_ip, dst_ip, src_port, dst_port);
+        let mut packet = Vec::with_capacity(
+            (if with_address_control { 2 } else { 0 })
+                + (if protocol_field_compressed { 1 } else { 2 })
+                + raw_ip.len(),
+        );
+
         if with_address_control {
-            let mut packet = vec![0xFF, 0x03, 0x00, 0x21];
-            packet.extend_from_slice(&raw_ip);
-            packet
-        } else {
-            let mut packet = vec![0x00, 0x21];
-            packet.extend_from_slice(&raw_ip);
-            packet
+            packet.extend_from_slice(&[0xFF, 0x03]);
         }
+
+        if protocol_field_compressed {
+            packet.push(0x21);
+        } else {
+            packet.extend_from_slice(&[0x00, 0x21]);
+        }
+
+        packet.extend_from_slice(&raw_ip);
+        packet
     }
 
     #[test]
@@ -3887,6 +3930,7 @@ mod tests {
     #[test]
     fn test_parse_ports_pppoe_ipv4_frame() {
         let frame = build_pppoe_ipv4_frame(
+            false,
             17,
             Ipv4Addr::new(192, 168, 1, 20),
             Ipv4Addr::new(128, 116, 80, 12),
@@ -3897,6 +3941,22 @@ mod tests {
         let (src, dst) = parse_ports(&frame).unwrap();
         assert_eq!(src, 55001);
         assert_eq!(dst, 62000);
+    }
+
+    #[test]
+    fn test_parse_ports_pppoe_ipv4_frame_with_protocol_field_compression() {
+        let frame = build_pppoe_ipv4_frame(
+            true,
+            17,
+            Ipv4Addr::new(192, 168, 1, 21),
+            Ipv4Addr::new(128, 116, 80, 13),
+            55002,
+            62001,
+        );
+
+        let (src, dst) = parse_ports(&frame).unwrap();
+        assert_eq!(src, 55002);
+        assert_eq!(dst, 62001);
     }
 
     #[test]
@@ -3918,6 +3978,7 @@ mod tests {
     fn test_parse_ports_ppp_ipv4_packet_without_ethernet_header() {
         let packet = build_ppp_ipv4_packet(
             false,
+            false,
             17,
             Ipv4Addr::new(10, 0, 0, 10),
             Ipv4Addr::new(128, 116, 20, 20),
@@ -3931,9 +3992,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ports_ppp_ipv4_packet_without_ethernet_header_protocol_field_compressed() {
+        let packet = build_ppp_ipv4_packet(
+            false,
+            true,
+            17,
+            Ipv4Addr::new(10, 0, 0, 12),
+            Ipv4Addr::new(128, 116, 22, 22),
+            53300,
+            54300,
+        );
+
+        let (src, dst) = parse_ports(&packet).unwrap();
+        assert_eq!(src, 53300);
+        assert_eq!(dst, 54300);
+    }
+
+    #[test]
     fn test_parse_ports_ppp_ipv4_packet_with_address_control() {
         let packet = build_ppp_ipv4_packet(
             true,
+            false,
             17,
             Ipv4Addr::new(10, 0, 0, 11),
             Ipv4Addr::new(128, 116, 21, 21),
@@ -3944,6 +4023,23 @@ mod tests {
         let (src, dst) = parse_ports(&packet).unwrap();
         assert_eq!(src, 53200);
         assert_eq!(dst, 54200);
+    }
+
+    #[test]
+    fn test_parse_ports_ppp_ipv4_packet_with_address_control_and_protocol_field_compressed() {
+        let packet = build_ppp_ipv4_packet(
+            true,
+            true,
+            17,
+            Ipv4Addr::new(10, 0, 0, 13),
+            Ipv4Addr::new(128, 116, 23, 23),
+            53400,
+            54400,
+        );
+
+        let (src, dst) = parse_ports(&packet).unwrap();
+        assert_eq!(src, 53400);
+        assert_eq!(dst, 54400);
     }
 
     #[test]
@@ -4037,7 +4133,40 @@ mod tests {
             created_at: std::time::Instant::now(),
         };
 
-        let frame = build_pppoe_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let frame = build_pppoe_ipv4_frame(false, 17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_should_route_snapshot_tunnels_udp_pppoe_frame_with_protocol_field_compression() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 111);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50110;
+        let dst_port = 443;
+        let pid = 9876;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_pppoe_ipv4_frame(true, 17, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(should_route_to_vpn_with_inline_cache(
