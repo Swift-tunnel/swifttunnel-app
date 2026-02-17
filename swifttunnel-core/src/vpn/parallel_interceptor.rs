@@ -4211,6 +4211,111 @@ mod tests {
     }
 
     #[test]
+    fn test_live_udp_flow_routes_across_encapsulation_matrix() {
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind UDP server");
+        server
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set server timeout");
+        let server_addr = server.local_addr().expect("server local addr");
+
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind UDP client");
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set client timeout");
+        client.connect(server_addr).expect("connect UDP client");
+
+        let payload = b"swifttunnel-traffic-matrix";
+        let sent = client.send(payload).expect("send UDP payload");
+        assert_eq!(sent, payload.len());
+
+        let mut recv_buf = [0u8; 128];
+        let (recv_len, recv_from) = server
+            .recv_from(&mut recv_buf)
+            .expect("receive UDP payload");
+        assert_eq!(&recv_buf[..recv_len], payload);
+
+        let ack = b"ok";
+        server.send_to(ack, recv_from).expect("send UDP ack");
+        let mut ack_buf = [0u8; 16];
+        let ack_len = client.recv(&mut ack_buf).expect("receive UDP ack");
+        assert_eq!(&ack_buf[..ack_len], ack);
+
+        let src_addr = client.local_addr().expect("client local addr");
+        let src_ip = match src_addr.ip() {
+            std::net::IpAddr::V4(ip) => ip,
+            std::net::IpAddr::V6(_) => panic!("test expects IPv4 localhost"),
+        };
+        let dst_ip = match server_addr.ip() {
+            std::net::IpAddr::V4(ip) => ip,
+            std::net::IpAddr::V6(_) => panic!("test expects IPv4 localhost"),
+        };
+        let src_port = src_addr.port();
+        let dst_port = server_addr.port();
+
+        let pid = std::process::id();
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frames = [
+            (
+                "ethernet_ipv4",
+                build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "single_vlan_ipv4",
+                build_vlan_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "pppoe_ipv4",
+                build_pppoe_ipv4_frame(false, 17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "pppoe_ipv4_pfc",
+                build_pppoe_ipv4_frame(true, 17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "ppp_ipv4",
+                build_ppp_ipv4_packet(false, false, 17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "ppp_ipv4_pfc",
+                build_ppp_ipv4_packet(false, true, 17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "ppp_ac_ipv4",
+                build_ppp_ipv4_packet(true, false, 17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "ppp_ac_ipv4_pfc",
+                build_ppp_ipv4_packet(true, true, 17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "raw_ipv4",
+                build_raw_ipv4_packet(17, src_ip, dst_ip, src_port, dst_port),
+            ),
+        ];
+
+        for (name, frame) in frames {
+            let mut inline_cache: InlineCache = HashMap::new();
+            assert!(
+                should_route_to_vpn_with_inline_cache(&frame, &snapshot, &mut inline_cache),
+                "expected tunneled routing for {}",
+                name
+            );
+        }
+    }
+
+    #[test]
     fn test_should_route_snapshot_does_not_tunnel_tcp() {
         let src_ip = Ipv4Addr::new(192, 168, 1, 100);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
