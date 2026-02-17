@@ -1604,17 +1604,12 @@ fn run_packet_reader(
                     if !should_tunnel || auto_routing_bypass {
                         // When bypassing due to auto-routing whitelist, still run game server
                         // detection + evaluation so teleports to non-whitelisted regions resume tunneling.
-                        if auto_routing_bypass && data.len() >= 14 + 20 {
-                            let ip_start = 14;
-                            let dst_ip = Ipv4Addr::new(
-                                data[ip_start + 16],
-                                data[ip_start + 17],
-                                data[ip_start + 18],
-                                data[ip_start + 19],
-                            );
-                            if is_roblox_game_server_ip(dst_ip) {
-                                if let Some(ref ar) = auto_router {
-                                    ar.evaluate_game_server(dst_ip);
+                        if auto_routing_bypass {
+                            if let Some(dst_ip) = parse_ipv4_dst_ip(data) {
+                                if is_roblox_game_server_ip(dst_ip) {
+                                    if let Some(ref ar) = auto_router {
+                                        ar.evaluate_game_server(dst_ip);
+                                    }
                                 }
                             }
                         }
@@ -1803,17 +1798,12 @@ fn run_packet_worker(
 
             // When bypassing, still run game server detection + auto-routing evaluation
             // so we can detect teleports to non-whitelisted regions and resume tunneling.
-            if auto_routing_bypass && work.data.len() > 14 + 20 {
-                let ip_start = 14;
-                let dst_ip = Ipv4Addr::new(
-                    work.data[ip_start + 16],
-                    work.data[ip_start + 17],
-                    work.data[ip_start + 18],
-                    work.data[ip_start + 19],
-                );
-                if is_roblox_game_server_ip(dst_ip) {
-                    if let Some(ref ar) = auto_router {
-                        ar.evaluate_game_server(dst_ip);
+            if auto_routing_bypass {
+                if let Some(dst_ip) = parse_ipv4_dst_ip(&work.data) {
+                    if is_roblox_game_server_ip(dst_ip) {
+                        if let Some(ref ar) = auto_router {
+                            ar.evaluate_game_server(dst_ip);
+                        }
                     }
                 }
             }
@@ -1826,10 +1816,11 @@ fn run_packet_worker(
                 throughput.add_tx(packet_len);
 
                 // Extract IP packet from Ethernet frame
-                if work.data.len() <= 14 {
-                    continue;
-                }
-                let ip_packet = &work.data[14..];
+                let ip_start = match parse_ipv4_header_offset(&work.data) {
+                    Some(offset) => offset,
+                    None => continue,
+                };
+                let ip_packet = &work.data[ip_start..];
 
                 // === GAME SERVER DETECTION (Bloxstrap-style) ===
                 // Track Roblox game server IPs for notifications
@@ -2323,28 +2314,85 @@ fn run_cache_refresher(
     log::info!("Cache refresher stopped");
 }
 
+/// Parse the IPv4 payload offset from an Ethernet frame.
+///
+/// Supports:
+/// - Untagged Ethernet IPv4
+/// - Single/double 802.1Q/802.1ad VLAN tags
+/// - PPPoE session frames carrying IPv4 (common on fiber/DSL ISPs)
+#[inline(always)]
+fn parse_ipv4_header_offset(data: &[u8]) -> Option<usize> {
+    // Minimum Ethernet header
+    if data.len() < 14 {
+        return None;
+    }
+
+    let mut ip_start = 14usize;
+    let mut ethertype = u16::from_be_bytes([data[12], data[13]]);
+
+    // Support one or two VLAN tags:
+    // - 0x8100: IEEE 802.1Q
+    // - 0x88A8: IEEE 802.1ad (Q-in-Q outer)
+    // - 0x9100: Provider bridging variant used by some NIC/driver stacks
+    for _ in 0..2 {
+        if ethertype == 0x8100 || ethertype == 0x88A8 || ethertype == 0x9100 {
+            if data.len() < ip_start + 4 {
+                return None;
+            }
+            ethertype = u16::from_be_bytes([data[ip_start + 2], data[ip_start + 3]]);
+            ip_start += 4;
+        } else {
+            break;
+        }
+    }
+
+    if ethertype == 0x8864 {
+        // PPPoE session frame:
+        // [PPPoE header: 6 bytes][PPP protocol: 2 bytes][payload...]
+        // We only tunnel IPv4 payload (PPP protocol 0x0021).
+        if data.len() < ip_start + 8 {
+            return None;
+        }
+        let ppp_protocol = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
+        if ppp_protocol != 0x0021 {
+            return None;
+        }
+        ip_start += 8;
+    } else if ethertype != 0x0800 {
+        return None;
+    }
+
+    if data.len() < ip_start + 20 {
+        return None;
+    }
+
+    // Must be IPv4
+    if (data[ip_start] >> 4) != 4 {
+        return None;
+    }
+
+    Some(ip_start)
+}
+
+#[inline(always)]
+fn parse_ipv4_dst_ip(data: &[u8]) -> Option<Ipv4Addr> {
+    let ip_start = parse_ipv4_header_offset(data)?;
+    Some(Ipv4Addr::new(
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    ))
+}
+
 /// Parse ports from packet (returns src_port, dst_port)
 #[inline(always)]
 fn parse_ports(data: &[u8]) -> Option<(u16, u16)> {
-    // Skip Ethernet header
-    if data.len() < 14 + 20 + 4 {
+    let ip_start = parse_ipv4_header_offset(data)?;
+    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
+    if ihl < 20 {
         return None;
     }
-
-    // Check EtherType
-    let ethertype = u16::from_be_bytes([data[12], data[13]]);
-    if ethertype != 0x0800 {
-        return None;
-    }
-
-    // Check IP version and get IHL
-    let version = (data[14] >> 4) & 0xF;
-    if version != 4 {
-        return None;
-    }
-
-    let ihl = ((data[14] & 0xF) as usize) * 4;
-    let ip_start = 14;
 
     // Check protocol (TCP=6, UDP=17)
     let protocol = data[ip_start + 9];
@@ -2404,25 +2452,20 @@ fn should_route_to_vpn_with_inline_cache(
         n
     });
 
-    // Skip Ethernet header (14 bytes)
-    if data.len() < 14 + 20 + 4 {
-        return false;
-    }
-
-    // Check EtherType
-    let ethertype = u16::from_be_bytes([data[12], data[13]]);
-    if ethertype != 0x0800 {
-        return false;
-    }
+    let ip_start = match parse_ipv4_header_offset(data) {
+        Some(offset) => offset,
+        None => return false,
+    };
 
     // Parse IP header
-    let ip_start = 14;
-    let version = (data[ip_start] >> 4) & 0xF;
-    if version != 4 {
+    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
+    if ihl < 20 {
         return false;
     }
 
-    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
+    if data.len() < ip_start + ihl + 4 {
+        return false;
+    }
     let protocol_num = data[ip_start + 9];
 
     let protocol = match protocol_num {
@@ -3586,6 +3629,63 @@ mod tests {
         frame
     }
 
+    fn build_vlan_ipv4_frame(
+        protocol: u8,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        // Ethernet + single 802.1Q VLAN tag + IPv4 + transport header
+        let mut frame = vec![0u8; 14 + 4 + 20 + 8];
+        frame[12..14].copy_from_slice(&0x8100u16.to_be_bytes()); // VLAN EtherType
+        frame[14..16].copy_from_slice(&0x0001u16.to_be_bytes()); // VLAN TCI (VID=1)
+        frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // Encapsulated IPv4 EtherType
+
+        let ip_start = 18;
+        frame[ip_start] = 0x45; // IPv4, IHL=5
+        frame[ip_start + 9] = protocol; // TCP=6, UDP=17
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+
+        let transport_start = ip_start + 20;
+        frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+
+        frame
+    }
+
+    fn build_pppoe_ipv4_frame(
+        protocol: u8,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        // Ethernet + PPPoE session + PPP protocol + IPv4 + transport
+        let mut frame = vec![0u8; 14 + 6 + 2 + 20 + 8];
+        frame[12..14].copy_from_slice(&0x8864u16.to_be_bytes()); // PPPoE Session EtherType
+
+        let pppoe_start = 14;
+        frame[pppoe_start] = 0x11; // Version=1, Type=1
+        frame[pppoe_start + 1] = 0x00; // Code=Session Data
+        frame[pppoe_start + 2..pppoe_start + 4].copy_from_slice(&0x0001u16.to_be_bytes()); // Session ID
+        frame[pppoe_start + 4..pppoe_start + 6].copy_from_slice(&0x001Eu16.to_be_bytes()); // Length: PPP(2) + IPv4(20) + L4(8)
+        frame[pppoe_start + 6..pppoe_start + 8].copy_from_slice(&0x0021u16.to_be_bytes()); // PPP protocol: IPv4
+
+        let ip_start = pppoe_start + 8;
+        frame[ip_start] = 0x45; // IPv4, IHL=5
+        frame[ip_start + 9] = protocol; // TCP=6, UDP=17
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+
+        let transport_start = ip_start + 20;
+        frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+
+        frame
+    }
+
     #[test]
     fn test_parse_ports() {
         // Create minimal Ethernet + IP + TCP frame
@@ -3602,6 +3702,36 @@ mod tests {
         let (src, dst) = parse_ports(&frame).unwrap();
         assert_eq!(src, 1234);
         assert_eq!(dst, 80);
+    }
+
+    #[test]
+    fn test_parse_ports_vlan_tagged_frame() {
+        let frame = build_vlan_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(128, 116, 50, 100),
+            54321,
+            55000,
+        );
+
+        let (src, dst) = parse_ports(&frame).unwrap();
+        assert_eq!(src, 54321);
+        assert_eq!(dst, 55000);
+    }
+
+    #[test]
+    fn test_parse_ports_pppoe_ipv4_frame() {
+        let frame = build_pppoe_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 20),
+            Ipv4Addr::new(128, 116, 80, 12),
+            55001,
+            62000,
+        );
+
+        let (src, dst) = parse_ports(&frame).unwrap();
+        assert_eq!(src, 55001);
+        assert_eq!(dst, 62000);
     }
 
     #[test]
@@ -3638,6 +3768,72 @@ mod tests {
             inline_cache.is_empty(),
             "Snapshot hit should not mutate cache"
         );
+    }
+
+    #[test]
+    fn test_should_route_snapshot_tunnels_udp_vlan_tagged_frame() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50000;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_vlan_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_should_route_snapshot_tunnels_udp_pppoe_frame() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 101);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50010;
+        let dst_port = 443;
+        let pid = 4321;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_pppoe_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
     }
 
     #[test]

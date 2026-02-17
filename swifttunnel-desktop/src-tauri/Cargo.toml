@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "1.5.16"
+version = "1.5.17"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel desktop app - Tauri v2 frontend"
