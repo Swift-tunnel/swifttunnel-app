@@ -47,8 +47,8 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -508,6 +508,24 @@ impl ParallelInterceptor {
 
     /// Get the interface index that has the default route (0.0.0.0/0)
     /// This ensures we intercept the correct adapter even on multi-NIC systems
+    fn select_default_route_interface_index<I>(rows: I) -> Option<(u32, u32, u32)>
+    where
+        I: IntoIterator<Item = (u32, u32, u32, u32, u32)>,
+    {
+        let mut best: Option<(u32, u32, u32)> = None; // (if_index, metric, next_hop)
+
+        for (dest, mask, next_hop, if_index, metric) in rows {
+            if dest != 0 || mask != 0 {
+                continue;
+            }
+            if best.is_none_or(|(_, best_metric, _)| metric < best_metric) {
+                best = Some((if_index, metric, next_hop));
+            }
+        }
+
+        best
+    }
+
     fn get_default_route_interface_index() -> Option<u32> {
         use windows::Win32::Foundation::*;
         use windows::Win32::NetworkManagement::IpHelper::*;
@@ -532,29 +550,26 @@ impl ParallelInterceptor {
             let num_entries = (*table).dwNumEntries as usize;
             let entries = std::slice::from_raw_parts((*table).table.as_ptr(), num_entries);
 
-            // Find the default route (destination 0.0.0.0 with lowest metric)
-            let mut best_metric = u32::MAX;
-            let mut best_if_index = None;
+            let best = Self::select_default_route_interface_index(entries.iter().map(|row| {
+                (
+                    row.dwForwardDest,
+                    row.dwForwardMask,
+                    row.dwForwardNextHop,
+                    row.dwForwardIfIndex,
+                    row.dwForwardMetric1,
+                )
+            }));
 
-            for row in entries {
-                // Default route: destination 0.0.0.0, mask 0.0.0.0, non-zero next hop
-                if row.dwForwardDest == 0 && row.dwForwardMask == 0 && row.dwForwardNextHop != 0 {
-                    if row.dwForwardMetric1 < best_metric {
-                        best_metric = row.dwForwardMetric1;
-                        best_if_index = Some(row.dwForwardIfIndex);
-                    }
-                }
-            }
-
-            if let Some(idx) = best_if_index {
+            if let Some((idx, metric, next_hop)) = best {
                 log::info!(
-                    "Default route is on interface index {} (metric: {})",
+                    "Default route is on interface index {} (metric: {}, next_hop: {})",
                     idx,
-                    best_metric
+                    metric,
+                    Ipv4Addr::from(next_hop.to_ne_bytes()),
                 );
             }
 
-            best_if_index
+            best.map(|(idx, _, _)| idx)
         }
     }
 
@@ -620,6 +635,47 @@ impl ParallelInterceptor {
     /// 1. LUID matching (most reliable - directly identifies our Wintun adapter)
     /// 2. Name matching (friendly name or internal name contains "swifttunnel" or "wintun")
     /// 3. Default route matching (prioritize adapter with default route)
+    fn score_physical_candidate(
+        friendly_name: &str,
+        adapter_idx: usize,
+        has_default_route: bool,
+    ) -> Option<i32> {
+        // If we couldn't resolve a friendly name, only keep this adapter if it
+        // has the active default route. This preserves reliability for PPPoE/WAN
+        // setups while avoiding random unknown adapters.
+        if friendly_name.is_empty() && !has_default_route {
+            return None;
+        }
+
+        let friendly_lower = friendly_name.to_lowercase();
+        let mut score = 0;
+
+        if has_default_route {
+            score += 1000; // Massive bonus - this is the active internet path
+        }
+
+        if friendly_lower.contains("ethernet")
+            || friendly_lower.contains("intel")
+            || friendly_lower.contains("realtek")
+            || friendly_lower.contains("broadcom")
+        {
+            score += 100;
+        }
+        if friendly_lower.contains("wi-fi")
+            || friendly_lower.contains("wifi")
+            || friendly_lower.contains("wireless")
+        {
+            score += 80; // WiFi is common for laptops
+        }
+
+        if !friendly_name.is_empty() {
+            score += 50;
+        }
+
+        score += (10 - adapter_idx.min(10)) as i32;
+        Some(score)
+    }
+
     fn find_adapters(&mut self, vpn_adapter_name: &str, vpn_adapter_luid: u64) -> VpnResult<()> {
         // Get default route interface first - this is the adapter we MUST intercept
         let default_route_if_index = Self::get_default_route_interface_index();
@@ -652,6 +708,8 @@ impl ParallelInterceptor {
             // Try both GetAdaptersInfo and GetAdaptersAddresses for friendly name
             let friendly_name = get_adapter_friendly_name(&internal_name)
                 .or_else(|| get_adapter_friendly_name_v2(&internal_name))
+                // ndisapi has extra NDISWAN-aware lookup logic as a final fallback.
+                .or_else(|| ndisapi::Ndisapi::get_friendly_adapter_name(internal_name).ok())
                 .unwrap_or_default();
 
             log::info!(
@@ -726,13 +784,7 @@ impl ParallelInterceptor {
                 vpn_adapter = Some((idx, friendly_name.clone()));
             } else if is_virtual {
                 log::info!("    -> Skipped (virtual/VPN adapter)");
-            } else if friendly_name.is_empty() {
-                // Unknown adapter with no friendly name - could be anything
-                // Don't use as physical adapter but also don't skip entirely
-                log::info!("    -> Skipped (unknown adapter, no friendly name)");
             } else {
-                let mut score = 0;
-
                 // CRITICAL FIX (v0.9.25): Prioritize adapter with default route
                 // This fixes the bug where users with multiple NICs (e.g., disconnected Ethernet + WiFi)
                 // had traffic going through the wrong adapter
@@ -740,40 +792,26 @@ impl ParallelInterceptor {
                 let has_default_route = adapter_if_index.is_some()
                     && default_route_if_index.is_some()
                     && adapter_if_index == default_route_if_index;
-
-                if has_default_route {
-                    score += 1000; // Massive bonus - this is THE adapter internet traffic uses
-                    log::info!("    -> Has DEFAULT ROUTE (priority +1000)");
-                }
-
-                if friendly_lower.contains("ethernet")
-                    || friendly_lower.contains("intel")
-                    || friendly_lower.contains("realtek")
-                    || friendly_lower.contains("broadcom")
+                if let Some(score) =
+                    Self::score_physical_candidate(&friendly_name, idx, has_default_route)
                 {
-                    score += 100;
+                    if has_default_route {
+                        log::info!("    -> Has DEFAULT ROUTE (priority +1000)");
+                    }
+                    log::info!(
+                        "    -> Physical adapter candidate (score: {}, has_default_route: {})",
+                        score,
+                        has_default_route
+                    );
+                    physical_candidates.push((
+                        idx,
+                        friendly_name.clone(),
+                        internal_name.to_string(),
+                        score,
+                    ));
+                } else {
+                    log::info!("    -> Skipped (unknown adapter, no friendly name)");
                 }
-                if friendly_lower.contains("wi-fi")
-                    || friendly_lower.contains("wifi")
-                    || friendly_lower.contains("wireless")
-                {
-                    score += 80; // WiFi is common for laptops
-                }
-                if !friendly_name.is_empty() {
-                    score += 50;
-                }
-                score += (10 - idx.min(10)) as i32;
-                log::info!(
-                    "    -> Physical adapter candidate (score: {}, has_default_route: {})",
-                    score,
-                    has_default_route
-                );
-                physical_candidates.push((
-                    idx,
-                    friendly_name.clone(),
-                    internal_name.to_string(),
-                    score,
-                ));
             }
         }
 
@@ -1500,7 +1538,8 @@ fn run_packet_reader(
     impl Drop for HandleGuard {
         fn drop(&mut self) {
             // Check for null (0) and INVALID_HANDLE_VALUE (-1 as isize cast to pointer)
-            if self.0.0 as isize != 0 && self.0.0 as isize != -1 {
+            let raw_handle = self.0 .0 as isize;
+            if raw_handle != 0 && raw_handle != -1 {
                 unsafe {
                     let _ = CloseHandle(self.0);
                 }
@@ -2320,58 +2359,109 @@ fn run_cache_refresher(
 /// - Untagged Ethernet IPv4
 /// - Single/double 802.1Q/802.1ad VLAN tags
 /// - PPPoE session frames carrying IPv4 (common on fiber/DSL ISPs)
+/// - PPP frames from WAN miniports (with/without Address+Control bytes)
+/// - Raw IPv4 packets on non-Ethernet adapters
+#[inline(always)]
+fn is_valid_ipv4_header_offset(data: &[u8], ip_start: usize) -> bool {
+    if data.len() < ip_start + 20 {
+        return false;
+    }
+    if (data[ip_start] >> 4) != 4 {
+        return false;
+    }
+    let ihl = ((data[ip_start] & 0x0F) as usize) * 4;
+    if ihl < 20 {
+        return false;
+    }
+    data.len() >= ip_start + ihl
+}
+
+#[inline(always)]
+fn looks_like_raw_ipv4_packet(data: &[u8]) -> bool {
+    if !is_valid_ipv4_header_offset(data, 0) {
+        return false;
+    }
+
+    let ihl = ((data[0] & 0x0F) as usize) * 4;
+    let total_len = u16::from_be_bytes([data[2], data[3]]) as usize;
+
+    if total_len < ihl {
+        return false;
+    }
+
+    // On raw adapters, packet buffers can include trailing padding but should
+    // never be shorter than the declared IPv4 total length.
+    data.len() >= total_len
+}
+
 #[inline(always)]
 fn parse_ipv4_header_offset(data: &[u8]) -> Option<usize> {
-    // Minimum Ethernet header
-    if data.len() < 14 {
-        return None;
-    }
+    if data.len() >= 14 {
+        let mut ip_start = 14usize;
+        let mut ethertype = u16::from_be_bytes([data[12], data[13]]);
 
-    let mut ip_start = 14usize;
-    let mut ethertype = u16::from_be_bytes([data[12], data[13]]);
+        // Support one or two VLAN tags:
+        // - 0x8100: IEEE 802.1Q
+        // - 0x88A8: IEEE 802.1ad (Q-in-Q outer)
+        // - 0x9100: Provider bridging variant used by some NIC/driver stacks
+        for _ in 0..2 {
+            if ethertype == 0x8100 || ethertype == 0x88A8 || ethertype == 0x9100 {
+                if data.len() < ip_start + 4 {
+                    return None;
+                }
+                ethertype = u16::from_be_bytes([data[ip_start + 2], data[ip_start + 3]]);
+                ip_start += 4;
+            } else {
+                break;
+            }
+        }
 
-    // Support one or two VLAN tags:
-    // - 0x8100: IEEE 802.1Q
-    // - 0x88A8: IEEE 802.1ad (Q-in-Q outer)
-    // - 0x9100: Provider bridging variant used by some NIC/driver stacks
-    for _ in 0..2 {
-        if ethertype == 0x8100 || ethertype == 0x88A8 || ethertype == 0x9100 {
-            if data.len() < ip_start + 4 {
+        if ethertype == 0x8864 {
+            // PPPoE session frame:
+            // [PPPoE header: 6 bytes][PPP protocol: 2 bytes][payload...]
+            // We only tunnel IPv4 payload (PPP protocol 0x0021).
+            if data.len() < ip_start + 8 {
                 return None;
             }
-            ethertype = u16::from_be_bytes([data[ip_start + 2], data[ip_start + 3]]);
-            ip_start += 4;
-        } else {
-            break;
+            let ppp_protocol = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
+            if ppp_protocol != 0x0021 {
+                return None;
+            }
+            ip_start += 8;
+        } else if ethertype != 0x0800 {
+            ip_start = usize::MAX;
+        }
+
+        if ip_start != usize::MAX && is_valid_ipv4_header_offset(data, ip_start) {
+            return Some(ip_start);
         }
     }
 
-    if ethertype == 0x8864 {
-        // PPPoE session frame:
-        // [PPPoE header: 6 bytes][PPP protocol: 2 bytes][payload...]
-        // We only tunnel IPv4 payload (PPP protocol 0x0021).
-        if data.len() < ip_start + 8 {
-            return None;
-        }
-        let ppp_protocol = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
-        if ppp_protocol != 0x0021 {
-            return None;
-        }
-        ip_start += 8;
-    } else if ethertype != 0x0800 {
-        return None;
+    // PPP frame formats seen on WAN miniport adapters:
+    //  - [0x00, 0x21, <IPv4...>] (protocol field only)
+    //  - [0xFF, 0x03, 0x00, 0x21, <IPv4...>] (address/control + protocol)
+    if data.len() >= 22
+        && data[0] == 0x00
+        && data[1] == 0x21
+        && is_valid_ipv4_header_offset(data, 2)
+    {
+        return Some(2);
+    }
+    if data.len() >= 24
+        && data[0] == 0xFF
+        && data[1] == 0x03
+        && data[2] == 0x00
+        && data[3] == 0x21
+        && is_valid_ipv4_header_offset(data, 4)
+    {
+        return Some(4);
     }
 
-    if data.len() < ip_start + 20 {
-        return None;
+    if looks_like_raw_ipv4_packet(data) {
+        return Some(0);
     }
 
-    // Must be IPv4
-    if (data[ip_start] >> 4) != 4 {
-        return None;
-    }
-
-    Some(ip_start)
+    None
 }
 
 #[inline(always)]
@@ -2897,8 +2987,8 @@ fn inline_connection_lookup(
 fn is_pid_tunnel_app(pid: u32, snapshot: &ProcessSnapshot) -> bool {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     // First try snapshot (fast path if PID is already known)
@@ -3013,7 +3103,7 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
 /// all adapters including Wintun TUN adapters that GetAdaptersInfo might miss.
 fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
@@ -3107,7 +3197,7 @@ fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
 /// identification even when friendly name lookup fails.
 fn check_adapter_matches_luid(internal_name: &str, target_luid: u64) -> bool {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
@@ -3312,7 +3402,11 @@ fn calculate_udp_checksum(packet: &[u8], ihl: usize) -> u16 {
 
     let checksum = !(sum as u16);
     // UDP checksum of 0 means "no checksum" - use 0xFFFF instead
-    if checksum == 0 { 0xFFFF } else { checksum }
+    if checksum == 0 {
+        0xFFFF
+    } else {
+        checksum
+    }
 }
 
 /// Fix checksums in an IP packet (modifies packet in place)
@@ -3686,16 +3780,91 @@ mod tests {
         frame
     }
 
+    fn build_raw_ipv4_packet(
+        protocol: u8,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut packet = vec![0u8; 20 + 8];
+        let packet_len = packet.len() as u16;
+        packet[0] = 0x45; // IPv4, IHL=5
+        packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
+        packet[9] = protocol; // TCP=6, UDP=17
+        packet[12..16].copy_from_slice(&src_ip.octets());
+        packet[16..20].copy_from_slice(&dst_ip.octets());
+
+        let transport_start = 20;
+        packet[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+        packet[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+
+        packet
+    }
+
+    fn build_ppp_ipv4_packet(
+        with_address_control: bool,
+        protocol: u8,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let raw_ip = build_raw_ipv4_packet(protocol, src_ip, dst_ip, src_port, dst_port);
+        if with_address_control {
+            let mut packet = vec![0xFF, 0x03, 0x00, 0x21];
+            packet.extend_from_slice(&raw_ip);
+            packet
+        } else {
+            let mut packet = vec![0x00, 0x21];
+            packet.extend_from_slice(&raw_ip);
+            packet
+        }
+    }
+
+    #[test]
+    fn test_select_default_route_interface_index_accepts_zero_gateway_ppp_route() {
+        let selected = ParallelInterceptor::select_default_route_interface_index([
+            (0, 0, 0, 25, 10),         // PPP-like default route
+            (0, 0xFFFFFF00, 0, 30, 5), // non-default route
+        ]);
+
+        assert_eq!(selected, Some((25, 10, 0)));
+    }
+
+    #[test]
+    fn test_select_default_route_interface_index_prefers_lowest_metric() {
+        let selected = ParallelInterceptor::select_default_route_interface_index([
+            (0, 0, 0, 8, 50),          // default route, higher metric
+            (0, 0, 0x01010101, 9, 20), // default route, lower metric
+            (0, 0xFFFF0000, 0, 7, 1),  // non-default route
+        ]);
+
+        assert_eq!(selected, Some((9, 20, 0x01010101)));
+    }
+
+    #[test]
+    fn test_score_physical_candidate_skips_unknown_non_default_route() {
+        let score = ParallelInterceptor::score_physical_candidate("", 3, false);
+        assert_eq!(score, None);
+    }
+
+    #[test]
+    fn test_score_physical_candidate_keeps_unknown_default_route_adapter() {
+        let score = ParallelInterceptor::score_physical_candidate("", 3, true);
+        assert_eq!(score, Some(1007));
+    }
+
     #[test]
     fn test_parse_ports() {
         // Create minimal Ethernet + IP + TCP frame
         let mut frame = vec![0u8; 54];
         // Ethernet header
         frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes()); // IPv4
-        // IP header
+                                                                 // IP header
         frame[14] = 0x45; // IPv4, IHL=5
         frame[23] = 6; // TCP
-        // TCP header
+                       // TCP header
         frame[34..36].copy_from_slice(&1234u16.to_be_bytes()); // src port
         frame[36..38].copy_from_slice(&80u16.to_be_bytes()); // dst port
 
@@ -3732,6 +3901,53 @@ mod tests {
         let (src, dst) = parse_ports(&frame).unwrap();
         assert_eq!(src, 55001);
         assert_eq!(dst, 62000);
+    }
+
+    #[test]
+    fn test_parse_ports_raw_ipv4_packet() {
+        let packet = build_raw_ipv4_packet(
+            17,
+            Ipv4Addr::new(10, 0, 0, 5),
+            Ipv4Addr::new(128, 116, 10, 10),
+            53000,
+            54000,
+        );
+
+        let (src, dst) = parse_ports(&packet).unwrap();
+        assert_eq!(src, 53000);
+        assert_eq!(dst, 54000);
+    }
+
+    #[test]
+    fn test_parse_ports_ppp_ipv4_packet_without_ethernet_header() {
+        let packet = build_ppp_ipv4_packet(
+            false,
+            17,
+            Ipv4Addr::new(10, 0, 0, 10),
+            Ipv4Addr::new(128, 116, 20, 20),
+            53100,
+            54100,
+        );
+
+        let (src, dst) = parse_ports(&packet).unwrap();
+        assert_eq!(src, 53100);
+        assert_eq!(dst, 54100);
+    }
+
+    #[test]
+    fn test_parse_ports_ppp_ipv4_packet_with_address_control() {
+        let packet = build_ppp_ipv4_packet(
+            true,
+            17,
+            Ipv4Addr::new(10, 0, 0, 11),
+            Ipv4Addr::new(128, 116, 21, 21),
+            53200,
+            54200,
+        );
+
+        let (src, dst) = parse_ports(&packet).unwrap();
+        assert_eq!(src, 53200);
+        assert_eq!(dst, 54200);
     }
 
     #[test]
@@ -3830,6 +4046,39 @@ mod tests {
 
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_should_route_snapshot_tunnels_udp_raw_ipv4_packet() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 102);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50020;
+        let dst_port = 443;
+        let pid = 6789;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let packet = build_raw_ipv4_packet(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &packet,
             &snapshot,
             &mut inline_cache
         ));
