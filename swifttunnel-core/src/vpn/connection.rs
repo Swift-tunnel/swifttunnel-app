@@ -6,16 +6,16 @@
 //! - UDP relay for game traffic forwarding
 //! - Connection state tracking
 
-use super::parallel_interceptor::ThroughputStats;
+use super::parallel_interceptor::{QueueOverflowMode, ThroughputStats};
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
 use super::{VpnError, VpnResult};
 use crate::auth::http_client::AuthClient;
-use crate::auth::types::VpnConfig;
+use crate::auth::types::{RelayPreflightMode, RelayQueueFullMode, VpnConfig};
 use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -25,6 +25,40 @@ use tokio::sync::Mutex;
 const REFRESH_INTERVAL_MS: u64 = 500;
 /// Number of ICMP samples to collect per relay candidate when probing.
 const AUTO_ROUTING_PING_SAMPLES: usize = 5;
+const CONNECT_FAIL_HANDSHAKE_TIMEOUT: &str = "ST_CONNECT_HANDSHAKE_TIMEOUT";
+const CONNECT_FAIL_CANDIDATE_EXHAUSTED: &str = "ST_CONNECT_CANDIDATE_EXHAUSTED";
+const CONNECT_FAIL_PREFLIGHT_ENFORCED: &str = "ST_CONNECT_PREFLIGHT_ENFORCED";
+const CONNECT_FAIL_REGION_UNAVAILABLE: &str = "ST_CONNECT_REGION_UNAVAILABLE";
+
+static HANDSHAKE_TIMEOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
+static CANDIDATE_EXHAUSTED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static PREFLIGHT_ENFORCED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static REGION_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+fn log_sampled_connect_event(counter: &AtomicU64, code: &str, message: impl AsRef<str>) {
+    let event = counter.fetch_add(1, Ordering::Relaxed) + 1;
+    if event <= 5 || event.is_power_of_two() {
+        log::warn!("{}: {} (event #{})", code, message.as_ref(), event);
+    }
+}
+
+fn select_candidate_after_preflight(
+    attempts: &[(String, SocketAddr, bool)],
+    preflight_mode: RelayPreflightMode,
+) -> Result<(String, SocketAddr), &'static str> {
+    if let Some((region, addr, _)) = attempts.iter().find(|(_, _, authenticated)| *authenticated) {
+        return Ok((region.clone(), *addr));
+    }
+
+    if preflight_mode == RelayPreflightMode::Enforce {
+        return Err(CONNECT_FAIL_PREFLIGHT_ENFORCED);
+    }
+
+    attempts
+        .first()
+        .map(|(region, addr, _)| (region.clone(), *addr))
+        .ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)
+}
 
 fn pick_lowest_latency_server<'a>(
     candidates: impl Iterator<Item = &'a (String, SocketAddr, Option<u32>)>,
@@ -76,6 +110,49 @@ pub(crate) fn relay_candidates_for_region(
             (server_region.clone(), *relay_addr, *latency_ms)
         })
         .collect()
+}
+
+fn sort_candidates_by_latency(candidates: &mut [(String, SocketAddr, Option<u32>)]) {
+    candidates.sort_by(|a, b| {
+        let a_latency = a.2.unwrap_or(u32::MAX);
+        let b_latency = b.2.unwrap_or(u32::MAX);
+        a_latency
+            .cmp(&b_latency)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
+    });
+}
+
+async fn ordered_relay_candidates_for_region(
+    selected_region: &str,
+    available_servers: &[(String, SocketAddr, Option<u32>)],
+    forced_server: Option<&str>,
+) -> Vec<(String, SocketAddr, Option<u32>)> {
+    let mut candidates =
+        relay_candidates_for_region(selected_region, available_servers, forced_server);
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    if should_probe_candidates(&candidates) {
+        let probe_targets: Vec<(String, SocketAddr)> = candidates
+            .iter()
+            .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
+            .collect();
+        if let Some((region, addr, latency_ms)) = ping_and_select_best(&probe_targets).await {
+            if let Some(candidate) = candidates
+                .iter_mut()
+                .find(|(server_region, relay_addr, _)| {
+                    *server_region == region && *relay_addr == addr
+                })
+            {
+                candidate.2 = Some(latency_ms);
+            }
+        }
+    }
+
+    sort_candidates_by_latency(&mut candidates);
+    candidates
 }
 
 pub(crate) fn resolve_relay_server_for_region(
@@ -428,25 +505,29 @@ impl VpnConnection {
         // Step 1: Resolve initial relay endpoint from available servers
         self.set_state(ConnectionState::FetchingConfig).await;
         let forced_for_region = forced_servers.get(region).map(|s| s.as_str());
-        let (resolved_server_region, selected_relay_addr) =
-            match resolve_relay_server_for_region_with_probing(
-                region,
-                &available_servers,
-                forced_for_region,
-            )
-            .await
-            {
-                Some((server_region, relay_addr)) => (server_region, relay_addr),
-                None => {
-                    let error = VpnError::ConfigFetch(format!(
-                        "Selected region '{}' is unavailable in server list",
-                        region
-                    ));
-                    self.set_state(ConnectionState::Error(error.to_string()))
-                        .await;
-                    return Err(error);
-                }
-            };
+        let relay_candidates =
+            ordered_relay_candidates_for_region(region, &available_servers, forced_for_region)
+                .await;
+        let (resolved_server_region, selected_relay_addr) = match relay_candidates
+            .first()
+            .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
+        {
+            Some((server_region, relay_addr)) => (server_region, relay_addr),
+            None => {
+                log_sampled_connect_event(
+                    &REGION_UNAVAILABLE_EVENTS,
+                    CONNECT_FAIL_REGION_UNAVAILABLE,
+                    format!("Selected region '{}' is unavailable in server list", region),
+                );
+                let error = VpnError::ConfigFetch(format!(
+                    "Selected region '{}' is unavailable in server list",
+                    region
+                ));
+                self.set_state(ConnectionState::Error(super::user_friendly_error(&error)))
+                    .await;
+                return Err(error);
+            }
+        };
 
         if resolved_server_region != region {
             log::info!(
@@ -485,6 +566,9 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel)
             .await;
 
+        let mut active_server_region = config.region.clone();
+        let mut active_server_endpoint = config.endpoint.clone();
+
         let (tunneled_processes, split_tunnel_active, relay_auth_mode) = if !tunnel_apps.is_empty()
         {
             match self
@@ -495,23 +579,23 @@ impl VpnConnection {
                     custom_relay_server,
                     auto_routing_enabled,
                     available_servers,
+                    relay_candidates,
                     whitelisted_regions,
                     forced_servers,
                 )
                 .await
             {
-                Ok((processes, auth_mode)) => {
+                Ok((processes, auth_mode, active_region, active_addr)) => {
                     log::info!("V3 split tunnel setup succeeded");
+                    active_server_region = active_region;
+                    active_server_endpoint = active_addr.to_string();
                     (processes, true, auth_mode)
                 }
                 Err(e) => {
                     log::error!("V3 split tunnel setup FAILED: {}", e);
                     self.cleanup().await;
-                    self.set_state(ConnectionState::Error(format!(
-                        "V3 split tunnel failed: {}",
-                        e
-                    )))
-                    .await;
+                    self.set_state(ConnectionState::Error(super::user_friendly_error(&e)))
+                        .await;
                     return Err(e);
                 }
             }
@@ -526,8 +610,8 @@ impl VpnConnection {
         // Step 4: Mark as connected
         self.set_state(ConnectionState::Connected {
             since: Instant::now(),
-            server_region: config.region.clone(),
-            server_endpoint: config.endpoint.clone(),
+            server_region: active_server_region,
+            server_endpoint: active_server_endpoint,
             assigned_ip: "V3-Relay".to_string(), // No VPN IP in V3 mode
             relay_auth_mode,
             split_tunnel_active,
@@ -555,9 +639,10 @@ impl VpnConnection {
         custom_relay_server: Option<String>,
         auto_routing_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
+        relay_candidates: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
-    ) -> VpnResult<(Vec<String>, String)> {
+    ) -> VpnResult<(Vec<String>, String, String, SocketAddr)> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
         // Check if driver is available
@@ -581,9 +666,11 @@ impl VpnConnection {
         })?;
         log::info!("V3: Split tunnel driver initialized");
 
-        // Create UDP relay to relay server
-        // Use custom relay if configured (experimental feature), otherwise auto-detect from VPN server
-        let relay_addr: SocketAddr = if let Some(ref custom) = custom_relay_server {
+        // Create UDP relay to relay server.
+        // Use custom relay if configured (experimental feature), otherwise bootstrap from
+        // the ordered candidate list resolved during connect().
+        let mut selected_relay_region = config.region.clone();
+        let mut relay_addr: SocketAddr = if let Some(ref custom) = custom_relay_server {
             // Custom relay configured - resolve with DNS support
             log::info!("V3: Using CUSTOM relay server: {}", custom);
 
@@ -631,6 +718,9 @@ impl VpnConnection {
                     }
                 }
             }
+        } else if let Some((server_region, addr, _)) = relay_candidates.first() {
+            selected_relay_region = server_region.clone();
+            *addr
         } else {
             // No custom relay = use resolved server endpoint, forcing relay port 51821.
             if let Ok(addr) = config.endpoint.parse::<SocketAddr>() {
@@ -670,76 +760,162 @@ impl VpnConnection {
         } else {
             "legacy_fallback".to_string()
         };
+        let mut queue_full_mode = RelayQueueFullMode::Bypass;
 
         if custom_relay_server.is_some() {
             log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
         } else {
             let auth_client = AuthClient::new();
             let session_id_hex = relay.session_id_hex();
-            match auth_client
-                .get_relay_ticket(access_token, &config.region, &session_id_hex)
-                .await
-            {
-                Ok(ticket) => match relay.authenticate_with_ticket(&ticket.token) {
+            let mut candidates = relay_candidates.clone();
+            if candidates.is_empty() {
+                candidates.push((config.region.clone(), relay_addr, None));
+            }
+
+            let mut authenticated = false;
+            let mut preflight_mode = RelayPreflightMode::Legacy;
+            let mut saw_timeout = false;
+            let mut attempt_results: Vec<(String, SocketAddr, bool)> = Vec::new();
+
+            for (idx, (candidate_region, candidate_addr, _)) in candidates.iter().enumerate() {
+                if relay.relay_addr() != *candidate_addr {
+                    relay.switch_relay(*candidate_addr);
+                }
+
+                let ticket = match auth_client
+                    .get_relay_ticket(access_token, candidate_region, &session_id_hex)
+                    .await
+                {
+                    Ok(ticket) => ticket,
+                    Err(e) => {
+                        log::warn!(
+                            "V3: Relay ticket unavailable for '{}' ({})",
+                            candidate_region,
+                            e
+                        );
+                        attempt_results.push((candidate_region.clone(), *candidate_addr, false));
+                        continue;
+                    }
+                };
+
+                preflight_mode = ticket.preflight_mode();
+                queue_full_mode = ticket.queue_full_mode();
+                log::info!(
+                    "V3: Candidate {} policy preflight={:?}, queue_full={:?}",
+                    candidate_region,
+                    preflight_mode,
+                    queue_full_mode
+                );
+
+                match relay.authenticate_with_ticket(&ticket.token) {
                     Ok(Some(super::udp_relay::RelayAuthAckStatus::Ok)) => {
                         relay_auth_mode = "authenticated".to_string();
+                        selected_relay_region = candidate_region.clone();
+                        relay_addr = *candidate_addr;
+                        attempt_results.push((candidate_region.clone(), *candidate_addr, true));
+                        authenticated = true;
+                        if idx > 0 {
+                            log::info!(
+                                "V3: Relay auth failover selected '{}' after {} attempt(s)",
+                                candidate_region,
+                                idx + 1
+                            );
+                        }
                         log::info!(
-                            "V3: Relay authenticated (session {}, key_id={})",
+                            "V3: Relay authenticated (session {}, key_id={}, region={})",
                             session_id_hex,
-                            ticket.key_id
+                            ticket.key_id,
+                            candidate_region
                         );
+                        break;
                     }
                     Ok(Some(status)) => {
-                        if ticket.auth_required {
-                            let _ = driver.close();
-                            return Err(VpnError::Connection(format!(
-                                "Relay authentication required but failed ({})",
-                                status.as_str()
-                            )));
-                        }
                         log::warn!(
-                            "V3: Relay auth ack '{}' (session {}) - falling back to legacy mode",
+                            "V3: Relay auth ack '{}' for candidate '{}' (session {})",
                             status.as_str(),
+                            candidate_region,
                             session_id_hex
                         );
+                        attempt_results.push((candidate_region.clone(), *candidate_addr, false));
                     }
                     Ok(None) => {
-                        if ticket.auth_required {
-                            let _ = driver.close();
-                            return Err(VpnError::Connection(
-                                "Relay authentication required but relay did not acknowledge auth hello"
-                                    .to_string(),
-                            ));
-                        }
-                        log::warn!(
-                            "V3: Relay auth timed out for session {} - falling back to legacy mode",
-                            session_id_hex
+                        saw_timeout = true;
+                        log_sampled_connect_event(
+                            &HANDSHAKE_TIMEOUT_EVENTS,
+                            CONNECT_FAIL_HANDSHAKE_TIMEOUT,
+                            format!(
+                                "Relay auth timed out for candidate '{}' (session {})",
+                                candidate_region, session_id_hex
+                            ),
                         );
+                        attempt_results.push((candidate_region.clone(), *candidate_addr, false));
                     }
                     Err(e) => {
-                        if ticket.auth_required {
-                            let _ = driver.close();
-                            return Err(VpnError::Connection(format!(
-                                "Relay authentication required but handshake failed: {}",
-                                e
-                            )));
-                        }
                         log::warn!(
-                            "V3: Relay auth handshake failed for session {} ({}), falling back to legacy mode",
+                            "V3: Relay auth handshake failed for candidate '{}' (session {}, {})",
+                            candidate_region,
                             session_id_hex,
                             e
                         );
+                        attempt_results.push((candidate_region.clone(), *candidate_addr, false));
                     }
-                },
-                Err(e) => {
-                    log::warn!(
-                        "V3: Relay ticket unavailable for '{}' ({}), using legacy fallback mode",
+                }
+            }
+
+            if !authenticated {
+                log_sampled_connect_event(
+                    &CANDIDATE_EXHAUSTED_EVENTS,
+                    CONNECT_FAIL_CANDIDATE_EXHAUSTED,
+                    format!(
+                        "All {} relay candidate(s) failed for '{}' (session {})",
+                        candidates.len(),
                         config.region,
-                        e
+                        session_id_hex
+                    ),
+                );
+                if preflight_mode == RelayPreflightMode::Enforce {
+                    log_sampled_connect_event(
+                        &PREFLIGHT_ENFORCED_EVENTS,
+                        CONNECT_FAIL_PREFLIGHT_ENFORCED,
+                        format!(
+                            "Strict preflight rejected legacy fallback for '{}' (session {})",
+                            config.region, session_id_hex
+                        ),
                     );
+                    let _ = driver.close();
+                    return Err(VpnError::Connection(
+                        "Relay preflight enforcement blocked connection (no healthy authenticated relay candidate)"
+                            .to_string(),
+                    ));
+                }
+
+                if saw_timeout {
+                    log::warn!(
+                        "V3: Falling back to legacy relay mode after authentication timeouts"
+                    );
+                } else {
+                    log::warn!("V3: Falling back to legacy relay mode after candidate exhaustion");
+                }
+
+                if let Ok((fallback_region, fallback_addr)) =
+                    select_candidate_after_preflight(&attempt_results, preflight_mode)
+                {
+                    selected_relay_region = fallback_region;
+                    relay_addr = fallback_addr;
+                    relay.switch_relay(fallback_addr);
                 }
             }
         }
+
+        let queue_overflow_mode = match queue_full_mode {
+            RelayQueueFullMode::Bypass => QueueOverflowMode::Bypass,
+            RelayQueueFullMode::Drop => QueueOverflowMode::Drop,
+        };
+        driver.set_queue_overflow_mode(queue_overflow_mode);
+        log::info!(
+            "V3: Queue overflow mode set from relay policy: {:?}",
+            queue_overflow_mode
+        );
 
         let relay_for_lookup = Arc::clone(&relay);
         driver.set_relay_context(relay);
@@ -748,9 +924,9 @@ impl VpnConnection {
         // Set up auto-routing
         let auto_router = Arc::new(super::auto_routing::AutoRouter::new(
             auto_routing_enabled,
-            &config.region,
+            &selected_relay_region,
         ));
-        auto_router.set_current_relay(relay_addr, &config.region);
+        auto_router.set_current_relay(relay_addr, &selected_relay_region);
         auto_router.set_available_servers(available_servers);
         if !whitelisted_regions.is_empty() {
             auto_router.set_whitelisted_regions(whitelisted_regions);
@@ -888,7 +1064,7 @@ impl VpnConnection {
         self.auto_router = Some(Arc::clone(&auto_router));
         log::info!(
             "V3: Auto-router initialized for region {} (enabled: {})",
-            config.region,
+            selected_relay_region,
             auto_routing_enabled
         );
 
@@ -1137,7 +1313,7 @@ impl VpnConnection {
         });
 
         log::info!("V3 split tunnel configured - game traffic relayed via UDP");
-        Ok((running, relay_auth_mode))
+        Ok((running, relay_auth_mode, selected_relay_region, relay_addr))
     }
 
     pub async fn disconnect(&mut self) -> VpnResult<()> {
@@ -1774,5 +1950,65 @@ mod tests {
     #[test]
     fn test_average_probe_latency_truncates_fractional_values() {
         assert_eq!(average_probe_latency(&[1, 2, 2]), Some(1));
+    }
+
+    #[test]
+    fn test_select_candidate_after_preflight_prefers_authenticated_candidate() {
+        let attempts = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                false,
+            ),
+            ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), true),
+            (
+                "germany-03".to_string(),
+                parse_addr("10.0.0.3:51821"),
+                false,
+            ),
+        ];
+
+        let selected =
+            select_candidate_after_preflight(&attempts, RelayPreflightMode::Legacy).unwrap();
+        assert_eq!(
+            selected,
+            ("germany-02".to_string(), parse_addr("10.0.0.2:51821"))
+        );
+    }
+
+    #[test]
+    fn test_select_candidate_after_preflight_legacy_falls_back_to_first() {
+        let attempts = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                false,
+            ),
+            (
+                "germany-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                false,
+            ),
+        ];
+
+        let selected =
+            select_candidate_after_preflight(&attempts, RelayPreflightMode::Legacy).unwrap();
+        assert_eq!(
+            selected,
+            ("germany-01".to_string(), parse_addr("10.0.0.1:51821"))
+        );
+    }
+
+    #[test]
+    fn test_select_candidate_after_preflight_enforce_rejects_fallback() {
+        let attempts = vec![(
+            "germany-01".to_string(),
+            parse_addr("10.0.0.1:51821"),
+            false,
+        )];
+
+        let error = select_candidate_after_preflight(&attempts, RelayPreflightMode::Enforce)
+            .expect_err("enforced preflight should reject fallback");
+        assert_eq!(error, CONNECT_FAIL_PREFLIGHT_ENFORCED);
     }
 }

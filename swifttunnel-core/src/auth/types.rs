@@ -129,6 +129,41 @@ pub struct ExchangeTokenResponse {
     pub user_id: String,
 }
 
+/// Relay connection policy delivered by relay ticket bootstrap endpoint.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayPreflightMode {
+    Legacy,
+    Enforce,
+}
+
+impl Default for RelayPreflightMode {
+    fn default() -> Self {
+        Self::Legacy
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayQueueFullMode {
+    Bypass,
+    Drop,
+}
+
+impl Default for RelayQueueFullMode {
+    fn default() -> Self {
+        Self::Bypass
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+pub struct RelayConnectionPolicy {
+    #[serde(default)]
+    pub preflight_mode: RelayPreflightMode,
+    #[serde(default)]
+    pub queue_full_mode: RelayQueueFullMode,
+}
+
 /// Response from relay ticket bootstrap endpoint
 #[derive(Debug, Clone, Deserialize)]
 pub struct RelayTicketResponse {
@@ -136,6 +171,24 @@ pub struct RelayTicketResponse {
     pub expires_at: String,
     pub auth_required: bool,
     pub key_id: String,
+    #[serde(default)]
+    pub connection_policy: Option<RelayConnectionPolicy>,
+}
+
+impl RelayTicketResponse {
+    pub fn preflight_mode(&self) -> RelayPreflightMode {
+        self.connection_policy
+            .as_ref()
+            .map(|policy| policy.preflight_mode)
+            .unwrap_or_default()
+    }
+
+    pub fn queue_full_mode(&self) -> RelayQueueFullMode {
+        self.connection_policy
+            .as_ref()
+            .map(|policy| policy.queue_full_mode)
+            .unwrap_or_default()
+    }
 }
 
 /// Error types for authentication
@@ -281,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn test_relay_ticket_response_deserialize() {
+    fn test_relay_ticket_response_deserialize_without_policy() {
         let json = r#"{
             "token": "abc.def",
             "expires_at": "2026-02-17T12:34:56.000Z",
@@ -293,5 +346,24 @@ mod tests {
         assert_eq!(resp.expires_at, "2026-02-17T12:34:56.000Z");
         assert!(!resp.auth_required);
         assert_eq!(resp.key_id, "relay-ed25519-2026-02");
+        assert_eq!(resp.preflight_mode(), RelayPreflightMode::Legacy);
+        assert_eq!(resp.queue_full_mode(), RelayQueueFullMode::Bypass);
+    }
+
+    #[test]
+    fn test_relay_ticket_response_deserialize_with_policy() {
+        let json = r#"{
+            "token": "abc.def",
+            "expires_at": "2026-02-17T12:34:56.000Z",
+            "auth_required": true,
+            "key_id": "relay-ed25519-2026-02",
+            "connection_policy": {
+                "preflight_mode": "enforce",
+                "queue_full_mode": "drop"
+            }
+        }"#;
+        let resp: RelayTicketResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.preflight_mode(), RelayPreflightMode::Enforce);
+        assert_eq!(resp.queue_full_mode(), RelayQueueFullMode::Drop);
     }
 }
