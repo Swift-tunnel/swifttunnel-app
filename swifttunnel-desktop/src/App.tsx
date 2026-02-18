@@ -15,6 +15,11 @@ import { useVpnStore } from "./stores/vpnStore";
 import { useUpdaterStore } from "./stores/updaterStore";
 import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
+import { shouldAutoReconnectOnLaunch } from "./lib/startup";
+import {
+  isPersistableWindowSize,
+  normalizeWindowState,
+} from "./lib/windowState";
 
 function TabContent() {
   const activeTab = useSettingsStore((s) => s.activeTab);
@@ -57,6 +62,7 @@ function App() {
   const fetchSystemInfo = useBoostStore((s) => s.fetchSystemInfo);
   const syncActiveFromSettings = useBoostStore((s) => s.syncActiveFromSettings);
   const fetchVpnState = useVpnStore((s) => s.fetchState);
+  const connectVpn = useVpnStore((s) => s.connect);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
 
   useEffect(() => {
@@ -75,6 +81,20 @@ function App() {
       if (!disposed) {
         const loadedSettings = useSettingsStore.getState().settings;
         syncActiveFromSettings(loadedSettings.optimizations_active);
+
+        if (
+          shouldAutoReconnectOnLaunch(
+            useAuthStore.getState().state,
+            useVpnStore.getState().state,
+            loadedSettings,
+          )
+        ) {
+          void connectVpn(
+            loadedSettings.selected_region,
+            loadedSettings.selected_game_presets,
+          );
+        }
+
         if (loadedSettings.update_settings.auto_check) {
           void checkForUpdates(false);
         }
@@ -93,6 +113,7 @@ function App() {
     fetchServers,
     fetchSystemInfo,
     fetchVpnState,
+    connectVpn,
     syncActiveFromSettings,
     checkForUpdates,
   ]);
@@ -117,21 +138,26 @@ function App() {
       if (disposed) return;
 
       try {
-        const [pos, size, maximized] = await Promise.all([
+        const [pos, size, maximized, minimized] = await Promise.all([
           appWindow.outerPosition(),
           appWindow.outerSize(),
           appWindow.isMaximized(),
+          appWindow.isMinimized(),
         ]);
         if (disposed) return;
+        if (minimized) return;
+        if (!isPersistableWindowSize(size.width, size.height)) return;
+
+        const nextWindowState = normalizeWindowState({
+          x: pos.x,
+          y: pos.y,
+          width: size.width,
+          height: size.height,
+          maximized,
+        });
 
         updateSettings({
-          window_state: {
-            x: pos.x,
-            y: pos.y,
-            width: size.width,
-            height: size.height,
-            maximized,
-          },
+          window_state: nextWindowState,
         });
         await saveSettings();
       } catch {
@@ -151,7 +177,9 @@ function App() {
     };
 
     const initWindowState = async () => {
-      const ws = useSettingsStore.getState().settings.window_state;
+      const ws = normalizeWindowState(
+        useSettingsStore.getState().settings.window_state,
+      );
       try {
         if (disposed) return;
 

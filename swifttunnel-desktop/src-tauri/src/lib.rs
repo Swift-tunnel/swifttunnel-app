@@ -1,13 +1,16 @@
+mod autostart;
 mod commands;
 mod events;
 mod state;
 mod tray;
+mod window_restore;
 
 use std::sync::Arc;
 
 use log::info;
 use state::AppState;
 use tauri::{Emitter, Manager};
+use window_restore::restore_main_window;
 
 const APP_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/icon.png");
 
@@ -121,6 +124,7 @@ fn sync_runtime_assets(_app: &tauri::App) {}
 
 pub fn run() {
     env_logger::init();
+    let launched_from_startup = autostart::launched_from_startup_flag();
 
     let mut ctx = tauri::generate_context!();
     ctx.set_default_window_icon(Some(APP_ICON.clone()));
@@ -130,8 +134,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Focus existing window when second instance launches
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+                restore_main_window(&window);
             }
         }))
         .plugin(tauri_plugin_notification::init())
@@ -180,7 +183,7 @@ pub fn run() {
             commands::system::system_install_driver,
             commands::system::system_open_url,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             info!("SwiftTunnel desktop app starting up");
             sync_runtime_assets(app);
 
@@ -192,7 +195,18 @@ pub fn run() {
                 Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
 
             let app_state = AppState::new(runtime.clone()).expect("Failed to initialize app state");
+            let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
             app.manage(app_state);
+
+            if let Err(e) = autostart::sync_run_on_startup(app.handle(), run_on_startup_enabled) {
+                log::warn!("Failed to sync startup registration: {}", e);
+            }
+
+            if launched_from_startup {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
 
             // Set up system tray
             if let Err(e) = tray::setup_tray(app.handle()) {

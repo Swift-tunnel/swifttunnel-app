@@ -85,7 +85,7 @@ describe("stores/updaterStore", () => {
     expect(notify).toHaveBeenCalledWith("SwiftTunnel", "You are on the latest version.");
   });
 
-  it("surfaces an available update and installs it via selected channel", async () => {
+  it("surfaces an available update on manual check and installs it via selected channel", async () => {
     updaterCheckChannel.mockResolvedValue({
       current_version: "1.0.0",
       available_version: "1.5.1",
@@ -98,7 +98,7 @@ describe("stores/updaterStore", () => {
     });
 
     const useUpdaterStore = await loadStore();
-    await useUpdaterStore.getState().checkForUpdates(false);
+    await useUpdaterStore.getState().checkForUpdates(true);
 
     expect(useUpdaterStore.getState().status).toBe("update_available");
     expect(useUpdaterStore.getState().availableVersion).toBe("1.5.1");
@@ -113,6 +113,26 @@ describe("stores/updaterStore", () => {
       "SwiftTunnel Update",
       "Update installed. Restarting application...",
     );
+  });
+
+  it("auto-installs available updates during background checks", async () => {
+    updaterCheckChannel.mockResolvedValue({
+      current_version: "1.0.0",
+      available_version: "1.5.1",
+      release_tag: "v1.5.1",
+      channel: "Stable",
+    });
+    updaterInstallChannel.mockResolvedValue({
+      installed_version: "1.5.1",
+      release_tag: "v1.5.1",
+    });
+
+    const useUpdaterStore = await loadStore();
+    await useUpdaterStore.getState().checkForUpdates(false);
+
+    expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
+    expect(useUpdaterStore.getState().status).toBe("up_to_date");
+    expect(useUpdaterStore.getState().availableVersion).toBeNull();
   });
 
   it("uses Live channel when selected in settings", async () => {
