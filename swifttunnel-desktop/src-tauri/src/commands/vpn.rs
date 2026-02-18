@@ -218,7 +218,7 @@ pub async fn vpn_connect(
             forced_servers,
         )
         .await
-        .map_err(|e| e.to_string());
+        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
     drop(vpn);
 
     {
@@ -243,7 +243,10 @@ pub async fn vpn_connect(
 #[tauri::command]
 pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let mut vpn = state.vpn_connection.lock().await;
-    let result = vpn.disconnect().await.map_err(|e| e.to_string());
+    let result = vpn
+        .disconnect()
+        .await
+        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
     drop(vpn);
 
     {

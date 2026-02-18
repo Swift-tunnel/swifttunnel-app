@@ -13,22 +13,45 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Session ID length in bytes
 const SESSION_ID_LEN: usize = 8;
+const UDP_HEADER_LEN: usize = 8;
+const IPV4_HEADER_LEN: usize = 20;
+const IPV6_HEADER_LEN: usize = 40;
 const AUTH_HELLO_FRAME_TYPE: u8 = 0xA1;
 const AUTH_ACK_FRAME_TYPE: u8 = 0xA2;
-const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(600);
-const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(150);
-const AUTH_HANDSHAKE_ATTEMPTS: usize = 2;
+// Slightly longer handshake budget improves reliability on congested/PPPoE paths
+// without affecting steady-state packet latency.
+const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(1500);
+const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(250);
+const AUTH_HANDSHAKE_ATTEMPTS: usize = 4;
 
-/// Maximum payload size for relay packets
-/// Allow full IP packets (up to 1500 bytes) to avoid silently dropping large game packets.
-/// Packets that cause the outer UDP datagram to exceed path MTU will be IP-fragmented
-/// by the OS, which is preferable to silent drops that cause Roblox Error 277.
-const MAX_PAYLOAD_SIZE: usize = 1500;
+/// Outer path MTU for relay packets (client <-> relay).
+///
+/// The tunneled payload is an *inner IPv4 packet* captured at NDIS layer. We then add:
+/// - 8 bytes session id (relay framing)
+/// - outer UDP header (8 bytes)
+/// - outer IP header (20 bytes for IPv4)
+///
+/// If Roblox (RakNet) negotiates ~1492-byte packets, adding our encapsulation overhead pushes
+/// the *outer* datagram over 1500, causing IP fragmentation on the client->relay path.
+/// Fragmented UDP is frequently dropped, and that can manifest as Roblox Error 279/277 during
+/// the connection handshake.
+///
+/// We avoid this by capping the inner packet length so the outer datagram stays <= 1500.
+///
+/// Note: 1500 is a *cap*, not a guarantee. If the user's active interface MTU is lower
+/// (PPPoE 1492, user-applied MTU boost, etc.), sending 1500-byte outer datagrams forces
+/// IP fragmentation. Fragmented UDP is frequently dropped.
+///
+/// On Windows we periodically refresh the effective MTU from the OS route/interface
+/// to the current relay endpoint, and clamp to that value (still capped at 1500).
+const RELAY_PATH_MTU_UPPER_BOUND: usize = 1500;
+const RELAY_PATH_MTU_MINIMUM: usize = 576;
+const RELAY_PATH_MTU_REFRESH_INTERVAL_MS: u64 = 5_000;
 
 /// Keepalive interval to maintain NAT bindings - 15s is safer for strict NATs
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -97,6 +120,11 @@ pub struct UdpRelay {
     packets_sent: AtomicU64,
     /// Packets received counter
     packets_received: AtomicU64,
+    /// Inner packets dropped because encapsulation would exceed path MTU.
+    oversize_drops: AtomicU64,
+    /// Effective outer MTU for relay packets (<= 1500), refreshed periodically on Windows.
+    relay_path_mtu: AtomicUsize,
+    last_mtu_refresh_ms: AtomicU64,
     /// Last activity time for keepalive
     last_activity: std::sync::Mutex<Instant>,
 }
@@ -159,6 +187,9 @@ impl UdpRelay {
             relay_addr
         );
 
+        let initial_mtu = detect_relay_path_mtu(relay_addr).unwrap_or(RELAY_PATH_MTU_UPPER_BOUND);
+        let initial_mtu = initial_mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
+
         Ok(Self {
             socket,
             relay_addr: ArcSwap::from_pointee(relay_addr),
@@ -168,6 +199,9 @@ impl UdpRelay {
             stop_flag: Arc::new(AtomicBool::new(false)),
             packets_sent: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
+            oversize_drops: AtomicU64::new(0),
+            relay_path_mtu: AtomicUsize::new(initial_mtu),
+            last_mtu_refresh_ms: AtomicU64::new(now_mono_ms()),
             last_activity: std::sync::Mutex::new(Instant::now()),
         })
     }
@@ -180,6 +214,55 @@ impl UdpRelay {
     /// Get the session ID as lower-case hex string.
     pub fn session_id_hex(&self) -> String {
         format!("{:016x}", self.session_id_u64())
+    }
+
+    fn max_inner_packet_len_for_addr(&self, relay_addr: SocketAddr) -> usize {
+        let mtu = self.relay_path_mtu.load(Ordering::Relaxed);
+        let overhead = if relay_addr.ip().is_ipv4() {
+            IPV4_HEADER_LEN + UDP_HEADER_LEN + SESSION_ID_LEN
+        } else {
+            IPV6_HEADER_LEN + UDP_HEADER_LEN + SESSION_ID_LEN
+        };
+        mtu.saturating_sub(overhead)
+    }
+
+    #[cfg(windows)]
+    fn maybe_refresh_relay_path_mtu(&self, relay_addr: SocketAddr) {
+        let now = now_mono_ms();
+        let last = self.last_mtu_refresh_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < RELAY_PATH_MTU_REFRESH_INTERVAL_MS {
+            return;
+        }
+
+        if self
+            .last_mtu_refresh_ms
+            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        if let Some(mtu) = detect_relay_path_mtu(relay_addr) {
+            let mtu = mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
+            let prev = self.relay_path_mtu.swap(mtu, Ordering::Relaxed);
+            if prev != mtu {
+                log::info!(
+                    "UDP Relay: Updated relay path MTU {} -> {} for {}",
+                    prev,
+                    mtu,
+                    relay_addr
+                );
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn maybe_refresh_relay_path_mtu(&self, _relay_addr: SocketAddr) {}
+
+    #[cfg(test)]
+    fn set_relay_path_mtu_for_test(&self, mtu: usize) {
+        let mtu = mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
+        self.relay_path_mtu.store(mtu, Ordering::Relaxed);
     }
 
     fn is_expected_relay_source(&self, from: SocketAddr) -> bool {
@@ -267,7 +350,7 @@ impl UdpRelay {
 
     /// Send relay auth hello and wait for ack.
     ///
-    /// Attempts: 0ms and +150ms, with a total wait budget of 600ms.
+    /// Attempts: up to 4 within a total 1.5s wait budget.
     pub fn authenticate_with_ticket(&self, token: &str) -> Result<Option<RelayAuthAckStatus>> {
         let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
 
@@ -306,23 +389,35 @@ impl UdpRelay {
     /// Takes the original UDP payload and prepends session ID before sending to relay
     /// Includes retry logic for transient send failures
     pub fn forward_outbound(&self, payload: &[u8]) -> Result<usize> {
-        if payload.len() > MAX_PAYLOAD_SIZE {
-            log::warn!(
-                "UDP Relay: Packet too large ({} > {}), dropping",
-                payload.len(),
-                MAX_PAYLOAD_SIZE
-            );
+        let current_addr = **self.relay_addr.load();
+        self.maybe_refresh_relay_path_mtu(current_addr);
+        let max_payload = self.max_inner_packet_len_for_addr(current_addr);
+
+        if payload.len() > max_payload {
+            let dropped = self.oversize_drops.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped <= 5 || dropped.is_power_of_two() {
+                let mtu = self.relay_path_mtu.load(Ordering::Relaxed);
+                let overhead = mtu.saturating_sub(max_payload);
+                log::warn!(
+                    "UDP Relay: Inner packet too large for encapsulation ({} > {} bytes). \
+                    Dropping to avoid fragmentation (relay path MTU {}, overhead {} bytes, relay {}).",
+                    payload.len(),
+                    max_payload,
+                    mtu,
+                    overhead,
+                    current_addr,
+                );
+            }
             return Ok(0);
         }
 
         // Build packet: [session_id][payload] on the stack (no heap alloc)
         let total_len = SESSION_ID_LEN + payload.len();
-        let mut packet = [0u8; SESSION_ID_LEN + 1500];
+        let mut packet = [0u8; SESSION_ID_LEN + RELAY_PATH_MTU_UPPER_BOUND];
         packet[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
         packet[SESSION_ID_LEN..total_len].copy_from_slice(payload);
 
         // Try to send, retry once on WouldBlock
-        let current_addr = **self.relay_addr.load();
         let sent = match self.socket.send_to(&packet[..total_len], current_addr) {
             Ok(sent) => sent,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -485,10 +580,11 @@ impl UdpRelay {
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Release);
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {})",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {})",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
-            self.packets_received.load(Ordering::Relaxed)
+            self.packets_received.load(Ordering::Relaxed),
+            self.oversize_drops.load(Ordering::Relaxed),
         );
     }
 
@@ -540,6 +636,97 @@ fn getrandom(buf: &mut [u8]) {
     rand::thread_rng().fill_bytes(buf);
 }
 
+fn now_mono_ms() -> u64 {
+    #[cfg(windows)]
+    unsafe {
+        return windows::Win32::System::SystemInformation::GetTickCount64();
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::sync::OnceLock;
+        static START: OnceLock<Instant> = OnceLock::new();
+        let start = START.get_or_init(Instant::now);
+        start.elapsed().as_millis() as u64
+    }
+}
+
+fn detect_relay_path_mtu(relay_addr: SocketAddr) -> Option<usize> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GetBestInterfaceEx, GetIfEntry2, MIB_IF_ROW2,
+        };
+        use windows::Win32::Networking::WinSock::{
+            AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, SOCKADDR, SOCKADDR_IN,
+            SOCKADDR_IN6, SOCKADDR_IN6_0,
+        };
+
+        let mut if_index: u32 = 0;
+
+        let rc = match relay_addr {
+            SocketAddr::V4(addr) => {
+                let ip_octets = addr.ip().octets();
+                let sockaddr_in = SOCKADDR_IN {
+                    sin_family: AF_INET,
+                    sin_port: 0,
+                    sin_addr: IN_ADDR {
+                        S_un: IN_ADDR_0 {
+                            S_addr: u32::from_ne_bytes(ip_octets),
+                        },
+                    },
+                    sin_zero: [0; 8],
+                };
+                unsafe {
+                    GetBestInterfaceEx(
+                        &sockaddr_in as *const SOCKADDR_IN as *const SOCKADDR,
+                        &mut if_index,
+                    )
+                }
+            }
+            SocketAddr::V6(addr) => {
+                let ip_octets = addr.ip().octets();
+                let sockaddr_in6 = SOCKADDR_IN6 {
+                    sin6_family: AF_INET6,
+                    sin6_port: 0,
+                    sin6_flowinfo: 0,
+                    sin6_addr: IN6_ADDR {
+                        u: IN6_ADDR_0 { Byte: ip_octets },
+                    },
+                    Anonymous: SOCKADDR_IN6_0 {
+                        sin6_scope_id: addr.scope_id(),
+                    },
+                };
+                unsafe {
+                    GetBestInterfaceEx(
+                        &sockaddr_in6 as *const SOCKADDR_IN6 as *const SOCKADDR,
+                        &mut if_index,
+                    )
+                }
+            }
+        };
+
+        if rc != 0 {
+            return None;
+        }
+
+        let mut row = MIB_IF_ROW2::default();
+        row.InterfaceIndex = if_index;
+        let rc = unsafe { GetIfEntry2(&mut row) };
+        if rc.0 != 0 {
+            return None;
+        }
+
+        return Some(row.Mtu as usize);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = relay_addr;
+        None
+    }
+}
+
 /// Context for relay mode in ParallelInterceptor
 pub struct RelayContext {
     pub relay: Arc<UdpRelay>,
@@ -579,5 +766,42 @@ mod tests {
 
         assert_eq!(packet.len(), 108);
         assert_eq!(&packet[..8], &session_id);
+    }
+
+    #[test]
+    fn test_forward_outbound_drops_oversize_payload() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        relay.set_relay_path_mtu_for_test(1500);
+        let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
+        let payload = vec![0u8; max_payload + 1];
+        let sent = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(sent, 0);
+        assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_forward_outbound_allows_max_payload() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        relay.set_relay_path_mtu_for_test(1500);
+        let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
+        let payload = vec![0u8; max_payload];
+        let sent = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(sent, SESSION_ID_LEN + max_payload);
+    }
+
+    #[test]
+    fn test_forward_outbound_respects_lower_path_mtu() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        relay.set_relay_path_mtu_for_test(1400);
+        let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
+        assert_eq!(
+            max_payload,
+            1400 - (IPV4_HEADER_LEN + UDP_HEADER_LEN + SESSION_ID_LEN)
+        );
+
+        let payload = vec![0u8; max_payload + 1];
+        let sent = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(sent, 0);
+        assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
     }
 }

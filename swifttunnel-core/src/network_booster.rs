@@ -2,8 +2,14 @@ use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OriginalMtu {
+    interface: String,
+    mtu: u32,
+}
+
 pub struct NetworkBooster {
-    original_mtu: Option<u32>,
+    original_mtu: Option<OriginalMtu>,
     qos_enabled: bool,
 }
 
@@ -56,22 +62,44 @@ impl NetworkBooster {
         Ok(())
     }
 
-    /// Get active network interface name
+    fn parse_first_line(output: &[u8], error_message: &str) -> Result<String> {
+        let value = String::from_utf8_lossy(output)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_string();
+
+        if value.is_empty() {
+            return Err(anyhow::anyhow!("{}", error_message));
+        }
+
+        Ok(value)
+    }
+
+    /// Get the default-route network interface name.
+    ///
+    /// This avoids selecting an arbitrary "Up" adapter (e.g. virtual NIC) that is not
+    /// actually carrying traffic to the internet.
     fn get_active_network_interface(&self) -> Result<String> {
         let output = hidden_command("powershell")
             .args(&[
                 "-Command",
-                "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -First 1 -ExpandProperty Name"
+                "$ErrorActionPreference = 'Stop'; \
+                 $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' \
+                     | Sort-Object -Property @{Expression = {$_.RouteMetric + $_.InterfaceMetric}; Ascending = $true} \
+                     | Select-Object -First 1; \
+                 if ($null -eq $route) { \
+                     $route = Get-NetRoute -AddressFamily IPv6 -DestinationPrefix '::/0' \
+                         | Sort-Object -Property @{Expression = {$_.RouteMetric + $_.InterfaceMetric}; Ascending = $true} \
+                         | Select-Object -First 1; \
+                 } \
+                 if ($null -eq $route) { throw 'No default route interface found'; } \
+                 Get-NetAdapter -InterfaceIndex $route.ifIndex | Select-Object -First 1 -ExpandProperty Name"
             ])
             .output()?;
 
-        let interface = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        if interface.is_empty() {
-            return Err(anyhow::anyhow!("No active network interface found"));
-        }
-
-        Ok(interface)
+        Self::parse_first_line(&output.stdout, "No active network interface found")
     }
 
     /// Prioritize game traffic using QoS
@@ -259,7 +287,10 @@ impl NetworkBooster {
 
         // Backup current MTU
         if let Ok(current_mtu) = self.get_current_mtu(&interface_name) {
-            self.original_mtu = Some(current_mtu);
+            self.original_mtu = Some(OriginalMtu {
+                interface: interface_name.clone(),
+                mtu: current_mtu,
+            });
             info!("Current MTU: {}", current_mtu);
         }
 
@@ -298,10 +329,10 @@ impl NetworkBooster {
             ])
             .output()?;
 
-        let mtu_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mtu_str = Self::parse_first_line(&output.stdout, "Failed to query MTU")?;
         mtu_str
             .parse::<u32>()
-            .map_err(|e| anyhow::anyhow!("Failed to parse MTU: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to parse MTU from '{}': {}", mtu_str, e))
     }
 
     /// Find the optimal MTU using ping with Don't Fragment flag
@@ -390,11 +421,14 @@ impl NetworkBooster {
     }
 
     /// Restore original MTU setting
-    pub fn restore_mtu(&self) -> Result<()> {
-        if let Some(original_mtu) = self.original_mtu {
-            info!("Restoring original MTU: {}", original_mtu);
-            let interface_name = self.get_active_network_interface()?;
-            self.apply_mtu(&interface_name, original_mtu)?;
+    pub fn restore_mtu(&mut self) -> Result<()> {
+        if let Some(snapshot) = self.original_mtu.clone() {
+            info!(
+                "Restoring original MTU {} on interface '{}'",
+                snapshot.mtu, snapshot.interface
+            );
+            self.apply_mtu(&snapshot.interface, snapshot.mtu)?;
+            self.original_mtu = None;
         }
         Ok(())
     }
@@ -700,6 +734,20 @@ impl Default for NetworkBooster {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_first_line_returns_trimmed_first_value() {
+        let output = b"\n  Ethernet  \nWi-Fi\n";
+        let parsed = NetworkBooster::parse_first_line(output, "missing").unwrap();
+        assert_eq!(parsed, "Ethernet");
+    }
+
+    #[test]
+    fn parse_first_line_errors_when_empty() {
+        let output = b"  \n\t\n";
+        let parsed = NetworkBooster::parse_first_line(output, "missing");
+        assert!(parsed.is_err());
+    }
+
     /// Verify apply_optimizations returns Ok even when individual optimizations
     /// fail (e.g. no active network adapter, no PowerShell, non-Windows host).
     /// Before the fix, a single failure (like optimize_mtu -> "No active network
@@ -740,5 +788,19 @@ mod tests {
 
         let result = booster.apply_optimizations(&config);
         assert!(result.is_ok());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn restore_mtu_keeps_snapshot_when_apply_fails() {
+        let mut booster = NetworkBooster::new();
+        booster.original_mtu = Some(OriginalMtu {
+            interface: "Ethernet".to_string(),
+            mtu: 1492,
+        });
+
+        let result = booster.restore_mtu();
+        assert!(result.is_err());
+        assert!(booster.original_mtu.is_some());
     }
 }
