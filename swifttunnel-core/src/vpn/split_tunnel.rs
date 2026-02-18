@@ -15,7 +15,7 @@
 //! - No lock contention between packet workers
 //! - No WFP complexity (callouts, filters, sublayers, providers)
 
-use super::parallel_interceptor::{ParallelInterceptor, ThroughputStats};
+use super::parallel_interceptor::{ParallelInterceptor, QueueOverflowMode, ThroughputStats};
 use super::{VpnError, VpnResult};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -216,6 +216,17 @@ impl SplitTunnelDriver {
             log::info!("V3 relay context set for unencrypted UDP forwarding");
         } else {
             log::warn!("Cannot set relay context: parallel interceptor not created yet");
+        }
+    }
+
+    pub fn set_queue_overflow_mode(&mut self, mode: QueueOverflowMode) {
+        if let Some(ref mut interceptor) = self.parallel_interceptor {
+            interceptor.set_queue_overflow_mode(mode);
+        } else {
+            log::warn!(
+                "Cannot set queue overflow mode ({:?}): parallel interceptor not created yet",
+                mode
+            );
         }
     }
 

@@ -18,6 +18,9 @@ const SERVERS_API_URL: &str = "https://swifttunnel.net/api/vpn/servers";
 
 /// Cache TTL in seconds (1 hour)
 const CACHE_TTL_SECONDS: i64 = 3600;
+/// Hard max stale cache age (24h). Older cached endpoints are treated as unsafe.
+const MAX_STALE_CACHE_AGE_SECONDS: i64 = 24 * 3600;
+const STALE_CACHE_REJECT_REASON: &str = "ST_STALE_CACHE_REJECTED";
 
 /// Measured latency for a server
 #[derive(Debug, Clone)]
@@ -140,6 +143,16 @@ impl CachedServerList {
     pub fn is_fresh(&self) -> bool {
         let age = Utc::now().signed_duration_since(self.cached_at);
         age.num_seconds() < CACHE_TTL_SECONDS
+    }
+
+    pub fn age_seconds(&self) -> i64 {
+        Utc::now()
+            .signed_duration_since(self.cached_at)
+            .num_seconds()
+    }
+
+    pub fn exceeds_hard_stale_limit(&self) -> bool {
+        self.age_seconds() > MAX_STALE_CACHE_AGE_SECONDS
     }
 }
 
@@ -284,6 +297,20 @@ pub async fn load_server_list() -> Result<
                 return Ok((data.servers, data.regions, ServerListSource::Api));
             }
             Err(e) => {
+                if cached.exceeds_hard_stale_limit() {
+                    let age = cached.age_seconds();
+                    log::error!(
+                        "{}: cache age {}s exceeds hard limit {}s and API refresh failed ({})",
+                        STALE_CACHE_REJECT_REASON,
+                        age,
+                        MAX_STALE_CACHE_AGE_SECONDS,
+                        e
+                    );
+                    return Err(format!(
+                        "{}: cached server list is too old ({}s > {}s) and API refresh failed ({})",
+                        STALE_CACHE_REJECT_REASON, age, MAX_STALE_CACHE_AGE_SECONDS, e
+                    ));
+                }
                 log::warn!("Failed to fetch from API, using stale cache: {}", e);
                 return Ok((
                     cached.data.servers,
@@ -722,6 +749,19 @@ mod tests {
             cached_at: Utc::now() - chrono::Duration::seconds(CACHE_TTL_SECONDS + 1),
         };
         assert!(!cached.is_fresh());
+    }
+
+    #[test]
+    fn test_cached_server_list_exceeds_hard_stale_limit() {
+        let cached = CachedServerList {
+            data: ServerListResponse {
+                servers: vec![],
+                regions: vec![],
+                version: "1.0".to_string(),
+            },
+            cached_at: Utc::now() - chrono::Duration::seconds(MAX_STALE_CACHE_AGE_SECONDS + 1),
+        };
+        assert!(cached.exceeds_hard_stale_limit());
     }
 
     // --- ServerListSource Display ---
