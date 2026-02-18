@@ -4,7 +4,15 @@ import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
 import { countryFlag, getLatencyColor, formatBytes } from "../../lib/utils";
-import { systemCheckDriver, systemInstallDriver } from "../../lib/commands";
+import {
+  isAdminPrivilegeError,
+  shouldResetElevationState,
+} from "../../lib/adminErrors";
+import {
+  systemCheckDriver,
+  systemInstallDriver,
+  systemRestartAsAdmin,
+} from "../../lib/commands";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import type { ServerRegion } from "../../lib/types";
 import "./connect.css";
@@ -159,6 +167,23 @@ export function ConnectTab() {
     !!vpnError &&
     vpnError.toLowerCase().includes("split tunnel driver not available") &&
     vpnError.toLowerCase().includes("windows packet filter driver");
+  const adminRequired = isAdminPrivilegeError(vpnError);
+  const [elevationRestartState, setElevationRestartState] = useState<
+    "idle" | "restarting" | "error"
+  >("idle");
+  const [elevationRestartError, setElevationRestartError] = useState<
+    string | null
+  >(null);
+  const previousVpnError = useRef<string | null>(vpnError);
+
+  useEffect(() => {
+    if (!shouldResetElevationState(previousVpnError.current, vpnError)) {
+      return;
+    }
+    previousVpnError.current = vpnError;
+    setElevationRestartState("idle");
+    setElevationRestartError(null);
+  }, [vpnError]);
 
   async function handleInstallDriver() {
     try {
@@ -178,7 +203,26 @@ export function ConnectTab() {
     }
   }
 
+  async function handleRestartAsAdmin() {
+    try {
+      setElevationRestartState("restarting");
+      setElevationRestartError(null);
+      await systemRestartAsAdmin();
+    } catch (e) {
+      setElevationRestartState("error");
+      setElevationRestartError(String(e));
+    }
+  }
+
   function renderStatusLine() {
+    if (elevationRestartState === "restarting") {
+      return "Restarting SwiftTunnel as Administrator\u2026";
+    }
+
+    if (elevationRestartState === "error") {
+      return elevationRestartError || "Failed to restart as Administrator.";
+    }
+
     if (driverInstallState === "installing") {
       return "Installing Windows Packet Filter driver\u2026";
     }
@@ -189,6 +233,28 @@ export function ConnectTab() {
 
     if (driverInstallState === "error") {
       return driverInstallError || "Driver install failed.";
+    }
+
+    if (adminRequired) {
+      return (
+        <span className="inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
+          <span>Administrator privileges required.</span>
+          <button
+            type="button"
+            onClick={() => void handleRestartAsAdmin()}
+            disabled={isTransitioning}
+            className="rounded-full px-2 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-60"
+            style={{
+              backgroundColor: "rgba(60,130,246,0.18)",
+              color: "var(--color-accent-secondary)",
+              border: "1px solid rgba(60,130,246,0.35)",
+            }}
+            title="Close this instance and relaunch SwiftTunnel with UAC prompt"
+          >
+            Restart as Administrator
+          </button>
+        </span>
+      );
     }
 
     if (driverMissing) {
@@ -434,8 +500,10 @@ export function ConnectTab() {
                 ? "var(--color-status-connected)"
                 : driverInstallState === "installed"
                   ? "var(--color-status-connected)"
-                  : vpnError || driverInstallState === "error"
-                    ? "var(--color-status-error)"
+                  : elevationRestartState === "restarting"
+                    ? "var(--color-text-secondary)"
+                    : vpnError || driverInstallState === "error"
+                      ? "var(--color-status-error)"
                     : "var(--color-text-muted)",
             }}
           >

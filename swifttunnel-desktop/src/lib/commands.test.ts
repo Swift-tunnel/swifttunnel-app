@@ -9,6 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import {
+  systemRestartAsAdmin,
   systemInstallDriver,
   updaterCheckChannel,
   updaterInstallChannel,
@@ -50,6 +51,12 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(undefined);
     await expect(systemInstallDriver()).resolves.toBeUndefined();
     expect(invoke).toHaveBeenCalledWith("system_install_driver");
+  });
+
+  it("systemRestartAsAdmin invokes backend with expected args", async () => {
+    invoke.mockResolvedValue(undefined);
+    await expect(systemRestartAsAdmin()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("system_restart_as_admin");
   });
 
   it("vpnGetPing invokes backend with expected args", async () => {

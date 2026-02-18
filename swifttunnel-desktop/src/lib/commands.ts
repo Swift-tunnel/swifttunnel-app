@@ -141,3 +141,6 @@ export const systemInstallDriver = () =>
 
 export const systemOpenUrl = (url: string) =>
   invoke<void>("system_open_url", { url });
+
+export const systemRestartAsAdmin = () =>
+  invoke<void>("system_restart_as_admin");

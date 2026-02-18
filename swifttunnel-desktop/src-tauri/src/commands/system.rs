@@ -72,6 +72,18 @@ fn build_elevated_msiexec_script(msi_path: &str) -> String {
     )
 }
 
+#[cfg(windows)]
+fn build_restart_as_admin_script(exe_path: &str, current_pid: u32) -> String {
+    // PowerShell single-quote escaping.
+    let escaped_exe = exe_path.replace('\'', "''");
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         $pidToWait={current_pid}; \
+         while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 200 }}; \
+         Start-Process -FilePath '{escaped_exe}' -Verb RunAs"
+    )
+}
+
 #[derive(Serialize)]
 pub struct AdminCheckResponse {
     pub is_admin: bool,
@@ -263,10 +275,50 @@ mod tests {
         assert!(script.contains("msiexec.exe"));
         assert!(script.contains("/passive"));
     }
+
+    #[test]
+    fn build_restart_as_admin_script_waits_for_pid_and_escapes_path() {
+        let script =
+            build_restart_as_admin_script("C:\\Program Files\\Swift'Tunnel\\SwiftTunnel.exe", 4242);
+        assert!(script.contains("$pidToWait=4242"));
+        assert!(script.contains("Get-Process -Id $pidToWait"));
+        assert!(script.contains("Swift''Tunnel"));
+        assert!(script.contains("Start-Process -FilePath"));
+        assert!(script.contains("-Verb RunAs"));
+    }
 }
 
 #[tauri::command]
 pub fn system_open_url(url: String) -> Result<(), String> {
     swifttunnel_core::utils::open_url(&url);
     Ok(())
+}
+
+#[tauri::command]
+pub fn system_restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if swifttunnel_core::is_administrator() {
+            return Ok(());
+        }
+
+        let exe_path =
+            std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {}", e))?;
+        let exe = exe_path.to_string_lossy().to_string();
+        let script = build_restart_as_admin_script(&exe, std::process::id());
+
+        swifttunnel_core::hidden_command("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .spawn()
+            .map_err(|e| format!("Failed to launch elevated restart helper: {}", e))?;
+
+        app.exit(0);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("Administrator restart is only supported on Windows".to_string())
+    }
 }

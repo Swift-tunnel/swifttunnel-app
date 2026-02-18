@@ -247,6 +247,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   system_check_driver: () => ({ installed: true, version: "3.4.1" }),
   system_install_driver: () => {},
   system_open_url: () => {},
+  system_restart_as_admin: () => {},
 };
 
 export async function invoke<T>(cmd: string, _args?: unknown): Promise<T> {
