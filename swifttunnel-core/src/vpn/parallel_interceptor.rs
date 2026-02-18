@@ -994,6 +994,7 @@ impl ParallelInterceptor {
                 Err(e) => {
                     log::warn!("Error waiting for PowerShell: {}", e);
                     let _ = child.kill();
+                    let _ = child.wait(); // Reap the process
                     let stdout = read_pipe_to_string(child.stdout.take());
                     let stderr = read_pipe_to_string(child.stderr.take());
                     return PowerShellRunOutput {

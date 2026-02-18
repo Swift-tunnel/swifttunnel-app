@@ -35,6 +35,15 @@ static CANDIDATE_EXHAUSTED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static PREFLIGHT_ENFORCED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static REGION_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone)]
+struct RelayCandidateAttempt {
+    region: String,
+    addr: SocketAddr,
+    authenticated: bool,
+    preflight_mode: RelayPreflightMode,
+    queue_full_mode: RelayQueueFullMode,
+}
+
 fn log_sampled_connect_event(counter: &AtomicU64, code: &str, message: impl AsRef<str>) {
     let event = counter.fetch_add(1, Ordering::Relaxed) + 1;
     if event <= 5 || event.is_power_of_two() {
@@ -43,21 +52,27 @@ fn log_sampled_connect_event(counter: &AtomicU64, code: &str, message: impl AsRe
 }
 
 fn select_candidate_after_preflight(
-    attempts: &[(String, SocketAddr, bool)],
-    preflight_mode: RelayPreflightMode,
-) -> Result<(String, SocketAddr), &'static str> {
-    if let Some((region, addr, _)) = attempts.iter().find(|(_, _, authenticated)| *authenticated) {
-        return Ok((region.clone(), *addr));
+    attempts: &[RelayCandidateAttempt],
+) -> Result<(String, SocketAddr, RelayQueueFullMode), &'static str> {
+    if let Some(attempt) = attempts.iter().find(|attempt| attempt.authenticated) {
+        return Ok((
+            attempt.region.clone(),
+            attempt.addr,
+            attempt.queue_full_mode,
+        ));
     }
 
-    if preflight_mode == RelayPreflightMode::Enforce {
+    let fallback = attempts.first().ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
+
+    if fallback.preflight_mode == RelayPreflightMode::Enforce {
         return Err(CONNECT_FAIL_PREFLIGHT_ENFORCED);
     }
 
-    attempts
-        .first()
-        .map(|(region, addr, _)| (region.clone(), *addr))
-        .ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)
+    Ok((
+        fallback.region.clone(),
+        fallback.addr,
+        fallback.queue_full_mode,
+    ))
 }
 
 fn pick_lowest_latency_server<'a>(
@@ -773,9 +788,8 @@ impl VpnConnection {
             }
 
             let mut authenticated = false;
-            let mut preflight_mode = RelayPreflightMode::Legacy;
             let mut saw_timeout = false;
-            let mut attempt_results: Vec<(String, SocketAddr, bool)> = Vec::new();
+            let mut attempt_results: Vec<RelayCandidateAttempt> = Vec::new();
 
             for (idx, (candidate_region, candidate_addr, _)) in candidates.iter().enumerate() {
                 if relay.relay_addr() != *candidate_addr {
@@ -793,18 +807,24 @@ impl VpnConnection {
                             candidate_region,
                             e
                         );
-                        attempt_results.push((candidate_region.clone(), *candidate_addr, false));
+                        attempt_results.push(RelayCandidateAttempt {
+                            region: candidate_region.clone(),
+                            addr: *candidate_addr,
+                            authenticated: false,
+                            preflight_mode: RelayPreflightMode::Legacy,
+                            queue_full_mode: RelayQueueFullMode::Bypass,
+                        });
                         continue;
                     }
                 };
 
-                preflight_mode = ticket.preflight_mode();
-                queue_full_mode = ticket.queue_full_mode();
+                let candidate_preflight_mode = ticket.preflight_mode();
+                let candidate_queue_full_mode = ticket.queue_full_mode();
                 log::info!(
                     "V3: Candidate {} policy preflight={:?}, queue_full={:?}",
                     candidate_region,
-                    preflight_mode,
-                    queue_full_mode
+                    candidate_preflight_mode,
+                    candidate_queue_full_mode
                 );
 
                 match relay.authenticate_with_ticket(&ticket.token) {
@@ -812,7 +832,14 @@ impl VpnConnection {
                         relay_auth_mode = "authenticated".to_string();
                         selected_relay_region = candidate_region.clone();
                         relay_addr = *candidate_addr;
-                        attempt_results.push((candidate_region.clone(), *candidate_addr, true));
+                        queue_full_mode = candidate_queue_full_mode;
+                        attempt_results.push(RelayCandidateAttempt {
+                            region: candidate_region.clone(),
+                            addr: *candidate_addr,
+                            authenticated: true,
+                            preflight_mode: candidate_preflight_mode,
+                            queue_full_mode: candidate_queue_full_mode,
+                        });
                         authenticated = true;
                         if idx > 0 {
                             log::info!(
@@ -836,7 +863,13 @@ impl VpnConnection {
                             candidate_region,
                             session_id_hex
                         );
-                        attempt_results.push((candidate_region.clone(), *candidate_addr, false));
+                        attempt_results.push(RelayCandidateAttempt {
+                            region: candidate_region.clone(),
+                            addr: *candidate_addr,
+                            authenticated: false,
+                            preflight_mode: candidate_preflight_mode,
+                            queue_full_mode: candidate_queue_full_mode,
+                        });
                     }
                     Ok(None) => {
                         saw_timeout = true;
@@ -848,7 +881,13 @@ impl VpnConnection {
                                 candidate_region, session_id_hex
                             ),
                         );
-                        attempt_results.push((candidate_region.clone(), *candidate_addr, false));
+                        attempt_results.push(RelayCandidateAttempt {
+                            region: candidate_region.clone(),
+                            addr: *candidate_addr,
+                            authenticated: false,
+                            preflight_mode: candidate_preflight_mode,
+                            queue_full_mode: candidate_queue_full_mode,
+                        });
                     }
                     Err(e) => {
                         log::warn!(
@@ -857,7 +896,13 @@ impl VpnConnection {
                             session_id_hex,
                             e
                         );
-                        attempt_results.push((candidate_region.clone(), *candidate_addr, false));
+                        attempt_results.push(RelayCandidateAttempt {
+                            region: candidate_region.clone(),
+                            addr: *candidate_addr,
+                            authenticated: false,
+                            preflight_mode: candidate_preflight_mode,
+                            queue_full_mode: candidate_queue_full_mode,
+                        });
                     }
                 }
             }
@@ -873,22 +918,6 @@ impl VpnConnection {
                         session_id_hex
                     ),
                 );
-                if preflight_mode == RelayPreflightMode::Enforce {
-                    log_sampled_connect_event(
-                        &PREFLIGHT_ENFORCED_EVENTS,
-                        CONNECT_FAIL_PREFLIGHT_ENFORCED,
-                        format!(
-                            "Strict preflight rejected legacy fallback for '{}' (session {})",
-                            config.region, session_id_hex
-                        ),
-                    );
-                    let _ = driver.close();
-                    return Err(VpnError::Connection(
-                        "Relay preflight enforcement blocked connection (no healthy authenticated relay candidate)"
-                            .to_string(),
-                    ));
-                }
-
                 if saw_timeout {
                     log::warn!(
                         "V3: Falling back to legacy relay mode after authentication timeouts"
@@ -897,12 +926,38 @@ impl VpnConnection {
                     log::warn!("V3: Falling back to legacy relay mode after candidate exhaustion");
                 }
 
-                if let Ok((fallback_region, fallback_addr)) =
-                    select_candidate_after_preflight(&attempt_results, preflight_mode)
-                {
-                    selected_relay_region = fallback_region;
-                    relay_addr = fallback_addr;
-                    relay.switch_relay(fallback_addr);
+                match select_candidate_after_preflight(&attempt_results) {
+                    Ok((fallback_region, fallback_addr, fallback_queue_mode)) => {
+                        selected_relay_region = fallback_region;
+                        relay_addr = fallback_addr;
+                        queue_full_mode = fallback_queue_mode;
+                        relay.switch_relay(fallback_addr);
+                    }
+                    Err(CONNECT_FAIL_PREFLIGHT_ENFORCED) => {
+                        log_sampled_connect_event(
+                            &PREFLIGHT_ENFORCED_EVENTS,
+                            CONNECT_FAIL_PREFLIGHT_ENFORCED,
+                            format!(
+                                "Strict preflight rejected legacy fallback for '{}' (session {})",
+                                config.region, session_id_hex
+                            ),
+                        );
+                        let _ = driver.close();
+                        return Err(VpnError::Connection(
+                            "Relay preflight enforcement blocked connection (no healthy authenticated relay candidate)"
+                                .to_string(),
+                        ));
+                    }
+                    Err(code) => {
+                        log_sampled_connect_event(
+                            &CANDIDATE_EXHAUSTED_EVENTS,
+                            code,
+                            format!(
+                                "Relay fallback candidate selection failed for '{}' (session {})",
+                                config.region, session_id_hex
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -1955,60 +2010,113 @@ mod tests {
     #[test]
     fn test_select_candidate_after_preflight_prefers_authenticated_candidate() {
         let attempts = vec![
-            (
-                "germany-01".to_string(),
-                parse_addr("10.0.0.1:51821"),
-                false,
-            ),
-            ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), true),
-            (
-                "germany-03".to_string(),
-                parse_addr("10.0.0.3:51821"),
-                false,
-            ),
+            RelayCandidateAttempt {
+                region: "germany-01".to_string(),
+                addr: parse_addr("10.0.0.1:51821"),
+                authenticated: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Bypass,
+            },
+            RelayCandidateAttempt {
+                region: "germany-02".to_string(),
+                addr: parse_addr("10.0.0.2:51821"),
+                authenticated: true,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Drop,
+            },
+            RelayCandidateAttempt {
+                region: "germany-03".to_string(),
+                addr: parse_addr("10.0.0.3:51821"),
+                authenticated: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Bypass,
+            },
         ];
 
-        let selected =
-            select_candidate_after_preflight(&attempts, RelayPreflightMode::Legacy).unwrap();
+        let selected = select_candidate_after_preflight(&attempts).unwrap();
         assert_eq!(
             selected,
-            ("germany-02".to_string(), parse_addr("10.0.0.2:51821"))
+            (
+                "germany-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                RelayQueueFullMode::Drop
+            )
         );
     }
 
     #[test]
     fn test_select_candidate_after_preflight_legacy_falls_back_to_first() {
         let attempts = vec![
+            RelayCandidateAttempt {
+                region: "germany-01".to_string(),
+                addr: parse_addr("10.0.0.1:51821"),
+                authenticated: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Bypass,
+            },
+            RelayCandidateAttempt {
+                region: "germany-02".to_string(),
+                addr: parse_addr("10.0.0.2:51821"),
+                authenticated: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Drop,
+            },
+        ];
+
+        let selected = select_candidate_after_preflight(&attempts).unwrap();
+        assert_eq!(
+            selected,
             (
                 "germany-01".to_string(),
                 parse_addr("10.0.0.1:51821"),
-                false,
-            ),
-            (
-                "germany-02".to_string(),
-                parse_addr("10.0.0.2:51821"),
-                false,
-            ),
-        ];
-
-        let selected =
-            select_candidate_after_preflight(&attempts, RelayPreflightMode::Legacy).unwrap();
-        assert_eq!(
-            selected,
-            ("germany-01".to_string(), parse_addr("10.0.0.1:51821"))
+                RelayQueueFullMode::Bypass
+            )
         );
     }
 
     #[test]
     fn test_select_candidate_after_preflight_enforce_rejects_fallback() {
-        let attempts = vec![(
-            "germany-01".to_string(),
-            parse_addr("10.0.0.1:51821"),
-            false,
-        )];
+        let attempts = vec![RelayCandidateAttempt {
+            region: "germany-01".to_string(),
+            addr: parse_addr("10.0.0.1:51821"),
+            authenticated: false,
+            preflight_mode: RelayPreflightMode::Enforce,
+            queue_full_mode: RelayQueueFullMode::Bypass,
+        }];
 
-        let error = select_candidate_after_preflight(&attempts, RelayPreflightMode::Enforce)
+        let error = select_candidate_after_preflight(&attempts)
             .expect_err("enforced preflight should reject fallback");
         assert_eq!(error, CONNECT_FAIL_PREFLIGHT_ENFORCED);
+    }
+
+    #[test]
+    fn test_select_candidate_after_preflight_fallback_uses_selected_policy() {
+        let attempts = vec![
+            RelayCandidateAttempt {
+                region: "germany-01".to_string(),
+                addr: parse_addr("10.0.0.1:51821"),
+                authenticated: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Bypass,
+            },
+            RelayCandidateAttempt {
+                region: "germany-02".to_string(),
+                addr: parse_addr("10.0.0.2:51821"),
+                authenticated: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Drop,
+            },
+        ];
+
+        let selected = select_candidate_after_preflight(&attempts)
+            .expect("legacy preflight should allow fallback");
+        assert_eq!(
+            selected,
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                RelayQueueFullMode::Bypass
+            )
+        );
     }
 }
