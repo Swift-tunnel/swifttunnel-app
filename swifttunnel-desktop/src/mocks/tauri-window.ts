@@ -22,6 +22,9 @@ class MockWindow {
   async isMaximized() {
     return false;
   }
+  async isMinimized() {
+    return false;
+  }
   async setSize() {}
   async setPosition() {}
   async maximize() {}

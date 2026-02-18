@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::state::AppState;
 
@@ -16,11 +16,16 @@ pub fn settings_load(state: State<'_, AppState>) -> Result<SettingsResponse, Str
 }
 
 #[tauri::command]
-pub fn settings_save(state: State<'_, AppState>, settings_json: String) -> Result<(), String> {
-    let new_settings: swifttunnel_core::settings::AppSettings =
+pub fn settings_save(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    settings_json: String,
+) -> Result<(), String> {
+    let mut new_settings: swifttunnel_core::settings::AppSettings =
         serde_json::from_str(&settings_json)
             .map_err(|e| format!("Invalid settings JSON: {}", e))?;
 
+    new_settings.sanitize_in_place();
     swifttunnel_core::settings::save_settings(&new_settings)?;
 
     {
@@ -30,6 +35,15 @@ pub fn settings_save(state: State<'_, AppState>, settings_json: String) -> Resul
 
     let mut settings = state.settings.lock();
     *settings = new_settings;
+    let run_on_startup = settings.run_on_startup;
+    drop(settings);
+
+    if let Err(e) = crate::autostart::sync_run_on_startup(&app, run_on_startup) {
+        log::warn!(
+            "Failed to sync startup registration after settings save: {}",
+            e
+        );
+    }
 
     Ok(())
 }

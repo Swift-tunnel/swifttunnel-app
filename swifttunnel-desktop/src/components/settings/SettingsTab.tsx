@@ -103,7 +103,7 @@ export function SettingsTab() {
             ))}
           </div>
         </Row>
-        <Row label="Auto Check Updates" desc="Check on app startup">
+        <Row label="Auto Update" desc="Check and install updates on app startup">
           <Toggle
             enabled={settings.update_settings.auto_check}
             onChange={(v) =>
@@ -114,6 +114,21 @@ export function SettingsTab() {
                 },
               })
             }
+          />
+        </Row>
+        <Row label="Run on Startup" desc="Launch SwiftTunnel when you sign into Windows">
+          <Toggle
+            enabled={settings.run_on_startup}
+            onChange={(v) => set({ run_on_startup: v })}
+          />
+        </Row>
+        <Row
+          label="Auto Reconnect VPN"
+          desc="Reconnect automatically after restart if your last session was connected"
+        >
+          <Toggle
+            enabled={settings.auto_reconnect}
+            onChange={(v) => set({ auto_reconnect: v })}
           />
         </Row>
         <Row

@@ -139,6 +139,14 @@ pub async fn auth_logout(state: State<'_, AppState>, app: AppHandle) -> Result<(
     if result.is_ok() {
         let mut discord = state.discord_manager.lock();
         discord.clear();
+
+        let mut settings = state.settings.lock();
+        settings.resume_vpn_on_startup = false;
+        let snapshot = settings.clone();
+        drop(settings);
+        if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
+            log::warn!("Failed to persist logout reconnect settings: {}", e);
+        }
     }
 
     emit_auth_state(&app, &state).await;
