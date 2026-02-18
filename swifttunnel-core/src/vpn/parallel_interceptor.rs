@@ -1133,7 +1133,7 @@ impl ParallelInterceptor {
     }
 
     fn build_disable_ipv6_script(adapter_friendly_name: &str) -> String {
-        // Note: must use non-silent error handling so failures get surfaced and we can block.
+        // Use explicit error output so failures are visible in logs for diagnostics.
         format!(
             r#"
             $ErrorActionPreference = 'Stop'
@@ -1173,9 +1173,8 @@ impl ParallelInterceptor {
         let friendly_name = match &self.physical_adapter_friendly_name {
             Some(name) => name.clone(),
             None => {
-                return Err(VpnError::SplitTunnelSetupFailed(
-                    "Physical adapter name not available; cannot disable IPv6".to_string(),
-                ));
+                log::warn!("No physical adapter friendly name available, skipping IPv6 disable");
+                return Ok(());
             }
         };
 
@@ -1210,17 +1209,6 @@ impl ParallelInterceptor {
             details = trimmed.chars().take(240).collect();
         }
 
-        let details_lower = details.to_lowercase();
-        let admin_hint = if details_lower.contains("access is denied")
-            || details_lower.contains("access denied")
-            || details_lower.contains("administrator")
-            || details_lower.contains("elevation")
-        {
-            " Please run SwiftTunnel as Administrator."
-        } else {
-            ""
-        };
-
         log::warn!(
             "Failed to disable IPv6 on {} (exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
             friendly_name,
@@ -1230,13 +1218,16 @@ impl ParallelInterceptor {
             output.stderr.trim()
         );
 
-        Err(VpnError::SplitTunnelSetupFailed(format!(
-            "Failed to disable IPv6 on adapter '{}'.{}{}{}",
+        log::warn!(
+            "Continuing without IPv6 disable on adapter '{}'. IPv6 traffic may bypass VPN.{}{}",
             friendly_name,
-            admin_hint,
-            if details.is_empty() { "" } else { "\n\n" },
+            if details.is_empty() { "" } else { " Details: " },
             details
-        )))
+        );
+
+        // Non-fatal by design: this optimization can fail on some systems due to
+        // privileges or adapter-specific behavior, but tunneling can still proceed.
+        Ok(())
     }
 
     /// Disable IPv6 on the physical adapter
@@ -4871,17 +4862,11 @@ mod tests {
     }
 
     #[test]
-    fn test_disable_ipv6_blocks_when_adapter_name_missing() {
+    fn test_disable_ipv6_skips_when_adapter_name_missing() {
         let mut interceptor = ParallelInterceptor::new(Vec::new());
-        let err = interceptor
+        interceptor
             .disable_ipv6_with_runner(|_, _| panic!("runner should not be called"))
-            .unwrap_err();
-        match err {
-            VpnError::SplitTunnelSetupFailed(msg) => {
-                assert!(msg.contains("Physical adapter name not available"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+            .unwrap();
         assert!(!interceptor.ipv6_was_disabled);
     }
 
@@ -4902,10 +4887,10 @@ mod tests {
     }
 
     #[test]
-    fn test_disable_ipv6_returns_error_on_failure() {
+    fn test_disable_ipv6_failure_is_non_fatal() {
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
-        let err = interceptor
+        interceptor
             .disable_ipv6_with_runner(|_, _| PowerShellRunOutput {
                 success: false,
                 timed_out: false,
@@ -4913,14 +4898,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: "Access is denied.".to_string(),
             })
-            .unwrap_err();
-        match err {
-            VpnError::SplitTunnelSetupFailed(msg) => {
-                assert!(msg.contains("Failed to disable IPv6"));
-                assert!(msg.contains("Ethernet"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+            .unwrap();
         assert!(!interceptor.ipv6_was_disabled);
     }
 }
