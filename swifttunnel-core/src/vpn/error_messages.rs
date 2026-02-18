@@ -18,11 +18,15 @@ pub fn user_friendly_error(error: &VpnError) -> String {
         }
 
         VpnError::SplitTunnelSetupFailed(msg) => {
-            if msg.contains("timed out") || msg.contains("timeout") {
+            let lc = msg.to_lowercase();
+            if lc.contains("timed out") || lc.contains("timeout") {
                 "Driver initialization timed out.\n\nPlease restart your computer and try again.".to_string()
-            } else if msg.contains("administrator") || msg.contains("Administrator") || msg.contains("access denied") {
+            } else if lc.contains("administrator")
+                || lc.contains("access denied")
+                || lc.contains("access is denied")
+            {
                 "Administrator privileges required.\n\nPlease run SwiftTunnel as Administrator.".to_string()
-            } else if msg.contains("internet interface") || msg.contains("No default gateway") {
+            } else if lc.contains("internet interface") || lc.contains("no default gateway") {
                 "No internet connection detected.\n\nPlease check your network connection and try again.".to_string()
             } else {
                 format!("Split tunnel setup failed.\n\n{}", msg)
@@ -163,6 +167,13 @@ mod tests {
         let error = VpnError::SplitTunnelSetupFailed("Driver timed out".to_string());
         let msg = user_friendly_error(&error);
         assert!(msg.contains("restart your computer"));
+    }
+
+    #[test]
+    fn test_user_friendly_admin_required() {
+        let error = VpnError::SplitTunnelSetupFailed("Access is denied.".to_string());
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("Administrator privileges required"));
     }
 
     #[test]
