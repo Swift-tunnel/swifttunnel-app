@@ -34,6 +34,9 @@ describe("stores/settingsStore", () => {
         update_settings: { auto_check: true, last_check: null },
         update_channel: "Stable",
         minimize_to_tray: true,
+        run_on_startup: true,
+        auto_reconnect: true,
+        resume_vpn_on_startup: false,
         last_connected_region: null,
         expanded_boost_info: [],
         selected_game_presets: ["roblox"],
@@ -64,6 +67,9 @@ describe("stores/settingsStore", () => {
 
     expect(useSettingsStore.getState().isLoaded).toBe(true);
     expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(false);
+    expect(useSettingsStore.getState().settings.run_on_startup).toBe(true);
+    expect(useSettingsStore.getState().settings.auto_reconnect).toBe(true);
+    expect(useSettingsStore.getState().settings.resume_vpn_on_startup).toBe(false);
   });
 
   it("save persists activeTab into current_tab", async () => {

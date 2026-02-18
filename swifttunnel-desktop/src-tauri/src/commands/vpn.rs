@@ -106,6 +106,33 @@ fn parse_game_presets(game_presets: &[String]) -> HashSet<swifttunnel_core::vpn:
         .collect()
 }
 
+fn apply_connected_session_settings(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+    region: &str,
+) {
+    settings.last_connected_region = Some(region.to_string());
+    settings.resume_vpn_on_startup = true;
+}
+
+fn apply_disconnected_session_settings(settings: &mut swifttunnel_core::settings::AppSettings) {
+    settings.resume_vpn_on_startup = false;
+}
+
+fn persist_session_settings(
+    state: &AppState,
+    connected_region: Option<&str>,
+) -> Result<(), String> {
+    let mut settings = state.settings.lock();
+    if let Some(region) = connected_region {
+        apply_connected_session_settings(&mut settings, region);
+    } else {
+        apply_disconnected_session_settings(&mut settings);
+    }
+    let snapshot = settings.clone();
+    drop(settings);
+    swifttunnel_core::settings::save_settings(&snapshot)
+}
+
 async fn emit_vpn_state(app: &AppHandle, state: &AppState) {
     let vpn = state.vpn_connection.lock().await;
     let conn_state = vpn.state().await;
@@ -203,6 +230,12 @@ pub async fn vpn_connect(
         }
     }
 
+    if result.is_ok() {
+        if let Err(e) = persist_session_settings(&state, Some(&region)) {
+            log::warn!("Failed to persist connected session settings: {}", e);
+        }
+    }
+
     emit_vpn_state(&app, &state).await;
     result
 }
@@ -216,6 +249,12 @@ pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Resul
     {
         let mut discord = state.discord_manager.lock();
         discord.set_idle();
+    }
+
+    if result.is_ok() {
+        if let Err(e) = persist_session_settings(&state, None) {
+            log::warn!("Failed to persist disconnected session settings: {}", e);
+        }
     }
 
     emit_vpn_state(&app, &state).await;
@@ -395,6 +434,27 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
             latency_ms: sl.get_region_best_latency(&r.id),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_connected_session_settings_marks_resume_and_region() {
+        let mut settings = swifttunnel_core::settings::AppSettings::default();
+        apply_connected_session_settings(&mut settings, "singapore");
+        assert_eq!(settings.last_connected_region.as_deref(), Some("singapore"));
+        assert!(settings.resume_vpn_on_startup);
+    }
+
+    #[test]
+    fn apply_disconnected_session_settings_clears_resume_flag() {
+        let mut settings = swifttunnel_core::settings::AppSettings::default();
+        settings.resume_vpn_on_startup = true;
+        apply_disconnected_session_settings(&mut settings);
+        assert!(!settings.resume_vpn_on_startup);
+    }
 }
 
 #[tauri::command]

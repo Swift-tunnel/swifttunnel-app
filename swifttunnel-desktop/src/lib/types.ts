@@ -233,6 +233,9 @@ export interface AppSettings {
   update_settings: UpdateSettings;
   update_channel: UpdateChannel;
   minimize_to_tray: boolean;
+  run_on_startup: boolean;
+  auto_reconnect: boolean;
+  resume_vpn_on_startup: boolean;
   last_connected_region: string | null;
   expanded_boost_info: string[];
   selected_game_presets: string[];

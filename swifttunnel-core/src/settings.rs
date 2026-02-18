@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 const SETTINGS_FILE: &str = "settings.json";
 const APP_NAME: &str = "SwiftTunnel";
+pub const MIN_WINDOW_WIDTH: f32 = 800.0;
+pub const MIN_WINDOW_HEIGHT: f32 = 600.0;
 
 // Routing mode removed - V3 (UDP relay) is the only mode now.
 // V1 (process-based WireGuard) and V2 (hybrid WireGuard) have been removed.
@@ -31,6 +33,26 @@ pub struct WindowState {
     pub height: f32,
     /// Whether window is maximized
     pub maximized: bool,
+}
+
+impl WindowState {
+    pub fn sanitize_in_place(&mut self) {
+        if !self.width.is_finite() || self.width < MIN_WINDOW_WIDTH {
+            self.width = MIN_WINDOW_WIDTH;
+        }
+
+        if !self.height.is_finite() || self.height < MIN_WINDOW_HEIGHT {
+            self.height = MIN_WINDOW_HEIGHT;
+        }
+
+        if self.x.is_some_and(|x| !x.is_finite()) {
+            self.x = None;
+        }
+
+        if self.y.is_some_and(|y| !y.is_finite()) {
+            self.y = None;
+        }
+    }
 }
 
 impl Default for WindowState {
@@ -75,6 +97,15 @@ pub struct AppSettings {
     /// Whether to minimize to tray instead of closing
     #[serde(default = "default_minimize_to_tray")]
     pub minimize_to_tray: bool,
+    /// Launch app automatically at Windows sign-in
+    #[serde(default = "default_run_on_startup")]
+    pub run_on_startup: bool,
+    /// Reconnect VPN automatically on next launch after an active session
+    #[serde(default = "default_auto_reconnect")]
+    pub auto_reconnect: bool,
+    /// Internal marker: set true after successful connect, cleared on disconnect/logout
+    #[serde(default)]
+    pub resume_vpn_on_startup: bool,
     /// Last successfully connected region (for "LAST USED" badge)
     #[serde(default)]
     pub last_connected_region: Option<String>,
@@ -130,6 +161,14 @@ fn default_minimize_to_tray() -> bool {
     false
 }
 
+fn default_run_on_startup() -> bool {
+    true
+}
+
+fn default_auto_reconnect() -> bool {
+    true
+}
+
 fn default_region() -> String {
     "singapore".to_string()
 }
@@ -155,6 +194,9 @@ impl Default for AppSettings {
             update_settings: UpdateSettings::default(),
             update_channel: UpdateChannel::Stable,
             minimize_to_tray: false,
+            run_on_startup: default_run_on_startup(),
+            auto_reconnect: default_auto_reconnect(),
+            resume_vpn_on_startup: false,
             last_connected_region: None,
             expanded_boost_info: Vec::new(),
             selected_game_presets: default_game_presets(),
@@ -169,6 +211,17 @@ impl Default for AppSettings {
             whitelisted_regions: Vec::new(),
         }
     }
+}
+
+impl AppSettings {
+    pub fn sanitize_in_place(&mut self) {
+        self.window_state.sanitize_in_place();
+    }
+}
+
+fn sanitize_settings(mut settings: AppSettings) -> AppSettings {
+    settings.sanitize_in_place();
+    settings
 }
 
 /// Get the settings directory path
@@ -188,29 +241,29 @@ pub fn load_settings() -> AppSettings {
         Some(p) => p,
         None => {
             debug!("Could not determine settings path, using defaults");
-            return AppSettings::default();
+            return sanitize_settings(AppSettings::default());
         }
     };
 
     if !path.exists() {
         debug!("Settings file does not exist, using defaults");
-        return AppSettings::default();
+        return sanitize_settings(AppSettings::default());
     }
 
     match fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str(&content) {
             Ok(settings) => {
                 info!("Loaded settings from {:?}", path);
-                settings
+                sanitize_settings(settings)
             }
             Err(e) => {
                 error!("Failed to parse settings file: {}", e);
-                AppSettings::default()
+                sanitize_settings(AppSettings::default())
             }
         },
         Err(e) => {
             error!("Failed to read settings file: {}", e);
-            AppSettings::default()
+            sanitize_settings(AppSettings::default())
         }
     }
 }
@@ -231,7 +284,10 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
 
     let path = dir.join(SETTINGS_FILE);
 
-    let json = match serde_json::to_string_pretty(settings) {
+    let mut settings_to_save = settings.clone();
+    settings_to_save.sanitize_in_place();
+
+    let json = match serde_json::to_string_pretty(&settings_to_save) {
         Ok(j) => j,
         Err(e) => return Err(format!("Failed to serialize settings: {}", e)),
     };
@@ -261,6 +317,9 @@ mod tests {
             !settings.minimize_to_tray,
             "Default should allow closing via X; tray behavior is opt-in"
         );
+        assert!(settings.run_on_startup);
+        assert!(settings.auto_reconnect);
+        assert!(!settings.resume_vpn_on_startup);
     }
 
     #[test]
@@ -296,6 +355,15 @@ mod tests {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!loaded.minimize_to_tray);
+    }
+
+    #[test]
+    fn test_settings_startup_reconnect_defaults() {
+        let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
+        let loaded: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(loaded.run_on_startup);
+        assert!(loaded.auto_reconnect);
+        assert!(!loaded.resume_vpn_on_startup);
     }
 
     #[test]
@@ -338,5 +406,39 @@ mod tests {
         let loaded: AppSettings = serde_json::from_str(old_json).unwrap();
         assert_eq!(loaded.selected_region, "singapore"); // Default value
         assert_eq!(loaded.selected_server, "mumbai-02");
+    }
+
+    #[test]
+    fn test_window_state_sanitize_in_place_clamps_invalid_values() {
+        let mut ws = WindowState {
+            x: Some(f32::NAN),
+            y: Some(f32::INFINITY),
+            width: 120.0,
+            height: -1.0,
+            maximized: false,
+        };
+
+        ws.sanitize_in_place();
+
+        assert_eq!(ws.x, None);
+        assert_eq!(ws.y, None);
+        assert_eq!(ws.width, MIN_WINDOW_WIDTH);
+        assert_eq!(ws.height, MIN_WINDOW_HEIGHT);
+    }
+
+    #[test]
+    fn test_app_settings_sanitize_in_place_updates_window_state() {
+        let mut settings = AppSettings::default();
+        settings.window_state.width = 1.0;
+        settings.window_state.height = 2.0;
+        settings.window_state.x = Some(f32::NAN);
+        settings.window_state.y = Some(f32::NAN);
+
+        settings.sanitize_in_place();
+
+        assert_eq!(settings.window_state.width, MIN_WINDOW_WIDTH);
+        assert_eq!(settings.window_state.height, MIN_WINDOW_HEIGHT);
+        assert_eq!(settings.window_state.x, None);
+        assert_eq!(settings.window_state.y, None);
     }
 }

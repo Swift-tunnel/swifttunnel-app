@@ -31,7 +31,7 @@ interface UpdaterStore {
   installUpdate: () => Promise<void>;
 }
 
-export const useUpdaterStore = create<UpdaterStore>((set) => ({
+export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
   status: "idle",
   currentVersion: __APP_VERSION__,
   availableVersion: null,
@@ -87,7 +87,11 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
           "Update Available",
           `Version ${update.available_version} is ready.`,
         );
+        return;
       }
+
+      // Startup/background checks should install immediately without extra clicks.
+      await get().installUpdate();
     } catch (e) {
       set({
         status: "error",
