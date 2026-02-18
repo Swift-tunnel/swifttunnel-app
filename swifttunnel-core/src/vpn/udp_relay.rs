@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 /// Session ID length in bytes
 const SESSION_ID_LEN: usize = 8;
+const UDP_HEADER_LEN: usize = 8;
+const IPV4_HEADER_LEN: usize = 20;
+const IPV6_HEADER_LEN: usize = 40;
 const AUTH_HELLO_FRAME_TYPE: u8 = 0xA1;
 const AUTH_ACK_FRAME_TYPE: u8 = 0xA2;
 // Slightly longer handshake budget improves reliability on congested/PPPoE paths
@@ -26,11 +29,24 @@ const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(1500);
 const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(250);
 const AUTH_HANDSHAKE_ATTEMPTS: usize = 4;
 
-/// Maximum payload size for relay packets
-/// Allow full IP packets (up to 1500 bytes) to avoid silently dropping large game packets.
-/// Packets that cause the outer UDP datagram to exceed path MTU will be IP-fragmented
-/// by the OS, which is preferable to silent drops that cause Roblox Error 277.
-const MAX_PAYLOAD_SIZE: usize = 1500;
+/// Outer path MTU assumption for relay packets (client <-> relay).
+///
+/// The tunneled payload is an *inner IPv4 packet* captured at NDIS layer. We then add:
+/// - 8 bytes session id (relay framing)
+/// - outer UDP header (8 bytes)
+/// - outer IP header (20 bytes for IPv4)
+///
+/// If Roblox (RakNet) negotiates ~1492-byte packets, adding our encapsulation overhead pushes
+/// the *outer* datagram over 1500, causing IP fragmentation on the client->relay path.
+/// Fragmented UDP is frequently dropped, and that can manifest as Roblox Error 279/277 during
+/// the connection handshake.
+///
+/// We avoid this by capping the inner packet length so the outer datagram stays <= 1500.
+const RELAY_PATH_MTU: usize = 1500;
+const MAX_INNER_PACKET_LEN_IPV4: usize =
+    RELAY_PATH_MTU - IPV4_HEADER_LEN - UDP_HEADER_LEN - SESSION_ID_LEN;
+const MAX_INNER_PACKET_LEN_IPV6: usize =
+    RELAY_PATH_MTU - IPV6_HEADER_LEN - UDP_HEADER_LEN - SESSION_ID_LEN;
 
 /// Keepalive interval to maintain NAT bindings - 15s is safer for strict NATs
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -99,6 +115,8 @@ pub struct UdpRelay {
     packets_sent: AtomicU64,
     /// Packets received counter
     packets_received: AtomicU64,
+    /// Inner packets dropped because encapsulation would exceed path MTU.
+    oversize_drops: AtomicU64,
     /// Last activity time for keepalive
     last_activity: std::sync::Mutex<Instant>,
 }
@@ -170,6 +188,7 @@ impl UdpRelay {
             stop_flag: Arc::new(AtomicBool::new(false)),
             packets_sent: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
+            oversize_drops: AtomicU64::new(0),
             last_activity: std::sync::Mutex::new(Instant::now()),
         })
     }
@@ -308,23 +327,36 @@ impl UdpRelay {
     /// Takes the original UDP payload and prepends session ID before sending to relay
     /// Includes retry logic for transient send failures
     pub fn forward_outbound(&self, payload: &[u8]) -> Result<usize> {
-        if payload.len() > MAX_PAYLOAD_SIZE {
-            log::warn!(
-                "UDP Relay: Packet too large ({} > {}), dropping",
-                payload.len(),
-                MAX_PAYLOAD_SIZE
-            );
+        let current_addr = **self.relay_addr.load();
+        let max_payload = if current_addr.ip().is_ipv4() {
+            MAX_INNER_PACKET_LEN_IPV4
+        } else {
+            MAX_INNER_PACKET_LEN_IPV6
+        };
+
+        if payload.len() > max_payload {
+            let dropped = self.oversize_drops.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped <= 5 || dropped.is_power_of_two() {
+                log::warn!(
+                    "UDP Relay: Inner packet too large for encapsulation ({} > {} bytes). \
+                    Dropping to avoid fragmentation (relay path MTU {}, overhead {} bytes, relay {}).",
+                    payload.len(),
+                    max_payload,
+                    RELAY_PATH_MTU,
+                    RELAY_PATH_MTU - max_payload,
+                    current_addr,
+                );
+            }
             return Ok(0);
         }
 
         // Build packet: [session_id][payload] on the stack (no heap alloc)
         let total_len = SESSION_ID_LEN + payload.len();
-        let mut packet = [0u8; SESSION_ID_LEN + 1500];
+        let mut packet = [0u8; SESSION_ID_LEN + RELAY_PATH_MTU];
         packet[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
         packet[SESSION_ID_LEN..total_len].copy_from_slice(payload);
 
         // Try to send, retry once on WouldBlock
-        let current_addr = **self.relay_addr.load();
         let sent = match self.socket.send_to(&packet[..total_len], current_addr) {
             Ok(sent) => sent,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -487,10 +519,11 @@ impl UdpRelay {
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Release);
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {})",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {})",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
-            self.packets_received.load(Ordering::Relaxed)
+            self.packets_received.load(Ordering::Relaxed),
+            self.oversize_drops.load(Ordering::Relaxed),
         );
     }
 
@@ -581,5 +614,22 @@ mod tests {
 
         assert_eq!(packet.len(), 108);
         assert_eq!(&packet[..8], &session_id);
+    }
+
+    #[test]
+    fn test_forward_outbound_drops_oversize_payload() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        let payload = vec![0u8; MAX_INNER_PACKET_LEN_IPV4 + 1];
+        let sent = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(sent, 0);
+        assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_forward_outbound_allows_max_payload() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        let payload = vec![0u8; MAX_INNER_PACKET_LEN_IPV4];
+        let sent = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(sent, SESSION_ID_LEN + MAX_INNER_PACKET_LEN_IPV4);
     }
 }
