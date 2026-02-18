@@ -8,3 +8,10 @@ export function isAdminPrivilegeError(message: string | null): boolean {
     lower.includes("run as administrator")
   );
 }
+
+export function shouldResetElevationState(
+  previousVpnError: string | null,
+  nextVpnError: string | null,
+): boolean {
+  return previousVpnError !== nextVpnError;
+}

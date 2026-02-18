@@ -4,7 +4,10 @@ import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
 import { countryFlag, getLatencyColor, formatBytes } from "../../lib/utils";
-import { isAdminPrivilegeError } from "../../lib/adminErrors";
+import {
+  isAdminPrivilegeError,
+  shouldResetElevationState,
+} from "../../lib/adminErrors";
 import {
   systemCheckDriver,
   systemInstallDriver,
@@ -171,6 +174,16 @@ export function ConnectTab() {
   const [elevationRestartError, setElevationRestartError] = useState<
     string | null
   >(null);
+  const previousVpnError = useRef<string | null>(vpnError);
+
+  useEffect(() => {
+    if (!shouldResetElevationState(previousVpnError.current, vpnError)) {
+      return;
+    }
+    previousVpnError.current = vpnError;
+    setElevationRestartState("idle");
+    setElevationRestartError(null);
+  }, [vpnError]);
 
   async function handleInstallDriver() {
     try {
@@ -489,8 +502,8 @@ export function ConnectTab() {
                   ? "var(--color-status-connected)"
                   : elevationRestartState === "restarting"
                     ? "var(--color-text-secondary)"
-                  : vpnError || driverInstallState === "error"
-                    ? "var(--color-status-error)"
+                    : vpnError || driverInstallState === "error"
+                      ? "var(--color-status-error)"
                     : "var(--color-text-muted)",
             }}
           >
