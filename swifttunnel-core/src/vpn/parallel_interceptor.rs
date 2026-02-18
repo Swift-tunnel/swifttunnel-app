@@ -80,6 +80,21 @@ use windows::Win32::System::Threading::{
     CreateEventW, ResetEvent, SetThreadAffinityMask, WaitForSingleObject,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueOverflowMode {
+    Bypass = 0,
+    Drop = 1,
+}
+
+impl QueueOverflowMode {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Drop,
+            _ => Self::Bypass,
+        }
+    }
+}
+
 /// Packet work item sent to workers
 /// Uses ArrayVec for stack allocation - avoids heap allocation per packet
 struct PacketWork {
@@ -206,6 +221,29 @@ fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
     false
 }
 
+#[derive(Debug, Clone)]
+struct PowerShellRunOutput {
+    success: bool,
+    timed_out: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+impl PowerShellRunOutput {
+    fn best_error_text(&self) -> Option<&str> {
+        let stderr = self.stderr.trim();
+        if !stderr.is_empty() {
+            return Some(stderr);
+        }
+        let stdout = self.stdout.trim();
+        if !stdout.is_empty() {
+            return Some(stdout);
+        }
+        None
+    }
+}
+
 /// Parallel packet interceptor
 pub struct ParallelInterceptor {
     /// Number of worker threads (typically = CPU cores)
@@ -257,6 +295,10 @@ pub struct ParallelInterceptor {
     refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     /// Auto-router for automatic relay switching based on game server region
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
+    /// Queue overflow policy used by reader thread when worker channels are full.
+    queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
+    /// Sampled event counter for queue-full handling.
+    queue_full_events: Arc<AtomicU64>,
 }
 
 impl ParallelInterceptor {
@@ -306,6 +348,10 @@ impl ParallelInterceptor {
             refresh_now_flag: Arc::new(AtomicBool::new(false)),
             refresh_condvar: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
             auto_router: None,
+            queue_overflow_mode: Arc::new(std::sync::atomic::AtomicU8::new(
+                QueueOverflowMode::Bypass as u8,
+            )),
+            queue_full_events: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -406,6 +452,12 @@ impl ParallelInterceptor {
     /// Set the auto-router for automatic relay switching based on game server region
     pub fn set_auto_router(&mut self, router: Arc<super::auto_routing::AutoRouter>) {
         self.auto_router = Some(router);
+    }
+
+    pub fn set_queue_overflow_mode(&mut self, mode: QueueOverflowMode) {
+        self.queue_overflow_mode
+            .store(mode as u8, Ordering::Relaxed);
+        log::info!("Queue overflow mode set to {:?}", mode);
     }
 
     /// Check if driver is available
@@ -865,12 +917,20 @@ impl ParallelInterceptor {
         Ok(())
     }
 
-    /// Run a PowerShell command with a timeout
+    /// Run a PowerShell command with a timeout and capture output.
     ///
-    /// Returns true if command succeeded, false otherwise.
     /// Uses spawn + try_wait loop to implement timeout without extra dependencies.
-    fn run_powershell_with_timeout(script: &str, timeout_secs: u64) -> bool {
+    fn run_powershell_with_timeout_capture(script: &str, timeout_secs: u64) -> PowerShellRunOutput {
+        use std::io::Read;
         use std::time::{Duration, Instant};
+
+        fn read_pipe_to_string<R: Read>(pipe: Option<R>) -> String {
+            let mut out = String::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_string(&mut out);
+            }
+            out
+        }
 
         let mut child = match std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -881,8 +941,13 @@ impl ParallelInterceptor {
         {
             Ok(child) => child,
             Err(e) => {
-                log::warn!("Failed to spawn PowerShell: {}", e);
-                return false;
+                return PowerShellRunOutput {
+                    success: false,
+                    timed_out: false,
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: format!("Failed to spawn PowerShell: {e}"),
+                };
             }
         };
 
@@ -893,21 +958,16 @@ impl ParallelInterceptor {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    // Process finished
-                    if status.success() {
-                        return true;
-                    } else {
-                        // Try to get stderr for logging
-                        if let Some(mut stderr) = child.stderr.take() {
-                            use std::io::Read;
-                            let mut err_msg = String::new();
-                            let _ = stderr.read_to_string(&mut err_msg);
-                            if !err_msg.is_empty() {
-                                log::warn!("PowerShell error: {}", err_msg.trim());
-                            }
-                        }
-                        return false;
-                    }
+                    // Process finished - drain pipes
+                    let stdout = read_pipe_to_string(child.stdout.take());
+                    let stderr = read_pipe_to_string(child.stderr.take());
+                    return PowerShellRunOutput {
+                        success: status.success(),
+                        timed_out: false,
+                        exit_code: status.code(),
+                        stdout,
+                        stderr,
+                    };
                 }
                 Ok(None) => {
                     // Still running - check timeout
@@ -918,7 +978,15 @@ impl ParallelInterceptor {
                         );
                         let _ = child.kill();
                         let _ = child.wait(); // Reap the process
-                        return false;
+                        let stdout = read_pipe_to_string(child.stdout.take());
+                        let stderr = read_pipe_to_string(child.stderr.take());
+                        return PowerShellRunOutput {
+                            success: false,
+                            timed_out: true,
+                            exit_code: None,
+                            stdout,
+                            stderr,
+                        };
                     }
                     // Sleep briefly before next poll (50ms)
                     std::thread::sleep(Duration::from_millis(50));
@@ -926,10 +994,29 @@ impl ParallelInterceptor {
                 Err(e) => {
                     log::warn!("Error waiting for PowerShell: {}", e);
                     let _ = child.kill();
-                    return false;
+                    let stdout = read_pipe_to_string(child.stdout.take());
+                    let stderr = read_pipe_to_string(child.stderr.take());
+                    return PowerShellRunOutput {
+                        success: false,
+                        timed_out: false,
+                        exit_code: None,
+                        stdout,
+                        stderr: if stderr.trim().is_empty() {
+                            format!("Error waiting for PowerShell: {e}")
+                        } else {
+                            stderr
+                        },
+                    };
                 }
             }
         }
+    }
+
+    /// Run a PowerShell command with a timeout.
+    ///
+    /// Returns true if command succeeded, false otherwise.
+    fn run_powershell_with_timeout(script: &str, timeout_secs: u64) -> bool {
+        Self::run_powershell_with_timeout_capture(script, timeout_secs).success
     }
 
     /// Disable TCP Segmentation Offload (TSO/LSO) on the physical adapter
@@ -1044,6 +1131,113 @@ impl ParallelInterceptor {
         self.tso_was_disabled = false;
     }
 
+    fn build_disable_ipv6_script(adapter_friendly_name: &str) -> String {
+        // Note: must use non-silent error handling so failures get surfaced and we can block.
+        format!(
+            r#"
+            $ErrorActionPreference = 'Stop'
+            $adapter = '{}'
+
+            try {{
+                # Disable IPv6 binding on the adapter (requires elevation)
+                Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false | Out-Null
+
+                # Verify it was disabled
+                $binding = Get-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6
+                if (-not $binding) {{
+                    Write-Output 'IPv6 binding not present'
+                    exit 0
+                }}
+
+                if (-not $binding.Enabled) {{
+                    Write-Output 'IPv6 disabled'
+                    exit 0
+                }}
+
+                Write-Error ('IPv6 binding still enabled on adapter: ' + $adapter)
+                exit 1
+            }} catch {{
+                Write-Error ('Failed to disable IPv6 on adapter ' + $adapter + ': ' + $_.Exception.Message)
+                exit 1
+            }}
+            "#,
+            adapter_friendly_name.replace("'", "''")
+        )
+    }
+
+    fn disable_ipv6_with_runner<F>(&mut self, runner: F) -> VpnResult<()>
+    where
+        F: Fn(&str, u64) -> PowerShellRunOutput,
+    {
+        let friendly_name = match &self.physical_adapter_friendly_name {
+            Some(name) => name.clone(),
+            None => {
+                return Err(VpnError::SplitTunnelSetupFailed(
+                    "Physical adapter name not available; cannot disable IPv6".to_string(),
+                ));
+            }
+        };
+
+        log::info!(
+            "Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)",
+            friendly_name
+        );
+
+        // Disable IPv6 binding on the adapter.
+        // This prevents Roblox/Windows from preferring IPv6 and bypassing our IPv4-only tunnel.
+        let script = Self::build_disable_ipv6_script(&friendly_name);
+
+        // Give this more time than offload toggles; adapter binding changes can be slow on some systems.
+        let timeout_secs = 15;
+        let output = runner(&script, timeout_secs);
+
+        if output.success {
+            log::info!(
+                "IPv6 disabled successfully on {} - all traffic will use IPv4",
+                friendly_name
+            );
+            self.ipv6_was_disabled = true;
+            return Ok(());
+        }
+
+        let mut details = String::new();
+        if output.timed_out {
+            details = format!("PowerShell timed out after {timeout_secs}s.");
+        } else if let Some(text) = output.best_error_text() {
+            // Keep the surfaced text short (UI + logs); include full details in debug logs.
+            let trimmed = text.trim().replace("\r\n", "\n");
+            details = trimmed.chars().take(240).collect();
+        }
+
+        let details_lower = details.to_lowercase();
+        let admin_hint = if details_lower.contains("access is denied")
+            || details_lower.contains("access denied")
+            || details_lower.contains("administrator")
+            || details_lower.contains("elevation")
+        {
+            " Please run SwiftTunnel as Administrator."
+        } else {
+            ""
+        };
+
+        log::warn!(
+            "Failed to disable IPv6 on {} (exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
+            friendly_name,
+            output.exit_code,
+            output.timed_out,
+            output.stdout.trim(),
+            output.stderr.trim()
+        );
+
+        Err(VpnError::SplitTunnelSetupFailed(format!(
+            "Failed to disable IPv6 on adapter '{}'.{}{}{}",
+            friendly_name,
+            admin_hint,
+            if details.is_empty() { "" } else { "\n\n" },
+            details
+        )))
+    }
+
     /// Disable IPv6 on the physical adapter
     ///
     /// SwiftTunnel is IPv4-only. If IPv6 is enabled, Roblox or Windows may prefer IPv6,
@@ -1053,53 +1247,7 @@ impl ParallelInterceptor {
     /// This is a common cause of "detection works but tunneling fails" - the process is
     /// detected, but its IPv6 traffic bypasses the VPN.
     pub fn disable_ipv6(&mut self) -> VpnResult<()> {
-        let friendly_name = match &self.physical_adapter_friendly_name {
-            Some(name) => name.clone(),
-            None => {
-                log::warn!("No physical adapter friendly name available, skipping IPv6 disable");
-                return Ok(());
-            }
-        };
-
-        log::info!(
-            "Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)",
-            friendly_name
-        );
-
-        // Disable IPv6 binding on the adapter using netsh
-        // This is safer than registry changes and takes effect immediately
-        let script = format!(
-            r#"
-            $ErrorActionPreference = 'SilentlyContinue'
-            $adapter = '{}'
-
-            # Disable IPv6 binding on the adapter
-            # This uses the Disable-NetAdapterBinding cmdlet which is the cleanest approach
-            Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null
-
-            # Verify it was disabled
-            $binding = Get-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null
-            if ($binding -and -not $binding.Enabled) {{
-                Write-Host 'IPv6 disabled'
-            }} else {{
-                Write-Host 'IPv6 disable may have failed'
-            }}
-            "#,
-            friendly_name.replace("'", "''")
-        );
-
-        if Self::run_powershell_with_timeout(&script, 5) {
-            log::info!(
-                "IPv6 disabled successfully on {} - all traffic will use IPv4",
-                friendly_name
-            );
-            self.ipv6_was_disabled = true;
-        } else {
-            log::warn!("Failed to disable IPv6 (non-fatal) - IPv6 traffic may bypass VPN");
-            // Don't fail - the VPN can still work, just with potential IPv6 leakage
-        }
-
-        Ok(())
+        self.disable_ipv6_with_runner(Self::run_powershell_with_timeout_capture)
     }
 
     /// Re-enable IPv6 on the physical adapter
@@ -1223,6 +1371,8 @@ impl ParallelInterceptor {
         let reader_cache = Arc::clone(&self.process_cache);
         let reader_worker_stats = self.worker_stats.clone();
         let reader_auto_router = self.auto_router.clone();
+        let reader_queue_overflow_mode = Arc::clone(&self.queue_overflow_mode);
+        let reader_queue_full_events = Arc::clone(&self.queue_full_events);
         let physical_name =
             Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
                 VpnError::SplitTunnel("Physical adapter name not set".to_string())
@@ -1236,6 +1386,8 @@ impl ParallelInterceptor {
                 reader_cache,
                 reader_worker_stats,
                 reader_auto_router,
+                reader_queue_overflow_mode,
+                reader_queue_full_events,
                 reader_stop,
                 num_workers,
             ) {
@@ -1499,6 +1651,8 @@ fn run_packet_reader(
     process_cache: Arc<LockFreeProcessCache>,
     worker_stats: Vec<Arc<WorkerStats>>,
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
+    queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
+    queue_full_events: Arc<AtomicU64>,
     stop_flag: Arc<AtomicBool>,
     num_workers: usize,
 ) -> VpnResult<()> {
@@ -1679,14 +1833,31 @@ fn run_packet_reader(
                         should_tunnel: true,
                     };
 
-                    // If worker queue is full, fall back to passthrough and count as bypass.
+                    // Worker queue overflow strategy is runtime-configurable:
+                    // `bypass` preserves delivery, `drop` preserves single-path consistency.
                     if senders[worker_id].try_send(work).is_err() {
-                        let _ = passthrough_to_adapter.push(&packets[i]);
-                        if let Some(stats) = worker_stats.get(worker_id) {
-                            stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
-                            stats
-                                .bytes_bypassed
-                                .fetch_add(packet_len, Ordering::Relaxed);
+                        let mode =
+                            QueueOverflowMode::from_u8(queue_overflow_mode.load(Ordering::Relaxed));
+                        match mode {
+                            QueueOverflowMode::Bypass => {
+                                let _ = passthrough_to_adapter.push(&packets[i]);
+                                if let Some(stats) = worker_stats.get(worker_id) {
+                                    stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
+                                    stats
+                                        .bytes_bypassed
+                                        .fetch_add(packet_len, Ordering::Relaxed);
+                                }
+                            }
+                            QueueOverflowMode::Drop => {
+                                let event = queue_full_events.fetch_add(1, Ordering::Relaxed) + 1;
+                                if event <= 5 || event.is_power_of_two() {
+                                    log::warn!(
+                                        "ST_QUEUE_FULL_DROP: worker {} queue full, dropping tunnel packet (event #{})",
+                                        worker_id,
+                                        event
+                                    );
+                                }
+                            }
                         }
                     }
                 } else {
@@ -4677,5 +4848,78 @@ mod tests {
             &mut inline_cache
         ));
         assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_queue_overflow_mode_defaults_to_bypass() {
+        let interceptor = ParallelInterceptor::new(Vec::new());
+        assert_eq!(
+            QueueOverflowMode::from_u8(interceptor.queue_overflow_mode.load(Ordering::Relaxed)),
+            QueueOverflowMode::Bypass
+        );
+    }
+
+    #[test]
+    fn test_queue_overflow_mode_updates_to_drop() {
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.set_queue_overflow_mode(QueueOverflowMode::Drop);
+        assert_eq!(
+            QueueOverflowMode::from_u8(interceptor.queue_overflow_mode.load(Ordering::Relaxed)),
+            QueueOverflowMode::Drop
+        );
+    }
+
+    #[test]
+    fn test_disable_ipv6_blocks_when_adapter_name_missing() {
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        let err = interceptor
+            .disable_ipv6_with_runner(|_, _| panic!("runner should not be called"))
+            .unwrap_err();
+        match err {
+            VpnError::SplitTunnelSetupFailed(msg) => {
+                assert!(msg.contains("Physical adapter name not available"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(!interceptor.ipv6_was_disabled);
+    }
+
+    #[test]
+    fn test_disable_ipv6_sets_flag_on_success() {
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
+        interceptor
+            .disable_ipv6_with_runner(|_, _| PowerShellRunOutput {
+                success: true,
+                timed_out: false,
+                exit_code: Some(0),
+                stdout: "IPv6 disabled".to_string(),
+                stderr: String::new(),
+            })
+            .unwrap();
+        assert!(interceptor.ipv6_was_disabled);
+    }
+
+    #[test]
+    fn test_disable_ipv6_returns_error_on_failure() {
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
+        let err = interceptor
+            .disable_ipv6_with_runner(|_, _| PowerShellRunOutput {
+                success: false,
+                timed_out: false,
+                exit_code: Some(1),
+                stdout: String::new(),
+                stderr: "Access is denied.".to_string(),
+            })
+            .unwrap_err();
+        match err {
+            VpnError::SplitTunnelSetupFailed(msg) => {
+                assert!(msg.contains("Failed to disable IPv6"));
+                assert!(msg.contains("Ethernet"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(!interceptor.ipv6_was_disabled);
     }
 }

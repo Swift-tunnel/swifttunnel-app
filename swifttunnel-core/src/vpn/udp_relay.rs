@@ -20,9 +20,11 @@ use std::time::{Duration, Instant};
 const SESSION_ID_LEN: usize = 8;
 const AUTH_HELLO_FRAME_TYPE: u8 = 0xA1;
 const AUTH_ACK_FRAME_TYPE: u8 = 0xA2;
-const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(600);
-const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(150);
-const AUTH_HANDSHAKE_ATTEMPTS: usize = 2;
+// Slightly longer handshake budget improves reliability on congested/PPPoE paths
+// without affecting steady-state packet latency.
+const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(1500);
+const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(250);
+const AUTH_HANDSHAKE_ATTEMPTS: usize = 4;
 
 /// Maximum payload size for relay packets
 /// Allow full IP packets (up to 1500 bytes) to avoid silently dropping large game packets.
@@ -267,7 +269,7 @@ impl UdpRelay {
 
     /// Send relay auth hello and wait for ack.
     ///
-    /// Attempts: 0ms and +150ms, with a total wait budget of 600ms.
+    /// Attempts: up to 4 within a total 1.5s wait budget.
     pub fn authenticate_with_ticket(&self, token: &str) -> Result<Option<RelayAuthAckStatus>> {
         let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
 

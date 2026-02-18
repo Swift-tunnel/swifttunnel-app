@@ -218,8 +218,11 @@ impl AuthClient {
             .map_err(|e| AuthError::ApiError(format!("Failed to parse relay ticket: {}", e)))?;
 
         info!(
-            "Received relay ticket (auth_required: {}, key_id: {})",
-            data.auth_required, data.key_id
+            "Received relay ticket (auth_required: {}, key_id: {}, preflight_mode: {:?}, queue_full_mode: {:?})",
+            data.auth_required,
+            data.key_id,
+            data.preflight_mode(),
+            data.queue_full_mode()
         );
         Ok(data)
     }
