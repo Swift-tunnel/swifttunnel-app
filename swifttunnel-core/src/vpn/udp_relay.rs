@@ -188,9 +188,7 @@ impl UdpRelay {
         );
 
         let initial_mtu = detect_relay_path_mtu(relay_addr).unwrap_or(RELAY_PATH_MTU_UPPER_BOUND);
-        let initial_mtu = initial_mtu
-            .clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND)
-            .min(RELAY_PATH_MTU_UPPER_BOUND);
+        let initial_mtu = initial_mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
 
         Ok(Self {
             socket,
@@ -245,9 +243,7 @@ impl UdpRelay {
         }
 
         if let Some(mtu) = detect_relay_path_mtu(relay_addr) {
-            let mtu = mtu
-                .clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND)
-                .min(RELAY_PATH_MTU_UPPER_BOUND);
+            let mtu = mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
             let prev = self.relay_path_mtu.swap(mtu, Ordering::Relaxed);
             if prev != mtu {
                 log::info!(
@@ -265,9 +261,7 @@ impl UdpRelay {
 
     #[cfg(test)]
     fn set_relay_path_mtu_for_test(&self, mtu: usize) {
-        let mtu = mtu
-            .clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND)
-            .min(RELAY_PATH_MTU_UPPER_BOUND);
+        let mtu = mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
         self.relay_path_mtu.store(mtu, Ordering::Relaxed);
     }
 
@@ -650,7 +644,10 @@ fn now_mono_ms() -> u64 {
 
     #[cfg(not(windows))]
     {
-        0
+        use std::sync::OnceLock;
+        static START: OnceLock<Instant> = OnceLock::new();
+        let start = START.get_or_init(Instant::now);
+        start.elapsed().as_millis() as u64
     }
 }
 
