@@ -182,6 +182,7 @@ pub fn run() {
             commands::system::system_check_driver,
             commands::system::system_install_driver,
             commands::system::system_open_url,
+            commands::system::system_restart_as_admin,
         ])
         .setup(move |app| {
             info!("SwiftTunnel desktop app starting up");
