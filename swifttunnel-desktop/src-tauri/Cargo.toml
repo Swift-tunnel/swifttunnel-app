@@ -25,5 +25,8 @@ base64 = "0.22"
 ring = "0.17"
 url = "2"
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
