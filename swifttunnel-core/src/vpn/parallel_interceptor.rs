@@ -1105,20 +1105,29 @@ impl ParallelInterceptor {
         }
 
         let friendly_lower = friendly_name.to_lowercase();
+        let is_wan_like = Self::is_wan_like_friendly_name(friendly_name);
         let mut score = 0;
 
         if has_default_route {
             score += 1000; // Massive bonus - this is the active internet path
         }
 
-        if !has_default_route
-            && (friendly_lower.contains("wan miniport")
-                || friendly_lower.contains("wan network interface")
-                || friendly_lower.starts_with("wan "))
-        {
+        if !has_default_route && is_wan_like {
             // Synthetic WAN adapters frequently appear in NDIS enumeration even when
             // they are not carrying user traffic. Keep them as a last-resort fallback.
             score -= 200;
+
+            // If we're forced to pick WAN pseudo-interfaces, prefer IPv4 payload path.
+            // Typical ordering on affected systems: (BH), (IPv6), (IP).
+            if friendly_lower.contains("(ip)") && !friendly_lower.contains("(ipv6)") {
+                score += 80;
+            }
+            if friendly_lower.contains("(bh)") {
+                score -= 40;
+            }
+            if friendly_lower.contains("(ipv6)") {
+                score -= 60;
+            }
         }
 
         if friendly_lower.contains("ethernet")
@@ -1141,6 +1150,13 @@ impl ParallelInterceptor {
 
         score += (10 - adapter_idx.min(10)) as i32;
         Some(score)
+    }
+
+    fn is_wan_like_friendly_name(friendly_name: &str) -> bool {
+        let friendly_lower = friendly_name.to_ascii_lowercase();
+        friendly_lower.contains("wan miniport")
+            || friendly_lower.contains("wan network interface")
+            || friendly_lower.starts_with("wan ")
     }
 
     fn select_best_physical_candidate<'a>(
@@ -1170,6 +1186,37 @@ impl ParallelInterceptor {
         }
 
         candidates.iter().filter(is_allowed).max_by_key(|c| c.score)
+    }
+
+    fn select_best_physical_candidate_with_wan_fallback<'a>(
+        candidates: &'a [PhysicalCandidate],
+        default_route_if_index: Option<u32>,
+        strict_default_route: bool,
+    ) -> (Option<&'a PhysicalCandidate>, bool) {
+        let selected = Self::select_best_physical_candidate(
+            candidates,
+            default_route_if_index,
+            strict_default_route,
+        );
+        if selected.is_some() || !strict_default_route || default_route_if_index.is_none() {
+            return (selected, false);
+        }
+
+        // Some environments (especially PPP/WAN stacks) only expose WAN pseudo-adapters
+        // through ndisapi while the routing table's default IfIndex points to the parent
+        // NIC. In that case, strict equality would always fail and block interception.
+        let wan_only_candidates = !candidates.is_empty()
+            && candidates
+                .iter()
+                .all(|c| Self::is_wan_like_friendly_name(&c.friendly_name));
+        if !wan_only_candidates {
+            return (None, false);
+        }
+
+        (
+            Self::select_best_physical_candidate(candidates, default_route_if_index, false),
+            true,
+        )
     }
 
     fn find_adapters(&mut self, vpn_adapter_name: &str, vpn_adapter_luid: u64) -> VpnResult<()> {
@@ -1347,11 +1394,12 @@ impl ParallelInterceptor {
         }
 
         // Select physical adapter - MUST have default route if available
-        let selected = Self::select_best_physical_candidate(
-            &physical_candidates,
-            default_route_if_index,
-            strict_default_route,
-        );
+        let (selected, used_wan_only_fallback) =
+            Self::select_best_physical_candidate_with_wan_fallback(
+                &physical_candidates,
+                default_route_if_index,
+                strict_default_route,
+            );
 
         if strict_default_route && default_route_if_index.is_some() && selected.is_none() {
             let def = default_route_if_index.expect("checked is_some");
@@ -1370,6 +1418,11 @@ impl ParallelInterceptor {
         }
 
         if let Some(selected) = selected {
+            if used_wan_only_fallback {
+                log::warn!(
+                    "No strict default-route IfIndex match was found. Falling back to WAN-only candidate selection."
+                );
+            }
             let idx = selected.idx;
             let friendly_name = &selected.friendly_name;
             let internal_name = &selected.internal_name;
@@ -1382,13 +1435,21 @@ impl ParallelInterceptor {
                 && default_route_if_index.is_some()
                 && if_index == default_route_if_index;
             if strict_default_route && !has_default && default_route_if_index.is_some() {
-                log::warn!(
-                    "Selected adapter '{}' does NOT have the default route - traffic may not be intercepted!",
-                    friendly_name
-                );
-                log::warn!(
-                    "This could cause split tunnel to fail. Check if the correct network adapter is being used."
-                );
+                if used_wan_only_fallback {
+                    log::warn!(
+                        "Selected adapter '{}' via WAN-only fallback (default-route IfIndex {:?} not directly visible in NDIS).",
+                        friendly_name,
+                        default_route_if_index
+                    );
+                } else {
+                    log::warn!(
+                        "Selected adapter '{}' does NOT have the default route - traffic may not be intercepted!",
+                        friendly_name
+                    );
+                    log::warn!(
+                        "This could cause split tunnel to fail. Check if the correct network adapter is being used."
+                    );
+                }
             }
 
             self.physical_adapter_idx = Some(idx);
@@ -4847,6 +4908,28 @@ mod tests {
     }
 
     #[test]
+    fn test_score_physical_candidate_prefers_wan_ip_variant() {
+        let bh =
+            ParallelInterceptor::score_physical_candidate("WAN Network Interface (BH)", 0, false)
+                .expect("BH should score");
+        let ipv6 =
+            ParallelInterceptor::score_physical_candidate("WAN Network Interface (IPv6)", 1, false)
+                .expect("IPv6 should score");
+        let ip =
+            ParallelInterceptor::score_physical_candidate("WAN Network Interface (IP)", 2, false)
+                .expect("IP should score");
+
+        assert!(
+            ip > bh,
+            "IPv4 WAN score ({ip}) should outrank BH score ({bh})"
+        );
+        assert!(
+            ip > ipv6,
+            "IPv4 WAN score ({ip}) should outrank IPv6 score ({ipv6})"
+        );
+    }
+
+    #[test]
     fn test_select_best_physical_candidate_strict_default_prefers_matching_if_index() {
         let candidates = vec![
             PhysicalCandidate {
@@ -4888,6 +4971,89 @@ mod tests {
 
         let selected =
             ParallelInterceptor::select_best_physical_candidate(&candidates, Some(11), true);
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn test_select_best_physical_candidate_strict_wan_only_fallback_selects_ipv4_path() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                friendly_name: "WAN Network Interface (BH)".to_string(),
+                internal_name: "wan-bh".to_string(),
+                if_index: Some(17),
+                score: ParallelInterceptor::score_physical_candidate(
+                    "WAN Network Interface (BH)",
+                    0,
+                    false,
+                )
+                .expect("BH should score"),
+                is_up: None,
+            },
+            PhysicalCandidate {
+                idx: 1,
+                friendly_name: "WAN Network Interface (IPv6)".to_string(),
+                internal_name: "wan-ipv6".to_string(),
+                if_index: Some(18),
+                score: ParallelInterceptor::score_physical_candidate(
+                    "WAN Network Interface (IPv6)",
+                    1,
+                    false,
+                )
+                .expect("IPv6 should score"),
+                is_up: None,
+            },
+            PhysicalCandidate {
+                idx: 2,
+                friendly_name: "WAN Network Interface (IP)".to_string(),
+                internal_name: "wan-ip".to_string(),
+                if_index: Some(10),
+                score: ParallelInterceptor::score_physical_candidate(
+                    "WAN Network Interface (IP)",
+                    2,
+                    false,
+                )
+                .expect("IP should score"),
+                is_up: None,
+            },
+        ];
+
+        let (selected, fallback_used) =
+            ParallelInterceptor::select_best_physical_candidate_with_wan_fallback(
+                &candidates,
+                Some(11),
+                true,
+            );
+
+        assert!(fallback_used, "WAN-only fallback should have been used");
+        assert_eq!(
+            selected.map(|c| c.friendly_name.as_str()),
+            Some("WAN Network Interface (IP)")
+        );
+    }
+
+    #[test]
+    fn test_select_best_physical_candidate_strict_non_wan_no_fallback() {
+        let candidates = vec![PhysicalCandidate {
+            idx: 0,
+            friendly_name: "Ethernet".to_string(),
+            internal_name: "eth".to_string(),
+            if_index: Some(20),
+            score: 9000,
+            is_up: Some(true),
+        }];
+
+        let (selected, fallback_used) =
+            ParallelInterceptor::select_best_physical_candidate_with_wan_fallback(
+                &candidates,
+                Some(11),
+                true,
+            );
+
+        assert!(
+            !fallback_used,
+            "fallback must not run for non-WAN candidates"
+        );
         assert!(selected.is_none());
     }
 
