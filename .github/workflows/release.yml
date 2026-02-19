@@ -24,8 +24,6 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Resolve tag metadata
         id: meta
@@ -47,7 +45,7 @@ jobs:
       - name: Ensure tag commit is on main history
         shell: bash
         run: |
-          git fetch origin main --depth=1
+          git fetch origin main --deepen=50
           if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
             echo "::error::Tag commit is not on origin/main history"
             exit 1
