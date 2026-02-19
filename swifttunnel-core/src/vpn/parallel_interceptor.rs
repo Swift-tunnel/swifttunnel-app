@@ -583,6 +583,39 @@ impl ParallelInterceptor {
         best
     }
 
+    fn parse_interface_index_output(output: &str) -> Option<u32> {
+        output.lines().find_map(|line| {
+            line.split_whitespace()
+                .find_map(|token| token.parse::<u32>().ok())
+        })
+    }
+
+    fn get_default_route_interface_index_powershell() -> Option<u32> {
+        let script = r#"
+            $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Sort-Object @{Expression='RouteMetric';Descending=$false}, @{Expression='InterfaceMetric';Descending=$false} |
+                Select-Object -First 1
+            if ($route) { [string]$route.InterfaceIndex }
+        "#;
+        let output = Self::run_powershell_with_timeout_capture(script, 5);
+        if !output.success {
+            log::warn!(
+                "PowerShell default-route lookup failed: {}",
+                output.stderr.trim()
+            );
+            return None;
+        }
+
+        let if_index = Self::parse_interface_index_output(&output.stdout);
+        if if_index.is_none() {
+            log::warn!(
+                "PowerShell default-route lookup returned no InterfaceIndex. stdout='{}'",
+                output.stdout.trim()
+            );
+        }
+        if_index
+    }
+
     fn get_best_interface_index_for_ipv4(ip: Ipv4Addr) -> Option<u32> {
         use windows::Win32::NetworkManagement::IpHelper::GetBestInterfaceEx;
         use windows::Win32::Networking::WinSock::{
@@ -633,47 +666,75 @@ impl ParallelInterceptor {
             return Some(idx);
         }
 
-        unsafe {
-            // Get routing table size
+        let native_if_index = unsafe {
+            // Get routing table size.
             let mut size: u32 = 0;
             let _ = GetIpForwardTable(None, &mut size, false);
-
             if size == 0 {
-                return None;
+                log::warn!("GetIpForwardTable returned zero size");
+                None
+            } else {
+                let mut best_if_index: Option<u32> = None;
+
+                // Table can grow between calls; retry a few times on buffer resize.
+                for attempt in 1..=3 {
+                    let mut buffer = vec![0u8; size as usize];
+                    let table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
+
+                    let rc = GetIpForwardTable(Some(table), &mut size, false);
+                    if rc == NO_ERROR.0 {
+                        let num_entries = (*table).dwNumEntries as usize;
+                        let entries =
+                            std::slice::from_raw_parts((*table).table.as_ptr(), num_entries);
+
+                        let best =
+                            Self::select_default_route_interface_index(entries.iter().map(|row| {
+                                (
+                                    row.dwForwardDest,
+                                    row.dwForwardMask,
+                                    row.dwForwardNextHop,
+                                    row.dwForwardIfIndex,
+                                    row.dwForwardMetric1,
+                                )
+                            }));
+                        if let Some((idx, metric, next_hop)) = best {
+                            log::info!(
+                                "Default route is on interface index {} (metric: {}, next_hop: {})",
+                                idx,
+                                metric,
+                                Ipv4Addr::from(next_hop.to_ne_bytes()),
+                            );
+                            best_if_index = Some(idx);
+                        }
+                        break;
+                    }
+
+                    if rc == ERROR_INSUFFICIENT_BUFFER.0 {
+                        log::debug!(
+                            "GetIpForwardTable buffer grew during read (attempt {}), retrying",
+                            attempt
+                        );
+                        continue;
+                    }
+
+                    log::warn!(
+                        "GetIpForwardTable failed with error {} on attempt {}",
+                        rc,
+                        attempt
+                    );
+                    break;
+                }
+
+                best_if_index
             }
+        };
 
-            // Allocate buffer
-            let mut buffer = vec![0u8; size as usize];
-            let table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
-
-            if GetIpForwardTable(Some(table), &mut size, false) != NO_ERROR.0 {
-                return None;
-            }
-
-            let num_entries = (*table).dwNumEntries as usize;
-            let entries = std::slice::from_raw_parts((*table).table.as_ptr(), num_entries);
-
-            let best = Self::select_default_route_interface_index(entries.iter().map(|row| {
-                (
-                    row.dwForwardDest,
-                    row.dwForwardMask,
-                    row.dwForwardNextHop,
-                    row.dwForwardIfIndex,
-                    row.dwForwardMetric1,
-                )
-            }));
-
-            if let Some((idx, metric, next_hop)) = best {
-                log::info!(
-                    "Default route is on interface index {} (metric: {}, next_hop: {})",
-                    idx,
-                    metric,
-                    Ipv4Addr::from(next_hop.to_ne_bytes()),
-                );
-            }
-
-            best.map(|(idx, _, _)| idx)
+        if native_if_index.is_some() {
+            return native_if_index;
         }
+
+        log::warn!("Native default-route lookup failed, falling back to PowerShell");
+        Self::get_default_route_interface_index_powershell()
     }
 
     fn parse_interface_guid_from_internal_name(internal_name: &str) -> Option<windows::core::GUID> {
@@ -802,6 +863,16 @@ impl ParallelInterceptor {
 
         if has_default_route {
             score += 1000; // Massive bonus - this is the active internet path
+        }
+
+        if !has_default_route
+            && (friendly_lower.contains("wan miniport")
+                || friendly_lower.contains("wan network interface")
+                || friendly_lower.starts_with("wan "))
+        {
+            // Synthetic WAN adapters frequently appear in NDIS enumeration even when
+            // they are not carrying user traffic. Keep them as a last-resort fallback.
+            score -= 200;
         }
 
         if friendly_lower.contains("ethernet")
@@ -4322,6 +4393,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_interface_index_output_extracts_first_integer_line() {
+        let stdout = "\n\n  42 \n";
+        assert_eq!(
+            ParallelInterceptor::parse_interface_index_output(stdout),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn test_parse_interface_index_output_ignores_non_numeric_output() {
+        let stdout = "InterfaceIndex\n----\n";
+        assert_eq!(
+            ParallelInterceptor::parse_interface_index_output(stdout),
+            None
+        );
+    }
+
+    #[test]
     fn test_score_physical_candidate_skips_unknown_non_default_route() {
         let score = ParallelInterceptor::score_physical_candidate("", 3, false);
         assert_eq!(score, None);
@@ -4331,6 +4420,20 @@ mod tests {
     fn test_score_physical_candidate_keeps_unknown_default_route_adapter() {
         let score = ParallelInterceptor::score_physical_candidate("", 3, true);
         assert_eq!(score, Some(1007));
+    }
+
+    #[test]
+    fn test_score_physical_candidate_deprioritizes_wan_when_not_default_route() {
+        let wan_score =
+            ParallelInterceptor::score_physical_candidate("WAN Network Interface (BH)", 0, false)
+                .expect("WAN candidate should still be scored");
+        let wifi_score = ParallelInterceptor::score_physical_candidate("Wi-Fi", 4, false)
+            .expect("Wi-Fi candidate should be scored");
+
+        assert!(
+            wifi_score > wan_score,
+            "Wi-Fi score ({wifi_score}) should outrank WAN score ({wan_score})"
+        );
     }
 
     #[test]
