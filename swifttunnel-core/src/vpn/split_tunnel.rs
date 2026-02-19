@@ -664,6 +664,29 @@ impl SplitTunnelDriver {
         Ok(running)
     }
 
+    /// Re-bind split tunnel interception to the currently active network interface if needed.
+    ///
+    /// This is primarily to handle default-route changes (Ethernet <-> Wi-Fi) while the app
+    /// remains connected, which otherwise results in "connected but 0 packets tunneled".
+    pub fn maybe_rebind_on_default_route_change(&mut self) -> VpnResult<bool> {
+        if self.state != DriverState::Active {
+            return Ok(false);
+        }
+
+        let config = match self.config.as_ref() {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+
+        let interceptor = match self.parallel_interceptor.as_mut() {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+
+        interceptor
+            .maybe_rebind_on_default_route_change("SwiftTunnel", config.tunnel_interface_luid)
+    }
+
     /// Refresh processes (alias for refresh_exclusions)
     pub fn refresh_processes(&mut self) -> VpnResult<bool> {
         self.refresh_exclusions()

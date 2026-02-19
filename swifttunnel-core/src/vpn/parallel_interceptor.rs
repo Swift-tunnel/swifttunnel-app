@@ -80,6 +80,23 @@ use windows::Win32::System::Threading::{
     CreateEventW, ResetEvent, SetThreadAffinityMask, WaitForSingleObject,
 };
 
+#[derive(Debug, Clone, Copy)]
+struct DefaultRouteInfo {
+    if_index: u32,
+    metric: u32,
+    next_hop: u32,
+}
+
+#[derive(Debug, Clone)]
+struct PhysicalCandidate {
+    idx: usize,
+    friendly_name: String,
+    internal_name: String,
+    if_index: Option<u32>,
+    score: i32,
+    is_up: Option<bool>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueOverflowMode {
     Bypass = 0,
@@ -272,6 +289,8 @@ pub struct ParallelInterceptor {
     ipv6_was_disabled: bool,
     /// Interface index of the adapter with the default route (for validation)
     default_route_if_index: Option<u32>,
+    /// Next-hop of the default route (0.0.0.0 for PPP/point-to-point)
+    default_route_next_hop: Option<u32>,
     /// VPN adapter index
     vpn_adapter_idx: Option<usize>,
     /// Whether interceptor is active
@@ -301,6 +320,8 @@ pub struct ParallelInterceptor {
     queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
     /// Sampled event counter for queue-full handling.
     queue_full_events: Arc<AtomicU64>,
+    /// Last time we attempted to rebind adapters due to default-route changes.
+    last_rebind_at: Option<Instant>,
 }
 
 impl ParallelInterceptor {
@@ -336,6 +357,7 @@ impl ParallelInterceptor {
             tso_was_disabled: false,
             ipv6_was_disabled: false,
             default_route_if_index: None,
+            default_route_next_hop: None,
             vpn_adapter_idx: None,
             active: false,
             worker_stats,
@@ -355,6 +377,7 @@ impl ParallelInterceptor {
                 QueueOverflowMode::Bypass as u8,
             )),
             queue_full_events: Arc::new(AtomicU64::new(0)),
+            last_rebind_at: None,
         }
     }
 
@@ -644,12 +667,32 @@ impl ParallelInterceptor {
             .map(|guid| guid.to_ascii_lowercase())
     }
 
-    fn get_default_route_interface_index_powershell() -> Option<u32> {
+    fn parse_default_route_info_output(output: &str) -> Option<DefaultRouteInfo> {
+        let mut tokens = output.split_whitespace();
+        let if_index = tokens.next()?.parse::<u32>().ok()?;
+        let metric = tokens
+            .next()
+            .and_then(|t| t.parse::<u32>().ok())
+            .unwrap_or(0);
+        let next_hop_str = tokens.next().unwrap_or("0.0.0.0");
+        let next_hop = next_hop_str
+            .parse::<Ipv4Addr>()
+            .ok()
+            .map(|ip| u32::from_ne_bytes(ip.octets()))
+            .unwrap_or(0);
+        Some(DefaultRouteInfo {
+            if_index,
+            metric,
+            next_hop,
+        })
+    }
+
+    fn get_default_route_info_powershell() -> Option<DefaultRouteInfo> {
         let script = r#"
             $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
                 Sort-Object @{Expression='RouteMetric';Descending=$false}, @{Expression='InterfaceMetric';Descending=$false} |
                 Select-Object -First 1
-            if ($route) { [string]$route.InterfaceIndex }
+            if ($route) { "{0} {1} {2}" -f $route.InterfaceIndex, $route.RouteMetric, $route.NextHop }
         "#;
         let output = Self::run_powershell_with_timeout_capture(script, 5);
         if !output.success {
@@ -660,14 +703,14 @@ impl ParallelInterceptor {
             return None;
         }
 
-        let if_index = Self::parse_interface_index_output(&output.stdout);
-        if if_index.is_none() {
+        let info = Self::parse_default_route_info_output(&output.stdout);
+        if info.is_none() {
             log::warn!(
-                "PowerShell default-route lookup returned no InterfaceIndex. stdout='{}'",
+                "PowerShell default-route lookup returned no parseable info. stdout='{}'",
                 output.stdout.trim()
             );
         }
-        if_index
+        info
     }
 
     fn get_best_interface_index_for_ipv4(ip: Ipv4Addr) -> Option<u32> {
@@ -701,99 +744,213 @@ impl ParallelInterceptor {
         Some(if_index)
     }
 
-    fn get_default_route_interface_index() -> Option<u32> {
+    fn is_interface_oper_up(if_index: u32) -> Option<bool> {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IF_OPER_STATUS, IP_ADAPTER_ADDRESSES_LH,
+        };
+        use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+        unsafe {
+            let mut size: u32 = 0;
+            let _ = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                None,
+                &mut size,
+            );
+            if size == 0 {
+                return None;
+            }
+
+            let mut buffer = vec![0u8; size as usize];
+            let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+            if GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(adapter_addresses),
+                &mut size,
+            ) != 0
+            {
+                return None;
+            }
+
+            let mut current = adapter_addresses;
+            while !current.is_null() {
+                let adapter = &*current;
+                let a_if = adapter.Anonymous1.Anonymous.IfIndex;
+                let a_ipv6_if = adapter.Ipv6IfIndex;
+                if a_if == if_index || a_ipv6_if == if_index {
+                    return Some(adapter.OperStatus == IF_OPER_STATUS::IfOperStatusUp);
+                }
+                current = adapter.Next;
+            }
+        }
+        None
+    }
+
+    fn get_default_route_info_native() -> Option<DefaultRouteInfo> {
         use windows::Win32::Foundation::*;
         use windows::Win32::NetworkManagement::IpHelper::*;
-
-        if let Some(idx) = Self::get_best_interface_index_for_ipv4(Ipv4Addr::new(1, 1, 1, 1)) {
-            log::info!(
-                "Best interface index via GetBestInterfaceEx (1.1.1.1): {}",
-                idx
-            );
-            return Some(idx);
-        }
-        if let Some(idx) = Self::get_best_interface_index_for_ipv4(Ipv4Addr::new(8, 8, 8, 8)) {
-            log::info!(
-                "Best interface index via GetBestInterfaceEx (8.8.8.8): {}",
-                idx
-            );
-            return Some(idx);
-        }
-
-        let native_if_index = unsafe {
+        unsafe {
             // Get routing table size.
             let mut size: u32 = 0;
             let _ = GetIpForwardTable(None, &mut size, false);
             if size == 0 {
                 log::warn!("GetIpForwardTable returned zero size");
-                None
-            } else {
-                let mut best_if_index: Option<u32> = None;
+                return None;
+            }
 
-                // Table can grow between calls; retry a few times on buffer resize.
-                for attempt in 1..=3 {
-                    let mut buffer = vec![0u8; size as usize];
-                    let table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
+            // Table can grow between calls; retry a few times on buffer resize.
+            for attempt in 1..=3 {
+                let mut buffer = vec![0u8; size as usize];
+                let table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
 
-                    let rc = GetIpForwardTable(Some(table), &mut size, false);
-                    if rc == NO_ERROR.0 {
-                        let num_entries = (*table).dwNumEntries as usize;
-                        let entries =
-                            std::slice::from_raw_parts((*table).table.as_ptr(), num_entries);
+                let rc = GetIpForwardTable(Some(table), &mut size, false);
+                if rc == NO_ERROR.0 {
+                    let num_entries = (*table).dwNumEntries as usize;
+                    let entries = std::slice::from_raw_parts((*table).table.as_ptr(), num_entries);
 
-                        let best =
-                            Self::select_default_route_interface_index(entries.iter().map(|row| {
-                                (
-                                    row.dwForwardDest,
-                                    row.dwForwardMask,
-                                    row.dwForwardNextHop,
-                                    row.dwForwardIfIndex,
-                                    row.dwForwardMetric1,
-                                )
-                            }));
-                        if let Some((idx, metric, next_hop)) = best {
-                            log::info!(
-                                "Default route is on interface index {} (metric: {}, next_hop: {})",
-                                idx,
-                                metric,
-                                Ipv4Addr::from(next_hop.to_ne_bytes()),
-                            );
-                            best_if_index = Some(idx);
+                    let mut defaults: Vec<DefaultRouteInfo> = entries
+                        .iter()
+                        .filter_map(|row| {
+                            if row.dwForwardDest != 0 || row.dwForwardMask != 0 {
+                                return None;
+                            }
+                            Some(DefaultRouteInfo {
+                                if_index: row.dwForwardIfIndex,
+                                metric: row.dwForwardMetric1,
+                                next_hop: row.dwForwardNextHop,
+                            })
+                        })
+                        .collect();
+
+                    if defaults.is_empty() {
+                        log::warn!("No default route found in GetIpForwardTable");
+                        return None;
+                    }
+
+                    defaults.sort_by_key(|d| d.metric);
+
+                    // Prefer an UP interface if we can determine oper status.
+                    let mut first_unknown: Option<DefaultRouteInfo> = None;
+                    for d in &defaults {
+                        match Self::is_interface_oper_up(d.if_index) {
+                            Some(true) => return Some(*d),
+                            Some(false) => continue,
+                            None => {
+                                if first_unknown.is_none() {
+                                    first_unknown = Some(*d);
+                                }
+                            }
                         }
-                        break;
                     }
 
-                    if rc == ERROR_INSUFFICIENT_BUFFER.0 {
-                        log::debug!(
-                            "GetIpForwardTable buffer grew during read (attempt {}), retrying",
-                            attempt
-                        );
-                        continue;
-                    }
-
-                    log::warn!(
-                        "GetIpForwardTable failed with error {} on attempt {}",
-                        rc,
-                        attempt
-                    );
-                    break;
+                    // No known-UP default route; return the first unknown, else lowest metric.
+                    return first_unknown.or_else(|| defaults.first().copied());
                 }
 
-                best_if_index
-            }
-        };
+                if rc == ERROR_INSUFFICIENT_BUFFER.0 {
+                    log::debug!(
+                        "GetIpForwardTable buffer grew during read (attempt {}), retrying",
+                        attempt
+                    );
+                    continue;
+                }
 
-        if native_if_index.is_some() {
-            return native_if_index;
+                log::warn!(
+                    "GetIpForwardTable failed with error {} on attempt {}",
+                    rc,
+                    attempt
+                );
+                break;
+            }
+        }
+
+        None
+    }
+
+    fn get_default_route_info() -> Option<DefaultRouteInfo> {
+        if let Some(info) = Self::get_default_route_info_native() {
+            log::info!(
+                "Default route is on interface index {} (metric: {}, next_hop: {})",
+                info.if_index,
+                info.metric,
+                Ipv4Addr::from(info.next_hop.to_ne_bytes()),
+            );
+            return Some(info);
         }
 
         log::warn!("Native default-route lookup failed, falling back to PowerShell");
-        Self::get_default_route_interface_index_powershell()
+        if let Some(info) = Self::get_default_route_info_powershell() {
+            log::info!(
+                "Default route (PowerShell) is on interface index {} (metric: {}, next_hop: {})",
+                info.if_index,
+                info.metric,
+                Ipv4Addr::from(info.next_hop.to_ne_bytes()),
+            );
+            return Some(info);
+        }
+
+        // Last resort: GetBestInterfaceEx for common public IPs (no next-hop/metric context).
+        if let Some(idx) = Self::get_best_interface_index_for_ipv4(Ipv4Addr::new(1, 1, 1, 1)) {
+            log::warn!(
+                "Default route fallback via GetBestInterfaceEx (1.1.1.1): {}",
+                idx
+            );
+            return Some(DefaultRouteInfo {
+                if_index: idx,
+                metric: 0,
+                next_hop: 0,
+            });
+        }
+        if let Some(idx) = Self::get_best_interface_index_for_ipv4(Ipv4Addr::new(8, 8, 8, 8)) {
+            log::warn!(
+                "Default route fallback via GetBestInterfaceEx (8.8.8.8): {}",
+                idx
+            );
+            return Some(DefaultRouteInfo {
+                if_index: idx,
+                metric: 0,
+                next_hop: 0,
+            });
+        }
+
+        None
     }
 
     fn parse_interface_guid_from_internal_name(internal_name: &str) -> Option<windows::core::GUID> {
         let guid_str = Self::extract_guid_str_from_internal_name(internal_name)?;
         windows::core::GUID::try_from(guid_str).ok()
+    }
+
+    fn get_interface_guid_ascii_lowercase_from_if_index(if_index: u32) -> Option<String> {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToGuid,
+        };
+        use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+
+        unsafe {
+            let mut luid = NET_LUID_LH::default();
+            let rc = ConvertInterfaceIndexToLuid(if_index, &mut luid);
+            if rc.0 != 0 {
+                return None;
+            }
+
+            let mut guid = windows::core::GUID::default();
+            let rc = ConvertInterfaceLuidToGuid(&luid, &mut guid);
+            if rc.0 != 0 {
+                return None;
+            }
+
+            let guid_str = guid.to_string();
+            Some(
+                guid_str
+                    .trim_matches(|c| c == '{' || c == '}')
+                    .to_ascii_lowercase(),
+            )
+        }
     }
 
     /// Resolve interface index (IfIndex) from the internal adapter name/friendly alias.
@@ -977,16 +1134,64 @@ impl ParallelInterceptor {
         Some(score)
     }
 
+    fn select_best_physical_candidate<'a>(
+        candidates: &'a [PhysicalCandidate],
+        default_route_if_index: Option<u32>,
+        strict_default_route: bool,
+    ) -> Option<&'a PhysicalCandidate> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Prefer UP adapters when we can determine oper status. This avoids binding
+        // to disconnected Ethernet on laptops (common cause of "connected but 0 packets").
+        let any_up = candidates.iter().any(|c| c.is_up == Some(true));
+        let is_allowed = |c: &&PhysicalCandidate| !any_up || c.is_up != Some(false);
+
+        // If this looks like a normal gateway-backed default route, we should bind ONLY to the
+        // physical adapter that matches the default-route IfIndex. Falling back to a non-default
+        // adapter is a common cause of "connected but no tunneled traffic" on multi-NIC systems.
+        if strict_default_route {
+            let def_idx = default_route_if_index?;
+            return candidates
+                .iter()
+                .filter(is_allowed)
+                .filter(|c| c.if_index == Some(def_idx))
+                .max_by_key(|c| c.score);
+        }
+
+        candidates.iter().filter(is_allowed).max_by_key(|c| c.score)
+    }
+
     fn find_adapters(&mut self, vpn_adapter_name: &str, vpn_adapter_luid: u64) -> VpnResult<()> {
         // Get default route interface first - this is the adapter we MUST intercept
-        let default_route_if_index = Self::get_default_route_interface_index();
+        let default_route = Self::get_default_route_info();
+        let default_route_if_index = default_route.map(|d| d.if_index);
+        let default_route_next_hop = default_route.map(|d| d.next_hop);
         self.default_route_if_index = default_route_if_index;
+        self.default_route_next_hop = default_route_next_hop;
+
+        // Treat gateway-backed default routes as "strict". PPP/point-to-point default routes
+        // often have next-hop 0.0.0.0 and map to a WAN/PPP interface rather than the
+        // underlying physical NIC we need to intercept.
+        let strict_default_route =
+            default_route_next_hop.is_some() && default_route_next_hop != Some(0);
+        let default_route_guid_lc = if strict_default_route {
+            default_route_if_index.and_then(Self::get_interface_guid_ascii_lowercase_from_if_index)
+        } else {
+            None
+        };
 
         if let Some(idx) = default_route_if_index {
             log::info!(
                 "Will prioritize adapter with interface index {} (has default route)",
                 idx
             );
+            if !strict_default_route {
+                log::info!(
+                    "Default route appears to be PPP/point-to-point (next_hop=0.0.0.0); adapter binding will not be strict."
+                );
+            }
         } else {
             log::warn!("Could not determine default route interface - will use name-based scoring");
         }
@@ -1001,8 +1206,7 @@ impl ParallelInterceptor {
         log::info!("Found {} adapters", adapters.len());
 
         let mut vpn_adapter: Option<(usize, String)> = None;
-        // (idx, friendly_name, internal_name, if_index, score)
-        let mut physical_candidates: Vec<(usize, String, String, Option<u32>, i32)> = Vec::new();
+        let mut physical_candidates: Vec<PhysicalCandidate> = Vec::new();
 
         for (idx, adapter) in adapters.iter().enumerate() {
             let internal_name = adapter.get_name();
@@ -1089,9 +1293,23 @@ impl ParallelInterceptor {
                 // CRITICAL FIX (v0.9.25): Prioritize adapter with default route
                 // This fixes the bug where users with multiple NICs (e.g., disconnected Ethernet + WiFi)
                 // had traffic going through the wrong adapter
-                let adapter_if_index =
+                let internal_guid_lc = Self::extract_guid_ascii_lowercase(internal_name);
+                let guid_matches_default = strict_default_route
+                    && default_route_guid_lc
+                        .as_ref()
+                        .is_some_and(|guid| internal_guid_lc.as_deref() == Some(guid.as_str()));
+
+                let mut adapter_if_index =
                     Self::resolve_adapter_interface_index(&internal_name, &friendly_name);
-                let has_default_route = adapter_if_index.is_some()
+                if guid_matches_default {
+                    // If we can match by GUID, prefer the default-route IfIndex. This makes
+                    // default-route binding robust even when alias/description lookups fail.
+                    adapter_if_index = default_route_if_index;
+                }
+
+                let is_up = adapter_if_index.and_then(Self::is_interface_oper_up);
+                let has_default_route = strict_default_route
+                    && adapter_if_index.is_some()
                     && default_route_if_index.is_some()
                     && adapter_if_index == default_route_if_index;
                 if let Some(score) =
@@ -1105,13 +1323,14 @@ impl ParallelInterceptor {
                         score,
                         has_default_route
                     );
-                    physical_candidates.push((
+                    physical_candidates.push(PhysicalCandidate {
                         idx,
-                        friendly_name.clone(),
-                        internal_name.to_string(),
-                        adapter_if_index,
+                        friendly_name: friendly_name.clone(),
+                        internal_name: internal_name.to_string(),
+                        if_index: adapter_if_index,
                         score,
-                    ));
+                        is_up,
+                    });
                 } else {
                     log::info!("    -> Skipped (unknown adapter, no friendly name)");
                 }
@@ -1119,12 +1338,41 @@ impl ParallelInterceptor {
         }
 
         // Select physical adapter - MUST have default route if available
-        let selected = physical_candidates.iter().max_by_key(|x| x.4);
+        let selected = Self::select_best_physical_candidate(
+            &physical_candidates,
+            default_route_if_index,
+            strict_default_route,
+        );
 
-        if let Some((idx, friendly_name, internal_name, if_index, score)) = selected {
+        if strict_default_route && default_route_if_index.is_some() && selected.is_none() {
+            let def = default_route_if_index.expect("checked is_some");
+            let mut lines = Vec::new();
+            for c in &physical_candidates {
+                lines.push(format!(
+                    "'{}' if_index={:?} up={:?} score={}",
+                    c.friendly_name, c.if_index, c.is_up, c.score
+                ));
+            }
+
+            return Err(VpnError::SplitTunnel(format!(
+                "No NDIS adapter matched the default-route interface index {def}. Candidates: {}",
+                lines.join(", ")
+            )));
+        }
+
+        if let Some(selected) = selected {
+            let idx = selected.idx;
+            let friendly_name = &selected.friendly_name;
+            let internal_name = &selected.internal_name;
+            let if_index = selected.if_index;
+            let score = selected.score;
+
             // Warn if selected adapter doesn't have default route but others exist
-            let has_default = *score >= 1000;
-            if !has_default && default_route_if_index.is_some() {
+            let has_default = strict_default_route
+                && if_index.is_some()
+                && default_route_if_index.is_some()
+                && if_index == default_route_if_index;
+            if strict_default_route && !has_default && default_route_if_index.is_some() {
                 log::warn!(
                     "Selected adapter '{}' does NOT have the default route - traffic may not be intercepted!",
                     friendly_name
@@ -1134,10 +1382,10 @@ impl ParallelInterceptor {
                 );
             }
 
-            self.physical_adapter_idx = Some(*idx);
+            self.physical_adapter_idx = Some(idx);
             self.physical_adapter_name = Some(internal_name.clone());
             self.physical_adapter_friendly_name = Some(friendly_name.clone());
-            self.physical_adapter_if_index = *if_index;
+            self.physical_adapter_if_index = if_index;
             log::info!(
                 "Selected physical adapter: {} (index {}, internal: '{}', if_index: {:?}, score: {})",
                 friendly_name,
@@ -1713,6 +1961,103 @@ impl ParallelInterceptor {
 
         // Re-enable IPv6 on physical adapter
         self.enable_ipv6();
+    }
+
+    /// Re-bind the interceptor to the current active interface if needed.
+    ///
+    /// This handles common laptop/network scenarios:
+    /// - User connects on Ethernet, then unplugs and switches to Wi-Fi
+    /// - Dock/undock changes the default route while SwiftTunnel stays "connected"
+    ///
+    /// For PPP/point-to-point default routes (next-hop 0.0.0.0), we avoid strict
+    /// default-route rebinding because the default IfIndex may refer to a WAN/PPP
+    /// interface rather than the underlying physical NIC carrying frames.
+    pub fn maybe_rebind_on_default_route_change(
+        &mut self,
+        vpn_adapter_name: &str,
+        vpn_adapter_luid: u64,
+    ) -> VpnResult<bool> {
+        if !self.active {
+            return Ok(false);
+        }
+
+        // Cooldown to avoid thrashing if the routing table is unstable.
+        let now = Instant::now();
+        if let Some(last) = self.last_rebind_at {
+            if now.duration_since(last) < Duration::from_secs(5) {
+                return Ok(false);
+            }
+        }
+
+        let prev_default_if_index = self.default_route_if_index;
+        let prev_default_next_hop = self.default_route_next_hop;
+        let current_if_index = self.physical_adapter_if_index;
+
+        let new_default = Self::get_default_route_info();
+        let new_default_if_index = new_default.map(|d| d.if_index);
+        let new_default_next_hop = new_default.map(|d| d.next_hop);
+
+        // Update stored default route info for diagnostics even if we don't rebind.
+        self.default_route_if_index = new_default_if_index;
+        self.default_route_next_hop = new_default_next_hop;
+
+        let strict_default_route =
+            new_default_next_hop.is_some() && new_default_next_hop != Some(0);
+
+        let current_is_up = current_if_index.and_then(Self::is_interface_oper_up);
+        let adapter_down = current_is_up == Some(false);
+
+        let default_changed = strict_default_route
+            && prev_default_if_index.is_some()
+            && new_default_if_index.is_some()
+            && prev_default_if_index != new_default_if_index;
+
+        let default_mismatch = strict_default_route
+            && current_if_index.is_some()
+            && new_default_if_index.is_some()
+            && current_if_index != new_default_if_index;
+
+        let needs_rebind = adapter_down || default_changed || default_mismatch;
+
+        if !needs_rebind {
+            return Ok(false);
+        }
+
+        self.last_rebind_at = Some(now);
+
+        log::warn!(
+            "Split tunnel adapter rebind requested: current_if_index={:?} (up={:?}), prev_default_if_index={:?}, new_default_if_index={:?}, strict_default_route={}",
+            current_if_index,
+            current_is_up,
+            prev_default_if_index,
+            new_default_if_index,
+            strict_default_route
+        );
+
+        let old_physical_adapter_idx = self.physical_adapter_idx;
+        let old_physical_adapter_name = self.physical_adapter_name.clone();
+        let old_physical_adapter_friendly_name = self.physical_adapter_friendly_name.clone();
+        let old_physical_adapter_if_index = self.physical_adapter_if_index;
+        let old_default_route_if_index = prev_default_if_index;
+        let old_default_route_next_hop = prev_default_next_hop;
+
+        self.stop();
+
+        if let Err(e) = self.find_adapters(vpn_adapter_name, vpn_adapter_luid) {
+            log::error!(
+                "Split tunnel rebind: adapter detection failed: {}. Restarting on previous adapter.",
+                e
+            );
+            self.physical_adapter_idx = old_physical_adapter_idx;
+            self.physical_adapter_name = old_physical_adapter_name;
+            self.physical_adapter_friendly_name = old_physical_adapter_friendly_name;
+            self.physical_adapter_if_index = old_physical_adapter_if_index;
+            self.default_route_if_index = old_default_route_if_index;
+            self.default_route_next_hop = old_default_route_next_hop;
+        }
+
+        self.start()?;
+        Ok(true)
     }
 
     /// Check if active
@@ -4490,6 +4835,107 @@ mod tests {
             wifi_score > wan_score,
             "Wi-Fi score ({wifi_score}) should outrank WAN score ({wan_score})"
         );
+    }
+
+    #[test]
+    fn test_select_best_physical_candidate_strict_default_prefers_matching_if_index() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                friendly_name: "Ethernet".to_string(),
+                internal_name: "eth".to_string(),
+                if_index: Some(20),
+                score: 9000,
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                friendly_name: "Wi-Fi".to_string(),
+                internal_name: "wifi".to_string(),
+                if_index: Some(11),
+                score: 1,
+                is_up: Some(true),
+            },
+        ];
+
+        let selected =
+            ParallelInterceptor::select_best_physical_candidate(&candidates, Some(11), true)
+                .expect("should select a candidate");
+
+        assert_eq!(selected.if_index, Some(11));
+        assert_eq!(selected.friendly_name, "Wi-Fi");
+    }
+
+    #[test]
+    fn test_select_best_physical_candidate_strict_default_returns_none_when_no_match() {
+        let candidates = vec![PhysicalCandidate {
+            idx: 0,
+            friendly_name: "Ethernet".to_string(),
+            internal_name: "eth".to_string(),
+            if_index: Some(20),
+            score: 9000,
+            is_up: Some(true),
+        }];
+
+        let selected =
+            ParallelInterceptor::select_best_physical_candidate(&candidates, Some(11), true);
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn test_select_best_physical_candidate_filters_down_adapters_when_up_exists() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                friendly_name: "Ethernet".to_string(),
+                internal_name: "eth".to_string(),
+                if_index: Some(20),
+                score: 9000,
+                is_up: Some(false),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                friendly_name: "Wi-Fi".to_string(),
+                internal_name: "wifi".to_string(),
+                if_index: Some(11),
+                score: 1,
+                is_up: Some(true),
+            },
+        ];
+
+        let selected =
+            ParallelInterceptor::select_best_physical_candidate(&candidates, None, false)
+                .expect("should select a candidate");
+
+        assert_eq!(selected.friendly_name, "Wi-Fi");
+    }
+
+    #[test]
+    fn test_select_best_physical_candidate_keeps_down_when_no_up_known() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                friendly_name: "Ethernet".to_string(),
+                internal_name: "eth".to_string(),
+                if_index: Some(20),
+                score: 9000,
+                is_up: Some(false),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                friendly_name: "Wi-Fi".to_string(),
+                internal_name: "wifi".to_string(),
+                if_index: Some(11),
+                score: 1,
+                is_up: Some(false),
+            },
+        ];
+
+        let selected =
+            ParallelInterceptor::select_best_physical_candidate(&candidates, None, false)
+                .expect("should select a candidate");
+
+        assert_eq!(selected.friendly_name, "Ethernet");
     }
 
     #[test]

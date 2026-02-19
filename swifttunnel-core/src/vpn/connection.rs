@@ -1321,6 +1321,11 @@ impl VpnConnection {
                     // Periodic refresh path
                     _ = refresh_tick.tick() => {
                         let mut driver_guard = driver.lock().await;
+                        match driver_guard.maybe_rebind_on_default_route_change() {
+                            Ok(true) => log::info!("V3: Split tunnel adapter re-bound to active interface"),
+                            Ok(false) => {}
+                            Err(e) => log::warn!("V3: Split tunnel adapter rebind failed: {}", e),
+                        }
                         match driver_guard.refresh_exclusions() {
                             Ok(_) => {
                                 let running_names = driver_guard.get_running_tunnel_apps();
