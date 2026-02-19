@@ -9,6 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import {
+  settingsGenerateNetworkDiagnosticsBundle,
   systemRestartAsAdmin,
   systemInstallDriver,
   updaterCheckChannel,
@@ -63,5 +64,18 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(42);
     await expect(vpnGetPing()).resolves.toEqual(42);
     expect(invoke).toHaveBeenCalledWith("vpn_get_ping");
+  });
+
+  it("settingsGenerateNetworkDiagnosticsBundle invokes backend with expected args", async () => {
+    const resp = {
+      file_path: "C:\\Users\\test\\Desktop\\SwiftTunnel_NetworkDiagnostics_20260219_160000.txt",
+      folder_path: "C:\\Users\\test\\Desktop",
+    };
+    invoke.mockResolvedValue(resp);
+
+    await expect(settingsGenerateNetworkDiagnosticsBundle()).resolves.toEqual(resp);
+    expect(invoke).toHaveBeenCalledWith(
+      "settings_generate_network_diagnostics_bundle",
+    );
   });
 });
