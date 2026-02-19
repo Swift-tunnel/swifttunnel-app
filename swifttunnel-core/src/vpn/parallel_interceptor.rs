@@ -590,6 +590,60 @@ impl ParallelInterceptor {
         })
     }
 
+    fn extract_guid_str_from_internal_name(internal_name: &str) -> Option<&str> {
+        fn is_guid_ascii(bytes: &[u8]) -> bool {
+            if bytes.len() != 36 {
+                return false;
+            }
+            const DASH_POS: [usize; 4] = [8, 13, 18, 23];
+            for (i, &b) in bytes.iter().enumerate() {
+                if DASH_POS.contains(&i) {
+                    if b != b'-' {
+                        return false;
+                    }
+                    continue;
+                }
+                if !b.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+            true
+        }
+
+        let bytes = internal_name.as_bytes();
+
+        // Fast path: `{GUID}` anywhere inside the adapter name.
+        for (open_idx, &b) in bytes.iter().enumerate() {
+            if b != b'{' {
+                continue;
+            }
+            let Some(close_rel) = bytes[open_idx + 1..].iter().position(|&b| b == b'}') else {
+                continue;
+            };
+            let close_idx = open_idx + 1 + close_rel;
+            let inner = &bytes[open_idx + 1..close_idx];
+            if is_guid_ascii(inner) {
+                // ASCII indices are always valid UTF-8 boundaries.
+                return internal_name.get(open_idx + 1..close_idx);
+            }
+        }
+
+        // Fallback: raw GUID without braces somewhere in the string.
+        for start in 0..=bytes.len().saturating_sub(36) {
+            let candidate = &bytes[start..start + 36];
+            if is_guid_ascii(candidate) {
+                return internal_name.get(start..start + 36);
+            }
+        }
+
+        None
+    }
+
+    fn extract_guid_ascii_lowercase(internal_name: &str) -> Option<String> {
+        Self::extract_guid_str_from_internal_name(internal_name)
+            .map(|guid| guid.to_ascii_lowercase())
+    }
+
     fn get_default_route_interface_index_powershell() -> Option<u32> {
         let script = r#"
             $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
@@ -738,11 +792,7 @@ impl ParallelInterceptor {
     }
 
     fn parse_interface_guid_from_internal_name(internal_name: &str) -> Option<windows::core::GUID> {
-        let guid_str = internal_name
-            .rsplit('\\')
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c| c == '{' || c == '}');
+        let guid_str = Self::extract_guid_str_from_internal_name(internal_name)?;
         windows::core::GUID::try_from(guid_str).ok()
     }
 
@@ -758,6 +808,9 @@ impl ParallelInterceptor {
         use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
         use windows::Win32::Networking::WinSock::AF_INET;
         use windows::core::HSTRING;
+
+        let internal_guid_lc = Self::extract_guid_ascii_lowercase(internal_name);
+        let friendly_name_lc = friendly_name.trim().to_ascii_lowercase();
 
         unsafe {
             if let Some(guid) = Self::parse_interface_guid_from_internal_name(internal_name) {
@@ -820,17 +873,44 @@ impl ParallelInterceptor {
                 let name = adapter.AdapterName.to_string().unwrap_or_default();
 
                 // Match by exact GUID comparison (strip \DEVICE\ prefix and compare)
-                let guid_from_internal = internal_name
-                    .rsplit('\\')
-                    .next()
-                    .unwrap_or("")
-                    .trim_matches(|c| c == '{' || c == '}')
-                    .to_ascii_lowercase();
-                let guid_from_adapter = name
-                    .trim_matches(|c| c == '{' || c == '}')
-                    .to_ascii_lowercase();
-                if !guid_from_internal.is_empty() && guid_from_internal == guid_from_adapter {
-                    return Some(adapter.Anonymous1.Anonymous.IfIndex);
+                if let Some(ref guid_from_internal) = internal_guid_lc {
+                    let guid_from_adapter = Self::extract_guid_ascii_lowercase(&name)
+                        .unwrap_or_else(|| {
+                            name.trim_matches(|c| c == '{' || c == '}')
+                                .to_ascii_lowercase()
+                        });
+                    if !guid_from_internal.is_empty() && guid_from_internal == &guid_from_adapter {
+                        return Some(adapter.Anonymous1.Anonymous.IfIndex);
+                    }
+                }
+
+                // Fallback matching: our "friendly name" can be an alias (Wi-Fi 2) or a description
+                // (TP-Link Wireless USB Adapter #2), depending on which API succeeds.
+                if !friendly_name_lc.is_empty() {
+                    let desc = if !adapter.Description.0.is_null() {
+                        std::ffi::CStr::from_ptr(adapter.Description.0 as *const i8)
+                            .to_string_lossy()
+                            .to_string()
+                    } else {
+                        String::new()
+                    };
+                    if !desc.is_empty() && desc.trim().to_ascii_lowercase() == friendly_name_lc {
+                        return Some(adapter.Anonymous1.Anonymous.IfIndex);
+                    }
+
+                    if !adapter.FriendlyName.0.is_null() {
+                        let len = (0..)
+                            .take_while(|&i| *adapter.FriendlyName.0.add(i) != 0)
+                            .count();
+                        let friendly_slice =
+                            std::slice::from_raw_parts(adapter.FriendlyName.0, len);
+                        let adapter_friendly = String::from_utf16_lossy(friendly_slice);
+                        if !adapter_friendly.is_empty()
+                            && adapter_friendly.trim().to_ascii_lowercase() == friendly_name_lc
+                        {
+                            return Some(adapter.Anonymous1.Anonymous.IfIndex);
+                        }
+                    }
                 }
 
                 current = adapter.Next;
@@ -3511,15 +3591,7 @@ fn is_pid_tunnel_app(pid: u32, snapshot: &ProcessSnapshot) -> bool {
 
 /// Get adapter friendly name
 fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
-    let guid = internal_name
-        .rsplit('\\')
-        .next()
-        .unwrap_or("")
-        .trim_matches(|c| c == '{' || c == '}');
-
-    if guid.is_empty() {
-        return None;
-    }
+    let guid = ParallelInterceptor::extract_guid_ascii_lowercase(internal_name)?;
 
     unsafe {
         let mut buf_len: u32 = 0;
@@ -3575,16 +3647,7 @@ fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
-    let guid = internal_name
-        .rsplit('\\')
-        .next()
-        .unwrap_or("")
-        .trim_matches(|c| c == '{' || c == '}')
-        .to_lowercase();
-
-    if guid.is_empty() {
-        return None;
-    }
+    let guid = ParallelInterceptor::extract_guid_ascii_lowercase(internal_name)?;
 
     unsafe {
         let mut buf_len: u32 = 0;
@@ -3673,17 +3736,10 @@ fn check_adapter_matches_luid(internal_name: &str, target_luid: u64) -> bool {
         return false;
     }
 
-    // Extract GUID from internal_name (format: \DEVICE\{GUID})
-    let internal_guid = internal_name
-        .rsplit('\\')
-        .next()
-        .unwrap_or("")
-        .trim_matches(|c| c == '{' || c == '}')
-        .to_lowercase();
-
-    if internal_guid.is_empty() {
+    let Some(internal_guid) = ParallelInterceptor::extract_guid_ascii_lowercase(internal_name)
+    else {
         return false;
-    }
+    };
 
     unsafe {
         let mut buf_len: u32 = 0;
@@ -5230,6 +5286,17 @@ mod tests {
             windows::core::GUID::try_from("12345678-1234-1234-1234-1234567890ab").unwrap();
         let parsed = ParallelInterceptor::parse_interface_guid_from_internal_name(
             "\\DEVICE\\{12345678-1234-1234-1234-1234567890AB}",
+        )
+        .unwrap();
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_parse_interface_guid_from_internal_name_handles_npf_prefixed_guid() {
+        let expected =
+            windows::core::GUID::try_from("12345678-1234-1234-1234-1234567890ab").unwrap();
+        let parsed = ParallelInterceptor::parse_interface_guid_from_internal_name(
+            "\\Device\\NPF_{12345678-1234-1234-1234-1234567890ab}",
         )
         .unwrap();
         assert_eq!(parsed, expected);
