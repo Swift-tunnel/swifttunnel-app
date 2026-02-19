@@ -264,6 +264,8 @@ pub struct ParallelInterceptor {
     physical_adapter_name: Option<String>,
     /// Physical adapter friendly name (e.g., "Ethernet") for offload control
     physical_adapter_friendly_name: Option<String>,
+    /// Physical adapter interface index (IfIndex) for default-route validation
+    physical_adapter_if_index: Option<u32>,
     /// Whether we disabled TSO on the physical adapter (to restore on cleanup)
     tso_was_disabled: bool,
     /// Whether we disabled IPv6 on the physical adapter (to restore on cleanup)
@@ -330,6 +332,7 @@ impl ParallelInterceptor {
             physical_adapter_idx: None,
             physical_adapter_name: None,
             physical_adapter_friendly_name: None,
+            physical_adapter_if_index: None,
             tso_was_disabled: false,
             ipv6_was_disabled: false,
             default_route_if_index: None,
@@ -400,7 +403,9 @@ impl ParallelInterceptor {
     /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
     pub fn get_diagnostics(&self) -> (Option<String>, bool, u64, u64) {
         let adapter_name = self.physical_adapter_friendly_name.clone();
-        let has_default_route = self.default_route_if_index.is_some();
+        let has_default_route = self.physical_adapter_if_index.is_some()
+            && self.default_route_if_index.is_some()
+            && self.physical_adapter_if_index == self.default_route_if_index;
 
         // Sum up stats from all workers
         let mut tunneled = 0u64;
@@ -578,9 +583,55 @@ impl ParallelInterceptor {
         best
     }
 
+    fn get_best_interface_index_for_ipv4(ip: Ipv4Addr) -> Option<u32> {
+        use windows::Win32::NetworkManagement::IpHelper::GetBestInterfaceEx;
+        use windows::Win32::Networking::WinSock::{
+            AF_INET, IN_ADDR, IN_ADDR_0, SOCKADDR, SOCKADDR_IN,
+        };
+
+        let mut if_index: u32 = 0;
+        let ip_octets = ip.octets();
+        let sockaddr_in = SOCKADDR_IN {
+            sin_family: AF_INET,
+            sin_port: 0,
+            sin_addr: IN_ADDR {
+                S_un: IN_ADDR_0 {
+                    S_addr: u32::from_ne_bytes(ip_octets),
+                },
+            },
+            sin_zero: [0; 8],
+        };
+
+        let rc = unsafe {
+            GetBestInterfaceEx(
+                &sockaddr_in as *const SOCKADDR_IN as *const SOCKADDR,
+                &mut if_index,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        Some(if_index)
+    }
+
     fn get_default_route_interface_index() -> Option<u32> {
         use windows::Win32::Foundation::*;
         use windows::Win32::NetworkManagement::IpHelper::*;
+
+        if let Some(idx) = Self::get_best_interface_index_for_ipv4(Ipv4Addr::new(1, 1, 1, 1)) {
+            log::info!(
+                "Best interface index via GetBestInterfaceEx (1.1.1.1): {}",
+                idx
+            );
+            return Some(idx);
+        }
+        if let Some(idx) = Self::get_best_interface_index_for_ipv4(Ipv4Addr::new(8, 8, 8, 8)) {
+            log::info!(
+                "Best interface index via GetBestInterfaceEx (8.8.8.8): {}",
+                idx
+            );
+            return Some(idx);
+        }
 
         unsafe {
             // Get routing table size
@@ -625,12 +676,54 @@ impl ParallelInterceptor {
         }
     }
 
-    /// Get interface index from adapter GUID/name using GetAdaptersAddresses
-    fn get_adapter_interface_index(adapter_guid: &str) -> Option<u32> {
-        use windows::Win32::NetworkManagement::IpHelper::*;
+    fn parse_interface_guid_from_internal_name(internal_name: &str) -> Option<windows::core::GUID> {
+        let guid_str = internal_name
+            .rsplit('\\')
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c| c == '{' || c == '}');
+        windows::core::GUID::try_from(guid_str).ok()
+    }
+
+    /// Resolve interface index (IfIndex) from the internal adapter name/friendly alias.
+    ///
+    /// `ndisapi` adapter names are typically `\\DEVICE\\{GUID}`. We convert GUID -> LUID -> IfIndex
+    /// using IP Helper APIs for reliable default-route comparisons.
+    fn resolve_adapter_interface_index(internal_name: &str, friendly_name: &str) -> Option<u32> {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            ConvertInterfaceAliasToLuid, ConvertInterfaceGuidToLuid, ConvertInterfaceLuidToIndex,
+            GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        };
+        use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
         use windows::Win32::Networking::WinSock::AF_INET;
+        use windows::core::HSTRING;
 
         unsafe {
+            if let Some(guid) = Self::parse_interface_guid_from_internal_name(internal_name) {
+                let mut luid = NET_LUID_LH::default();
+                let rc = ConvertInterfaceGuidToLuid(&guid, &mut luid);
+                if rc.0 == 0 {
+                    let mut if_index: u32 = 0;
+                    let rc = ConvertInterfaceLuidToIndex(&luid, &mut if_index);
+                    if rc.0 == 0 {
+                        return Some(if_index);
+                    }
+                }
+            }
+
+            if !friendly_name.is_empty() {
+                let mut luid = NET_LUID_LH::default();
+                let alias = HSTRING::from(friendly_name);
+                let rc = ConvertInterfaceAliasToLuid(&alias, &mut luid);
+                if rc.0 == 0 {
+                    let mut if_index: u32 = 0;
+                    let rc = ConvertInterfaceLuidToIndex(&luid, &mut if_index);
+                    if rc.0 == 0 {
+                        return Some(if_index);
+                    }
+                }
+            }
+
             let mut size: u32 = 0;
             let _ = GetAdaptersAddresses(
                 AF_INET.0 as u32,
@@ -666,11 +759,16 @@ impl ParallelInterceptor {
                 let name = adapter.AdapterName.to_string().unwrap_or_default();
 
                 // Match by exact GUID comparison (strip \DEVICE\ prefix and compare)
-                let guid_from_adapter = adapter_guid.trim_start_matches("\\DEVICE\\");
-                if guid_from_adapter == name
-                    || guid_from_adapter.trim_matches('{').trim_matches('}')
-                        == name.trim_matches('{').trim_matches('}')
-                {
+                let guid_from_internal = internal_name
+                    .rsplit('\\')
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(|c| c == '{' || c == '}')
+                    .to_ascii_lowercase();
+                let guid_from_adapter = name
+                    .trim_matches(|c| c == '{' || c == '}')
+                    .to_ascii_lowercase();
+                if !guid_from_internal.is_empty() && guid_from_internal == guid_from_adapter {
                     return Some(adapter.Anonymous1.Anonymous.IfIndex);
                 }
 
@@ -752,8 +850,8 @@ impl ParallelInterceptor {
         log::info!("Found {} adapters", adapters.len());
 
         let mut vpn_adapter: Option<(usize, String)> = None;
-        // (idx, friendly_name, internal_name, score)
-        let mut physical_candidates: Vec<(usize, String, String, i32)> = Vec::new();
+        // (idx, friendly_name, internal_name, if_index, score)
+        let mut physical_candidates: Vec<(usize, String, String, Option<u32>, i32)> = Vec::new();
 
         for (idx, adapter) in adapters.iter().enumerate() {
             let internal_name = adapter.get_name();
@@ -840,7 +938,8 @@ impl ParallelInterceptor {
                 // CRITICAL FIX (v0.9.25): Prioritize adapter with default route
                 // This fixes the bug where users with multiple NICs (e.g., disconnected Ethernet + WiFi)
                 // had traffic going through the wrong adapter
-                let adapter_if_index = Self::get_adapter_interface_index(&internal_name);
+                let adapter_if_index =
+                    Self::resolve_adapter_interface_index(&internal_name, &friendly_name);
                 let has_default_route = adapter_if_index.is_some()
                     && default_route_if_index.is_some()
                     && adapter_if_index == default_route_if_index;
@@ -859,6 +958,7 @@ impl ParallelInterceptor {
                         idx,
                         friendly_name.clone(),
                         internal_name.to_string(),
+                        adapter_if_index,
                         score,
                     ));
                 } else {
@@ -868,9 +968,9 @@ impl ParallelInterceptor {
         }
 
         // Select physical adapter - MUST have default route if available
-        let selected = physical_candidates.iter().max_by_key(|x| x.3);
+        let selected = physical_candidates.iter().max_by_key(|x| x.4);
 
-        if let Some((idx, friendly_name, internal_name, score)) = selected {
+        if let Some((idx, friendly_name, internal_name, if_index, score)) = selected {
             // Warn if selected adapter doesn't have default route but others exist
             let has_default = *score >= 1000;
             if !has_default && default_route_if_index.is_some() {
@@ -886,11 +986,13 @@ impl ParallelInterceptor {
             self.physical_adapter_idx = Some(*idx);
             self.physical_adapter_name = Some(internal_name.clone());
             self.physical_adapter_friendly_name = Some(friendly_name.clone());
+            self.physical_adapter_if_index = *if_index;
             log::info!(
-                "Selected physical adapter: {} (index {}, internal: '{}', score: {})",
+                "Selected physical adapter: {} (index {}, internal: '{}', if_index: {:?}, score: {})",
                 friendly_name,
                 idx,
                 internal_name,
+                if_index,
                 score
             );
         } else {
@@ -4900,5 +5002,35 @@ mod tests {
             })
             .unwrap();
         assert!(!interceptor.ipv6_was_disabled);
+    }
+
+    #[test]
+    fn test_parse_interface_guid_from_internal_name_handles_device_prefix_and_braces() {
+        let expected =
+            windows::core::GUID::try_from("12345678-1234-1234-1234-1234567890ab").unwrap();
+        let parsed = ParallelInterceptor::parse_interface_guid_from_internal_name(
+            "\\DEVICE\\{12345678-1234-1234-1234-1234567890AB}",
+        )
+        .unwrap();
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_get_diagnostics_has_default_route_requires_ifindex_match() {
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_friendly_name = Some("Wi-Fi".to_string());
+
+        interceptor.physical_adapter_if_index = Some(11);
+        interceptor.default_route_if_index = Some(11);
+        let (_, has_default_route, _, _) = interceptor.get_diagnostics();
+        assert!(has_default_route);
+
+        interceptor.physical_adapter_if_index = Some(20);
+        let (_, has_default_route, _, _) = interceptor.get_diagnostics();
+        assert!(!has_default_route);
+
+        interceptor.physical_adapter_if_index = None;
+        let (_, has_default_route, _, _) = interceptor.get_diagnostics();
+        assert!(!has_default_route);
     }
 }
