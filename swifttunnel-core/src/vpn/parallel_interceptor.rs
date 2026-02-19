@@ -2699,6 +2699,31 @@ fn parse_ppp_ipv4_payload_offset(data: &[u8], start: usize) -> Option<usize> {
 }
 
 #[inline(always)]
+fn parse_llc_snap_ipv4_payload_offset(data: &[u8], llc_start: usize) -> Option<usize> {
+    // LLC + SNAP header:
+    // [DSAP=0xAA][SSAP=0xAA][CTRL=0x03][OUI(3)][EtherType(2)]
+    if data.len() < llc_start + 8 {
+        return None;
+    }
+
+    if data[llc_start] != 0xAA || data[llc_start + 1] != 0xAA || data[llc_start + 2] != 0x03 {
+        return None;
+    }
+
+    let snap_ethertype = u16::from_be_bytes([data[llc_start + 6], data[llc_start + 7]]);
+    if snap_ethertype != 0x0800 {
+        return None;
+    }
+
+    let ip_start = llc_start + 8;
+    if is_valid_ipv4_header_offset(data, ip_start) {
+        Some(ip_start)
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
 fn parse_ipv4_header_offset(data: &[u8]) -> Option<usize> {
     if data.len() >= 14 {
         let mut ip_start = 14usize;
@@ -2732,6 +2757,14 @@ fn parse_ipv4_header_offset(data: &[u8]) -> Option<usize> {
                 return None;
             }
             return parse_ppp_ipv4_payload_offset(data, ip_start + 6);
+        } else if ethertype <= 1500 {
+            // IEEE 802.3 length field + LLC/SNAP encapsulation.
+            // Seen on some wireless/virtual adapters where IPv4 is carried via
+            // SNAP rather than Ethernet-II EtherType framing.
+            if let Some(offset) = parse_llc_snap_ipv4_payload_offset(data, ip_start) {
+                return Some(offset);
+            }
+            ip_start = usize::MAX;
         } else if ethertype != 0x0800 {
             ip_start = usize::MAX;
         }
@@ -4109,6 +4142,38 @@ mod tests {
         frame
     }
 
+    fn build_llc_snap_ipv4_frame(
+        protocol: u8,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        // IEEE 802.3 length + LLC/SNAP + IPv4 + transport header
+        let payload_len = (8 + 20 + 8) as u16;
+        let mut frame = vec![0u8; 14 + payload_len as usize];
+        frame[12..14].copy_from_slice(&payload_len.to_be_bytes()); // 802.3 length
+
+        // LLC + SNAP header
+        frame[14] = 0xAA; // DSAP
+        frame[15] = 0xAA; // SSAP
+        frame[16] = 0x03; // Control (UI)
+        frame[17..20].copy_from_slice(&[0x00, 0x00, 0x00]); // OUI
+        frame[20..22].copy_from_slice(&0x0800u16.to_be_bytes()); // SNAP EtherType: IPv4
+
+        let ip_start = 22;
+        frame[ip_start] = 0x45; // IPv4, IHL=5
+        frame[ip_start + 9] = protocol; // TCP=6, UDP=17
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+
+        let transport_start = ip_start + 20;
+        frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+
+        frame
+    }
+
     fn build_pppoe_ipv4_frame(
         protocol_field_compressed: bool,
         protocol: u8,
@@ -4334,6 +4399,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ports_llc_snap_ipv4_frame() {
+        let frame = build_llc_snap_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 30),
+            Ipv4Addr::new(128, 116, 80, 30),
+            55030,
+            62030,
+        );
+
+        let (src, dst) = parse_ports(&frame).unwrap();
+        assert_eq!(src, 55030);
+        assert_eq!(dst, 62030);
+    }
+
+    #[test]
     fn test_parse_ports_raw_ipv4_packet() {
         let packet = build_raw_ipv4_packet(
             17,
@@ -4541,6 +4621,39 @@ mod tests {
         };
 
         let frame = build_pppoe_ipv4_frame(true, 17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_should_route_snapshot_tunnels_udp_llc_snap_frame() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 112);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50120;
+        let dst_port = 443;
+        let pid = 8765;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_llc_snap_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -4786,6 +4899,10 @@ mod tests {
             (
                 "single_vlan_ipv4",
                 build_vlan_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port),
+            ),
+            (
+                "llc_snap_ipv4",
+                build_llc_snap_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port),
             ),
             (
                 "pppoe_ipv4",
