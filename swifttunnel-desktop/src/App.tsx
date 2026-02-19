@@ -1,6 +1,10 @@
 import { useEffect } from "react";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  availableMonitors,
+  getCurrentWindow,
+  primaryMonitor,
+} from "@tauri-apps/api/window";
 import { Sidebar } from "./components/common/Sidebar";
 import { LoginScreen } from "./components/auth/LoginScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
@@ -17,6 +21,7 @@ import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { shouldAutoReconnectOnLaunch } from "./lib/startup";
 import {
+  ensureWindowStateVisible,
   isPersistableWindowSize,
   normalizeWindowState,
 } from "./lib/windowState";
@@ -177,11 +182,48 @@ function App() {
     };
 
     const initWindowState = async () => {
-      const ws = normalizeWindowState(
+      let ws = normalizeWindowState(
         useSettingsStore.getState().settings.window_state,
       );
       try {
         if (disposed) return;
+
+        try {
+          const [monitors, primary] = await Promise.all([
+            availableMonitors(),
+            primaryMonitor(),
+          ]);
+
+          const workAreas = monitors.map((monitor) => ({
+            x: monitor.workArea.position.x,
+            y: monitor.workArea.position.y,
+            width: monitor.workArea.size.width,
+            height: monitor.workArea.size.height,
+          }));
+
+          const primaryWorkArea = primary
+            ? {
+                x: primary.workArea.position.x,
+                y: primary.workArea.position.y,
+                width: primary.workArea.size.width,
+                height: primary.workArea.size.height,
+              }
+            : undefined;
+
+          const next = ensureWindowStateVisible(ws, workAreas, {
+            primaryMonitor: primaryWorkArea,
+          });
+
+          if (next.x !== ws.x || next.y !== ws.y) {
+            ws = next;
+            updateSettings({ window_state: ws });
+            await saveSettings();
+          } else {
+            ws = next;
+          }
+        } catch {
+          // ignore monitor detection errors (we'll fall back to the persisted position)
+        }
 
         if (ws.width > 0 && ws.height > 0) {
           await appWindow.setSize(
