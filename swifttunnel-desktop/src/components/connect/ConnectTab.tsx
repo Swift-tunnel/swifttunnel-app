@@ -4,6 +4,7 @@ import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
 import { countryFlag, getLatencyColor, formatBytes } from "../../lib/utils";
+import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import {
   isAdminPrivilegeError,
   shouldResetElevationState,
@@ -53,6 +54,7 @@ function stateLabel(state: string): string {
 export function ConnectTab() {
   const vpnState = useVpnStore((s) => s.state);
   const vpnRegion = useVpnStore((s) => s.region);
+  const vpnServerEndpoint = useVpnStore((s) => s.serverEndpoint);
   const splitActive = useVpnStore((s) => s.splitTunnelActive);
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
   const vpnError = useVpnStore((s) => s.error);
@@ -70,6 +72,7 @@ export function ConnectTab() {
   const save = useSettingsStore((s) => s.save);
 
   const regions = useServerStore((s) => s.regions);
+  const servers = useServerStore((s) => s.servers);
   const serversLoading = useServerStore((s) => s.isLoading);
   const serversError = useServerStore((s) => s.error);
   const getLatency = useServerStore((s) => s.getLatency);
@@ -83,6 +86,11 @@ export function ConnectTab() {
   const selectedRegion = regions.find((r) => r.id === settings.selected_region);
   const selectedLatency = getLatency(settings.selected_region);
   const connectedRegion = findRegionForVpnRegion(regions, vpnRegion);
+  const connectedServerLabel = formatConnectedServerLabel(
+    vpnServerEndpoint,
+    servers,
+    vpnRegion,
+  );
 
   useEffect(() => {
     if (!isConnected) return;
@@ -433,15 +441,13 @@ export function ConnectTab() {
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="white"
-                strokeWidth="1.8"
+                strokeWidth="2"
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 style={{ filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.15))" }}
               >
-                <path d="M5 12.55a11 11 0 0 1 14.08 0" />
-                <path d="M1.42 9a16 16 0 0 1 21.16 0" />
-                <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
-                <circle cx="12" cy="20" r="1" fill="white" />
+                <path d="M12 2v10" />
+                <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
               </svg>
             )}
           </motion.button>
@@ -526,7 +532,7 @@ export function ConnectTab() {
               style={{ backgroundColor: "var(--color-border-subtle)" }}
             >
               <div className="grid grid-cols-3 gap-px">
-                <HudCell label="Mode" value="V3 Relay" accent />
+                <HudCell label="Server" value={connectedServerLabel} />
                 <HudCell
                   label="Ping"
                   value={

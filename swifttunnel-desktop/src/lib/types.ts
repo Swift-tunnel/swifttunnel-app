@@ -210,6 +210,11 @@ export interface WindowState {
   maximized: boolean;
 }
 
+export interface NetworkDiagnosticsBundleResponse {
+  file_path: string;
+  folder_path: string;
+}
+
 export interface UpdaterCheckResponse {
   current_version: string;
   available_version: string | null;

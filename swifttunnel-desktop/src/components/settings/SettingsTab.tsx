@@ -1,9 +1,12 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { useAuthStore } from "../../stores/authStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
 import { Toggle } from "../common/Toggle";
-import { systemOpenUrl } from "../../lib/commands";
+import {
+  settingsGenerateNetworkDiagnosticsBundle,
+  systemOpenUrl,
+} from "../../lib/commands";
 import type { AppSettings, UpdateChannel } from "../../lib/types";
 
 declare const __APP_VERSION__: string;
@@ -24,10 +27,35 @@ export function SettingsTab() {
   const updaterError = useUpdaterStore((s) => s.error);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
+  const [isGeneratingDiagnostics, setIsGeneratingDiagnostics] = useState(false);
+  const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
 
   function set(partial: Partial<AppSettings>) {
     update(partial);
     save();
+  }
+
+  async function generateDiagnosticsBundle() {
+    setIsGeneratingDiagnostics(true);
+    setDiagnosticsError(null);
+
+    try {
+      const response = await settingsGenerateNetworkDiagnosticsBundle();
+      setDiagnosticsPath(response.file_path);
+
+      try {
+        await systemOpenUrl(response.folder_path);
+      } catch (openError) {
+        setDiagnosticsError(
+          `Bundle generated, but failed to open folder: ${String(openError)}`,
+        );
+      }
+    } catch (e) {
+      setDiagnosticsError(String(e));
+    } finally {
+      setIsGeneratingDiagnostics(false);
+    }
   }
 
   return (
@@ -249,6 +277,35 @@ export function SettingsTab() {
           </Row>
         </Section>
       )}
+
+      {/* ── Support ── */}
+      <Section title="Support">
+        <Row
+          label="Generate Network Diagnostics"
+          desc="Create a support-ready .txt with ISP, routing, and split tunnel diagnostics"
+        >
+          <button
+            onClick={() => void generateDiagnosticsBundle()}
+            disabled={isGeneratingDiagnostics}
+            className="rounded border border-border-subtle px-2.5 py-1 text-xs text-text-primary disabled:opacity-50"
+          >
+            {isGeneratingDiagnostics ? "Generating..." : "Generate Bundle"}
+          </button>
+        </Row>
+        {diagnosticsPath && (
+          <div className="px-4 pb-3 text-xs text-text-muted">
+            Saved to:
+            <div className="mt-1 break-all font-mono text-[11px] text-text-secondary">
+              {diagnosticsPath}
+            </div>
+          </div>
+        )}
+        {diagnosticsError && (
+          <div className="px-4 pb-3 text-xs text-status-error">
+            {diagnosticsError}
+          </div>
+        )}
+      </Section>
 
       {/* ── About ── */}
       <Section title="About">

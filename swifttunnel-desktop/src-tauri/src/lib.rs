@@ -174,6 +174,7 @@ pub fn run() {
             // Settings
             commands::settings::settings_load,
             commands::settings::settings_save,
+            commands::settings::settings_generate_network_diagnostics_bundle,
             // Updater
             commands::updater::updater_check_channel,
             commands::updater::updater_install_channel,

@@ -14,6 +14,7 @@ import type {
   BufferbloatResultResponse,
   AdminCheckResponse,
   DriverCheckResponse,
+  NetworkDiagnosticsBundleResponse,
   UpdaterCheckResponse,
   UpdaterInstallResponse,
   UpdateChannel,
@@ -113,6 +114,11 @@ export const settingsLoad = () =>
 
 export const settingsSave = (settingsJson: string) =>
   invoke<void>("settings_save", { settingsJson });
+
+export const settingsGenerateNetworkDiagnosticsBundle = () =>
+  invoke<NetworkDiagnosticsBundleResponse>(
+    "settings_generate_network_diagnostics_bundle",
+  );
 
 // ── Updater ──
 

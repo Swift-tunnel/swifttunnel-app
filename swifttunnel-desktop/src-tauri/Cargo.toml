@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "1.15.25"
+version = "1.15.26"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel desktop app - Tauri v2 frontend"
@@ -24,6 +24,7 @@ sha2 = "0.10"
 base64 = "0.22"
 ring = "0.17"
 url = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
