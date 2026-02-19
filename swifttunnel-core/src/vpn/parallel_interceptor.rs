@@ -746,8 +746,9 @@ impl ParallelInterceptor {
 
     fn is_interface_oper_up(if_index: u32) -> Option<bool> {
         use windows::Win32::NetworkManagement::IpHelper::{
-            GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IF_OPER_STATUS, IP_ADAPTER_ADDRESSES_LH,
+            GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
         };
+        use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
         use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
         unsafe {
@@ -782,7 +783,7 @@ impl ParallelInterceptor {
                 let a_if = adapter.Anonymous1.Anonymous.IfIndex;
                 let a_ipv6_if = adapter.Ipv6IfIndex;
                 if a_if == if_index || a_ipv6_if == if_index {
-                    return Some(adapter.OperStatus == IF_OPER_STATUS::IfOperStatusUp);
+                    return Some(adapter.OperStatus == IfOperStatusUp);
                 }
                 current = adapter.Next;
             }
@@ -944,12 +945,20 @@ impl ParallelInterceptor {
                 return None;
             }
 
-            let guid_str = guid.to_string();
-            Some(
-                guid_str
-                    .trim_matches(|c| c == '{' || c == '}')
-                    .to_ascii_lowercase(),
-            )
+            Some(format!(
+                "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                guid.data1,
+                guid.data2,
+                guid.data3,
+                guid.data4[0],
+                guid.data4[1],
+                guid.data4[2],
+                guid.data4[3],
+                guid.data4[4],
+                guid.data4[5],
+                guid.data4[6],
+                guid.data4[7],
+            ))
         }
     }
 
