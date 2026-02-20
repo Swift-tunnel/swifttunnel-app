@@ -494,6 +494,7 @@ impl VpnConnection {
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
+        preferred_physical_adapter_guid: Option<String>,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -597,6 +598,7 @@ impl VpnConnection {
                     relay_candidates,
                     whitelisted_regions,
                     forced_servers,
+                    preferred_physical_adapter_guid.clone(),
                 )
                 .await
             {
@@ -657,6 +659,7 @@ impl VpnConnection {
         relay_candidates: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
+        preferred_physical_adapter_guid: Option<String>,
     ) -> VpnResult<(Vec<String>, String, String, SocketAddr)> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -1124,7 +1127,11 @@ impl VpnConnection {
         );
 
         // Configure split tunnel driver (no Wintun LUID needed for UDP relay)
-        let split_config = SplitTunnelConfig::new(tunnel_apps.clone(), 0);
+        let split_config = SplitTunnelConfig::new(
+            tunnel_apps.clone(),
+            0,
+            preferred_physical_adapter_guid.clone(),
+        );
 
         driver.configure(split_config).map_err(|e| {
             let _ = driver.close();

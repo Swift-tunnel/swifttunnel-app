@@ -15,6 +15,7 @@ import {
   updaterCheckChannel,
   updaterInstallChannel,
   vpnGetPing,
+  vpnListNetworkAdapters,
 } from "./commands";
 
 describe("lib/commands", () => {
@@ -64,6 +65,24 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(42);
     await expect(vpnGetPing()).resolves.toEqual(42);
     expect(invoke).toHaveBeenCalledWith("vpn_get_ping");
+  });
+
+  it("vpnListNetworkAdapters invokes backend with expected args", async () => {
+    const resp = [
+      {
+        guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        friendly_name: "Wi-Fi",
+        description: "Realtek RTL8852BE WiFi 6 802.11ax PCIe Adapter",
+        if_index: 12,
+        is_up: true,
+        is_default_route: true,
+        kind: "wifi",
+      },
+    ];
+    invoke.mockResolvedValue(resp);
+
+    await expect(vpnListNetworkAdapters()).resolves.toEqual(resp);
+    expect(invoke).toHaveBeenCalledWith("vpn_list_network_adapters");
   });
 
   it("settingsGenerateNetworkDiagnosticsBundle invokes backend with expected args", async () => {

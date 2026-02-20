@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useAuthStore } from "../../stores/authStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
@@ -6,8 +6,9 @@ import { Toggle } from "../common/Toggle";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
   systemOpenUrl,
+  vpnListNetworkAdapters,
 } from "../../lib/commands";
-import type { AppSettings, UpdateChannel } from "../../lib/types";
+import type { AppSettings, NetworkAdapterInfo, UpdateChannel } from "../../lib/types";
 
 declare const __APP_VERSION__: string;
 
@@ -30,11 +31,43 @@ export function SettingsTab() {
   const [isGeneratingDiagnostics, setIsGeneratingDiagnostics] = useState(false);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [networkAdapters, setNetworkAdapters] = useState<NetworkAdapterInfo[] | null>(
+    null,
+  );
+  const [networkAdaptersLoading, setNetworkAdaptersLoading] = useState(false);
+  const [networkAdaptersError, setNetworkAdaptersError] = useState<string | null>(
+    null,
+  );
 
   function set(partial: Partial<AppSettings>) {
     update(partial);
     save();
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    setNetworkAdaptersLoading(true);
+    setNetworkAdaptersError(null);
+
+    vpnListNetworkAdapters()
+      .then((adapters) => {
+        if (cancelled) return;
+        setNetworkAdapters(adapters);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setNetworkAdapters(null);
+        setNetworkAdaptersError(String(e));
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setNetworkAdaptersLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function generateDiagnosticsBundle() {
     setIsGeneratingDiagnostics(true);
@@ -171,6 +204,102 @@ export function SettingsTab() {
             onChange={(v) => set({ enable_discord_rpc: v })}
           />
         </Row>
+      </Section>
+
+      {/* ── VPN ── */}
+      <Section title="VPN">
+        <Row
+          label="Network Adapter"
+          desc="Auto-selects your active adapter. If split tunnel fails, pick Wi‑Fi/Ethernet here (applies on next connect)."
+        >
+          <select
+            value={settings.preferred_physical_adapter_guid || ""}
+            onChange={(e) =>
+              set({
+                preferred_physical_adapter_guid: e.target.value
+                  ? e.target.value
+                  : null,
+              })
+            }
+            disabled={networkAdaptersLoading}
+            className="w-64 rounded border bg-bg-input px-2 py-1 text-sm text-text-primary disabled:opacity-50"
+            style={{ borderColor: "var(--color-border-default)" }}
+            onFocus={(e) =>
+              (e.currentTarget.style.borderColor =
+                "var(--color-accent-primary)")
+            }
+            onBlur={(e) =>
+              (e.currentTarget.style.borderColor =
+                "var(--color-border-default)")
+            }
+          >
+            <option value="">Auto (Recommended)</option>
+            {(networkAdapters || [])
+              .slice()
+              .sort((a, b) => {
+                if (a.is_default_route !== b.is_default_route) {
+                  return a.is_default_route ? -1 : 1;
+                }
+                if (a.is_up !== b.is_up) {
+                  return a.is_up ? -1 : 1;
+                }
+                const kindPriority = (kind: string) => {
+                  switch (kind) {
+                    case "ethernet":
+                      return 0;
+                    case "wifi":
+                      return 1;
+                    case "ppp":
+                      return 2;
+                    case "tunnel":
+                      return 3;
+                    case "loopback":
+                      return 4;
+                    default:
+                      return 5;
+                  }
+                };
+                const ap = kindPriority(a.kind);
+                const bp = kindPriority(b.kind);
+                if (ap !== bp) return ap - bp;
+                const an = (a.friendly_name || a.description || a.guid).toLowerCase();
+                const bn = (b.friendly_name || b.description || b.guid).toLowerCase();
+                return an.localeCompare(bn);
+              })
+              .map((adapter) => {
+                const label =
+                  adapter.friendly_name || adapter.description || adapter.guid;
+                const tags = [
+                  adapter.kind && adapter.kind !== "other" ? adapter.kind : null,
+                  adapter.is_up ? "up" : "down",
+                  adapter.is_default_route ? "default" : null,
+                ]
+                  .filter(Boolean)
+                  .join(", ");
+                return (
+                  <option key={adapter.guid} value={adapter.guid}>
+                    {tags ? `${label} (${tags})` : label}
+                  </option>
+                );
+              })}
+          </select>
+        </Row>
+        {networkAdaptersError && (
+          <div className="px-4 pb-3 text-xs text-status-error">
+            Failed to load adapters: {networkAdaptersError}
+          </div>
+        )}
+        {!networkAdaptersError &&
+          settings.preferred_physical_adapter_guid &&
+          networkAdapters &&
+          !networkAdapters.some(
+            (a) => a.guid === settings.preferred_physical_adapter_guid,
+          ) && (
+            <div className="px-4 pb-3 text-xs text-status-error">
+              Selected adapter not found. Choose Auto (Recommended) or select
+              another adapter.
+            </div>
+          )}
       </Section>
 
       {/* ── Updates ── */}

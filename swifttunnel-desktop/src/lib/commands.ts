@@ -5,6 +5,7 @@ import type {
   VpnStateResponse,
   ThroughputResponse,
   DiagnosticsResponse,
+  NetworkAdapterInfo,
   ServerListResponse,
   LatencyEntry,
   PerformanceMetricsResponse,
@@ -62,6 +63,9 @@ export const vpnGetPing = () =>
 
 export const vpnGetDiagnostics = () =>
   invoke<DiagnosticsResponse | null>("vpn_get_diagnostics");
+
+export const vpnListNetworkAdapters = () =>
+  invoke<NetworkAdapterInfo[]>("vpn_list_network_adapters");
 
 // ── Servers ──
 

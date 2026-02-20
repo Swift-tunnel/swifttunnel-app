@@ -147,6 +147,12 @@ pub struct AppSettings {
     /// Stored as RobloxRegion display names (e.g., "Singapore", "Tokyo", "US East")
     #[serde(default)]
     pub whitelisted_regions: Vec<String>,
+    /// Preferred physical network adapter GUID to bind split tunneling to.
+    ///
+    /// When set, SwiftTunnel will prefer this adapter over default-route auto-detection.
+    /// Stored as lowercase `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+    #[serde(default)]
+    pub preferred_physical_adapter_guid: Option<String>,
 }
 
 fn default_discord_rpc() -> bool {
@@ -181,6 +187,63 @@ fn default_game_presets() -> Vec<String> {
     vec!["roblox".to_string()] // Default to Roblox selected
 }
 
+fn normalize_guid_ascii_lowercase(value: &str) -> Option<String> {
+    fn is_guid_ascii(bytes: &[u8]) -> bool {
+        if bytes.len() != 36 {
+            return false;
+        }
+        const DASH_POS: [usize; 4] = [8, 13, 18, 23];
+        for (i, &b) in bytes.iter().enumerate() {
+            if DASH_POS.contains(&i) {
+                if b != b'-' {
+                    return false;
+                }
+                continue;
+            }
+            if !b.is_ascii_hexdigit() {
+                return false;
+            }
+        }
+        true
+    }
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let bytes = trimmed.as_bytes();
+
+    // Fast path: `{GUID}` anywhere inside the string.
+    for (open_idx, &b) in bytes.iter().enumerate() {
+        if b != b'{' {
+            continue;
+        }
+        let Some(close_rel) = bytes[open_idx + 1..].iter().position(|&b| b == b'}') else {
+            continue;
+        };
+        let close_idx = open_idx + 1 + close_rel;
+        let inner = &bytes[open_idx + 1..close_idx];
+        if is_guid_ascii(inner) {
+            return trimmed
+                .get(open_idx + 1..close_idx)
+                .map(|guid| guid.to_ascii_lowercase());
+        }
+    }
+
+    // Fallback: raw GUID without braces somewhere in the string.
+    for start in 0..=bytes.len().saturating_sub(36) {
+        let candidate = &bytes[start..start + 36];
+        if is_guid_ascii(candidate) {
+            return trimmed
+                .get(start..start + 36)
+                .map(|guid| guid.to_ascii_lowercase());
+        }
+    }
+
+    None
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -209,6 +272,7 @@ impl Default for AppSettings {
             enable_discord_rpc: default_discord_rpc(),
             auto_routing_enabled: default_auto_routing(),
             whitelisted_regions: Vec::new(),
+            preferred_physical_adapter_guid: None,
         }
     }
 }
@@ -216,6 +280,10 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn sanitize_in_place(&mut self) {
         self.window_state.sanitize_in_place();
+        self.preferred_physical_adapter_guid = self
+            .preferred_physical_adapter_guid
+            .as_deref()
+            .and_then(normalize_guid_ascii_lowercase);
     }
 }
 
@@ -320,6 +388,7 @@ mod tests {
         assert!(settings.run_on_startup);
         assert!(settings.auto_reconnect);
         assert!(!settings.resume_vpn_on_startup);
+        assert!(settings.preferred_physical_adapter_guid.is_none());
     }
 
     #[test]
@@ -330,6 +399,8 @@ mod tests {
         settings.selected_region = "tokyo".to_string();
         settings.selected_server = "tokyo-02".to_string();
         settings.update_channel = UpdateChannel::Live;
+        settings.preferred_physical_adapter_guid =
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string());
 
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
@@ -339,6 +410,22 @@ mod tests {
         assert_eq!(loaded.selected_region, "tokyo");
         assert_eq!(loaded.selected_server, "tokyo-02");
         assert_eq!(loaded.update_channel, UpdateChannel::Live);
+        assert_eq!(
+            loaded.preferred_physical_adapter_guid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+    }
+
+    #[test]
+    fn test_settings_sanitize_normalizes_preferred_physical_adapter_guid() {
+        let mut settings = AppSettings::default();
+        settings.preferred_physical_adapter_guid =
+            Some("  {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}  ".to_string());
+        settings.sanitize_in_place();
+        assert_eq!(
+            settings.preferred_physical_adapter_guid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
     }
 
     #[test]

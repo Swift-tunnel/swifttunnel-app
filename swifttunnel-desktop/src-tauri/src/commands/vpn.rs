@@ -169,7 +169,13 @@ pub async fn vpn_connect(
     }
 
     // Gather needed data from settings and server list before locking vpn
-    let (custom_relay, auto_routing, whitelisted_regions, forced_servers) = {
+    let (
+        custom_relay,
+        auto_routing,
+        whitelisted_regions,
+        forced_servers,
+        preferred_physical_adapter_guid,
+    ) = {
         let settings = state.settings.lock();
         (
             if settings.custom_relay_server.is_empty() {
@@ -180,6 +186,7 @@ pub async fn vpn_connect(
             settings.auto_routing_enabled,
             settings.whitelisted_regions.clone(),
             settings.forced_servers.clone(),
+            settings.preferred_physical_adapter_guid.clone(),
         )
     };
 
@@ -216,6 +223,7 @@ pub async fn vpn_connect(
             available_servers,
             whitelisted_regions,
             forced_servers,
+            preferred_physical_adapter_guid,
         )
         .await
         .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
@@ -327,6 +335,12 @@ pub async fn vpn_get_diagnostics(
             packets_tunneled: tunneled,
             packets_bypassed: bypassed,
         }))
+}
+
+#[tauri::command]
+pub fn vpn_list_network_adapters() -> Result<Vec<swifttunnel_core::vpn::NetworkAdapterInfo>, String>
+{
+    swifttunnel_core::vpn::list_network_adapters().map_err(|e| e.to_string())
 }
 
 // --- Server commands ---
