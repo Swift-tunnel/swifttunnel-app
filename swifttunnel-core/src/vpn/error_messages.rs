@@ -26,6 +26,8 @@ pub fn user_friendly_error(error: &VpnError) -> String {
                 || lc.contains("access is denied")
             {
                 "Administrator privileges required.\n\nPlease run SwiftTunnel as Administrator.".to_string()
+            } else if lc.contains("no ndis adapter matched the default-route interface index") {
+                "SwiftTunnel couldn't detect your active network adapter for split tunneling.\n\nGo to Settings -> VPN -> Network Adapter, select your Wi-Fi/Ethernet adapter, then reconnect.\n\nThis can happen if another VPN, network bridge, or virtual adapter owns the default route.".to_string()
             } else if lc.contains("internet interface") || lc.contains("no default gateway") {
                 "No internet connection detected.\n\nPlease check your network connection and try again.".to_string()
             } else {
@@ -174,6 +176,16 @@ mod tests {
         let error = VpnError::SplitTunnelSetupFailed("Access is denied.".to_string());
         let msg = user_friendly_error(&error);
         assert!(msg.contains("Administrator privileges required"));
+    }
+
+    #[test]
+    fn test_user_friendly_default_route_adapter_mismatch_guides_to_picker() {
+        let error = VpnError::SplitTunnelSetupFailed(
+            "Failed to configure V3 split tunnel: Split tunnel driver error: No NDIS adapter matched the default-route interface index 54.".to_string(),
+        );
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("Settings"));
+        assert!(msg.contains("Network Adapter"));
     }
 
     #[test]

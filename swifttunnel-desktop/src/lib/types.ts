@@ -60,6 +60,16 @@ export interface DiagnosticsResponse {
   packets_bypassed: number;
 }
 
+export interface NetworkAdapterInfo {
+  guid: string;
+  friendly_name: string;
+  description: string;
+  if_index: number;
+  is_up: boolean;
+  is_default_route: boolean;
+  kind: string;
+}
+
 // ── Servers ──
 
 export interface ServerRegion {
@@ -251,6 +261,7 @@ export interface AppSettings {
   enable_discord_rpc: boolean;
   auto_routing_enabled: boolean;
   whitelisted_regions: string[];
+  preferred_physical_adapter_guid: string | null;
 }
 
 // ── System ──

@@ -56,6 +56,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   enable_discord_rpc: true,
   auto_routing_enabled: false,
   whitelisted_regions: [],
+  preferred_physical_adapter_guid: null,
 };
 
 interface SettingsStore {

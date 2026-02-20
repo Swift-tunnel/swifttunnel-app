@@ -135,13 +135,79 @@ pub struct SplitTunnelConfig {
     pub tunnel_apps: HashSet<String>,
     /// VPN interface LUID (for adapter identification)
     pub tunnel_interface_luid: u64,
+    /// Preferred physical adapter GUID (If set, binds split tunnel to this adapter)
+    pub preferred_physical_adapter_guid: Option<String>,
 }
 
 impl SplitTunnelConfig {
-    pub fn new(tunnel_apps: Vec<String>, tunnel_interface_luid: u64) -> Self {
+    pub fn new(
+        tunnel_apps: Vec<String>,
+        tunnel_interface_luid: u64,
+        preferred_physical_adapter_guid: Option<String>,
+    ) -> Self {
+        fn normalize_guid_ascii_lowercase(value: &str) -> Option<String> {
+            fn is_guid_ascii(bytes: &[u8]) -> bool {
+                if bytes.len() != 36 {
+                    return false;
+                }
+                const DASH_POS: [usize; 4] = [8, 13, 18, 23];
+                for (i, &b) in bytes.iter().enumerate() {
+                    if DASH_POS.contains(&i) {
+                        if b != b'-' {
+                            return false;
+                        }
+                        continue;
+                    }
+                    if !b.is_ascii_hexdigit() {
+                        return false;
+                    }
+                }
+                true
+            }
+
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let bytes = trimmed.as_bytes();
+
+            // Fast path: `{GUID}` anywhere inside the string.
+            for (open_idx, &b) in bytes.iter().enumerate() {
+                if b != b'{' {
+                    continue;
+                }
+                let Some(close_rel) = bytes[open_idx + 1..].iter().position(|&b| b == b'}') else {
+                    continue;
+                };
+                let close_idx = open_idx + 1 + close_rel;
+                let inner = &bytes[open_idx + 1..close_idx];
+                if is_guid_ascii(inner) {
+                    return trimmed
+                        .get(open_idx + 1..close_idx)
+                        .map(|guid| guid.to_ascii_lowercase());
+                }
+            }
+
+            // Fallback: raw GUID without braces somewhere in the string.
+            for start in 0..=bytes.len().saturating_sub(36) {
+                let candidate = &bytes[start..start + 36];
+                if is_guid_ascii(candidate) {
+                    return trimmed
+                        .get(start..start + 36)
+                        .map(|guid| guid.to_ascii_lowercase());
+                }
+            }
+
+            None
+        }
+
         Self {
             tunnel_apps: tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect(),
             tunnel_interface_luid,
+            preferred_physical_adapter_guid: preferred_physical_adapter_guid
+                .as_deref()
+                .and_then(normalize_guid_ascii_lowercase),
         }
     }
 
@@ -644,6 +710,7 @@ impl SplitTunnelDriver {
             "SwiftTunnel", // VPN adapter name
             config.tunnel_apps.iter().cloned().collect(),
             config.tunnel_interface_luid, // LUID for reliable detection
+            config.preferred_physical_adapter_guid.clone(),
         )?;
 
         // Start packet interception
@@ -846,8 +913,16 @@ mod tests {
 
     #[test]
     fn test_config_creation() {
-        let config = SplitTunnelConfig::new(vec!["robloxplayerbeta.exe".to_string()], 12345);
+        let config = SplitTunnelConfig::new(
+            vec!["robloxplayerbeta.exe".to_string()],
+            12345,
+            Some("{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}".to_string()),
+        );
         assert!(config.tunnel_apps.contains("robloxplayerbeta.exe"));
+        assert_eq!(
+            config.preferred_physical_adapter_guid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
     }
 
     #[test]

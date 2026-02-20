@@ -53,6 +53,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
+use serde::Serialize;
 
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
@@ -95,6 +96,111 @@ struct PhysicalCandidate {
     if_index: Option<u32>,
     score: i32,
     is_up: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkAdapterInfo {
+    pub guid: String,
+    pub friendly_name: String,
+    pub description: String,
+    pub if_index: u32,
+    pub is_up: bool,
+    pub is_default_route: bool,
+    pub kind: String,
+}
+
+fn pwstr_to_string(ptr: windows::core::PWSTR) -> String {
+    if ptr.0.is_null() {
+        return String::new();
+    }
+
+    unsafe {
+        let len = (0..).take_while(|&i| *ptr.0.add(i) != 0).count();
+        let slice = std::slice::from_raw_parts(ptr.0, len);
+        String::from_utf16_lossy(slice)
+    }
+}
+
+pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211,
+        IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+    let default_route_if_index = ParallelInterceptor::get_default_route_info().map(|d| d.if_index);
+
+    unsafe {
+        let mut size: u32 = 0;
+        let _ = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            None,
+            &mut size,
+        );
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+        let rc = GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            Some(adapter_addresses),
+            &mut size,
+        );
+        if rc != 0 {
+            return Err(VpnError::SplitTunnel(format!(
+                "Failed to list network adapters (GetAdaptersAddresses rc={})",
+                rc
+            )));
+        }
+
+        let mut out: Vec<NetworkAdapterInfo> = Vec::new();
+
+        let mut current = adapter_addresses;
+        while !current.is_null() {
+            let adapter = &*current;
+            let adapter_name = adapter.AdapterName.to_string().unwrap_or_default();
+            let Some(guid) = ParallelInterceptor::extract_guid_ascii_lowercase(&adapter_name)
+            else {
+                current = adapter.Next;
+                continue;
+            };
+
+            let if_index = adapter.Anonymous1.Anonymous.IfIndex;
+            let is_up = adapter.OperStatus == IfOperStatusUp;
+
+            let kind = match adapter.IfType {
+                IF_TYPE_IEEE80211 => "wifi",
+                IF_TYPE_ETHERNET_CSMACD => "ethernet",
+                IF_TYPE_PPP => "ppp",
+                IF_TYPE_SOFTWARE_LOOPBACK => "loopback",
+                IF_TYPE_TUNNEL => "tunnel",
+                _ => "other",
+            }
+            .to_string();
+
+            out.push(NetworkAdapterInfo {
+                guid,
+                friendly_name: pwstr_to_string(adapter.FriendlyName),
+                description: pwstr_to_string(adapter.Description),
+                if_index,
+                is_up,
+                is_default_route: default_route_if_index
+                    .is_some_and(|idx| if_index == idx || adapter.Ipv6IfIndex == idx),
+                kind,
+            });
+
+            current = adapter.Next;
+        }
+
+        Ok(out)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +397,8 @@ pub struct ParallelInterceptor {
     default_route_if_index: Option<u32>,
     /// Next-hop of the default route (0.0.0.0 for PPP/point-to-point)
     default_route_next_hop: Option<u32>,
+    /// Preferred physical adapter GUID for manual split-tunnel binding.
+    preferred_physical_adapter_guid: Option<String>,
     /// VPN adapter index
     vpn_adapter_idx: Option<usize>,
     /// Whether interceptor is active
@@ -358,6 +466,7 @@ impl ParallelInterceptor {
             ipv6_was_disabled: false,
             default_route_if_index: None,
             default_route_next_hop: None,
+            preferred_physical_adapter_guid: None,
             vpn_adapter_idx: None,
             active: false,
             worker_stats,
@@ -517,12 +626,20 @@ impl ParallelInterceptor {
         vpn_adapter_name: &str,
         tunnel_apps: Vec<String>,
         vpn_adapter_luid: u64,
+        preferred_physical_adapter_guid: Option<String>,
     ) -> VpnResult<()> {
         log::info!(
             "Configuring parallel interceptor for VPN adapter: {} (LUID: {})",
             vpn_adapter_name,
             vpn_adapter_luid
         );
+
+        self.preferred_physical_adapter_guid = preferred_physical_adapter_guid
+            .as_deref()
+            .and_then(Self::extract_guid_ascii_lowercase);
+        if let Some(ref guid) = self.preferred_physical_adapter_guid {
+            log::info!("Preferred physical adapter GUID set: {}", guid);
+        }
 
         // Update tunnel apps in cache
         Arc::get_mut(&mut self.process_cache)
@@ -1053,13 +1170,7 @@ impl ParallelInterceptor {
                 // Fallback matching: our "friendly name" can be an alias (Wi-Fi 2) or a description
                 // (TP-Link Wireless USB Adapter #2), depending on which API succeeds.
                 if !friendly_name_lc.is_empty() {
-                    let desc = if !adapter.Description.0.is_null() {
-                        std::ffi::CStr::from_ptr(adapter.Description.0 as *const i8)
-                            .to_string_lossy()
-                            .to_string()
-                    } else {
-                        String::new()
-                    };
+                    let desc = pwstr_to_string(adapter.Description);
                     if !desc.is_empty() && desc.trim().to_ascii_lowercase() == friendly_name_lc {
                         return Some(adapter.Anonymous1.Anonymous.IfIndex);
                     }
@@ -1219,6 +1330,33 @@ impl ParallelInterceptor {
         )
     }
 
+    fn select_best_physical_candidate_with_preference<'a>(
+        candidates: &'a [PhysicalCandidate],
+        default_route_if_index: Option<u32>,
+        strict_default_route: bool,
+        preferred_guid: Option<&str>,
+    ) -> (Option<&'a PhysicalCandidate>, bool, bool) {
+        if let Some(guid) = preferred_guid {
+            let preferred = candidates
+                .iter()
+                .filter(|c| {
+                    Self::extract_guid_ascii_lowercase(&c.internal_name).as_deref() == Some(guid)
+                })
+                .max_by_key(|c| c.score);
+            if preferred.is_some() {
+                return (preferred, false, true);
+            }
+        }
+
+        let (selected, used_wan_only_fallback) =
+            Self::select_best_physical_candidate_with_wan_fallback(
+                candidates,
+                default_route_if_index,
+                strict_default_route,
+            );
+        (selected, used_wan_only_fallback, false)
+    }
+
     fn find_adapters(&mut self, vpn_adapter_name: &str, vpn_adapter_luid: u64) -> VpnResult<()> {
         // Get default route interface first - this is the adapter we MUST intercept
         let default_route = Self::get_default_route_info();
@@ -1350,6 +1488,10 @@ impl ParallelInterceptor {
                 // This fixes the bug where users with multiple NICs (e.g., disconnected Ethernet + WiFi)
                 // had traffic going through the wrong adapter
                 let internal_guid_lc = Self::extract_guid_ascii_lowercase(internal_name);
+                let matches_preferred_guid = self
+                    .preferred_physical_adapter_guid
+                    .as_deref()
+                    .is_some_and(|preferred| internal_guid_lc.as_deref() == Some(preferred));
                 let guid_matches_default = strict_default_route
                     && default_route_guid_lc
                         .as_ref()
@@ -1387,19 +1529,50 @@ impl ParallelInterceptor {
                         score,
                         is_up,
                     });
+                } else if matches_preferred_guid {
+                    log::info!(
+                        "    -> Included due to preferred GUID match (friendly name unavailable)"
+                    );
+                    physical_candidates.push(PhysicalCandidate {
+                        idx,
+                        friendly_name: friendly_name.clone(),
+                        internal_name: internal_name.to_string(),
+                        if_index: adapter_if_index,
+                        score: 0,
+                        is_up,
+                    });
                 } else {
                     log::info!("    -> Skipped (unknown adapter, no friendly name)");
                 }
             }
         }
 
-        // Select physical adapter - MUST have default route if available
-        let (selected, used_wan_only_fallback) =
-            Self::select_best_physical_candidate_with_wan_fallback(
+        let preferred_guid = self.preferred_physical_adapter_guid.as_deref();
+        let (selected, used_wan_only_fallback, used_preferred_physical_adapter) =
+            Self::select_best_physical_candidate_with_preference(
                 &physical_candidates,
                 default_route_if_index,
                 strict_default_route,
+                preferred_guid,
             );
+
+        if let Some(guid) = preferred_guid {
+            if used_preferred_physical_adapter {
+                if let Some(selected) = selected {
+                    log::info!(
+                        "Selected physical adapter via user preference GUID {}: '{}' (internal: '{}')",
+                        guid,
+                        selected.friendly_name,
+                        selected.internal_name
+                    );
+                }
+            } else {
+                log::warn!(
+                    "Preferred physical adapter GUID {} was not found in NDIS candidates; falling back to auto selection.",
+                    guid
+                );
+            }
+        }
 
         if strict_default_route && default_route_if_index.is_some() && selected.is_none() {
             let def = default_route_if_index.expect("checked is_some");
@@ -1435,7 +1608,13 @@ impl ParallelInterceptor {
                 && default_route_if_index.is_some()
                 && if_index == default_route_if_index;
             if strict_default_route && !has_default && default_route_if_index.is_some() {
-                if used_wan_only_fallback {
+                if used_preferred_physical_adapter {
+                    log::info!(
+                        "Selected adapter '{}' via user preference (default-route IfIndex {:?}).",
+                        friendly_name,
+                        default_route_if_index
+                    );
+                } else if used_wan_only_fallback {
                     log::warn!(
                         "Selected adapter '{}' via WAN-only fallback (default-route IfIndex {:?} not directly visible in NDIS).",
                         friendly_name,
@@ -2087,7 +2266,12 @@ impl ParallelInterceptor {
             && new_default_if_index.is_some()
             && current_if_index != new_default_if_index;
 
-        let needs_rebind = adapter_down || default_changed || default_mismatch;
+        let manual_binding = self.preferred_physical_adapter_guid.is_some();
+        let needs_rebind = if manual_binding {
+            adapter_down
+        } else {
+            adapter_down || default_changed || default_mismatch
+        };
 
         if !needs_rebind {
             return Ok(false);
@@ -5055,6 +5239,74 @@ mod tests {
             "fallback must not run for non-WAN candidates"
         );
         assert!(selected.is_none());
+    }
+
+    #[test]
+    fn test_select_best_physical_candidate_with_preference_selects_matching_guid() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                friendly_name: "Ethernet".to_string(),
+                internal_name: "\\\\DEVICE\\\\{11111111-1111-1111-1111-111111111111}".to_string(),
+                if_index: Some(20),
+                score: 9000,
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                friendly_name: "Wi-Fi".to_string(),
+                internal_name: "\\\\DEVICE\\\\{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}".to_string(),
+                if_index: Some(12),
+                score: 1,
+                is_up: Some(true),
+            },
+        ];
+
+        let (selected, fallback_used, preferred_used) =
+            ParallelInterceptor::select_best_physical_candidate_with_preference(
+                &candidates,
+                Some(11),
+                true,
+                Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            );
+
+        assert!(preferred_used);
+        assert!(!fallback_used);
+        assert_eq!(selected.map(|c| c.friendly_name.as_str()), Some("Wi-Fi"));
+    }
+
+    #[test]
+    fn test_select_best_physical_candidate_with_preference_falls_back_to_auto_when_missing() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                friendly_name: "Ethernet".to_string(),
+                internal_name: "\\\\DEVICE\\\\{11111111-1111-1111-1111-111111111111}".to_string(),
+                if_index: Some(20),
+                score: 9000,
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                friendly_name: "Wi-Fi".to_string(),
+                internal_name: "\\\\DEVICE\\\\{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}".to_string(),
+                if_index: Some(12),
+                score: 1,
+                is_up: Some(true),
+            },
+        ];
+
+        let (selected, fallback_used, preferred_used) =
+            ParallelInterceptor::select_best_physical_candidate_with_preference(
+                &candidates,
+                None,
+                false,
+                Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            );
+
+        assert!(!preferred_used);
+        assert!(!fallback_used);
+        assert_eq!(selected.map(|c| c.friendly_name.as_str()), Some("Ethernet"));
     }
 
     #[test]

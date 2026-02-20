@@ -47,6 +47,7 @@ describe("stores/settingsStore", () => {
         enable_discord_rpc: true,
         auto_routing_enabled: false,
         whitelisted_regions: [],
+        preferred_physical_adapter_guid: null,
       }),
     });
 
@@ -70,6 +71,9 @@ describe("stores/settingsStore", () => {
     expect(useSettingsStore.getState().settings.run_on_startup).toBe(true);
     expect(useSettingsStore.getState().settings.auto_reconnect).toBe(true);
     expect(useSettingsStore.getState().settings.resume_vpn_on_startup).toBe(false);
+    expect(useSettingsStore.getState().settings.preferred_physical_adapter_guid).toBe(
+      null,
+    );
   });
 
   it("save persists activeTab into current_tab", async () => {

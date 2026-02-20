@@ -38,7 +38,9 @@ pub use auto_routing::{AutoRouter, AutoRoutingAction, AutoRoutingEvent};
 pub use config::{VpnConfigRequest, fetch_vpn_config, update_latency};
 pub use connection::{ConnectionState, VpnConnection};
 pub use error_messages::{short_error, user_friendly_error};
-pub use parallel_interceptor::{ParallelInterceptor, ThroughputStats};
+pub use parallel_interceptor::{
+    NetworkAdapterInfo, ParallelInterceptor, ThroughputStats, list_network_adapters,
+};
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
 pub use process_watcher::{ProcessStartEvent, ProcessWatcher};
 pub use servers::{
