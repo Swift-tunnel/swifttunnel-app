@@ -11,8 +11,7 @@ permissions:
 jobs:
   release:
     name: Build & Publish (Tauri)
-    runs-on:
-      labels: windows-2022-16core
+    runs-on: windows-latest
 
     steps:
       - name: Disable Windows Defender
