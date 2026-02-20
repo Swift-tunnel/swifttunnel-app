@@ -1001,7 +1001,11 @@ impl ParallelInterceptor {
 
         for ip in target_ips {
             if let Some(idx) = Self::get_best_interface_index_for_ipv4(ip) {
-                log::info!("Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}", ip, idx);
+                log::info!(
+                    "Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}",
+                    ip,
+                    idx
+                );
                 // Return a non-zero next_hop to ensure 'strict_default_route' passes.
                 // This ensures we bind specifically to this physical adapter.
                 return Some(DefaultRouteInfo {
@@ -1012,7 +1016,9 @@ impl ParallelInterceptor {
             }
         }
 
-        log::warn!("GetBestInterfaceEx failed for all target IPs. Falling back to native table lookup.");
+        log::warn!(
+            "GetBestInterfaceEx failed for all target IPs. Falling back to native table lookup."
+        );
         if let Some(info) = Self::get_default_route_info_native() {
             return Some(info);
         }
