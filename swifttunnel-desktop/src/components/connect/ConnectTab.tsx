@@ -9,11 +9,7 @@ import {
   isAdminPrivilegeError,
   shouldResetElevationState,
 } from "../../lib/adminErrors";
-import {
-  systemCheckDriver,
-  systemInstallDriver,
-  systemRestartAsAdmin,
-} from "../../lib/commands";
+import { systemRestartAsAdmin } from "../../lib/commands";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import type { ServerRegion } from "../../lib/types";
 import "./connect.css";
@@ -58,10 +54,13 @@ export function ConnectTab() {
   const splitActive = useVpnStore((s) => s.splitTunnelActive);
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
   const vpnError = useVpnStore((s) => s.error);
+  const driverSetupState = useVpnStore((s) => s.driverSetupState);
+  const driverSetupError = useVpnStore((s) => s.driverSetupError);
   const bytesUp = useVpnStore((s) => s.bytesUp);
   const bytesDown = useVpnStore((s) => s.bytesDown);
   const connect = useVpnStore((s) => s.connect);
   const disconnect = useVpnStore((s) => s.disconnect);
+  const installDriver = useVpnStore((s) => s.installDriver);
   const ping = useVpnStore((s) => s.ping);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
   const fetchPing = useVpnStore((s) => s.fetchPing);
@@ -164,13 +163,6 @@ export function ConnectTab() {
   const ringSpeed = isTransitioning ? 3.5 : 55;
   const innerSpeed = isTransitioning ? 2.8 : 38;
 
-  const [driverInstallState, setDriverInstallState] = useState<
-    "idle" | "installing" | "installed" | "error"
-  >("idle");
-  const [driverInstallError, setDriverInstallError] = useState<string | null>(
-    null,
-  );
-
   const driverMissing =
     !!vpnError &&
     vpnError.toLowerCase().includes("split tunnel driver not available") &&
@@ -195,19 +187,9 @@ export function ConnectTab() {
 
   async function handleInstallDriver() {
     try {
-      setDriverInstallState("installing");
-      setDriverInstallError(null);
-      await systemInstallDriver();
-      const check = await systemCheckDriver();
-      if (!check.installed) {
-        throw new Error(
-          "Driver installation completed, but the driver is still not detected.",
-        );
-      }
-      setDriverInstallState("installed");
-    } catch (e) {
-      setDriverInstallState("error");
-      setDriverInstallError(String(e));
+      await installDriver();
+    } catch {
+      // Store state already captures installation errors.
     }
   }
 
@@ -231,16 +213,20 @@ export function ConnectTab() {
       return elevationRestartError || "Failed to restart as Administrator.";
     }
 
-    if (driverInstallState === "installing") {
-      return "Installing Windows Packet Filter driver\u2026";
+    if (driverSetupState === "checking") {
+      return "Checking split tunnel driver\u2026";
     }
 
-    if (driverInstallState === "installed") {
+    if (driverSetupState === "installing") {
+      return "Installing required split tunnel driver\u2026";
+    }
+
+    if (driverSetupState === "installed") {
       return "Driver installed. Click Connect to retry.";
     }
 
-    if (driverInstallState === "error") {
-      return driverInstallError || "Driver install failed.";
+    if (driverSetupState === "error") {
+      return driverSetupError || "Driver install failed.";
     }
 
     if (adminRequired) {
@@ -504,11 +490,11 @@ export function ConnectTab() {
             style={{
               color: isConnected
                 ? "var(--color-status-connected)"
-                : driverInstallState === "installed"
+                : driverSetupState === "installed"
                   ? "var(--color-status-connected)"
-                  : elevationRestartState === "restarting"
+                    : elevationRestartState === "restarting"
                     ? "var(--color-text-secondary)"
-                    : vpnError || driverInstallState === "error"
+                    : vpnError || driverSetupState === "error"
                       ? "var(--color-status-error)"
                     : "var(--color-text-muted)",
             }}

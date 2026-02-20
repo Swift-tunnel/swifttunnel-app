@@ -18,4 +18,11 @@ describe("ConnectTab power button icon", () => {
       '<path d="M8.53 16.11a6 6 0 0 1 6.95 0" />',
     );
   });
+
+  it("shows automatic split tunnel driver install status text", () => {
+    expect(connectTabSource).toContain("Checking split tunnel driver");
+    expect(connectTabSource).toContain(
+      "Installing required split tunnel driver",
+    );
+  });
 });

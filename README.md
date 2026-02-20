@@ -155,6 +155,7 @@ Notes:
 - `vX.Y.Z` publishes as stable release (`Stable` channel).
 - `TAURI_UPDATER_PUBLIC_KEY` is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
 - `WinpkFilter-x64.msi` is fetched in CI and bundled into NSIS resources.
+- Runtime driver install is bundle-first with pinned fallback download (`Windows.Packet.Filter.3.6.2.1.x64.msi`) plus SHA-256 verification if bundled MSI is missing.
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
 - `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
@@ -164,8 +165,9 @@ Notes:
 1. Install using the generated NSIS installer on a clean VM.
 2. Launch app and confirm login flow works.
 3. Confirm `%APPDATA%\SwiftTunnel\settings.json` is read/written correctly.
-4. Connect/disconnect VPN at least once (ensures `wintun.dll` staging and driver checks are healthy).
-5. Run in-app updater check from Settings.
+4. Click Connect once on a clean machine and confirm SwiftTunnel auto-installs the Windows Packet Filter driver (UAC prompt expected) before connecting.
+5. Connect/disconnect VPN at least once (ensures `wintun.dll` staging and split tunnel checks are healthy).
+6. Run in-app updater check from Settings.
 
 Settings migration status: no schema migration required. The Tauri app continues using `%APPDATA%\SwiftTunnel\settings.json`.
 

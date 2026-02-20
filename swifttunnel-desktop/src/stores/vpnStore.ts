@@ -12,8 +12,34 @@ import {
   vpnGetThroughput,
   vpnGetPing,
   vpnGetDiagnostics,
+  systemCheckDriver,
+  systemInstallDriver,
 } from "../lib/commands";
 import { notify } from "../lib/notifications";
+
+type DriverSetupState =
+  | "idle"
+  | "checking"
+  | "installing"
+  | "installed"
+  | "error";
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function formatDriverSetupError(error: unknown): string {
+  const detail = getErrorMessage(error);
+  return [
+    "Split tunnel driver not available (Windows Packet Filter driver).",
+    "Automatic installation failed.",
+    "",
+    detail,
+  ].join("\n");
+}
 
 interface VpnStore {
   state: VpnState;
@@ -23,6 +49,8 @@ interface VpnStore {
   splitTunnelActive: boolean;
   tunneledProcesses: string[];
   error: string | null;
+  driverSetupState: DriverSetupState;
+  driverSetupError: string | null;
 
   // Throughput
   bytesUp: number;
@@ -38,6 +66,8 @@ interface VpnStore {
 
   // Actions
   fetchState: () => Promise<void>;
+  ensureDriverReady: () => Promise<void>;
+  installDriver: () => Promise<void>;
   connect: (region: string, gamePresets: string[]) => Promise<void>;
   disconnect: () => Promise<void>;
   fetchThroughput: () => Promise<void>;
@@ -55,6 +85,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   splitTunnelActive: false,
   tunneledProcesses: [],
   error: null,
+  driverSetupState: "idle",
+  driverSetupError: null,
   bytesUp: 0,
   bytesDown: 0,
   packetsTunneled: 0,
@@ -79,17 +111,91 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   },
 
+  ensureDriverReady: async () => {
+    try {
+      set({ driverSetupState: "checking", driverSetupError: null });
+      const check = await systemCheckDriver();
+      if (check.installed) {
+        set({ driverSetupState: "idle", driverSetupError: null });
+        return;
+      }
+
+      set({ driverSetupState: "installing", driverSetupError: null });
+      await systemInstallDriver();
+      const postInstall = await systemCheckDriver();
+      if (!postInstall.installed) {
+        throw new Error(
+          "Driver installation completed, but Windows Packet Filter driver is still not detected. Please restart your computer and try again.",
+        );
+      }
+      set({ driverSetupState: "idle", driverSetupError: null });
+    } catch (e) {
+      const message = formatDriverSetupError(e);
+      set({ driverSetupState: "error", driverSetupError: message });
+      throw new Error(message);
+    }
+  },
+
+  installDriver: async () => {
+    try {
+      set({ driverSetupState: "installing", driverSetupError: null });
+      await systemInstallDriver();
+      const check = await systemCheckDriver();
+      if (!check.installed) {
+        throw new Error(
+          "Driver installation completed, but Windows Packet Filter driver is still not detected. Please restart your computer and try again.",
+        );
+      }
+      set({
+        error: null,
+        driverSetupState: "installed",
+        driverSetupError: null,
+      });
+    } catch (e) {
+      const message = formatDriverSetupError(e);
+      set({
+        state: "error",
+        error: message,
+        driverSetupState: "error",
+        driverSetupError: message,
+      });
+      throw new Error(message);
+    }
+  },
+
   connect: async (region, gamePresets) => {
     try {
-      set({ state: "fetching_config", error: null });
+      set({
+        state: "fetching_config",
+        error: null,
+        driverSetupError: null,
+      });
+      await get().ensureDriverReady();
+      set({
+        state: "fetching_config",
+        error: null,
+        driverSetupState: "idle",
+        driverSetupError: null,
+      });
       await vpnConnect(region, gamePresets);
       await get().fetchState();
       await get().fetchDiagnostics();
       if (get().state === "connected") {
         await notify("SwiftTunnel", `Connected to ${get().region ?? region}`);
       }
+      set({ driverSetupState: "idle", driverSetupError: null });
     } catch (e) {
-      set({ state: "error", error: String(e) });
+      const message = getErrorMessage(e);
+      set((current) => ({
+        state: "error",
+        error: message,
+        driverSetupState:
+          current.driverSetupState === "error" ? "error" : "idle",
+        driverSetupError:
+          current.driverSetupState === "error"
+            ? current.driverSetupError
+            : null,
+      }));
     }
   },
 
@@ -110,6 +216,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         packetsBypassed: 0,
         ping: null,
         diagnostics: null,
+        driverSetupState: "idle",
+        driverSetupError: null,
       });
       await notify("SwiftTunnel", "VPN disconnected.");
     } catch (e) {

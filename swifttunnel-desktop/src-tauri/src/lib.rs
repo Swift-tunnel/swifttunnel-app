@@ -77,7 +77,14 @@ fn sync_runtime_assets(app: &tauri::App) {
 
     for (name, source, destination) in targets {
         let Some(source) = source else {
-            log::debug!("Bundled runtime asset not found: {}", name);
+            if name == "WinpkFilter-x64.msi" {
+                log::warn!(
+                    "Bundled runtime asset not found: {} (runtime fallback download will be used)",
+                    name
+                );
+            } else {
+                log::debug!("Bundled runtime asset not found: {}", name);
+            }
             continue;
         };
 

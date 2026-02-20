@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "1.15.35"
+version = "1.15.36"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel desktop app - Tauri v2 frontend"
@@ -18,7 +18,7 @@ tokio = { version = "1", features = ["full"] }
 parking_lot = "0.12"
 log = "0.4"
 env_logger = "0.11"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 semver = "1.0"
 sha2 = "0.10"
 base64 = "0.22"
