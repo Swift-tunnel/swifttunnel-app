@@ -59,11 +59,6 @@ const ROBLOX_RANGES: &[(u32, u32, u32)] = &[
     (0xCC0DAC00, 0xFFFFFE00, 23), // 204.13.172.0/23 (covers .172-.173)
 ];
 
-/// Roblox game server UDP port range
-/// Game traffic uses ephemeral ports in this range
-const ROBLOX_PORT_MIN: u16 = 49152;
-const ROBLOX_PORT_MAX: u16 = 65535;
-
 /// Validate that a mask is a valid CIDR mask for the given prefix length
 /// A valid CIDR mask has all 1s on the left and all 0s on the right
 #[inline(always)]
@@ -103,17 +98,11 @@ fn ip_in_range(ip: Ipv4Addr, network: u32, mask: u32) -> bool {
 /// Check if destination is a Roblox game server
 /// Returns true if:
 /// - IP is in known Roblox server ranges
-/// - Port is in game server range (49152-65535)
 /// - Protocol is UDP
 #[inline(always)]
-pub fn is_roblox_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bool {
+pub fn is_roblox_game_server(dst_ip: Ipv4Addr, _dst_port: u16, protocol: Protocol) -> bool {
     // Must be UDP for game traffic
     if protocol != Protocol::Udp {
-        return false;
-    }
-
-    // Check port range
-    if dst_port < ROBLOX_PORT_MIN || dst_port > ROBLOX_PORT_MAX {
         return false;
     }
 
