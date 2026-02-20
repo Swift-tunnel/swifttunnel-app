@@ -424,11 +424,9 @@ impl VpnConnection {
         })
     }
 
-    /// Get split tunnel diagnostic info for UI display
-    ///
-    /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
+    /// Get split tunnel diagnostic info for UI display.
     /// Uses try_lock() to avoid blocking the GUI thread.
-    pub fn get_split_tunnel_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
+    pub fn get_split_tunnel_diagnostics(&self) -> Option<super::SplitTunnelDiagnostics> {
         self.split_tunnel.as_ref().and_then(|st| {
             st.try_lock()
                 .ok()

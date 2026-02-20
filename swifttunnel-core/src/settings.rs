@@ -5,6 +5,7 @@
 use crate::network_analyzer::NetworkTestResultsCache;
 use crate::structs::Config;
 use crate::updater::{UpdateChannel, UpdateSettings};
+use crate::utils::normalize_guid_ascii_lowercase;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -153,6 +154,22 @@ pub struct AppSettings {
     /// Stored as lowercase `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
     #[serde(default)]
     pub preferred_physical_adapter_guid: Option<String>,
+    /// Physical adapter binding strategy for split tunnel interception.
+    #[serde(default)]
+    pub adapter_binding_mode: AdapterBindingMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterBindingMode {
+    SmartAuto,
+    Manual,
+}
+
+impl Default for AdapterBindingMode {
+    fn default() -> Self {
+        Self::SmartAuto
+    }
 }
 
 fn default_discord_rpc() -> bool {
@@ -187,63 +204,6 @@ fn default_game_presets() -> Vec<String> {
     vec!["roblox".to_string()] // Default to Roblox selected
 }
 
-fn normalize_guid_ascii_lowercase(value: &str) -> Option<String> {
-    fn is_guid_ascii(bytes: &[u8]) -> bool {
-        if bytes.len() != 36 {
-            return false;
-        }
-        const DASH_POS: [usize; 4] = [8, 13, 18, 23];
-        for (i, &b) in bytes.iter().enumerate() {
-            if DASH_POS.contains(&i) {
-                if b != b'-' {
-                    return false;
-                }
-                continue;
-            }
-            if !b.is_ascii_hexdigit() {
-                return false;
-            }
-        }
-        true
-    }
-
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let bytes = trimmed.as_bytes();
-
-    // Fast path: `{GUID}` anywhere inside the string.
-    for (open_idx, &b) in bytes.iter().enumerate() {
-        if b != b'{' {
-            continue;
-        }
-        let Some(close_rel) = bytes[open_idx + 1..].iter().position(|&b| b == b'}') else {
-            continue;
-        };
-        let close_idx = open_idx + 1 + close_rel;
-        let inner = &bytes[open_idx + 1..close_idx];
-        if is_guid_ascii(inner) {
-            return trimmed
-                .get(open_idx + 1..close_idx)
-                .map(|guid| guid.to_ascii_lowercase());
-        }
-    }
-
-    // Fallback: raw GUID without braces somewhere in the string.
-    for start in 0..=bytes.len().saturating_sub(36) {
-        let candidate = &bytes[start..start + 36];
-        if is_guid_ascii(candidate) {
-            return trimmed
-                .get(start..start + 36)
-                .map(|guid| guid.to_ascii_lowercase());
-        }
-    }
-
-    None
-}
-
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -273,6 +233,7 @@ impl Default for AppSettings {
             auto_routing_enabled: default_auto_routing(),
             whitelisted_regions: Vec::new(),
             preferred_physical_adapter_guid: None,
+            adapter_binding_mode: AdapterBindingMode::SmartAuto,
         }
     }
 }
@@ -389,6 +350,7 @@ mod tests {
         assert!(settings.auto_reconnect);
         assert!(!settings.resume_vpn_on_startup);
         assert!(settings.preferred_physical_adapter_guid.is_none());
+        assert_eq!(settings.adapter_binding_mode, AdapterBindingMode::SmartAuto);
     }
 
     #[test]
@@ -401,6 +363,7 @@ mod tests {
         settings.update_channel = UpdateChannel::Live;
         settings.preferred_physical_adapter_guid =
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string());
+        settings.adapter_binding_mode = AdapterBindingMode::Manual;
 
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
@@ -414,6 +377,7 @@ mod tests {
             loaded.preferred_physical_adapter_guid.as_deref(),
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         );
+        assert_eq!(loaded.adapter_binding_mode, AdapterBindingMode::Manual);
     }
 
     #[test]
@@ -426,6 +390,13 @@ mod tests {
             settings.preferred_physical_adapter_guid.as_deref(),
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         );
+    }
+
+    #[test]
+    fn test_settings_adapter_binding_mode_defaults_to_smart_auto() {
+        let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
+        let loaded: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.adapter_binding_mode, AdapterBindingMode::SmartAuto);
     }
 
     #[test]

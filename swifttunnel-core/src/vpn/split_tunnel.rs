@@ -15,8 +15,11 @@
 //! - No lock contention between packet workers
 //! - No WFP complexity (callouts, filters, sublayers, providers)
 
-use super::parallel_interceptor::{ParallelInterceptor, QueueOverflowMode, ThroughputStats};
+use super::parallel_interceptor::{
+    ParallelInterceptor, QueueOverflowMode, SplitTunnelDiagnostics, ThroughputStats,
+};
 use super::{VpnError, VpnResult};
+use crate::utils::normalize_guid_ascii_lowercase;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -145,63 +148,6 @@ impl SplitTunnelConfig {
         tunnel_interface_luid: u64,
         preferred_physical_adapter_guid: Option<String>,
     ) -> Self {
-        fn normalize_guid_ascii_lowercase(value: &str) -> Option<String> {
-            fn is_guid_ascii(bytes: &[u8]) -> bool {
-                if bytes.len() != 36 {
-                    return false;
-                }
-                const DASH_POS: [usize; 4] = [8, 13, 18, 23];
-                for (i, &b) in bytes.iter().enumerate() {
-                    if DASH_POS.contains(&i) {
-                        if b != b'-' {
-                            return false;
-                        }
-                        continue;
-                    }
-                    if !b.is_ascii_hexdigit() {
-                        return false;
-                    }
-                }
-                true
-            }
-
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-
-            let bytes = trimmed.as_bytes();
-
-            // Fast path: `{GUID}` anywhere inside the string.
-            for (open_idx, &b) in bytes.iter().enumerate() {
-                if b != b'{' {
-                    continue;
-                }
-                let Some(close_rel) = bytes[open_idx + 1..].iter().position(|&b| b == b'}') else {
-                    continue;
-                };
-                let close_idx = open_idx + 1 + close_rel;
-                let inner = &bytes[open_idx + 1..close_idx];
-                if is_guid_ascii(inner) {
-                    return trimmed
-                        .get(open_idx + 1..close_idx)
-                        .map(|guid| guid.to_ascii_lowercase());
-                }
-            }
-
-            // Fallback: raw GUID without braces somewhere in the string.
-            for start in 0..=bytes.len().saturating_sub(36) {
-                let candidate = &bytes[start..start + 36];
-                if is_guid_ascii(candidate) {
-                    return trimmed
-                        .get(start..start + 36)
-                        .map(|guid| guid.to_ascii_lowercase());
-                }
-            }
-
-            None
-        }
-
         Self {
             tunnel_apps: tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect(),
             tunnel_interface_luid,
@@ -817,10 +763,8 @@ impl SplitTunnelDriver {
             .map(|p| p.get_throughput_stats())
     }
 
-    /// Get diagnostic info for UI display
-    ///
-    /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
-    pub fn get_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
+    /// Get diagnostic info for UI display.
+    pub fn get_diagnostics(&self) -> Option<SplitTunnelDiagnostics> {
         self.parallel_interceptor
             .as_ref()
             .map(|p| p.get_diagnostics())

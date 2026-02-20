@@ -55,7 +55,13 @@ export interface ThroughputResponse {
 
 export interface DiagnosticsResponse {
   adapter_name: string | null;
+  adapter_guid: string | null;
+  selected_if_index: number | null;
+  resolved_if_index: number | null;
   has_default_route: boolean;
+  route_resolution_source: string | null;
+  route_resolution_target_ip: string | null;
+  manual_binding_active: boolean;
   packets_tunneled: number;
   packets_bypassed: number;
 }
@@ -262,6 +268,7 @@ export interface AppSettings {
   auto_routing_enabled: boolean;
   whitelisted_regions: string[];
   preferred_physical_adapter_guid: string | null;
+  adapter_binding_mode: "smart_auto" | "manual";
 }
 
 // ── System ──

@@ -48,6 +48,7 @@ describe("stores/settingsStore", () => {
         auto_routing_enabled: false,
         whitelisted_regions: [],
         preferred_physical_adapter_guid: null,
+        adapter_binding_mode: "smart_auto",
       }),
     });
 
@@ -73,6 +74,9 @@ describe("stores/settingsStore", () => {
     expect(useSettingsStore.getState().settings.resume_vpn_on_startup).toBe(false);
     expect(useSettingsStore.getState().settings.preferred_physical_adapter_guid).toBe(
       null,
+    );
+    expect(useSettingsStore.getState().settings.adapter_binding_mode).toBe(
+      "smart_auto",
     );
   });
 
