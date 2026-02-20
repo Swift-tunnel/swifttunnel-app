@@ -1,7 +1,7 @@
 {
   "name": "swifttunnel-desktop",
   "private": true,
-  "version": "1.15.33",
+  "version": "1.15.34",
   "type": "module",
   "scripts": {
     "dev": "vite",
