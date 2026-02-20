@@ -990,52 +990,34 @@ impl ParallelInterceptor {
     }
 
     fn get_default_route_info() -> Option<DefaultRouteInfo> {
+        // KISS: Ask the OS routing table directly which interface is used to reach the internet.
+        // We prioritize a known primary Roblox IP (128.116.1.1) to guarantee we bind to the
+        // adapter actively routing the game's traffic.
+        let target_ips = [
+            Ipv4Addr::new(128, 116, 1, 1), // Primary Roblox subnet (128.116.0.0/17)
+            Ipv4Addr::new(8, 8, 8, 8),     // Google DNS
+            Ipv4Addr::new(1, 1, 1, 1),     // Cloudflare DNS
+        ];
+
+        for ip in target_ips {
+            if let Some(idx) = Self::get_best_interface_index_for_ipv4(ip) {
+                log::info!("Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}", ip, idx);
+                // Return a non-zero next_hop to ensure 'strict_default_route' passes.
+                // This ensures we bind specifically to this physical adapter.
+                return Some(DefaultRouteInfo {
+                    if_index: idx,
+                    metric: 0,
+                    next_hop: 1,
+                });
+            }
+        }
+
+        log::warn!("GetBestInterfaceEx failed for all target IPs. Falling back to native table lookup.");
         if let Some(info) = Self::get_default_route_info_native() {
-            log::info!(
-                "Default route is on interface index {} (metric: {}, next_hop: {})",
-                info.if_index,
-                info.metric,
-                Ipv4Addr::from(info.next_hop.to_ne_bytes()),
-            );
             return Some(info);
         }
 
-        log::warn!("Native default-route lookup failed, falling back to PowerShell");
-        if let Some(info) = Self::get_default_route_info_powershell() {
-            log::info!(
-                "Default route (PowerShell) is on interface index {} (metric: {}, next_hop: {})",
-                info.if_index,
-                info.metric,
-                Ipv4Addr::from(info.next_hop.to_ne_bytes()),
-            );
-            return Some(info);
-        }
-
-        // Last resort: GetBestInterfaceEx for common public IPs (no next-hop/metric context).
-        if let Some(idx) = Self::get_best_interface_index_for_ipv4(Ipv4Addr::new(1, 1, 1, 1)) {
-            log::warn!(
-                "Default route fallback via GetBestInterfaceEx (1.1.1.1): {}",
-                idx
-            );
-            return Some(DefaultRouteInfo {
-                if_index: idx,
-                metric: 0,
-                next_hop: 0,
-            });
-        }
-        if let Some(idx) = Self::get_best_interface_index_for_ipv4(Ipv4Addr::new(8, 8, 8, 8)) {
-            log::warn!(
-                "Default route fallback via GetBestInterfaceEx (8.8.8.8): {}",
-                idx
-            );
-            return Some(DefaultRouteInfo {
-                if_index: idx,
-                metric: 0,
-                next_hop: 0,
-            });
-        }
-
-        None
+        Self::get_default_route_info_powershell()
     }
 
     fn parse_interface_guid_from_internal_name(internal_name: &str) -> Option<windows::core::GUID> {

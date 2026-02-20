@@ -112,11 +112,6 @@ pub fn is_roblox_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol
         return false;
     }
 
-    // Check port range
-    if dst_port < ROBLOX_PORT_MIN || dst_port > ROBLOX_PORT_MAX {
-        return false;
-    }
-
     // Check IP ranges
     for &(network, mask, _prefix) in ROBLOX_RANGES {
         if ip_in_range(dst_ip, network, mask) {
