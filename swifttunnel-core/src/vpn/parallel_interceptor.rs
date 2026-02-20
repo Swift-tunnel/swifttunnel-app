@@ -990,6 +990,10 @@ impl ParallelInterceptor {
     }
 
     fn get_default_route_info() -> Option<DefaultRouteInfo> {
+        // Sentinel value for next_hop to indicate a valid default route was found via GetBestInterfaceEx.
+        // Any non-zero value works; this ensures strict_default_route logic treats the route as gateway-backed.
+        const NEXT_HOP_SENTINEL: u32 = 1;
+
         // KISS: Ask the OS routing table directly which interface is used to reach the internet.
         // We prioritize a known primary Roblox IP (128.116.1.1) to guarantee we bind to the
         // adapter actively routing the game's traffic.
@@ -1001,6 +1005,16 @@ impl ParallelInterceptor {
 
         for ip in target_ips {
             if let Some(idx) = Self::get_best_interface_index_for_ipv4(ip) {
+                // Skip if interface is known to be down
+                if Self::is_interface_oper_up(idx) == Some(false) {
+                    log::debug!(
+                        "GetBestInterfaceEx returned if_index {} for {} but interface is down, trying next",
+                        idx,
+                        ip
+                    );
+                    continue;
+                }
+
                 log::info!(
                     "Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}",
                     ip,
@@ -1011,7 +1025,7 @@ impl ParallelInterceptor {
                 return Some(DefaultRouteInfo {
                     if_index: idx,
                     metric: 0,
-                    next_hop: 1,
+                    next_hop: NEXT_HOP_SENTINEL,
                 });
             }
         }
