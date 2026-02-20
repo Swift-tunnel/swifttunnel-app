@@ -15,7 +15,9 @@
 //! - No lock contention between packet workers
 //! - No WFP complexity (callouts, filters, sublayers, providers)
 
-use super::parallel_interceptor::{ParallelInterceptor, QueueOverflowMode, ThroughputStats};
+use super::parallel_interceptor::{
+    ParallelInterceptor, QueueOverflowMode, SplitTunnelDiagnostics, ThroughputStats,
+};
 use super::{VpnError, VpnResult};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -817,10 +819,8 @@ impl SplitTunnelDriver {
             .map(|p| p.get_throughput_stats())
     }
 
-    /// Get diagnostic info for UI display
-    ///
-    /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
-    pub fn get_diagnostics(&self) -> Option<(Option<String>, bool, u64, u64)> {
+    /// Get diagnostic info for UI display.
+    pub fn get_diagnostics(&self) -> Option<SplitTunnelDiagnostics> {
         self.parallel_interceptor
             .as_ref()
             .map(|p| p.get_diagnostics())

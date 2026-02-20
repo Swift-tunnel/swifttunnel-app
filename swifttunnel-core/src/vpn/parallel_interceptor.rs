@@ -88,6 +88,27 @@ struct DefaultRouteInfo {
     next_hop: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DefaultRouteSource {
+    GameRoute,
+    InternetFallback,
+    NativeTableFallback,
+    PowerShellFallback,
+    Unresolved,
+}
+
+impl DefaultRouteSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::GameRoute => "game_route",
+            Self::InternetFallback => "internet_fallback",
+            Self::NativeTableFallback => "native_table_fallback",
+            Self::PowerShellFallback => "powershell_fallback",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PhysicalCandidate {
     idx: usize,
@@ -107,6 +128,20 @@ pub struct NetworkAdapterInfo {
     pub is_up: bool,
     pub is_default_route: bool,
     pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SplitTunnelDiagnostics {
+    pub adapter_name: Option<String>,
+    pub adapter_guid: Option<String>,
+    pub selected_if_index: Option<u32>,
+    pub resolved_if_index: Option<u32>,
+    pub has_default_route: bool,
+    pub packets_tunneled: u64,
+    pub packets_bypassed: u64,
+    pub route_resolution_source: String,
+    pub route_resolution_target_ip: Option<String>,
+    pub manual_binding_active: bool,
 }
 
 fn pwstr_to_string(ptr: windows::core::PWSTR) -> String {
@@ -397,6 +432,12 @@ pub struct ParallelInterceptor {
     default_route_if_index: Option<u32>,
     /// Next-hop of the default route (0.0.0.0 for PPP/point-to-point)
     default_route_next_hop: Option<u32>,
+    /// Source of current route resolution used for adapter binding diagnostics.
+    default_route_source: DefaultRouteSource,
+    /// Target IP used to resolve the current route (if any).
+    default_route_target_ip: Option<Ipv4Addr>,
+    /// Whether the selected adapter came from an explicit user manual preference.
+    manual_binding_active: bool,
     /// Preferred physical adapter GUID for manual split-tunnel binding.
     preferred_physical_adapter_guid: Option<String>,
     /// VPN adapter index
@@ -466,6 +507,9 @@ impl ParallelInterceptor {
             ipv6_was_disabled: false,
             default_route_if_index: None,
             default_route_next_hop: None,
+            default_route_source: DefaultRouteSource::Unresolved,
+            default_route_target_ip: None,
+            manual_binding_active: false,
             preferred_physical_adapter_guid: None,
             vpn_adapter_idx: None,
             active: false,
@@ -530,11 +574,13 @@ impl ParallelInterceptor {
         self.physical_adapter_friendly_name.clone()
     }
 
-    /// Get diagnostic info for UI display
-    ///
-    /// Returns: (adapter_name, has_default_route, packets_tunneled, packets_bypassed)
-    pub fn get_diagnostics(&self) -> (Option<String>, bool, u64, u64) {
+    /// Get diagnostic info for UI display.
+    pub fn get_diagnostics(&self) -> SplitTunnelDiagnostics {
         let adapter_name = self.physical_adapter_friendly_name.clone();
+        let adapter_guid = self
+            .physical_adapter_name
+            .as_deref()
+            .and_then(Self::extract_guid_ascii_lowercase);
         let has_default_route = self.physical_adapter_if_index.is_some()
             && self.default_route_if_index.is_some()
             && self.physical_adapter_if_index == self.default_route_if_index;
@@ -547,7 +593,18 @@ impl ParallelInterceptor {
             bypassed += stats.packets_bypassed.load(Ordering::Relaxed);
         }
 
-        (adapter_name, has_default_route, tunneled, bypassed)
+        SplitTunnelDiagnostics {
+            adapter_name,
+            adapter_guid,
+            selected_if_index: self.physical_adapter_if_index,
+            resolved_if_index: self.default_route_if_index,
+            has_default_route,
+            packets_tunneled: tunneled,
+            packets_bypassed: bypassed,
+            route_resolution_source: self.default_route_source.as_str().to_string(),
+            route_resolution_target_ip: self.default_route_target_ip.map(|ip| ip.to_string()),
+            manual_binding_active: self.manual_binding_active,
+        }
     }
 
     /// Set UDP relay context for V3 mode (unencrypted relay)
@@ -989,21 +1046,41 @@ impl ParallelInterceptor {
         None
     }
 
-    fn get_default_route_info() -> Option<DefaultRouteInfo> {
+    fn candidate_route_targets(game_targets: &[Ipv4Addr]) -> Vec<(Ipv4Addr, DefaultRouteSource)> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        let mut sorted_game_targets = game_targets.to_vec();
+        sorted_game_targets.sort_unstable();
+        sorted_game_targets.truncate(8);
+
+        for ip in sorted_game_targets {
+            if seen.insert(ip) {
+                out.push((ip, DefaultRouteSource::GameRoute));
+            }
+        }
+
+        for ip in [
+            Ipv4Addr::new(128, 116, 1, 1), // Primary Roblox subnet (128.116.0.0/17)
+            Ipv4Addr::new(8, 8, 8, 8),     // Google DNS
+            Ipv4Addr::new(1, 1, 1, 1),     // Cloudflare DNS
+        ] {
+            if seen.insert(ip) {
+                out.push((ip, DefaultRouteSource::InternetFallback));
+            }
+        }
+
+        out
+    }
+
+    fn get_default_route_info_for_targets(
+        game_targets: &[Ipv4Addr],
+    ) -> Option<(DefaultRouteInfo, DefaultRouteSource, Option<Ipv4Addr>)> {
         // Sentinel value for next_hop to indicate a valid default route was found via GetBestInterfaceEx.
         // Any non-zero value works; this ensures strict_default_route logic treats the route as gateway-backed.
         const NEXT_HOP_SENTINEL: u32 = 1;
 
-        // KISS: Ask the OS routing table directly which interface is used to reach the internet.
-        // We prioritize a known primary Roblox IP (128.116.1.1) to guarantee we bind to the
-        // adapter actively routing the game's traffic.
-        let target_ips = [
-            Ipv4Addr::new(128, 116, 1, 1), // Primary Roblox subnet (128.116.0.0/17)
-            Ipv4Addr::new(8, 8, 8, 8),     // Google DNS
-            Ipv4Addr::new(1, 1, 1, 1),     // Cloudflare DNS
-        ];
-
-        for ip in target_ips {
+        for (ip, source) in Self::candidate_route_targets(game_targets) {
             if let Some(idx) = Self::get_best_interface_index_for_ipv4(ip) {
                 // Skip if interface is known to be down
                 if Self::is_interface_oper_up(idx) == Some(false) {
@@ -1016,17 +1093,22 @@ impl ParallelInterceptor {
                 }
 
                 log::info!(
-                    "Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}",
+                    "Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}, source={}",
                     ip,
-                    idx
+                    idx,
+                    source.as_str()
                 );
                 // Return a non-zero next_hop to ensure 'strict_default_route' passes.
                 // This ensures we bind specifically to this physical adapter.
-                return Some(DefaultRouteInfo {
-                    if_index: idx,
-                    metric: 0,
-                    next_hop: NEXT_HOP_SENTINEL,
-                });
+                return Some((
+                    DefaultRouteInfo {
+                        if_index: idx,
+                        metric: 0,
+                        next_hop: NEXT_HOP_SENTINEL,
+                    },
+                    source,
+                    Some(ip),
+                ));
             }
         }
 
@@ -1034,10 +1116,15 @@ impl ParallelInterceptor {
             "GetBestInterfaceEx failed for all target IPs. Falling back to native table lookup."
         );
         if let Some(info) = Self::get_default_route_info_native() {
-            return Some(info);
+            return Some((info, DefaultRouteSource::NativeTableFallback, None));
         }
 
         Self::get_default_route_info_powershell()
+            .map(|info| (info, DefaultRouteSource::PowerShellFallback, None))
+    }
+
+    fn get_default_route_info() -> Option<DefaultRouteInfo> {
+        Self::get_default_route_info_for_targets(&[]).map(|(info, _, _)| info)
     }
 
     fn parse_interface_guid_from_internal_name(internal_name: &str) -> Option<windows::core::GUID> {
@@ -1361,9 +1448,17 @@ impl ParallelInterceptor {
 
     fn find_adapters(&mut self, vpn_adapter_name: &str, vpn_adapter_luid: u64) -> VpnResult<()> {
         // Get default route interface first - this is the adapter we MUST intercept
-        let default_route = Self::get_default_route_info();
+        let observed_game_targets: Vec<Ipv4Addr> =
+            self.detected_game_servers.read().iter().copied().collect();
+        let default_route_with_source =
+            Self::get_default_route_info_for_targets(&observed_game_targets);
+        let default_route = default_route_with_source.map(|(info, _, _)| info);
         let default_route_if_index = default_route.map(|d| d.if_index);
         let default_route_next_hop = default_route.map(|d| d.next_hop);
+        self.default_route_source = default_route_with_source
+            .map(|(_, source, _)| source)
+            .unwrap_or(DefaultRouteSource::Unresolved);
+        self.default_route_target_ip = default_route_with_source.and_then(|(_, _, ip)| ip);
         self.default_route_if_index = default_route_if_index;
         self.default_route_next_hop = default_route_next_hop;
 
@@ -1386,6 +1481,18 @@ impl ParallelInterceptor {
             if !strict_default_route {
                 log::info!(
                     "Default route appears to be PPP/point-to-point (next_hop=0.0.0.0); adapter binding will not be strict."
+                );
+            }
+            if let Some(target_ip) = self.default_route_target_ip {
+                log::info!(
+                    "Route resolution source: {} (target {})",
+                    self.default_route_source.as_str(),
+                    target_ip
+                );
+            } else {
+                log::info!(
+                    "Route resolution source: {}",
+                    self.default_route_source.as_str()
                 );
             }
         } else {
@@ -1575,6 +1682,8 @@ impl ParallelInterceptor {
                 );
             }
         }
+
+        self.manual_binding_active = used_preferred_physical_adapter;
 
         if strict_default_route && default_route_if_index.is_some() && selected.is_none() {
             let def = default_route_if_index.expect("checked is_some");
@@ -2242,15 +2351,26 @@ impl ParallelInterceptor {
 
         let prev_default_if_index = self.default_route_if_index;
         let prev_default_next_hop = self.default_route_next_hop;
+        let prev_default_source = self.default_route_source;
+        let prev_default_target_ip = self.default_route_target_ip;
         let current_if_index = self.physical_adapter_if_index;
+        let old_adapter_name_for_toast = self.physical_adapter_friendly_name.clone();
 
-        let new_default = Self::get_default_route_info();
+        let observed_game_targets: Vec<Ipv4Addr> =
+            self.detected_game_servers.read().iter().copied().collect();
+        let new_default_with_source =
+            Self::get_default_route_info_for_targets(&observed_game_targets);
+        let new_default = new_default_with_source.map(|(info, _, _)| info);
         let new_default_if_index = new_default.map(|d| d.if_index);
         let new_default_next_hop = new_default.map(|d| d.next_hop);
 
         // Update stored default route info for diagnostics even if we don't rebind.
         self.default_route_if_index = new_default_if_index;
         self.default_route_next_hop = new_default_next_hop;
+        self.default_route_source = new_default_with_source
+            .map(|(_, source, _)| source)
+            .unwrap_or(DefaultRouteSource::Unresolved);
+        self.default_route_target_ip = new_default_with_source.and_then(|(_, _, ip)| ip);
 
         let strict_default_route =
             new_default_next_hop.is_some() && new_default_next_hop != Some(0);
@@ -2296,6 +2416,9 @@ impl ParallelInterceptor {
         let old_physical_adapter_if_index = self.physical_adapter_if_index;
         let old_default_route_if_index = prev_default_if_index;
         let old_default_route_next_hop = prev_default_next_hop;
+        let old_default_route_source = prev_default_source;
+        let old_default_route_target_ip = prev_default_target_ip;
+        let old_manual_binding_active = self.manual_binding_active;
 
         self.stop();
 
@@ -2310,9 +2433,23 @@ impl ParallelInterceptor {
             self.physical_adapter_if_index = old_physical_adapter_if_index;
             self.default_route_if_index = old_default_route_if_index;
             self.default_route_next_hop = old_default_route_next_hop;
+            self.default_route_source = old_default_route_source;
+            self.default_route_target_ip = old_default_route_target_ip;
+            self.manual_binding_active = old_manual_binding_active;
         }
 
         self.start()?;
+        if let (Some(old_name), Some(new_name)) = (
+            old_adapter_name_for_toast,
+            self.physical_adapter_friendly_name.clone(),
+        ) {
+            if old_name != new_name {
+                crate::notification::show_notification(
+                    "SwiftTunnel adapter switched",
+                    &format!("Network changed: {} -> {}", old_name, new_name),
+                );
+            }
+        }
         Ok(true)
     }
 
@@ -6184,15 +6321,12 @@ mod tests {
 
         interceptor.physical_adapter_if_index = Some(11);
         interceptor.default_route_if_index = Some(11);
-        let (_, has_default_route, _, _) = interceptor.get_diagnostics();
-        assert!(has_default_route);
+        assert!(interceptor.get_diagnostics().has_default_route);
 
         interceptor.physical_adapter_if_index = Some(20);
-        let (_, has_default_route, _, _) = interceptor.get_diagnostics();
-        assert!(!has_default_route);
+        assert!(!interceptor.get_diagnostics().has_default_route);
 
         interceptor.physical_adapter_if_index = None;
-        let (_, has_default_route, _, _) = interceptor.get_diagnostics();
-        assert!(!has_default_route);
+        assert!(!interceptor.get_diagnostics().has_default_route);
     }
 }

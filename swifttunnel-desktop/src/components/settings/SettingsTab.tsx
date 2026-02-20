@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { useAuthStore } from "../../stores/authStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
+import { useVpnStore } from "../../stores/vpnStore";
 import { Toggle } from "../common/Toggle";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
@@ -28,6 +29,9 @@ export function SettingsTab() {
   const updaterError = useUpdaterStore((s) => s.error);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
+  const vpnState = useVpnStore((s) => s.state);
+  const vpnDiagnostics = useVpnStore((s) => s.diagnostics);
+  const fetchVpnDiagnostics = useVpnStore((s) => s.fetchDiagnostics);
   const [isGeneratingDiagnostics, setIsGeneratingDiagnostics] = useState(false);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
@@ -38,6 +42,23 @@ export function SettingsTab() {
   const [networkAdaptersError, setNetworkAdaptersError] = useState<string | null>(
     null,
   );
+  const adapterBindingMode = settings.adapter_binding_mode;
+  const manualAdapterBinding = adapterBindingMode === "manual";
+
+  const routeSourceLabel = (() => {
+    switch (vpnDiagnostics?.route_resolution_source) {
+      case "game_route":
+        return "Game route";
+      case "internet_fallback":
+        return "Internet fallback";
+      case "native_table_fallback":
+        return "Native route table fallback";
+      case "powershell_fallback":
+        return "PowerShell fallback";
+      default:
+        return "Not resolved";
+    }
+  })();
 
   function set(partial: Partial<AppSettings>) {
     update(partial);
@@ -68,6 +89,17 @@ export function SettingsTab() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    void fetchVpnDiagnostics();
+    if (vpnState !== "connected") {
+      return;
+    }
+    const id = setInterval(() => {
+      void fetchVpnDiagnostics();
+    }, 3000);
+    return () => clearInterval(id);
+  }, [fetchVpnDiagnostics, vpnState]);
 
   async function generateDiagnosticsBundle() {
     setIsGeneratingDiagnostics(true);
@@ -209,19 +241,62 @@ export function SettingsTab() {
       {/* ── VPN ── */}
       <Section title="VPN">
         <Row
+          label="Adapter Selection"
+          desc="Smart Auto follows active route. Manual locks split tunnel to a specific adapter."
+        >
+          <div className="flex gap-1">
+            <button
+              onClick={() => set({ adapter_binding_mode: "smart_auto" })}
+              className="rounded px-3 py-1 text-xs transition-colors"
+              style={{
+                backgroundColor:
+                  adapterBindingMode === "smart_auto"
+                    ? "var(--color-accent-primary)"
+                    : "var(--color-bg-hover)",
+                color:
+                  adapterBindingMode === "smart_auto"
+                    ? "white"
+                    : "var(--color-text-secondary)",
+              }}
+            >
+              Smart Auto
+            </button>
+            <button
+              onClick={() => set({ adapter_binding_mode: "manual" })}
+              className="rounded px-3 py-1 text-xs transition-colors"
+              style={{
+                backgroundColor:
+                  adapterBindingMode === "manual"
+                    ? "var(--color-accent-primary)"
+                    : "var(--color-bg-hover)",
+                color:
+                  adapterBindingMode === "manual"
+                    ? "white"
+                    : "var(--color-text-secondary)",
+              }}
+            >
+              Manual
+            </button>
+          </div>
+        </Row>
+        <Row
           label="Network Adapter"
-          desc="Auto-selects your active adapter. If split tunnel fails, pick Wi‑Fi/Ethernet here (applies on next connect)."
+          desc={
+            manualAdapterBinding
+              ? "Pick your active Wi‑Fi/Ethernet adapter (applies on next connect)."
+              : "SwiftTunnel selects adapter from active route and rebinds automatically on network change."
+          }
         >
           <select
             value={settings.preferred_physical_adapter_guid || ""}
             onChange={(e) =>
               set({
                 preferred_physical_adapter_guid: e.target.value
-                  ? e.target.value
-                  : null,
+                    ? e.target.value
+                    : null,
               })
             }
-            disabled={networkAdaptersLoading}
+            disabled={networkAdaptersLoading || !manualAdapterBinding}
             className="w-64 rounded border bg-bg-input px-2 py-1 text-sm text-text-primary disabled:opacity-50"
             style={{ borderColor: "var(--color-border-default)" }}
             onFocus={(e) =>
@@ -233,7 +308,9 @@ export function SettingsTab() {
                 "var(--color-border-default)")
             }
           >
-            <option value="">Auto (Recommended)</option>
+            <option value="">
+              {manualAdapterBinding ? "Auto fallback (Recommended)" : "Smart Auto"}
+            </option>
             {(networkAdapters || [])
               .slice()
               .sort((a, b) => {
@@ -284,12 +361,29 @@ export function SettingsTab() {
               })}
           </select>
         </Row>
+        {!manualAdapterBinding && (
+          <div className="px-4 pb-2 text-xs text-text-muted">
+            Current adapter:{" "}
+            <span className="text-text-primary">
+              {vpnDiagnostics?.adapter_name || "Not resolved yet"}
+            </span>
+            {" · "}
+            Source:{" "}
+            <span className="text-text-primary">
+              {routeSourceLabel}
+              {vpnDiagnostics?.route_resolution_target_ip
+                ? ` (${vpnDiagnostics.route_resolution_target_ip})`
+                : ""}
+            </span>
+          </div>
+        )}
         {networkAdaptersError && (
           <div className="px-4 pb-3 text-xs text-status-error">
             Failed to load adapters: {networkAdaptersError}
           </div>
         )}
         {!networkAdaptersError &&
+          manualAdapterBinding &&
           settings.preferred_physical_adapter_guid &&
           networkAdapters &&
           !networkAdapters.some(
@@ -300,6 +394,69 @@ export function SettingsTab() {
               another adapter.
             </div>
           )}
+        <details className="mx-4 mb-3 rounded border border-border-subtle bg-bg-card p-3">
+          <summary className="cursor-pointer text-xs font-medium text-text-secondary">
+            Advanced Adapter Diagnostics
+          </summary>
+          <div className="mt-3 grid grid-cols-1 gap-1 text-[11px] text-text-muted">
+            <span>
+              State: <span className="text-text-primary">{vpnState}</span>
+            </span>
+            <span>
+              Selected adapter:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.adapter_name || "unknown"}
+              </span>
+            </span>
+            <span>
+              Adapter GUID:{" "}
+              <span className="font-mono text-text-primary">
+                {vpnDiagnostics?.adapter_guid || "unknown"}
+              </span>
+            </span>
+            <span>
+              Selected ifIndex:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.selected_if_index ?? "n/a"}
+              </span>
+            </span>
+            <span>
+              Resolved ifIndex:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.resolved_if_index ?? "n/a"}
+              </span>
+            </span>
+            <span>
+              Route source:{" "}
+              <span className="text-text-primary">{routeSourceLabel}</span>
+            </span>
+            <span>
+              Route target:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.route_resolution_target_ip || "n/a"}
+              </span>
+            </span>
+            <span>
+              Has resolved route:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.has_default_route ? "yes" : "no"}
+              </span>
+            </span>
+            <span>
+              Manual binding active:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.manual_binding_active ? "yes" : "no"}
+              </span>
+            </span>
+            <span>
+              Packets tunneled / bypassed:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.packets_tunneled ?? 0} /{" "}
+                {vpnDiagnostics?.packets_bypassed ?? 0}
+              </span>
+            </span>
+          </div>
+        </details>
       </Section>
 
       {/* ── Updates ── */}

@@ -121,7 +121,13 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     mockVpnConnected
       ? {
           adapter_name: "SwiftTunnel",
+          adapter_guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          selected_if_index: 7,
+          resolved_if_index: 7,
           has_default_route: true,
+          route_resolution_source: "internet_fallback",
+          route_resolution_target_ip: "8.8.8.8",
+          manual_binding_active: false,
           packets_tunneled: 42891,
           packets_bypassed: 128744,
         }

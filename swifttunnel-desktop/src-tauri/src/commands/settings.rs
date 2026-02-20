@@ -39,7 +39,7 @@ struct BundleContext {
     platform: String,
     settings: swifttunnel_core::settings::AppSettings,
     vpn_state: swifttunnel_core::vpn::ConnectionState,
-    split_tunnel_diag: Option<(Option<String>, bool, u64, u64)>,
+    split_tunnel_diag: Option<swifttunnel_core::vpn::SplitTunnelDiagnostics>,
 }
 
 #[tauri::command]
@@ -314,15 +314,25 @@ fn format_settings_snapshot(settings: &swifttunnel_core::settings::AppSettings) 
     } else {
         settings.custom_relay_server.trim().to_string()
     };
+    let adapter_binding_mode = match settings.adapter_binding_mode {
+        swifttunnel_core::settings::AdapterBindingMode::SmartAuto => "smart_auto",
+        swifttunnel_core::settings::AdapterBindingMode::Manual => "manual",
+    };
+    let preferred_adapter = settings
+        .preferred_physical_adapter_guid
+        .as_deref()
+        .unwrap_or("none");
 
     format!(
-        "selected_region: {}\nselected_game_presets: {}\nauto_routing_enabled: {}\nwhitelisted_regions: {}\nupdate_channel: {:?}\ncustom_relay_server: {}",
+        "selected_region: {}\nselected_game_presets: {}\nauto_routing_enabled: {}\nwhitelisted_regions: {}\nupdate_channel: {:?}\ncustom_relay_server: {}\nadapter_binding_mode: {}\npreferred_physical_adapter_guid: {}",
         settings.selected_region,
         selected_games,
         settings.auto_routing_enabled,
         whitelisted_regions,
         settings.update_channel,
-        custom_relay
+        custom_relay,
+        adapter_binding_mode,
+        preferred_adapter
     )
 }
 
@@ -360,14 +370,27 @@ fn format_vpn_snapshot(vpn_state: &swifttunnel_core::vpn::ConnectionState) -> St
     }
 }
 
-fn format_split_tunnel_snapshot(diag: Option<(Option<String>, bool, u64, u64)>) -> String {
+fn format_split_tunnel_snapshot(
+    diag: Option<swifttunnel_core::vpn::SplitTunnelDiagnostics>,
+) -> String {
     match diag {
-        Some((adapter_name, has_default_route, packets_tunneled, packets_bypassed)) => format!(
-            "adapter_name: {}\nhas_default_route: {}\npackets_tunneled: {}\npackets_bypassed: {}",
-            adapter_name.unwrap_or_else(|| "unknown".to_string()),
-            has_default_route,
-            packets_tunneled,
-            packets_bypassed
+        Some(diag) => format!(
+            "adapter_name: {}\nadapter_guid: {}\nselected_if_index: {}\nresolved_if_index: {}\nhas_default_route: {}\nroute_resolution_source: {}\nroute_resolution_target_ip: {}\nmanual_binding_active: {}\npackets_tunneled: {}\npackets_bypassed: {}",
+            diag.adapter_name.unwrap_or_else(|| "unknown".to_string()),
+            diag.adapter_guid.unwrap_or_else(|| "unknown".to_string()),
+            diag.selected_if_index
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            diag.resolved_if_index
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            diag.has_default_route,
+            diag.route_resolution_source,
+            diag.route_resolution_target_ip
+                .unwrap_or_else(|| "n/a".to_string()),
+            diag.manual_binding_active,
+            diag.packets_tunneled,
+            diag.packets_bypassed
         ),
         None => "split tunnel diagnostics unavailable".to_string(),
     }
@@ -502,7 +525,18 @@ mod tests {
                 split_tunnel_active: true,
                 tunneled_processes: vec!["robloxplayerbeta.exe".to_string()],
             },
-            split_tunnel_diag: Some((Some("Ethernet".to_string()), true, 77, 12)),
+            split_tunnel_diag: Some(swifttunnel_core::vpn::SplitTunnelDiagnostics {
+                adapter_name: Some("Ethernet".to_string()),
+                adapter_guid: Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
+                selected_if_index: Some(7),
+                resolved_if_index: Some(7),
+                has_default_route: true,
+                packets_tunneled: 77,
+                packets_bypassed: 12,
+                route_resolution_source: "game_route".to_string(),
+                route_resolution_target_ip: Some("128.116.1.1".to_string()),
+                manual_binding_active: false,
+            }),
         };
 
         let bundle = compose_bundle_text(

@@ -57,6 +57,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   auto_routing_enabled: false,
   whitelisted_regions: [],
   preferred_physical_adapter_guid: null,
+  adapter_binding_mode: "smart_auto",
 };
 
 interface SettingsStore {
@@ -79,7 +80,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   load: async () => {
     try {
       const resp = await settingsLoad();
-      const settings = JSON.parse(resp.json) as AppSettings;
+      const raw = JSON.parse(resp.json) as Partial<AppSettings>;
+      const settings: AppSettings = {
+        ...DEFAULT_SETTINGS,
+        ...raw,
+      };
       set({
         settings,
         activeTab: (settings.current_tab as TabId) || "connect",

@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::events::{SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent};
 use crate::state::AppState;
+use swifttunnel_core::settings::AdapterBindingMode;
 
 #[derive(Serialize)]
 pub struct VpnStateResponse {
@@ -177,6 +178,10 @@ pub async fn vpn_connect(
         preferred_physical_adapter_guid,
     ) = {
         let settings = state.settings.lock();
+        let preferred_physical_adapter_guid = match settings.adapter_binding_mode {
+            AdapterBindingMode::Manual => settings.preferred_physical_adapter_guid.clone(),
+            AdapterBindingMode::SmartAuto => None,
+        };
         (
             if settings.custom_relay_server.is_empty() {
                 None
@@ -186,7 +191,7 @@ pub async fn vpn_connect(
             settings.auto_routing_enabled,
             settings.whitelisted_regions.clone(),
             settings.forced_servers.clone(),
-            settings.preferred_physical_adapter_guid.clone(),
+            preferred_physical_adapter_guid,
         )
     };
 
@@ -317,7 +322,13 @@ pub async fn vpn_get_throughput(
 #[derive(Serialize)]
 pub struct DiagnosticsResponse {
     pub adapter_name: Option<String>,
+    pub adapter_guid: Option<String>,
+    pub selected_if_index: Option<u32>,
+    pub resolved_if_index: Option<u32>,
     pub has_default_route: bool,
+    pub route_resolution_source: Option<String>,
+    pub route_resolution_target_ip: Option<String>,
+    pub manual_binding_active: bool,
     pub packets_tunneled: u64,
     pub packets_bypassed: u64,
 }
@@ -329,11 +340,17 @@ pub async fn vpn_get_diagnostics(
     let vpn = state.vpn_connection.lock().await;
     Ok(vpn
         .get_split_tunnel_diagnostics()
-        .map(|(adapter, route, tunneled, bypassed)| DiagnosticsResponse {
-            adapter_name: adapter,
-            has_default_route: route,
-            packets_tunneled: tunneled,
-            packets_bypassed: bypassed,
+        .map(|diag| DiagnosticsResponse {
+            adapter_name: diag.adapter_name,
+            adapter_guid: diag.adapter_guid,
+            selected_if_index: diag.selected_if_index,
+            resolved_if_index: diag.resolved_if_index,
+            has_default_route: diag.has_default_route,
+            route_resolution_source: Some(diag.route_resolution_source),
+            route_resolution_target_ip: diag.route_resolution_target_ip,
+            manual_binding_active: diag.manual_binding_active,
+            packets_tunneled: diag.packets_tunneled,
+            packets_bypassed: diag.packets_bypassed,
         }))
 }
 
