@@ -25,6 +25,68 @@ pub fn hidden_command(program: &str) -> Command {
     cmd
 }
 
+/// Normalize a GUID string to lowercase canonical form.
+///
+/// Accepts either raw GUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) or
+/// wrapped GUID (`{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`), and can extract
+/// either form when embedded within larger strings.
+pub fn normalize_guid_ascii_lowercase(value: &str) -> Option<String> {
+    fn is_guid_ascii(bytes: &[u8]) -> bool {
+        if bytes.len() != 36 {
+            return false;
+        }
+        const DASH_POS: [usize; 4] = [8, 13, 18, 23];
+        for (i, &b) in bytes.iter().enumerate() {
+            if DASH_POS.contains(&i) {
+                if b != b'-' {
+                    return false;
+                }
+                continue;
+            }
+            if !b.is_ascii_hexdigit() {
+                return false;
+            }
+        }
+        true
+    }
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let bytes = trimmed.as_bytes();
+
+    // Fast path: `{GUID}` anywhere inside the string.
+    for (open_idx, &b) in bytes.iter().enumerate() {
+        if b != b'{' {
+            continue;
+        }
+        let Some(close_rel) = bytes[open_idx + 1..].iter().position(|&b| b == b'}') else {
+            continue;
+        };
+        let close_idx = open_idx + 1 + close_rel;
+        let inner = &bytes[open_idx + 1..close_idx];
+        if is_guid_ascii(inner) {
+            return trimmed
+                .get(open_idx + 1..close_idx)
+                .map(|guid| guid.to_ascii_lowercase());
+        }
+    }
+
+    // Fallback: raw GUID without braces somewhere in the string.
+    for start in 0..=bytes.len().saturating_sub(36) {
+        let candidate = &bytes[start..start + 36];
+        if is_guid_ascii(candidate) {
+            return trimmed
+                .get(start..start + 36)
+                .map(|guid| guid.to_ascii_lowercase());
+        }
+    }
+
+    None
+}
+
 /// Check if the current process has administrator privileges
 ///
 /// Returns true if running with elevated privileges, false otherwise.
@@ -429,5 +491,24 @@ mod tests {
     fn test_with_retry_sync_success() {
         let result: Result<i32, &str> = with_retry_sync(3, || Ok(42));
         assert_eq!(result, Ok(42));
+    }
+
+    #[test]
+    fn test_normalize_guid_ascii_lowercase_accepts_wrapped_guid() {
+        let guid = normalize_guid_ascii_lowercase("  {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}  ");
+        assert_eq!(
+            guid.as_deref(),
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        );
+    }
+
+    #[test]
+    fn test_normalize_guid_ascii_lowercase_extracts_embedded_guid() {
+        let guid =
+            normalize_guid_ascii_lowercase("\\\\DEVICE\\\\{12345678-1234-1234-1234-1234567890AB}");
+        assert_eq!(
+            guid.as_deref(),
+            Some("12345678-1234-1234-1234-1234567890ab")
+        );
     }
 }
