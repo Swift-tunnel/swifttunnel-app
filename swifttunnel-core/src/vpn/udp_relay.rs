@@ -360,7 +360,7 @@ impl UdpRelay {
                     let tos_bytes = std::slice::from_raw_parts(&tos as *const i32 as *const u8, 4);
                     let result = windows::Win32::Networking::WinSock::setsockopt(
                         sock,
-                        windows::Win32::Networking::WinSock::IPPROTO_IP,
+                        windows::Win32::Networking::WinSock::IPPROTO_IP.0,
                         windows::Win32::Networking::WinSock::IP_TOS,
                         Some(tos_bytes),
                     );
@@ -371,7 +371,7 @@ impl UdpRelay {
                     // Best-effort for IPv6 traffic class when dual-stack is used.
                     let result = windows::Win32::Networking::WinSock::setsockopt(
                         sock,
-                        windows::Win32::Networking::WinSock::IPPROTO_IPV6,
+                        windows::Win32::Networking::WinSock::IPPROTO_IPV6.0,
                         windows::Win32::Networking::WinSock::IPV6_TCLASS,
                         Some(tos_bytes),
                     );
