@@ -282,9 +282,26 @@ pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Resul
 
 #[tauri::command]
 pub async fn vpn_get_ping(state: State<'_, AppState>) -> Result<Option<u32>, String> {
-    let vpn = state.vpn_connection.lock().await;
-    let relay_addr = vpn.current_relay_addr();
-    drop(vpn);
+    let (relay_ping, relay_addr) = {
+        let vpn = state.vpn_connection.lock().await;
+        let relay_ping = vpn.get_relay_ping_snapshot().and_then(|snapshot| {
+            if !snapshot.enabled {
+                return None;
+            }
+            snapshot
+                .last_rtt_ms
+                .or(snapshot.p50_rtt_ms)
+                .or(snapshot.p99_rtt_ms)
+        });
+        let relay_addr = vpn.current_relay_addr();
+        (relay_ping, relay_addr)
+    };
+
+    // Preferred source: in-tunnel relay RTT telemetry from control-plane ping/pong.
+    // This keeps ping populated even when ICMP is blocked or rate-limited.
+    if relay_ping.is_some() {
+        return Ok(relay_ping);
+    }
 
     let addr = match relay_addr {
         Some(a) => a,
