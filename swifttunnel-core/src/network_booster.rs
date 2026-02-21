@@ -1,6 +1,7 @@
 use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
+use std::collections::HashMap;
 
 const LEGACY_ROBLOX_PRIORITY_POLICY: &str = "RobloxPriority";
 const ROBLOX_QOS_EXECUTABLES: [&str; 4] = [
@@ -10,6 +11,12 @@ const ROBLOX_QOS_EXECUTABLES: [&str; 4] = [
     "Windows10Universal.exe",
 ];
 const RELAY_QOS_EXECUTABLES: [&str; 2] = ["SwiftTunnel.exe", "swifttunnel-desktop.exe"];
+const NETWORK_SYSTEM_PROFILE_KEY: &str =
+    r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
+const REG_VALUE_TCP_ACK_FREQUENCY: &str = "TcpAckFrequency";
+const REG_VALUE_TCP_NO_DELAY: &str = "TCPNoDelay";
+const REG_VALUE_NETWORK_THROTTLING_INDEX: &str = "NetworkThrottlingIndex";
+const REG_VALUE_SYSTEM_RESPONSIVENESS: &str = "SystemResponsiveness";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OriginalMtu {
@@ -17,9 +24,23 @@ struct OriginalMtu {
     mtu: u32,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NagleRegistrySnapshot {
+    tcp_ack_frequency: Option<u32>,
+    tcp_no_delay: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NetworkThrottlingSnapshot {
+    network_throttling_index: Option<u32>,
+    system_responsiveness: Option<u32>,
+}
+
 pub struct NetworkBooster {
     original_mtu: Option<OriginalMtu>,
     qos_enabled: bool,
+    nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
+    network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
 }
 
 impl NetworkBooster {
@@ -27,6 +48,8 @@ impl NetworkBooster {
         Self {
             original_mtu: None,
             qos_enabled: false,
+            nagle_registry_snapshot: HashMap::new(),
+            network_throttling_snapshot: None,
         }
     }
 
@@ -150,6 +173,89 @@ impl NetworkBooster {
         }
     }
 
+    fn parse_registry_dword(token: &str) -> Option<u32> {
+        let raw = token.trim();
+        if raw.is_empty() {
+            return None;
+        }
+
+        if let Some(hex) = raw.strip_prefix("0x") {
+            return u32::from_str_radix(hex, 16).ok();
+        }
+
+        raw.parse::<u32>().ok()
+    }
+
+    fn query_registry_dword(key_path: &str, value_name: &str) -> Option<u32> {
+        let output = hidden_command("reg")
+            .args(["query", key_path, "/v", value_name])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        for line in output_str.lines() {
+            if !line.contains(value_name) || !line.contains("REG_DWORD") {
+                continue;
+            }
+
+            if let Some(value_token) = line.split_whitespace().last() {
+                if let Some(parsed) = Self::parse_registry_dword(value_token) {
+                    return Some(parsed);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn set_registry_dword(key_path: &str, value_name: &str, value: u32) {
+        let value_str = value.to_string();
+        let output = hidden_command("reg")
+            .args([
+                "add",
+                key_path,
+                "/v",
+                value_name,
+                "/t",
+                "REG_DWORD",
+                "/d",
+                &value_str,
+                "/f",
+            ])
+            .output();
+
+        match output {
+            Ok(result) => {
+                if !result.status.success() {
+                    warn!("Failed to set {}\\{} to {}", key_path, value_name, value);
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to set {}\\{} to {}: {}",
+                    key_path, value_name, value, e
+                );
+            }
+        }
+    }
+
+    fn restore_registry_dword(key_path: &str, value_name: &str, value: Option<u32>) {
+        match value {
+            Some(saved) => {
+                Self::set_registry_dword(key_path, value_name, saved);
+            }
+            None => {
+                let _ = hidden_command("reg")
+                    .args(["delete", key_path, "/v", value_name, "/f"])
+                    .output();
+            }
+        }
+    }
+
     /// Prioritize game traffic using QoS
     fn prioritize_game_traffic(&self) -> Result<()> {
         info!("Prioritizing Roblox game traffic");
@@ -222,7 +328,7 @@ impl NetworkBooster {
     /// Disable Nagle's algorithm for lower latency on small packets
     /// Nagle's algorithm batches small packets to reduce overhead, but adds latency
     /// This is especially beneficial for games that send many small packets
-    fn disable_nagle_algorithm(&self) -> Result<()> {
+    fn disable_nagle_algorithm(&mut self) -> Result<()> {
         info!("Disabling Nagle's algorithm for all adapters");
 
         for guid in self.list_adapter_guids() {
@@ -230,146 +336,106 @@ impl NetworkBooster {
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
                 guid
             );
+            self.nagle_registry_snapshot
+                .entry(guid)
+                .or_insert_with(|| NagleRegistrySnapshot {
+                    tcp_ack_frequency: Self::query_registry_dword(
+                        &key_path,
+                        REG_VALUE_TCP_ACK_FREQUENCY,
+                    ),
+                    tcp_no_delay: Self::query_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY),
+                });
 
             // TcpAckFrequency = 1
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &key_path,
-                    "/v",
-                    "TcpAckFrequency",
-                    "/t",
-                    "REG_DWORD",
-                    "/d",
-                    "1",
-                    "/f",
-                ])
-                .output();
+            Self::set_registry_dword(&key_path, REG_VALUE_TCP_ACK_FREQUENCY, 1);
 
             // TCPNoDelay = 1 (disable Nagle)
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &key_path,
-                    "/v",
-                    "TCPNoDelay",
-                    "/t",
-                    "REG_DWORD",
-                    "/d",
-                    "1",
-                    "/f",
-                ])
-                .output();
+            Self::set_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, 1);
         }
         info!("Nagle's algorithm disabled on all adapters");
 
         Ok(())
     }
 
-    fn restore_nagle_algorithm(&self) -> Result<()> {
-        info!("Restoring Nagle settings to adapter defaults");
-        for guid in self.list_adapter_guids() {
+    fn restore_nagle_algorithm(&mut self) -> Result<()> {
+        info!("Restoring Nagle settings to adapter snapshots");
+
+        if self.nagle_registry_snapshot.is_empty() {
+            info!("No Nagle snapshot captured in this session; skipping restore");
+            return Ok(());
+        }
+
+        for (guid, snapshot) in self.nagle_registry_snapshot.drain() {
             let key_path = format!(
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
                 guid
             );
 
-            // Delete custom overrides so Windows defaults apply.
-            let _ = hidden_command("reg")
-                .args(["delete", &key_path, "/v", "TcpAckFrequency", "/f"])
-                .output();
-            let _ = hidden_command("reg")
-                .args(["delete", &key_path, "/v", "TCPNoDelay", "/f"])
-                .output();
+            Self::restore_registry_dword(
+                &key_path,
+                REG_VALUE_TCP_ACK_FREQUENCY,
+                snapshot.tcp_ack_frequency,
+            );
+            Self::restore_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, snapshot.tcp_no_delay);
         }
+
         Ok(())
     }
 
     /// Disable Windows network throttling for full bandwidth to games
     /// Windows throttles network for multimedia apps, this gives games full bandwidth
-    fn disable_network_throttling(&self) -> Result<()> {
+    fn disable_network_throttling(&mut self) -> Result<()> {
         info!("Disabling Windows network throttling");
 
-        // Disable network throttling (0xFFFFFFFF = disabled)
-        let output = hidden_command("reg")
-            .args([
-                "add",
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
-                "/v",
-                "NetworkThrottlingIndex",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "4294967295", // 0xFFFFFFFF
-                "/f",
-            ])
-            .output();
-
-        match output {
-            Ok(result) => {
-                if result.status.success() {
-                    info!("Network throttling disabled");
-                } else {
-                    warn!("Failed to disable network throttling (may need admin)");
-                }
-            }
-            Err(e) => {
-                warn!("Failed to set network throttling: {}", e);
-            }
+        if self.network_throttling_snapshot.is_none() {
+            self.network_throttling_snapshot = Some(NetworkThrottlingSnapshot {
+                network_throttling_index: Self::query_registry_dword(
+                    NETWORK_SYSTEM_PROFILE_KEY,
+                    REG_VALUE_NETWORK_THROTTLING_INDEX,
+                ),
+                system_responsiveness: Self::query_registry_dword(
+                    NETWORK_SYSTEM_PROFILE_KEY,
+                    REG_VALUE_SYSTEM_RESPONSIVENESS,
+                ),
+            });
         }
+
+        // Disable network throttling (0xFFFFFFFF = disabled)
+        Self::set_registry_dword(
+            NETWORK_SYSTEM_PROFILE_KEY,
+            REG_VALUE_NETWORK_THROTTLING_INDEX,
+            u32::MAX, // 0xFFFFFFFF
+        );
+        info!("Network throttling disabled");
 
         // Also set SystemResponsiveness to 0 (0% reserved for background tasks)
-        let output = hidden_command("reg")
-            .args([
-                "add",
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
-                "/v",
-                "SystemResponsiveness",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
-
-        if let Err(e) = output {
-            warn!("Failed to set SystemResponsiveness: {}", e);
-        }
+        Self::set_registry_dword(
+            NETWORK_SYSTEM_PROFILE_KEY,
+            REG_VALUE_SYSTEM_RESPONSIVENESS,
+            0,
+        );
 
         Ok(())
     }
 
-    fn restore_network_throttling(&self) -> Result<()> {
-        info!("Restoring Windows network throttling defaults");
+    fn restore_network_throttling(&mut self) -> Result<()> {
+        info!("Restoring Windows network throttling from snapshot");
 
-        let _ = hidden_command("reg")
-            .args([
-                "add",
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
-                "/v",
-                "NetworkThrottlingIndex",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "10",
-                "/f",
-            ])
-            .output()?;
+        let Some(snapshot) = self.network_throttling_snapshot.take() else {
+            info!("No network throttling snapshot captured in this session; skipping restore");
+            return Ok(());
+        };
 
-        let _ = hidden_command("reg")
-            .args([
-                "add",
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
-                "/v",
-                "SystemResponsiveness",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "20",
-                "/f",
-            ])
-            .output()?;
+        Self::restore_registry_dword(
+            NETWORK_SYSTEM_PROFILE_KEY,
+            REG_VALUE_NETWORK_THROTTLING_INDEX,
+            snapshot.network_throttling_index,
+        );
+        Self::restore_registry_dword(
+            NETWORK_SYSTEM_PROFILE_KEY,
+            REG_VALUE_SYSTEM_RESPONSIVENESS,
+            snapshot.system_responsiveness,
+        );
 
         Ok(())
     }
@@ -830,6 +896,17 @@ mod tests {
         let output = b"  \n\t\n";
         let parsed = NetworkBooster::parse_first_line(output, "missing");
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_registry_dword_supports_hex_and_decimal() {
+        assert_eq!(NetworkBooster::parse_registry_dword("0x1"), Some(1));
+        assert_eq!(
+            NetworkBooster::parse_registry_dword("4294967295"),
+            Some(u32::MAX)
+        );
+        assert_eq!(NetworkBooster::parse_registry_dword(""), None);
+        assert_eq!(NetworkBooster::parse_registry_dword("invalid"), None);
     }
 
     /// Verify apply_optimizations returns Ok even when individual optimizations

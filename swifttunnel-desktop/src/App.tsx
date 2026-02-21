@@ -87,7 +87,9 @@ function App() {
         const loadedSettings = useSettingsStore.getState().settings;
         // Apply saved per-boost config on startup so enabled boosts are active
         // without requiring a master toggle.
-        void boostUpdateConfig(JSON.stringify(loadedSettings.config)).catch(() => {});
+        void boostUpdateConfig(JSON.stringify(loadedSettings.config)).catch((err) => {
+          console.warn("Failed to apply boost config on startup:", err);
+        });
 
         if (
           shouldAutoReconnectOnLaunch(
