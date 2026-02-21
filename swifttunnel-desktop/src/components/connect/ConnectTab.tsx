@@ -97,7 +97,7 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [isConnected, fetchThroughput]);
 
-  // Real-time ICMP ping to the actual relay server
+  // Real-time relay RTT telemetry (control-plane ping/pong, ICMP fallback).
   useEffect(() => {
     if (!isConnected) return;
     void fetchPing();

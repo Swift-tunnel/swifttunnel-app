@@ -26,7 +26,6 @@ describe("stores/settingsStore", () => {
       json: JSON.stringify({
         theme: "light",
         config: {},
-        optimizations_active: false,
         window_state: { x: null, y: null, width: 560, height: 750, maximized: false },
         selected_region: "singapore",
         selected_server: "singapore",

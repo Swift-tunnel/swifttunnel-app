@@ -309,7 +309,7 @@ impl UdpRelay {
     /// Create a new UDP relay connection to the specified server
     ///
     /// relay_addr should already be resolved (use tokio::net::lookup_host for DNS)
-    pub fn new(relay_addr: SocketAddr) -> Result<Self> {
+    pub fn new(relay_addr: SocketAddr, relay_qos_enabled: bool) -> Result<Self> {
         // Bind to any available port
         let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket")?;
 
@@ -349,6 +349,35 @@ impl UdpRelay {
                 );
                 if result != 0 {
                     log::warn!("UDP Relay: Failed to set SO_SNDBUF to 256KB, using default");
+                }
+            }
+
+            if relay_qos_enabled {
+                // DSCP EF (46) => TOS byte 184. This prioritizes relay traffic if the path
+                // honors DSCP (router + ISP + relay uplink policy dependent).
+                let tos: i32 = 46 << 2;
+                unsafe {
+                    let tos_bytes = std::slice::from_raw_parts(&tos as *const i32 as *const u8, 4);
+                    let result = windows::Win32::Networking::WinSock::setsockopt(
+                        sock,
+                        windows::Win32::Networking::WinSock::IPPROTO_IP,
+                        windows::Win32::Networking::WinSock::IP_TOS,
+                        Some(tos_bytes),
+                    );
+                    if result != 0 {
+                        log::warn!("UDP Relay: Failed to set IP_TOS DSCP EF; continuing");
+                    }
+
+                    // Best-effort for IPv6 traffic class when dual-stack is used.
+                    let result = windows::Win32::Networking::WinSock::setsockopt(
+                        sock,
+                        windows::Win32::Networking::WinSock::IPPROTO_IPV6,
+                        windows::Win32::Networking::WinSock::IPV6_TCLASS,
+                        Some(tos_bytes),
+                    );
+                    if result != 0 {
+                        log::debug!("UDP Relay: Could not set IPV6_TCLASS DSCP EF");
+                    }
                 }
             }
         }
@@ -473,9 +502,10 @@ impl UdpRelay {
             .context("Failed to spawn udp-relay-sender thread")?;
 
         log::info!(
-            "UDP Relay: Created session {:016x} to {}",
+            "UDP Relay: Created session {:016x} to {} (relay_qos={})",
             u64::from_be_bytes(session_id),
-            relay_addr
+            relay_addr,
+            relay_qos_enabled
         );
 
         let initial_mtu = detect_relay_path_mtu(relay_addr).unwrap_or(RELAY_PATH_MTU_UPPER_BOUND);
@@ -1118,7 +1148,7 @@ mod tests {
 
     #[test]
     fn test_forward_outbound_drops_oversize_payload() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
         relay.set_relay_path_mtu_for_test(1500);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
         let payload = vec![0u8; max_payload + 1];
@@ -1129,7 +1159,7 @@ mod tests {
 
     #[test]
     fn test_forward_outbound_allows_max_payload() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
         relay.set_relay_path_mtu_for_test(1500);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
         let payload = vec![0u8; max_payload];
@@ -1139,7 +1169,7 @@ mod tests {
 
     #[test]
     fn test_forward_outbound_respects_lower_path_mtu() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
         relay.set_relay_path_mtu_for_test(1400);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
         assert_eq!(
@@ -1155,7 +1185,7 @@ mod tests {
 
     #[test]
     fn test_receive_inbound_ignores_pong_and_records_ping_stats() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
         relay.set_ping_enabled(true);
 
         // Use an ephemeral socket as our "relay server", then switch the expected source.

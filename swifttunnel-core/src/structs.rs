@@ -177,7 +177,7 @@ pub struct NetworkConfig {
     pub disable_network_throttling: bool,
     #[serde(default)]
     pub optimize_mtu: bool,
-    /// Gaming QoS - Marks game packets with DSCP EF (46) for router prioritization
+    /// Gaming QoS - Marks Roblox and relay tunnel UDP packets with DSCP EF (46)
     #[serde(default = "default_true")]
     pub gaming_qos: bool,
 }
@@ -357,7 +357,7 @@ pub mod boost_info {
         id: "gaming_qos",
         title: "Gaming QoS",
         short_desc: "Router traffic prioritization",
-        long_desc: "Marks Roblox packets with DSCP EF (Expedited Forwarding) priority. If your router supports QoS, game traffic will be prioritized over downloads, streaming, and other network activity. Safe, no side effects.",
+        long_desc: "Marks Roblox and SwiftTunnel relay UDP packets with DSCP EF (Expedited Forwarding) priority. If your router supports QoS, gameplay traffic is prioritized over downloads, streaming, and other activity. Safe, no side effects.",
         impact: "-5-20ms if router honors QoS",
         risk_level: RiskLevel::Safe,
         requires_admin: true,

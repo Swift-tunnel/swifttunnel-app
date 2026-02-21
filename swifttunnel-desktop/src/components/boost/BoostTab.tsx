@@ -154,10 +154,6 @@ export function BoostTab() {
     return () => clearInterval(id);
   }, [boost.fetchMetrics]);
 
-  useEffect(() => {
-    boost.syncActiveFromSettings(settings.optimizations_active);
-  }, [boost.syncActiveFromSettings, settings.optimizations_active]);
-
   // Apply: persist draft to settings + backend
   const applyChanges = useCallback(() => {
     updateSettings({ config: draft });
@@ -211,17 +207,6 @@ export function BoostTab() {
 
   return (
     <div className="flex flex-col gap-6 pb-16">
-      {/* ── Boost Toggle ── */}
-      <div className="flex items-center justify-between rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-5 py-3">
-        <span className="text-sm font-medium text-text-primary">
-          {boost.isActive ? "Boost Active" : "Boost Off"}
-        </span>
-        <Toggle
-          enabled={boost.isActive}
-          onChange={(v) => boost.toggle(v)}
-          disabled={boost.isToggling}
-        />
-      </div>
       {boost.error && (
         <p className="text-xs text-status-error">{boost.error}</p>
       )}
@@ -319,7 +304,7 @@ export function BoostTab() {
         />
         <BoostCard
           title="Gaming QoS"
-          desc="Router traffic prioritization"
+          desc="Prioritize Roblox + tunnel UDP"
           impact="-5-20ms"
           enabled={draft.network_settings.gaming_qos}
           onChange={(v) => updateNetOpt({ gaming_qos: v })}

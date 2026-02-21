@@ -33,7 +33,6 @@ const MOCK_SETTINGS = {
     auto_start_with_roblox: false,
     show_overlay: true,
   },
-  optimizations_active: true,
   window_state: { x: null, y: null, width: 560, height: 750, maximized: false },
   selected_region: "singapore",
   selected_server: "singapore",
@@ -182,7 +181,6 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     process_id: 12480,
   }),
 
-  boost_toggle: () => {},
   boost_update_config: () => {},
   boost_restart_roblox: async () => {
     await new Promise((r) => setTimeout(r, 1200));

@@ -86,9 +86,6 @@ export const serverSmartSelect = (regionId: string) =>
 export const boostGetMetrics = () =>
   invoke<PerformanceMetricsResponse>("boost_get_metrics");
 
-export const boostToggle = (enable: boolean) =>
-  invoke<void>("boost_toggle", { enable });
-
 export const boostUpdateConfig = (configJson: string) =>
   invoke<void>("boost_update_config", { configJson });
 
