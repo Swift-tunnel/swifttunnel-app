@@ -35,7 +35,6 @@ const DEFAULT_SETTINGS: AppSettings = {
     auto_start_with_roblox: false,
     show_overlay: true,
   },
-  optimizations_active: false,
   window_state: { x: null, y: null, width: 560, height: 750, maximized: false },
   selected_region: "singapore",
   selected_server: "singapore",

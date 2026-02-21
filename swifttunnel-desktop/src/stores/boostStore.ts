@@ -2,13 +2,11 @@ import { create } from "zustand";
 import type { PerformanceMetricsEvent } from "../lib/types";
 import {
   boostGetMetrics,
-  boostToggle,
   boostGetSystemInfo,
   boostUpdateConfig,
   boostRestartRoblox,
 } from "../lib/commands";
 import { notify } from "../lib/notifications";
-import { useSettingsStore } from "./settingsStore";
 
 interface BoostStore {
   // Metrics
@@ -20,9 +18,6 @@ interface BoostStore {
   robloxRunning: boolean;
   processId: number | null;
 
-  // State
-  isActive: boolean;
-  isToggling: boolean;
   error: string | null;
 
   // System info
@@ -32,11 +27,9 @@ interface BoostStore {
 
   // Actions
   fetchMetrics: () => Promise<void>;
-  toggle: (enable: boolean) => Promise<void>;
   fetchSystemInfo: () => Promise<void>;
   updateConfig: (configJson: string) => Promise<void>;
   restartRoblox: () => Promise<void>;
-  syncActiveFromSettings: (isActive: boolean) => void;
   clearError: () => void;
   handleMetricsEvent: (event: PerformanceMetricsEvent) => void;
 }
@@ -49,8 +42,6 @@ export const useBoostStore = create<BoostStore>((set) => ({
   ping: 0,
   robloxRunning: false,
   processId: null,
-  isActive: false,
-  isToggling: false,
   error: null,
   isAdmin: false,
   osVersion: "",
@@ -70,22 +61,6 @@ export const useBoostStore = create<BoostStore>((set) => ({
       });
     } catch {
       // Silently ignore
-    }
-  },
-
-  toggle: async (enable) => {
-    try {
-      set({ isToggling: true, error: null });
-      await boostToggle(enable);
-      set({ isActive: enable, isToggling: false });
-      // Sync to settingsStore so state persists across page navigation
-      const { update, save } = useSettingsStore.getState();
-      update({ optimizations_active: enable });
-      void save();
-    } catch (e) {
-      const message = String(e);
-      set({ isToggling: false, error: message });
-      await notify("Boost failed", "Could not apply optimization changes.");
     }
   },
 
@@ -121,10 +96,6 @@ export const useBoostStore = create<BoostStore>((set) => ({
       set({ error: message });
       await notify("Restart failed", "Could not restart Roblox.");
     }
-  },
-
-  syncActiveFromSettings: (isActive) => {
-    set({ isActive });
   },
 
   clearError: () => {

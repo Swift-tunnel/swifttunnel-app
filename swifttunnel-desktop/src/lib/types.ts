@@ -246,7 +246,6 @@ export interface UpdaterInstallResponse {
 export interface AppSettings {
   theme: string;
   config: Config;
-  optimizations_active: boolean;
   window_state: WindowState;
   selected_region: string;
   selected_server: string;

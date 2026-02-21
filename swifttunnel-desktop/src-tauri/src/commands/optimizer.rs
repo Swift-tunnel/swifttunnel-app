@@ -31,80 +31,45 @@ pub fn boost_get_metrics(state: State<'_, AppState>) -> PerformanceMetricsRespon
     }
 }
 
-#[tauri::command]
-pub fn boost_toggle(state: State<'_, AppState>, enable: bool) -> Result<(), String> {
-    let settings = state.settings.lock().clone();
-
+fn reconcile_boosts(state: &AppState, config: &swifttunnel_core::structs::Config) -> Vec<String> {
+    let mut warnings = Vec::new();
     // Resolve Roblox PID from performance monitor (needed for process-specific boosts)
     let roblox_pid = {
         let mut monitor = state.performance_monitor.lock();
         monitor.get_roblox_pid().unwrap_or(0)
     };
 
-    if enable {
-        let mut warnings = Vec::new();
-
-        // Apply system optimizations (with real PID for priority/affinity)
-        if let Err(e) = state
-            .system_optimizer
-            .lock()
-            .apply_optimizations(&settings.config.system_optimization, roblox_pid)
+    // Restore first, then apply the current per-boost config so disabled toggles are respected.
+    {
+        let mut system_optimizer = state.system_optimizer.lock();
+        if let Err(e) = system_optimizer.restore(roblox_pid) {
+            warnings.push(format!("System optimizer restore: {}", e));
+        }
+        if let Err(e) =
+            system_optimizer.apply_optimizations(&config.system_optimization, roblox_pid)
         {
             warnings.push(format!("System optimizer: {}", e));
         }
+    }
 
-        // Apply network optimizations
-        if let Err(e) = state
-            .network_booster
-            .lock()
-            .apply_optimizations(&settings.config.network_settings)
-        {
+    {
+        let mut network_booster = state.network_booster.lock();
+        if let Err(e) = network_booster.reconcile_optimizations(&config.network_settings) {
             warnings.push(format!("Network booster: {}", e));
         }
+    }
 
-        // Apply roblox optimizations
-        if let Err(e) = state
-            .roblox_optimizer
-            .lock()
-            .apply_optimizations(&settings.config.roblox_settings)
-        {
-            warnings.push(format!("Roblox optimizer: {}", e));
-        }
-
-        if !warnings.is_empty() {
-            log::warn!("Boost applied with warnings: {}", warnings.join("; "));
-        }
-    } else {
-        let mut warnings = Vec::new();
-
-        // Revert system optimizations
-        if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
-            warnings.push(format!("System optimizer restore: {}", e));
-        }
-
-        // Revert network optimizations
-        if let Err(e) = state.network_booster.lock().restore() {
-            warnings.push(format!("Network booster restore: {}", e));
-        }
-
-        // Revert roblox optimizations
-        if let Err(e) = state.roblox_optimizer.lock().restore_settings() {
+    {
+        let roblox_optimizer = state.roblox_optimizer.lock();
+        if let Err(e) = roblox_optimizer.restore_settings() {
             warnings.push(format!("Roblox optimizer restore: {}", e));
         }
-
-        if !warnings.is_empty() {
-            log::warn!("Boost disabled with warnings: {}", warnings.join("; "));
+        if let Err(e) = roblox_optimizer.apply_optimizations(&config.roblox_settings) {
+            warnings.push(format!("Roblox optimizer: {}", e));
         }
     }
 
-    // Update settings
-    {
-        let mut s = state.settings.lock();
-        s.optimizations_active = enable;
-        swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
-    }
-
-    Ok(())
+    warnings
 }
 
 #[tauri::command]
@@ -112,51 +77,18 @@ pub fn boost_update_config(state: State<'_, AppState>, config_json: String) -> R
     let config: swifttunnel_core::structs::Config =
         serde_json::from_str(&config_json).map_err(|e| format!("Invalid config: {}", e))?;
 
-    let optimizations_active;
     {
         let mut settings = state.settings.lock();
-        settings.config = config;
-        optimizations_active = settings.optimizations_active;
+        settings.config = config.clone();
         swifttunnel_core::settings::save_settings(&settings).map_err(|e| e.to_string())?;
     }
 
-    // If boosts are currently active, re-apply with the updated config
-    if optimizations_active {
-        let settings = state.settings.lock().clone();
-        let roblox_pid = {
-            let mut monitor = state.performance_monitor.lock();
-            monitor.get_roblox_pid().unwrap_or(0)
-        };
-
-        let mut warnings = Vec::new();
-
-        if let Err(e) = state
-            .system_optimizer
-            .lock()
-            .apply_optimizations(&settings.config.system_optimization, roblox_pid)
-        {
-            warnings.push(format!("System optimizer: {}", e));
-        }
-
-        if let Err(e) = state
-            .network_booster
-            .lock()
-            .apply_optimizations(&settings.config.network_settings)
-        {
-            warnings.push(format!("Network booster: {}", e));
-        }
-
-        if let Err(e) = state
-            .roblox_optimizer
-            .lock()
-            .apply_optimizations(&settings.config.roblox_settings)
-        {
-            warnings.push(format!("Roblox optimizer: {}", e));
-        }
-
-        if !warnings.is_empty() {
-            log::warn!("Boost re-applied with warnings: {}", warnings.join("; "));
-        }
+    let warnings = reconcile_boosts(&state, &config);
+    if !warnings.is_empty() {
+        log::warn!(
+            "Boost config applied with warnings: {}",
+            warnings.join("; ")
+        );
     }
 
     Ok(())

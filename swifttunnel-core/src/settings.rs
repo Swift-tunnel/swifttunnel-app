@@ -75,7 +75,11 @@ pub struct AppSettings {
     pub theme: String,
     /// App configuration
     pub config: Config,
-    /// Whether optimizations were active on last exit
+    /// Legacy field from the removed master boost toggle.
+    ///
+    /// Kept only for backwards-compatible deserialization of older settings files.
+    /// Runtime behavior now uses per-boost config and ignores this field.
+    #[serde(default, skip_serializing)]
     pub optimizations_active: bool,
     /// Window state (position, size, maximized)
     #[serde(default)]
@@ -369,7 +373,11 @@ mod tests {
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
 
         assert_eq!(loaded.theme, "light");
-        assert!(loaded.optimizations_active);
+        assert!(
+            !json.contains("optimizations_active"),
+            "legacy master boost field should not be serialized"
+        );
+        assert!(!loaded.optimizations_active);
         assert_eq!(loaded.selected_region, "tokyo");
         assert_eq!(loaded.selected_server, "tokyo-02");
         assert_eq!(loaded.update_channel, UpdateChannel::Live);

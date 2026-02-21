@@ -18,6 +18,7 @@ import { useBoostStore } from "./stores/boostStore";
 import { useVpnStore } from "./stores/vpnStore";
 import { useUpdaterStore } from "./stores/updaterStore";
 import { cleanupEventListeners, initEventListeners } from "./lib/events";
+import { boostUpdateConfig } from "./lib/commands";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { shouldAutoReconnectOnLaunch } from "./lib/startup";
 import {
@@ -65,7 +66,6 @@ function App() {
   const loadSettings = useSettingsStore((s) => s.load);
   const fetchServers = useServerStore((s) => s.fetchList);
   const fetchSystemInfo = useBoostStore((s) => s.fetchSystemInfo);
-  const syncActiveFromSettings = useBoostStore((s) => s.syncActiveFromSettings);
   const fetchVpnState = useVpnStore((s) => s.fetchState);
   const connectVpn = useVpnStore((s) => s.connect);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
@@ -85,7 +85,9 @@ function App() {
 
       if (!disposed) {
         const loadedSettings = useSettingsStore.getState().settings;
-        syncActiveFromSettings(loadedSettings.optimizations_active);
+        // Apply saved per-boost config on startup so enabled boosts are active
+        // without requiring a master toggle.
+        void boostUpdateConfig(JSON.stringify(loadedSettings.config)).catch(() => {});
 
         if (
           shouldAutoReconnectOnLaunch(
@@ -119,7 +121,6 @@ function App() {
     fetchSystemInfo,
     fetchVpnState,
     connectVpn,
-    syncActiveFromSettings,
     checkForUpdates,
   ]);
 

@@ -2,6 +2,15 @@ use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
 
+const LEGACY_ROBLOX_PRIORITY_POLICY: &str = "RobloxPriority";
+const ROBLOX_QOS_EXECUTABLES: [&str; 4] = [
+    "RobloxPlayerBeta.exe",
+    "RobloxStudioBeta.exe",
+    "RobloxCrashHandler.exe",
+    "Windows10Universal.exe",
+];
+const RELAY_QOS_EXECUTABLES: [&str; 2] = ["SwiftTunnel.exe", "swifttunnel-desktop.exe"];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OriginalMtu {
     interface: String,
@@ -26,12 +35,22 @@ impl NetworkBooster {
     /// Individual optimizations are non-fatal: if one fails (e.g. no active
     /// network adapter for MTU), the remaining optimizations still run.
     pub fn apply_optimizations(&mut self, config: &NetworkConfig) -> Result<()> {
-        info!("Applying network optimizations");
+        self.reconcile_optimizations(config)
+    }
+
+    /// Reconcile network optimizations to exactly match the provided config.
+    ///
+    /// This makes per-toggle behavior deterministic without relying on a global
+    /// "boost on/off" switch.
+    pub fn reconcile_optimizations(&mut self, config: &NetworkConfig) -> Result<()> {
+        info!("Reconciling network optimizations");
 
         if config.prioritize_roblox_traffic {
             if let Err(e) = self.prioritize_game_traffic() {
                 warn!("Could not prioritize game traffic: {}", e);
             }
+        } else if let Err(e) = self.remove_prioritize_game_traffic() {
+            warn!("Could not remove Roblox priority QoS policy: {}", e);
         }
 
         // Tier 1 (Safe) Network Boosts
@@ -39,24 +58,32 @@ impl NetworkBooster {
             if let Err(e) = self.disable_nagle_algorithm() {
                 warn!("Could not disable Nagle's algorithm: {}", e);
             }
+        } else if let Err(e) = self.restore_nagle_algorithm() {
+            warn!("Could not restore Nagle's algorithm defaults: {}", e);
         }
 
         if config.disable_network_throttling {
             if let Err(e) = self.disable_network_throttling() {
                 warn!("Could not disable network throttling: {}", e);
             }
+        } else if let Err(e) = self.restore_network_throttling() {
+            warn!("Could not restore network throttling defaults: {}", e);
         }
 
         if config.optimize_mtu {
             if let Err(e) = self.optimize_mtu() {
                 warn!("Could not optimize MTU: {}", e);
             }
+        } else if let Err(e) = self.restore_mtu() {
+            warn!("Could not restore original MTU: {}", e);
         }
 
         if config.gaming_qos {
             if let Err(e) = self.enable_gaming_qos() {
                 warn!("Could not enable gaming QoS: {}", e);
             }
+        } else if let Err(e) = self.disable_gaming_qos() {
+            warn!("Could not disable gaming QoS: {}", e);
         }
 
         Ok(())
@@ -102,6 +129,27 @@ impl NetworkBooster {
         Self::parse_first_line(&output.stdout, "No active network interface found")
     }
 
+    fn list_adapter_guids(&self) -> Vec<String> {
+        match hidden_command("powershell")
+            .args(&[
+                "-Command",
+                "Get-NetAdapter | Select-Object -ExpandProperty InterfaceGuid",
+            ])
+            .output()
+        {
+            Ok(output) => String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect(),
+            Err(e) => {
+                warn!("Failed to get adapter GUIDs: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
     /// Prioritize game traffic using QoS
     fn prioritize_game_traffic(&self) -> Result<()> {
         info!("Prioritizing Roblox game traffic");
@@ -120,6 +168,23 @@ impl NetworkBooster {
             warn!("Failed to create QoS policy (may already exist or need admin)");
         }
 
+        Ok(())
+    }
+
+    fn remove_prioritize_game_traffic(&self) -> Result<()> {
+        let output = hidden_command("powershell")
+            .args(&[
+                "-Command",
+                &format!(
+                    "Remove-NetQosPolicy -Name '{}' -Confirm:$false -ErrorAction SilentlyContinue",
+                    LEGACY_ROBLOX_PRIORITY_POLICY
+                ),
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            warn!("Failed to remove legacy RobloxPriority QoS policy");
+        }
         Ok(())
     }
 
@@ -160,66 +225,63 @@ impl NetworkBooster {
     fn disable_nagle_algorithm(&self) -> Result<()> {
         info!("Disabling Nagle's algorithm for all adapters");
 
-        // Get all network adapter GUIDs
-        let output = hidden_command("powershell")
-            .args(&[
-                "-Command",
-                "Get-NetAdapter | Select-Object -ExpandProperty InterfaceGuid",
-            ])
-            .output();
+        for guid in self.list_adapter_guids() {
+            let key_path = format!(
+                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
+                guid
+            );
 
-        match output {
-            Ok(result) => {
-                let guids = String::from_utf8_lossy(&result.stdout);
-                for guid in guids.lines() {
-                    let guid = guid.trim();
-                    if guid.is_empty() {
-                        continue;
-                    }
+            // TcpAckFrequency = 1
+            let _ = hidden_command("reg")
+                .args([
+                    "add",
+                    &key_path,
+                    "/v",
+                    "TcpAckFrequency",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    "1",
+                    "/f",
+                ])
+                .output();
 
-                    // Set TcpAckFrequency = 1 (acknowledge every packet immediately)
-                    let key_path = format!(
-                        r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
-                        guid
-                    );
-
-                    // TcpAckFrequency = 1
-                    let _ = hidden_command("reg")
-                        .args([
-                            "add",
-                            &key_path,
-                            "/v",
-                            "TcpAckFrequency",
-                            "/t",
-                            "REG_DWORD",
-                            "/d",
-                            "1",
-                            "/f",
-                        ])
-                        .output();
-
-                    // TCPNoDelay = 1 (disable Nagle)
-                    let _ = hidden_command("reg")
-                        .args([
-                            "add",
-                            &key_path,
-                            "/v",
-                            "TCPNoDelay",
-                            "/t",
-                            "REG_DWORD",
-                            "/d",
-                            "1",
-                            "/f",
-                        ])
-                        .output();
-                }
-                info!("Nagle's algorithm disabled on all adapters");
-            }
-            Err(e) => {
-                warn!("Failed to get adapter GUIDs: {}", e);
-            }
+            // TCPNoDelay = 1 (disable Nagle)
+            let _ = hidden_command("reg")
+                .args([
+                    "add",
+                    &key_path,
+                    "/v",
+                    "TCPNoDelay",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    "1",
+                    "/f",
+                ])
+                .output();
         }
+        info!("Nagle's algorithm disabled on all adapters");
 
+        Ok(())
+    }
+
+    fn restore_nagle_algorithm(&self) -> Result<()> {
+        info!("Restoring Nagle settings to adapter defaults");
+        for guid in self.list_adapter_guids() {
+            let key_path = format!(
+                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
+                guid
+            );
+
+            // Delete custom overrides so Windows defaults apply.
+            let _ = hidden_command("reg")
+                .args(["delete", &key_path, "/v", "TcpAckFrequency", "/f"])
+                .output();
+            let _ = hidden_command("reg")
+                .args(["delete", &key_path, "/v", "TCPNoDelay", "/f"])
+                .output();
+        }
         Ok(())
     }
 
@@ -278,6 +340,40 @@ impl NetworkBooster {
         Ok(())
     }
 
+    fn restore_network_throttling(&self) -> Result<()> {
+        info!("Restoring Windows network throttling defaults");
+
+        let _ = hidden_command("reg")
+            .args([
+                "add",
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
+                "/v",
+                "NetworkThrottlingIndex",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "10",
+                "/f",
+            ])
+            .output()?;
+
+        let _ = hidden_command("reg")
+            .args([
+                "add",
+                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
+                "/v",
+                "SystemResponsiveness",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "20",
+                "/f",
+            ])
+            .output()?;
+
+        Ok(())
+    }
+
     /// Optimize MTU for the active network interface
     /// Finds the optimal MTU that doesn't cause fragmentation and applies it
     fn optimize_mtu(&mut self) -> Result<()> {
@@ -285,13 +381,15 @@ impl NetworkBooster {
 
         let interface_name = self.get_active_network_interface()?;
 
-        // Backup current MTU
-        if let Ok(current_mtu) = self.get_current_mtu(&interface_name) {
-            self.original_mtu = Some(OriginalMtu {
-                interface: interface_name.clone(),
-                mtu: current_mtu,
-            });
-            info!("Current MTU: {}", current_mtu);
+        // Backup current MTU only once so we can restore to the true pre-optimization value.
+        if self.original_mtu.is_none() {
+            if let Ok(current_mtu) = self.get_current_mtu(&interface_name) {
+                self.original_mtu = Some(OriginalMtu {
+                    interface: interface_name.clone(),
+                    mtu: current_mtu,
+                });
+                info!("Current MTU: {}", current_mtu);
+            }
         }
 
         // Find optimal MTU
@@ -435,7 +533,7 @@ impl NetworkBooster {
 
     // ===== GAMING QOS =====
 
-    /// Enable Gaming QoS - marks Roblox packets with DSCP EF (46) for router prioritization
+    /// Enable Gaming QoS - marks Roblox and relay UDP packets with DSCP EF (46)
     /// This uses Windows QoS Policy via registry to mark packets without needing socket ownership
     pub fn enable_gaming_qos(&mut self) -> Result<()> {
         info!("Enabling Gaming QoS with DSCP EF (46) priority");
@@ -484,26 +582,14 @@ impl NetworkBooster {
             ])
             .output();
 
-        // Step 3: Create QoS policies for Roblox executables with DSCP 46 (EF - Expedited Forwarding)
-        // DSCP 46 = 101110 binary = highest priority for low-latency traffic
-        let roblox_executables = [
-            "RobloxPlayerBeta.exe",
-            "RobloxStudioBeta.exe",
-            "RobloxCrashHandler.exe",
-            "Windows10Universal.exe",
-        ];
-
-        for exe in roblox_executables {
-            let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
-
-            // Create QoS policy via registry
-            // Path: HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\<PolicyName>
+        // Step 3: Create QoS policies for Roblox and tunnel relay app traffic.
+        // DSCP 46 = 101110 binary = highest priority for low-latency traffic.
+        let write_policy = |policy_name: String, exe: &str, protocol: &str, remote_port: &str| {
             let policy_path = format!(
                 r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
                 policy_name
             );
 
-            // Set Version
             let _ = hidden_command("reg")
                 .args([
                     "add",
@@ -517,8 +603,6 @@ impl NetworkBooster {
                     "/f",
                 ])
                 .output();
-
-            // Set Application Name
             let _ = hidden_command("reg")
                 .args([
                     "add",
@@ -532,8 +616,6 @@ impl NetworkBooster {
                     "/f",
                 ])
                 .output();
-
-            // Set Protocol (UDP for game traffic, but * for all)
             let _ = hidden_command("reg")
                 .args([
                     "add",
@@ -543,12 +625,10 @@ impl NetworkBooster {
                     "/t",
                     "REG_SZ",
                     "/d",
-                    "*",
+                    protocol,
                     "/f",
                 ])
                 .output();
-
-            // Set DSCP Value = 46 (EF - Expedited Forwarding)
             let _ = hidden_command("reg")
                 .args([
                     "add",
@@ -562,8 +642,6 @@ impl NetworkBooster {
                     "/f",
                 ])
                 .output();
-
-            // Set Throttle Rate = -1 (no throttling)
             let _ = hidden_command("reg")
                 .args([
                     "add",
@@ -577,8 +655,6 @@ impl NetworkBooster {
                     "/f",
                 ])
                 .output();
-
-            // Set wildcards for ports and IPs
             let _ = hidden_command("reg")
                 .args([
                     "add",
@@ -627,7 +703,7 @@ impl NetworkBooster {
                     "/t",
                     "REG_SZ",
                     "/d",
-                    "*",
+                    remote_port,
                     "/f",
                 ])
                 .output();
@@ -657,12 +733,23 @@ impl NetworkBooster {
                     "/f",
                 ])
                 .output();
+        };
 
+        for exe in ROBLOX_QOS_EXECUTABLES {
+            let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
+            write_policy(policy_name, exe, "*", "*");
             info!("Created QoS policy for {}", exe);
         }
 
+        // Fallback for tunnel traffic: app process packets to relay port 51821.
+        for exe in RELAY_QOS_EXECUTABLES {
+            let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
+            write_policy(policy_name, exe, "UDP", "51821");
+            info!("Created relay QoS policy for {}", exe);
+        }
+
         self.qos_enabled = true;
-        info!("Gaming QoS enabled - Roblox traffic will be marked with DSCP 46 (EF)");
+        info!("Gaming QoS enabled - Roblox + relay traffic marked with DSCP 46 (EF)");
         Ok(())
     }
 
@@ -670,14 +757,7 @@ impl NetworkBooster {
     pub fn disable_gaming_qos(&mut self) -> Result<()> {
         info!("Disabling Gaming QoS");
 
-        let roblox_executables = [
-            "RobloxPlayerBeta.exe",
-            "RobloxStudioBeta.exe",
-            "RobloxCrashHandler.exe",
-            "Windows10Universal.exe",
-        ];
-
-        for exe in roblox_executables {
+        for exe in ROBLOX_QOS_EXECUTABLES {
             let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
             let policy_path = format!(
                 r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
@@ -685,6 +765,17 @@ impl NetworkBooster {
             );
 
             // Delete the policy key
+            let _ = hidden_command("reg")
+                .args(["delete", &policy_path, "/f"])
+                .output();
+        }
+
+        for exe in RELAY_QOS_EXECUTABLES {
+            let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
+            let policy_path = format!(
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+                policy_name
+            );
             let _ = hidden_command("reg")
                 .args(["delete", &policy_path, "/f"])
                 .output();
@@ -704,21 +795,14 @@ impl NetworkBooster {
     pub fn restore(&mut self) -> Result<()> {
         info!("Restoring original network settings");
 
-        // Restore original MTU
+        // Restore original MTU and low-latency registry overrides.
         let _ = self.restore_mtu();
+        let _ = self.restore_nagle_algorithm();
+        let _ = self.restore_network_throttling();
 
         // Remove old QoS policy (legacy)
-        let _ = hidden_command("powershell")
-            .args(&[
-                "-Command",
-                "Remove-NetQosPolicy -Name 'RobloxPriority' -Confirm:$false -ErrorAction SilentlyContinue"
-            ])
-            .output();
-
-        // Disable Gaming QoS if enabled
-        if self.qos_enabled {
-            let _ = self.disable_gaming_qos();
-        }
+        let _ = self.remove_prioritize_game_traffic();
+        let _ = self.disable_gaming_qos();
 
         Ok(())
     }

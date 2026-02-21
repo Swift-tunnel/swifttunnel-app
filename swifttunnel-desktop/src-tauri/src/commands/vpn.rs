@@ -173,6 +173,7 @@ pub async fn vpn_connect(
     let (
         custom_relay,
         auto_routing,
+        relay_qos_enabled,
         whitelisted_regions,
         forced_servers,
         preferred_physical_adapter_guid,
@@ -189,6 +190,7 @@ pub async fn vpn_connect(
                 Some(settings.custom_relay_server.clone())
             },
             settings.auto_routing_enabled,
+            settings.config.network_settings.gaming_qos,
             settings.whitelisted_regions.clone(),
             settings.forced_servers.clone(),
             preferred_physical_adapter_guid,
@@ -225,6 +227,7 @@ pub async fn vpn_connect(
             tunnel_apps,
             custom_relay,
             auto_routing,
+            relay_qos_enabled,
             available_servers,
             whitelisted_regions,
             forced_servers,

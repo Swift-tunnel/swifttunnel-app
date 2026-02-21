@@ -501,6 +501,7 @@ impl VpnConnection {
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
         auto_routing_enabled: bool,
+        relay_qos_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
@@ -604,6 +605,7 @@ impl VpnConnection {
                     tunnel_apps.clone(),
                     custom_relay_server,
                     auto_routing_enabled,
+                    relay_qos_enabled,
                     available_servers,
                     relay_candidates,
                     whitelisted_regions,
@@ -665,6 +667,7 @@ impl VpnConnection {
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
         auto_routing_enabled: bool,
+        relay_qos_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         relay_candidates: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
@@ -772,7 +775,7 @@ impl VpnConnection {
 
         log::info!("V3: Creating UDP relay to {}", relay_addr);
 
-        let relay = match super::udp_relay::UdpRelay::new(relay_addr) {
+        let relay = match super::udp_relay::UdpRelay::new(relay_addr, relay_qos_enabled) {
             Ok(r) => std::sync::Arc::new(r),
             Err(e) => {
                 let _ = driver.close();
