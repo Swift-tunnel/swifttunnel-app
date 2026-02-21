@@ -1359,6 +1359,19 @@ impl ParallelInterceptor {
             || friendly_lower.starts_with("wan ")
     }
 
+    fn should_allow_virtual_default_route_candidate(
+        is_virtual: bool,
+        adapter_if_index: Option<u32>,
+        default_route_if_index: Option<u32>,
+        manual_binding: bool,
+    ) -> bool {
+        is_virtual
+            && !manual_binding
+            && adapter_if_index.is_some()
+            && default_route_if_index.is_some()
+            && adapter_if_index == default_route_if_index
+    }
+
     fn select_best_physical_candidate<'a>(
         candidates: &'a [PhysicalCandidate],
         default_route_if_index: Option<u32>,
@@ -1587,48 +1600,65 @@ impl ParallelInterceptor {
                     || friendly_lower.contains("tunnel")
                 ));
 
+            // Smart Auto may bind to an active third-party
+            // VPN/virtual adapter, but only when it currently owns the default route.
+            // This keeps behavior simple and deterministic without adding new UX modes.
+            let internal_guid_lc = Self::extract_guid_ascii_lowercase(internal_name);
+            let matches_preferred_guid = self
+                .preferred_physical_adapter_guid
+                .as_deref()
+                .is_some_and(|preferred| internal_guid_lc.as_deref() == Some(preferred));
+            let guid_matches_default = strict_default_route
+                && default_route_guid_lc
+                    .as_ref()
+                    .is_some_and(|guid| internal_guid_lc.as_deref() == Some(guid.as_str()));
+
+            let mut adapter_if_index =
+                Self::resolve_adapter_interface_index(&internal_name, &friendly_name);
+            if guid_matches_default {
+                // If we can match by GUID, prefer the default-route IfIndex. This makes
+                // default-route binding robust even when alias/description lookups fail.
+                adapter_if_index = default_route_if_index;
+            }
+
+            let is_up = adapter_if_index.and_then(Self::is_interface_oper_up);
+            let has_default_route = strict_default_route
+                && adapter_if_index.is_some()
+                && default_route_if_index.is_some()
+                && adapter_if_index == default_route_if_index;
+            let virtual_default_route_candidate =
+                Self::should_allow_virtual_default_route_candidate(
+                    is_virtual,
+                    adapter_if_index,
+                    default_route_if_index,
+                    self.preferred_physical_adapter_guid.is_some(),
+                );
+            let has_default_route_for_scoring =
+                has_default_route || virtual_default_route_candidate;
+
             if is_vpn {
                 log::info!("    -> VPN adapter (SwiftTunnel/Wintun)");
                 vpn_adapter = Some((idx, friendly_name.clone()));
-            } else if is_virtual {
+            } else if is_virtual && !virtual_default_route_candidate {
                 log::info!("    -> Skipped (virtual/VPN adapter)");
             } else {
-                // CRITICAL FIX (v0.9.25): Prioritize adapter with default route
-                // This fixes the bug where users with multiple NICs (e.g., disconnected Ethernet + WiFi)
-                // had traffic going through the wrong adapter
-                let internal_guid_lc = Self::extract_guid_ascii_lowercase(internal_name);
-                let matches_preferred_guid = self
-                    .preferred_physical_adapter_guid
-                    .as_deref()
-                    .is_some_and(|preferred| internal_guid_lc.as_deref() == Some(preferred));
-                let guid_matches_default = strict_default_route
-                    && default_route_guid_lc
-                        .as_ref()
-                        .is_some_and(|guid| internal_guid_lc.as_deref() == Some(guid.as_str()));
-
-                let mut adapter_if_index =
-                    Self::resolve_adapter_interface_index(&internal_name, &friendly_name);
-                if guid_matches_default {
-                    // If we can match by GUID, prefer the default-route IfIndex. This makes
-                    // default-route binding robust even when alias/description lookups fail.
-                    adapter_if_index = default_route_if_index;
-                }
-
-                let is_up = adapter_if_index.and_then(Self::is_interface_oper_up);
-                let has_default_route = strict_default_route
-                    && adapter_if_index.is_some()
-                    && default_route_if_index.is_some()
-                    && adapter_if_index == default_route_if_index;
-                if let Some(score) =
-                    Self::score_physical_candidate(&friendly_name, idx, has_default_route)
-                {
-                    if has_default_route {
+                if let Some(score) = Self::score_physical_candidate(
+                    &friendly_name,
+                    idx,
+                    has_default_route_for_scoring,
+                ) {
+                    if virtual_default_route_candidate {
+                        log::info!(
+                            "    -> Virtual/VPN adapter allowed (Smart Auto + active default route)"
+                        );
+                    }
+                    if has_default_route_for_scoring {
                         log::info!("    -> Has DEFAULT ROUTE (priority +1000)");
                     }
                     log::info!(
                         "    -> Physical adapter candidate (score: {}, has_default_route: {})",
                         score,
-                        has_default_route
+                        has_default_route_for_scoring
                     );
                     physical_candidates.push(PhysicalCandidate {
                         idx,
@@ -5250,6 +5280,77 @@ mod tests {
             ip > ipv6,
             "IPv4 WAN score ({ip}) should outrank IPv6 score ({ipv6})"
         );
+    }
+
+    #[test]
+    fn test_should_allow_virtual_default_route_candidate_in_smart_auto() {
+        assert!(
+            ParallelInterceptor::should_allow_virtual_default_route_candidate(
+                true,
+                Some(42),
+                Some(42),
+                false,
+            )
+        );
+    }
+
+    #[test]
+    fn test_should_reject_virtual_candidate_when_not_default_route() {
+        assert!(
+            !ParallelInterceptor::should_allow_virtual_default_route_candidate(
+                true,
+                Some(42),
+                Some(43),
+                false,
+            )
+        );
+    }
+
+    #[test]
+    fn test_should_reject_virtual_candidate_in_manual_mode() {
+        assert!(
+            !ParallelInterceptor::should_allow_virtual_default_route_candidate(
+                true,
+                Some(42),
+                Some(42),
+                true,
+            )
+        );
+    }
+
+    #[test]
+    fn test_virtual_default_route_candidate_outranks_non_default_physical_candidate() {
+        let virtual_score =
+            ParallelInterceptor::score_physical_candidate("NordVPN Tunnel", 1, true)
+                .expect("virtual adapter should score when treated as default-route");
+        let ethernet_score = ParallelInterceptor::score_physical_candidate("Ethernet", 0, false)
+            .expect("ethernet adapter should score");
+
+        assert!(virtual_score > ethernet_score);
+
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                friendly_name: "Ethernet".to_string(),
+                internal_name: "eth".to_string(),
+                if_index: Some(11),
+                score: ethernet_score,
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                friendly_name: "NordVPN Tunnel".to_string(),
+                internal_name: "nordvpn".to_string(),
+                if_index: Some(77),
+                score: virtual_score,
+                is_up: Some(true),
+            },
+        ];
+
+        let selected =
+            ParallelInterceptor::select_best_physical_candidate(&candidates, Some(77), false)
+                .expect("expected a best candidate");
+        assert_eq!(selected.friendly_name, "NordVPN Tunnel");
     }
 
     #[test]
