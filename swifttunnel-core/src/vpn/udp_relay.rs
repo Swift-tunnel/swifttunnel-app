@@ -299,6 +299,7 @@ pub struct UdpRelay {
     last_mtu_refresh_ms: AtomicU64,
     /// Last activity time for keepalive
     last_activity: std::sync::Mutex<Instant>,
+    sender_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     outbound_pool: Arc<OutboundPool>,
     outbound_tx: channel::Sender<OutboundJob>,
     ping: Arc<PingMetrics>,
@@ -372,7 +373,7 @@ impl UdpRelay {
         let sender_ping = Arc::clone(&ping);
         let sender_send_errors = Arc::clone(&send_errors);
         let sender_session_id = session_id;
-        std::thread::Builder::new()
+        let sender_handle = std::thread::Builder::new()
             .name("udp-relay-sender".to_string())
             .spawn(move || {
                 let mut last_relay_addr: Option<SocketAddr> = None;
@@ -495,6 +496,7 @@ impl UdpRelay {
             relay_path_mtu: AtomicUsize::new(initial_mtu),
             last_mtu_refresh_ms: AtomicU64::new(now_mono_ms()),
             last_activity: std::sync::Mutex::new(Instant::now()),
+            sender_handle: std::sync::Mutex::new(Some(sender_handle)),
             outbound_pool,
             outbound_tx,
             ping,
@@ -956,6 +958,23 @@ impl UdpRelay {
     /// Get session ID bytes
     pub fn session_id_bytes(&self) -> &[u8; SESSION_ID_LEN] {
         &self.session_id
+    }
+}
+
+impl Drop for UdpRelay {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Release);
+
+        let handle = self
+            .sender_handle
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        if let Some(handle) = handle {
+            if let Err(panic) = handle.join() {
+                log::error!("UDP Relay: sender thread panicked: {:?}", panic);
+            }
+        }
     }
 }
 
