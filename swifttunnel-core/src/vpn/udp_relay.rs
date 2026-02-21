@@ -136,7 +136,14 @@ struct OutboundPool {
     free_rx: channel::Receiver<usize>,
 }
 
-// Safety: buffer indices are checked out exclusively via the free list.
+// SAFETY: OutboundPool is Sync + Send because:
+// - Each buffer index is exclusively owned between OutboundPool::try_acquire() and
+//   OutboundPool::release() (no aliasing of indices).
+// - The bounded free-list channel is the sole authority for slot ownership.
+// - forward_outbound() writes the frame into the slot before enqueueing OutboundJob,
+//   and the sender loop in UdpRelay::new() reads the slot after recv_timeout() on the
+//   same crossbeam channel, which provides the necessary happens-before so writes
+//   are visible across threads.
 unsafe impl Sync for OutboundPool {}
 unsafe impl Send for OutboundPool {}
 
@@ -243,7 +250,7 @@ impl PingMetrics {
             if sample_count > 0 {
                 let mut values: Vec<u32> = samples.iter().copied().collect();
                 values.sort_unstable();
-                let p50_idx = ((values.len() - 1) as f64 * 0.50).round() as usize;
+                let p50_idx = ((values.len() - 1) as f64 * 0.50).floor() as usize;
                 let p99_idx = ((values.len() - 1) as f64 * 0.99).floor() as usize;
                 p50_rtt_ms = values.get(p50_idx).copied();
                 p99_rtt_ms = values.get(p99_idx).copied();
@@ -285,6 +292,8 @@ pub struct UdpRelay {
     oversize_drops: AtomicU64,
     /// Outbound frames dropped due to send queue pressure.
     outbound_drops: AtomicU64,
+    /// Sender thread UDP send_to() errors.
+    send_errors: Arc<AtomicU64>,
     /// Effective outer MTU for relay packets (<= 1500), refreshed periodically on Windows.
     relay_path_mtu: AtomicUsize,
     last_mtu_refresh_ms: AtomicU64,
@@ -353,6 +362,7 @@ impl UdpRelay {
         let outbound_pool = Arc::new(OutboundPool::new(OUTBOUND_POOL_SLOTS));
         let (outbound_tx, outbound_rx) = channel::bounded::<OutboundJob>(OUTBOUND_QUEUE_CAP);
         let ping = Arc::new(PingMetrics::new());
+        let send_errors = Arc::new(AtomicU64::new(0));
 
         let sender_socket = socket
             .try_clone()
@@ -360,6 +370,7 @@ impl UdpRelay {
         let sender_pool = Arc::clone(&outbound_pool);
         let sender_stop = Arc::clone(&stop_flag);
         let sender_ping = Arc::clone(&ping);
+        let sender_send_errors = Arc::clone(&send_errors);
         let sender_session_id = session_id;
         std::thread::Builder::new()
             .name("udp-relay-sender".to_string())
@@ -387,7 +398,17 @@ impl UdpRelay {
 
                             // Send and release buffer slot.
                             let bytes = unsafe { sender_pool.buffer(job.buf_idx) };
-                            let _ = sender_socket.send_to(&bytes[..job.len], job.addr);
+                            if let Err(e) = sender_socket.send_to(&bytes[..job.len], job.addr) {
+                                let count = sender_send_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                                if count <= 5 || count.is_power_of_two() {
+                                    log::warn!(
+                                        "UDP Relay: Sender thread send_to error #{} to {}: {}",
+                                        count,
+                                        job.addr,
+                                        e
+                                    );
+                                }
+                            }
                             sender_pool.release(job.buf_idx);
                         }
                         Err(channel::RecvTimeoutError::Timeout) => {}
@@ -428,7 +449,17 @@ impl UdpRelay {
                     frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
                         .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
 
-                    let _ = sender_socket.send_to(&frame, relay_addr);
+                    if let Err(e) = sender_socket.send_to(&frame, relay_addr) {
+                        let count = sender_send_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                        if count <= 5 || count.is_power_of_two() {
+                            log::warn!(
+                                "UDP Relay: Sender thread ping send_to error #{} to {}: {}",
+                                count,
+                                relay_addr,
+                                e
+                            );
+                        }
+                    }
                     sender_ping.sent.fetch_add(1, Ordering::Relaxed);
                     next_ping_at = now + PING_INTERVAL;
                 }
@@ -460,6 +491,7 @@ impl UdpRelay {
             packets_received: AtomicU64::new(0),
             oversize_drops: AtomicU64::new(0),
             outbound_drops: AtomicU64::new(0),
+            send_errors,
             relay_path_mtu: AtomicUsize::new(initial_mtu),
             last_mtu_refresh_ms: AtomicU64::new(now_mono_ms()),
             last_activity: std::sync::Mutex::new(Instant::now()),
@@ -878,12 +910,13 @@ impl UdpRelay {
         self.stop_flag.store(true, Ordering::Release);
         let ping = self.ping.snapshot();
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, ping: {}/{} {:.1}% loss)",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, send_errors: {}, ping: {}/{} {:.1}% loss)",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
             self.oversize_drops.load(Ordering::Relaxed),
             self.outbound_drops.load(Ordering::Relaxed),
+            self.send_errors.load(Ordering::Relaxed),
             ping.sent,
             ping.received,
             ping.loss_pct,
