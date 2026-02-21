@@ -424,6 +424,18 @@ impl VpnConnection {
         })
     }
 
+    /// Get relay RTT/jitter telemetry snapshot for UI display.
+    /// Uses try_lock() to avoid blocking the GUI thread.
+    pub fn get_relay_ping_snapshot(&self) -> Option<super::RelayPingSnapshot> {
+        self.split_tunnel.as_ref().and_then(|st| {
+            st.try_lock().ok().and_then(|driver| {
+                driver
+                    .get_relay_context()
+                    .map(|relay| relay.ping_snapshot())
+            })
+        })
+    }
+
     /// Get split tunnel diagnostic info for UI display.
     /// Uses try_lock() to avoid blocking the GUI thread.
     pub fn get_split_tunnel_diagnostics(&self) -> Option<super::SplitTunnelDiagnostics> {
@@ -976,6 +988,8 @@ impl VpnConnection {
         let relay_for_lookup = Arc::clone(&relay);
         driver.set_relay_context(relay);
         log::info!("V3: UDP relay context set (auth mode: {})", relay_auth_mode);
+        relay_for_lookup.set_ping_enabled(true);
+        log::debug!("V3: Relay ping telemetry enabled (20Hz when active)");
 
         // Set up auto-routing
         let auto_router = Arc::new(super::auto_routing::AutoRouter::new(

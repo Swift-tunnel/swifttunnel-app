@@ -11,6 +11,9 @@
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use crossbeam_channel as channel;
+use std::cell::UnsafeCell;
+use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -23,6 +26,10 @@ const IPV4_HEADER_LEN: usize = 20;
 const IPV6_HEADER_LEN: usize = 40;
 const AUTH_HELLO_FRAME_TYPE: u8 = 0xA1;
 const AUTH_ACK_FRAME_TYPE: u8 = 0xA2;
+const PING_FRAME_TYPE: u8 = 0xA3;
+const PONG_FRAME_TYPE: u8 = 0xA4;
+const PING_FRAME_LEN: usize = SESSION_ID_LEN + 1 + 4 + 8;
+const PONG_FRAME_LEN: usize = SESSION_ID_LEN + 1 + 4 + 8 + 8;
 // Slightly longer handshake budget improves reliability on congested/PPPoE paths
 // without affecting steady-state packet latency.
 const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -59,6 +66,20 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// Read timeout - only affects idle wakeups (packets wake the socket immediately).
 /// Higher values reduce CPU usage when idle without adding latency when active.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Outbound send path: bounded queue + fixed buffer pool.
+///
+/// This avoids per-packet heap allocations and eliminates multi-threaded contention
+/// on Winsock send calls from per-CPU packet workers (reduces p99 jitter).
+const OUTBOUND_FRAME_MAX: usize = SESSION_ID_LEN + RELAY_PATH_MTU_UPPER_BOUND;
+const OUTBOUND_POOL_SLOTS: usize = 4096;
+const OUTBOUND_QUEUE_CAP: usize = 4096;
+
+/// Control-plane ping for RTT/jitter telemetry (optional).
+const PING_INTERVAL: Duration = Duration::from_millis(50); // 20Hz
+const PING_IDLE_THRESHOLD: Duration = Duration::from_secs(2);
+const PING_IDLE_INTERVAL: Duration = Duration::from_millis(250);
+const PING_SAMPLE_WINDOW: usize = 1024;
 
 /// Grace period after relay switch: accept packets from BOTH old and new relay.
 /// This eliminates the inbound blackout while the new relay establishes session.
@@ -102,6 +123,146 @@ impl RelayAuthAckStatus {
     }
 }
 
+#[derive(Clone, Copy)]
+struct OutboundJob {
+    addr: SocketAddr,
+    buf_idx: usize,
+    len: usize,
+}
+
+struct OutboundPool {
+    buffers: Vec<UnsafeCell<[u8; OUTBOUND_FRAME_MAX]>>,
+    free_tx: channel::Sender<usize>,
+    free_rx: channel::Receiver<usize>,
+}
+
+// Safety: buffer indices are checked out exclusively via the free list.
+unsafe impl Sync for OutboundPool {}
+unsafe impl Send for OutboundPool {}
+
+impl OutboundPool {
+    fn new(slots: usize) -> Self {
+        let (free_tx, free_rx) = channel::bounded(slots);
+        let mut buffers = Vec::with_capacity(slots);
+        for i in 0..slots {
+            buffers.push(UnsafeCell::new([0u8; OUTBOUND_FRAME_MAX]));
+            free_tx
+                .send(i)
+                .expect("outbound pool free list must accept initial slots");
+        }
+        Self {
+            buffers,
+            free_tx,
+            free_rx,
+        }
+    }
+
+    fn try_acquire(&self) -> Option<usize> {
+        self.free_rx.try_recv().ok()
+    }
+
+    fn release(&self, idx: usize) {
+        let _ = self.free_tx.send(idx);
+    }
+
+    unsafe fn buffer_mut(&self, idx: usize) -> &mut [u8; OUTBOUND_FRAME_MAX] {
+        &mut *self.buffers[idx].get()
+    }
+
+    unsafe fn buffer(&self, idx: usize) -> &[u8; OUTBOUND_FRAME_MAX] {
+        &*self.buffers[idx].get()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RelayPingSnapshot {
+    pub enabled: bool,
+    pub sent: u64,
+    pub received: u64,
+    pub loss_pct: f32,
+    pub last_rtt_ms: Option<u32>,
+    pub p50_rtt_ms: Option<u32>,
+    pub p99_rtt_ms: Option<u32>,
+    pub sample_count: usize,
+}
+
+struct PingMetrics {
+    enabled: AtomicBool,
+    sent: AtomicU64,
+    received: AtomicU64,
+    last_rtt_ms: AtomicU64,
+    samples: std::sync::Mutex<VecDeque<u32>>,
+}
+
+impl PingMetrics {
+    fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            sent: AtomicU64::new(0),
+            received: AtomicU64::new(0),
+            last_rtt_ms: AtomicU64::new(0),
+            samples: std::sync::Mutex::new(VecDeque::with_capacity(PING_SAMPLE_WINDOW)),
+        }
+    }
+
+    fn record_rtt_ms(&self, rtt_ms: u32) {
+        self.received.fetch_add(1, Ordering::Relaxed);
+        self.last_rtt_ms.store(rtt_ms as u64, Ordering::Relaxed);
+
+        if let Ok(mut samples) = self.samples.lock() {
+            if samples.len() >= PING_SAMPLE_WINDOW {
+                samples.pop_front();
+            }
+            samples.push_back(rtt_ms);
+        }
+    }
+
+    fn snapshot(&self) -> RelayPingSnapshot {
+        let enabled = self.enabled.load(Ordering::Acquire);
+        let sent = self.sent.load(Ordering::Relaxed);
+        let received = self.received.load(Ordering::Relaxed);
+        let loss_pct = if sent == 0 {
+            0.0
+        } else {
+            let lost = sent.saturating_sub(received);
+            (lost as f32) * 100.0 / (sent as f32)
+        };
+        let last_rtt_raw = self.last_rtt_ms.load(Ordering::Relaxed);
+        let last_rtt_ms = if last_rtt_raw == 0 {
+            None
+        } else {
+            Some(last_rtt_raw as u32)
+        };
+
+        let mut p50_rtt_ms: Option<u32> = None;
+        let mut p99_rtt_ms: Option<u32> = None;
+        let mut sample_count = 0usize;
+
+        if let Ok(samples) = self.samples.lock() {
+            sample_count = samples.len();
+            if sample_count > 0 {
+                let mut values: Vec<u32> = samples.iter().copied().collect();
+                values.sort_unstable();
+                let p50_idx = ((values.len() - 1) as f64 * 0.50).round() as usize;
+                let p99_idx = ((values.len() - 1) as f64 * 0.99).floor() as usize;
+                p50_rtt_ms = values.get(p50_idx).copied();
+                p99_rtt_ms = values.get(p99_idx).copied();
+            }
+        }
+
+        RelayPingSnapshot {
+            enabled,
+            sent,
+            received,
+            loss_pct,
+            last_rtt_ms,
+            p50_rtt_ms,
+            p99_rtt_ms,
+            sample_count,
+        }
+    }
+}
+
 /// UDP Relay client for Game Booster mode
 pub struct UdpRelay {
     /// Socket for communicating with relay server
@@ -122,11 +283,16 @@ pub struct UdpRelay {
     packets_received: AtomicU64,
     /// Inner packets dropped because encapsulation would exceed path MTU.
     oversize_drops: AtomicU64,
+    /// Outbound frames dropped due to send queue pressure.
+    outbound_drops: AtomicU64,
     /// Effective outer MTU for relay packets (<= 1500), refreshed periodically on Windows.
     relay_path_mtu: AtomicUsize,
     last_mtu_refresh_ms: AtomicU64,
     /// Last activity time for keepalive
     last_activity: std::sync::Mutex<Instant>,
+    outbound_pool: Arc<OutboundPool>,
+    outbound_tx: channel::Sender<OutboundJob>,
+    ping: Arc<PingMetrics>,
 }
 
 impl UdpRelay {
@@ -181,6 +347,99 @@ impl UdpRelay {
         let mut session_id = [0u8; SESSION_ID_LEN];
         getrandom(&mut session_id);
 
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Dedicated sender thread: eliminates multi-threaded Winsock send contention.
+        let outbound_pool = Arc::new(OutboundPool::new(OUTBOUND_POOL_SLOTS));
+        let (outbound_tx, outbound_rx) = channel::bounded::<OutboundJob>(OUTBOUND_QUEUE_CAP);
+        let ping = Arc::new(PingMetrics::new());
+
+        let sender_socket = socket
+            .try_clone()
+            .context("Failed to clone UDP socket for sender thread")?;
+        let sender_pool = Arc::clone(&outbound_pool);
+        let sender_stop = Arc::clone(&stop_flag);
+        let sender_ping = Arc::clone(&ping);
+        let sender_session_id = session_id;
+        std::thread::Builder::new()
+            .name("udp-relay-sender".to_string())
+            .spawn(move || {
+                let mut last_relay_addr: Option<SocketAddr> = None;
+                let mut last_data_at: Option<Instant> = None;
+                let mut ping_seq: u32 = 0;
+                let mut next_ping_at = Instant::now() + PING_INTERVAL;
+
+                loop {
+                    if sender_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+
+                    // Wait for outbound work, but wake periodically to service ping timing.
+                    let now = Instant::now();
+                    let timeout = next_ping_at
+                        .saturating_duration_since(now)
+                        .min(Duration::from_millis(50));
+
+                    match outbound_rx.recv_timeout(timeout) {
+                        Ok(job) => {
+                            last_relay_addr = Some(job.addr);
+                            last_data_at = Some(Instant::now());
+
+                            // Send and release buffer slot.
+                            let bytes = unsafe { sender_pool.buffer(job.buf_idx) };
+                            let _ = sender_socket.send_to(&bytes[..job.len], job.addr);
+                            sender_pool.release(job.buf_idx);
+                        }
+                        Err(channel::RecvTimeoutError::Timeout) => {}
+                        Err(channel::RecvTimeoutError::Disconnected) => break,
+                    }
+
+                    let now = Instant::now();
+                    if !sender_ping.enabled.load(Ordering::Acquire) {
+                        continue;
+                    }
+
+                    let Some(relay_addr) = last_relay_addr else {
+                        continue;
+                    };
+
+                    let Some(last_data_at) = last_data_at else {
+                        continue;
+                    };
+
+                    // Back off pings when idle to avoid noisy telemetry at rest.
+                    if now.duration_since(last_data_at) >= PING_IDLE_THRESHOLD {
+                        next_ping_at = now + PING_IDLE_INTERVAL;
+                        continue;
+                    }
+
+                    if now < next_ping_at {
+                        continue;
+                    }
+
+                    ping_seq = ping_seq.wrapping_add(1);
+                    let client_ts_mono_ms = now_mono_ms();
+
+                    let mut frame = [0u8; PING_FRAME_LEN];
+                    frame[..SESSION_ID_LEN].copy_from_slice(&sender_session_id);
+                    frame[SESSION_ID_LEN] = PING_FRAME_TYPE;
+                    frame[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5]
+                        .copy_from_slice(&ping_seq.to_be_bytes());
+                    frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
+                        .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
+
+                    let _ = sender_socket.send_to(&frame, relay_addr);
+                    sender_ping.sent.fetch_add(1, Ordering::Relaxed);
+                    next_ping_at = now + PING_INTERVAL;
+                }
+
+                // Drain any queued jobs to return buffer slots to the free list.
+                while let Ok(job) = outbound_rx.try_recv() {
+                    sender_pool.release(job.buf_idx);
+                }
+            })
+            .context("Failed to spawn udp-relay-sender thread")?;
+
         log::info!(
             "UDP Relay: Created session {:016x} to {}",
             u64::from_be_bytes(session_id),
@@ -196,13 +455,17 @@ impl UdpRelay {
             previous_relay_addr: ArcSwap::from_pointee(None),
             switch_time: ArcSwap::from_pointee(None),
             session_id,
-            stop_flag: Arc::new(AtomicBool::new(false)),
+            stop_flag,
             packets_sent: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
             oversize_drops: AtomicU64::new(0),
+            outbound_drops: AtomicU64::new(0),
             relay_path_mtu: AtomicUsize::new(initial_mtu),
             last_mtu_refresh_ms: AtomicU64::new(now_mono_ms()),
             last_activity: std::sync::Mutex::new(Instant::now()),
+            outbound_pool,
+            outbound_tx,
+            ping,
         })
     }
 
@@ -384,10 +647,19 @@ impl UdpRelay {
         Arc::clone(&self.stop_flag)
     }
 
+    /// Enable or disable control-plane ping telemetry.
+    pub fn set_ping_enabled(&self, enabled: bool) {
+        self.ping.enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn ping_snapshot(&self) -> RelayPingSnapshot {
+        self.ping.snapshot()
+    }
+
     /// Forward a packet through the relay (outbound: game client -> relay -> game server)
     ///
-    /// Takes the original UDP payload and prepends session ID before sending to relay
-    /// Includes retry logic for transient send failures
+    /// Takes the original UDP payload and prepends session ID before enqueueing to the
+    /// dedicated sender thread.
     pub fn forward_outbound(&self, payload: &[u8]) -> Result<usize> {
         let current_addr = **self.relay_addr.load();
         self.maybe_refresh_relay_path_mtu(current_addr);
@@ -411,31 +683,36 @@ impl UdpRelay {
             return Ok(0);
         }
 
-        // Build packet: [session_id][payload] on the stack (no heap alloc)
         let total_len = SESSION_ID_LEN + payload.len();
-        let mut packet = [0u8; SESSION_ID_LEN + RELAY_PATH_MTU_UPPER_BOUND];
-        packet[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
-        packet[SESSION_ID_LEN..total_len].copy_from_slice(payload);
 
-        // Try to send, retry once on WouldBlock
-        let sent = match self.socket.send_to(&packet[..total_len], current_addr) {
-            Ok(sent) => sent,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Retry once after tiny delay
-                std::thread::sleep(Duration::from_micros(50));
-                self.socket
-                    .send_to(&packet[..total_len], current_addr)
-                    .context("Retry send failed")?
-            }
-            Err(e) => return Err(e.into()),
+        let Some(buf_idx) = self.outbound_pool.try_acquire() else {
+            self.outbound_drops.fetch_add(1, Ordering::Relaxed);
+            return Ok(0);
         };
+
+        unsafe {
+            let packet = self.outbound_pool.buffer_mut(buf_idx);
+            packet[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
+            packet[SESSION_ID_LEN..total_len].copy_from_slice(payload);
+        }
+
+        let job = OutboundJob {
+            addr: current_addr,
+            buf_idx,
+            len: total_len,
+        };
+        if self.outbound_tx.try_send(job).is_err() {
+            self.outbound_drops.fetch_add(1, Ordering::Relaxed);
+            self.outbound_pool.release(buf_idx);
+            return Ok(0);
+        }
 
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = self.last_activity.lock() {
             *guard = Instant::now();
         }
 
-        Ok(sent)
+        Ok(total_len)
     }
 
     /// Receive a packet from the relay (inbound: game server -> relay -> game client)
@@ -476,14 +753,34 @@ impl UdpRelay {
                     return Ok(None);
                 }
 
-                // Ignore relay control frames so they never reach packet injection.
-                if payload_len >= 1
-                    && matches!(
-                        recv_buf[SESSION_ID_LEN],
-                        AUTH_HELLO_FRAME_TYPE | AUTH_ACK_FRAME_TYPE
-                    )
-                {
-                    return Ok(None);
+                // Control frames (auth + ping telemetry) should never reach packet injection.
+                if payload_len >= 1 {
+                    match recv_buf[SESSION_ID_LEN] {
+                        AUTH_HELLO_FRAME_TYPE | AUTH_ACK_FRAME_TYPE | PING_FRAME_TYPE => {
+                            return Ok(None);
+                        }
+                        PONG_FRAME_TYPE => {
+                            if len == PONG_FRAME_LEN && self.ping.enabled.load(Ordering::Acquire) {
+                                let client_ts_mono_ms = u64::from_be_bytes([
+                                    recv_buf[SESSION_ID_LEN + 5],
+                                    recv_buf[SESSION_ID_LEN + 6],
+                                    recv_buf[SESSION_ID_LEN + 7],
+                                    recv_buf[SESSION_ID_LEN + 8],
+                                    recv_buf[SESSION_ID_LEN + 9],
+                                    recv_buf[SESSION_ID_LEN + 10],
+                                    recv_buf[SESSION_ID_LEN + 11],
+                                    recv_buf[SESSION_ID_LEN + 12],
+                                ]);
+                                let now_ms = now_mono_ms();
+                                if now_ms >= client_ts_mono_ms {
+                                    let rtt_ms = (now_ms - client_ts_mono_ms) as u32;
+                                    self.ping.record_rtt_ms(rtt_ms);
+                                }
+                            }
+                            return Ok(None);
+                        }
+                        _ => {}
+                    }
                 }
 
                 buffer[..payload_len].copy_from_slice(&recv_buf[SESSION_ID_LEN..len]);
@@ -579,12 +876,17 @@ impl UdpRelay {
     /// Stop the relay
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Release);
+        let ping = self.ping.snapshot();
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {})",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, ping: {}/{} {:.1}% loss)",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
             self.oversize_drops.load(Ordering::Relaxed),
+            self.outbound_drops.load(Ordering::Relaxed),
+            ping.sent,
+            ping.received,
+            ping.loss_pct,
         );
     }
 
@@ -803,5 +1105,37 @@ mod tests {
         let sent = relay.forward_outbound(&payload).unwrap();
         assert_eq!(sent, 0);
         assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_receive_inbound_ignores_pong_and_records_ping_stats() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        relay.set_ping_enabled(true);
+
+        // Use an ephemeral socket as our "relay server", then switch the expected source.
+        let fake_relay = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fake_addr = fake_relay.local_addr().unwrap();
+        relay.switch_relay(fake_addr);
+
+        let local_addr = relay.try_clone_socket().unwrap().local_addr().unwrap();
+
+        let seq: u32 = 1;
+        let client_ts_mono_ms = now_mono_ms();
+        let mut frame = [0u8; PONG_FRAME_LEN];
+        frame[..SESSION_ID_LEN].copy_from_slice(relay.session_id_bytes());
+        frame[SESSION_ID_LEN] = PONG_FRAME_TYPE;
+        frame[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5].copy_from_slice(&seq.to_be_bytes());
+        frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
+            .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
+        frame[SESSION_ID_LEN + 13..SESSION_ID_LEN + 21].copy_from_slice(&0u64.to_be_bytes());
+
+        fake_relay.send_to(&frame, local_addr).unwrap();
+
+        let mut buffer = [0u8; 1600];
+        let result = relay.receive_inbound(&mut buffer).unwrap();
+        assert_eq!(result, None);
+
+        let snap = relay.ping_snapshot();
+        assert!(snap.received >= 1);
     }
 }
