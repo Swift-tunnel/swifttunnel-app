@@ -963,7 +963,7 @@ impl UdpRelay {
 
 impl Drop for UdpRelay {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Release);
+        self.stop();
 
         let handle = self
             .sender_handle
@@ -975,12 +975,6 @@ impl Drop for UdpRelay {
                 log::error!("UDP Relay: sender thread panicked: {:?}", panic);
             }
         }
-    }
-}
-
-impl Drop for UdpRelay {
-    fn drop(&mut self) {
-        self.stop();
     }
 }
 
