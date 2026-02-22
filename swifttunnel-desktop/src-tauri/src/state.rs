@@ -34,7 +34,17 @@ pub struct AppState {
 impl AppState {
     pub fn new(runtime: Arc<tokio::runtime::Runtime>) -> Result<Self, String> {
         let auth_manager = AuthManager::new().map_err(|e| format!("Failed to init auth: {}", e))?;
-        let settings = swifttunnel_core::settings::load_settings();
+        let mut settings = swifttunnel_core::settings::load_settings();
+        let roblox_optimizer = RobloxOptimizer::new();
+
+        if let Ok(current) = roblox_optimizer.read_current_settings() {
+            settings.config.roblox_settings.window_fullscreen = current.fullscreen;
+            if let Some((width, height)) = current.window_size {
+                settings.config.roblox_settings.window_width = width;
+                settings.config.roblox_settings.window_height = height;
+            }
+        }
+
         let enable_discord_rpc = settings.enable_discord_rpc;
 
         Ok(Self {
@@ -45,7 +55,7 @@ impl AppState {
             settings: Arc::new(Mutex::new(settings)),
             performance_monitor: Arc::new(Mutex::new(PerformanceMonitor::new())),
             system_optimizer: Arc::new(Mutex::new(SystemOptimizer::new())),
-            roblox_optimizer: Arc::new(Mutex::new(RobloxOptimizer::new())),
+            roblox_optimizer: Arc::new(Mutex::new(roblox_optimizer)),
             network_booster: Arc::new(Mutex::new(NetworkBooster::new())),
             discord_manager: Arc::new(Mutex::new(DiscordManager::new(enable_discord_rpc))),
             runtime,

@@ -19,6 +19,11 @@ const PROFILES: { id: OptimizationProfile; name: string; desc: string; icon: str
   { id: "HighEnd", name: "Quality", desc: "Best visuals, stable perf", icon: "\u2728" },
 ];
 
+const MIN_WINDOW_WIDTH = 800;
+const MAX_WINDOW_WIDTH = 3840;
+const MIN_WINDOW_HEIGHT = 600;
+const MAX_WINDOW_HEIGHT = 2160;
+
 function getPresetConfig(profile: OptimizationProfile, current: Config): Config {
   const base: Config = {
     ...current,
@@ -127,6 +132,24 @@ function robloxSettingsChanged(a: Config, b: Config): boolean {
   return JSON.stringify(a.roblox_settings) !== JSON.stringify(b.roblox_settings);
 }
 
+function validateWindowDimension(
+  label: "Width" | "Height",
+  value: number,
+  min: number,
+  max: number,
+): string | null {
+  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+    return `${label} must be a whole number.`;
+  }
+  if (value < min || value > max) {
+    return `${label} must be between ${min} and ${max}.`;
+  }
+  if (value % 2 !== 0) {
+    return `${label} must be an even number.`;
+  }
+  return null;
+}
+
 // ── Component ──
 
 export function BoostTab() {
@@ -148,6 +171,19 @@ export function BoostTab() {
   const hasChanges = !configsEqual(draft, savedConfig);
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
+  const windowWidthError = validateWindowDimension(
+    "Width",
+    draft.roblox_settings.window_width,
+    MIN_WINDOW_WIDTH,
+    MAX_WINDOW_WIDTH,
+  );
+  const windowHeightError = validateWindowDimension(
+    "Height",
+    draft.roblox_settings.window_height,
+    MIN_WINDOW_HEIGHT,
+    MAX_WINDOW_HEIGHT,
+  );
+  const windowValidationError = windowWidthError ?? windowHeightError;
 
   useEffect(() => {
     const id = setInterval(boost.fetchMetrics, 2000);
@@ -156,20 +192,26 @@ export function BoostTab() {
 
   // Apply: persist draft to settings + backend
   const applyChanges = useCallback(() => {
+    if (windowValidationError) {
+      return;
+    }
     updateSettings({ config: draft });
     saveSettings();
     void boost.updateConfig(JSON.stringify(draft));
-  }, [draft, updateSettings, saveSettings, boost]);
+  }, [draft, saveSettings, updateSettings, boost, windowValidationError]);
 
   // Restart & Apply: close Roblox, apply, relaunch
   const restartAndApply = useCallback(async () => {
+    if (windowValidationError) {
+      return;
+    }
     setIsRestarting(true);
     updateSettings({ config: draft });
     saveSettings();
     void boost.updateConfig(JSON.stringify(draft));
     await boost.restartRoblox();
     setIsRestarting(false);
-  }, [draft, updateSettings, saveSettings, boost]);
+  }, [draft, saveSettings, updateSettings, boost, windowValidationError]);
 
   // Discard: reset draft to saved
   const discardChanges = useCallback(() => {
@@ -364,6 +406,58 @@ export function BoostTab() {
           enabled={draft.roblox_settings.ultraboost}
           onChange={(v) => updateRblxOpt({ ultraboost: v })}
         />
+
+        <div className="rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-4 py-3">
+          <div className="mb-2 text-sm font-medium text-text-primary">
+            Window Resolution
+          </div>
+          <p className="mb-3 text-xs text-text-muted">
+            Sets Roblox launch window size in pixels.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-text-muted">Width</span>
+              <input
+                type="number"
+                min={MIN_WINDOW_WIDTH}
+                max={MAX_WINDOW_WIDTH}
+                step={2}
+                value={draft.roblox_settings.window_width}
+                onChange={(e) =>
+                  updateRblxOpt({
+                    window_width: Number.parseInt(e.target.value, 10) || 0,
+                  })}
+                className="rounded-[var(--radius-input)] border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-text-muted">Height</span>
+              <input
+                type="number"
+                min={MIN_WINDOW_HEIGHT}
+                max={MAX_WINDOW_HEIGHT}
+                step={2}
+                value={draft.roblox_settings.window_height}
+                onChange={(e) =>
+                  updateRblxOpt({
+                    window_height: Number.parseInt(e.target.value, 10) || 0,
+                  })}
+                className="rounded-[var(--radius-input)] border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
+              />
+            </label>
+          </div>
+          {windowValidationError && (
+            <p className="mt-2 text-xs text-status-error">{windowValidationError}</p>
+          )}
+        </div>
+
+        <BoostCard
+          title="Launch Fullscreen"
+          desc="Set Roblox fullscreen default"
+          impact="Display mode"
+          enabled={draft.roblox_settings.window_fullscreen}
+          onChange={(v) => updateRblxOpt({ window_fullscreen: v })}
+        />
       </Section>
 
       {/* ── Sticky Apply Bar ── */}
@@ -383,9 +477,11 @@ export function BoostTab() {
           >
             <div className="mx-auto flex max-w-[640px] items-center justify-between">
               <span className="text-xs text-text-muted">
-                {hasRobloxChanges && boost.robloxRunning
-                  ? "Roblox must restart for changes to apply"
-                  : "Unsaved changes"}
+                {windowValidationError
+                  ? windowValidationError
+                  : hasRobloxChanges && boost.robloxRunning
+                    ? "Roblox must restart for changes to apply"
+                    : "Unsaved changes"}
               </span>
               <div className="flex items-center gap-2">
                 <button
@@ -398,7 +494,7 @@ export function BoostTab() {
                 {hasRobloxChanges && boost.robloxRunning ? (
                   <button
                     onClick={() => void restartAndApply()}
-                    disabled={isRestarting}
+                    disabled={isRestarting || Boolean(windowValidationError)}
                     className="rounded-[var(--radius-button)] px-5 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-50"
                     style={{
                       background: "linear-gradient(145deg, #3c82f6, #5a9fff)",
@@ -410,7 +506,7 @@ export function BoostTab() {
                 ) : (
                   <button
                     onClick={applyChanges}
-                    disabled={isRestarting}
+                    disabled={isRestarting || Boolean(windowValidationError)}
                     className="rounded-[var(--radius-button)] px-5 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-50"
                     style={{
                       background: "linear-gradient(145deg, #3c82f6, #5a9fff)",
