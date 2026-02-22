@@ -150,6 +150,11 @@ function validateWindowDimension(
   return null;
 }
 
+export function parseWindowDimensionInput(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 // ── Component ──
 
 export function BoostTab() {
@@ -425,7 +430,10 @@ export function BoostTab() {
                 value={draft.roblox_settings.window_width}
                 onChange={(e) =>
                   updateRblxOpt({
-                    window_width: Number.parseInt(e.target.value, 10) || 0,
+                    window_width: parseWindowDimensionInput(
+                      e.target.value,
+                      MIN_WINDOW_WIDTH,
+                    ),
                   })}
                 className="rounded-[var(--radius-input)] border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
               />
@@ -440,7 +448,10 @@ export function BoostTab() {
                 value={draft.roblox_settings.window_height}
                 onChange={(e) =>
                   updateRblxOpt({
-                    window_height: Number.parseInt(e.target.value, 10) || 0,
+                    window_height: parseWindowDimensionInput(
+                      e.target.value,
+                      MIN_WINDOW_HEIGHT,
+                    ),
                   })}
                 className="rounded-[var(--radius-input)] border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
               />
