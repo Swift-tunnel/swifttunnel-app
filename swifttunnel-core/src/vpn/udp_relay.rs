@@ -1193,7 +1193,14 @@ mod tests {
         let fake_addr = fake_relay.local_addr().unwrap();
         relay.switch_relay(fake_addr);
 
-        let local_addr = relay.try_clone_socket().unwrap().local_addr().unwrap();
+        let local_port = relay
+            .try_clone_socket()
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        // Relay sockets bind on 0.0.0.0; use loopback as the concrete destination for send_to.
+        let local_addr = SocketAddr::from(([127, 0, 0, 1], local_port));
 
         let seq: u32 = 1;
         let client_ts_mono_ms = now_mono_ms();
