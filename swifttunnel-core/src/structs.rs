@@ -63,6 +63,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_roblox_window_width() -> u32 {
+    1280
+}
+
+fn default_roblox_window_height() -> u32 {
+    720
+}
+
+fn default_roblox_window_fullscreen() -> bool {
+    false
+}
+
 impl Default for SystemOptimizationConfig {
     fn default() -> Self {
         Self {
@@ -95,6 +107,12 @@ pub struct RobloxSettingsConfig {
     pub graphics_quality: GraphicsQuality,
     pub unlock_fps: bool,
     pub target_fps: u32,
+    #[serde(default = "default_roblox_window_width")]
+    pub window_width: u32,
+    #[serde(default = "default_roblox_window_height")]
+    pub window_height: u32,
+    #[serde(default = "default_roblox_window_fullscreen")]
+    pub window_fullscreen: bool,
     /// Ultraboost: applies all allowlisted performance FFlags for maximum FPS
     #[serde(default)]
     pub ultraboost: bool,
@@ -106,6 +124,9 @@ impl Default for RobloxSettingsConfig {
             graphics_quality: GraphicsQuality::Manual,
             unlock_fps: true,
             target_fps: 144,
+            window_width: default_roblox_window_width(),
+            window_height: default_roblox_window_height(),
+            window_fullscreen: default_roblox_window_fullscreen(),
             ultraboost: false,
         }
     }
@@ -489,7 +510,24 @@ mod tests {
         assert_eq!(cfg.graphics_quality, GraphicsQuality::Manual);
         assert!(cfg.unlock_fps);
         assert_eq!(cfg.target_fps, 144);
+        assert_eq!(cfg.window_width, 1280);
+        assert_eq!(cfg.window_height, 720);
+        assert!(!cfg.window_fullscreen);
         assert!(!cfg.ultraboost);
+    }
+
+    #[test]
+    fn test_roblox_settings_legacy_json_defaults_window_fields() {
+        let legacy = r#"{
+            "graphics_quality": "Manual",
+            "unlock_fps": true,
+            "target_fps": 144,
+            "ultraboost": false
+        }"#;
+        let cfg: RobloxSettingsConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cfg.window_width, 1280);
+        assert_eq!(cfg.window_height, 720);
+        assert!(!cfg.window_fullscreen);
     }
 
     // ── GraphicsQuality ──

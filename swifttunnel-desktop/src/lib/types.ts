@@ -155,6 +155,9 @@ export interface RobloxSettingsConfig {
   graphics_quality: GraphicsQuality;
   unlock_fps: boolean;
   target_fps: number;
+  window_width: number;
+  window_height: number;
+  window_fullscreen: boolean;
   ultraboost: boolean;
 }
 

@@ -20,6 +20,9 @@ const MOCK_SETTINGS = {
       graphics_quality: "Manual",
       unlock_fps: true,
       target_fps: 144,
+      window_width: 1280,
+      window_height: 720,
+      window_fullscreen: false,
       ultraboost: false,
     },
     network_settings: {

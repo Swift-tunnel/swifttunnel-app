@@ -77,6 +77,15 @@ describe("stores/settingsStore", () => {
     expect(useSettingsStore.getState().settings.adapter_binding_mode).toBe(
       "smart_auto",
     );
+    expect(useSettingsStore.getState().settings.config.roblox_settings.window_width).toBe(
+      1280,
+    );
+    expect(useSettingsStore.getState().settings.config.roblox_settings.window_height).toBe(
+      720,
+    );
+    expect(
+      useSettingsStore.getState().settings.config.roblox_settings.window_fullscreen,
+    ).toBe(false);
   });
 
   it("save persists activeTab into current_tab", async () => {
@@ -92,8 +101,21 @@ describe("stores/settingsStore", () => {
 
     expect(settingsSave).toHaveBeenCalledTimes(1);
     const payload = settingsSave.mock.calls[0]?.[0] as string;
-    const parsed = JSON.parse(payload) as { current_tab?: string; theme?: string };
+    const parsed = JSON.parse(payload) as {
+      current_tab?: string;
+      theme?: string;
+      config?: {
+        roblox_settings?: {
+          window_width?: number;
+          window_height?: number;
+          window_fullscreen?: boolean;
+        };
+      };
+    };
     expect(parsed.current_tab).toBe("connect");
     expect(parsed.theme).toBe("dark");
+    expect(parsed.config?.roblox_settings?.window_width).toBe(1280);
+    expect(parsed.config?.roblox_settings?.window_height).toBe(720);
+    expect(parsed.config?.roblox_settings?.window_fullscreen).toBe(false);
   });
 });

@@ -18,6 +18,7 @@ pub struct CurrentRobloxSettings {
     pub fps_cap: u32,
     pub graphics_quality: i32,
     pub fullscreen: bool,
+    pub window_size: Option<(u32, u32)>,
 }
 
 pub struct RobloxOptimizer {
@@ -26,6 +27,11 @@ pub struct RobloxOptimizer {
 }
 
 impl RobloxOptimizer {
+    const MIN_WINDOW_WIDTH: u32 = 800;
+    const MAX_WINDOW_WIDTH: u32 = 3840;
+    const MIN_WINDOW_HEIGHT: u32 = 600;
+    const MAX_WINDOW_HEIGHT: u32 = 2160;
+
     pub fn new() -> Self {
         // Find the GlobalBasicSettings XML file
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -133,11 +139,14 @@ impl RobloxOptimizer {
 
         // Parse fullscreen
         let fullscreen = Self::extract_bool_value(&content, "Fullscreen").unwrap_or(false);
+        let window_size = Self::extract_vector2_value(&content, "StartScreenSize")
+            .and_then(|(x, y)| Self::sanitize_window_dimensions_from_xml(x, y));
 
         Ok(CurrentRobloxSettings {
             fps_cap: fps_cap as u32,
             graphics_quality,
             fullscreen,
+            window_size,
         })
     }
 
@@ -179,6 +188,28 @@ impl RobloxOptimizer {
             }
         }
         None
+    }
+
+    fn extract_vector2_value(content: &str, name: &str) -> Option<(i32, i32)> {
+        let pattern = format!("<Vector2 name=\"{}\">", name);
+        let start = content.find(&pattern)?;
+        let vector_start = start + pattern.len();
+        let vector_end = content[vector_start..].find("</Vector2>")?;
+        let vector_body = &content[vector_start..vector_start + vector_end];
+
+        let x = Self::extract_vector_axis(vector_body, "X")?;
+        let y = Self::extract_vector_axis(vector_body, "Y")?;
+        Some((x, y))
+    }
+
+    fn extract_vector_axis(vector_body: &str, axis: &str) -> Option<i32> {
+        let open = format!("<{}>", axis);
+        let close = format!("</{}>", axis);
+        let start = vector_body.find(&open)?;
+        let value_start = start + open.len();
+        let end = vector_body[value_start..].find(&close)?;
+        let value = &vector_body[value_start..value_start + end];
+        value.trim().parse().ok()
     }
 
     /// Remove read-only attribute from a file (Windows only)
@@ -335,6 +366,21 @@ impl RobloxOptimizer {
         content = self.set_xml_token_value(&content, "SavedQualityLevel", quality_value);
         info!("Set graphics quality to level: {}", quality_value);
 
+        // Apply windowed resolution and fullscreen defaults.
+        let (window_width, window_height) =
+            Self::sanitize_window_dimensions(config.window_width, config.window_height);
+        content = self.set_xml_vector2_value(
+            &content,
+            "StartScreenSize",
+            window_width as i32,
+            window_height as i32,
+        );
+        content = self.set_xml_bool_value(&content, "Fullscreen", config.window_fullscreen);
+        info!(
+            "Set Roblox launch window to {}x{} (fullscreen: {})",
+            window_width, window_height, config.window_fullscreen
+        );
+
         // Write updated content back
         fs::write(&settings_path, &content)?;
 
@@ -418,7 +464,76 @@ impl RobloxOptimizer {
             }
         }
 
-        content.to_string()
+        let entry = format!("<bool name=\"{}\">{}</bool>", name, value_str);
+        Self::append_setting_block(content, &entry)
+    }
+
+    fn set_xml_vector2_value(&self, content: &str, name: &str, x: i32, y: i32) -> String {
+        let pattern = format!("<Vector2 name=\"{}\">", name);
+        let entry = format!(
+            "<Vector2 name=\"{}\"><X>{}</X><Y>{}</Y></Vector2>",
+            name, x, y
+        );
+
+        if let Some(start) = content.find(&pattern) {
+            let Some(end_offset) = content[start..].find("</Vector2>") else {
+                return content.to_string();
+            };
+            let end = start + end_offset + "</Vector2>".len();
+            return format!("{}{}{}", &content[..start], entry, &content[end..]);
+        }
+
+        Self::append_setting_block(content, &entry)
+    }
+
+    fn append_setting_block(content: &str, entry: &str) -> String {
+        if let Some(close_idx) = content.rfind("</roblox>") {
+            let mut output = String::new();
+            output.push_str(&content[..close_idx]);
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str("  ");
+            output.push_str(entry);
+            output.push('\n');
+            output.push_str(&content[close_idx..]);
+            output
+        } else {
+            format!("{}\n{}\n", content, entry)
+        }
+    }
+
+    fn sanitize_window_dimensions(width: u32, height: u32) -> (u32, u32) {
+        let mut sanitized_width = width.clamp(Self::MIN_WINDOW_WIDTH, Self::MAX_WINDOW_WIDTH);
+        let mut sanitized_height = height.clamp(Self::MIN_WINDOW_HEIGHT, Self::MAX_WINDOW_HEIGHT);
+
+        if sanitized_width % 2 != 0 {
+            sanitized_width = if sanitized_width == Self::MAX_WINDOW_WIDTH {
+                sanitized_width - 1
+            } else {
+                sanitized_width + 1
+            };
+        }
+
+        if sanitized_height % 2 != 0 {
+            sanitized_height = if sanitized_height == Self::MAX_WINDOW_HEIGHT {
+                sanitized_height - 1
+            } else {
+                sanitized_height + 1
+            };
+        }
+
+        (sanitized_width, sanitized_height)
+    }
+
+    fn sanitize_window_dimensions_from_xml(width: i32, height: i32) -> Option<(u32, u32)> {
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        Some(Self::sanitize_window_dimensions(
+            width as u32,
+            height as u32,
+        ))
     }
 
     /// Backup current Roblox settings
@@ -743,9 +858,10 @@ mod tests {
 
     /// Helper: create a RobloxOptimizer pointing at a specific path
     fn optimizer_with_path(settings_path: PathBuf) -> RobloxOptimizer {
+        let backup_path = settings_path.with_extension("backup.xml");
         RobloxOptimizer {
             settings_path,
-            backup_path: PathBuf::from("test_backup.xml"),
+            backup_path,
         }
     }
 
@@ -828,6 +944,31 @@ mod tests {
         assert_eq!(RobloxOptimizer::extract_bool_value(xml, "Missing"), None);
     }
 
+    // ── extract_vector2_value ───────────────────────────────────────
+
+    #[test]
+    fn extract_vector2_value_parses_window_size() {
+        let xml = r#"<roblox>
+            <Vector2 name="StartScreenSize">
+                <X>1920</X>
+                <Y>1080</Y>
+            </Vector2>
+        </roblox>"#;
+        assert_eq!(
+            RobloxOptimizer::extract_vector2_value(xml, "StartScreenSize"),
+            Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn extract_vector2_value_returns_none_for_malformed_vector() {
+        let xml = r#"<roblox><Vector2 name="StartScreenSize"><X>1920</X></Vector2></roblox>"#;
+        assert_eq!(
+            RobloxOptimizer::extract_vector2_value(xml, "StartScreenSize"),
+            None
+        );
+    }
+
     // ── set_xml_int_value ───────────────────────────────────────────
 
     #[test]
@@ -849,6 +990,24 @@ mod tests {
         assert_eq!(result, xml);
     }
 
+    #[test]
+    fn set_xml_vector2_value_upserts_start_screen_size() {
+        let xml = r#"<roblox><int name="FramerateCap">60</int></roblox>"#;
+        let opt = optimizer_with_path(PathBuf::from("dummy"));
+        let result = opt.set_xml_vector2_value(xml, "StartScreenSize", 1280, 720);
+        assert!(
+            result.contains(r#"<Vector2 name="StartScreenSize"><X>1280</X><Y>720</Y></Vector2>"#)
+        );
+    }
+
+    #[test]
+    fn set_xml_bool_value_upserts_when_missing() {
+        let xml = r#"<roblox><int name="FramerateCap">60</int></roblox>"#;
+        let opt = optimizer_with_path(PathBuf::from("dummy"));
+        let result = opt.set_xml_bool_value(xml, "Fullscreen", true);
+        assert!(result.contains(r#"<bool name="Fullscreen">true</bool>"#));
+    }
+
     // ── graphics_quality_to_int ─────────────────────────────────────
 
     #[test]
@@ -866,6 +1025,20 @@ mod tests {
         assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level8), 8);
         assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level9), 9);
         assert_eq!(opt.graphics_quality_to_int(&GraphicsQuality::Level10), 10);
+    }
+
+    // ── sanitize_window_dimensions ──────────────────────────────────
+
+    #[test]
+    fn sanitize_window_dimensions_clamps_and_even_rounds() {
+        assert_eq!(
+            RobloxOptimizer::sanitize_window_dimensions(799, 2159),
+            (800, 2160)
+        );
+        assert_eq!(
+            RobloxOptimizer::sanitize_window_dimensions(3841, 601),
+            (3840, 602)
+        );
     }
 
     // ── find_settings_file ──────────────────────────────────────────
@@ -911,6 +1084,10 @@ mod tests {
             <int name="FramerateCap">240</int>
             <int name="GraphicsQualityLevel">8</int>
             <bool name="Fullscreen">true</bool>
+            <Vector2 name="StartScreenSize">
+                <X>1919</X>
+                <Y>1081</Y>
+            </Vector2>
         </roblox>"#;
 
         let path = dir.join("settings.xml");
@@ -922,6 +1099,7 @@ mod tests {
         assert_eq!(settings.fps_cap, 240);
         assert_eq!(settings.graphics_quality, 8);
         assert!(settings.fullscreen);
+        assert_eq!(settings.window_size, Some((1920, 1082)));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -942,6 +1120,7 @@ mod tests {
         assert_eq!(settings.fps_cap, 60);
         assert_eq!(settings.graphics_quality, 5);
         assert!(!settings.fullscreen);
+        assert_eq!(settings.window_size, None);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -950,6 +1129,45 @@ mod tests {
     fn read_current_settings_errors_if_file_missing() {
         let opt = optimizer_with_path(PathBuf::from("nonexistent_file.xml"));
         assert!(opt.read_current_settings().is_err());
+    }
+
+    #[test]
+    fn apply_optimizations_inserts_and_sanitizes_window_settings() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_apply_window");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("settings.xml");
+        let xml = r#"<roblox>
+            <int name="FramerateCap">60</int>
+            <int name="GraphicsQualityLevel">5</int>
+            <token name="SavedQualityLevel">5</token>
+        </roblox>"#;
+        fs::write(&path, xml).unwrap();
+
+        let opt = optimizer_with_path(path.clone());
+        let config = RobloxSettingsConfig {
+            graphics_quality: GraphicsQuality::Level3,
+            unlock_fps: true,
+            target_fps: 240,
+            window_width: 799,
+            window_height: 601,
+            window_fullscreen: true,
+            ultraboost: false,
+        };
+
+        opt.apply_optimizations(&config).unwrap();
+
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(updated.contains(r#"<int name="FramerateCap">240</int>"#));
+        assert!(updated.contains(r#"<int name="GraphicsQualityLevel">3</int>"#));
+        assert!(updated.contains(r#"<token name="SavedQualityLevel">3</token>"#));
+        assert!(
+            updated.contains(r#"<Vector2 name="StartScreenSize"><X>800</X><Y>602</Y></Vector2>"#)
+        );
+        assert!(updated.contains(r#"<bool name="Fullscreen">true</bool>"#));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── ultraboost FFlag constants ────────────────────────────────────
