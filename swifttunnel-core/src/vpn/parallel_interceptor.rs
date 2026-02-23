@@ -2851,24 +2851,16 @@ fn run_packet_reader(
         passthrough_to_adapter = EthMRequest::new(physical_handle);
         passthrough_to_mstcp = EthMRequest::new(physical_handle);
 
-        // Dispatch packets to workers based on hash of source port
+        // Dispatch packets to workers using source-port hash or fragment metadata hash.
         for i in 0..packets_read {
             let direction_flags = packets[i].get_device_flags();
             let is_outbound = direction_flags == DirectionFlags::PACKET_FLAG_ON_SEND;
             let data = packets[i].get_data();
 
             if is_outbound {
-                // Parse to get source port for hashing (and ensure TCP/UDP IPv4)
-                if let Some((src_port, _dst_port)) = parse_ports(data) {
-                    // Hash by source port to select worker
-                    // DEFENSIVE: Prevent division by zero (should never happen with num_workers >= 1)
-                    let worker_id = if num_workers > 0 {
-                        (src_port as usize) % num_workers
-                    } else {
-                        log::error!("CRITICAL: num_workers is 0 - this should never happen");
-                        0
-                    };
-
+                // Select worker for UDP/TCP packets. For non-initial UDP fragments with very
+                // short tails, ports may be absent; use fragment metadata hash instead.
+                if let Some(worker_id) = select_worker_id_for_outbound_packet(data, num_workers) {
                     let packet_len = data.len() as u64;
 
                     // Decide routing here to keep bypass traffic out of the workers.
@@ -3817,6 +3809,61 @@ fn parse_ports(data: &[u8]) -> Option<(u16, u16)> {
     let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
 
     Some((src_port, dst_port))
+}
+
+#[inline(always)]
+fn parse_non_initial_fragment_hash(data: &[u8]) -> Option<u32> {
+    let ip_start = parse_ipv4_header_offset(data)?;
+    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
+    if ihl < 20 {
+        return None;
+    }
+
+    let protocol = data[ip_start + 9];
+    if protocol != 6 && protocol != 17 {
+        return None;
+    }
+
+    let fragment_bits = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
+    let fragment_offset = fragment_bits & 0x1FFF;
+    if fragment_offset == 0 {
+        return None;
+    }
+
+    let packet_id = u16::from_be_bytes([data[ip_start + 4], data[ip_start + 5]]) as u32;
+    let src_ip = u32::from_be_bytes([
+        data[ip_start + 12],
+        data[ip_start + 13],
+        data[ip_start + 14],
+        data[ip_start + 15],
+    ]);
+    let dst_ip = u32::from_be_bytes([
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    ]);
+
+    Some(
+        src_ip
+            ^ dst_ip.rotate_left(7)
+            ^ packet_id.rotate_left(16)
+            ^ ((fragment_offset as u32) << 3)
+            ^ (protocol as u32),
+    )
+}
+
+#[inline(always)]
+fn select_worker_id_for_outbound_packet(data: &[u8], num_workers: usize) -> Option<usize> {
+    if num_workers == 0 {
+        return None;
+    }
+
+    if let Some((src_port, _dst_port)) = parse_ports(data) {
+        return Some((src_port as usize) % num_workers);
+    }
+
+    parse_non_initial_fragment_hash(data).map(|hash| (hash as usize) % num_workers)
 }
 
 /// Per-worker inline cache for connection lookups
@@ -5181,6 +5228,62 @@ mod tests {
         frame
     }
 
+    fn build_pppoe_ipv4_udp_fragment_frame(
+        protocol_field_compressed: bool,
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        identification: u16,
+        fragment_offset_blocks: u16,
+        more_fragments: bool,
+        payload_len: usize,
+    ) -> Vec<u8> {
+        let ppp_protocol_len = if protocol_field_compressed { 1 } else { 2 };
+        let payload_len = if fragment_offset_blocks == 0 {
+            payload_len.max(8)
+        } else {
+            payload_len
+        };
+        let ip_total_len = 20 + payload_len;
+
+        let mut frame = vec![0u8; 14 + 6 + ppp_protocol_len + ip_total_len];
+        frame[12..14].copy_from_slice(&0x8864u16.to_be_bytes()); // PPPoE Session EtherType
+
+        let pppoe_start = 14;
+        frame[pppoe_start] = 0x11; // Version=1, Type=1
+        frame[pppoe_start + 1] = 0x00; // Code=Session Data
+        frame[pppoe_start + 2..pppoe_start + 4].copy_from_slice(&0x0001u16.to_be_bytes()); // Session ID
+        let ppp_payload_len = (ppp_protocol_len + ip_total_len) as u16;
+        frame[pppoe_start + 4..pppoe_start + 6].copy_from_slice(&ppp_payload_len.to_be_bytes());
+
+        if protocol_field_compressed {
+            frame[pppoe_start + 6] = 0x21; // PPP protocol (PFC-compressed): IPv4
+        } else {
+            frame[pppoe_start + 6..pppoe_start + 8].copy_from_slice(&0x0021u16.to_be_bytes()); // PPP protocol: IPv4
+        }
+
+        let ip_start = pppoe_start + 6 + ppp_protocol_len;
+        frame[ip_start] = 0x45; // IPv4, IHL=5
+        frame[ip_start + 9] = 17; // UDP
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
+        frame[ip_start + 4..ip_start + 6].copy_from_slice(&identification.to_be_bytes());
+        let fragment_bits =
+            (fragment_offset_blocks & 0x1FFF) | if more_fragments { 0x2000 } else { 0 };
+        frame[ip_start + 6..ip_start + 8].copy_from_slice(&fragment_bits.to_be_bytes());
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+
+        if fragment_offset_blocks == 0 {
+            let transport_start = ip_start + 20;
+            frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+            frame[transport_start + 2..transport_start + 4]
+                .copy_from_slice(&dst_port.to_be_bytes());
+        }
+
+        frame
+    }
+
     fn build_raw_ipv4_packet(
         protocol: u8,
         src_ip: Ipv4Addr,
@@ -6146,6 +6249,57 @@ mod tests {
             &snapshot,
             &mut inline_cache
         ));
+    }
+
+    #[test]
+    fn test_select_worker_id_for_outbound_packet_handles_short_pppoe_tail_fragment() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 140);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 53000;
+        let dst_port = 443;
+        let packet_id = 0x4242;
+        let pid = 9001;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let first_fragment = build_pppoe_ipv4_udp_fragment_frame(
+            false, src_ip, dst_ip, src_port, dst_port, packet_id, 0, true, 8,
+        );
+        let short_tail_fragment = build_pppoe_ipv4_udp_fragment_frame(
+            false, src_ip, dst_ip, src_port, dst_port, packet_id, 1, false, 3,
+        );
+
+        let mut inline_cache: InlineCache = HashMap::new();
+        assert!(should_route_to_vpn_with_inline_cache(
+            &first_fragment,
+            &snapshot,
+            &mut inline_cache
+        ));
+        assert!(
+            parse_ports(&short_tail_fragment).is_none(),
+            "legacy parse_ports-only reader dispatch would bypass this PPPoE tail fragment"
+        );
+        assert!(should_route_to_vpn_with_inline_cache(
+            &short_tail_fragment,
+            &snapshot,
+            &mut inline_cache
+        ));
+
+        let worker = select_worker_id_for_outbound_packet(&short_tail_fragment, 4);
+        assert!(
+            worker.is_some(),
+            "reader dispatch should keep routed PPPoE tail fragments on the tunnel path"
+        );
     }
 
     #[test]
