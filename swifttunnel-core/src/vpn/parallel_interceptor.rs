@@ -965,6 +965,70 @@ impl ParallelInterceptor {
         None
     }
 
+    fn is_point_to_point_interface_type_or_name(if_type: u32, friendly_name: &str) -> bool {
+        use windows::Win32::NetworkManagement::IpHelper::IF_TYPE_PPP;
+
+        if if_type == IF_TYPE_PPP {
+            return true;
+        }
+
+        let friendly_lower = friendly_name.to_ascii_lowercase();
+        friendly_lower.contains("pppoe")
+            || friendly_lower.contains("wan miniport")
+            || friendly_lower.contains("wan network interface")
+    }
+
+    fn is_interface_point_to_point(if_index: u32) -> Option<bool> {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        };
+        use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+        unsafe {
+            let mut size: u32 = 0;
+            let _ = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                None,
+                &mut size,
+            );
+            if size == 0 {
+                return None;
+            }
+
+            let mut buffer = vec![0u8; size as usize];
+            let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+            if GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(adapter_addresses),
+                &mut size,
+            ) != 0
+            {
+                return None;
+            }
+
+            let mut current = adapter_addresses;
+            while !current.is_null() {
+                let adapter = &*current;
+                let a_if = adapter.Anonymous1.Anonymous.IfIndex;
+                let a_ipv6_if = adapter.Ipv6IfIndex;
+                if a_if == if_index || a_ipv6_if == if_index {
+                    let friendly_name = pwstr_to_string(adapter.FriendlyName);
+                    return Some(Self::is_point_to_point_interface_type_or_name(
+                        adapter.IfType,
+                        &friendly_name,
+                    ));
+                }
+                current = adapter.Next;
+            }
+        }
+
+        None
+    }
+
     fn get_default_route_info_native() -> Option<DefaultRouteInfo> {
         use windows::Win32::Foundation::*;
         use windows::Win32::NetworkManagement::IpHelper::*;
@@ -1076,9 +1140,9 @@ impl ParallelInterceptor {
     fn get_default_route_info_for_targets(
         game_targets: &[Ipv4Addr],
     ) -> Option<(DefaultRouteInfo, DefaultRouteSource, Option<Ipv4Addr>)> {
-        // Sentinel value for next_hop to indicate a valid default route was found via GetBestInterfaceEx.
-        // Any non-zero value works; this ensures strict_default_route logic treats the route as gateway-backed.
-        const NEXT_HOP_SENTINEL: u32 = 1;
+        // Sentinel value for gateway-backed routes discovered via GetBestInterfaceEx.
+        // Any non-zero value works and keeps strict default-route binding enabled.
+        const NEXT_HOP_GATEWAY_SENTINEL: u32 = 1;
 
         for (ip, source) in Self::candidate_route_targets(game_targets) {
             if let Some(idx) = Self::get_best_interface_index_for_ipv4(ip) {
@@ -1092,19 +1156,28 @@ impl ParallelInterceptor {
                     continue;
                 }
 
+                // PPP/PPPoE paths often expose WAN pseudo-interfaces where strict IfIndex
+                // equality fails even though routing is correct. Mark those as point-to-point
+                // so adapter selection can use WAN fallback logic instead of hard-failing.
+                let is_point_to_point = Self::is_interface_point_to_point(idx) == Some(true);
+                let next_hop = if is_point_to_point {
+                    0
+                } else {
+                    NEXT_HOP_GATEWAY_SENTINEL
+                };
+
                 log::info!(
-                    "Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}, source={}",
+                    "Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}, source={}, point_to_point={}",
                     ip,
                     idx,
-                    source.as_str()
+                    source.as_str(),
+                    is_point_to_point
                 );
-                // Return a non-zero next_hop to ensure 'strict_default_route' passes.
-                // This ensures we bind specifically to this physical adapter.
                 return Some((
                     DefaultRouteInfo {
                         if_index: idx,
                         metric: 0,
-                        next_hop: NEXT_HOP_SENTINEL,
+                        next_hop,
                     },
                     source,
                     Some(ip),
@@ -5201,6 +5274,39 @@ mod tests {
         assert_eq!(
             ParallelInterceptor::parse_interface_index_output(stdout),
             None
+        );
+    }
+
+    #[test]
+    fn test_is_point_to_point_interface_type_or_name_detects_ppp_if_type() {
+        use windows::Win32::NetworkManagement::IpHelper::IF_TYPE_PPP;
+
+        assert!(
+            ParallelInterceptor::is_point_to_point_interface_type_or_name(IF_TYPE_PPP, "Ethernet")
+        );
+    }
+
+    #[test]
+    fn test_is_point_to_point_interface_type_or_name_detects_pppoe_name() {
+        use windows::Win32::NetworkManagement::IpHelper::IF_TYPE_ETHERNET_CSMACD;
+
+        assert!(
+            ParallelInterceptor::is_point_to_point_interface_type_or_name(
+                IF_TYPE_ETHERNET_CSMACD,
+                "WAN Miniport (PPPOE)"
+            )
+        );
+    }
+
+    #[test]
+    fn test_is_point_to_point_interface_type_or_name_rejects_wifi_name() {
+        use windows::Win32::NetworkManagement::IpHelper::IF_TYPE_IEEE80211;
+
+        assert!(
+            !ParallelInterceptor::is_point_to_point_interface_type_or_name(
+                IF_TYPE_IEEE80211,
+                "Wi-Fi"
+            )
         );
     }
 
