@@ -6,7 +6,9 @@
 //! - UDP relay for game traffic forwarding
 //! - Connection state tracking
 
-use super::parallel_interceptor::{QueueOverflowMode, ThroughputStats};
+use super::parallel_interceptor::{
+    QueueOverflowMode, ThroughputStats, is_point_to_point_default_route_context,
+};
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
 use super::{VpnError, VpnResult};
@@ -775,7 +777,18 @@ impl VpnConnection {
 
         log::info!("V3: Creating UDP relay to {}", relay_addr);
 
-        let relay = match super::udp_relay::UdpRelay::new(relay_addr, relay_qos_enabled) {
+        let relay_path_context = super::udp_relay::RelayPathContext {
+            point_to_point_default_route: is_point_to_point_default_route_context(),
+        };
+        if relay_path_context.point_to_point_default_route {
+            log::info!("V3: PPP/point-to-point default route detected; enabling relay MTU clamp");
+        }
+
+        let relay = match super::udp_relay::UdpRelay::new_with_path_context(
+            relay_addr,
+            relay_qos_enabled,
+            relay_path_context,
+        ) {
             Ok(r) => std::sync::Arc::new(r),
             Err(e) => {
                 let _ = driver.close();

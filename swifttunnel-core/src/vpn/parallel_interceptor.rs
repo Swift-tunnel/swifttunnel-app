@@ -238,6 +238,46 @@ pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
     }
 }
 
+/// Detect whether the current active default route is point-to-point (PPP/PPPoE/WAN).
+///
+/// This reuses the same route + adapter probes used for split-tunnel adapter binding so
+/// relay-path policies can stay aligned with the actual WAN context.
+pub fn is_point_to_point_default_route_context() -> bool {
+    let Some((route, source, target_ip)) = ParallelInterceptor::get_default_route_info_for_targets(&[])
+    else {
+        return false;
+    };
+
+    let next_hop_is_zero = route.next_hop == 0;
+    let interface_is_point_to_point =
+        ParallelInterceptor::is_interface_point_to_point(route.if_index) == Some(true);
+    let is_point_to_point = next_hop_is_zero || interface_is_point_to_point;
+
+    if is_point_to_point {
+        let next_hop = Ipv4Addr::from(route.next_hop.to_ne_bytes());
+        if let Some(target_ip) = target_ip {
+            log::info!(
+                "Default-route context is point-to-point (if_index={}, next_hop={}, source={}, target={}, interface_point_to_point={})",
+                route.if_index,
+                next_hop,
+                source.as_str(),
+                target_ip,
+                interface_is_point_to_point
+            );
+        } else {
+            log::info!(
+                "Default-route context is point-to-point (if_index={}, next_hop={}, source={}, interface_point_to_point={})",
+                route.if_index,
+                next_hop,
+                source.as_str(),
+                interface_is_point_to_point
+            );
+        }
+    }
+
+    is_point_to_point
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueOverflowMode {
     Bypass = 0,

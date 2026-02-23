@@ -68,6 +68,12 @@ const RELAY_PATH_MTU_REFRESH_INTERVAL_MS: u64 = 5_000;
 /// While we're still on fallback MTU (probe never succeeded), retry probing
 /// more aggressively so we converge to the true path MTU quickly.
 const RELAY_PATH_MTU_FALLBACK_RETRY_INTERVAL_MS: u64 = 1_000;
+/// PPPoE lowers L3 MTU from 1500 to 1492 (8-byte PPPoE overhead).
+///
+/// Some WAN/PPPoE stacks still report a 1500 MTU on the selected interface even when
+/// effective internet-path MTU is 1492, which can reintroduce outer UDP fragmentation.
+/// In point-to-point default-route context we cap to 1492 to avoid that mismatch.
+const RELAY_PATH_MTU_POINT_TO_POINT_CEILING: usize = 1492;
 
 /// Keepalive interval to maintain NAT bindings - 15s is safer for strict NATs
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -93,6 +99,11 @@ const PING_SAMPLE_WINDOW: usize = 1024;
 /// Grace period after relay switch: accept packets from BOTH old and new relay.
 /// This eliminates the inbound blackout while the new relay establishes session.
 const RELAY_SWITCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RelayPathContext {
+    pub point_to_point_default_route: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayAuthAckStatus {
@@ -305,11 +316,16 @@ pub struct UdpRelay {
     send_errors: Arc<AtomicU64>,
     /// Effective outer MTU for relay packets (<= 1500), refreshed periodically on Windows.
     relay_path_mtu: AtomicUsize,
+    relay_path_context: RelayPathContext,
     /// True when relay_path_mtu is still a conservative fallback (probe failed).
     relay_path_mtu_is_fallback: AtomicBool,
     last_mtu_refresh_ms: AtomicU64,
     /// Consecutive MTU detection failures (for throttled warning logs).
     mtu_detect_failures: AtomicU64,
+    /// Whether PPPoE/point-to-point MTU clamp is currently active.
+    point_to_point_mtu_clamp_active: AtomicBool,
+    /// Number of times PPPoE/point-to-point MTU clamp has been applied.
+    point_to_point_mtu_clamp_events: AtomicU64,
     /// Last activity time for keepalive
     last_activity: std::sync::Mutex<Instant>,
     sender_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -323,6 +339,14 @@ impl UdpRelay {
     ///
     /// relay_addr should already be resolved (use tokio::net::lookup_host for DNS)
     pub fn new(relay_addr: SocketAddr, relay_qos_enabled: bool) -> Result<Self> {
+        Self::new_with_path_context(relay_addr, relay_qos_enabled, RelayPathContext::default())
+    }
+
+    pub fn new_with_path_context(
+        relay_addr: SocketAddr,
+        relay_qos_enabled: bool,
+        path_context: RelayPathContext,
+    ) -> Result<Self> {
         // Bind to any available port
         let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket")?;
 
@@ -521,18 +545,28 @@ impl UdpRelay {
             relay_qos_enabled
         );
 
-        let (initial_mtu, initial_mtu_is_fallback) =
-            select_initial_relay_path_mtu(detect_relay_path_mtu(relay_addr));
-        if initial_mtu_is_fallback {
+        let detected_mtu = detect_relay_path_mtu(relay_addr);
+        let initial_mtu = select_initial_relay_path_mtu_for_context(detected_mtu, path_context);
+        if initial_mtu.is_fallback {
             log::warn!(
                 "UDP Relay: MTU probe unavailable for {}; using conservative fallback MTU {} (will retry)",
                 relay_addr,
-                initial_mtu
+                initial_mtu.mtu
+            );
+        } else if initial_mtu.point_to_point_clamped {
+            let detected_mtu = detected_mtu
+                .map(clamp_relay_path_mtu)
+                .unwrap_or(RELAY_PATH_MTU_UPPER_BOUND);
+            log::warn!(
+                "UDP Relay: PPP/point-to-point default route detected; clamping relay path MTU to {} (detected {}, relay {})",
+                initial_mtu.mtu,
+                detected_mtu,
+                relay_addr
             );
         } else {
             log::info!(
                 "UDP Relay: Detected relay path MTU {} for {}",
-                initial_mtu,
+                initial_mtu.mtu,
                 relay_addr
             );
         }
@@ -549,14 +583,21 @@ impl UdpRelay {
             oversize_drops: AtomicU64::new(0),
             outbound_drops: AtomicU64::new(0),
             send_errors,
-            relay_path_mtu: AtomicUsize::new(initial_mtu),
-            relay_path_mtu_is_fallback: AtomicBool::new(initial_mtu_is_fallback),
-            last_mtu_refresh_ms: AtomicU64::new(if initial_mtu_is_fallback {
+            relay_path_mtu: AtomicUsize::new(initial_mtu.mtu),
+            relay_path_context: path_context,
+            relay_path_mtu_is_fallback: AtomicBool::new(initial_mtu.is_fallback),
+            last_mtu_refresh_ms: AtomicU64::new(if initial_mtu.is_fallback {
                 0
             } else {
                 now_mono_ms()
             }),
             mtu_detect_failures: AtomicU64::new(0),
+            point_to_point_mtu_clamp_active: AtomicBool::new(initial_mtu.point_to_point_clamped),
+            point_to_point_mtu_clamp_events: AtomicU64::new(if initial_mtu.point_to_point_clamped {
+                1
+            } else {
+                0
+            }),
             last_activity: std::sync::Mutex::new(Instant::now()),
             sender_handle: std::sync::Mutex::new(Some(sender_handle)),
             outbound_pool,
@@ -607,12 +648,17 @@ impl UdpRelay {
         }
 
         match detect_relay_path_mtu(relay_addr) {
-            Some(mtu) => {
-                let mtu = clamp_relay_path_mtu(mtu);
+            Some(detected_mtu) => {
+                let detected_mtu = clamp_relay_path_mtu(detected_mtu);
+                let (mtu, point_to_point_clamped) =
+                    apply_point_to_point_relay_mtu_ceiling(detected_mtu, self.relay_path_context);
                 let prev = self.relay_path_mtu.swap(mtu, Ordering::Relaxed);
                 let was_fallback = self
                     .relay_path_mtu_is_fallback
                     .swap(false, Ordering::AcqRel);
+                let was_point_to_point_clamped = self
+                    .point_to_point_mtu_clamp_active
+                    .swap(point_to_point_clamped, Ordering::AcqRel);
                 self.mtu_detect_failures.store(0, Ordering::Relaxed);
                 if prev != mtu || was_fallback {
                     if was_fallback {
@@ -629,6 +675,25 @@ impl UdpRelay {
                             relay_addr
                         );
                     }
+                }
+                if point_to_point_clamped && (!was_point_to_point_clamped || prev != mtu) {
+                    let events = self
+                        .point_to_point_mtu_clamp_events
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    log::info!(
+                        "UDP Relay: PPPoE clamp active (detected MTU {}, clamped to {}, relay {}, event #{})",
+                        detected_mtu,
+                        mtu,
+                        relay_addr,
+                        events
+                    );
+                } else if !point_to_point_clamped && was_point_to_point_clamped {
+                    log::info!(
+                        "UDP Relay: PPPoE clamp no longer active (detected MTU {}, relay {})",
+                        detected_mtu,
+                        relay_addr
+                    );
                 }
             }
             None => {
@@ -657,6 +722,10 @@ impl UdpRelay {
         self.relay_path_mtu_is_fallback
             .store(false, Ordering::Release);
         self.mtu_detect_failures.store(0, Ordering::Relaxed);
+        self.point_to_point_mtu_clamp_active
+            .store(false, Ordering::Release);
+        self.point_to_point_mtu_clamp_events
+            .store(0, Ordering::Relaxed);
     }
 
     fn is_expected_relay_source(&self, from: SocketAddr) -> bool {
@@ -1009,13 +1078,15 @@ impl UdpRelay {
         self.stop_flag.store(true, Ordering::Release);
         let ping = self.ping.snapshot();
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, send_errors: {}, ping: {}/{} {:.1}% loss)",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, send_errors: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, ping: {}/{} {:.1}% loss)",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
             self.oversize_drops.load(Ordering::Relaxed),
             self.outbound_drops.load(Ordering::Relaxed),
             self.send_errors.load(Ordering::Relaxed),
+            self.point_to_point_mtu_clamp_active.load(Ordering::Acquire),
+            self.point_to_point_mtu_clamp_events.load(Ordering::Relaxed),
             ping.sent,
             ping.received,
             ping.loss_pct,
@@ -1104,11 +1175,58 @@ fn clamp_relay_path_mtu(mtu: usize) -> usize {
 }
 
 #[inline]
-fn select_initial_relay_path_mtu(detected_mtu: Option<usize>) -> (usize, bool) {
-    match detected_mtu {
-        Some(mtu) => (clamp_relay_path_mtu(mtu), false),
-        None => (clamp_relay_path_mtu(RELAY_PATH_MTU_FALLBACK), true),
+fn apply_point_to_point_relay_mtu_ceiling(
+    mtu: usize,
+    path_context: RelayPathContext,
+) -> (usize, bool) {
+    if path_context.point_to_point_default_route && mtu > RELAY_PATH_MTU_POINT_TO_POINT_CEILING {
+        (RELAY_PATH_MTU_POINT_TO_POINT_CEILING, true)
+    } else {
+        (mtu, false)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InitialRelayPathMtu {
+    mtu: usize,
+    is_fallback: bool,
+    point_to_point_clamped: bool,
+}
+
+#[inline]
+fn select_initial_relay_path_mtu_for_context(
+    detected_mtu: Option<usize>,
+    path_context: RelayPathContext,
+) -> InitialRelayPathMtu {
+    match detected_mtu {
+        Some(mtu) => {
+            let mtu = clamp_relay_path_mtu(mtu);
+            let (mtu, point_to_point_clamped) =
+                apply_point_to_point_relay_mtu_ceiling(mtu, path_context);
+            InitialRelayPathMtu {
+                mtu,
+                is_fallback: false,
+                point_to_point_clamped,
+            }
+        }
+        None => {
+            let fallback_mtu = clamp_relay_path_mtu(RELAY_PATH_MTU_FALLBACK);
+            let (mtu, point_to_point_clamped) =
+                apply_point_to_point_relay_mtu_ceiling(fallback_mtu, path_context);
+            InitialRelayPathMtu {
+                mtu,
+                is_fallback: true,
+                point_to_point_clamped,
+            }
+        }
+    }
+}
+
+#[inline]
+fn select_initial_relay_path_mtu(detected_mtu: Option<usize>) -> (usize, bool) {
+    let selection =
+        select_initial_relay_path_mtu_for_context(detected_mtu, RelayPathContext::default());
+    (selection.mtu, selection.is_fallback)
 }
 
 fn detect_relay_path_mtu(relay_addr: SocketAddr) -> Option<usize> {
@@ -1251,6 +1369,32 @@ mod tests {
         let (mtu, fallback) = select_initial_relay_path_mtu(None);
         assert_eq!(mtu, RELAY_PATH_MTU_FALLBACK);
         assert!(fallback);
+    }
+
+    #[test]
+    fn test_select_initial_relay_path_mtu_pppoe_path_caps_detected_1500() {
+        let selected = select_initial_relay_path_mtu_for_context(
+            Some(1500),
+            RelayPathContext {
+                point_to_point_default_route: true,
+            },
+        );
+        assert_eq!(selected.mtu, RELAY_PATH_MTU_POINT_TO_POINT_CEILING);
+        assert!(!selected.is_fallback);
+        assert!(selected.point_to_point_clamped);
+    }
+
+    #[test]
+    fn test_select_initial_relay_path_mtu_non_pppoe_path_keeps_detected_value() {
+        let selected = select_initial_relay_path_mtu_for_context(
+            Some(1500),
+            RelayPathContext {
+                point_to_point_default_route: false,
+            },
+        );
+        assert_eq!(selected.mtu, 1500);
+        assert!(!selected.is_fallback);
+        assert!(!selected.point_to_point_clamped);
     }
 
     #[test]
