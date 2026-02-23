@@ -243,7 +243,8 @@ pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
 /// This reuses the same route + adapter probes used for split-tunnel adapter binding so
 /// relay-path policies can stay aligned with the actual WAN context.
 pub fn is_point_to_point_default_route_context() -> bool {
-    let Some((route, source, target_ip)) = ParallelInterceptor::get_default_route_info_for_targets(&[])
+    let Some((route, source, target_ip)) =
+        ParallelInterceptor::get_default_route_info_for_targets(&[])
     else {
         return false;
     };

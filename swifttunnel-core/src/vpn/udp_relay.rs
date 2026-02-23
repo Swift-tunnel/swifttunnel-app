@@ -593,11 +593,13 @@ impl UdpRelay {
             }),
             mtu_detect_failures: AtomicU64::new(0),
             point_to_point_mtu_clamp_active: AtomicBool::new(initial_mtu.point_to_point_clamped),
-            point_to_point_mtu_clamp_events: AtomicU64::new(if initial_mtu.point_to_point_clamped {
-                1
-            } else {
-                0
-            }),
+            point_to_point_mtu_clamp_events: AtomicU64::new(
+                if initial_mtu.point_to_point_clamped {
+                    1
+                } else {
+                    0
+                },
+            ),
             last_activity: std::sync::Mutex::new(Instant::now()),
             sender_handle: std::sync::Mutex::new(Some(sender_handle)),
             outbound_pool,
