@@ -2916,8 +2916,8 @@ fn run_packet_reader(
                     if senders[worker_id].try_send(work).is_err() {
                         let mode =
                             QueueOverflowMode::from_u8(queue_overflow_mode.load(Ordering::Relaxed));
-                        match mode {
-                            QueueOverflowMode::Bypass => {
+                        match queue_overflow_action(mode, data) {
+                            QueueFullAction::Bypass => {
                                 let _ = passthrough_to_adapter.push(&packets[i]);
                                 if let Some(stats) = worker_stats.get(worker_id) {
                                     stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
@@ -2926,14 +2926,22 @@ fn run_packet_reader(
                                         .fetch_add(packet_len, Ordering::Relaxed);
                                 }
                             }
-                            QueueOverflowMode::Drop => {
+                            QueueFullAction::Drop => {
                                 let event = queue_full_events.fetch_add(1, Ordering::Relaxed) + 1;
                                 if event <= 5 || event.is_power_of_two() {
-                                    log::warn!(
-                                        "ST_QUEUE_FULL_DROP: worker {} queue full, dropping tunnel packet (event #{})",
-                                        worker_id,
-                                        event
-                                    );
+                                    if mode == QueueOverflowMode::Bypass && is_ipv4_fragment(data) {
+                                        log::warn!(
+                                            "ST_QUEUE_FULL_FRAGMENT_DROP: worker {} queue full, dropping fragmented tunnel packet to preserve single-path routing (event #{})",
+                                            worker_id,
+                                            event
+                                        );
+                                    } else {
+                                        log::warn!(
+                                            "ST_QUEUE_FULL_DROP: worker {} queue full, dropping tunnel packet (event #{})",
+                                            worker_id,
+                                            event
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -3864,6 +3872,37 @@ fn select_worker_id_for_outbound_packet(data: &[u8], num_workers: usize) -> Opti
     }
 
     parse_non_initial_fragment_hash(data).map(|hash| (hash as usize) % num_workers)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueFullAction {
+    Bypass,
+    Drop,
+}
+
+#[inline(always)]
+fn is_ipv4_fragment(data: &[u8]) -> bool {
+    let ip_start = match parse_ipv4_header_offset(data) {
+        Some(offset) => offset,
+        None => return false,
+    };
+
+    let fragment_bits = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
+    (fragment_bits & 0x2000) != 0 || (fragment_bits & 0x1FFF) != 0
+}
+
+#[inline(always)]
+fn queue_overflow_action(mode: QueueOverflowMode, data: &[u8]) -> QueueFullAction {
+    match mode {
+        QueueOverflowMode::Drop => QueueFullAction::Drop,
+        QueueOverflowMode::Bypass => {
+            if is_ipv4_fragment(data) {
+                QueueFullAction::Drop
+            } else {
+                QueueFullAction::Bypass
+            }
+        }
+    }
 }
 
 /// Per-worker inline cache for connection lookups
@@ -6299,6 +6338,65 @@ mod tests {
         assert!(
             worker.is_some(),
             "reader dispatch should keep routed PPPoE tail fragments on the tunnel path"
+        );
+    }
+
+    #[test]
+    fn test_queue_overflow_action_bypass_keeps_non_fragment_packets() {
+        let frame = build_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 200),
+            Ipv4Addr::new(128, 116, 10, 10),
+            53010,
+            54010,
+        );
+
+        assert!(!is_ipv4_fragment(&frame));
+        assert_eq!(
+            queue_overflow_action(QueueOverflowMode::Bypass, &frame),
+            QueueFullAction::Bypass
+        );
+    }
+
+    #[test]
+    fn test_queue_overflow_action_bypass_drops_fragmented_pppoe_packets() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 201);
+        let dst_ip = Ipv4Addr::new(128, 116, 40, 40);
+        let src_port = 53011;
+        let dst_port = 54011;
+        let packet_id = 0x9898;
+
+        let first_fragment = build_pppoe_ipv4_udp_fragment_frame(
+            false, src_ip, dst_ip, src_port, dst_port, packet_id, 0, true, 8,
+        );
+        let tail_fragment = build_pppoe_ipv4_udp_fragment_frame(
+            false, src_ip, dst_ip, src_port, dst_port, packet_id, 1, false, 3,
+        );
+
+        assert!(is_ipv4_fragment(&first_fragment));
+        assert!(is_ipv4_fragment(&tail_fragment));
+        assert_eq!(
+            queue_overflow_action(QueueOverflowMode::Bypass, &first_fragment),
+            QueueFullAction::Drop
+        );
+        assert_eq!(
+            queue_overflow_action(QueueOverflowMode::Bypass, &tail_fragment),
+            QueueFullAction::Drop
+        );
+    }
+
+    #[test]
+    fn test_queue_overflow_action_drop_mode_always_drops() {
+        let frame = build_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 202),
+            Ipv4Addr::new(128, 116, 41, 41),
+            53012,
+            54012,
+        );
+        assert_eq!(
+            queue_overflow_action(QueueOverflowMode::Drop, &frame),
+            QueueFullAction::Drop
         );
     }
 
