@@ -4,7 +4,7 @@
 //! and updates presence based on VPN state.
 
 use super::state::{
-    DiscordActivity, DiscordState, game_display_name, game_icon_key, region_display_name,
+    DiscordActivity, DiscordState, game_display_name, game_icon_key, region_display_label,
     region_flag_key,
 };
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
@@ -175,8 +175,8 @@ impl DiscordManager {
                     .map_err(|e| format!("Failed to set activity: {}", e))?;
             }
             DiscordState::Connecting { region } => {
-                let region_name = region_display_name(region);
-                let state_str = format!("Connecting to {}...", region_name);
+                let region_name = region_display_label(region);
+                let state_str = format!("Connecting to {}...", region_name.as_ref());
                 let payload = activity::Activity::new()
                     .state(&state_str)
                     .details("Establishing VPN")
@@ -185,7 +185,7 @@ impl DiscordManager {
                             .large_image("swifttunnel")
                             .large_text("SwiftTunnel")
                             .small_image(region_flag_key(region))
-                            .small_text(region_name),
+                            .small_text(region_name.as_ref()),
                     )
                     .buttons(Self::create_buttons());
                 client
@@ -196,14 +196,14 @@ impl DiscordManager {
                 region,
                 connected_at,
             } => {
-                let region_name = region_display_name(region);
+                let region_name = region_display_label(region);
                 let elapsed_secs = connected_at.elapsed().as_secs();
                 // Use Unix timestamp for Discord's elapsed time display
                 let start_timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64 - elapsed_secs as i64)
                     .unwrap_or(0);
-                let state_str = format!("Connected to {}", region_name);
+                let state_str = format!("Connected to {}", region_name.as_ref());
 
                 let payload = activity::Activity::new()
                     .state(&state_str)
@@ -213,7 +213,7 @@ impl DiscordManager {
                             .large_image("swifttunnel")
                             .large_text("SwiftTunnel")
                             .small_image(region_flag_key(region))
-                            .small_text(region_name),
+                            .small_text(region_name.as_ref()),
                     )
                     .timestamps(activity::Timestamps::new().start(start_timestamp))
                     .buttons(Self::create_buttons());
@@ -226,14 +226,14 @@ impl DiscordManager {
                 region,
                 connected_at,
             } => {
-                let region_name = region_display_name(region);
+                let region_name = region_display_label(region);
                 let display_name = game_display_name(game_name);
                 let elapsed_secs = connected_at.elapsed().as_secs();
                 let start_timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64 - elapsed_secs as i64)
                     .unwrap_or(0);
-                let state_str = format!("Connected to {}", region_name);
+                let state_str = format!("Connected to {}", region_name.as_ref());
                 let details_str = format!("Playing {}", display_name);
 
                 let payload = activity::Activity::new()

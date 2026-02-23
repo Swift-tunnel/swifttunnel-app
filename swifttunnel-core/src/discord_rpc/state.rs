@@ -1,5 +1,6 @@
 //! Discord activity state types
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 /// Current state for Discord Rich Presence display
@@ -42,6 +43,8 @@ pub enum DiscordActivity {
 
 /// Get region display name for Discord
 pub fn region_display_name(region_id: &str) -> &'static str {
+    const UNKNOWN_REGION: &str = "Unknown Region";
+
     // Server IDs like "us-east-nj" should match their region prefix "us-east"
     match region_id {
         "singapore" => "Singapore",
@@ -69,7 +72,75 @@ pub fn region_display_name(region_id: &str) -> &'static str {
         _ if region_id == "us-east" || region_id.starts_with("us-east-") => "US East",
         _ if region_id == "us-west" || region_id.starts_with("us-west-") => "US West",
         _ if region_id == "us-central" || region_id.starts_with("us-central-") => "US Central",
-        _ => "Unknown Region",
+        _ => UNKNOWN_REGION,
+    }
+}
+
+fn format_region_token(token: &str) -> String {
+    if token.is_empty() {
+        return String::new();
+    }
+
+    let lower = token.to_ascii_lowercase();
+    if lower.chars().all(|c| c.is_ascii_digit()) {
+        return lower;
+    }
+
+    match lower.as_str() {
+        "us" | "eu" | "uk" | "uae" | "na" | "sa" | "ap" | "af" | "latam" | "emea" => {
+            lower.to_ascii_uppercase()
+        }
+        _ => {
+            let mut chars = lower.chars();
+            let first = chars
+                .next()
+                .map(|c| c.to_ascii_uppercase())
+                .unwrap_or_default();
+            format!("{}{}", first, chars.as_str())
+        }
+    }
+}
+
+/// Resolve a Discord region label, preserving existing mappings and falling back
+/// to a readable label when the region id is meaningful but not yet mapped.
+pub fn region_display_label(region_id: &str) -> Cow<'static, str> {
+    let known = region_display_name(region_id);
+    if known != "Unknown Region" {
+        return Cow::Borrowed(known);
+    }
+
+    let trimmed = region_id.trim();
+    if trimmed.is_empty() {
+        return Cow::Borrowed("Unknown Region");
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "unknown"
+            | "unknown-region"
+            | "unknown_region"
+            | "auto"
+            | "automatic"
+            | "default"
+            | "none"
+            | "null"
+    ) {
+        return Cow::Borrowed("Unknown Region");
+    }
+
+    let pretty = trimmed
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(format_region_token)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if pretty.is_empty() {
+        Cow::Borrowed("Unknown Region")
+    } else {
+        Cow::Owned(pretty)
     }
 }
 
@@ -136,6 +207,24 @@ mod tests {
         assert_eq!(region_display_name("us-central-dallas"), "US Central");
         assert_eq!(region_display_name("us-east2"), "Unknown Region"); // no "-" boundary
         assert_eq!(region_display_name("unknown"), "Unknown Region");
+    }
+
+    #[test]
+    fn test_region_display_label_uses_known_mapping() {
+        assert_eq!(region_display_label("us-east-nj"), "US East");
+    }
+
+    #[test]
+    fn test_region_display_label_formats_unknown_region_slug() {
+        assert_eq!(region_display_label("eu-west"), "EU West");
+        assert_eq!(region_display_label("na-east-1"), "NA East 1");
+    }
+
+    #[test]
+    fn test_region_display_label_keeps_unknown_for_non_meaningful_values() {
+        assert_eq!(region_display_label("unknown"), "Unknown Region");
+        assert_eq!(region_display_label(""), "Unknown Region");
+        assert_eq!(region_display_label("auto"), "Unknown Region");
     }
 
     #[test]

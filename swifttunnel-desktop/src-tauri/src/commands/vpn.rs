@@ -92,6 +92,20 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
     }
 }
 
+fn resolve_discord_region(
+    conn_state: &swifttunnel_core::vpn::ConnectionState,
+    requested_region: &str,
+) -> String {
+    match conn_state {
+        swifttunnel_core::vpn::ConnectionState::Connected { server_region, .. }
+            if !server_region.trim().is_empty() =>
+        {
+            server_region.clone()
+        }
+        _ => requested_region.to_string(),
+    }
+}
+
 fn parse_game_presets(game_presets: &[String]) -> HashSet<swifttunnel_core::vpn::GamePreset> {
     game_presets
         .iter()
@@ -237,10 +251,18 @@ pub async fn vpn_connect(
         .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
     drop(vpn);
 
+    let discord_region = if result.is_ok() {
+        let vpn = state.vpn_connection.lock().await;
+        let conn_state = vpn.state().await;
+        Some(resolve_discord_region(&conn_state, &region))
+    } else {
+        None
+    };
+
     {
         let mut discord = state.discord_manager.lock();
-        if result.is_ok() {
-            discord.set_connected(&region);
+        if let Some(ref connected_region) = discord_region {
+            discord.set_connected(connected_region);
         } else {
             discord.set_idle();
         }
@@ -493,6 +515,7 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn apply_connected_session_settings_marks_resume_and_region() {
@@ -508,6 +531,53 @@ mod tests {
         settings.resume_vpn_on_startup = true;
         apply_disconnected_session_settings(&mut settings);
         assert!(!settings.resume_vpn_on_startup);
+    }
+
+    #[test]
+    fn resolve_discord_region_prefers_connected_server_region() {
+        let conn_state = swifttunnel_core::vpn::ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: "us-east-nj".to_string(),
+            server_endpoint: "1.2.3.4:51821".to_string(),
+            assigned_ip: "V3-Relay".to_string(),
+            relay_auth_mode: "authenticated".to_string(),
+            split_tunnel_active: true,
+            tunneled_processes: vec!["RobloxPlayerBeta.exe".to_string()],
+        };
+
+        assert_eq!(
+            resolve_discord_region(&conn_state, "na-east"),
+            "us-east-nj".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_discord_region_falls_back_when_not_connected() {
+        assert_eq!(
+            resolve_discord_region(
+                &swifttunnel_core::vpn::ConnectionState::FetchingConfig,
+                "singapore"
+            ),
+            "singapore".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_discord_region_falls_back_when_connected_region_empty() {
+        let conn_state = swifttunnel_core::vpn::ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: "   ".to_string(),
+            server_endpoint: "1.2.3.4:51821".to_string(),
+            assigned_ip: "V3-Relay".to_string(),
+            relay_auth_mode: "authenticated".to_string(),
+            split_tunnel_active: true,
+            tunneled_processes: vec![],
+        };
+
+        assert_eq!(
+            resolve_discord_region(&conn_state, "germany"),
+            "germany".to_string()
+        );
     }
 }
 
