@@ -58,7 +58,16 @@ const AUTH_HANDSHAKE_ATTEMPTS: usize = 4;
 /// to the current relay endpoint, and clamp to that value (still capped at 1500).
 const RELAY_PATH_MTU_UPPER_BOUND: usize = 1500;
 const RELAY_PATH_MTU_MINIMUM: usize = 576;
+/// Conservative fallback when OS MTU probing fails.
+///
+/// 1400 keeps outer relay datagrams below common reduced-MTU links
+/// (PPPoE 1492 and many VLAN/overlay paths) instead of assuming 1500
+/// and silently fragmenting UDP.
+const RELAY_PATH_MTU_FALLBACK: usize = 1400;
 const RELAY_PATH_MTU_REFRESH_INTERVAL_MS: u64 = 5_000;
+/// While we're still on fallback MTU (probe never succeeded), retry probing
+/// more aggressively so we converge to the true path MTU quickly.
+const RELAY_PATH_MTU_FALLBACK_RETRY_INTERVAL_MS: u64 = 1_000;
 
 /// Keepalive interval to maintain NAT bindings - 15s is safer for strict NATs
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -296,7 +305,11 @@ pub struct UdpRelay {
     send_errors: Arc<AtomicU64>,
     /// Effective outer MTU for relay packets (<= 1500), refreshed periodically on Windows.
     relay_path_mtu: AtomicUsize,
+    /// True when relay_path_mtu is still a conservative fallback (probe failed).
+    relay_path_mtu_is_fallback: AtomicBool,
     last_mtu_refresh_ms: AtomicU64,
+    /// Consecutive MTU detection failures (for throttled warning logs).
+    mtu_detect_failures: AtomicU64,
     /// Last activity time for keepalive
     last_activity: std::sync::Mutex<Instant>,
     sender_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -508,8 +521,21 @@ impl UdpRelay {
             relay_qos_enabled
         );
 
-        let initial_mtu = detect_relay_path_mtu(relay_addr).unwrap_or(RELAY_PATH_MTU_UPPER_BOUND);
-        let initial_mtu = initial_mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
+        let (initial_mtu, initial_mtu_is_fallback) =
+            select_initial_relay_path_mtu(detect_relay_path_mtu(relay_addr));
+        if initial_mtu_is_fallback {
+            log::warn!(
+                "UDP Relay: MTU probe unavailable for {}; using conservative fallback MTU {} (will retry)",
+                relay_addr,
+                initial_mtu
+            );
+        } else {
+            log::info!(
+                "UDP Relay: Detected relay path MTU {} for {}",
+                initial_mtu,
+                relay_addr
+            );
+        }
 
         Ok(Self {
             socket,
@@ -524,7 +550,13 @@ impl UdpRelay {
             outbound_drops: AtomicU64::new(0),
             send_errors,
             relay_path_mtu: AtomicUsize::new(initial_mtu),
-            last_mtu_refresh_ms: AtomicU64::new(now_mono_ms()),
+            relay_path_mtu_is_fallback: AtomicBool::new(initial_mtu_is_fallback),
+            last_mtu_refresh_ms: AtomicU64::new(if initial_mtu_is_fallback {
+                0
+            } else {
+                now_mono_ms()
+            }),
+            mtu_detect_failures: AtomicU64::new(0),
             last_activity: std::sync::Mutex::new(Instant::now()),
             sender_handle: std::sync::Mutex::new(Some(sender_handle)),
             outbound_pool,
@@ -556,8 +588,13 @@ impl UdpRelay {
     #[cfg(windows)]
     fn maybe_refresh_relay_path_mtu(&self, relay_addr: SocketAddr) {
         let now = now_mono_ms();
+        let refresh_interval_ms = if self.relay_path_mtu_is_fallback.load(Ordering::Acquire) {
+            RELAY_PATH_MTU_FALLBACK_RETRY_INTERVAL_MS
+        } else {
+            RELAY_PATH_MTU_REFRESH_INTERVAL_MS
+        };
         let last = self.last_mtu_refresh_ms.load(Ordering::Relaxed);
-        if now.saturating_sub(last) < RELAY_PATH_MTU_REFRESH_INTERVAL_MS {
+        if now.saturating_sub(last) < refresh_interval_ms {
             return;
         }
 
@@ -569,16 +606,43 @@ impl UdpRelay {
             return;
         }
 
-        if let Some(mtu) = detect_relay_path_mtu(relay_addr) {
-            let mtu = mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
-            let prev = self.relay_path_mtu.swap(mtu, Ordering::Relaxed);
-            if prev != mtu {
-                log::info!(
-                    "UDP Relay: Updated relay path MTU {} -> {} for {}",
-                    prev,
-                    mtu,
-                    relay_addr
-                );
+        match detect_relay_path_mtu(relay_addr) {
+            Some(mtu) => {
+                let mtu = clamp_relay_path_mtu(mtu);
+                let prev = self.relay_path_mtu.swap(mtu, Ordering::Relaxed);
+                let was_fallback = self
+                    .relay_path_mtu_is_fallback
+                    .swap(false, Ordering::AcqRel);
+                self.mtu_detect_failures.store(0, Ordering::Relaxed);
+                if prev != mtu || was_fallback {
+                    if was_fallback {
+                        log::info!(
+                            "UDP Relay: MTU probe recovered for {}; using detected MTU {}",
+                            relay_addr,
+                            mtu
+                        );
+                    } else {
+                        log::info!(
+                            "UDP Relay: Updated relay path MTU {} -> {} for {}",
+                            prev,
+                            mtu,
+                            relay_addr
+                        );
+                    }
+                }
+            }
+            None => {
+                let failures = self.mtu_detect_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                if self.relay_path_mtu_is_fallback.load(Ordering::Acquire)
+                    && (failures <= 5 || failures.is_power_of_two())
+                {
+                    log::warn!(
+                        "UDP Relay: MTU probe failed for {}; keeping fallback MTU {} (attempt #{})",
+                        relay_addr,
+                        self.relay_path_mtu.load(Ordering::Relaxed),
+                        failures
+                    );
+                }
             }
         }
     }
@@ -588,8 +652,11 @@ impl UdpRelay {
 
     #[cfg(test)]
     fn set_relay_path_mtu_for_test(&self, mtu: usize) {
-        let mtu = mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND);
+        let mtu = clamp_relay_path_mtu(mtu);
         self.relay_path_mtu.store(mtu, Ordering::Relaxed);
+        self.relay_path_mtu_is_fallback
+            .store(false, Ordering::Release);
+        self.mtu_detect_failures.store(0, Ordering::Relaxed);
     }
 
     fn is_expected_relay_source(&self, from: SocketAddr) -> bool {
@@ -976,6 +1043,8 @@ impl UdpRelay {
         self.previous_relay_addr.store(Arc::new(Some(old_addr)));
         self.switch_time.store(Arc::new(Some(Instant::now())));
         self.relay_addr.store(Arc::new(new_addr));
+        self.last_mtu_refresh_ms.store(0, Ordering::Relaxed);
+        self.maybe_refresh_relay_path_mtu(new_addr);
         log::info!(
             "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
             old_addr,
@@ -1026,6 +1095,19 @@ fn now_mono_ms() -> u64 {
         static START: OnceLock<Instant> = OnceLock::new();
         let start = START.get_or_init(Instant::now);
         start.elapsed().as_millis() as u64
+    }
+}
+
+#[inline]
+fn clamp_relay_path_mtu(mtu: usize) -> usize {
+    mtu.clamp(RELAY_PATH_MTU_MINIMUM, RELAY_PATH_MTU_UPPER_BOUND)
+}
+
+#[inline]
+fn select_initial_relay_path_mtu(detected_mtu: Option<usize>) -> (usize, bool) {
+    match detected_mtu {
+        Some(mtu) => (clamp_relay_path_mtu(mtu), false),
+        None => (clamp_relay_path_mtu(RELAY_PATH_MTU_FALLBACK), true),
     }
 }
 
@@ -1144,6 +1226,31 @@ mod tests {
 
         assert_eq!(packet.len(), 108);
         assert_eq!(&packet[..8], &session_id);
+    }
+
+    #[test]
+    fn test_select_initial_relay_path_mtu_prefers_detected_value() {
+        let (mtu, fallback) = select_initial_relay_path_mtu(Some(1492));
+        assert_eq!(mtu, 1492);
+        assert!(!fallback);
+    }
+
+    #[test]
+    fn test_select_initial_relay_path_mtu_clamps_detected_value() {
+        let (mtu_low, fallback_low) = select_initial_relay_path_mtu(Some(400));
+        assert_eq!(mtu_low, RELAY_PATH_MTU_MINIMUM);
+        assert!(!fallback_low);
+
+        let (mtu_high, fallback_high) = select_initial_relay_path_mtu(Some(9000));
+        assert_eq!(mtu_high, RELAY_PATH_MTU_UPPER_BOUND);
+        assert!(!fallback_high);
+    }
+
+    #[test]
+    fn test_select_initial_relay_path_mtu_uses_conservative_fallback_on_failure() {
+        let (mtu, fallback) = select_initial_relay_path_mtu(None);
+        assert_eq!(mtu, RELAY_PATH_MTU_FALLBACK);
+        assert!(fallback);
     }
 
     #[test]
