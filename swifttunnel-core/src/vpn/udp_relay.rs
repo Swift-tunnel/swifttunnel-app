@@ -1249,8 +1249,8 @@ fn detect_relay_path_mtu(relay_addr: SocketAddr) -> Option<usize> {
     #[cfg(windows)]
     {
         use windows::Win32::NetworkManagement::IpHelper::{
-            GetBestInterfaceEx, GetIfEntry2, GetIpInterfaceEntry, MIB_IF_ROW2,
-            MIB_IPINTERFACE_ROW, IF_TYPE_PPP,
+            GetBestInterfaceEx, GetIfEntry2, GetIpInterfaceEntry, IF_TYPE_PPP, MIB_IF_ROW2,
+            MIB_IPINTERFACE_ROW,
         };
         use windows::Win32::Networking::WinSock::{
             AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, SOCKADDR, SOCKADDR_IN,
