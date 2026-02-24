@@ -614,14 +614,23 @@ impl SplitTunnelDriver {
 
     /// Get running tunnel app names
     pub fn get_running_tunnel_apps(&mut self) -> Vec<String> {
+        self.get_running_tunnel_processes()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    /// Get running tunnel processes as `(pid, process_name)` pairs.
+    pub fn get_running_tunnel_processes(&mut self) -> Vec<(u32, String)> {
         if let Some(ref interceptor) = self.parallel_interceptor {
             let snapshot = interceptor.get_snapshot();
-            snapshot
+            let mut processes: Vec<(u32, String)> = snapshot
                 .tunnel_pids
                 .iter()
-                .filter_map(|pid| snapshot.pid_names.get(pid))
-                .cloned()
-                .collect()
+                .filter_map(|pid| snapshot.pid_names.get(pid).map(|name| (*pid, name.clone())))
+                .collect();
+            processes.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+            processes
         } else {
             Vec::new()
         }

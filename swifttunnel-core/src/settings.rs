@@ -161,6 +161,11 @@ pub struct AppSettings {
     /// Physical adapter binding strategy for split tunnel interception.
     #[serde(default)]
     pub adapter_binding_mode: AdapterBindingMode,
+    /// Game-process performance tuning controls (Windows-only, per target game process).
+    ///
+    /// All options are opt-in and default OFF.
+    #[serde(default)]
+    pub game_process_performance: GameProcessPerformanceSettings,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +179,17 @@ impl Default for AdapterBindingMode {
     fn default() -> Self {
         Self::SmartAuto
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct GameProcessPerformanceSettings {
+    /// Persist a high-performance GPU preference for each target game executable.
+    pub high_performance_gpu_binding: bool,
+    /// Prefer performance-core CPU sets for target game processes on hybrid CPUs.
+    pub prefer_performance_cores: bool,
+    /// Exclude logical CPU 0 from target game process scheduling when possible.
+    pub unbind_cpu0: bool,
 }
 
 fn default_discord_rpc() -> bool {
@@ -238,6 +254,7 @@ impl Default for AppSettings {
             whitelisted_regions: Vec::new(),
             preferred_physical_adapter_guid: None,
             adapter_binding_mode: AdapterBindingMode::SmartAuto,
+            game_process_performance: GameProcessPerformanceSettings::default(),
         }
     }
 }
@@ -355,6 +372,9 @@ mod tests {
         assert!(!settings.resume_vpn_on_startup);
         assert!(settings.preferred_physical_adapter_guid.is_none());
         assert_eq!(settings.adapter_binding_mode, AdapterBindingMode::SmartAuto);
+        assert!(!settings.game_process_performance.high_performance_gpu_binding);
+        assert!(!settings.game_process_performance.prefer_performance_cores);
+        assert!(!settings.game_process_performance.unbind_cpu0);
     }
 
     #[test]
@@ -368,6 +388,9 @@ mod tests {
         settings.preferred_physical_adapter_guid =
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string());
         settings.adapter_binding_mode = AdapterBindingMode::Manual;
+        settings.game_process_performance.high_performance_gpu_binding = true;
+        settings.game_process_performance.prefer_performance_cores = true;
+        settings.game_process_performance.unbind_cpu0 = true;
 
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
@@ -386,6 +409,9 @@ mod tests {
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         );
         assert_eq!(loaded.adapter_binding_mode, AdapterBindingMode::Manual);
+        assert!(loaded.game_process_performance.high_performance_gpu_binding);
+        assert!(loaded.game_process_performance.prefer_performance_cores);
+        assert!(loaded.game_process_performance.unbind_cpu0);
     }
 
     #[test]
@@ -405,6 +431,15 @@ mod tests {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert_eq!(loaded.adapter_binding_mode, AdapterBindingMode::SmartAuto);
+    }
+
+    #[test]
+    fn test_settings_game_process_performance_defaults_disabled() {
+        let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
+        let loaded: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!loaded.game_process_performance.high_performance_gpu_binding);
+        assert!(!loaded.game_process_performance.prefer_performance_cores);
+        assert!(!loaded.game_process_performance.unbind_cpu0);
     }
 
     #[test]

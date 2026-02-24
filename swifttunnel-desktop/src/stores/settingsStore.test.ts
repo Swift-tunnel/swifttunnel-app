@@ -48,6 +48,11 @@ describe("stores/settingsStore", () => {
         whitelisted_regions: [],
         preferred_physical_adapter_guid: null,
         adapter_binding_mode: "smart_auto",
+        game_process_performance: {
+          high_performance_gpu_binding: true,
+          prefer_performance_cores: false,
+          unbind_cpu0: true,
+        },
       }),
     });
 
@@ -57,6 +62,13 @@ describe("stores/settingsStore", () => {
     expect(settingsLoad).toHaveBeenCalled();
     expect(useSettingsStore.getState().isLoaded).toBe(true);
     expect(useSettingsStore.getState().settings.theme).toBe("light");
+    expect(
+      useSettingsStore.getState().settings.game_process_performance
+        .high_performance_gpu_binding,
+    ).toBe(true);
+    expect(
+      useSettingsStore.getState().settings.game_process_performance.unbind_cpu0,
+    ).toBe(true);
     expect(useSettingsStore.getState().activeTab).toBe("boost");
   });
 
@@ -77,6 +89,17 @@ describe("stores/settingsStore", () => {
     expect(useSettingsStore.getState().settings.adapter_binding_mode).toBe(
       "smart_auto",
     );
+    expect(
+      useSettingsStore.getState().settings.game_process_performance
+        .high_performance_gpu_binding,
+    ).toBe(false);
+    expect(
+      useSettingsStore.getState().settings.game_process_performance
+        .prefer_performance_cores,
+    ).toBe(false);
+    expect(
+      useSettingsStore.getState().settings.game_process_performance.unbind_cpu0,
+    ).toBe(false);
     expect(useSettingsStore.getState().settings.config.roblox_settings.window_width).toBe(
       1280,
     );

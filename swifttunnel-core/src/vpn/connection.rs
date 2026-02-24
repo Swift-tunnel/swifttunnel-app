@@ -9,11 +9,15 @@
 use super::parallel_interceptor::{
     QueueOverflowMode, ThroughputStats, is_point_to_point_default_route_context,
 };
+use super::process_performance::{
+    GameProcessPerformanceManager, GameProcessPerformancePolicy,
+};
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
 use super::{VpnError, VpnResult};
 use crate::auth::http_client::AuthClient;
 use crate::auth::types::{RelayPreflightMode, RelayQueueFullMode, VpnConfig};
+use crate::settings::GameProcessPerformanceSettings;
 use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -138,6 +142,13 @@ fn sort_candidates_by_latency(candidates: &mut [(String, SocketAddr, Option<u32>
             .then_with(|| a.0.cmp(&b.0))
             .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
     });
+}
+
+fn dedupe_process_names(processes: &[(u32, String)]) -> Vec<String> {
+    let mut names: Vec<String> = processes.iter().map(|(_, name)| name.clone()).collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 async fn ordered_relay_candidates_for_region(
@@ -392,6 +403,8 @@ pub struct VpnConnection {
     etw_watcher: Option<ProcessWatcher>,
     /// Auto-router for automatic relay switching based on game server region
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
+    /// Per-process game performance tuning manager (Windows-only behavior).
+    process_performance_manager: Option<Arc<Mutex<GameProcessPerformanceManager>>>,
 }
 
 impl VpnConnection {
@@ -403,6 +416,7 @@ impl VpnConnection {
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
             etw_watcher: None,
             auto_router: None,
+            process_performance_manager: None,
         }
     }
 
@@ -508,6 +522,7 @@ impl VpnConnection {
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
         preferred_physical_adapter_guid: Option<String>,
+        process_performance_settings: GameProcessPerformanceSettings,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -521,6 +536,7 @@ impl VpnConnection {
 
         log::info!("Starting VPN connection to region: {}", region);
         log::info!("Apps to tunnel: {:?}", tunnel_apps);
+        self.process_performance_manager = None;
 
         log::info!("========================================");
         log::info!("V3 MODE: Lightweight UDP Relay");
@@ -613,6 +629,7 @@ impl VpnConnection {
                     whitelisted_regions,
                     forced_servers,
                     preferred_physical_adapter_guid.clone(),
+                    process_performance_settings,
                 )
                 .await
             {
@@ -675,6 +692,7 @@ impl VpnConnection {
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
         preferred_physical_adapter_guid: Option<String>,
+        process_performance_settings: GameProcessPerformanceSettings,
     ) -> VpnResult<(Vec<String>, String, String, SocketAddr)> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -1166,6 +1184,24 @@ impl VpnConnection {
             VpnError::SplitTunnelSetupFailed(format!("Failed to configure V3 split tunnel: {}", e))
         })?;
 
+        let process_performance_policy =
+            GameProcessPerformancePolicy::from(process_performance_settings);
+        let process_performance_manager = if process_performance_policy.is_enabled() {
+            log::info!(
+                "V3: Process tuning enabled (gpu_binding={}, prefer_p_cores={}, unbind_cpu0={})",
+                process_performance_policy.high_performance_gpu_binding,
+                process_performance_policy.prefer_performance_cores,
+                process_performance_policy.unbind_cpu0
+            );
+            Some(Arc::new(Mutex::new(GameProcessPerformanceManager::new(
+                process_performance_policy,
+            ))))
+        } else {
+            log::info!("V3: Process tuning disabled (all toggles off)");
+            None
+        };
+        self.process_performance_manager = process_performance_manager.clone();
+
         // CACHE WARMUP: Do an immediate refresh to populate process snapshot
         // This handles the case where Roblox is ALREADY running when the user connects.
         // Without this, the snapshot is empty until the first periodic refresh (up to 2s),
@@ -1176,7 +1212,12 @@ impl VpnConnection {
             log::info!("V3: Initial cache warmup completed - process snapshot populated");
         }
 
-        let running = driver.get_running_tunnel_apps();
+        let running_processes = driver.get_running_tunnel_processes();
+        if let Some(ref manager) = process_performance_manager {
+            let mut guard = manager.lock().await;
+            guard.sync_targets(&running_processes);
+        }
+        let running = dedupe_process_names(&running_processes);
         if !running.is_empty() {
             log::info!("V3: Currently tunneling: {:?}", running);
         }
@@ -1238,6 +1279,7 @@ impl VpnConnection {
         let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
         let auto_router_for_monitor = self.auto_router.clone();
+        let process_performance_for_monitor = self.process_performance_manager.clone();
 
         tokio::spawn(async move {
             log::info!("V3: Process monitor started");
@@ -1308,7 +1350,6 @@ impl VpnConnection {
                                 if etw_events_received {
                                     let mut driver_guard = driver.lock().await;
                                     let refresh_ok = driver_guard.refresh_exclusions().is_ok();
-                                    let running_names = driver_guard.get_running_tunnel_apps();
                                     drop(driver_guard);
 
                                     if refresh_ok {
@@ -1321,7 +1362,14 @@ impl VpnConnection {
                                     tokio::time::sleep(Duration::from_millis(2)).await;
                                     let mut driver_guard = driver.lock().await;
                                     let _ = driver_guard.refresh_exclusions();
+                                    let running_processes = driver_guard.get_running_tunnel_processes();
+                                    let running_names = dedupe_process_names(&running_processes);
                                     drop(driver_guard);
+
+                                    if let Some(ref manager) = process_performance_for_monitor {
+                                        let mut guard = manager.lock().await;
+                                        guard.sync_targets(&running_processes);
+                                    }
 
                                     // Update UI state promptly when games start/stop
                                     let mut state = state_handle.lock().await;
@@ -1363,8 +1411,14 @@ impl VpnConnection {
                         }
                         match driver_guard.refresh_exclusions() {
                             Ok(_) => {
-                                let running_names = driver_guard.get_running_tunnel_apps();
+                                let running_processes = driver_guard.get_running_tunnel_processes();
+                                let running_names = dedupe_process_names(&running_processes);
                                 drop(driver_guard);
+
+                                if let Some(ref manager) = process_performance_for_monitor {
+                                    let mut guard = manager.lock().await;
+                                    guard.sync_targets(&running_processes);
+                                }
 
                                 let mut state = state_handle.lock().await;
                                 if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
@@ -1438,6 +1492,11 @@ impl VpnConnection {
             auto_router.reset();
         }
         self.auto_router = None;
+
+        if let Some(manager) = self.process_performance_manager.take() {
+            let mut guard = manager.lock().await;
+            guard.cleanup_all("tunnel_cleanup");
+        }
 
         // Clear split tunnel
         if let Some(ref driver) = self.split_tunnel {
@@ -1586,6 +1645,16 @@ impl Drop for VpnConnection {
         // Stop ETW watcher
         if let Some(mut watcher) = self.etw_watcher.take() {
             watcher.stop();
+        }
+
+        if let Some(manager) = self.process_performance_manager.take() {
+            if let Ok(mut guard) = manager.try_lock() {
+                guard.cleanup_all("vpn_connection_drop");
+            } else {
+                log::warn!(
+                    "Process tuning: manager lock busy during VpnConnection drop; skipping immediate cleanup"
+                );
+            }
         }
 
         if let Some(ref driver) = self.split_tunnel {
