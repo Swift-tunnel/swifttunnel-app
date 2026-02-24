@@ -9,9 +9,7 @@
 use super::parallel_interceptor::{
     QueueOverflowMode, ThroughputStats, is_point_to_point_default_route_context,
 };
-use super::process_performance::{
-    GameProcessPerformanceManager, GameProcessPerformancePolicy,
-};
+use super::process_performance::{GameProcessPerformanceManager, GameProcessPerformancePolicy};
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
 use super::{VpnError, VpnResult};

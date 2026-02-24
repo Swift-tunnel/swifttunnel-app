@@ -372,7 +372,11 @@ mod tests {
         assert!(!settings.resume_vpn_on_startup);
         assert!(settings.preferred_physical_adapter_guid.is_none());
         assert_eq!(settings.adapter_binding_mode, AdapterBindingMode::SmartAuto);
-        assert!(!settings.game_process_performance.high_performance_gpu_binding);
+        assert!(
+            !settings
+                .game_process_performance
+                .high_performance_gpu_binding
+        );
         assert!(!settings.game_process_performance.prefer_performance_cores);
         assert!(!settings.game_process_performance.unbind_cpu0);
     }
@@ -388,7 +392,9 @@ mod tests {
         settings.preferred_physical_adapter_guid =
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string());
         settings.adapter_binding_mode = AdapterBindingMode::Manual;
-        settings.game_process_performance.high_performance_gpu_binding = true;
+        settings
+            .game_process_performance
+            .high_performance_gpu_binding = true;
         settings.game_process_performance.prefer_performance_cores = true;
         settings.game_process_performance.unbind_cpu0 = true;
 

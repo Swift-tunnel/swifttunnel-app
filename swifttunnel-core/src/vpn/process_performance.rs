@@ -124,27 +124,28 @@ impl GameProcessPerformanceManager {
 
         #[cfg(windows)]
         {
-        // Defensive cleanup in case refs got out of sync.
-        if !self.gpu_preferences.is_empty() {
-            let remaining: Vec<String> = self.gpu_preferences.keys().cloned().collect();
-            for key in remaining {
-                if let Some(snapshot) = self.gpu_preferences.remove(&key) {
-                    if let Err(e) = restore_gpu_preference(&snapshot.value_name, &snapshot.previous_value)
-                    {
-                        log::warn!(
-                            "Process tuning: failed to force-restore GPU preference '{}' during cleanup: {}",
-                            snapshot.value_name,
-                            e
-                        );
-                    } else {
-                        log::info!(
-                            "Process tuning: force-restored GPU preference for '{}' during cleanup",
-                            snapshot.value_name
-                        );
+            // Defensive cleanup in case refs got out of sync.
+            if !self.gpu_preferences.is_empty() {
+                let remaining: Vec<String> = self.gpu_preferences.keys().cloned().collect();
+                for key in remaining {
+                    if let Some(snapshot) = self.gpu_preferences.remove(&key) {
+                        if let Err(e) =
+                            restore_gpu_preference(&snapshot.value_name, &snapshot.previous_value)
+                        {
+                            log::warn!(
+                                "Process tuning: failed to force-restore GPU preference '{}' during cleanup: {}",
+                                snapshot.value_name,
+                                e
+                            );
+                        } else {
+                            log::info!(
+                                "Process tuning: force-restored GPU preference for '{}' during cleanup",
+                                snapshot.value_name
+                            );
+                        }
                     }
                 }
             }
-        }
         }
 
         #[cfg(not(windows))]
@@ -241,7 +242,12 @@ impl GameProcessPerformanceManager {
     }
 
     #[cfg(windows)]
-    fn revert_windows_process_controls(&mut self, pid: u32, state: &AppliedProcessState, reason: &str) {
+    fn revert_windows_process_controls(
+        &mut self,
+        pid: u32,
+        state: &AppliedProcessState,
+        reason: &str,
+    ) {
         use windows::Win32::Foundation::CloseHandle;
 
         let process = open_process_for_tuning(pid);
@@ -365,7 +371,8 @@ impl GameProcessPerformanceManager {
         process: windows::Win32::Foundation::HANDLE,
         state: &mut AppliedProcessState,
     ) -> Result<(), String> {
-        let api = cpu_set_api().ok_or_else(|| "CPU Sets API not exported by kernel32".to_string())?;
+        let api =
+            cpu_set_api().ok_or_else(|| "CPU Sets API not exported by kernel32".to_string())?;
 
         let cpu_sets = query_system_cpu_sets(api)?;
         if cpu_sets.is_empty() {
@@ -459,10 +466,9 @@ impl GameProcessPerformanceManager {
         }
 
         unsafe {
-            if let Err(e) = windows::Win32::System::Threading::SetProcessAffinityMask(
-                process,
-                updated_mask,
-            ) {
+            if let Err(e) =
+                windows::Win32::System::Threading::SetProcessAffinityMask(process, updated_mask)
+            {
                 log::warn!(
                     "Process tuning: failed to apply CPU0 affinity unbind for '{}' (PID {}): {}",
                     state.process_name,
@@ -614,7 +620,8 @@ pub(crate) fn select_cpu_set_ids(
     prefer_performance_cores: bool,
     unbind_cpu0: bool,
 ) -> Vec<u32> {
-    let mut candidates: Vec<&CpuSetDescriptor> = cpu_sets.iter().filter(|set| !set.parked).collect();
+    let mut candidates: Vec<&CpuSetDescriptor> =
+        cpu_sets.iter().filter(|set| !set.parked).collect();
     if candidates.is_empty() {
         candidates = cpu_sets.iter().collect();
     }
@@ -631,7 +638,8 @@ pub(crate) fn select_cpu_set_ids(
 
     // If strict filters emptied the list, relax performance-core preference but still honor CPU0 exclusion.
     if candidates.is_empty() && unbind_cpu0 {
-        let mut fallback: Vec<&CpuSetDescriptor> = cpu_sets.iter().filter(|set| !set.parked).collect();
+        let mut fallback: Vec<&CpuSetDescriptor> =
+            cpu_sets.iter().filter(|set| !set.parked).collect();
         if fallback.is_empty() {
             fallback = cpu_sets.iter().collect();
         }
@@ -757,10 +765,19 @@ fn restore_gpu_preference(value_name: &str, previous_value: &Option<String>) -> 
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 struct CpuSetApi {
-    get_system_cpu_set_information:
-        unsafe extern "system" fn(*mut std::ffi::c_void, u32, *mut u32, windows::Win32::Foundation::HANDLE, u32) -> i32,
-    get_process_default_cpu_sets:
-        unsafe extern "system" fn(windows::Win32::Foundation::HANDLE, *mut u32, u32, *mut u32) -> i32,
+    get_system_cpu_set_information: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        u32,
+        *mut u32,
+        windows::Win32::Foundation::HANDLE,
+        u32,
+    ) -> i32,
+    get_process_default_cpu_sets: unsafe extern "system" fn(
+        windows::Win32::Foundation::HANDLE,
+        *mut u32,
+        u32,
+        *mut u32,
+    ) -> i32,
     set_process_default_cpu_sets:
         unsafe extern "system" fn(windows::Win32::Foundation::HANDLE, *const u32, u32) -> i32,
 }
