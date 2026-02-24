@@ -4807,14 +4807,18 @@ fn calculate_tcp_checksum(packet: &[u8], ihl: usize) -> u16 {
         return 0;
     }
 
-    let tcp_len = u16::from_be_bytes([packet[ihl + 12], packet[ihl + 13]]) as usize;
-    if tcp_len < 20 || packet.len() < ihl + tcp_len {
+    let total_len = match ipv4_total_len(packet, ihl) {
+        Some(total_len) => total_len,
+        None => return 0,
+    };
+    let tcp_len = total_len - ihl;
+    if tcp_len < 20 {
         return 0;
     }
 
     let src_ip = &packet[12..16];
     let dst_ip = &packet[16..20];
-    let tcp_segment = &packet[ihl..ihl + tcp_len];
+    let tcp_segment = &packet[ihl..total_len];
 
     let mut sum: u32 = 0;
 
@@ -6486,7 +6490,11 @@ mod tests {
             53100,
             54100,
         );
+        packet.resize(40, 0);
+        packet[2..4].copy_from_slice(&40u16.to_be_bytes());
+
         let ihl = ((packet[0] & 0x0F) as usize) * 4;
+        packet[ihl + 12] = 0x50; // data offset: 5 (20-byte TCP header)
         packet[ihl + 16] = 0;
         packet[ihl + 17] = 0;
 
