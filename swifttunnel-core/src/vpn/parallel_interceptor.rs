@@ -4807,10 +4807,14 @@ fn calculate_tcp_checksum(packet: &[u8], ihl: usize) -> u16 {
         return 0;
     }
 
+    let tcp_len = u16::from_be_bytes([packet[ihl + 12], packet[ihl + 13]]) as usize;
+    if tcp_len < 20 || packet.len() < ihl + tcp_len {
+        return 0;
+    }
+
     let src_ip = &packet[12..16];
     let dst_ip = &packet[16..20];
-    let tcp_len = packet.len() - ihl;
-    let tcp_segment = &packet[ihl..];
+    let tcp_segment = &packet[ihl..ihl + tcp_len];
 
     let mut sum: u32 = 0;
 
@@ -4917,6 +4921,9 @@ fn ipv4_total_len(packet: &[u8], ihl: usize) -> Option<usize> {
 
 #[inline(always)]
 fn ipv4_is_fragment(packet: &[u8]) -> bool {
+    if packet.len() < 8 {
+        return false;
+    }
     let fragment_bits = u16::from_be_bytes([packet[6], packet[7]]);
     (fragment_bits & 0x2000) != 0 || (fragment_bits & 0x1FFF) != 0
 }
@@ -6462,6 +6469,38 @@ mod tests {
         assert_eq!(
             u16::from_be_bytes([packet[ihl + 6], packet[ihl + 7]]),
             expected_udp
+        );
+    }
+
+    #[test]
+    fn test_ipv4_is_fragment_short_packet_is_safe_false() {
+        assert!(!ipv4_is_fragment(&[0u8; 7]));
+    }
+
+    #[test]
+    fn test_fix_packet_checksums_uses_ipv4_total_len_for_tcp_checksum() {
+        let mut packet = build_raw_ipv4_packet(
+            6,
+            Ipv4Addr::new(10, 1, 0, 1),
+            Ipv4Addr::new(10, 1, 0, 2),
+            53100,
+            54100,
+        );
+        let ihl = ((packet[0] & 0x0F) as usize) * 4;
+        packet[ihl + 16] = 0;
+        packet[ihl + 17] = 0;
+
+        packet.extend_from_slice(&[0x5A; 12]); // bytes outside IPv4 total_length
+
+        let mut expected_packet = packet[..40].to_vec();
+        expected_packet[ihl + 16] = 0;
+        expected_packet[ihl + 17] = 0;
+        let expected_tcp = calculate_tcp_checksum(&expected_packet, ihl);
+
+        assert!(fix_packet_checksums(&mut packet));
+        assert_eq!(
+            u16::from_be_bytes([packet[ihl + 16], packet[ihl + 17]]),
+            expected_tcp
         );
     }
 
