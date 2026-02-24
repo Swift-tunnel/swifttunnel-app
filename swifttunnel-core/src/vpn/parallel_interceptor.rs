@@ -4855,10 +4855,14 @@ fn calculate_udp_checksum(packet: &[u8], ihl: usize) -> u16 {
         return 0;
     }
 
+    let udp_len = u16::from_be_bytes([packet[ihl + 4], packet[ihl + 5]]) as usize;
+    if udp_len < 8 || packet.len() < ihl + udp_len {
+        return 0;
+    }
+
     let src_ip = &packet[12..16];
     let dst_ip = &packet[16..20];
-    let udp_len = packet.len() - ihl;
-    let udp_datagram = &packet[ihl..];
+    let udp_datagram = &packet[ihl..ihl + udp_len];
 
     let mut sum: u32 = 0;
 
@@ -4897,6 +4901,26 @@ fn calculate_udp_checksum(packet: &[u8], ihl: usize) -> u16 {
     if checksum == 0 { 0xFFFF } else { checksum }
 }
 
+#[inline(always)]
+fn ipv4_total_len(packet: &[u8], ihl: usize) -> Option<usize> {
+    if packet.len() < 4 || ihl < 20 {
+        return None;
+    }
+
+    let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    if total_len < ihl || packet.len() < total_len {
+        return None;
+    }
+
+    Some(total_len)
+}
+
+#[inline(always)]
+fn ipv4_is_fragment(packet: &[u8]) -> bool {
+    let fragment_bits = u16::from_be_bytes([packet[6], packet[7]]);
+    (fragment_bits & 0x2000) != 0 || (fragment_bits & 0x1FFF) != 0
+}
+
 /// Fix checksums in an IP packet (modifies packet in place)
 /// Returns true if checksums were fixed
 fn fix_packet_checksums(packet: &mut [u8]) -> bool {
@@ -4909,12 +4933,26 @@ fn fix_packet_checksums(packet: &mut [u8]) -> bool {
         return false;
     }
 
+    let total_len = match ipv4_total_len(packet, ihl) {
+        Some(total_len) => total_len,
+        None => return false,
+    };
+    let packet = &mut packet[..total_len];
+
     // Fix IP header checksum
     packet[10] = 0;
     packet[11] = 0;
     let ip_checksum = calculate_ip_checksum(&packet[..ihl]);
     packet[10] = (ip_checksum >> 8) as u8;
     packet[11] = (ip_checksum & 0xFF) as u8;
+
+    // For fragmented IP packets, transport headers are incomplete:
+    // only the first fragment contains TCP/UDP ports and many fragments contain
+    // no transport header at all. Rewriting transport checksums here would corrupt
+    // fragmented datagrams, so only fix the IP header checksum.
+    if ipv4_is_fragment(packet) {
+        return true;
+    }
 
     let protocol = packet[9];
     let transport_offset = ihl;
@@ -6329,6 +6367,102 @@ mod tests {
             &snapshot,
             &mut inline_cache
         ));
+    }
+
+    #[test]
+    fn test_fix_packet_checksums_preserves_udp_checksum_on_first_fragment() {
+        let frame = build_ipv4_udp_fragment_frame(
+            Ipv4Addr::new(192, 168, 1, 210),
+            Ipv4Addr::new(128, 116, 20, 20),
+            54000,
+            51821,
+            0x9911,
+            0,
+            true,
+        );
+        let ip_start = parse_ipv4_header_offset(&frame).expect("must parse ipv4 offset");
+        let mut packet = frame[ip_start..].to_vec();
+        let ihl = ((packet[0] & 0x0F) as usize) * 4;
+
+        packet[10] = 0;
+        packet[11] = 0;
+        packet[ihl + 6] = 0x12;
+        packet[ihl + 7] = 0x34;
+
+        assert!(fix_packet_checksums(&mut packet));
+        assert_eq!(
+            u16::from_be_bytes([packet[ihl + 6], packet[ihl + 7]]),
+            0x1234,
+            "fragmented UDP packets must keep transport checksum untouched"
+        );
+
+        let mut header = packet[..ihl].to_vec();
+        header[10] = 0;
+        header[11] = 0;
+        let expected_ip = calculate_ip_checksum(&header);
+        assert_eq!(u16::from_be_bytes([packet[10], packet[11]]), expected_ip);
+    }
+
+    #[test]
+    fn test_fix_packet_checksums_preserves_non_initial_fragment_payload() {
+        let frame = build_ipv4_udp_fragment_frame(
+            Ipv4Addr::new(192, 168, 1, 211),
+            Ipv4Addr::new(128, 116, 21, 21),
+            54001,
+            51821,
+            0x9912,
+            1,
+            false,
+        );
+        let ip_start = parse_ipv4_header_offset(&frame).expect("must parse ipv4 offset");
+        let mut packet = frame[ip_start..].to_vec();
+        let ihl = ((packet[0] & 0x0F) as usize) * 4;
+
+        packet[10] = 0;
+        packet[11] = 0;
+        packet[ihl + 6] = 0xBE;
+        packet[ihl + 7] = 0xEF;
+
+        assert!(fix_packet_checksums(&mut packet));
+        assert_eq!(
+            [packet[ihl + 6], packet[ihl + 7]],
+            [0xBE, 0xEF],
+            "non-initial fragments must not be treated like UDP headers"
+        );
+
+        let mut header = packet[..ihl].to_vec();
+        header[10] = 0;
+        header[11] = 0;
+        let expected_ip = calculate_ip_checksum(&header);
+        assert_eq!(u16::from_be_bytes([packet[10], packet[11]]), expected_ip);
+    }
+
+    #[test]
+    fn test_fix_packet_checksums_uses_ipv4_total_len_for_udp_checksum() {
+        let mut packet = build_raw_ipv4_packet(
+            17,
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            53000,
+            54000,
+        );
+        let ihl = ((packet[0] & 0x0F) as usize) * 4;
+        packet[ihl + 4..ihl + 6].copy_from_slice(&8u16.to_be_bytes());
+        packet[ihl + 6] = 0;
+        packet[ihl + 7] = 0;
+
+        packet.extend_from_slice(&[0xA5; 12]); // trailing bytes outside IPv4 total_length
+
+        let mut expected_packet = packet[..28].to_vec();
+        expected_packet[ihl + 6] = 0;
+        expected_packet[ihl + 7] = 0;
+        let expected_udp = calculate_udp_checksum(&expected_packet, ihl);
+
+        assert!(fix_packet_checksums(&mut packet));
+        assert_eq!(
+            u16::from_be_bytes([packet[ihl + 6], packet[ihl + 7]]),
+            expected_udp
+        );
     }
 
     #[test]
