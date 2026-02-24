@@ -229,6 +229,12 @@ export interface WindowState {
   maximized: boolean;
 }
 
+export interface GameProcessPerformanceSettings {
+  high_performance_gpu_binding: boolean;
+  prefer_performance_cores: boolean;
+  unbind_cpu0: boolean;
+}
+
 export interface NetworkDiagnosticsBundleResponse {
   file_path: string;
   folder_path: string;
@@ -271,6 +277,7 @@ export interface AppSettings {
   whitelisted_regions: string[];
   preferred_physical_adapter_guid: string | null;
   adapter_binding_mode: "smart_auto" | "manual";
+  game_process_performance: GameProcessPerformanceSettings;
 }
 
 // ── System ──

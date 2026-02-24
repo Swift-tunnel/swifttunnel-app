@@ -60,6 +60,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   whitelisted_regions: [],
   preferred_physical_adapter_guid: null,
   adapter_binding_mode: "smart_auto",
+  game_process_performance: {
+    high_performance_gpu_binding: false,
+    prefer_performance_cores: false,
+    unbind_cpu0: false,
+  },
 };
 
 interface SettingsStore {

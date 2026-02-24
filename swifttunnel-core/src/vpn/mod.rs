@@ -25,6 +25,7 @@ pub mod connection;
 pub mod error_messages;
 pub mod parallel_interceptor;
 pub mod process_cache;
+pub mod process_performance;
 pub mod process_tracker;
 pub mod process_watcher;
 pub mod routes;

@@ -191,6 +191,7 @@ pub async fn vpn_connect(
         whitelisted_regions,
         forced_servers,
         preferred_physical_adapter_guid,
+        game_process_performance,
     ) = {
         let settings = state.settings.lock();
         let preferred_physical_adapter_guid = match settings.adapter_binding_mode {
@@ -208,6 +209,7 @@ pub async fn vpn_connect(
             settings.whitelisted_regions.clone(),
             settings.forced_servers.clone(),
             preferred_physical_adapter_guid,
+            settings.game_process_performance,
         )
     };
 
@@ -246,6 +248,7 @@ pub async fn vpn_connect(
             whitelisted_regions,
             forced_servers,
             preferred_physical_adapter_guid,
+            game_process_performance,
         )
         .await
         .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));

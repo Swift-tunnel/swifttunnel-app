@@ -56,6 +56,11 @@ const MOCK_SETTINGS = {
   enable_discord_rpc: true,
   auto_routing_enabled: false,
   whitelisted_regions: [],
+  game_process_performance: {
+    high_performance_gpu_binding: false,
+    prefer_performance_cores: false,
+    unbind_cpu0: false,
+  },
 };
 
 let mockVpnConnected = false;
