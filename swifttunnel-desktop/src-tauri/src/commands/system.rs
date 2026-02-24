@@ -35,6 +35,9 @@ fn driver_install_failure_message(code: i32) -> String {
         1223 | 1602 => "Driver installation was canceled at the UAC/installer prompt.".to_string(),
         1618 => "Another installer is already running. Close it and retry.".to_string(),
         1625 => "Windows blocked this installer by policy. Contact support.".to_string(),
+        1639 => {
+            "Driver installer received invalid command-line arguments (msiexec 1639).".to_string()
+        }
         _ => format!("Driver install failed with code {}", code),
     }
 }
@@ -238,12 +241,24 @@ fn resolve_winpkfilter_msi(
 }
 
 #[cfg(windows)]
-fn build_elevated_msiexec_script(msi_path: &str) -> String {
+fn default_driver_install_log_path() -> PathBuf {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("swifttunnel-winpkfilter-install-{now_ms}.log"))
+}
+
+#[cfg(windows)]
+fn build_elevated_msiexec_script(msi_path: &str, log_path: &str, passive: bool) -> String {
     // PowerShell single-quote escaping.
     let escaped_msi = msi_path.replace('\'', "''");
+    let escaped_log = log_path.replace('\'', "''");
+    let ui_flag = if passive { "/passive" } else { "/qn" };
     format!(
         "$ErrorActionPreference='Stop'; \
-         $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -ArgumentList @('/i','{escaped_msi}','/passive','/norestart') -Wait -PassThru; \
+         $args=@('/i','{escaped_msi}','{ui_flag}','/norestart','/L*V','{escaped_log}'); \
+         $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -ArgumentList $args -Wait -PassThru; \
          exit $p.ExitCode"
     )
 }
@@ -335,33 +350,52 @@ pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
         )?;
 
         let msi_string = msi_path.to_string_lossy().to_string();
+        let first_log_path = default_driver_install_log_path();
+        let first_log_string = first_log_path.to_string_lossy().to_string();
+        let retry_log_path = first_log_path.with_extension("retry.log");
+        let retry_log_string = retry_log_path.to_string_lossy().to_string();
 
         // If we are elevated already, run msiexec directly and capture output.
         // Otherwise, use Start-Process -Verb RunAs to trigger a UAC prompt.
-        let (exit_code, output_error) = if swifttunnel_core::is_administrator() {
-            let output = swifttunnel_core::hidden_command("msiexec")
-                .args(["/i", &msi_string, "/passive", "/norestart"])
-                .output()
-                .map_err(|e| format!("Failed to run msiexec: {}", e))?;
-            (
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            )
-        } else {
-            let script = build_elevated_msiexec_script(&msi_string);
+        let run_install = |passive: bool, log_string: &str| -> Result<(i32, String), String> {
+            if swifttunnel_core::is_administrator() {
+                let ui_flag = if passive { "/passive" } else { "/qn" };
+                let output = swifttunnel_core::hidden_command("msiexec")
+                    .args(["/i", &msi_string, ui_flag, "/norestart", "/L*V", log_string])
+                    .output()
+                    .map_err(|e| format!("Failed to run msiexec: {}", e))?;
+                Ok((
+                    output.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                ))
+            } else {
+                let script = build_elevated_msiexec_script(&msi_string, log_string, passive);
 
-            let output = swifttunnel_core::hidden_command("powershell")
-                .args(["-NoProfile", "-Command", &script])
-                .output()
-                .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
+                let output = swifttunnel_core::hidden_command("powershell")
+                    .args(["-NoProfile", "-Command", &script])
+                    .output()
+                    .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
 
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (
-                output.status.code().unwrap_or(-1),
-                if !stderr.is_empty() { stderr } else { stdout },
-            )
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok((
+                    output.status.code().unwrap_or(-1),
+                    if !stderr.is_empty() { stderr } else { stdout },
+                ))
+            }
         };
+
+        let (mut exit_code, mut output_error) = run_install(true, &first_log_string)?;
+        let mut retry_attempted = false;
+
+        // Some systems return 1639 with /passive. Retry once with /qn.
+        if exit_code == 1639 {
+            retry_attempted = true;
+            log::warn!("WinpkFilter install returned 1639 with /passive; retrying with /qn");
+            let (retry_code, retry_error) = run_install(false, &retry_log_string)?;
+            exit_code = retry_code;
+            output_error = retry_error;
+        }
 
         if !driver_install_success_exit_code(exit_code) {
             let mut message = if is_probable_uac_cancel_message(&output_error) {
@@ -373,12 +407,20 @@ pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
                 message.push_str(": ");
                 message.push_str(&output_error);
             }
+            message.push_str(". Installer log: ");
+            message.push_str(&first_log_string);
+            if retry_attempted {
+                message.push_str(". Retry log: ");
+                message.push_str(&retry_log_string);
+            }
             return Err(message);
         }
 
         // Post-install: poll driver availability briefly so the UI can proceed immediately.
         for _ in 0..10 {
             if swifttunnel_core::vpn::SplitTunnelDriver::is_available() {
+                let _ = fs::remove_file(&first_log_path);
+                let _ = fs::remove_file(&retry_log_path);
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -432,6 +474,7 @@ mod tests {
         assert!(driver_install_failure_message(1223).contains("canceled"));
         assert!(driver_install_failure_message(1602).contains("canceled"));
         assert!(driver_install_failure_message(1618).contains("Another installer"));
+        assert!(driver_install_failure_message(1639).contains("invalid command-line"));
         assert_eq!(
             driver_install_failure_message(42),
             "Driver install failed with code 42"
@@ -527,11 +570,17 @@ mod tests {
 
     #[test]
     fn build_elevated_msiexec_script_escapes_single_quotes() {
-        let script = build_elevated_msiexec_script("C:\\path\\ev'elyn\\WinpkFilter-x64.msi");
+        let script = build_elevated_msiexec_script(
+            "C:\\path\\ev'elyn\\WinpkFilter-x64.msi",
+            "C:\\Temp\\log's\\winpk.log",
+            true,
+        );
         assert!(script.contains("ev''elyn"));
+        assert!(script.contains("log''s"));
         assert!(script.contains("Start-Process"));
         assert!(script.contains("msiexec.exe"));
         assert!(script.contains("/passive"));
+        assert!(script.contains("/L*V"));
     }
 
     #[test]
