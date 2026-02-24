@@ -1231,11 +1231,26 @@ fn select_initial_relay_path_mtu(detected_mtu: Option<usize>) -> (usize, bool) {
     (selection.mtu, selection.is_fallback)
 }
 
+#[inline]
+fn select_detected_relay_path_mtu(
+    link_mtu: usize,
+    ip_layer_mtu: Option<usize>,
+    is_ppp: bool,
+) -> usize {
+    let mtu = ip_layer_mtu.unwrap_or(link_mtu);
+    if is_ppp {
+        mtu.min(RELAY_PATH_MTU_POINT_TO_POINT_CEILING)
+    } else {
+        mtu
+    }
+}
+
 fn detect_relay_path_mtu(relay_addr: SocketAddr) -> Option<usize> {
     #[cfg(windows)]
     {
         use windows::Win32::NetworkManagement::IpHelper::{
-            GetBestInterfaceEx, GetIfEntry2, MIB_IF_ROW2,
+            GetBestInterfaceEx, GetIfEntry2, GetIpInterfaceEntry, MIB_IF_ROW2,
+            MIB_IPINTERFACE_ROW, IF_TYPE_PPP,
         };
         use windows::Win32::Networking::WinSock::{
             AF_INET, AF_INET6, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0, SOCKADDR, SOCKADDR_IN,
@@ -1297,7 +1312,27 @@ fn detect_relay_path_mtu(relay_addr: SocketAddr) -> Option<usize> {
             return None;
         }
 
-        return Some(row.Mtu as usize);
+        let family = match relay_addr {
+            SocketAddr::V4(_) => AF_INET,
+            SocketAddr::V6(_) => AF_INET6,
+        };
+        let mut ip_row = MIB_IPINTERFACE_ROW::default();
+        ip_row.InterfaceIndex = if_index;
+        ip_row.Family = family;
+        let ip_layer_mtu = if unsafe { GetIpInterfaceEntry(&mut ip_row) }.0 == 0
+            && ip_row.NlMtu > 0
+        {
+            Some(ip_row.NlMtu as usize)
+        } else {
+            None
+        };
+
+        let detected_mtu = select_detected_relay_path_mtu(
+            row.Mtu as usize,
+            ip_layer_mtu,
+            row.Type == IF_TYPE_PPP,
+        );
+        return Some(detected_mtu);
     }
 
     #[cfg(not(windows))]
@@ -1397,6 +1432,31 @@ mod tests {
         assert_eq!(selected.mtu, 1500);
         assert!(!selected.is_fallback);
         assert!(!selected.point_to_point_clamped);
+    }
+
+    #[test]
+    fn test_select_detected_relay_path_mtu_prefers_ip_layer_mtu() {
+        assert_eq!(
+            select_detected_relay_path_mtu(1500, Some(1460), false),
+            1460
+        );
+    }
+
+    #[test]
+    fn test_select_detected_relay_path_mtu_falls_back_to_link_mtu() {
+        assert_eq!(select_detected_relay_path_mtu(1492, None, false), 1492);
+    }
+
+    #[test]
+    fn test_select_detected_relay_path_mtu_clamps_ppp_to_1492() {
+        assert_eq!(
+            select_detected_relay_path_mtu(1500, Some(1500), true),
+            RELAY_PATH_MTU_POINT_TO_POINT_CEILING
+        );
+        assert_eq!(
+            select_detected_relay_path_mtu(1492, Some(1460), true),
+            1460
+        );
     }
 
     #[test]

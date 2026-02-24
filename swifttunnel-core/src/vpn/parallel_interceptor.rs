@@ -242,6 +242,15 @@ pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
 ///
 /// This reuses the same route + adapter probes used for split-tunnel adapter binding so
 /// relay-path policies can stay aligned with the actual WAN context.
+#[inline]
+fn infer_point_to_point_default_route(
+    next_hop_is_zero: bool,
+    interface_is_point_to_point: bool,
+    interface_has_wan_ppp_hint: bool,
+) -> bool {
+    interface_is_point_to_point || (next_hop_is_zero && interface_has_wan_ppp_hint)
+}
+
 pub fn is_point_to_point_default_route_context() -> bool {
     let Some((route, source, target_ip)) =
         ParallelInterceptor::get_default_route_info_for_targets(&[])
@@ -250,28 +259,40 @@ pub fn is_point_to_point_default_route_context() -> bool {
     };
 
     let next_hop_is_zero = route.next_hop == 0;
-    let interface_is_point_to_point =
-        ParallelInterceptor::is_interface_point_to_point(route.if_index) == Some(true);
-    let is_point_to_point = next_hop_is_zero || interface_is_point_to_point;
+    let (interface_is_point_to_point, interface_has_wan_ppp_hint) =
+        ParallelInterceptor::point_to_point_interface_signals(route.if_index)
+            .unwrap_or((false, false));
+    // Keep zero-next-hop as a secondary signal only when the interface name/description
+    // looks WAN/PPP-ish; this avoids over-matching plain gateway-less routes.
+    let next_hop_hint_match = next_hop_is_zero && interface_has_wan_ppp_hint;
+    let is_point_to_point = infer_point_to_point_default_route(
+        next_hop_is_zero,
+        interface_is_point_to_point,
+        interface_has_wan_ppp_hint,
+    );
 
     if is_point_to_point {
         let next_hop = Ipv4Addr::from(route.next_hop.to_ne_bytes());
         if let Some(target_ip) = target_ip {
             log::info!(
-                "Default-route context is point-to-point (if_index={}, next_hop={}, source={}, target={}, interface_point_to_point={})",
+                "Default-route context is point-to-point (if_index={}, next_hop={}, source={}, target={}, interface_point_to_point={}, interface_wan_ppp_hint={}, next_hop_hint_match={})",
                 route.if_index,
                 next_hop,
                 source.as_str(),
                 target_ip,
-                interface_is_point_to_point
+                interface_is_point_to_point,
+                interface_has_wan_ppp_hint,
+                next_hop_hint_match
             );
         } else {
             log::info!(
-                "Default-route context is point-to-point (if_index={}, next_hop={}, source={}, interface_point_to_point={})",
+                "Default-route context is point-to-point (if_index={}, next_hop={}, source={}, interface_point_to_point={}, interface_wan_ppp_hint={}, next_hop_hint_match={})",
                 route.if_index,
                 next_hop,
                 source.as_str(),
-                interface_is_point_to_point
+                interface_is_point_to_point,
+                interface_has_wan_ppp_hint,
+                next_hop_hint_match
             );
         }
     }
@@ -1006,20 +1027,44 @@ impl ParallelInterceptor {
         None
     }
 
-    fn is_point_to_point_interface_type_or_name(if_type: u32, friendly_name: &str) -> bool {
+    fn has_wan_or_ppp_name_hint(friendly_name: &str, description: &str) -> bool {
+        fn has_hint(value: &str) -> bool {
+            let lower = value.to_ascii_lowercase();
+            let has_ppp_hint = lower.contains("pppoe")
+                || lower.contains("(ppp)")
+                || lower.contains(" ppp ")
+                || lower.starts_with("ppp ")
+                || lower.ends_with(" ppp")
+                || lower.contains("point-to-point")
+                || lower.contains("point to point");
+            has_ppp_hint
+                || lower.contains("wan miniport")
+                || lower.contains("wan network interface")
+                || lower.contains("ndiswan")
+                || (lower.contains("wan")
+                    && (lower.contains("broadband")
+                        || lower.contains("dial-up")
+                        || lower.contains("miniport")))
+        }
+
+        has_hint(friendly_name) || has_hint(description)
+    }
+
+    fn is_point_to_point_interface_type_or_name(
+        if_type: u32,
+        friendly_name: &str,
+        description: &str,
+    ) -> bool {
         use windows::Win32::NetworkManagement::IpHelper::IF_TYPE_PPP;
 
         if if_type == IF_TYPE_PPP {
             return true;
         }
 
-        let friendly_lower = friendly_name.to_ascii_lowercase();
-        friendly_lower.contains("pppoe")
-            || friendly_lower.contains("wan miniport")
-            || friendly_lower.contains("wan network interface")
+        Self::has_wan_or_ppp_name_hint(friendly_name, description)
     }
 
-    fn is_interface_point_to_point(if_index: u32) -> Option<bool> {
+    fn point_to_point_interface_signals(if_index: u32) -> Option<(bool, bool)> {
         use windows::Win32::NetworkManagement::IpHelper::{
             GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
         };
@@ -1058,16 +1103,26 @@ impl ParallelInterceptor {
                 let a_ipv6_if = adapter.Ipv6IfIndex;
                 if a_if == if_index || a_ipv6_if == if_index {
                     let friendly_name = pwstr_to_string(adapter.FriendlyName);
-                    return Some(Self::is_point_to_point_interface_type_or_name(
+                    let description = pwstr_to_string(adapter.Description);
+                    let has_wan_ppp_hint =
+                        Self::has_wan_or_ppp_name_hint(&friendly_name, &description);
+                    let is_point_to_point = Self::is_point_to_point_interface_type_or_name(
                         adapter.IfType,
                         &friendly_name,
-                    ));
+                        &description,
+                    );
+                    return Some((is_point_to_point, has_wan_ppp_hint));
                 }
                 current = adapter.Next;
             }
         }
 
         None
+    }
+
+    fn is_interface_point_to_point(if_index: u32) -> Option<bool> {
+        Self::point_to_point_interface_signals(if_index)
+            .map(|(is_point_to_point, _)| is_point_to_point)
     }
 
     fn get_default_route_info_native() -> Option<DefaultRouteInfo> {
@@ -5544,7 +5599,11 @@ mod tests {
         use windows::Win32::NetworkManagement::IpHelper::IF_TYPE_PPP;
 
         assert!(
-            ParallelInterceptor::is_point_to_point_interface_type_or_name(IF_TYPE_PPP, "Ethernet")
+            ParallelInterceptor::is_point_to_point_interface_type_or_name(
+                IF_TYPE_PPP,
+                "Ethernet",
+                "Intel Ethernet",
+            )
         );
     }
 
@@ -5555,9 +5614,34 @@ mod tests {
         assert!(
             ParallelInterceptor::is_point_to_point_interface_type_or_name(
                 IF_TYPE_ETHERNET_CSMACD,
-                "WAN Miniport (PPPOE)"
+                "WAN Miniport (PPPOE)",
+                "",
             )
         );
+    }
+
+    #[test]
+    fn test_is_point_to_point_interface_type_or_name_detects_wan_hint_in_description() {
+        use windows::Win32::NetworkManagement::IpHelper::IF_TYPE_ETHERNET_CSMACD;
+
+        assert!(
+            ParallelInterceptor::is_point_to_point_interface_type_or_name(
+                IF_TYPE_ETHERNET_CSMACD,
+                "Ethernet 3",
+                "NDISWANIP",
+            )
+        );
+    }
+
+    #[test]
+    fn test_infer_point_to_point_default_route_requires_wan_ppp_hint_for_zero_next_hop() {
+        assert!(!infer_point_to_point_default_route(true, false, false));
+        assert!(infer_point_to_point_default_route(true, false, true));
+    }
+
+    #[test]
+    fn test_infer_point_to_point_default_route_keeps_interface_signal_primary() {
+        assert!(infer_point_to_point_default_route(false, true, false));
     }
 
     #[test]
@@ -5567,7 +5651,8 @@ mod tests {
         assert!(
             !ParallelInterceptor::is_point_to_point_interface_type_or_name(
                 IF_TYPE_IEEE80211,
-                "Wi-Fi"
+                "Wi-Fi",
+                "Intel Wireless AX210",
             )
         );
     }
