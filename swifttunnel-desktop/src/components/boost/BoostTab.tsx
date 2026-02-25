@@ -305,98 +305,6 @@ export function BoostTab() {
         )}
       </Section>
 
-      {/* ── System Optimizations ── */}
-      <Section title="System Optimizations">
-        <BoostCard
-          title="High Priority Mode"
-          desc="Boost game process priority"
-          impact="+5-15 FPS"
-          enabled={draft.system_optimization.set_high_priority}
-          onChange={(v) => updateSysOpt({ set_high_priority: v })}
-        />
-        <BoostCard
-          title="0.5ms Timer Resolution"
-          desc="Max precision frame pacing"
-          impact="Smoother frames"
-          enabled={draft.system_optimization.timer_resolution_1ms}
-          onChange={(v) => updateSysOpt({ timer_resolution_1ms: v })}
-        />
-        <BoostCard
-          title="MMCSS Gaming Profile"
-          desc="Better thread scheduling"
-          impact="Stable frame times"
-          enabled={draft.system_optimization.mmcss_gaming_profile}
-          onChange={(v) => updateSysOpt({ mmcss_gaming_profile: v })}
-        />
-        <BoostCard
-          title="Windows Game Mode"
-          desc="System resource prioritization"
-          impact="Consistent perf"
-          enabled={draft.system_optimization.game_mode_enabled}
-          onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
-        />
-      </Section>
-
-      {/* ── Game Process Scheduling ── */}
-      <Section title="Game Process Scheduling">
-        <BoostCard
-          title="High-Performance GPU Binding"
-          desc="Bind target game executables to high-performance GPU while connected"
-          impact="Stability"
-          enabled={settings.game_process_performance.high_performance_gpu_binding}
-          onChange={(v) =>
-            setGameProcessPerformance({ high_performance_gpu_binding: v })
-          }
-        />
-        <BoostCard
-          title="Prefer Performance Cores"
-          desc="Use CPU Sets to steer target games to P-cores on hybrid CPUs"
-          impact="Frame Time"
-          enabled={settings.game_process_performance.prefer_performance_cores}
-          onChange={(v) => setGameProcessPerformance({ prefer_performance_cores: v })}
-        />
-        <BoostCard
-          title="Unbind CPU0"
-          desc="Exclude logical CPU 0 for target games when enough cores are available"
-          impact="Stability"
-          enabled={settings.game_process_performance.unbind_cpu0}
-          onChange={(v) => setGameProcessPerformance({ unbind_cpu0: v })}
-        />
-      </Section>
-
-      {/* ── Network Optimizations ── */}
-      <Section title="Network Optimizations">
-        <BoostCard
-          title="Disable Nagle's Algorithm"
-          desc="Faster packet delivery"
-          impact="-5-15ms"
-          enabled={draft.network_settings.disable_nagle}
-          onChange={(v) => updateNetOpt({ disable_nagle: v })}
-        />
-        <BoostCard
-          title="Disable Network Throttling"
-          desc="Full bandwidth for games"
-          impact="Less lag spikes"
-          enabled={draft.network_settings.disable_network_throttling}
-          onChange={(v) => updateNetOpt({ disable_network_throttling: v })}
-        />
-        <BoostCard
-          title="Optimize MTU"
-          desc="Find best packet size"
-          impact="Less fragmentation"
-          risk="Low Risk"
-          enabled={draft.network_settings.optimize_mtu}
-          onChange={(v) => updateNetOpt({ optimize_mtu: v })}
-        />
-        <BoostCard
-          title="Gaming QoS"
-          desc="Prioritize Roblox + tunnel UDP"
-          impact="-5-20ms"
-          enabled={draft.network_settings.gaming_qos}
-          onChange={(v) => updateNetOpt({ gaming_qos: v })}
-        />
-      </Section>
-
       {/* ── Roblox Settings ── */}
       <Section title="Roblox">
         <BoostCard
@@ -507,6 +415,99 @@ export function BoostTab() {
           impact="Display mode"
           enabled={draft.roblox_settings.window_fullscreen}
           onChange={(v) => updateRblxOpt({ window_fullscreen: v })}
+        />
+      </Section>
+
+      
+{/* ── System Optimizations ── */}
+      <Section title="System Optimizations">
+        <BoostCard
+          title="High Priority Mode"
+          desc="Boost game process priority"
+          impact="+5-15 FPS"
+          enabled={draft.system_optimization.set_high_priority}
+          onChange={(v) => updateSysOpt({ set_high_priority: v })}
+        />
+        <BoostCard
+          title="0.5ms Timer Resolution"
+          desc="Max precision frame pacing"
+          impact="Smoother frames"
+          enabled={draft.system_optimization.timer_resolution_1ms}
+          onChange={(v) => updateSysOpt({ timer_resolution_1ms: v })}
+        />
+        <BoostCard
+          title="MMCSS Gaming Profile"
+          desc="Better thread scheduling"
+          impact="Stable frame times"
+          enabled={draft.system_optimization.mmcss_gaming_profile}
+          onChange={(v) => updateSysOpt({ mmcss_gaming_profile: v })}
+        />
+        <BoostCard
+          title="Windows Game Mode"
+          desc="System resource prioritization"
+          impact="Consistent perf"
+          enabled={draft.system_optimization.game_mode_enabled}
+          onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
+        />
+      </Section>
+
+      {/* ── Game Process Scheduling ── */}
+      <Section title="Game Process Scheduling">
+        <BoostCard
+          title="High-Performance GPU Binding"
+          desc="Bind target game executables to high-performance GPU while connected"
+          impact="Stability"
+          enabled={settings.game_process_performance.high_performance_gpu_binding}
+          onChange={(v) =>
+            setGameProcessPerformance({ high_performance_gpu_binding: v })
+          }
+        />
+        <BoostCard
+          title="Prefer Performance Cores"
+          desc="Use CPU Sets to steer target games to P-cores on hybrid CPUs"
+          impact="Frame Time"
+          enabled={settings.game_process_performance.prefer_performance_cores}
+          onChange={(v) => setGameProcessPerformance({ prefer_performance_cores: v })}
+        />
+        <BoostCard
+          title="Unbind CPU0"
+          desc="Exclude logical CPU 0 for target games when enough cores are available"
+          impact="Stability"
+          enabled={settings.game_process_performance.unbind_cpu0}
+          onChange={(v) => setGameProcessPerformance({ unbind_cpu0: v })}
+        />
+      </Section>
+
+      {/* ── Network Optimizations ── */}
+      <Section title="Network Optimizations">
+        <BoostCard
+          title="Disable Nagle's Algorithm"
+          desc="Faster packet delivery"
+          impact="-5-15ms"
+          enabled={draft.network_settings.disable_nagle}
+          onChange={(v) => updateNetOpt({ disable_nagle: v })}
+        />
+        <BoostCard
+          title="Disable Network Throttling"
+          desc="Full bandwidth for games"
+          impact="Less lag spikes"
+          enabled={draft.network_settings.disable_network_throttling}
+          onChange={(v) => updateNetOpt({ disable_network_throttling: v })}
+        />
+        <BoostCard
+          title="Optimize MTU"
+          desc="Find best packet size"
+          impact="Less fragmentation"
+          risk="Low Risk"
+          enabled={draft.network_settings.optimize_mtu}
+          onChange={(v) => updateNetOpt({ optimize_mtu: v })}
+        />
+        <BoostCard
+          title="Gaming QoS"
+          desc="Prioritize Roblox + tunnel UDP"
+          impact="-5-20ms"
+          enabled={draft.network_settings.gaming_qos}
+          onChange={(v) => updateNetOpt({ gaming_qos: v })}
         />
       </Section>
 
