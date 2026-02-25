@@ -252,6 +252,18 @@ export function BoostTab() {
     }));
   }
 
+  function setGameProcessPerformance(
+    partial: Partial<typeof settings.game_process_performance>,
+  ) {
+    updateSettings({
+      game_process_performance: {
+        ...settings.game_process_performance,
+        ...partial,
+      },
+    });
+    saveSettings();
+  }
+
   return (
     <div className="flex flex-col gap-6 pb-16">
       {boost.error && (
@@ -322,6 +334,33 @@ export function BoostTab() {
           impact="Consistent perf"
           enabled={draft.system_optimization.game_mode_enabled}
           onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
+        />
+      </Section>
+
+      {/* ── Game Process Scheduling ── */}
+      <Section title="Game Process Scheduling">
+        <BoostCard
+          title="High-Performance GPU Binding"
+          desc="Bind target game executables to high-performance GPU while connected"
+          impact="Stability"
+          enabled={settings.game_process_performance.high_performance_gpu_binding}
+          onChange={(v) =>
+            setGameProcessPerformance({ high_performance_gpu_binding: v })
+          }
+        />
+        <BoostCard
+          title="Prefer Performance Cores"
+          desc="Use CPU Sets to steer target games to P-cores on hybrid CPUs"
+          impact="Frame Time"
+          enabled={settings.game_process_performance.prefer_performance_cores}
+          onChange={(v) => setGameProcessPerformance({ prefer_performance_cores: v })}
+        />
+        <BoostCard
+          title="Unbind CPU0"
+          desc="Exclude logical CPU 0 for target games when enough cores are available"
+          impact="Stability"
+          enabled={settings.game_process_performance.unbind_cpu0}
+          onChange={(v) => setGameProcessPerformance({ unbind_cpu0: v })}
         />
       </Section>
 

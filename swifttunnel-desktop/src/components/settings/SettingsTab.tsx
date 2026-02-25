@@ -65,16 +65,6 @@ export function SettingsTab() {
     save();
   }
 
-  function setGameProcessPerformance(
-    partial: Partial<AppSettings["game_process_performance"]>,
-  ) {
-    set({
-      game_process_performance: {
-        ...settings.game_process_performance,
-        ...partial,
-      },
-    });
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -469,35 +459,6 @@ export function SettingsTab() {
           </div>
         </details>
 
-        <Row
-          label="Game GPU Preference"
-          desc="Bind target game executables to High Performance GPU while connected."
-        >
-          <Toggle
-            enabled={settings.game_process_performance.high_performance_gpu_binding}
-            onChange={(v) =>
-              setGameProcessPerformance({ high_performance_gpu_binding: v })
-            }
-          />
-        </Row>
-        <Row
-          label="Prefer Performance Cores"
-          desc="Use CPU Sets to steer target games to P-cores on hybrid CPUs when available."
-        >
-          <Toggle
-            enabled={settings.game_process_performance.prefer_performance_cores}
-            onChange={(v) => setGameProcessPerformance({ prefer_performance_cores: v })}
-          />
-        </Row>
-        <Row
-          label="Unbind CPU0"
-          desc="Exclude logical CPU 0 for target games when enough cores are available."
-        >
-          <Toggle
-            enabled={settings.game_process_performance.unbind_cpu0}
-            onChange={(v) => setGameProcessPerformance({ unbind_cpu0: v })}
-          />
-        </Row>
       </Section>
 
       {/* ── Updates ── */}
