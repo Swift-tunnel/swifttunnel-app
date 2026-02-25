@@ -10,6 +10,8 @@ import type {
   LatencyEntry,
   PerformanceMetricsResponse,
   SystemInfoResponse,
+  SystemMemorySnapshot,
+  RamCleanResultResponse,
   StabilityResultResponse,
   SpeedResultResponse,
   BufferbloatResultResponse,
@@ -86,8 +88,14 @@ export const serverSmartSelect = (regionId: string) =>
 export const boostGetMetrics = () =>
   invoke<PerformanceMetricsResponse>("boost_get_metrics");
 
+export const boostGetSystemMemory = () =>
+  invoke<SystemMemorySnapshot>("boost_get_system_memory");
+
 export const boostUpdateConfig = (configJson: string) =>
   invoke<void>("boost_update_config", { configJson });
+
+export const boostCleanRam = () =>
+  invoke<RamCleanResultResponse>("boost_clean_ram");
 
 export const boostGetSystemInfo = () =>
   invoke<SystemInfoResponse>("boost_get_system_info");

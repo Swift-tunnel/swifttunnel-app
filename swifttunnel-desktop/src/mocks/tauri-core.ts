@@ -64,6 +64,8 @@ const MOCK_SETTINGS = {
 };
 
 let mockVpnConnected = false;
+let mockSystemMemTotalMb = 16384;
+let mockSystemMemUsedMb = 9800;
 
 const handlers: Record<string, (...args: unknown[]) => unknown> = {
   auth_get_state: () => ({
@@ -189,7 +191,48 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     process_id: 12480,
   }),
 
+  boost_get_system_memory: () => {
+    const total = mockSystemMemTotalMb;
+    const used = Math.min(mockSystemMemUsedMb, total);
+    const available = Math.max(0, total - used);
+    const loadPct = Math.max(0, Math.min(100, Math.round((used / total) * 100)));
+    return {
+      total_mb: total,
+      used_mb: used,
+      available_mb: available,
+      load_pct: loadPct,
+    };
+  },
+
   boost_update_config: () => {},
+  boost_clean_ram: async () => {
+    const before = handlers.boost_get_system_memory() as {
+      total_mb: number;
+      used_mb: number;
+      available_mb: number;
+      load_pct: number;
+    };
+
+    await new Promise((r) => setTimeout(r, 900));
+    const freedMb = 400 + Math.floor(Math.random() * 600);
+    mockSystemMemUsedMb = Math.max(2000, before.used_mb - freedMb);
+
+    const after = handlers.boost_get_system_memory() as {
+      total_mb: number;
+      used_mb: number;
+      available_mb: number;
+      load_pct: number;
+    };
+
+    return {
+      before,
+      after,
+      trimmed_count: 12,
+      standby_purge: { attempted: true, success: true, skipped_reason: null },
+      duration_ms: 1100,
+      warnings: [],
+    };
+  },
   boost_restart_roblox: async () => {
     await new Promise((r) => setTimeout(r, 1200));
   },

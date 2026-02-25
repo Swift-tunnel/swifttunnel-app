@@ -171,7 +171,9 @@ pub fn run() {
             commands::vpn::server_smart_select,
             // Optimizer
             commands::optimizer::boost_get_metrics,
+            commands::optimizer::boost_get_system_memory,
             commands::optimizer::boost_update_config,
+            commands::optimizer::boost_clean_ram,
             commands::optimizer::boost_get_system_info,
             commands::optimizer::boost_restart_roblox,
             // Network

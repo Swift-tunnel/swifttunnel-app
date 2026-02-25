@@ -4,6 +4,7 @@ import type {
   AuthStateEvent,
   ThroughputEvent,
   PerformanceMetricsEvent,
+  RamCleanProgressEvent,
 } from "./types";
 import { useVpnStore } from "../stores/vpnStore";
 import { useAuthStore } from "../stores/authStore";
@@ -14,6 +15,7 @@ const EVENT_VPN_STATE_CHANGED = "vpn-state-changed";
 const EVENT_AUTH_STATE_CHANGED = "auth-state-changed";
 const EVENT_THROUGHPUT_UPDATE = "throughput-update";
 const EVENT_PERFORMANCE_METRICS_UPDATE = "performance-metrics-update";
+const EVENT_RAM_CLEAN_PROGRESS = "ram-clean-progress";
 const EVENT_SERVER_LIST_UPDATED = "server-list-updated";
 
 let unlisteners: UnlistenFn[] = [];
@@ -47,6 +49,12 @@ export async function initEventListeners() {
         useBoostStore.getState().handleMetricsEvent(event.payload);
       },
     ),
+  );
+
+  unlisteners.push(
+    await listen<RamCleanProgressEvent>(EVENT_RAM_CLEAN_PROGRESS, (event) => {
+      useBoostStore.getState().handleRamCleanProgress(event.payload);
+    }),
   );
 
   unlisteners.push(
