@@ -32,6 +32,8 @@ interface BoostStore {
   ramCleanTrimmedCount: number;
   ramCleanCurrentProcess: string | null;
   ramCleanResult: RamCleanResultResponse | null;
+  ramCleanStartSnapshot: SystemMemorySnapshot | null;
+  ramCleanDoneSnapshot: SystemMemorySnapshot | null;
 
   error: string | null;
 
@@ -66,6 +68,8 @@ export const useBoostStore = create<BoostStore>((set) => ({
   ramCleanTrimmedCount: 0,
   ramCleanCurrentProcess: null,
   ramCleanResult: null,
+  ramCleanStartSnapshot: null,
+  ramCleanDoneSnapshot: null,
   error: null,
   isAdmin: false,
   osVersion: "",
@@ -130,19 +134,36 @@ export const useBoostStore = create<BoostStore>((set) => ({
         ramCleanTrimmedCount: 0,
         ramCleanCurrentProcess: null,
         ramCleanResult: null,
+        ramCleanStartSnapshot: null,
+        ramCleanDoneSnapshot: null,
       });
+
+      // Refresh a baseline snapshot immediately on click. Polling can be stale by up to 1s,
+      // which makes the UI look like the cleaner freed memory before it actually ran.
+      const baseline = await boostGetSystemMemory().catch(() => null);
+      if (baseline) {
+        set({ systemMem: baseline, ramCleanStartSnapshot: baseline });
+      }
+
       const result = await boostCleanRam();
-      set({
+      set((state) => ({
         isCleaningRam: false,
         ramCleanStage: "done",
         ramCleanResult: result,
         systemMem: result.after,
         ramCleanTrimmedCount: result.trimmed_count,
         ramCleanCurrentProcess: null,
-      });
+        ramCleanDoneSnapshot: state.ramCleanDoneSnapshot ?? result.after,
+      }));
     } catch (e) {
       const message = String(e);
-      set({ error: message, isCleaningRam: false });
+      set({
+        error: message,
+        isCleaningRam: false,
+        ramCleanStage: null,
+        ramCleanStartSnapshot: null,
+        ramCleanDoneSnapshot: null,
+      });
       await notify("RAM cleaner failed", "Could not clean memory.");
     }
   },
@@ -172,7 +193,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
   },
 
   handleRamCleanProgress: (event) => {
-    set({
+    set((state) => ({
       systemMem: {
         total_mb: event.total_mb,
         used_mb: event.used_mb,
@@ -182,6 +203,24 @@ export const useBoostStore = create<BoostStore>((set) => ({
       ramCleanStage: event.stage,
       ramCleanTrimmedCount: event.trimmed_count,
       ramCleanCurrentProcess: event.current_process,
-    });
+      ramCleanStartSnapshot:
+        event.stage === "start" && !state.ramCleanStartSnapshot
+          ? {
+              total_mb: event.total_mb,
+              used_mb: event.used_mb,
+              available_mb: event.available_mb,
+              load_pct: event.load_pct,
+            }
+          : state.ramCleanStartSnapshot,
+      ramCleanDoneSnapshot:
+        event.stage === "done"
+          ? {
+              total_mb: event.total_mb,
+              used_mb: event.used_mb,
+              available_mb: event.available_mb,
+              load_pct: event.load_pct,
+            }
+          : state.ramCleanDoneSnapshot,
+    }));
   },
 }));

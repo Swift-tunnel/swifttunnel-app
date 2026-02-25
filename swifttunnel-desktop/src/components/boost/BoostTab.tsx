@@ -345,6 +345,8 @@ export function BoostTab() {
         trimmedCount={boost.ramCleanTrimmedCount}
         currentProcess={boost.ramCleanCurrentProcess}
         result={boost.ramCleanResult}
+        startSnapshot={boost.ramCleanStartSnapshot}
+        doneSnapshot={boost.ramCleanDoneSnapshot}
         isAdmin={boost.isAdmin}
         restartState={restartAdminState}
         restartError={restartAdminError}
@@ -689,6 +691,8 @@ function RamCleanerCard({
   trimmedCount,
   currentProcess,
   result,
+  startSnapshot,
+  doneSnapshot,
   isAdmin,
   restartState,
   restartError,
@@ -727,6 +731,18 @@ function RamCleanerCard({
     duration_ms: number;
     warnings: string[];
   } | null;
+  startSnapshot: {
+    total_mb: number;
+    used_mb: number;
+    available_mb: number;
+    load_pct: number;
+  } | null;
+  doneSnapshot: {
+    total_mb: number;
+    used_mb: number;
+    available_mb: number;
+    load_pct: number;
+  } | null;
   isAdmin: boolean;
   restartState: "idle" | "restarting" | "error";
   restartError: string | null;
@@ -739,9 +755,12 @@ function RamCleanerCard({
   const percent =
     totalMb > 0 ? Math.max(0, Math.min(100, (usedMb / totalMb) * 100)) : 0;
 
-  const deltaAvailableMb = result
-    ? result.after.available_mb - result.before.available_mb
-    : null;
+  const runStart = startSnapshot ?? result?.before ?? null;
+  const runDone = doneSnapshot ?? result?.after ?? null;
+  const deltaAvailableMb =
+    runStart && runDone ? runDone.available_mb - runStart.available_mb : null;
+  const freedAvailableMb =
+    deltaAvailableMb !== null ? Math.max(0, deltaAvailableMb) : null;
 
   return (
     <div className="rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-4 py-4">
@@ -826,7 +845,15 @@ function RamCleanerCard({
           <div className="mt-2 rounded-[var(--radius-card)] border border-border-subtle bg-bg-elevated px-3 py-2 text-xs text-text-muted">
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               <span>
-                Freed (approx):{" "}
+                Freed (this run, approx):{" "}
+                <span className="font-mono text-text-primary">
+                  {freedAvailableMb !== null
+                    ? formatDeltaMb(freedAvailableMb)
+                    : "+0 MB"}
+                </span>
+              </span>
+              <span>
+                Net change (this run):{" "}
                 <span className="font-mono text-text-primary">
                   {deltaAvailableMb !== null
                     ? formatDeltaMb(deltaAvailableMb)

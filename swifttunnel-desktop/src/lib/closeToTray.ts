@@ -6,13 +6,14 @@ type CloseToTrayDeps = {
   persistWindowState: () => Promise<void>;
   hide: () => Promise<void>;
   close: () => Promise<void>;
-  shouldMinimizeToTray: () => boolean;
+  shouldMinimizeToTray?: () => boolean;
   isDisposed?: () => boolean;
 };
 
 // Creates an onCloseRequested handler that:
 // - If minimize_to_tray is enabled: prevents close, hides to tray
 // - If minimize_to_tray is disabled: persists state, then closes normally
+// - If no minimize preference is provided: defaults to hide-to-tray
 // - Falls back to a real close if hide fails (without infinite recursion)
 export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
   let closing = false;
@@ -32,7 +33,8 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
       // Persist failures shouldn't block close/hide.
     }
 
-    if (!deps.shouldMinimizeToTray()) {
+    const shouldMinimizeToTray = deps.shouldMinimizeToTray?.() ?? true;
+    if (!shouldMinimizeToTray) {
       // User wants X to actually close the app.
       closing = true;
       try {
