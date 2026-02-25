@@ -5,6 +5,7 @@ import { useBoostStore } from "../../stores/boostStore";
 import { Toggle } from "../common/Toggle";
 import type {
   Config,
+  GameProcessPerformanceSettings,
   SystemOptimizationConfig,
   NetworkConfig,
   RobloxSettingsConfig,
@@ -173,7 +174,19 @@ export function BoostTab() {
     setDraft(savedConfig);
   }, [savedConfig]);
 
-  const hasChanges = !configsEqual(draft, savedConfig);
+  const savedGameProcessPerformance = settings.game_process_performance;
+  const [draftGameProcessPerformance, setDraftGameProcessPerformance] =
+    useState<GameProcessPerformanceSettings>(savedGameProcessPerformance);
+
+  useEffect(() => {
+    setDraftGameProcessPerformance(savedGameProcessPerformance);
+  }, [savedGameProcessPerformance]);
+
+  const hasConfigChanges = !configsEqual(draft, savedConfig);
+  const hasGameProcessPerformanceChanges =
+    JSON.stringify(draftGameProcessPerformance) !==
+    JSON.stringify(savedGameProcessPerformance);
+  const hasChanges = hasConfigChanges || hasGameProcessPerformanceChanges;
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
   const windowWidthError = validateWindowDimension(
@@ -200,10 +213,23 @@ export function BoostTab() {
     if (windowValidationError) {
       return;
     }
-    updateSettings({ config: draft });
+    updateSettings({
+      config: draft,
+      game_process_performance: draftGameProcessPerformance,
+    });
     saveSettings();
-    void boost.updateConfig(JSON.stringify(draft));
-  }, [draft, saveSettings, updateSettings, boost, windowValidationError]);
+    if (hasConfigChanges) {
+      void boost.updateConfig(JSON.stringify(draft));
+    }
+  }, [
+    draft,
+    draftGameProcessPerformance,
+    hasConfigChanges,
+    saveSettings,
+    updateSettings,
+    boost,
+    windowValidationError,
+  ]);
 
   // Restart & Apply: close Roblox, apply, relaunch
   const restartAndApply = useCallback(async () => {
@@ -211,17 +237,31 @@ export function BoostTab() {
       return;
     }
     setIsRestarting(true);
-    updateSettings({ config: draft });
+    updateSettings({
+      config: draft,
+      game_process_performance: draftGameProcessPerformance,
+    });
     saveSettings();
-    void boost.updateConfig(JSON.stringify(draft));
+    if (hasConfigChanges) {
+      void boost.updateConfig(JSON.stringify(draft));
+    }
     await boost.restartRoblox();
     setIsRestarting(false);
-  }, [draft, saveSettings, updateSettings, boost, windowValidationError]);
+  }, [
+    draft,
+    draftGameProcessPerformance,
+    hasConfigChanges,
+    saveSettings,
+    updateSettings,
+    boost,
+    windowValidationError,
+  ]);
 
   // Discard: reset draft to saved
   const discardChanges = useCallback(() => {
     setDraft(savedConfig);
-  }, [savedConfig]);
+    setDraftGameProcessPerformance(savedGameProcessPerformance);
+  }, [savedConfig, savedGameProcessPerformance]);
 
   // Draft mutators (no persistence, just local state)
   function selectProfile(id: OptimizationProfile) {
@@ -252,16 +292,10 @@ export function BoostTab() {
     }));
   }
 
-  function setGameProcessPerformance(
-    partial: Partial<typeof settings.game_process_performance>,
+  function updateGameProcessPerformance(
+    partial: Partial<GameProcessPerformanceSettings>,
   ) {
-    updateSettings({
-      game_process_performance: {
-        ...settings.game_process_performance,
-        ...partial,
-      },
-    });
-    saveSettings();
+    setDraftGameProcessPerformance((prev) => ({ ...prev, ...partial }));
   }
 
   return (
@@ -457,24 +491,26 @@ export function BoostTab() {
           title="High-Performance GPU Binding"
           desc="Bind target game executables to high-performance GPU while connected"
           impact="Stability"
-          enabled={settings.game_process_performance.high_performance_gpu_binding}
+          enabled={draftGameProcessPerformance.high_performance_gpu_binding}
           onChange={(v) =>
-            setGameProcessPerformance({ high_performance_gpu_binding: v })
+            updateGameProcessPerformance({ high_performance_gpu_binding: v })
           }
         />
         <BoostCard
           title="Prefer Performance Cores"
           desc="Use CPU Sets to steer target games to P-cores on hybrid CPUs"
           impact="Frame Time"
-          enabled={settings.game_process_performance.prefer_performance_cores}
-          onChange={(v) => setGameProcessPerformance({ prefer_performance_cores: v })}
+          enabled={draftGameProcessPerformance.prefer_performance_cores}
+          onChange={(v) =>
+            updateGameProcessPerformance({ prefer_performance_cores: v })
+          }
         />
         <BoostCard
           title="Unbind CPU0"
           desc="Exclude logical CPU 0 for target games when enough cores are available"
           impact="Stability"
-          enabled={settings.game_process_performance.unbind_cpu0}
-          onChange={(v) => setGameProcessPerformance({ unbind_cpu0: v })}
+          enabled={draftGameProcessPerformance.unbind_cpu0}
+          onChange={(v) => updateGameProcessPerformance({ unbind_cpu0: v })}
         />
       </Section>
 

@@ -65,7 +65,6 @@ export function SettingsTab() {
     save();
   }
 
-
   useEffect(() => {
     let cancelled = false;
     setNetworkAdaptersLoading(true);
