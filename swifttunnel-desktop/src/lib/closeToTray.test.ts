@@ -39,6 +39,26 @@ describe("createCloseToTrayHandler", () => {
     expect(close).not.toHaveBeenCalled();
   });
 
+  it("defaults to hide-to-tray when no minimize preference callback is provided", async () => {
+    const preventDefault = vi.fn();
+    const persistWindowState = vi.fn(async () => {});
+    const hide = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+
+    const handler = createCloseToTrayHandler({
+      persistWindowState,
+      hide,
+      close,
+    });
+
+    await handler({ preventDefault });
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(persistWindowState).toHaveBeenCalledTimes(1);
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it("closes the app when minimize_to_tray is disabled", async () => {
     const preventDefault = vi.fn();
     const persistWindowState = vi.fn(async () => {});

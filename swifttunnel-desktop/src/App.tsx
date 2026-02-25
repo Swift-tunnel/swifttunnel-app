@@ -255,8 +255,6 @@ function App() {
             persistWindowState,
             hide: () => appWindow.hide(),
             close: () => appWindow.close(),
-            shouldMinimizeToTray: () =>
-              useSettingsStore.getState().settings.minimize_to_tray,
             isDisposed: () => disposed,
           }),
         ),
