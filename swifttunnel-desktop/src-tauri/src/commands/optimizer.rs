@@ -1,6 +1,7 @@
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
+use crate::events;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -28,6 +29,80 @@ pub fn boost_get_metrics(state: State<'_, AppState>) -> PerformanceMetricsRespon
         ping: metrics.ping,
         roblox_running: metrics.roblox_running,
         process_id: metrics.process_id,
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct SystemMemorySnapshotResponse {
+    pub total_mb: u64,
+    pub used_mb: u64,
+    pub available_mb: u64,
+    pub load_pct: u8,
+}
+
+impl From<swifttunnel_core::ram_cleaner::SystemMemorySnapshot> for SystemMemorySnapshotResponse {
+    fn from(value: swifttunnel_core::ram_cleaner::SystemMemorySnapshot) -> Self {
+        Self {
+            total_mb: value.total_mb,
+            used_mb: value.used_mb,
+            available_mb: value.available_mb,
+            load_pct: value.load_pct,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct StandbyPurgeResultResponse {
+    pub attempted: bool,
+    pub success: bool,
+    pub skipped_reason: Option<String>,
+}
+
+impl From<swifttunnel_core::ram_cleaner::StandbyPurgeResult> for StandbyPurgeResultResponse {
+    fn from(value: swifttunnel_core::ram_cleaner::StandbyPurgeResult) -> Self {
+        Self {
+            attempted: value.attempted,
+            success: value.success,
+            skipped_reason: value.skipped_reason,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct RamCleanResultResponse {
+    pub before: SystemMemorySnapshotResponse,
+    pub after: SystemMemorySnapshotResponse,
+    pub trimmed_count: u32,
+    pub standby_purge: StandbyPurgeResultResponse,
+    pub duration_ms: u64,
+    pub warnings: Vec<String>,
+}
+
+impl From<swifttunnel_core::ram_cleaner::RamCleanResult> for RamCleanResultResponse {
+    fn from(value: swifttunnel_core::ram_cleaner::RamCleanResult) -> Self {
+        Self {
+            before: value.before.into(),
+            after: value.after.into(),
+            trimmed_count: value.trimmed_count,
+            standby_purge: value.standby_purge.into(),
+            duration_ms: value.duration_ms,
+            warnings: value.warnings,
+        }
+    }
+}
+
+#[tauri::command]
+pub fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, String> {
+    #[cfg(windows)]
+    {
+        swifttunnel_core::ram_cleaner::get_system_memory_snapshot()
+            .map(SystemMemorySnapshotResponse::from)
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err("System memory stats are only supported on Windows".to_string())
     }
 }
 
@@ -92,6 +167,58 @@ pub fn boost_update_config(state: State<'_, AppState>, config_json: String) -> R
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn boost_clean_ram(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<RamCleanResultResponse, String> {
+    #[cfg(windows)]
+    {
+        // Exclude Roblox PID to avoid stutters; foreground PID is excluded inside core.
+        let roblox_pid = {
+            let mut monitor = state.performance_monitor.lock();
+            monitor.get_roblox_pid().unwrap_or(0)
+        };
+
+        let mut exclude_pids: Vec<u32> = Vec::new();
+        if roblox_pid != 0 {
+            exclude_pids.push(roblox_pid);
+        }
+
+        let app_handle = app.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            swifttunnel_core::ram_cleaner::clean_ram(
+                &exclude_pids,
+                |stage, snapshot, trimmed, current, warning| {
+                    let payload = events::RamCleanProgressEvent {
+                        stage: stage.to_string(),
+                        total_mb: snapshot.total_mb,
+                        used_mb: snapshot.used_mb,
+                        available_mb: snapshot.available_mb,
+                        load_pct: snapshot.load_pct,
+                        trimmed_count: trimmed,
+                        current_process: current,
+                        warning,
+                    };
+                    let _ = app_handle.emit(events::RAM_CLEAN_PROGRESS, payload);
+                },
+            )
+        })
+        .await
+        .map_err(|e| format!("RAM clean task failed: {}", e))?
+        .map_err(|e| e.to_string())?;
+
+        Ok(RamCleanResultResponse::from(result))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        let _ = app;
+        Err("RAM cleaner is only supported on Windows".to_string())
+    }
 }
 
 #[derive(Serialize)]

@@ -123,6 +123,28 @@ export interface SystemInfoResponse {
   cpu_count: number;
 }
 
+export interface SystemMemorySnapshot {
+  total_mb: number;
+  used_mb: number;
+  available_mb: number;
+  load_pct: number;
+}
+
+export interface StandbyPurgeResult {
+  attempted: boolean;
+  success: boolean;
+  skipped_reason: string | null;
+}
+
+export interface RamCleanResultResponse {
+  before: SystemMemorySnapshot;
+  after: SystemMemorySnapshot;
+  trimmed_count: number;
+  standby_purge: StandbyPurgeResult;
+  duration_ms: number;
+  warnings: string[];
+}
+
 export type OptimizationProfile = "LowEnd" | "Balanced" | "HighEnd" | "Custom";
 export type PowerPlan = "Balanced" | "HighPerformance" | "Ultimate";
 export type GraphicsQuality =
@@ -320,6 +342,17 @@ export interface PerformanceMetricsEvent {
   ram_total: number;
   fps: number;
   roblox_running: boolean;
+}
+
+export interface RamCleanProgressEvent {
+  stage: string;
+  total_mb: number;
+  used_mb: number;
+  available_mb: number;
+  load_pct: number;
+  trimmed_count: number;
+  current_process: string | null;
+  warning: string | null;
 }
 
 // ── Tabs ──

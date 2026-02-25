@@ -1,7 +1,14 @@
 import { create } from "zustand";
-import type { PerformanceMetricsEvent } from "../lib/types";
+import type {
+  PerformanceMetricsEvent,
+  RamCleanProgressEvent,
+  RamCleanResultResponse,
+  SystemMemorySnapshot,
+} from "../lib/types";
 import {
   boostGetMetrics,
+  boostGetSystemMemory,
+  boostCleanRam,
   boostGetSystemInfo,
   boostUpdateConfig,
   boostRestartRoblox,
@@ -18,6 +25,14 @@ interface BoostStore {
   robloxRunning: boolean;
   processId: number | null;
 
+  // System memory (RAM cleaner)
+  systemMem: SystemMemorySnapshot | null;
+  isCleaningRam: boolean;
+  ramCleanStage: string | null;
+  ramCleanTrimmedCount: number;
+  ramCleanCurrentProcess: string | null;
+  ramCleanResult: RamCleanResultResponse | null;
+
   error: string | null;
 
   // System info
@@ -27,11 +42,14 @@ interface BoostStore {
 
   // Actions
   fetchMetrics: () => Promise<void>;
+  fetchSystemMemory: () => Promise<void>;
   fetchSystemInfo: () => Promise<void>;
   updateConfig: (configJson: string) => Promise<void>;
   restartRoblox: () => Promise<void>;
+  cleanRam: () => Promise<void>;
   clearError: () => void;
   handleMetricsEvent: (event: PerformanceMetricsEvent) => void;
+  handleRamCleanProgress: (event: RamCleanProgressEvent) => void;
 }
 
 export const useBoostStore = create<BoostStore>((set) => ({
@@ -42,6 +60,12 @@ export const useBoostStore = create<BoostStore>((set) => ({
   ping: 0,
   robloxRunning: false,
   processId: null,
+  systemMem: null,
+  isCleaningRam: false,
+  ramCleanStage: null,
+  ramCleanTrimmedCount: 0,
+  ramCleanCurrentProcess: null,
+  ramCleanResult: null,
   error: null,
   isAdmin: false,
   osVersion: "",
@@ -59,6 +83,15 @@ export const useBoostStore = create<BoostStore>((set) => ({
         robloxRunning: m.roblox_running,
         processId: m.process_id,
       });
+    } catch {
+      // Silently ignore
+    }
+  },
+
+  fetchSystemMemory: async () => {
+    try {
+      const mem = await boostGetSystemMemory();
+      set({ systemMem: mem });
     } catch {
       // Silently ignore
     }
@@ -88,6 +121,32 @@ export const useBoostStore = create<BoostStore>((set) => ({
     }
   },
 
+  cleanRam: async () => {
+    try {
+      set({
+        error: null,
+        isCleaningRam: true,
+        ramCleanStage: "start",
+        ramCleanTrimmedCount: 0,
+        ramCleanCurrentProcess: null,
+        ramCleanResult: null,
+      });
+      const result = await boostCleanRam();
+      set({
+        isCleaningRam: false,
+        ramCleanStage: "done",
+        ramCleanResult: result,
+        systemMem: result.after,
+        ramCleanTrimmedCount: result.trimmed_count,
+        ramCleanCurrentProcess: null,
+      });
+    } catch (e) {
+      const message = String(e);
+      set({ error: message, isCleaningRam: false });
+      await notify("RAM cleaner failed", "Could not clean memory.");
+    }
+  },
+
   restartRoblox: async () => {
     try {
       await boostRestartRoblox();
@@ -109,6 +168,20 @@ export const useBoostStore = create<BoostStore>((set) => ({
       ramUsage: event.ram_usage,
       ramTotal: event.ram_total,
       robloxRunning: event.roblox_running,
+    });
+  },
+
+  handleRamCleanProgress: (event) => {
+    set({
+      systemMem: {
+        total_mb: event.total_mb,
+        used_mb: event.used_mb,
+        available_mb: event.available_mb,
+        load_pct: event.load_pct,
+      },
+      ramCleanStage: event.stage,
+      ramCleanTrimmedCount: event.trimmed_count,
+      ramCleanCurrentProcess: event.current_process,
     });
   },
 }));

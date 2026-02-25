@@ -2,6 +2,8 @@ import { useEffect, useState, useCallback, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
+import { systemRestartAsAdmin } from "../../lib/commands";
+import { notify } from "../../lib/notifications";
 import { Toggle } from "../common/Toggle";
 import type {
   Config,
@@ -165,6 +167,13 @@ export function BoostTab() {
 
   const boost = useBoostStore();
 
+  const [restartAdminState, setRestartAdminState] = useState<
+    "idle" | "restarting" | "error"
+  >("idle");
+  const [restartAdminError, setRestartAdminError] = useState<string | null>(
+    null,
+  );
+
   // Draft config — local buffer until user hits Apply
   const savedConfig = settings.config;
   const [draft, setDraft] = useState<Config>(savedConfig);
@@ -208,6 +217,18 @@ export function BoostTab() {
     return () => clearInterval(id);
   }, [boost.fetchMetrics]);
 
+  useEffect(() => {
+    void boost.fetchSystemMemory();
+  }, [boost.fetchSystemMemory]);
+
+  useEffect(() => {
+    const intervalMs = boost.isCleaningRam ? 250 : 1000;
+    const id = setInterval(() => {
+      void boost.fetchSystemMemory();
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [boost.fetchSystemMemory, boost.isCleaningRam]);
+
   // Apply: persist draft to settings + backend
   const applyChanges = useCallback(() => {
     if (windowValidationError) {
@@ -230,6 +251,19 @@ export function BoostTab() {
     boost,
     windowValidationError,
   ]);
+
+  const restartAsAdmin = useCallback(async () => {
+    try {
+      setRestartAdminState("restarting");
+      setRestartAdminError(null);
+      await systemRestartAsAdmin();
+    } catch (e) {
+      const message = String(e);
+      setRestartAdminState("error");
+      setRestartAdminError(message);
+      await notify("Restart canceled", "Could not restart as Administrator.");
+    }
+  }, []);
 
   // Restart & Apply: close Roblox, apply, relaunch
   const restartAndApply = useCallback(async () => {
@@ -303,6 +337,20 @@ export function BoostTab() {
       {boost.error && (
         <p className="text-xs text-status-error">{boost.error}</p>
       )}
+
+      <RamCleanerCard
+        systemMem={boost.systemMem}
+        isCleaning={boost.isCleaningRam}
+        stage={boost.ramCleanStage}
+        trimmedCount={boost.ramCleanTrimmedCount}
+        currentProcess={boost.ramCleanCurrentProcess}
+        result={boost.ramCleanResult}
+        isAdmin={boost.isAdmin}
+        restartState={restartAdminState}
+        restartError={restartAdminError}
+        onRestartAsAdmin={() => void restartAsAdmin()}
+        onClean={() => void boost.cleanRam()}
+      />
 
       {/* ── Profile Selector ── */}
       <Section title="Profile">
@@ -613,6 +661,202 @@ export function BoostTab() {
 }
 
 // ── Sub-components ──
+
+function formatGbFromMb(mb: number): string {
+  if (!Number.isFinite(mb) || mb <= 0) return "0.0";
+  return (mb / 1024).toFixed(1);
+}
+
+function formatDeltaMb(delta: number): string {
+  if (!Number.isFinite(delta)) return "0 MB";
+  const sign = delta >= 0 ? "+" : "-";
+  return `${sign}${Math.abs(Math.round(delta))} MB`;
+}
+
+function deepCleanLabel(
+  standby: { attempted: boolean; success: boolean; skipped_reason: string | null },
+): string {
+  if (standby.success) return "Success";
+  const reason = standby.skipped_reason ? ` (${standby.skipped_reason})` : "";
+  if (!standby.attempted) return `Skipped${reason}`;
+  return `Failed${reason}`;
+}
+
+function RamCleanerCard({
+  systemMem,
+  isCleaning,
+  stage,
+  trimmedCount,
+  currentProcess,
+  result,
+  isAdmin,
+  restartState,
+  restartError,
+  onRestartAsAdmin,
+  onClean,
+}: {
+  systemMem: {
+    total_mb: number;
+    used_mb: number;
+    available_mb: number;
+    load_pct: number;
+  } | null;
+  isCleaning: boolean;
+  stage: string | null;
+  trimmedCount: number;
+  currentProcess: string | null;
+  result: {
+    before: {
+      total_mb: number;
+      used_mb: number;
+      available_mb: number;
+      load_pct: number;
+    };
+    after: {
+      total_mb: number;
+      used_mb: number;
+      available_mb: number;
+      load_pct: number;
+    };
+    trimmed_count: number;
+    standby_purge: {
+      attempted: boolean;
+      success: boolean;
+      skipped_reason: string | null;
+    };
+    duration_ms: number;
+    warnings: string[];
+  } | null;
+  isAdmin: boolean;
+  restartState: "idle" | "restarting" | "error";
+  restartError: string | null;
+  onRestartAsAdmin: () => void;
+  onClean: () => void;
+}) {
+  const totalMb = systemMem?.total_mb ?? 0;
+  const usedMb = systemMem?.used_mb ?? 0;
+  const availableMb = systemMem?.available_mb ?? 0;
+  const percent =
+    totalMb > 0 ? Math.max(0, Math.min(100, (usedMb / totalMb) * 100)) : 0;
+
+  const deltaAvailableMb = result
+    ? result.after.available_mb - result.before.available_mb
+    : null;
+
+  return (
+    <div className="rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-4 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-col">
+          <div className="text-sm font-medium text-text-primary">
+            RAM Cleaner
+          </div>
+          <div className="mt-0.5 text-xs text-text-muted">
+            Frees memory by trimming background apps. Deep clean runs when Administrator.
+          </div>
+        </div>
+        <button
+          onClick={onClean}
+          disabled={isCleaning}
+          className="rounded-[var(--radius-button)] px-5 py-2 text-xs font-semibold text-white transition-all disabled:opacity-60"
+          style={{
+            background: "linear-gradient(145deg, #3c82f6, #5a9fff)",
+            boxShadow: "0 2px 8px rgba(60,130,246,0.25)",
+          }}
+        >
+          {isCleaning ? "Cleaning\u2026" : "Clean RAM"}
+        </button>
+      </div>
+
+      <div className="mt-4 flex flex-col gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
+          <span>
+            Used:{" "}
+            <span className="font-mono text-text-primary">
+              {formatGbFromMb(usedMb)} GB / {formatGbFromMb(totalMb)} GB
+            </span>
+          </span>
+          <span>
+            Available:{" "}
+            <span className="font-mono text-text-primary">
+              {formatGbFromMb(availableMb)} GB
+            </span>
+          </span>
+        </div>
+
+        <div className="h-2 w-full overflow-hidden rounded-full bg-bg-elevated">
+          <div
+            className="h-full rounded-full"
+            style={{
+              width: `${percent}%`,
+              background: "linear-gradient(90deg, #3c82f6, #22c55e)",
+            }}
+          />
+        </div>
+
+        {isCleaning && (
+          <div className="text-xs text-text-muted">
+            {stage ? `Stage: ${stage}` : "Cleaning\u2026"}{" "}
+            {trimmedCount > 0 ? `• Trimmed: ${trimmedCount}` : ""}
+            {currentProcess ? ` • ${currentProcess}` : ""}
+          </div>
+        )}
+
+        {!isAdmin && (
+          <div className="text-xs text-text-muted">
+            Deep clean requires Administrator.{" "}
+            <button
+              type="button"
+              onClick={onRestartAsAdmin}
+              disabled={restartState === "restarting"}
+              className="rounded px-1.5 py-0.5 font-semibold text-accent-secondary hover:underline disabled:opacity-60"
+            >
+              {restartState === "restarting"
+                ? "Restarting\u2026"
+                : "Restart as Admin"}
+            </button>
+            {restartState === "error" && restartError && (
+              <div className="mt-1 text-xs text-status-error">
+                {restartError}
+              </div>
+            )}
+          </div>
+        )}
+
+        {result && (
+          <div className="mt-2 rounded-[var(--radius-card)] border border-border-subtle bg-bg-elevated px-3 py-2 text-xs text-text-muted">
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              <span>
+                Freed (approx):{" "}
+                <span className="font-mono text-text-primary">
+                  {deltaAvailableMb !== null
+                    ? formatDeltaMb(deltaAvailableMb)
+                    : "+0 MB"}
+                </span>
+              </span>
+              <span>
+                Trimmed:{" "}
+                <span className="font-mono text-text-primary">
+                  {result.trimmed_count}
+                </span>
+              </span>
+              <span>
+                Deep clean:{" "}
+                <span className="font-mono text-text-primary">
+                  {deepCleanLabel(result.standby_purge)}
+                </span>
+              </span>
+            </div>
+            {result.warnings.length > 0 && (
+              <div className="mt-1 text-[11px] text-status-warning">
+                Warnings: {result.warnings.length}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function Section({
   title,
