@@ -38,6 +38,8 @@ pub struct SystemMemorySnapshotResponse {
     pub used_mb: u64,
     pub available_mb: u64,
     pub load_pct: u8,
+    pub standby_mb: Option<u64>,
+    pub modified_mb: Option<u64>,
 }
 
 impl From<swifttunnel_core::ram_cleaner::SystemMemorySnapshot> for SystemMemorySnapshotResponse {
@@ -47,6 +49,8 @@ impl From<swifttunnel_core::ram_cleaner::SystemMemorySnapshot> for SystemMemoryS
             used_mb: value.used_mb,
             available_mb: value.available_mb,
             load_pct: value.load_pct,
+            standby_mb: value.standby_mb,
+            modified_mb: value.modified_mb,
         }
     }
 }
@@ -69,11 +73,32 @@ impl From<swifttunnel_core::ram_cleaner::StandbyPurgeResult> for StandbyPurgeRes
 }
 
 #[derive(Clone, Serialize)]
+pub struct ModifiedFlushResultResponse {
+    pub attempted: bool,
+    pub success: bool,
+    pub skipped_reason: Option<String>,
+}
+
+impl From<swifttunnel_core::ram_cleaner::ModifiedFlushResult> for ModifiedFlushResultResponse {
+    fn from(value: swifttunnel_core::ram_cleaner::ModifiedFlushResult) -> Self {
+        Self {
+            attempted: value.attempted,
+            success: value.success,
+            skipped_reason: value.skipped_reason,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
 pub struct RamCleanResultResponse {
     pub before: SystemMemorySnapshotResponse,
     pub after: SystemMemorySnapshotResponse,
     pub trimmed_count: u32,
     pub standby_purge: StandbyPurgeResultResponse,
+    pub modified_flush: ModifiedFlushResultResponse,
+    pub freed_mb: i64,
+    pub standby_freed_mb: Option<i64>,
+    pub modified_freed_mb: Option<i64>,
     pub duration_ms: u64,
     pub warnings: Vec<String>,
 }
@@ -85,6 +110,10 @@ impl From<swifttunnel_core::ram_cleaner::RamCleanResult> for RamCleanResultRespo
             after: value.after.into(),
             trimmed_count: value.trimmed_count,
             standby_purge: value.standby_purge.into(),
+            modified_flush: value.modified_flush.into(),
+            freed_mb: value.freed_mb,
+            standby_freed_mb: value.standby_freed_mb,
+            modified_freed_mb: value.modified_freed_mb,
             duration_ms: value.duration_ms,
             warnings: value.warnings,
         }
@@ -198,6 +227,8 @@ pub async fn boost_clean_ram(
                         used_mb: snapshot.used_mb,
                         available_mb: snapshot.available_mb,
                         load_pct: snapshot.load_pct,
+                        standby_mb: snapshot.standby_mb,
+                        modified_mb: snapshot.modified_mb,
                         trimmed_count: trimmed,
                         current_process: current,
                         warning,

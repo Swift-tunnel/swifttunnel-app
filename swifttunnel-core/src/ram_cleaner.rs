@@ -10,6 +10,21 @@ pub struct SystemMemorySnapshot {
     pub available_mb: u64,
     pub used_mb: u64,
     pub load_pct: u8,
+    pub standby_mb: Option<u64>,
+    pub modified_mb: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MemoryListStats {
+    pub standby_mb: u64,
+    pub modified_mb: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModifiedFlushResult {
+    pub attempted: bool,
+    pub success: bool,
+    pub skipped_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,6 +40,10 @@ pub struct RamCleanResult {
     pub after: SystemMemorySnapshot,
     pub trimmed_count: u32,
     pub standby_purge: StandbyPurgeResult,
+    pub modified_flush: ModifiedFlushResult,
+    pub freed_mb: i64,
+    pub standby_freed_mb: Option<i64>,
+    pub modified_freed_mb: Option<i64>,
     pub duration_ms: u64,
     pub warnings: Vec<String>,
 }
@@ -37,11 +56,12 @@ struct ProcessSample {
     cpu_usage: f32,
 }
 
-const MIN_PROCESS_BYTES: u64 = 200 * 1024 * 1024;
-const MAX_TRIM_PROCESSES: usize = 20;
-const MAX_CPU_PERCENT: f32 = 2.0;
+const MIN_PROCESS_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_TRIM_PROCESSES: usize = 40;
+const MAX_CPU_PERCENT: f32 = 5.0;
 
 const DENYLIST_NAMES_LOWER: &[&str] = &[
+    // System critical
     "system",
     "registry",
     "idle",
@@ -59,6 +79,29 @@ const DENYLIST_NAMES_LOWER: &[&str] = &[
     "taskhostw.exe",
     "conhost.exe",
     "msmpeng.exe",
+    // SwiftTunnel itself
+    "swifttunnel.exe",
+    "swifttunnel-desktop.exe",
+    // Roblox
+    "robloxplayerbeta.exe",
+    "robloxplayer.exe",
+    "windows10universal.exe",
+    "robloxplayerlauncher.exe",
+    "robloxstudiobeta.exe",
+    "robloxstudio.exe",
+    "robloxstudiolauncherbeta.exe",
+    "robloxstudiolauncher.exe",
+    // Valorant
+    "valorant-win64-shipping.exe",
+    "valorant.exe",
+    "riotclientservices.exe",
+    "riotclientux.exe",
+    "riotclientuxrender.exe",
+    // Fortnite
+    "fortniteclient-win64-shipping.exe",
+    "fortnitelauncher.exe",
+    "epicgameslauncher.exe",
+    "epicwebhelper.exe",
 ];
 
 fn select_trim_candidates(
@@ -97,6 +140,18 @@ pub fn get_system_memory_snapshot() -> Result<SystemMemorySnapshot> {
     #[cfg(not(windows))]
     {
         Err(anyhow::anyhow!("RAM cleaner is only supported on Windows"))
+    }
+}
+
+pub fn get_memory_list_stats() -> Option<MemoryListStats> {
+    #[cfg(windows)]
+    {
+        windows_impl::query_memory_lists()
+    }
+
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
@@ -143,10 +198,57 @@ mod windows_impl {
             SystemInformation: *const c_void,
             SystemInformationLength: u32,
         ) -> i32;
+
+        fn NtQuerySystemInformation(
+            SystemInformationClass: u32,
+            SystemInformation: *mut c_void,
+            SystemInformationLength: u32,
+            ReturnLength: *mut u32,
+        ) -> i32;
     }
 
     const SYSTEM_MEMORY_LIST_INFORMATION: u32 = 80;
     const MEMORY_PURGE_STANDBY_LIST: u32 = 4;
+    const MEMORY_FLUSH_MODIFIED_LIST: u32 = 3;
+
+    /// Matches Windows `SYSTEM_MEMORY_LIST_INFORMATION` (class 80).
+    /// 27 usize fields on x64.
+    #[repr(C)]
+    struct SystemMemoryListInfo {
+        _zeroed_page_count: usize,
+        _free_page_count: usize,
+        modified_page_count: usize,
+        _modified_no_write_page_count: usize,
+        _bad_page_count: usize,
+        page_count_by_priority: [usize; 8],
+        _repurposed_page_by_priority: [usize; 8],
+        _modified_page_count_page_file: usize,
+    }
+
+    pub(super) fn query_memory_lists() -> Option<MemoryListStats> {
+        unsafe {
+            let mut info: SystemMemoryListInfo = std::mem::zeroed();
+            let mut return_length: u32 = 0;
+            let status = NtQuerySystemInformation(
+                SYSTEM_MEMORY_LIST_INFORMATION,
+                &mut info as *mut _ as *mut c_void,
+                std::mem::size_of::<SystemMemoryListInfo>() as u32,
+                &mut return_length,
+            );
+            if status != 0 {
+                return None;
+            }
+
+            let page_size: u64 = 4096;
+            let standby_pages: u64 = info.page_count_by_priority.iter().sum::<usize>() as u64;
+            let modified_pages: u64 = info.modified_page_count as u64;
+
+            Some(MemoryListStats {
+                standby_mb: standby_pages * page_size / 1_048_576,
+                modified_mb: modified_pages * page_size / 1_048_576,
+            })
+        }
+    }
 
     pub(super) fn get_system_memory_snapshot() -> Result<SystemMemorySnapshot> {
         unsafe {
@@ -159,11 +261,15 @@ mod windows_impl {
             let available_mb = status.ullAvailPhys / 1024 / 1024;
             let used_mb = total_mb.saturating_sub(available_mb);
 
+            let mem_lists = query_memory_lists();
+
             Ok(SystemMemorySnapshot {
                 total_mb,
                 available_mb,
                 used_mb,
                 load_pct: status.dwMemoryLoad as u8,
+                standby_mb: mem_lists.map(|s| s.standby_mb),
+                modified_mb: mem_lists.map(|s| s.modified_mb),
             })
         }
     }
@@ -190,6 +296,8 @@ mod windows_impl {
                     available_mb: 0,
                     used_mb: 0,
                     load_pct: 0,
+                    standby_mb: None,
+                    modified_mb: None,
                 }
             }
         }
@@ -307,6 +415,52 @@ mod windows_impl {
         }
     }
 
+    fn flush_modified_list() -> ModifiedFlushResult {
+        if !crate::is_administrator() {
+            return ModifiedFlushResult {
+                attempted: false,
+                success: false,
+                skipped_reason: Some("Requires Administrator".to_string()),
+            };
+        }
+
+        unsafe {
+            if let Err(e) = enable_privilege("SeIncreaseQuotaPrivilege") {
+                return ModifiedFlushResult {
+                    attempted: false,
+                    success: false,
+                    skipped_reason: Some(format!(
+                        "Could not enable SeIncreaseQuotaPrivilege: {}",
+                        e
+                    )),
+                };
+            }
+
+            let command: u32 = MEMORY_FLUSH_MODIFIED_LIST;
+            let status = NtSetSystemInformation(
+                SYSTEM_MEMORY_LIST_INFORMATION,
+                &command as *const u32 as *const c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+
+            if status == 0 {
+                ModifiedFlushResult {
+                    attempted: true,
+                    success: true,
+                    skipped_reason: None,
+                }
+            } else {
+                ModifiedFlushResult {
+                    attempted: true,
+                    success: false,
+                    skipped_reason: Some(format!(
+                        "NtSetSystemInformation failed (0x{status:08X})"
+                    )),
+                }
+            }
+        }
+    }
+
     pub(super) fn clean_ram<F>(exclude_pids: &[u32], on_progress: &mut F) -> Result<RamCleanResult>
     where
         F: FnMut(&str, SystemMemorySnapshot, u32, Option<String>, Option<String>),
@@ -353,8 +507,20 @@ mod windows_impl {
             }
         }
 
+        // Phase 2: Flush modified page list (converts dirty pages to standby)
         let snap = snapshot_or_warn(&mut warnings);
-        on_progress("standby_purge", snap, trimmed_count, None, None);
+        on_progress("flushing_modified", snap, trimmed_count, None, None);
+
+        let modified_flush = flush_modified_list();
+        if !modified_flush.success {
+            if let Some(reason) = modified_flush.skipped_reason.clone() {
+                warnings.push(format!("Modified flush: {}", reason));
+            }
+        }
+
+        // Phase 3: Purge standby list (reclaims all standby pages including newly flushed)
+        let pre_standby = snapshot_or_warn(&mut warnings);
+        on_progress("standby_purge", pre_standby, trimmed_count, None, None);
 
         let standby_purge = purge_standby_list();
         if !standby_purge.success {
@@ -366,11 +532,26 @@ mod windows_impl {
         let after = snapshot_or_warn(&mut warnings);
         on_progress("done", after, trimmed_count, None, None);
 
+        // Compute freed deltas
+        let freed_mb = after.available_mb as i64 - before.available_mb as i64;
+        let standby_freed_mb = match (before.standby_mb, after.standby_mb) {
+            (Some(b), Some(a)) => Some(b as i64 - a as i64),
+            _ => None,
+        };
+        let modified_freed_mb = match (before.modified_mb, after.modified_mb) {
+            (Some(b), Some(a)) => Some(b as i64 - a as i64),
+            _ => None,
+        };
+
         Ok(RamCleanResult {
             before,
             after,
             trimmed_count,
             standby_purge,
+            modified_flush,
+            freed_mb,
+            standby_freed_mb,
+            modified_freed_mb,
             duration_ms: started.elapsed().as_millis() as u64,
             warnings,
         })
@@ -418,7 +599,7 @@ mod tests {
     fn select_candidates_skips_busy_processes() {
         let processes = vec![
             proc(10, "chrome.exe", 900, 10.0),
-            proc(11, "discord.exe", 700, 1.0),
+            proc(11, "discord.exe", 700, 4.0),
         ];
         let exclude = HashSet::new();
         let selected = select_trim_candidates(processes, &exclude);
@@ -429,15 +610,75 @@ mod tests {
     #[test]
     fn select_candidates_applies_memory_threshold_and_caps_max() {
         let mut processes = Vec::new();
-        processes.push(proc(1, "small.exe", 199, 0.0));
-        for i in 0..25 {
-            processes.push(proc(100 + i, &format!("p{i}.exe"), 200 + i as u64, 0.0));
+        // Below 50MB threshold - should be excluded
+        processes.push(proc(1, "small.exe", 49, 0.0));
+        for i in 0..45 {
+            processes.push(proc(100 + i, &format!("p{i}.exe"), 50 + i as u64, 0.0));
         }
         let exclude = HashSet::new();
         let selected = select_trim_candidates(processes, &exclude);
         assert_eq!(selected.len(), MAX_TRIM_PROCESSES);
         assert!(selected.iter().all(|p| p.memory_bytes >= MIN_PROCESS_BYTES));
-        // Highest memory first (200+24)
-        assert_eq!(selected[0].pid, 124);
+        // Highest memory first (50+44)
+        assert_eq!(selected[0].pid, 144);
+    }
+
+    #[test]
+    fn select_candidates_excludes_game_processes() {
+        let processes = vec![
+            proc(10, "RobloxPlayerBeta.exe", 800, 0.0),
+            proc(11, "valorant-win64-shipping.exe", 900, 0.0),
+            proc(12, "FortniteClient-Win64-Shipping.exe", 700, 0.0),
+            proc(13, "Chrome.exe", 600, 0.0),
+        ];
+        let exclude = HashSet::new();
+        let selected = select_trim_candidates(processes, &exclude);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].pid, 13);
+    }
+
+    #[test]
+    fn select_candidates_excludes_swifttunnel_processes() {
+        let processes = vec![
+            proc(10, "swifttunnel.exe", 500, 0.0),
+            proc(11, "SwiftTunnel-Desktop.exe", 300, 0.0),
+            proc(12, "Chrome.exe", 600, 0.0),
+        ];
+        let exclude = HashSet::new();
+        let selected = select_trim_candidates(processes, &exclude);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].pid, 12);
+    }
+
+    #[test]
+    fn memory_list_stats_default() {
+        let stats = MemoryListStats::default();
+        assert_eq!(stats.standby_mb, 0);
+        assert_eq!(stats.modified_mb, 0);
+    }
+
+    #[test]
+    fn system_memory_snapshot_optional_fields() {
+        let snap = SystemMemorySnapshot {
+            total_mb: 16000,
+            available_mb: 8000,
+            used_mb: 8000,
+            load_pct: 50,
+            standby_mb: Some(2048),
+            modified_mb: Some(512),
+        };
+        assert_eq!(snap.standby_mb, Some(2048));
+        assert_eq!(snap.modified_mb, Some(512));
+
+        let snap_none = SystemMemorySnapshot {
+            total_mb: 16000,
+            available_mb: 8000,
+            used_mb: 8000,
+            load_pct: 50,
+            standby_mb: None,
+            modified_mb: None,
+        };
+        assert_eq!(snap_none.standby_mb, None);
+        assert_eq!(snap_none.modified_mb, None);
     }
 }

@@ -201,6 +201,8 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       used_mb: used,
       available_mb: available,
       load_pct: loadPct,
+      standby_mb: Math.floor(available * 0.4),
+      modified_mb: Math.floor(used * 0.05),
     };
   },
 
@@ -211,6 +213,8 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       used_mb: number;
       available_mb: number;
       load_pct: number;
+      standby_mb: number | null;
+      modified_mb: number | null;
     };
 
     await new Promise((r) => setTimeout(r, 900));
@@ -222,13 +226,26 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       used_mb: number;
       available_mb: number;
       load_pct: number;
+      standby_mb: number | null;
+      modified_mb: number | null;
     };
+
+    const standbyFreed = before.standby_mb != null && after.standby_mb != null
+      ? before.standby_mb - after.standby_mb
+      : null;
+    const modifiedFreed = before.modified_mb != null && after.modified_mb != null
+      ? before.modified_mb - after.modified_mb
+      : null;
 
     return {
       before,
       after,
       trimmed_count: 12,
       standby_purge: { attempted: true, success: true, skipped_reason: null },
+      modified_flush: { attempted: true, success: true, skipped_reason: null },
+      freed_mb: freedMb,
+      standby_freed_mb: standbyFreed,
+      modified_freed_mb: modifiedFreed,
       duration_ms: 1100,
       warnings: [],
     };

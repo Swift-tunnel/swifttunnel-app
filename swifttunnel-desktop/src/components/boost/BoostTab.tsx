@@ -12,6 +12,8 @@ import type {
   NetworkConfig,
   RobloxSettingsConfig,
   OptimizationProfile,
+  SystemMemorySnapshot,
+  RamCleanResultResponse,
 } from "../../lib/types";
 
 // ── Profile presets ──
@@ -854,50 +856,14 @@ function RamCleanerHero({
   onRestartAsAdmin,
   onClean,
 }: {
-  systemMem: {
-    total_mb: number;
-    used_mb: number;
-    available_mb: number;
-    load_pct: number;
-  } | null;
+  systemMem: SystemMemorySnapshot | null;
   isCleaning: boolean;
   stage: string | null;
   trimmedCount: number;
   currentProcess: string | null;
-  result: {
-    before: {
-      total_mb: number;
-      used_mb: number;
-      available_mb: number;
-      load_pct: number;
-    };
-    after: {
-      total_mb: number;
-      used_mb: number;
-      available_mb: number;
-      load_pct: number;
-    };
-    trimmed_count: number;
-    standby_purge: {
-      attempted: boolean;
-      success: boolean;
-      skipped_reason: string | null;
-    };
-    duration_ms: number;
-    warnings: string[];
-  } | null;
-  startSnapshot: {
-    total_mb: number;
-    used_mb: number;
-    available_mb: number;
-    load_pct: number;
-  } | null;
-  doneSnapshot: {
-    total_mb: number;
-    used_mb: number;
-    available_mb: number;
-    load_pct: number;
-  } | null;
+  result: RamCleanResultResponse | null;
+  startSnapshot: SystemMemorySnapshot | null;
+  doneSnapshot: SystemMemorySnapshot | null;
   isAdmin: boolean;
   restartState: "idle" | "restarting" | "error";
   restartError: string | null;
@@ -998,6 +964,22 @@ function RamCleanerHero({
                 {formatGbFromMb(availableMb)} GB
               </span>
             </div>
+            {systemMem?.standby_mb != null && (
+              <>
+                <div
+                  className="mb-0.5 h-4 w-px"
+                  style={{ backgroundColor: "var(--color-border-subtle)" }}
+                />
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
+                    Standby
+                  </span>
+                  <span className="font-mono text-text-primary">
+                    {formatGbFromMb(systemMem.standby_mb)} GB
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1012,7 +994,13 @@ function RamCleanerHero({
                 style={{ backgroundColor: "var(--color-accent-primary)" }}
               />
               <span>
-                {stage ? `${stage}` : "Cleaning\u2026"}
+                {stage === "flushing_modified"
+                  ? "Flushing modified pages\u2026"
+                  : stage === "standby_purge"
+                    ? "Purging standby list\u2026"
+                    : stage
+                      ? `${stage}`
+                      : "Cleaning\u2026"}
                 {trimmedCount > 0 ? ` \u00B7 Trimmed: ${trimmedCount}` : ""}
                 {currentProcess ? ` \u00B7 ${currentProcess}` : ""}
               </span>
@@ -1051,19 +1039,25 @@ function RamCleanerHero({
                 <span>
                   Freed{" "}
                   <span className="font-mono font-medium text-text-primary">
-                    {freedAvailableMb !== null
-                      ? formatDeltaMb(freedAvailableMb)
-                      : "+0 MB"}
+                    {formatDeltaMb(result.freed_mb)}
                   </span>
                 </span>
-                <span>
-                  Net{" "}
-                  <span className="font-mono font-medium text-text-primary">
-                    {deltaAvailableMb !== null
-                      ? formatDeltaMb(deltaAvailableMb)
-                      : "+0 MB"}
+                {result.standby_freed_mb != null && (
+                  <span>
+                    Standby{" "}
+                    <span className="font-mono font-medium text-text-primary">
+                      {formatDeltaMb(result.standby_freed_mb)}
+                    </span>
                   </span>
-                </span>
+                )}
+                {result.modified_freed_mb != null && (
+                  <span>
+                    Modified{" "}
+                    <span className="font-mono font-medium text-text-primary">
+                      {formatDeltaMb(result.modified_freed_mb)}
+                    </span>
+                  </span>
+                )}
                 <span>
                   Trimmed{" "}
                   <span className="font-mono font-medium text-text-primary">
