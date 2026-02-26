@@ -26,6 +26,7 @@ pub use utils::hidden_command;
 pub use utils::is_administrator;
 pub use utils::load_pending_connection;
 pub use utils::pending_connection_path;
+pub use utils::quote_windows_arg;
 pub use utils::relaunch_elevated;
 pub use utils::relaunch_elevated_with_args;
 pub use utils::rotate_log_if_needed;

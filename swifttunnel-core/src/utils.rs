@@ -325,6 +325,44 @@ pub fn relaunch_elevated() -> std::io::Result<()> {
     ))
 }
 
+/// Quote a single argument for Windows command-line parsing.
+///
+/// Produces a string that round-trips through `CommandLineToArgvW`:
+/// - Args without special characters are returned as-is.
+/// - Args with spaces, tabs, or quotes are wrapped in `"..."` with
+///   backslashes and quotes escaped per the 2n/2n+1 rule.
+pub fn quote_windows_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.to_owned();
+    }
+
+    let mut out = String::from('"');
+    let mut backslashes: usize = 0;
+
+    for ch in arg.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                // 2n+1 backslashes before a quote → n literal backslashes + literal quote
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                // Backslashes not before a quote are literal
+                out.extend(std::iter::repeat_n('\\', backslashes));
+                backslashes = 0;
+                out.push(ch);
+            }
+        }
+    }
+
+    // Trailing backslashes must be doubled before the closing quote
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
+    out
+}
+
 /// Relaunch the current process elevated, preserving command-line arguments
 ///
 /// Unlike `relaunch_elevated()` which hardcodes `--resume-connect`, this
@@ -341,9 +379,13 @@ pub fn relaunch_elevated_with_args() -> std::io::Result<()> {
     let exe_path = std::env::current_exe()?;
     let exe_path_str = exe_path.to_string_lossy();
 
-    // Collect current args (skip argv[0] which is the exe itself)
+    // Collect and properly quote each argument for CommandLineToArgvW
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args_joined = args.join(" ");
+    let args_joined = args
+        .iter()
+        .map(|a| quote_windows_arg(a))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
     let file: Vec<u16> = OsStr::new(&*exe_path_str)
@@ -593,15 +635,59 @@ mod tests {
         let _result: bool = is_administrator();
     }
 
+    // Avoid calling relaunch_elevated_with_args() directly in tests —
+    // on Windows it invokes ShellExecuteW("runas") which can trigger UAC.
+    // Instead we verify the function is linked and test the quoting helper.
+
+    #[cfg(not(windows))]
     #[test]
-    fn test_relaunch_elevated_with_args_returns_result() {
-        // On non-Windows (CI), this returns Unsupported.
-        // On Windows non-elevated, it would attempt ShellExecuteW.
-        // We just verify the function is callable and doesn't panic.
+    fn test_relaunch_elevated_with_args_returns_unsupported() {
         let result = relaunch_elevated_with_args();
-        #[cfg(not(windows))]
         assert!(result.is_err());
-        #[cfg(windows)]
-        let _ = result; // May succeed or fail depending on elevation context
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_relaunch_elevated_with_args_is_linked() {
+        // Verify the symbol exists without invoking it
+        let _f: fn() -> std::io::Result<()> = relaunch_elevated_with_args;
+    }
+
+    #[test]
+    fn test_quote_windows_arg_simple_flag() {
+        assert_eq!(quote_windows_arg("--startup"), "--startup");
+    }
+
+    #[test]
+    fn test_quote_windows_arg_with_spaces() {
+        assert_eq!(
+            quote_windows_arg("C:\\Users\\A B\\config.json"),
+            "\"C:\\Users\\A B\\config.json\""
+        );
+    }
+
+    #[test]
+    fn test_quote_windows_arg_with_quotes() {
+        // Inner quote must be escaped as \"
+        assert_eq!(quote_windows_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
+    }
+
+    #[test]
+    fn test_quote_windows_arg_trailing_backslashes() {
+        // Trailing backslashes before closing quote must be doubled
+        assert_eq!(
+            quote_windows_arg("path with trailing\\\\"),
+            "\"path with trailing\\\\\\\\\""
+        );
+    }
+
+    #[test]
+    fn test_quote_windows_arg_empty() {
+        assert_eq!(quote_windows_arg(""), "\"\"");
+    }
+
+    #[test]
+    fn test_quote_windows_arg_no_special_chars() {
+        assert_eq!(quote_windows_arg("--resume-connect"), "--resume-connect");
     }
 }
