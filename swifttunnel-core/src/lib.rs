@@ -27,6 +27,7 @@ pub use utils::is_administrator;
 pub use utils::load_pending_connection;
 pub use utils::pending_connection_path;
 pub use utils::relaunch_elevated;
+pub use utils::relaunch_elevated_with_args;
 pub use utils::rotate_log_if_needed;
 pub use utils::save_pending_connection;
 pub use utils::with_retry;

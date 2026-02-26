@@ -325,6 +325,81 @@ pub fn relaunch_elevated() -> std::io::Result<()> {
     ))
 }
 
+/// Relaunch the current process elevated, preserving command-line arguments
+///
+/// Unlike `relaunch_elevated()` which hardcodes `--resume-connect`, this
+/// passes through whatever arguments the current process was started with
+/// (e.g. `--startup`). Used by the admin gate in `main()`.
+#[cfg(windows)]
+pub fn relaunch_elevated_with_args() -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+
+    let exe_path = std::env::current_exe()?;
+    let exe_path_str = exe_path.to_string_lossy();
+
+    // Collect current args (skip argv[0] which is the exe itself)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args_joined = args.join(" ");
+
+    let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = OsStr::new(&*exe_path_str)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let params: Vec<u16> = OsStr::new(&args_joined)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+
+    log::info!(
+        "Relaunching elevated with args: {} {}",
+        exe_path_str,
+        args_joined
+    );
+
+    unsafe {
+        let result = ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+
+        let result_int = result.0 as isize;
+        if result_int > 32 {
+            log::info!("Elevated process launched successfully");
+            Ok(())
+        } else {
+            let error = match result_int {
+                0 => "Out of memory",
+                2 => "File not found",
+                3 => "Path not found",
+                5 => "Access denied (UAC cancelled?)",
+                _ => "Unknown error",
+            };
+            log::error!("ShellExecuteW failed: {} (code {})", error, result_int);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Failed to elevate: {} (code {})", error, result_int),
+            ))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn relaunch_elevated_with_args() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Elevation not supported on this platform",
+    ))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  RETRY UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -510,5 +585,23 @@ mod tests {
             guid.as_deref(),
             Some("12345678-1234-1234-1234-1234567890ab")
         );
+    }
+
+    #[test]
+    fn test_is_administrator_returns_bool() {
+        // Just verify it returns without panicking on any platform
+        let _result: bool = is_administrator();
+    }
+
+    #[test]
+    fn test_relaunch_elevated_with_args_returns_result() {
+        // On non-Windows (CI), this returns Unsupported.
+        // On Windows non-elevated, it would attempt ShellExecuteW.
+        // We just verify the function is callable and doesn't panic.
+        let result = relaunch_elevated_with_args();
+        #[cfg(not(windows))]
+        assert!(result.is_err());
+        #[cfg(windows)]
+        let _ = result; // May succeed or fail depending on elevation context
     }
 }
