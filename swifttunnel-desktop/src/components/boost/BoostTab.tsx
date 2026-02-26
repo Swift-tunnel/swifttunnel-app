@@ -451,8 +451,6 @@ export function BoostTab() {
         trimmedCount={boost.ramCleanTrimmedCount}
         currentProcess={boost.ramCleanCurrentProcess}
         result={boost.ramCleanResult}
-        startSnapshot={boost.ramCleanStartSnapshot}
-        doneSnapshot={boost.ramCleanDoneSnapshot}
         isAdmin={boost.isAdmin}
         restartState={restartAdminState}
         restartError={restartAdminError}
@@ -848,8 +846,6 @@ function RamCleanerHero({
   trimmedCount,
   currentProcess,
   result,
-  startSnapshot,
-  doneSnapshot,
   isAdmin,
   restartState,
   restartError,
@@ -862,8 +858,6 @@ function RamCleanerHero({
   trimmedCount: number;
   currentProcess: string | null;
   result: RamCleanResultResponse | null;
-  startSnapshot: SystemMemorySnapshot | null;
-  doneSnapshot: SystemMemorySnapshot | null;
   isAdmin: boolean;
   restartState: "idle" | "restarting" | "error";
   restartError: string | null;
