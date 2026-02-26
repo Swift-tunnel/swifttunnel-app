@@ -876,13 +876,6 @@ function RamCleanerHero({
   const percent =
     totalMb > 0 ? Math.max(0, Math.min(100, (usedMb / totalMb) * 100)) : 0;
 
-  const runStart = startSnapshot ?? result?.before ?? null;
-  const runDone = doneSnapshot ?? result?.after ?? null;
-  const deltaAvailableMb =
-    runStart && runDone ? runDone.available_mb - runStart.available_mb : null;
-  const freedAvailableMb =
-    deltaAvailableMb !== null ? Math.max(0, deltaAvailableMb) : null;
-
   const color = memColor(percent);
   const showBottom = isCleaning || !isAdmin || result;
 
