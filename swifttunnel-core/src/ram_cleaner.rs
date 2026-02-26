@@ -453,9 +453,7 @@ mod windows_impl {
                 ModifiedFlushResult {
                     attempted: true,
                     success: false,
-                    skipped_reason: Some(format!(
-                        "NtSetSystemInformation failed (0x{status:08X})"
-                    )),
+                    skipped_reason: Some(format!("NtSetSystemInformation failed (0x{status:08X})")),
                 }
             }
         }
