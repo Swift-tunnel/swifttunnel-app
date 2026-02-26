@@ -16,10 +16,30 @@ import type {
 
 // ── Profile presets ──
 
-const PROFILES: { id: OptimizationProfile; name: string; desc: string; icon: string }[] = [
-  { id: "LowEnd", name: "Performance", desc: "Max FPS, lowest quality", icon: "\u26A1" },
-  { id: "Balanced", name: "Balanced", desc: "Good FPS, decent visuals", icon: "\u2696\uFE0F" },
-  { id: "HighEnd", name: "Quality", desc: "Best visuals, stable perf", icon: "\u2728" },
+const PROFILES: {
+  id: OptimizationProfile;
+  name: string;
+  desc: string;
+  icon: string;
+}[] = [
+  {
+    id: "LowEnd",
+    name: "Performance",
+    desc: "Max FPS, lowest quality",
+    icon: "\u26A1",
+  },
+  {
+    id: "Balanced",
+    name: "Balanced",
+    desc: "Good FPS, decent visuals",
+    icon: "\u2696\uFE0F",
+  },
+  {
+    id: "HighEnd",
+    name: "Quality",
+    desc: "Best visuals, stable perf",
+    icon: "\u2728",
+  },
 ];
 
 const MIN_WINDOW_WIDTH = 800;
@@ -153,9 +173,64 @@ function validateWindowDimension(
   return null;
 }
 
-export function parseWindowDimensionInput(value: string, fallback: number): number {
+export function parseWindowDimensionInput(
+  value: string,
+  fallback: number,
+): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function countActive(...flags: boolean[]): number {
+  return flags.filter(Boolean).length;
+}
+
+function formatGbFromMb(mb: number): string {
+  if (!Number.isFinite(mb) || mb <= 0) return "0.0";
+  return (mb / 1024).toFixed(1);
+}
+
+function formatDeltaMb(delta: number): string {
+  if (!Number.isFinite(delta)) return "0 MB";
+  const sign = delta >= 0 ? "+" : "-";
+  return `${sign}${Math.abs(Math.round(delta))} MB`;
+}
+
+function deepCleanLabel(standby: {
+  attempted: boolean;
+  success: boolean;
+  skipped_reason: string | null;
+}): string {
+  if (standby.success) return "Success";
+  const reason = standby.skipped_reason ? ` (${standby.skipped_reason})` : "";
+  if (!standby.attempted) return `Skipped${reason}`;
+  return `Failed${reason}`;
+}
+
+function memColor(percent: number): string {
+  if (percent > 85) return "#f05a5a";
+  if (percent > 65) return "#f5b428";
+  return "#28d296";
+}
+
+// ── SVG helpers ──
+
+function polarToCartesian(cx: number, cy: number, r: number, deg: number) {
+  const rad = ((deg - 90) * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function arcPath(
+  cx: number,
+  cy: number,
+  r: number,
+  startDeg: number,
+  endDeg: number,
+): string {
+  const s = polarToCartesian(cx, cy, r, startDeg);
+  const e = polarToCartesian(cx, cy, r, endDeg);
+  const large = endDeg - startDeg > 180 ? 1 : 0;
+  return `M ${s.x} ${s.y} A ${r} ${r} 0 ${large} 1 ${e.x} ${e.y}`;
 }
 
 // ── Component ──
@@ -178,7 +253,6 @@ export function BoostTab() {
   const savedConfig = settings.config;
   const [draft, setDraft] = useState<Config>(savedConfig);
 
-  // Sync draft when saved config changes externally (e.g. settings loaded)
   useEffect(() => {
     setDraft(savedConfig);
   }, [savedConfig]);
@@ -229,7 +303,6 @@ export function BoostTab() {
     return () => clearInterval(id);
   }, [boost.fetchSystemMemory, boost.isCleaningRam]);
 
-  // Apply: persist draft to settings + backend
   const applyChanges = useCallback(() => {
     if (windowValidationError) {
       return;
@@ -265,7 +338,6 @@ export function BoostTab() {
     }
   }, []);
 
-  // Restart & Apply: close Roblox, apply, relaunch
   const restartAndApply = useCallback(async () => {
     if (windowValidationError) {
       return;
@@ -291,13 +363,11 @@ export function BoostTab() {
     windowValidationError,
   ]);
 
-  // Discard: reset draft to saved
   const discardChanges = useCallback(() => {
     setDraft(savedConfig);
     setDraftGameProcessPerformance(savedGameProcessPerformance);
   }, [savedConfig, savedGameProcessPerformance]);
 
-  // Draft mutators (no persistence, just local state)
   function selectProfile(id: OptimizationProfile) {
     setDraft(getPresetConfig(id, draft));
   }
@@ -332,13 +402,47 @@ export function BoostTab() {
     setDraftGameProcessPerformance((prev) => ({ ...prev, ...partial }));
   }
 
+  // Active counts per section
+  const robloxActive = countActive(
+    draft.roblox_settings.unlock_fps,
+    draft.roblox_settings.ultraboost,
+    draft.roblox_settings.window_fullscreen,
+  );
+  const systemActive = countActive(
+    draft.system_optimization.set_high_priority,
+    draft.system_optimization.timer_resolution_1ms,
+    draft.system_optimization.mmcss_gaming_profile,
+    draft.system_optimization.game_mode_enabled,
+  );
+  const processActive = countActive(
+    draftGameProcessPerformance.high_performance_gpu_binding,
+    draftGameProcessPerformance.prefer_performance_cores,
+    draftGameProcessPerformance.unbind_cpu0,
+  );
+  const networkActive = countActive(
+    draft.network_settings.disable_nagle,
+    draft.network_settings.disable_network_throttling,
+    draft.network_settings.optimize_mtu,
+    draft.network_settings.gaming_qos,
+  );
+
   return (
-    <div className="flex flex-col gap-6 pb-16">
+    <div className="mx-auto flex max-w-[660px] flex-col gap-4 pb-16">
       {boost.error && (
-        <p className="text-xs text-status-error">{boost.error}</p>
+        <div
+          className="rounded-lg px-4 py-2 text-xs"
+          style={{
+            backgroundColor: "var(--color-status-error-soft-10)",
+            color: "var(--color-status-error)",
+            border: "1px solid var(--color-status-error-soft-20)",
+          }}
+        >
+          {boost.error}
+        </div>
       )}
 
-      <RamCleanerCard
+      {/* ── RAM Cleaner ── */}
+      <RamCleanerHero
         systemMem={boost.systemMem}
         isCleaning={boost.isCleaningRam}
         stage={boost.ramCleanStage}
@@ -355,43 +459,43 @@ export function BoostTab() {
       />
 
       {/* ── Profile Selector ── */}
-      <Section title="Profile">
-        <div className="grid grid-cols-3 gap-2">
+      <div>
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-dimmed">
+          Profile
+        </div>
+        <div className="flex gap-1 rounded-xl border border-border-subtle bg-bg-card p-1">
           {PROFILES.map((p) => {
             const sel = draft.profile === p.id;
             return (
               <button
                 key={p.id}
                 onClick={() => selectProfile(p.id)}
-                className="rounded-[var(--radius-card)] border p-4 text-left transition-all"
+                className="flex-1 rounded-lg px-3 py-2.5 text-center text-[13px] font-medium transition-all duration-200"
                 style={{
-                  backgroundColor: sel
-                    ? "var(--color-accent-primary-soft-8)"
-                    : "var(--color-bg-card)",
-                  borderColor: sel
-                    ? "var(--color-accent-primary)"
-                    : "var(--color-border-subtle)",
+                  background: sel
+                    ? "linear-gradient(145deg, var(--color-accent-primary), var(--color-accent-cyan))"
+                    : "transparent",
+                  color: sel ? "#fff" : "var(--color-text-muted)",
+                  boxShadow: sel
+                    ? "0 2px 10px rgba(60,130,246,0.25)"
+                    : "none",
                 }}
               >
-                <div className="flex items-center gap-2 text-sm font-medium text-text-primary">
-                  <span>{p.icon}</span>
-                  {p.name}
-                </div>
-                <div className="mt-0.5 text-xs text-text-muted">{p.desc}</div>
+                {p.icon} {p.name}
               </button>
             );
           })}
         </div>
         {draft.profile === "Custom" && (
-          <p className="mt-2 text-xs text-text-muted">
-            Custom configuration — individual settings below
+          <p className="mt-2 text-[11px] text-text-dimmed">
+            Custom — individual settings below
           </p>
         )}
-      </Section>
+      </div>
 
-      {/* ── Roblox Settings ── */}
-      <Section title="Roblox">
-        <BoostCard
+      {/* ── Roblox ── */}
+      <OptGroup title="Roblox" active={robloxActive} total={3} accent="#82dc3c">
+        <OptRow
           title="Unlock FPS"
           desc="Remove 60 FPS cap"
           impact="Uncapped FPS"
@@ -400,42 +504,13 @@ export function BoostTab() {
         />
 
         {draft.roblox_settings.unlock_fps && (
-          <div className="rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-4 py-3">
-            <div className="flex items-center justify-between">
-              <label
-                htmlFor="target-fps-slider"
-                className="text-sm text-text-primary"
-              >
-                Target FPS
-              </label>
-              <span className="font-mono text-sm text-accent-secondary">
-                {draft.roblox_settings.target_fps >= 99999
-                  ? "Uncapped"
-                  : draft.roblox_settings.target_fps}
-              </span>
-            </div>
-            <input
-              id="target-fps-slider"
-              type="range"
-              aria-label="Target FPS"
-              min={30}
-              max={1010}
-              step={10}
-              value={
-                draft.roblox_settings.target_fps >= 99999
-                  ? 1010
-                  : draft.roblox_settings.target_fps
-              }
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                updateRblxOpt({ target_fps: v >= 1010 ? 99999 : v });
-              }}
-              className="mt-2 w-full accent-accent-primary"
-            />
-          </div>
+          <FpsSlider
+            value={draft.roblox_settings.target_fps}
+            onChange={(v) => updateRblxOpt({ target_fps: v })}
+          />
         )}
 
-        <BoostCard
+        <OptRow
           title="Ultraboost"
           desc="All allowlisted performance FFlags for max FPS"
           impact="+20-40% FPS"
@@ -443,101 +518,82 @@ export function BoostTab() {
           onChange={(v) => updateRblxOpt({ ultraboost: v })}
         />
 
-        <div className="rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-4 py-3">
-          <div className="mb-2 text-sm font-medium text-text-primary">
-            Window Resolution
-          </div>
-          <p className="mb-3 text-xs text-text-muted">
-            Sets Roblox launch window size in pixels.
-          </p>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-text-muted">Width</span>
-              <input
-                type="number"
-                min={MIN_WINDOW_WIDTH}
-                max={MAX_WINDOW_WIDTH}
-                step={2}
-                value={draft.roblox_settings.window_width}
-                onChange={(e) =>
-                  updateRblxOpt({
-                    window_width: parseWindowDimensionInput(
-                      e.target.value,
-                      MIN_WINDOW_WIDTH,
-                    ),
-                  })}
-                className="rounded-[var(--radius-input)] border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-text-muted">Height</span>
-              <input
-                type="number"
-                min={MIN_WINDOW_HEIGHT}
-                max={MAX_WINDOW_HEIGHT}
-                step={2}
-                value={draft.roblox_settings.window_height}
-                onChange={(e) =>
-                  updateRblxOpt({
-                    window_height: parseWindowDimensionInput(
-                      e.target.value,
-                      MIN_WINDOW_HEIGHT,
-                    ),
-                  })}
-                className="rounded-[var(--radius-input)] border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
-              />
-            </label>
-          </div>
-          {windowValidationError && (
-            <p className="mt-2 text-xs text-status-error">{windowValidationError}</p>
-          )}
-        </div>
+        <ResolutionRow
+          width={draft.roblox_settings.window_width}
+          height={draft.roblox_settings.window_height}
+          onWidthChange={(w) =>
+            updateRblxOpt({
+              window_width: parseWindowDimensionInput(
+                String(w),
+                MIN_WINDOW_WIDTH,
+              ),
+            })
+          }
+          onHeightChange={(h) =>
+            updateRblxOpt({
+              window_height: parseWindowDimensionInput(
+                String(h),
+                MIN_WINDOW_HEIGHT,
+              ),
+            })
+          }
+          error={windowValidationError}
+        />
 
-        <BoostCard
+        <OptRow
           title="Launch Fullscreen"
           desc="Set Roblox fullscreen default"
           impact="Display mode"
           enabled={draft.roblox_settings.window_fullscreen}
           onChange={(v) => updateRblxOpt({ window_fullscreen: v })}
         />
-      </Section>
+      </OptGroup>
 
-      
-{/* ── System Optimizations ── */}
-      <Section title="System Optimizations">
-        <BoostCard
+      {/* ── System ── */}
+      <OptGroup
+        title="System"
+        active={systemActive}
+        total={4}
+        accent="#3c82f6"
+      >
+        <OptRow
           title="High Priority Mode"
           desc="Boost game process priority"
           impact="+5-15 FPS"
           enabled={draft.system_optimization.set_high_priority}
           onChange={(v) => updateSysOpt({ set_high_priority: v })}
         />
-        <BoostCard
+        <OptRow
           title="0.5ms Timer Resolution"
           desc="Max precision frame pacing"
           impact="Smoother frames"
           enabled={draft.system_optimization.timer_resolution_1ms}
           onChange={(v) => updateSysOpt({ timer_resolution_1ms: v })}
         />
-        <BoostCard
+        <OptRow
           title="MMCSS Gaming Profile"
           desc="Better thread scheduling"
           impact="Stable frame times"
           enabled={draft.system_optimization.mmcss_gaming_profile}
           onChange={(v) => updateSysOpt({ mmcss_gaming_profile: v })}
         />
-        <BoostCard
+        <OptRow
           title="Windows Game Mode"
           desc="System resource prioritization"
           impact="Consistent perf"
           enabled={draft.system_optimization.game_mode_enabled}
           onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
         />
-      </Section>
+      </OptGroup>
 
-      {/* ── Game Process Scheduling ── */}
-      <Section title="Game Process Scheduling">
-        <BoostCard
+      {/* ── Process Scheduling ── */}
+      <OptGroup
+        title="Process Scheduling"
+        active={processActive}
+        total={3}
+        accent="#9664ff"
+      >
+        <OptRow
           title="High-Performance GPU Binding"
           desc="Bind target game executables to high-performance GPU while connected"
           impact="Stability"
@@ -546,7 +602,7 @@ export function BoostTab() {
             updateGameProcessPerformance({ high_performance_gpu_binding: v })
           }
         />
-        <BoostCard
+        <OptRow
           title="Prefer Performance Cores"
           desc="Use CPU Sets to steer target games to P-cores on hybrid CPUs"
           impact="Frame Time"
@@ -555,32 +611,37 @@ export function BoostTab() {
             updateGameProcessPerformance({ prefer_performance_cores: v })
           }
         />
-        <BoostCard
+        <OptRow
           title="Unbind CPU0"
           desc="Exclude logical CPU 0 for target games when enough cores are available"
           impact="Stability"
           enabled={draftGameProcessPerformance.unbind_cpu0}
           onChange={(v) => updateGameProcessPerformance({ unbind_cpu0: v })}
         />
-      </Section>
+      </OptGroup>
 
-      {/* ── Network Optimizations ── */}
-      <Section title="Network Optimizations">
-        <BoostCard
+      {/* ── Network ── */}
+      <OptGroup
+        title="Network"
+        active={networkActive}
+        total={4}
+        accent="#3898ff"
+      >
+        <OptRow
           title="Disable Nagle's Algorithm"
           desc="Faster packet delivery"
           impact="-5-15ms"
           enabled={draft.network_settings.disable_nagle}
           onChange={(v) => updateNetOpt({ disable_nagle: v })}
         />
-        <BoostCard
+        <OptRow
           title="Disable Network Throttling"
           desc="Full bandwidth for games"
           impact="Less lag spikes"
           enabled={draft.network_settings.disable_network_throttling}
           onChange={(v) => updateNetOpt({ disable_network_throttling: v })}
         />
-        <BoostCard
+        <OptRow
           title="Optimize MTU"
           desc="Find best packet size"
           impact="Less fragmentation"
@@ -588,31 +649,32 @@ export function BoostTab() {
           enabled={draft.network_settings.optimize_mtu}
           onChange={(v) => updateNetOpt({ optimize_mtu: v })}
         />
-        <BoostCard
+        <OptRow
           title="Gaming QoS"
           desc="Prioritize Roblox + tunnel UDP"
           impact="-5-20ms"
           enabled={draft.network_settings.gaming_qos}
           onChange={(v) => updateNetOpt({ gaming_qos: v })}
         />
-      </Section>
+      </OptGroup>
 
       {/* ── Sticky Apply Bar ── */}
       <AnimatePresence>
         {hasChanges && (
           <motion.div
-            initial={{ opacity: 0, y: 20 }}
+            initial={{ opacity: 0, y: 24 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 20 }}
+            exit={{ opacity: 0, y: 24 }}
             transition={{ duration: 0.2, ease: "easeOut" }}
             className="fixed bottom-0 left-[var(--spacing-sidebar)] right-0 z-40 border-t px-6 py-3"
             style={{
-              backgroundColor: "var(--color-bg-sidebar)",
+              backgroundColor: "rgba(18, 18, 23, 0.88)",
               borderColor: "var(--color-border-subtle)",
-              backdropFilter: "blur(12px)",
+              backdropFilter: "blur(16px)",
+              WebkitBackdropFilter: "blur(16px)",
             }}
           >
-            <div className="mx-auto flex max-w-[640px] items-center justify-between">
+            <div className="mx-auto flex max-w-[660px] items-center justify-between">
               <span className="text-xs text-text-muted">
                 {windowValidationError
                   ? windowValidationError
@@ -624,7 +686,7 @@ export function BoostTab() {
                 <button
                   onClick={discardChanges}
                   disabled={isRestarting}
-                  className="rounded-[var(--radius-button)] px-4 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-bg-hover disabled:opacity-50"
+                  className="rounded-lg px-4 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-bg-hover disabled:opacity-50"
                 >
                   Discard
                 </button>
@@ -632,10 +694,11 @@ export function BoostTab() {
                   <button
                     onClick={() => void restartAndApply()}
                     disabled={isRestarting || Boolean(windowValidationError)}
-                    className="rounded-[var(--radius-button)] px-5 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-50"
+                    className="rounded-lg px-5 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-50"
                     style={{
-                      background: "linear-gradient(145deg, #3c82f6, #5a9fff)",
-                      boxShadow: "0 2px 8px rgba(60,130,246,0.25)",
+                      background:
+                        "linear-gradient(145deg, #3c82f6, #5a9fff)",
+                      boxShadow: "0 2px 10px rgba(60,130,246,0.3)",
                     }}
                   >
                     {isRestarting ? "Restarting\u2026" : "Restart & Apply"}
@@ -644,10 +707,11 @@ export function BoostTab() {
                   <button
                     onClick={applyChanges}
                     disabled={isRestarting || Boolean(windowValidationError)}
-                    className="rounded-[var(--radius-button)] px-5 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-50"
+                    className="rounded-lg px-5 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-50"
                     style={{
-                      background: "linear-gradient(145deg, #3c82f6, #5a9fff)",
-                      boxShadow: "0 2px 8px rgba(60,130,246,0.25)",
+                      background:
+                        "linear-gradient(145deg, #3c82f6, #5a9fff)",
+                      boxShadow: "0 2px 10px rgba(60,130,246,0.3)",
                     }}
                   >
                     Apply
@@ -664,27 +728,85 @@ export function BoostTab() {
 
 // ── Sub-components ──
 
-function formatGbFromMb(mb: number): string {
-  if (!Number.isFinite(mb) || mb <= 0) return "0.0";
-  return (mb / 1024).toFixed(1);
+function MemoryGauge({ percent }: { percent: number }) {
+  const cx = 48;
+  const cy = 44;
+  const r = 32;
+  const sw = 5.5;
+  const startAngle = 225;
+  const totalSweep = 270;
+  const endAngle = startAngle + totalSweep;
+  const filledSweep = Math.max(0.5, (percent / 100) * totalSweep);
+  const filledEnd = startAngle + filledSweep;
+  const color = memColor(percent);
+
+  const bgArc = arcPath(cx, cy, r, startAngle, endAngle);
+  const fillArc = arcPath(cx, cy, r, startAngle, filledEnd);
+
+  return (
+    <svg
+      width="96"
+      height="76"
+      viewBox="0 0 96 76"
+      className="shrink-0"
+      aria-label={`Memory usage: ${Math.round(percent)}%`}
+    >
+      <defs>
+        <filter id="gauge-glow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+      {/* Background track */}
+      <path
+        d={bgArc}
+        fill="none"
+        stroke="rgba(255,255,255,0.05)"
+        strokeWidth={sw}
+        strokeLinecap="round"
+      />
+      {/* Filled arc */}
+      <path
+        d={fillArc}
+        fill="none"
+        stroke={color}
+        strokeWidth={sw}
+        strokeLinecap="round"
+        filter="url(#gauge-glow)"
+        style={{ transition: "stroke 0.4s ease, d 0.5s ease-out" }}
+      />
+      {/* Percentage text */}
+      <text
+        x={cx}
+        y={cy + 1}
+        textAnchor="middle"
+        dominantBaseline="central"
+        fill="var(--color-text-primary)"
+        fontSize="18"
+        fontWeight="700"
+        fontFamily="'Cascadia Mono', Consolas, 'Courier New', monospace"
+      >
+        {Math.round(percent)}
+      </text>
+      <text
+        x={cx}
+        y={cy + 16}
+        textAnchor="middle"
+        dominantBaseline="central"
+        fill="var(--color-text-dimmed)"
+        fontSize="9"
+        fontWeight="500"
+      >
+        %
+      </text>
+    </svg>
+  );
 }
 
-function formatDeltaMb(delta: number): string {
-  if (!Number.isFinite(delta)) return "0 MB";
-  const sign = delta >= 0 ? "+" : "-";
-  return `${sign}${Math.abs(Math.round(delta))} MB`;
-}
-
-function deepCleanLabel(
-  standby: { attempted: boolean; success: boolean; skipped_reason: string | null },
-): string {
-  if (standby.success) return "Success";
-  const reason = standby.skipped_reason ? ` (${standby.skipped_reason})` : "";
-  if (!standby.attempted) return `Skipped${reason}`;
-  return `Failed${reason}`;
-}
-
-function RamCleanerCard({
+function RamCleanerHero({
   systemMem,
   isCleaning,
   stage,
@@ -762,147 +884,389 @@ function RamCleanerCard({
   const freedAvailableMb =
     deltaAvailableMb !== null ? Math.max(0, deltaAvailableMb) : null;
 
+  const color = memColor(percent);
+  const showBottom = isCleaning || !isAdmin || result;
+
   return (
-    <div className="rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-4 py-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex flex-col">
-          <div className="text-sm font-medium text-text-primary">
-            RAM Cleaner
-          </div>
-          <div className="mt-0.5 text-xs text-text-muted">
-            Frees memory by trimming background apps. Deep clean runs when Administrator.
-          </div>
-        </div>
-        <button
-          onClick={onClean}
-          disabled={isCleaning}
-          className="rounded-[var(--radius-button)] px-5 py-2 text-xs font-semibold text-white transition-all disabled:opacity-60"
-          style={{
-            background: "linear-gradient(145deg, #3c82f6, #5a9fff)",
-            boxShadow: "0 2px 8px rgba(60,130,246,0.25)",
-          }}
+    <div
+      className="overflow-hidden rounded-xl border border-border-subtle"
+      style={{
+        background: `linear-gradient(155deg, var(--color-bg-card) 60%, ${color}08 100%)`,
+      }}
+    >
+      {/* Top: gauge + info + button */}
+      <div className="flex items-start gap-5 px-5 pb-4 pt-5">
+        <motion.div
+          animate={isCleaning ? { scale: [1, 1.03, 1] } : {}}
+          transition={
+            isCleaning
+              ? { repeat: Number.POSITIVE_INFINITY, duration: 2, ease: "easeInOut" }
+              : {}
+          }
+          className="shrink-0"
         >
-          {isCleaning ? "Cleaning\u2026" : "Clean RAM"}
-        </button>
-      </div>
+          <MemoryGauge percent={percent} />
+        </motion.div>
 
-      <div className="mt-4 flex flex-col gap-2">
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
-          <span>
-            Used:{" "}
-            <span className="font-mono text-text-primary">
-              {formatGbFromMb(usedMb)} GB / {formatGbFromMb(totalMb)} GB
-            </span>
-          </span>
-          <span>
-            Available:{" "}
-            <span className="font-mono text-text-primary">
-              {formatGbFromMb(availableMb)} GB
-            </span>
-          </span>
-        </div>
-
-        <div className="h-2 w-full overflow-hidden rounded-full bg-bg-elevated">
-          <div
-            className="h-full rounded-full"
-            style={{
-              width: `${percent}%`,
-              background: "linear-gradient(90deg, #3c82f6, #22c55e)",
-            }}
-          />
-        </div>
-
-        {isCleaning && (
-          <div className="text-xs text-text-muted">
-            {stage ? `Stage: ${stage}` : "Cleaning\u2026"}{" "}
-            {trimmedCount > 0 ? `• Trimmed: ${trimmedCount}` : ""}
-            {currentProcess ? ` • ${currentProcess}` : ""}
-          </div>
-        )}
-
-        {!isAdmin && (
-          <div className="text-xs text-text-muted">
-            Deep clean requires Administrator.{" "}
-            <button
-              type="button"
-              onClick={onRestartAsAdmin}
-              disabled={restartState === "restarting"}
-              className="rounded px-1.5 py-0.5 font-semibold text-accent-secondary hover:underline disabled:opacity-60"
-            >
-              {restartState === "restarting"
-                ? "Restarting\u2026"
-                : "Restart as Admin"}
-            </button>
-            {restartState === "error" && restartError && (
-              <div className="mt-1 text-xs text-status-error">
-                {restartError}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-text-primary">
+                RAM Cleaner
               </div>
-            )}
+              <div className="mt-0.5 text-[11px] text-text-muted">
+                Frees memory by trimming background apps
+              </div>
+            </div>
+            <button
+              onClick={onClean}
+              disabled={isCleaning}
+              className="shrink-0 rounded-lg px-5 py-2 text-xs font-semibold text-white transition-all disabled:opacity-60"
+              style={{
+                background: "linear-gradient(145deg, #3c82f6, #5a9fff)",
+                boxShadow: "0 2px 8px rgba(60,130,246,0.25)",
+              }}
+            >
+              {isCleaning ? "Cleaning\u2026" : "Clean RAM"}
+            </button>
           </div>
-        )}
 
-        {result && (
-          <div className="mt-2 rounded-[var(--radius-card)] border border-border-subtle bg-bg-elevated px-3 py-2 text-xs text-text-muted">
-            <div className="flex flex-wrap gap-x-4 gap-y-1">
-              <span>
-                Freed (this run, approx):{" "}
-                <span className="font-mono text-text-primary">
-                  {freedAvailableMb !== null
-                    ? formatDeltaMb(freedAvailableMb)
-                    : "+0 MB"}
-                </span>
+          {/* Stats row */}
+          <div className="mt-4 flex items-end gap-5 text-xs">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
+                Used
               </span>
-              <span>
-                Net change (this run):{" "}
-                <span className="font-mono text-text-primary">
-                  {deltaAvailableMb !== null
-                    ? formatDeltaMb(deltaAvailableMb)
-                    : "+0 MB"}
-                </span>
-              </span>
-              <span>
-                Trimmed:{" "}
-                <span className="font-mono text-text-primary">
-                  {result.trimmed_count}
-                </span>
-              </span>
-              <span>
-                Deep clean:{" "}
-                <span className="font-mono text-text-primary">
-                  {deepCleanLabel(result.standby_purge)}
-                </span>
+              <span className="font-mono text-text-primary">
+                {formatGbFromMb(usedMb)} GB
               </span>
             </div>
-            {result.warnings.length > 0 && (
-              <div className="mt-1 text-[11px] text-status-warning">
-                Warnings: {result.warnings.length}
-              </div>
-            )}
+            <div
+              className="mb-0.5 h-4 w-px"
+              style={{ backgroundColor: "var(--color-border-subtle)" }}
+            />
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
+                Total
+              </span>
+              <span className="font-mono text-text-primary">
+                {formatGbFromMb(totalMb)} GB
+              </span>
+            </div>
+            <div
+              className="mb-0.5 h-4 w-px"
+              style={{ backgroundColor: "var(--color-border-subtle)" }}
+            />
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
+                Available
+              </span>
+              <span className="font-mono font-semibold" style={{ color }}>
+                {formatGbFromMb(availableMb)} GB
+              </span>
+            </div>
           </div>
-        )}
+        </div>
+      </div>
+
+      {/* Bottom: progress / admin / result */}
+      {showBottom && (
+        <div className="space-y-2 border-t border-border-subtle px-5 py-3">
+          {isCleaning && (
+            <div className="flex items-center gap-2 text-xs text-text-muted">
+              <div
+                className="h-1.5 w-1.5 animate-pulse rounded-full"
+                style={{ backgroundColor: "var(--color-accent-primary)" }}
+              />
+              <span>
+                {stage ? `${stage}` : "Cleaning\u2026"}
+                {trimmedCount > 0 ? ` \u00B7 Trimmed: ${trimmedCount}` : ""}
+                {currentProcess ? ` \u00B7 ${currentProcess}` : ""}
+              </span>
+            </div>
+          )}
+
+          {!isAdmin && (
+            <div className="text-xs text-text-muted">
+              Deep clean requires Administrator.{" "}
+              <button
+                type="button"
+                onClick={onRestartAsAdmin}
+                disabled={restartState === "restarting"}
+                className="rounded px-1.5 py-0.5 font-semibold text-accent-secondary hover:underline disabled:opacity-60"
+              >
+                {restartState === "restarting"
+                  ? "Restarting\u2026"
+                  : "Restart as Admin"}
+              </button>
+              {restartState === "error" && restartError && (
+                <div className="mt-1 text-xs text-status-error">
+                  {restartError}
+                </div>
+              )}
+            </div>
+          )}
+
+          {result && (
+            <div
+              className="rounded-lg px-3 py-2.5 text-xs text-text-muted"
+              style={{
+                backgroundColor: "var(--color-bg-elevated)",
+              }}
+            >
+              <div className="flex flex-wrap gap-x-5 gap-y-1">
+                <span>
+                  Freed{" "}
+                  <span className="font-mono font-medium text-text-primary">
+                    {freedAvailableMb !== null
+                      ? formatDeltaMb(freedAvailableMb)
+                      : "+0 MB"}
+                  </span>
+                </span>
+                <span>
+                  Net{" "}
+                  <span className="font-mono font-medium text-text-primary">
+                    {deltaAvailableMb !== null
+                      ? formatDeltaMb(deltaAvailableMb)
+                      : "+0 MB"}
+                  </span>
+                </span>
+                <span>
+                  Trimmed{" "}
+                  <span className="font-mono font-medium text-text-primary">
+                    {result.trimmed_count}
+                  </span>
+                </span>
+                <span>
+                  Deep clean{" "}
+                  <span className="font-mono font-medium text-text-primary">
+                    {deepCleanLabel(result.standby_purge)}
+                  </span>
+                </span>
+              </div>
+              {result.warnings.length > 0 && (
+                <div className="mt-1.5 text-[11px] text-status-warning">
+                  Warnings: {result.warnings.length}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FpsSlider({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  const isUncapped = value >= 99999;
+  const sliderValue = isUncapped ? 1000 : Math.min(value, 1000);
+  const sliderPercent = ((sliderValue - 30) / (1000 - 30)) * 100;
+
+  const [inputText, setInputText] = useState(isUncapped ? "" : String(value));
+
+  // Sync local input when parent value changes (e.g. profile switch)
+  useEffect(() => {
+    setInputText(isUncapped ? "" : String(value));
+  }, [value, isUncapped]);
+
+  function commitInput(raw: string) {
+    const v = Number.parseInt(raw, 10);
+    if (Number.isFinite(v) && v >= 30) {
+      onChange(Math.min(v, 9999));
+    }
+  }
+
+  return (
+    <div className="px-4 py-3">
+      <div className="mb-2.5 flex items-center justify-between">
+        <span className="text-xs text-text-muted">Target FPS</span>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number"
+            min={30}
+            max={9999}
+            value={inputText}
+            placeholder="MAX"
+            disabled={isUncapped}
+            onChange={(e) => {
+              setInputText(e.target.value);
+              const v = Number.parseInt(e.target.value, 10);
+              if (Number.isFinite(v) && v >= 30 && v <= 9999) {
+                onChange(v);
+              }
+            }}
+            onBlur={(e) => commitInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitInput(e.currentTarget.value);
+            }}
+            className="boost-input w-[72px] rounded-md border border-border-subtle bg-bg-elevated px-2 py-1 text-right font-mono text-sm font-semibold text-text-primary outline-none transition-colors focus:border-accent-primary disabled:opacity-40"
+          />
+          <button
+            type="button"
+            onClick={() => onChange(isUncapped ? 240 : 99999)}
+            className="rounded-md px-2 py-1 text-[10px] font-bold tracking-wide transition-all"
+            style={{
+              backgroundColor: isUncapped
+                ? "var(--color-accent-primary)"
+                : "var(--color-bg-elevated)",
+              color: isUncapped ? "#fff" : "var(--color-text-muted)",
+              boxShadow: isUncapped
+                ? "0 1px 6px rgba(60,130,246,0.3)"
+                : "none",
+            }}
+          >
+            MAX
+          </button>
+        </div>
+      </div>
+      <input
+        type="range"
+        aria-label="Target FPS slider"
+        min={30}
+        max={1000}
+        step={10}
+        value={sliderValue}
+        disabled={isUncapped}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          onChange(v);
+        }}
+        className="boost-slider w-full disabled:opacity-30"
+        style={{
+          background: isUncapped
+            ? "rgba(255,255,255,0.06)"
+            : `linear-gradient(to right, var(--color-accent-primary) 0%, var(--color-accent-primary) ${sliderPercent}%, rgba(255,255,255,0.06) ${sliderPercent}%, rgba(255,255,255,0.06) 100%)`,
+        }}
+      />
+      <div className="mt-1.5 flex justify-between text-[10px] text-text-dimmed">
+        <span>30</span>
+        <span>120</span>
+        <span>240</span>
+        <span>360</span>
+        <span>1000</span>
       </div>
     </div>
   );
 }
 
-function Section({
+function ResolutionRow({
+  width,
+  height,
+  onWidthChange,
+  onHeightChange,
+  error,
+}: {
+  width: number;
+  height: number;
+  onWidthChange: (v: number) => void;
+  onHeightChange: (v: number) => void;
+  error: string | null;
+}) {
+  return (
+    <div className="px-4 py-3">
+      <div className="mb-1 text-sm font-medium text-text-primary">
+        Window Resolution
+      </div>
+      <p className="mb-3 text-[11px] text-text-muted">
+        Sets Roblox launch window size in pixels.
+      </p>
+      <div className="flex items-center gap-2">
+        <label className="flex flex-1 flex-col gap-1">
+          <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
+            Width
+          </span>
+          <input
+            type="number"
+            min={MIN_WINDOW_WIDTH}
+            max={MAX_WINDOW_WIDTH}
+            step={2}
+            value={width}
+            onChange={(e) =>
+              onWidthChange(
+                parseWindowDimensionInput(e.target.value, MIN_WINDOW_WIDTH),
+              )
+            }
+            className="boost-input rounded-lg border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
+          />
+        </label>
+        <span className="mt-4 text-xs text-text-dimmed">\u00D7</span>
+        <label className="flex flex-1 flex-col gap-1">
+          <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
+            Height
+          </span>
+          <input
+            type="number"
+            min={MIN_WINDOW_HEIGHT}
+            max={MAX_WINDOW_HEIGHT}
+            step={2}
+            value={height}
+            onChange={(e) =>
+              onHeightChange(
+                parseWindowDimensionInput(e.target.value, MIN_WINDOW_HEIGHT),
+              )
+            }
+            className="boost-input rounded-lg border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
+          />
+        </label>
+      </div>
+      {error && (
+        <p className="mt-2 text-xs text-status-error">{error}</p>
+      )}
+    </div>
+  );
+}
+
+function OptGroup({
   title,
+  active,
+  total,
+  accent,
   children,
 }: {
   title: string;
+  active: number;
+  total: number;
+  accent: string;
   children: ReactNode;
 }) {
+  const allActive = active === total;
+
   return (
-    <section>
-      <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-text-muted">
-        {title}
-      </h3>
-      <div className="flex flex-col gap-2">{children}</div>
+    <section
+      className="overflow-hidden rounded-xl border border-border-subtle bg-bg-card"
+      style={{ borderTopColor: allActive ? accent : undefined, borderTopWidth: allActive ? 2 : undefined }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-2.5">
+        <span className="text-[11px] font-semibold uppercase tracking-widest text-text-dimmed">
+          {title}
+        </span>
+        <span
+          className="rounded-md px-2 py-0.5 font-mono text-[10px] font-medium"
+          style={{
+            backgroundColor:
+              active > 0 ? `${accent}15` : "var(--color-bg-elevated)",
+            color: active > 0 ? accent : "var(--color-text-dimmed)",
+          }}
+        >
+          {active}/{total}
+        </span>
+      </div>
+      {/* Rows */}
+      <div className="divide-y divide-border-subtle border-t border-border-subtle">
+        {children}
+      </div>
     </section>
   );
 }
 
-function BoostCard({
+function OptRow({
   title,
   desc,
   impact,
@@ -918,14 +1282,27 @@ function BoostCard({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <div className="flex items-center justify-between rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-4 py-3">
-      <div className="flex flex-col gap-0.5">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-text-primary">
+    <div
+      className="relative flex items-center justify-between px-4 py-3 transition-colors duration-200"
+      style={{
+        backgroundColor: enabled ? "rgba(60, 130, 246, 0.025)" : "transparent",
+      }}
+    >
+      {/* Active indicator bar */}
+      {enabled && (
+        <div
+          className="absolute bottom-2 left-0 top-2 w-[2px] rounded-r"
+          style={{ backgroundColor: "var(--color-accent-primary)" }}
+        />
+      )}
+
+      <div className="flex min-w-0 flex-col gap-0.5 pr-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[13px] font-medium text-text-primary">
             {title}
           </span>
           <span
-            className="rounded px-1.5 py-0.5 text-[10px]"
+            className="rounded px-1.5 py-0.5 text-[10px] font-medium"
             style={{
               backgroundColor: "var(--color-accent-lime-soft-10)",
               color: "var(--color-accent-lime)",
@@ -935,7 +1312,7 @@ function BoostCard({
           </span>
           {risk && (
             <span
-              className="rounded px-1.5 py-0.5 text-[10px]"
+              className="rounded px-1.5 py-0.5 text-[10px] font-medium"
               style={{
                 backgroundColor: "var(--color-status-warning-soft-10)",
                 color: "var(--color-status-warning)",
@@ -945,7 +1322,7 @@ function BoostCard({
             </span>
           )}
         </div>
-        <span className="text-xs text-text-muted">{desc}</span>
+        <span className="text-[11px] text-text-muted">{desc}</span>
       </div>
       <Toggle enabled={enabled} onChange={onChange} />
     </div>

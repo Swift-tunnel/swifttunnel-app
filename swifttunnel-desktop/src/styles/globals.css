@@ -64,7 +64,41 @@
   /* Radius */
   --radius-card: 10px;
   --radius-button: 8px;
+  --radius-input: 8px;
   --radius-sm: 6px;
+}
+
+/* Boost slider */
+.boost-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+.boost-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  transition: box-shadow 0.15s ease;
+}
+.boost-slider::-webkit-slider-thumb:hover {
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(60, 130, 246, 0.2);
+}
+
+/* Hide number input spinners */
+.boost-input {
+  -moz-appearance: textfield;
+}
+.boost-input::-webkit-inner-spin-button,
+.boost-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 body {
