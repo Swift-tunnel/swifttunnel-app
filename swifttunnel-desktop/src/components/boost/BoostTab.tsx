@@ -662,60 +662,93 @@ export function BoostTab() {
       <AnimatePresence>
         {hasChanges && (
           <motion.div
-            initial={{ opacity: 0, y: 24 }}
+            initial={{ opacity: 0, y: 32 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 24 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
-            className="fixed bottom-0 left-[var(--spacing-sidebar)] right-0 z-40 border-t px-6 py-3"
+            exit={{ opacity: 0, y: 32 }}
+            transition={{ type: "spring", damping: 22, stiffness: 300 }}
+            className="fixed bottom-0 left-[var(--spacing-sidebar)] right-0 z-40 px-6 py-4"
             style={{
-              backgroundColor: "rgba(18, 18, 23, 0.88)",
-              borderColor: "var(--color-border-subtle)",
-              backdropFilter: "blur(16px)",
-              WebkitBackdropFilter: "blur(16px)",
+              background:
+                "linear-gradient(to top, rgba(10, 10, 14, 0.97) 60%, rgba(10, 10, 14, 0.0))",
             }}
           >
-            <div className="mx-auto flex max-w-[660px] items-center justify-between">
-              <span className="text-xs text-text-muted">
-                {windowValidationError
-                  ? windowValidationError
-                  : hasRobloxChanges && boost.robloxRunning
-                    ? "Roblox must restart for changes to apply"
-                    : "Unsaved changes"}
-              </span>
+            <div
+              className="mx-auto flex max-w-[660px] items-center justify-between rounded-xl border px-5 py-3"
+              style={{
+                backgroundColor: "rgba(30, 30, 40, 0.95)",
+                borderColor: "rgba(60, 130, 246, 0.25)",
+                boxShadow:
+                  "0 0 20px rgba(60, 130, 246, 0.12), 0 4px 24px rgba(0, 0, 0, 0.4)",
+                backdropFilter: "blur(20px)",
+                WebkitBackdropFilter: "blur(20px)",
+              }}
+            >
+              <div className="flex items-center gap-2.5">
+                <motion.div
+                  animate={{ scale: [1, 1.3, 1] }}
+                  transition={{
+                    repeat: Number.POSITIVE_INFINITY,
+                    duration: 2,
+                    ease: "easeInOut",
+                  }}
+                  className="h-2 w-2 rounded-full"
+                  style={{
+                    backgroundColor: windowValidationError
+                      ? "var(--color-status-error)"
+                      : "var(--color-accent-primary)",
+                    boxShadow: windowValidationError
+                      ? "0 0 8px rgba(240, 90, 90, 0.5)"
+                      : "0 0 8px rgba(60, 130, 246, 0.5)",
+                  }}
+                />
+                <span className="text-xs font-medium text-text-secondary">
+                  {windowValidationError
+                    ? windowValidationError
+                    : hasRobloxChanges && boost.robloxRunning
+                      ? "Roblox must restart for changes to apply"
+                      : "Unsaved changes"}
+                </span>
+              </div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={discardChanges}
                   disabled={isRestarting}
-                  className="rounded-lg px-4 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-bg-hover disabled:opacity-50"
+                  className="rounded-lg border border-border-subtle px-4 py-2 text-xs font-medium text-text-secondary transition-all hover:border-border-hover hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
                 >
                   Discard
                 </button>
                 {hasRobloxChanges && boost.robloxRunning ? (
-                  <button
+                  <motion.button
+                    whileHover={{ scale: 1.03 }}
+                    whileTap={{ scale: 0.97 }}
                     onClick={() => void restartAndApply()}
                     disabled={isRestarting || Boolean(windowValidationError)}
-                    className="rounded-lg px-5 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-50"
+                    className="rounded-lg px-6 py-2 text-xs font-bold text-white transition-all disabled:opacity-50"
                     style={{
                       background:
-                        "linear-gradient(145deg, #3c82f6, #5a9fff)",
-                      boxShadow: "0 2px 10px rgba(60,130,246,0.3)",
+                        "linear-gradient(145deg, #3c82f6, #60a5ff)",
+                      boxShadow:
+                        "0 2px 12px rgba(60, 130, 246, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1)",
                     }}
                   >
                     {isRestarting ? "Restarting\u2026" : "Restart & Apply"}
-                  </button>
+                  </motion.button>
                 ) : (
-                  <button
+                  <motion.button
+                    whileHover={{ scale: 1.03 }}
+                    whileTap={{ scale: 0.97 }}
                     onClick={applyChanges}
                     disabled={isRestarting || Boolean(windowValidationError)}
-                    className="rounded-lg px-5 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-50"
+                    className="rounded-lg px-6 py-2 text-xs font-bold text-white transition-all disabled:opacity-50"
                     style={{
                       background:
-                        "linear-gradient(145deg, #3c82f6, #5a9fff)",
-                      boxShadow: "0 2px 10px rgba(60,130,246,0.3)",
+                        "linear-gradient(145deg, #3c82f6, #60a5ff)",
+                      boxShadow:
+                        "0 2px 12px rgba(60, 130, 246, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1)",
                     }}
                   >
                     Apply
-                  </button>
+                  </motion.button>
                 )}
               </div>
             </div>
