@@ -116,6 +116,28 @@ impl RobloxOptimizer {
         Self::find_settings_file(&roblox_dir)
     }
 
+    /// Proactively repair Roblox GlobalBasicSettings file permissions.
+    ///
+    /// Older versions of SwiftTunnel (and some user tweaks) could leave the
+    /// GlobalBasicSettings XML file marked read-only. Roblox needs to write to
+    /// this file during startup; if it's read-only, Roblox may show
+    /// "Failed to download or apply critical settings".
+    pub fn repair_global_basic_settings_permissions(&self) -> Result<()> {
+        let settings_path = self.resolve_settings_path();
+        if !settings_path.exists() {
+            return Ok(());
+        }
+
+        if Self::is_readonly_path(&settings_path) {
+            info!(
+                "Roblox GlobalBasicSettings is read-only. Removing attribute to prevent startup errors..."
+            );
+            Self::remove_readonly_path(&settings_path)?;
+        }
+
+        Ok(())
+    }
+
     /// Get the path to the settings file
     pub fn get_settings_path(&self) -> &PathBuf {
         &self.settings_path
@@ -1166,6 +1188,31 @@ mod tests {
             updated.contains(r#"<Vector2 name="StartScreenSize"><X>800</X><Y>602</Y></Vector2>"#)
         );
         assert!(updated.contains(r#"<bool name="Fullscreen">true</bool>"#));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn repair_global_basic_settings_permissions_removes_readonly() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("roblox_opt_test_repair_perms");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("settings.xml");
+        fs::write(&path, "<roblox></roblox>").unwrap();
+
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o444);
+        fs::set_permissions(&path, perms).unwrap();
+        assert!(fs::metadata(&path).unwrap().permissions().readonly());
+
+        let opt = optimizer_with_path(path.clone());
+        opt.repair_global_basic_settings_permissions().unwrap();
+
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
 
         let _ = fs::remove_dir_all(&dir);
     }

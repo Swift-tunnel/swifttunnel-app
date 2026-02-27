@@ -37,6 +37,10 @@ impl AppState {
         let mut settings = swifttunnel_core::settings::load_settings();
         let roblox_optimizer = RobloxOptimizer::new();
 
+        if let Err(e) = roblox_optimizer.repair_global_basic_settings_permissions() {
+            log::warn!("Failed to repair Roblox settings permissions: {}", e);
+        }
+
         if let Ok(current) = roblox_optimizer.read_current_settings() {
             settings.config.roblox_settings.window_fullscreen = current.fullscreen;
             if let Some((width, height)) = current.window_size {
