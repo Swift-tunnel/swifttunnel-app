@@ -128,9 +128,17 @@ export interface SystemMemorySnapshot {
   used_mb: number;
   available_mb: number;
   load_pct: number;
+  standby_mb: number | null;
+  modified_mb: number | null;
 }
 
 export interface StandbyPurgeResult {
+  attempted: boolean;
+  success: boolean;
+  skipped_reason: string | null;
+}
+
+export interface ModifiedFlushResult {
   attempted: boolean;
   success: boolean;
   skipped_reason: string | null;
@@ -141,6 +149,10 @@ export interface RamCleanResultResponse {
   after: SystemMemorySnapshot;
   trimmed_count: number;
   standby_purge: StandbyPurgeResult;
+  modified_flush: ModifiedFlushResult;
+  freed_mb: number;
+  standby_freed_mb: number | null;
+  modified_freed_mb: number | null;
   duration_ms: number;
   warnings: string[];
 }
@@ -350,6 +362,8 @@ export interface RamCleanProgressEvent {
   used_mb: number;
   available_mb: number;
   load_pct: number;
+  standby_mb: number | null;
+  modified_mb: number | null;
   trimmed_count: number;
   current_process: string | null;
   warning: string | null;

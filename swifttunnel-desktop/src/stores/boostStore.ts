@@ -199,6 +199,8 @@ export const useBoostStore = create<BoostStore>((set) => ({
         used_mb: event.used_mb,
         available_mb: event.available_mb,
         load_pct: event.load_pct,
+        standby_mb: event.standby_mb,
+        modified_mb: event.modified_mb,
       },
       ramCleanStage: event.stage,
       ramCleanTrimmedCount: event.trimmed_count,
@@ -210,6 +212,8 @@ export const useBoostStore = create<BoostStore>((set) => ({
               used_mb: event.used_mb,
               available_mb: event.available_mb,
               load_pct: event.load_pct,
+              standby_mb: event.standby_mb,
+              modified_mb: event.modified_mb,
             }
           : state.ramCleanStartSnapshot,
       ramCleanDoneSnapshot:
@@ -219,6 +223,8 @@ export const useBoostStore = create<BoostStore>((set) => ({
               used_mb: event.used_mb,
               available_mb: event.available_mb,
               load_pct: event.load_pct,
+              standby_mb: event.standby_mb,
+              modified_mb: event.modified_mb,
             }
           : state.ramCleanDoneSnapshot,
     }));

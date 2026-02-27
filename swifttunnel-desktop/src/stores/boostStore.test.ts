@@ -70,13 +70,19 @@ describe("stores/boostStore", () => {
       used_mb: 10000,
       available_mb: 6000,
       load_pct: 63,
+      standby_mb: null,
+      modified_mb: null,
     });
 
     const resp = {
-      before: { total_mb: 16000, used_mb: 10000, available_mb: 6000, load_pct: 63 },
-      after: { total_mb: 16000, used_mb: 9000, available_mb: 7000, load_pct: 56 },
+      before: { total_mb: 16000, used_mb: 10000, available_mb: 6000, load_pct: 63, standby_mb: null, modified_mb: null },
+      after: { total_mb: 16000, used_mb: 9000, available_mb: 7000, load_pct: 56, standby_mb: null, modified_mb: null },
       trimmed_count: 8,
       standby_purge: { attempted: true, success: true, skipped_reason: null },
+      modified_flush: { attempted: true, success: true, skipped_reason: null },
+      freed_mb: 1000,
+      standby_freed_mb: null,
+      modified_freed_mb: null,
       duration_ms: 900,
       warnings: [],
     };
@@ -109,6 +115,8 @@ describe("stores/boostStore", () => {
       used_mb: 10000,
       available_mb: 6000,
       load_pct: 63,
+      standby_mb: null,
+      modified_mb: null,
     });
     expect(useBoostStore.getState().ramCleanDoneSnapshot).toEqual(resp.after);
     expect(notify).not.toHaveBeenCalled();
@@ -120,6 +128,8 @@ describe("stores/boostStore", () => {
       used_mb: 10000,
       available_mb: 6000,
       load_pct: 63,
+      standby_mb: null,
+      modified_mb: null,
     });
     boostCleanRam.mockRejectedValue(new Error("boom"));
 
@@ -146,6 +156,8 @@ describe("stores/boostStore", () => {
       used_mb: 10000,
       available_mb: 6000,
       load_pct: 63,
+      standby_mb: 2048,
+      modified_mb: 512,
       trimmed_count: 0,
       current_process: null,
       warning: null,
@@ -156,6 +168,8 @@ describe("stores/boostStore", () => {
       used_mb: 10000,
       available_mb: 6000,
       load_pct: 63,
+      standby_mb: 2048,
+      modified_mb: 512,
     });
 
     useBoostStore.getState().handleRamCleanProgress({
@@ -164,6 +178,8 @@ describe("stores/boostStore", () => {
       used_mb: 9500,
       available_mb: 6500,
       load_pct: 59,
+      standby_mb: 2048,
+      modified_mb: 512,
       trimmed_count: 1,
       current_process: "chrome.exe",
       warning: null,
@@ -174,6 +190,8 @@ describe("stores/boostStore", () => {
       used_mb: 10000,
       available_mb: 6000,
       load_pct: 63,
+      standby_mb: 2048,
+      modified_mb: 512,
     });
 
     useBoostStore.getState().handleRamCleanProgress({
@@ -182,6 +200,8 @@ describe("stores/boostStore", () => {
       used_mb: 9000,
       available_mb: 7000,
       load_pct: 56,
+      standby_mb: 256,
+      modified_mb: 64,
       trimmed_count: 1,
       current_process: null,
       warning: null,
@@ -192,6 +212,8 @@ describe("stores/boostStore", () => {
       used_mb: 9000,
       available_mb: 7000,
       load_pct: 56,
+      standby_mb: 256,
+      modified_mb: 64,
     });
   });
 
@@ -204,6 +226,8 @@ describe("stores/boostStore", () => {
       used_mb: 11000,
       available_mb: 5000,
       load_pct: 69,
+      standby_mb: null,
+      modified_mb: null,
       trimmed_count: 3,
       current_process: "chrome.exe",
       warning: null,
@@ -214,9 +238,63 @@ describe("stores/boostStore", () => {
       used_mb: 11000,
       available_mb: 5000,
       load_pct: 69,
+      standby_mb: null,
+      modified_mb: null,
     });
     expect(useBoostStore.getState().ramCleanStage).toBe("trimming");
     expect(useBoostStore.getState().ramCleanTrimmedCount).toBe(3);
     expect(useBoostStore.getState().ramCleanCurrentProcess).toBe("chrome.exe");
+  });
+
+  it("progresses through flushing_modified stage", async () => {
+    const useBoostStore = await loadStore();
+
+    useBoostStore.getState().handleRamCleanProgress({
+      stage: "start",
+      total_mb: 16000,
+      used_mb: 10000,
+      available_mb: 6000,
+      load_pct: 63,
+      standby_mb: 2048,
+      modified_mb: 512,
+      trimmed_count: 0,
+      current_process: null,
+      warning: null,
+    });
+
+    useBoostStore.getState().handleRamCleanProgress({
+      stage: "flushing_modified",
+      total_mb: 16000,
+      used_mb: 9800,
+      available_mb: 6200,
+      load_pct: 61,
+      standby_mb: 2048,
+      modified_mb: 512,
+      trimmed_count: 5,
+      current_process: null,
+      warning: null,
+    });
+
+    expect(useBoostStore.getState().ramCleanStage).toBe("flushing_modified");
+    expect(useBoostStore.getState().systemMem?.standby_mb).toBe(2048);
+    expect(useBoostStore.getState().systemMem?.modified_mb).toBe(512);
+
+    useBoostStore.getState().handleRamCleanProgress({
+      stage: "standby_purge",
+      total_mb: 16000,
+      used_mb: 9800,
+      available_mb: 6200,
+      load_pct: 61,
+      standby_mb: 2560,
+      modified_mb: 64,
+      trimmed_count: 5,
+      current_process: null,
+      warning: null,
+    });
+
+    expect(useBoostStore.getState().ramCleanStage).toBe("standby_purge");
+    // Modified pages should have been flushed to standby
+    expect(useBoostStore.getState().systemMem?.modified_mb).toBe(64);
+    expect(useBoostStore.getState().systemMem?.standby_mb).toBe(2560);
   });
 });

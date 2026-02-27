@@ -53,6 +53,8 @@ pub struct RamCleanProgressEvent {
     pub used_mb: u64,
     pub available_mb: u64,
     pub load_pct: u8,
+    pub standby_mb: Option<u64>,
+    pub modified_mb: Option<u64>,
     pub trimmed_count: u32,
     pub current_process: Option<String>,
     pub warning: Option<String>,
