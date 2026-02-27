@@ -1193,10 +1193,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
     fn repair_global_basic_settings_permissions_removes_readonly() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = std::env::temp_dir().join("roblox_opt_test_repair_perms");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1204,15 +1201,28 @@ mod tests {
         let path = dir.join("settings.xml");
         fs::write(&path, "<roblox></roblox>").unwrap();
 
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o444);
-        fs::set_permissions(&path, perms).unwrap();
-        assert!(fs::metadata(&path).unwrap().permissions().readonly());
+        // Use the cross-platform set_readonly_path helper
+        RobloxOptimizer::set_readonly_path(&path).unwrap();
+        assert!(RobloxOptimizer::is_readonly_path(&path));
 
         let opt = optimizer_with_path(path.clone());
         opt.repair_global_basic_settings_permissions().unwrap();
 
-        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+        assert!(!RobloxOptimizer::is_readonly_path(&path));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repair_global_basic_settings_permissions_noop_when_missing() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_repair_noop");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("settings.xml");
+        // File doesn't exist — should return Ok(()) without error
+        let opt = optimizer_with_path(path);
+        opt.repair_global_basic_settings_permissions().unwrap();
 
         let _ = fs::remove_dir_all(&dir);
     }

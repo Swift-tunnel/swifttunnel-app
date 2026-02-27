@@ -246,6 +246,37 @@ describe("stores/boostStore", () => {
     expect(useBoostStore.getState().ramCleanCurrentProcess).toBe("chrome.exe");
   });
 
+  it("updateConfig resolves before restartRoblox can proceed (sequencing contract)", async () => {
+    // Verifies the async contract used by BoostTab.restartAndApply:
+    // updateConfig must fully resolve before restartRoblox is called.
+    const callOrder: string[] = [];
+
+    boostUpdateConfig.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => {
+            callOrder.push("updateConfig:resolved");
+            resolve(undefined);
+          }, 50),
+        ),
+    );
+    boostRestartRoblox.mockImplementation(async () => {
+      callOrder.push("restartRoblox:called");
+    });
+
+    const useBoostStore = await loadStore();
+    const store = useBoostStore.getState();
+
+    // Simulate the BoostTab.restartAndApply sequencing: await config, then restart
+    await store.updateConfig('{"test":true}');
+    await store.restartRoblox();
+
+    expect(callOrder).toEqual([
+      "updateConfig:resolved",
+      "restartRoblox:called",
+    ]);
+  });
+
   it("progresses through flushing_modified stage", async () => {
     const useBoostStore = await loadStore();
 
