@@ -305,7 +305,7 @@ export function BoostTab() {
     return () => clearInterval(id);
   }, [boost.fetchSystemMemory, boost.isCleaningRam]);
 
-  const applyChanges = useCallback(() => {
+  const applyChanges = useCallback(async () => {
     if (windowValidationError) {
       return;
     }
@@ -315,7 +315,7 @@ export function BoostTab() {
     });
     saveSettings();
     if (hasConfigChanges) {
-      void boost.updateConfig(JSON.stringify(draft));
+      await boost.updateConfig(JSON.stringify(draft));
     }
   }, [
     draft,
@@ -345,16 +345,19 @@ export function BoostTab() {
       return;
     }
     setIsRestarting(true);
-    updateSettings({
-      config: draft,
-      game_process_performance: draftGameProcessPerformance,
-    });
-    saveSettings();
-    if (hasConfigChanges) {
-      void boost.updateConfig(JSON.stringify(draft));
+    try {
+      updateSettings({
+        config: draft,
+        game_process_performance: draftGameProcessPerformance,
+      });
+      saveSettings();
+      if (hasConfigChanges) {
+        await boost.updateConfig(JSON.stringify(draft));
+      }
+      await boost.restartRoblox();
+    } finally {
+      setIsRestarting(false);
     }
-    await boost.restartRoblox();
-    setIsRestarting(false);
   }, [
     draft,
     draftGameProcessPerformance,
