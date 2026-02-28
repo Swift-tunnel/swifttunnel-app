@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn parse_response_nxdomain() {
         let mut resp = vec![0x00, 0x01, 0x81, 0x83]; // RCODE = 3 (NXDOMAIN)
-        resp.extend_from_slice(&[0x00, 0x00; 4]);
+        resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         assert!(parse_dns_response(&resp).is_err());
     }
 
@@ -403,11 +403,7 @@ mod tests {
         let resolver = DohResolver::new();
 
         // Insert an entry
-        resolver.insert_cache(
-            "test.com",
-            vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))],
-            300,
-        );
+        resolver.insert_cache("test.com", vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))], 300);
 
         // Cache hit
         let cached = resolver.check_cache("test.com");

@@ -43,8 +43,8 @@ fn hosts_path() -> PathBuf {
 pub fn apply_overrides() -> Result<(), String> {
     let path = hosts_path();
 
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read hosts file: {e}"))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read hosts file: {e}"))?;
 
     let clean = remove_marker_block(&content);
 
@@ -63,8 +63,7 @@ pub fn apply_overrides() -> Result<(), String> {
     }
     out.push_str(&block);
 
-    fs::write(&path, &out)
-        .map_err(|e| format!("Failed to write hosts file: {e}"))?;
+    fs::write(&path, &out).map_err(|e| format!("Failed to write hosts file: {e}"))?;
 
     info!(
         "Applied {} Roblox domain overrides to hosts file",
@@ -79,14 +78,13 @@ pub fn apply_overrides() -> Result<(), String> {
 pub fn remove_overrides() -> Result<(), String> {
     let path = hosts_path();
 
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read hosts file: {e}"))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read hosts file: {e}"))?;
 
     let clean = remove_marker_block(&content);
 
     if clean != content {
-        fs::write(&path, &clean)
-            .map_err(|e| format!("Failed to write hosts file: {e}"))?;
+        fs::write(&path, &clean).map_err(|e| format!("Failed to write hosts file: {e}"))?;
         info!("Removed Roblox proxy overrides from hosts file");
         flush_dns_cache();
     }
@@ -149,9 +147,7 @@ fn remove_marker_block(content: &str) -> String {
 
 /// Flush the Windows DNS resolver cache (`ipconfig /flushdns`).
 fn flush_dns_cache() {
-    let output = crate::hidden_command("ipconfig")
-        .arg("/flushdns")
-        .output();
+    let output = crate::hidden_command("ipconfig").arg("/flushdns").output();
 
     match output {
         Ok(o) if o.status.success() => debug!("DNS cache flushed"),

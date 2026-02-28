@@ -109,8 +109,9 @@ pub fn parse_sni(buf: &[u8]) -> Option<SniInfo> {
                 return None;
             }
 
-            let hostname =
-                std::str::from_utf8(&hs[name_start..name_start + name_len]).ok()?.to_string();
+            let hostname = std::str::from_utf8(&hs[name_start..name_start + name_len])
+                .ok()?
+                .to_string();
 
             // Absolute offset: 5 (TLS record header) + name_start (within handshake)
             let absolute_offset = 5 + name_start;
@@ -135,7 +136,10 @@ pub fn parse_http_host(buf: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(buf).ok()?;
 
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("Host:").or_else(|| line.strip_prefix("host:")) {
+        if let Some(rest) = line
+            .strip_prefix("Host:")
+            .or_else(|| line.strip_prefix("host:"))
+        {
             let host = rest.trim();
             // Strip port suffix (e.g., ":443")
             return Some(match host.rfind(':') {

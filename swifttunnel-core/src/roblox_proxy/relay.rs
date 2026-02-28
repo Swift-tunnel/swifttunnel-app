@@ -6,20 +6,20 @@
 //!
 //! No TLS termination — the relay operates at TCP level only.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::RobloxProxyError;
 use super::doh::DohResolver;
 use super::hosts;
 use super::sni_parser;
-use super::RobloxProxyError;
 
 const BIND_ADDR: &str = "127.66.0.1";
 
@@ -211,10 +211,7 @@ impl RobloxProxy {
         }
 
         self.state = ProxyState::Running;
-        info!(
-            "Roblox proxy started (SNI fragmentation: {})",
-            sni_fragment
-        );
+        info!("Roblox proxy started (SNI fragmentation: {})", sni_fragment);
         Ok(())
     }
 
