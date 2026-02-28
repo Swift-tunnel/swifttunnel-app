@@ -7,6 +7,7 @@ use swifttunnel_core::discord_rpc::DiscordManager;
 use swifttunnel_core::network_booster::NetworkBooster;
 use swifttunnel_core::performance_monitor::PerformanceMonitor;
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
+use swifttunnel_core::roblox_proxy::RobloxProxy;
 use swifttunnel_core::settings::AppSettings;
 use swifttunnel_core::system_optimizer::SystemOptimizer;
 use swifttunnel_core::vpn::connection::VpnConnection;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub roblox_optimizer: Arc<Mutex<RobloxOptimizer>>,
     pub network_booster: Arc<Mutex<NetworkBooster>>,
     pub discord_manager: Arc<Mutex<DiscordManager>>,
+    pub roblox_proxy: Arc<tokio::sync::Mutex<RobloxProxy>>,
     pub runtime: Arc<tokio::runtime::Runtime>,
 }
 
@@ -62,6 +64,7 @@ impl AppState {
             roblox_optimizer: Arc::new(Mutex::new(roblox_optimizer)),
             network_booster: Arc::new(Mutex::new(NetworkBooster::new())),
             discord_manager: Arc::new(Mutex::new(DiscordManager::new(enable_discord_rpc))),
+            roblox_proxy: Arc::new(tokio::sync::Mutex::new(RobloxProxy::new())),
             runtime,
         })
     }

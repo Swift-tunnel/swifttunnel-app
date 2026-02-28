@@ -166,6 +166,19 @@ pub struct AppSettings {
     /// All options are opt-in and default OFF.
     #[serde(default)]
     pub game_process_performance: GameProcessPerformanceSettings,
+
+    /// Route Roblox HTTPS through a local proxy to bypass restrictive networks.
+    ///
+    /// When enabled, Roblox domains are redirected to a local TCP relay that
+    /// resolves DNS via DoH and forwards traffic to the real servers.
+    #[serde(default)]
+    pub roblox_network_bypass: bool,
+
+    /// Fragment the TLS ClientHello to evade SNI-based deep packet inspection.
+    ///
+    /// Only effective when `roblox_network_bypass` is also enabled.
+    #[serde(default)]
+    pub roblox_network_bypass_sni_fragment: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,6 +268,8 @@ impl Default for AppSettings {
             preferred_physical_adapter_guid: None,
             adapter_binding_mode: AdapterBindingMode::SmartAuto,
             game_process_performance: GameProcessPerformanceSettings::default(),
+            roblox_network_bypass: false,
+            roblox_network_bypass_sni_fragment: false,
         }
     }
 }

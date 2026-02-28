@@ -21,6 +21,7 @@ import type {
   UpdaterCheckResponse,
   UpdaterInstallResponse,
   UpdateChannel,
+  ProxyStateResponse,
 } from "./types";
 
 // ── Auth ──
@@ -159,3 +160,11 @@ export const systemOpenUrl = (url: string) =>
 
 export const systemRestartAsAdmin = () =>
   invoke<void>("system_restart_as_admin");
+
+// ── Proxy ──
+
+export const proxyGetState = () =>
+  invoke<ProxyStateResponse>("proxy_get_state");
+
+export const proxyToggle = (enabled: boolean) =>
+  invoke<void>("proxy_toggle", { enabled });
