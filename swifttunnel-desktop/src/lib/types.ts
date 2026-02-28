@@ -369,6 +369,18 @@ export interface RamCleanProgressEvent {
   warning: string | null;
 }
 
+// ── Proxy ──
+
+export type ProxyState = "stopped" | "starting" | "running" | "error";
+
+export interface ProxyStateResponse {
+  state: ProxyState;
+  error: string | null;
+  active_connections: number;
+  total_connections: number;
+  bytes_relayed: number;
+}
+
 // ── Tabs ──
 
 export type TabId = "connect" | "boost" | "network" | "settings";
