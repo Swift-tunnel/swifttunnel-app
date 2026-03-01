@@ -1,3 +1,4 @@
+use crate::firewall_fixer::FirewallFixer;
 use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
@@ -41,6 +42,7 @@ pub struct NetworkBooster {
     qos_enabled: bool,
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
+    firewall_fixer: FirewallFixer,
 }
 
 impl NetworkBooster {
@@ -50,6 +52,7 @@ impl NetworkBooster {
             qos_enabled: false,
             nagle_registry_snapshot: HashMap::new(),
             network_throttling_snapshot: None,
+            firewall_fixer: FirewallFixer::new(),
         }
     }
 
@@ -107,6 +110,14 @@ impl NetworkBooster {
             }
         } else if let Err(e) = self.disable_gaming_qos() {
             warn!("Could not disable gaming QoS: {}", e);
+        }
+
+        if config.firewall_fix {
+            if let Err(e) = self.firewall_fixer.apply() {
+                warn!("Could not apply Roblox firewall fix: {}", e);
+            }
+        } else if let Err(e) = self.firewall_fixer.restore() {
+            warn!("Could not restore Roblox firewall rules: {}", e);
         }
 
         Ok(())
@@ -869,6 +880,9 @@ impl NetworkBooster {
         // Remove old QoS policy (legacy)
         let _ = self.remove_prioritize_game_traffic();
         let _ = self.disable_gaming_qos();
+
+        // Remove firewall rules
+        let _ = self.firewall_fixer.restore();
 
         Ok(())
     }
