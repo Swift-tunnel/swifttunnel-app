@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod discord_rpc;
+pub mod firewall_fixer;
 pub mod geolocation;
 pub mod network_analyzer;
 pub mod network_booster;

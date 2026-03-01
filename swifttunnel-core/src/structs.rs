@@ -201,6 +201,9 @@ pub struct NetworkConfig {
     /// Gaming QoS - Marks Roblox and relay tunnel UDP packets with DSCP EF (46)
     #[serde(default = "default_true")]
     pub gaming_qos: bool,
+    /// Firewall Fix - Adds Windows Firewall allow rules for Roblox, flushes DNS, resets Winsock
+    #[serde(default)]
+    pub firewall_fix: bool,
 }
 
 impl Default for NetworkConfig {
@@ -213,6 +216,7 @@ impl Default for NetworkConfig {
             disable_network_throttling: true,
             optimize_mtu: false, // Off by default as it requires admin and takes a few seconds
             gaming_qos: true,    // Enabled by default
+            firewall_fix: false, // Off by default, one-click fix for Roblox launch crashes
         }
     }
 }
@@ -384,6 +388,16 @@ pub mod boost_info {
         requires_admin: true,
     };
 
+    pub const FIREWALL_FIX: BoostInfo = BoostInfo {
+        id: "firewall_fix",
+        title: "Roblox Firewall Fix",
+        short_desc: "Fix Roblox launch crashes",
+        long_desc: "Adds Windows Firewall allow rules for all Roblox executables, flushes DNS cache, resets Winsock catalog, and clears ARP cache. Fixes 'HttpError: Timedout' crashes on launch caused by firewall or DNS blocking Roblox network access. Winsock reset requires a reboot to fully take effect.",
+        impact: "Fixes Roblox launch failures",
+        risk_level: RiskLevel::LowRisk,
+        requires_admin: true,
+    };
+
     // Roblox Boosts
     pub const ULTRABOOST: BoostInfo = BoostInfo {
         id: "ultraboost",
@@ -401,12 +415,13 @@ pub mod boost_info {
     }
 
     /// Get all network boost infos
-    pub fn network_boosts() -> [&'static BoostInfo; 4] {
+    pub fn network_boosts() -> [&'static BoostInfo; 5] {
         [
             &DISABLE_NAGLE,
             &NETWORK_THROTTLING,
             &OPTIMIZE_MTU,
             &GAMING_QOS,
+            &FIREWALL_FIX,
         ]
     }
 
@@ -502,6 +517,7 @@ mod tests {
         assert!(cfg.disable_network_throttling);
         assert!(!cfg.optimize_mtu);
         assert!(cfg.gaming_qos);
+        assert!(!cfg.firewall_fix);
     }
 
     #[test]
@@ -595,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_network_boosts_count() {
-        assert_eq!(boost_info::network_boosts().len(), 4);
+        assert_eq!(boost_info::network_boosts().len(), 5);
     }
 
     #[test]
@@ -627,6 +643,10 @@ mod tests {
         assert!(
             boost_info::GAMING_QOS.requires_admin,
             "QoS writes to HKLM, must require admin"
+        );
+        assert!(
+            boost_info::FIREWALL_FIX.requires_admin,
+            "Firewall fix uses netsh, must require admin"
         );
     }
 
