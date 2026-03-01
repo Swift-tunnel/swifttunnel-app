@@ -129,18 +129,8 @@ impl NetworkBooster {
         }
 
         if config.firewall_fix {
-            match self.firewall_fixer.apply() {
-                Ok(result) => {
-                    if result.winsock_reboot_required {
-                        warn!(
-                            "Roblox firewall fix applied, but Windows reboot is recommended \
-                             for Winsock reset to fully take effect"
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!("Could not apply Roblox firewall fix: {}", e);
-                }
+            if let Err(e) = self.firewall_fixer.apply() {
+                warn!("Could not apply Roblox firewall fix: {}", e);
             }
         } else if let Err(e) = self.firewall_fixer.restore() {
             warn!("Could not restore Roblox firewall rules: {}", e);
