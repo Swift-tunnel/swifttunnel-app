@@ -597,6 +597,12 @@ mod tests {
 }
 
 #[tauri::command]
+pub fn system_cleanup() -> Result<(), String> {
+    swifttunnel_core::network_booster::cleanup_all_system_state();
+    Ok(())
+}
+
+#[tauri::command]
 pub fn system_open_url(url: String) -> Result<(), String> {
     swifttunnel_core::utils::open_url(&url);
     Ok(())

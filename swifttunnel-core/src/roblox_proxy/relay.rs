@@ -316,7 +316,9 @@ async fn relay_tls(
 
     // Bidirectional relay
     let (tx, rx) = tokio::io::copy_bidirectional(client, &mut upstream).await?;
-    stats.bytes.fetch_add(tx + rx, Ordering::Relaxed);
+    stats
+        .bytes
+        .fetch_add(tx + rx + initial.len() as u64, Ordering::Relaxed);
 
     Ok(())
 }
@@ -358,7 +360,9 @@ async fn relay_http(
     upstream.write_all(initial).await?;
 
     let (tx, rx) = tokio::io::copy_bidirectional(client, &mut upstream).await?;
-    stats.bytes.fetch_add(tx + rx, Ordering::Relaxed);
+    stats
+        .bytes
+        .fetch_add(tx + rx + initial.len() as u64, Ordering::Relaxed);
 
     Ok(())
 }

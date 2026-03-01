@@ -2,7 +2,9 @@ use crate::firewall_fixer::FirewallFixer;
 use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 const LEGACY_ROBLOX_PRIORITY_POLICY: &str = "RobloxPriority";
 const ROBLOX_QOS_EXECUTABLES: [&str; 4] = [
@@ -19,22 +21,36 @@ const REG_VALUE_TCP_NO_DELAY: &str = "TCPNoDelay";
 const REG_VALUE_NETWORK_THROTTLING_INDEX: &str = "NetworkThrottlingIndex";
 const REG_VALUE_SYSTEM_RESPONSIVENESS: &str = "SystemResponsiveness";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct OriginalMtu {
     interface: String,
     mtu: u32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct NagleRegistrySnapshot {
     tcp_ack_frequency: Option<u32>,
     tcp_no_delay: Option<u32>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct NetworkThrottlingSnapshot {
     network_throttling_index: Option<u32>,
     system_responsiveness: Option<u32>,
+}
+
+/// On-disk snapshot of pre-modification values for crash/uninstall recovery.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistentSnapshot {
+    original_mtu: Option<OriginalMtu>,
+    nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
+    network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
+}
+
+const SNAPSHOT_FILE: &str = "network_snapshots.json";
+
+fn snapshot_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|p| p.join("SwiftTunnel").join(SNAPSHOT_FILE))
 }
 
 pub struct NetworkBooster {
@@ -120,6 +136,8 @@ impl NetworkBooster {
             warn!("Could not restore Roblox firewall rules: {}", e);
         }
 
+        self.persist_snapshot();
+
         Ok(())
     }
 
@@ -142,7 +160,7 @@ impl NetworkBooster {
     ///
     /// This avoids selecting an arbitrary "Up" adapter (e.g. virtual NIC) that is not
     /// actually carrying traffic to the internet.
-    fn get_active_network_interface(&self) -> Result<String> {
+    pub(crate) fn get_active_network_interface(&self) -> Result<String> {
         let output = hidden_command("powershell")
             .args(&[
                 "-Command",
@@ -163,7 +181,7 @@ impl NetworkBooster {
         Self::parse_first_line(&output.stdout, "No active network interface found")
     }
 
-    fn list_adapter_guids(&self) -> Vec<String> {
+    pub(crate) fn list_adapter_guids(&self) -> Vec<String> {
         match hidden_command("powershell")
             .args(&[
                 "-Command",
@@ -830,7 +848,7 @@ impl NetworkBooster {
         Ok(())
     }
 
-    /// Disable Gaming QoS - removes the QoS policies
+    /// Disable Gaming QoS - removes the QoS policies and DSCP registry keys
     pub fn disable_gaming_qos(&mut self) -> Result<()> {
         info!("Disabling Gaming QoS");
 
@@ -858,6 +876,26 @@ impl NetworkBooster {
                 .output();
         }
 
+        // Remove DSCP tagging registry keys set by enable_gaming_qos()
+        let _ = hidden_command("reg")
+            .args([
+                "delete",
+                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
+                "/v",
+                "Do not use NLA",
+                "/f",
+            ])
+            .output();
+        let _ = hidden_command("reg")
+            .args([
+                "delete",
+                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+                "/v",
+                "DisableUserTOSSetting",
+                "/f",
+            ])
+            .output();
+
         self.qos_enabled = false;
         info!("Gaming QoS disabled");
         Ok(())
@@ -884,8 +922,209 @@ impl NetworkBooster {
         // Remove firewall rules
         let _ = self.firewall_fixer.restore();
 
+        Self::clear_snapshot();
+
         Ok(())
     }
+
+    /// Save pre-modification values to disk for crash/uninstall recovery.
+    fn persist_snapshot(&self) {
+        let Some(path) = snapshot_path() else {
+            return;
+        };
+        let snapshot = PersistentSnapshot {
+            original_mtu: self.original_mtu.clone(),
+            nagle_registry_snapshot: self.nagle_registry_snapshot.clone(),
+            network_throttling_snapshot: self.network_throttling_snapshot.clone(),
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(&snapshot) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    warn!("Failed to persist network snapshot: {e}");
+                }
+            }
+            Err(e) => warn!("Failed to serialize network snapshot: {e}"),
+        }
+    }
+
+    /// Remove the on-disk snapshot file.
+    fn clear_snapshot() {
+        if let Some(path) = snapshot_path() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Recover from a persisted snapshot (call on startup).
+    ///
+    /// If a snapshot file exists, it means the previous session didn't get to
+    /// `restore()`. Load the saved originals and restore them.
+    pub fn recover_from_snapshot(&mut self) {
+        let Some(path) = snapshot_path() else {
+            return;
+        };
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return, // no snapshot on disk
+        };
+        let snapshot: PersistentSnapshot = match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to parse network snapshot, removing: {e}");
+                let _ = std::fs::remove_file(&path);
+                return;
+            }
+        };
+
+        info!("Recovering network settings from persisted snapshot");
+
+        if self.original_mtu.is_none() {
+            self.original_mtu = snapshot.original_mtu;
+        }
+        if self.nagle_registry_snapshot.is_empty() {
+            self.nagle_registry_snapshot = snapshot.nagle_registry_snapshot;
+        }
+        if self.network_throttling_snapshot.is_none() {
+            self.network_throttling_snapshot = snapshot.network_throttling_snapshot;
+        }
+
+        let _ = self.restore();
+    }
+}
+
+/// Stateless cleanup of ALL SwiftTunnel system modifications.
+///
+/// Does not rely on in-memory snapshots — scans the system for known
+/// SwiftTunnel artifacts and removes them. Used by `--cleanup` (NSIS
+/// uninstaller) and the `system_cleanup` Tauri command.
+pub fn cleanup_all_system_state() {
+    info!("Running full stateless system cleanup");
+
+    // 1. Remove hosts file entries
+    if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
+        warn!("Cleanup: failed to remove hosts overrides: {e}");
+    }
+
+    // 2. Delete SwiftTunnel QoS registry policies
+    for exe in ROBLOX_QOS_EXECUTABLES {
+        let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
+        let policy_path = format!(
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+            policy_name
+        );
+        let _ = hidden_command("reg")
+            .args(["delete", &policy_path, "/f"])
+            .output();
+    }
+    for exe in RELAY_QOS_EXECUTABLES {
+        let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
+        let policy_path = format!(
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+            policy_name
+        );
+        let _ = hidden_command("reg")
+            .args(["delete", &policy_path, "/f"])
+            .output();
+    }
+
+    // 3. Delete DSCP tagging registry keys
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
+            "/v",
+            "Do not use NLA",
+            "/f",
+        ])
+        .output();
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+            "/v",
+            "DisableUserTOSSetting",
+            "/f",
+        ])
+        .output();
+
+    // 4. Delete TcpAckFrequency/TCPNoDelay on all adapter GUIDs (OS default = absent)
+    let booster = NetworkBooster::new();
+    for guid in booster.list_adapter_guids() {
+        let key_path = format!(
+            r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
+            guid
+        );
+        let _ = hidden_command("reg")
+            .args(["delete", &key_path, "/v", REG_VALUE_TCP_ACK_FREQUENCY, "/f"])
+            .output();
+        let _ = hidden_command("reg")
+            .args(["delete", &key_path, "/v", REG_VALUE_TCP_NO_DELAY, "/f"])
+            .output();
+    }
+
+    // 5. Delete NetworkThrottlingIndex/SystemResponsiveness (OS default = absent)
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            NETWORK_SYSTEM_PROFILE_KEY,
+            "/v",
+            REG_VALUE_NETWORK_THROTTLING_INDEX,
+            "/f",
+        ])
+        .output();
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            NETWORK_SYSTEM_PROFILE_KEY,
+            "/v",
+            REG_VALUE_SYSTEM_RESPONSIVENESS,
+            "/f",
+        ])
+        .output();
+
+    // 6. Remove firewall rules (instance-based + PowerShell fallback)
+    let mut firewall = FirewallFixer::new();
+    let _ = firewall.restore();
+    // PowerShell fallback: remove any remaining rules matching the prefix
+    let _ = hidden_command("powershell")
+        .args([
+            "-Command",
+            "Get-NetFirewallRule -DisplayName 'SwiftTunnel - Roblox*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue",
+        ])
+        .output();
+
+    // 7. Reset MTU to 1500 on active interface
+    if let Ok(iface) = booster.get_active_network_interface() {
+        let _ = hidden_command("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
+                &iface,
+                "mtu=1500",
+                "store=persistent",
+            ])
+            .output();
+    }
+
+    // 8. Delete legacy RobloxPriority QoS policy
+    let _ = hidden_command("powershell")
+        .args([
+            "-Command",
+            &format!(
+                "Remove-NetQosPolicy -Name '{}' -Confirm:$false -ErrorAction SilentlyContinue",
+                LEGACY_ROBLOX_PRIORITY_POLICY
+            ),
+        ])
+        .output();
+
+    // 9. Remove the snapshot file itself
+    NetworkBooster::clear_snapshot();
+
+    info!("Full system cleanup completed");
 }
 
 impl Default for NetworkBooster {

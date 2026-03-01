@@ -193,6 +193,7 @@ pub fn run() {
             commands::system::system_install_driver,
             commands::system::system_open_url,
             commands::system::system_restart_as_admin,
+            commands::system::system_cleanup,
             // Proxy
             commands::proxy::proxy_get_state,
             commands::proxy::proxy_toggle,
@@ -212,6 +213,9 @@ pub fn run() {
             swifttunnel_core::roblox_proxy::hosts::recover_stale();
 
             let app_state = AppState::new(runtime.clone()).expect("Failed to initialize app state");
+
+            // Recover network booster state from persisted snapshot (crash recovery)
+            app_state.network_booster.lock().recover_from_snapshot();
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
             let proxy_enabled = app_state.settings.lock().roblox_network_bypass;
             let proxy_sni_frag = app_state.settings.lock().roblox_network_bypass_sni_fragment;
@@ -291,6 +295,12 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 // Ensure hosts file is cleaned up on exit
                 swifttunnel_core::roblox_proxy::hosts::recover_stale();
+                // Restore network booster modifications (registry, MTU, firewall, QoS)
+                if let Some(state) = _app.try_state::<crate::state::AppState>() {
+                    if let Err(e) = state.network_booster.lock().restore() {
+                        log::warn!("Failed to restore network settings on exit: {e}");
+                    }
+                }
             }
         });
 }
