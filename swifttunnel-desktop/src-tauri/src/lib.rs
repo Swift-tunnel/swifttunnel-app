@@ -216,6 +216,10 @@ pub fn run() {
 
             // Recover network booster state from persisted snapshot (crash recovery)
             app_state.network_booster.lock().recover_from_snapshot();
+
+            // One-time fix: reset MTU on all adapters (the removed MTU optimizer
+            // used store=persistent which broke WiFi on some drivers).
+            swifttunnel_core::network_booster::fix_mtu_on_upgrade();
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
             let proxy_enabled = app_state.settings.lock().roblox_network_bypass;
             let proxy_sni_frag = app_state.settings.lock().roblox_network_bypass_sni_fragment;

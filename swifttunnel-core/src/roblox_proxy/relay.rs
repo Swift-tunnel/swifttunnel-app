@@ -111,7 +111,11 @@ impl RobloxProxy {
         self.stats.snapshot()
     }
 
-    /// Start the proxy: apply hosts overrides and begin listening.
+    /// Start the proxy: bind listeners first, then apply hosts overrides.
+    ///
+    /// Binding before modifying the hosts file eliminates a race condition
+    /// where DNS resolves to `127.66.0.1` before anything is accepting
+    /// connections, causing Roblox to time out on `clientsettingscdn.roblox.com`.
     pub async fn start(&mut self, sni_fragment: bool) -> Result<(), RobloxProxyError> {
         if self.state == ProxyState::Running {
             return Err(RobloxProxyError::AlreadyRunning);
@@ -120,21 +124,15 @@ impl RobloxProxy {
         self.state = ProxyState::Starting;
         self.sni_fragment = sni_fragment;
 
-        // Apply hosts file redirects
-        if let Err(e) = hosts::apply_overrides() {
-            self.state = ProxyState::Error(e.clone());
-            return Err(RobloxProxyError::HostsFile(e));
-        }
-
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         self.shutdown_tx = Some(shutdown_tx);
         self.stats.reset();
 
-        // Bind listeners
+        // Bind listeners BEFORE modifying the hosts file so that connections
+        // are accepted the instant DNS starts resolving to our address.
         let listener_443 = match TcpListener::bind(format!("{BIND_ADDR}:443")).await {
             Ok(l) => l,
             Err(e) => {
-                let _ = hosts::remove_overrides();
                 self.state = ProxyState::Error(e.to_string());
                 return Err(RobloxProxyError::Io(e));
             }
@@ -143,7 +141,6 @@ impl RobloxProxy {
         let listener_80 = match TcpListener::bind(format!("{BIND_ADDR}:80")).await {
             Ok(l) => l,
             Err(e) => {
-                let _ = hosts::remove_overrides();
                 self.state = ProxyState::Error(e.to_string());
                 return Err(RobloxProxyError::Io(e));
             }
@@ -208,6 +205,20 @@ impl RobloxProxy {
                     }
                 }
             }));
+        }
+
+        // NOW apply hosts file redirects — listeners are already accepting
+        // connections, so any DNS resolution hitting 127.66.0.1 will succeed.
+        if let Err(e) = hosts::apply_overrides() {
+            // Listeners are up but hosts failed — tear down everything.
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(true);
+            }
+            for task in self.tasks.drain(..) {
+                task.abort();
+            }
+            self.state = ProxyState::Error(e.clone());
+            return Err(RobloxProxyError::HostsFile(e));
         }
 
         self.state = ProxyState::Running;

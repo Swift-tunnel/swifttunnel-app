@@ -32,7 +32,7 @@ const DEFAULT_SETTINGS: AppSettings = {
       prioritize_roblox_traffic: true,
       disable_nagle: true,
       disable_network_throttling: true,
-      optimize_mtu: false,
+
       gaming_qos: true,
     },
     auto_start_with_roblox: false,

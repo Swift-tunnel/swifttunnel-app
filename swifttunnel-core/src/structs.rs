@@ -196,8 +196,6 @@ pub struct NetworkConfig {
     pub disable_nagle: bool,
     #[serde(default = "default_true")]
     pub disable_network_throttling: bool,
-    #[serde(default)]
-    pub optimize_mtu: bool,
     /// Gaming QoS - Marks Roblox and relay tunnel UDP packets with DSCP EF (46)
     #[serde(default = "default_true")]
     pub gaming_qos: bool,
@@ -214,7 +212,6 @@ impl Default for NetworkConfig {
             // Tier 1 network boosts enabled by default
             disable_nagle: true,
             disable_network_throttling: true,
-            optimize_mtu: false, // Off by default as it requires admin and takes a few seconds
             gaming_qos: true,    // Enabled by default
             firewall_fix: false, // Off by default, one-click fix for Roblox launch crashes
         }
@@ -368,16 +365,6 @@ pub mod boost_info {
         requires_admin: true,
     };
 
-    pub const OPTIMIZE_MTU: BoostInfo = BoostInfo {
-        id: "optimize_mtu",
-        title: "Optimize MTU",
-        short_desc: "Find & apply best packet size",
-        long_desc: "Automatically discovers and sets the optimal Maximum Transmission Unit (MTU) for your network. Properly sized packets reduce fragmentation and can improve throughput. Requires admin to modify network settings.",
-        impact: "Reduced packet fragmentation",
-        risk_level: RiskLevel::LowRisk,
-        requires_admin: true,
-    };
-
     pub const GAMING_QOS: BoostInfo = BoostInfo {
         id: "gaming_qos",
         title: "Gaming QoS",
@@ -415,11 +402,10 @@ pub mod boost_info {
     }
 
     /// Get all network boost infos
-    pub fn network_boosts() -> [&'static BoostInfo; 5] {
+    pub fn network_boosts() -> [&'static BoostInfo; 4] {
         [
             &DISABLE_NAGLE,
             &NETWORK_THROTTLING,
-            &OPTIMIZE_MTU,
             &GAMING_QOS,
             &FIREWALL_FIX,
         ]
@@ -515,7 +501,6 @@ mod tests {
         assert!(cfg.prioritize_roblox_traffic);
         assert!(cfg.disable_nagle);
         assert!(cfg.disable_network_throttling);
-        assert!(!cfg.optimize_mtu);
         assert!(cfg.gaming_qos);
         assert!(!cfg.firewall_fix);
     }
@@ -635,10 +620,6 @@ mod tests {
         assert!(
             boost_info::NETWORK_THROTTLING.requires_admin,
             "Network throttling writes to HKLM, must require admin"
-        );
-        assert!(
-            boost_info::OPTIMIZE_MTU.requires_admin,
-            "MTU optimization requires admin"
         );
         assert!(
             boost_info::GAMING_QOS.requires_admin,

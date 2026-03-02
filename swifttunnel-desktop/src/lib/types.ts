@@ -200,7 +200,6 @@ export interface NetworkConfig {
   prioritize_roblox_traffic: boolean;
   disable_nagle: boolean;
   disable_network_throttling: boolean;
-  optimize_mtu: boolean;
   gaming_qos: boolean;
 }
 

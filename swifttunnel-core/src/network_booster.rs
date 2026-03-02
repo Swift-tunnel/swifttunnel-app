@@ -21,12 +21,6 @@ const REG_VALUE_TCP_NO_DELAY: &str = "TCPNoDelay";
 const REG_VALUE_NETWORK_THROTTLING_INDEX: &str = "NetworkThrottlingIndex";
 const REG_VALUE_SYSTEM_RESPONSIVENESS: &str = "SystemResponsiveness";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct OriginalMtu {
-    interface: String,
-    mtu: u32,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct NagleRegistrySnapshot {
     tcp_ack_frequency: Option<u32>,
@@ -42,7 +36,6 @@ struct NetworkThrottlingSnapshot {
 /// On-disk snapshot of pre-modification values for crash/uninstall recovery.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistentSnapshot {
-    original_mtu: Option<OriginalMtu>,
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
 }
@@ -54,7 +47,6 @@ fn snapshot_path() -> Option<PathBuf> {
 }
 
 pub struct NetworkBooster {
-    original_mtu: Option<OriginalMtu>,
     qos_enabled: bool,
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
@@ -64,7 +56,6 @@ pub struct NetworkBooster {
 impl NetworkBooster {
     pub fn new() -> Self {
         Self {
-            original_mtu: None,
             qos_enabled: false,
             nagle_registry_snapshot: HashMap::new(),
             network_throttling_snapshot: None,
@@ -74,8 +65,8 @@ impl NetworkBooster {
 
     /// Apply network optimizations
     ///
-    /// Individual optimizations are non-fatal: if one fails (e.g. no active
-    /// network adapter for MTU), the remaining optimizations still run.
+    /// Individual optimizations are non-fatal: if one fails, the remaining
+    /// optimizations still run.
     pub fn apply_optimizations(&mut self, config: &NetworkConfig) -> Result<()> {
         self.reconcile_optimizations(config)
     }
@@ -110,14 +101,6 @@ impl NetworkBooster {
             }
         } else if let Err(e) = self.restore_network_throttling() {
             warn!("Could not restore network throttling defaults: {}", e);
-        }
-
-        if config.optimize_mtu {
-            if let Err(e) = self.optimize_mtu() {
-                warn!("Could not optimize MTU: {}", e);
-            }
-        } else if let Err(e) = self.restore_mtu() {
-            warn!("Could not restore original MTU: {}", e);
         }
 
         if config.gaming_qos {
@@ -469,163 +452,6 @@ impl NetworkBooster {
         Ok(())
     }
 
-    /// Optimize MTU for the active network interface
-    /// Finds the optimal MTU that doesn't cause fragmentation and applies it
-    fn optimize_mtu(&mut self) -> Result<()> {
-        info!("Optimizing MTU for active network interface");
-
-        let interface_name = self.get_active_network_interface()?;
-
-        // Backup current MTU only once so we can restore to the true pre-optimization value.
-        if self.original_mtu.is_none() {
-            if let Ok(current_mtu) = self.get_current_mtu(&interface_name) {
-                self.original_mtu = Some(OriginalMtu {
-                    interface: interface_name.clone(),
-                    mtu: current_mtu,
-                });
-                info!("Current MTU: {}", current_mtu);
-            }
-        }
-
-        // Find optimal MTU
-        match self.find_optimal_mtu() {
-            Ok(optimal_mtu) => {
-                info!("Found optimal MTU: {}", optimal_mtu);
-
-                // Apply the optimal MTU
-                if let Err(e) = self.apply_mtu(&interface_name, optimal_mtu) {
-                    warn!("Failed to apply MTU: {}", e);
-                } else {
-                    info!(
-                        "MTU optimized to {} for interface '{}'",
-                        optimal_mtu, interface_name
-                    );
-                }
-            }
-            Err(e) => {
-                warn!("Failed to find optimal MTU: {}", e);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Get the current MTU for an interface
-    fn get_current_mtu(&self, interface: &str) -> Result<u32> {
-        let output = hidden_command("powershell")
-            .args(&[
-                "-Command",
-                &format!(
-                    "Get-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 | Select-Object -ExpandProperty NlMtu",
-                    interface
-                )
-            ])
-            .output()?;
-
-        let mtu_str = Self::parse_first_line(&output.stdout, "Failed to query MTU")?;
-        mtu_str
-            .parse::<u32>()
-            .map_err(|e| anyhow::anyhow!("Failed to parse MTU from '{}': {}", mtu_str, e))
-    }
-
-    /// Find the optimal MTU using ping with Don't Fragment flag
-    /// Tests from 1500 down to find the largest packet size that doesn't fragment
-    pub fn find_optimal_mtu(&self) -> Result<u32> {
-        info!("Finding optimal MTU...");
-
-        // Use Google DNS as a reliable target
-        let target = "8.8.8.8";
-
-        // Standard Ethernet MTU is 1500
-        // IP header is 20 bytes, ICMP header is 8 bytes
-        // So we test data sizes and add 28 to get MTU
-        let header_overhead = 28;
-
-        // Start at 1472 (1500 - 28) and work down
-        let mut test_size: u32 = 1472;
-        let min_size: u32 = 576 - header_overhead; // Minimum MTU is 576
-
-        while test_size >= min_size {
-            // Use ping with -f flag (Don't Fragment) and -l flag (packet size)
-            let output = hidden_command("ping")
-                .args(&[
-                    "-n",
-                    "1",  // Send 1 packet
-                    "-f", // Don't Fragment flag
-                    "-l",
-                    &test_size.to_string(), // Packet size
-                    "-w",
-                    "1000", // 1 second timeout
-                    target,
-                ])
-                .output()?;
-
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let output_lower = output_str.to_lowercase();
-
-            // Check if ping succeeded without fragmentation
-            // If we see "Reply from" without "needs to be fragmented" or "Packet needs to be fragmented"
-            if output_str.contains("Reply from")
-                && !output_lower.contains("fragment")
-                && !output_lower.contains("too big")
-            {
-                // Found a working size, optimal MTU is test_size + header_overhead
-                let optimal_mtu = test_size + header_overhead;
-                info!(
-                    "Found optimal MTU: {} (test size: {})",
-                    optimal_mtu, test_size
-                );
-                return Ok(optimal_mtu);
-            }
-
-            // Reduce test size by 10 and try again
-            test_size = test_size.saturating_sub(10);
-        }
-
-        // If we couldn't find optimal, return safe default
-        warn!("Could not determine optimal MTU, using safe default of 1400");
-        Ok(1400)
-    }
-
-    /// Apply MTU to a network interface
-    fn apply_mtu(&self, interface: &str, mtu: u32) -> Result<()> {
-        info!("Applying MTU {} to interface '{}'", mtu, interface);
-
-        // Use netsh to set MTU
-        let output = hidden_command("netsh")
-            .args(&[
-                "interface",
-                "ipv4",
-                "set",
-                "subinterface",
-                interface,
-                &format!("mtu={}", mtu),
-                "store=persistent",
-            ])
-            .output()?;
-
-        if output.status.success() {
-            info!("MTU set successfully");
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow::anyhow!("Failed to set MTU: {}", stderr))
-        }
-    }
-
-    /// Restore original MTU setting
-    pub fn restore_mtu(&mut self) -> Result<()> {
-        if let Some(snapshot) = self.original_mtu.clone() {
-            info!(
-                "Restoring original MTU {} on interface '{}'",
-                snapshot.mtu, snapshot.interface
-            );
-            self.apply_mtu(&snapshot.interface, snapshot.mtu)?;
-            self.original_mtu = None;
-        }
-        Ok(())
-    }
-
     // ===== GAMING QOS =====
 
     /// Enable Gaming QoS - marks Roblox and relay UDP packets with DSCP EF (46)
@@ -910,8 +736,7 @@ impl NetworkBooster {
     pub fn restore(&mut self) -> Result<()> {
         info!("Restoring original network settings");
 
-        // Restore original MTU and low-latency registry overrides.
-        let _ = self.restore_mtu();
+        // Restore low-latency registry overrides.
         let _ = self.restore_nagle_algorithm();
         let _ = self.restore_network_throttling();
 
@@ -933,7 +758,6 @@ impl NetworkBooster {
             return;
         };
         let snapshot = PersistentSnapshot {
-            original_mtu: self.original_mtu.clone(),
             nagle_registry_snapshot: self.nagle_registry_snapshot.clone(),
             network_throttling_snapshot: self.network_throttling_snapshot.clone(),
         };
@@ -980,9 +804,6 @@ impl NetworkBooster {
 
         info!("Recovering network settings from persisted snapshot");
 
-        if self.original_mtu.is_none() {
-            self.original_mtu = snapshot.original_mtu;
-        }
         if self.nagle_registry_snapshot.is_empty() {
             self.nagle_registry_snapshot = snapshot.nagle_registry_snapshot;
         }
@@ -1095,20 +916,9 @@ pub fn cleanup_all_system_state() {
         ])
         .output();
 
-    // 7. Reset MTU to 1500 on active interface
-    if let Ok(iface) = booster.get_active_network_interface() {
-        let _ = hidden_command("netsh")
-            .args([
-                "interface",
-                "ipv4",
-                "set",
-                "subinterface",
-                &iface,
-                "mtu=1500",
-                "store=persistent",
-            ])
-            .output();
-    }
+    // 7. Reset MTU to 1500 on all adapters (cleans up damage from the
+    //    removed MTU optimizer which set store=persistent on WiFi adapters).
+    reset_mtu_all_adapters();
 
     // 8. Delete legacy RobloxPriority QoS policy
     let _ = hidden_command("powershell")
@@ -1125,6 +935,63 @@ pub fn cleanup_all_system_state() {
     NetworkBooster::clear_snapshot();
 
     info!("Full system cleanup completed");
+}
+
+/// Reset MTU to 1500 on all active network adapters.
+///
+/// The removed MTU optimizer used `store=persistent` which permanently changed
+/// WiFi adapter MTU values, causing Roblox connection timeouts on some drivers.
+fn reset_mtu_all_adapters() {
+    let adapters: Vec<String> = match hidden_command("powershell")
+        .args([
+            "-Command",
+            "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Select-Object -ExpandProperty Name",
+        ])
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    for iface in &adapters {
+        let _ = hidden_command("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
+                iface,
+                "mtu=1500",
+                "store=persistent",
+            ])
+            .output();
+    }
+}
+
+/// One-time migration: undo persistent MTU changes from the removed optimizer.
+///
+/// Call on app startup. Uses a marker file so it only runs once.
+pub fn fix_mtu_on_upgrade() {
+    let Some(config_dir) = dirs::config_dir() else {
+        return;
+    };
+    let marker = config_dir.join("SwiftTunnel").join(".mtu_fix_applied");
+    if marker.exists() {
+        return;
+    }
+
+    info!("Running one-time MTU fix for upgrade (resetting all adapters to MTU 1500)");
+    reset_mtu_all_adapters();
+
+    // Write marker so this doesn't run again
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&marker, "1");
 }
 
 impl Default for NetworkBooster {
@@ -1163,9 +1030,7 @@ mod tests {
     }
 
     /// Verify apply_optimizations returns Ok even when individual optimizations
-    /// fail (e.g. no active network adapter, no PowerShell, non-Windows host).
-    /// Before the fix, a single failure (like optimize_mtu -> "No active network
-    /// interface found") would abort the entire boost toggle via `?`.
+    /// fail (e.g. no PowerShell, non-Windows host).
     #[test]
     fn apply_optimizations_succeeds_despite_individual_failures() {
         let mut booster = NetworkBooster::new();
@@ -1173,7 +1038,6 @@ mod tests {
             prioritize_roblox_traffic: true,
             disable_nagle: true,
             disable_network_throttling: true,
-            optimize_mtu: true,
             gaming_qos: true,
             ..Default::default()
         };
@@ -1195,26 +1059,11 @@ mod tests {
             prioritize_roblox_traffic: false,
             disable_nagle: false,
             disable_network_throttling: false,
-            optimize_mtu: false,
             gaming_qos: false,
             ..Default::default()
         };
 
         let result = booster.apply_optimizations(&config);
         assert!(result.is_ok());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn restore_mtu_keeps_snapshot_when_apply_fails() {
-        let mut booster = NetworkBooster::new();
-        booster.original_mtu = Some(OriginalMtu {
-            interface: "Ethernet".to_string(),
-            mtu: 1492,
-        });
-
-        let result = booster.restore_mtu();
-        assert!(result.is_err());
-        assert!(booster.original_mtu.is_some());
     }
 }

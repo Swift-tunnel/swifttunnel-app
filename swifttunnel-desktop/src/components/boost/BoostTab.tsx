@@ -80,7 +80,6 @@ function getPresetConfig(profile: OptimizationProfile, current: Config): Config 
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
-          optimize_mtu: true,
           gaming_qos: true,
         },
       };
@@ -109,7 +108,7 @@ function getPresetConfig(profile: OptimizationProfile, current: Config): Config 
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
-          optimize_mtu: false,
+
           gaming_qos: true,
         },
       };
@@ -138,7 +137,7 @@ function getPresetConfig(profile: OptimizationProfile, current: Config): Config 
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
-          optimize_mtu: false,
+
           gaming_qos: true,
         },
       };
@@ -427,7 +426,6 @@ export function BoostTab() {
   const networkActive = countActive(
     draft.network_settings.disable_nagle,
     draft.network_settings.disable_network_throttling,
-    draft.network_settings.optimize_mtu,
     draft.network_settings.gaming_qos,
   );
 
@@ -643,14 +641,6 @@ export function BoostTab() {
           impact="Less lag spikes"
           enabled={draft.network_settings.disable_network_throttling}
           onChange={(v) => updateNetOpt({ disable_network_throttling: v })}
-        />
-        <OptRow
-          title="Optimize MTU"
-          desc="Find best packet size"
-          impact="Less fragmentation"
-          risk="Low Risk"
-          enabled={draft.network_settings.optimize_mtu}
-          onChange={(v) => updateNetOpt({ optimize_mtu: v })}
         />
         <OptRow
           title="Gaming QoS"
