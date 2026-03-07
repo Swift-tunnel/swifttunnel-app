@@ -12,6 +12,7 @@ build:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
   script:
     - Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+    - $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
 
     # Resolve version from tag
     - |
