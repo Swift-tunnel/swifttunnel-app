@@ -16,20 +16,27 @@ build:
     - rustc --version
     - node --version
 
-    # Fix NSIS: Tauri downloads its own NSIS to %LOCALAPPDATA%\tauri\NSIS\ with a
-    # 2.5KB stub launcher that fails under the SYSTEM service account. Replace the
-    # stub with the real compiler and set NSISDIR + NSIS_TOOLSET_PATH.
+    # Fix NSIS: Tauri downloads NSIS to %LOCALAPPDATA%\tauri\NSIS\ with a 2.5KB
+    # stub that fails under SYSTEM. Replace the stub with the real compiler and
+    # create a Stubs junction one level up so it resolves ../Stubs/ correctly.
     - |
       $tauriNsis = "$env:LOCALAPPDATA\tauri\NSIS"
       if (Test-Path "$tauriNsis\Bin\makensis.exe") {
         Copy-Item "$tauriNsis\Bin\makensis.exe" "$tauriNsis\makensis.exe" -Force
-        $env:NSISDIR = $tauriNsis
-        $env:NSIS_TOOLSET_PATH = $tauriNsis
+        $parentDir = Split-Path $tauriNsis -Parent
+        if (-not (Test-Path "$parentDir\Stubs")) {
+          cmd /c mklink /J "$parentDir\Stubs" "$tauriNsis\Stubs"
+        }
+        if (-not (Test-Path "$parentDir\Plugins")) {
+          cmd /c mklink /J "$parentDir\Plugins" "$tauriNsis\Plugins"
+        }
+        if (-not (Test-Path "$parentDir\Include")) {
+          cmd /c mklink /J "$parentDir\Include" "$tauriNsis\Include"
+        }
         & "$tauriNsis\makensis.exe" /VERSION
         Write-Host "Fixed Tauri NSIS at $tauriNsis"
       } else {
-        Write-Host "Tauri NSIS not found, checking system NSIS..."
-        makensis /VERSION
+        Write-Host "Tauri NSIS not found, will be downloaded during build"
       }
 
     # Resolve and verify version
