@@ -5,18 +5,15 @@ stages:
 build:
   stage: build
   tags:
-    - saas-windows-medium-amd64
+    - shared-windows
+    - windows
+    - windows-1809
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
   script:
     - Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-
-    # Install Rust, Node, NSIS (cmd to avoid PowerShell stderr issues)
-    - cmd /c "curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64 && rustup-init.exe -y --default-toolchain stable"
-    - $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+    - rustup default stable
     - rustc --version
-    - cmd /c "choco install nodejs-lts nsis -y --no-progress"
-    - $env:PATH = "C:\Program Files\nodejs;C:\Program Files (x86)\NSIS;$env:PATH"
     - node --version
     - makensis /VERSION
 
@@ -49,15 +46,15 @@ build:
         if ($size -lt 500000) { throw "WinpkFilter MSI is suspiciously small ($size bytes)" }
       }
 
-    # Inject updater public key (use simple string replace to avoid encoding issues)
+    # Inject updater public key
     - |
       $confPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
       $content = Get-Content $confPath -Raw -Encoding UTF8
       $content = $content.Replace("REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY", $env:TAURI_UPDATER_PUBLIC_KEY)
       [System.IO.File]::WriteAllText((Resolve-Path $confPath).Path, $content, [System.Text.UTF8Encoding]::new($false))
 
-    # Install Tauri CLI and build
-    - cmd /c "cargo install tauri-cli --version ^2 --locked"
+    # Build
+    - cargo install tauri-cli --version "^2" --locked
     - Set-Location swifttunnel-desktop
     - cargo tauri build --bundles nsis
     - Set-Location ..
