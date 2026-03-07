@@ -1,0 +1,140 @@
+stages:
+  - build
+  - release
+
+variables:
+  CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
+  RUSTUP_HOME: "${CI_PROJECT_DIR}/.rustup"
+
+.windows_runner:
+  tags:
+    - saas-windows-medium-amd64
+
+build:
+  stage: build
+  extends: .windows_runner
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  script:
+    # Disable Defender for build perf
+    - Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+
+    # Install Rust
+    - Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile rustup-init.exe
+    - .\rustup-init.exe -y --default-toolchain stable 2>&1
+    - $env:PATH = "${env:CARGO_HOME}\bin;${env:PATH}"
+    - rustc --version
+
+    # Install Node
+    - Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.15.0/node-v22.15.0-x64.msi" -OutFile node.msi
+    - Start-Process msiexec.exe -ArgumentList "/i", "node.msi", "/quiet", "/norestart" -Wait
+    - $env:PATH = "C:\Program Files\nodejs;${env:PATH}"
+    - node --version
+
+    # Resolve version from tag
+    - |
+      $tag = $env:CI_COMMIT_TAG
+      $version = $tag.Substring(1)
+      Write-Host "Building version $version from tag $tag"
+
+    # Enforce version consistency
+    - |
+      $cargoContent = Get-Content "swifttunnel-desktop/src-tauri/Cargo.toml" -Raw
+      $cargoMatch = [regex]::Match($cargoContent, '(?m)^version\s*=\s*"([^"]+)"')
+      $cargoVersion = $cargoMatch.Groups[1].Value
+      $tauriConfig = Get-Content "swifttunnel-desktop/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+      $tauriVersion = [string]$tauriConfig.version
+      if ($cargoVersion -ne $version) { throw "Version mismatch: tag=$version cargo=$cargoVersion" }
+      if ($tauriVersion -ne $version) { throw "Version mismatch: tag=$version tauri.conf=$tauriVersion" }
+
+    # Install frontend deps
+    - Set-Location swifttunnel-desktop
+    - npm ci
+    - Set-Location ..
+
+    # Download WinpkFilter driver
+    - |
+      $driversDir = "swifttunnel-desktop/src-tauri/resources/drivers"
+      New-Item -ItemType Directory -Path $driversDir -Force | Out-Null
+      $msiPath = Join-Path $driversDir "WinpkFilter-x64.msi"
+      if (-not (Test-Path $msiPath)) {
+        Invoke-WebRequest -Uri "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi" -OutFile $msiPath
+        $size = (Get-Item $msiPath).Length
+        if ($size -lt 500000) { throw "WinpkFilter MSI is suspiciously small ($size bytes)" }
+      }
+
+    # Inject updater public key
+    - |
+      $confPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
+      $config = Get-Content $confPath -Raw | ConvertFrom-Json
+      $config.plugins.updater.pubkey = $env:TAURI_UPDATER_PUBLIC_KEY
+      $config | ConvertTo-Json -Depth 32 | Set-Content -Path $confPath -Encoding utf8
+
+    # Install Tauri CLI and build
+    - cargo install tauri-cli --version "^2" --locked
+    - Set-Location swifttunnel-desktop
+    - cargo tauri build --bundles nsis
+    - Set-Location ..
+
+    # Collect artifacts
+    - |
+      $bundleDir = "swifttunnel-desktop/src-tauri/target/release/bundle/nsis"
+      $outDir = "release-artifacts"
+      New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+      Copy-Item "$bundleDir/*.exe" $outDir/
+      Copy-Item "$bundleDir/*.nsis.zip" $outDir/ -ErrorAction SilentlyContinue
+      Copy-Item "$bundleDir/*.nsis.zip.sig" $outDir/ -ErrorAction SilentlyContinue
+      if (Test-Path "$bundleDir/latest.json") { Copy-Item "$bundleDir/latest.json" $outDir/ }
+      Get-ChildItem $outDir
+  artifacts:
+    paths:
+      - release-artifacts/
+    expire_in: 1 week
+  cache:
+    key: rust-windows
+    paths:
+      - .cargo/
+      - swifttunnel-desktop/src-tauri/target/
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: build
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  script:
+    - echo "Creating release for ${CI_COMMIT_TAG}"
+    # Upload artifacts as generic package so we get permanent URLs
+    - |
+      VERSION="${CI_COMMIT_TAG#v}"
+      for file in release-artifacts/*; do
+        filename=$(basename "$file")
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "$file" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${VERSION}/${filename}"
+      done
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "SwiftTunnel ${CI_COMMIT_TAG}"
+    description: |
+      ## SwiftTunnel ${CI_COMMIT_TAG}
+
+      ### Downloads
+      - [SwiftTunnel_${CI_COMMIT_TAG#v}_x64-setup.exe](${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${CI_COMMIT_TAG#v}/SwiftTunnel_${CI_COMMIT_TAG#v}_x64-setup.exe)
+
+      ### Auto-updater
+      - [latest.json](${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${CI_COMMIT_TAG#v}/latest.json)
+
+      ### Requirements
+      - Windows 10/11 (64-bit)
+      - Administrator privileges
+    assets:
+      links:
+        - name: "SwiftTunnel_${CI_COMMIT_TAG#v}_x64-setup.exe"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${CI_COMMIT_TAG#v}/SwiftTunnel_${CI_COMMIT_TAG#v}_x64-setup.exe"
+          link_type: package
+        - name: "latest.json"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${CI_COMMIT_TAG#v}/latest.json"
+          link_type: other
