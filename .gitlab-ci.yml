@@ -45,12 +45,12 @@ build:
         if ($size -lt 500000) { throw "WinpkFilter MSI is suspiciously small ($size bytes)" }
       }
 
-    # Inject updater public key
+    # Inject updater public key (use simple string replace to avoid encoding issues)
     - |
       $confPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
-      $config = Get-Content $confPath -Raw | ConvertFrom-Json
-      $config.plugins.updater.pubkey = $env:TAURI_UPDATER_PUBLIC_KEY
-      $config | ConvertTo-Json -Depth 32 | Set-Content -Path $confPath -Encoding utf8
+      $content = Get-Content $confPath -Raw -Encoding UTF8
+      $content = $content.Replace("REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY", $env:TAURI_UPDATER_PUBLIC_KEY)
+      [System.IO.File]::WriteAllText((Resolve-Path $confPath).Path, $content, [System.Text.UTF8Encoding]::new($false))
 
     # Ensure Rust toolchain is available
     - rustup default stable
