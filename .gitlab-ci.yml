@@ -62,7 +62,7 @@ build:
 
     # Collect artifacts
     - |
-      $bundleDir = "swifttunnel-desktop/src-tauri/target/release/bundle/nsis"
+      $bundleDir = "target/release/bundle/nsis"
       $outDir = "release-artifacts"
       New-Item -ItemType Directory -Path $outDir -Force | Out-Null
       Copy-Item "$bundleDir/*.exe" $outDir/
