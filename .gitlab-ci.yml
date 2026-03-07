@@ -13,17 +13,20 @@ build:
 
     # Install Rust
     - Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile rustup-init.exe
-    - .\rustup-init.exe -y --default-toolchain stable 2>&1
+    - $ErrorActionPreference = 'Continue'
+    - .\rustup-init.exe -y --default-toolchain stable 2>&1 | ForEach-Object { "$_" }
+    - $ErrorActionPreference = 'Stop'
     - $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
     - rustc --version
 
     # Install Node
-    - choco install nodejs-lts -y --no-progress 2>&1
+    - choco install nodejs-lts -y --no-progress 2>&1 | ForEach-Object { "$_" }
     - $env:PATH = "C:\Program Files\nodejs;$env:PATH"
+    - refreshenv
     - node --version
 
     # Install NSIS
-    - choco install nsis -y --no-progress 2>&1
+    - choco install nsis -y --no-progress 2>&1 | ForEach-Object { "$_" }
     - $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
     - makensis /VERSION
 
