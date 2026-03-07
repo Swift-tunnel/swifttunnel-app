@@ -8,7 +8,9 @@ variables:
 
 .windows_runner:
   tags:
-    - saas-windows-medium-amd64
+    - shared-windows
+    - windows
+    - windows-1809
 
 build:
   stage: build
