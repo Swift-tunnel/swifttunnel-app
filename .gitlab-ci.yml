@@ -2,36 +2,16 @@ stages:
   - build
   - release
 
-variables:
-  CARGO_HOME: "${CI_PROJECT_DIR}/.cargo"
-  RUSTUP_HOME: "${CI_PROJECT_DIR}/.rustup"
-
-.windows_runner:
+build:
+  stage: build
   tags:
     - shared-windows
     - windows
     - windows-1809
-
-build:
-  stage: build
-  extends: .windows_runner
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
   script:
-    # Disable Defender for build perf
     - Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-
-    # Install Rust
-    - Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile rustup-init.exe
-    - .\rustup-init.exe -y --default-toolchain stable 2>&1
-    - $env:PATH = "${env:CARGO_HOME}\bin;${env:PATH}"
-    - rustc --version
-
-    # Install Node
-    - Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.15.0/node-v22.15.0-x64.msi" -OutFile node.msi
-    - Start-Process msiexec.exe -ArgumentList "/i", "node.msi", "/quiet", "/norestart" -Wait
-    - $env:PATH = "C:\Program Files\nodejs;${env:PATH}"
-    - node --version
 
     # Resolve version from tag
     - |
@@ -92,11 +72,6 @@ build:
     paths:
       - release-artifacts/
     expire_in: 1 week
-  cache:
-    key: rust-windows
-    paths:
-      - .cargo/
-      - swifttunnel-desktop/src-tauri/target/
 
 release:
   stage: release
@@ -108,7 +83,6 @@ release:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
   script:
     - echo "Creating release for ${CI_COMMIT_TAG}"
-    # Upload artifacts as generic package so we get permanent URLs
     - |
       VERSION="${CI_COMMIT_TAG#v}"
       for file in release-artifacts/*; do
