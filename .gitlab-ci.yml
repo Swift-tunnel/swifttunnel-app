@@ -57,7 +57,7 @@ build:
       [System.IO.File]::WriteAllText((Resolve-Path $confPath).Path, $content, [System.Text.UTF8Encoding]::new($false))
 
     # Install Tauri CLI and build
-    - cargo install tauri-cli --version "^2" --locked
+    - cmd /c "cargo install tauri-cli --version ^2 --locked"
     - Set-Location swifttunnel-desktop
     - cargo tauri build --bundles nsis
     - Set-Location ..
