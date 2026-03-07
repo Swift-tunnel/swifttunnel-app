@@ -85,6 +85,48 @@ fn pick_lowest_latency_server<'a>(
     candidates.min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
 }
 
+#[derive(Debug, Clone)]
+struct RankedRelayCandidate {
+    region: String,
+    addr: SocketAddr,
+    cached_latency_ms: Option<u32>,
+    probed_latency_ms: Option<u32>,
+}
+
+impl RankedRelayCandidate {
+    fn from_candidate(candidate: (String, SocketAddr, Option<u32>)) -> Self {
+        let (region, addr, cached_latency_ms) = candidate;
+        Self {
+            region,
+            addr,
+            cached_latency_ms,
+            probed_latency_ms: None,
+        }
+    }
+
+    fn effective_latency_ms(&self) -> Option<u32> {
+        self.probed_latency_ms.or(self.cached_latency_ms)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RelayProbeMeasurement {
+    region: String,
+    addr: SocketAddr,
+    latency_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelaySelectionSource {
+    FreshProbe,
+    CachedLatency,
+    Deterministic,
+}
+
+fn region_matches_candidate(selected_region: &str, server_region: &str) -> bool {
+    server_region == selected_region || server_region.starts_with(&format!("{selected_region}-"))
+}
+
 pub(crate) fn relay_candidates_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
@@ -109,26 +151,142 @@ pub(crate) fn relay_candidates_for_region(
         );
     }
 
-    let exact: Vec<(String, SocketAddr, Option<u32>)> = available_servers
-        .iter()
-        .filter(|(server_region, _, _)| server_region == selected_region)
-        .map(|(server_region, relay_addr, latency_ms)| {
-            (server_region.clone(), *relay_addr, *latency_ms)
-        })
-        .collect();
-
-    if !exact.is_empty() {
-        return exact;
-    }
-
-    let prefix = format!("{selected_region}-");
     available_servers
         .iter()
-        .filter(|(server_region, _, _)| server_region.starts_with(&prefix))
+        .filter(|(server_region, _, _)| region_matches_candidate(selected_region, server_region))
         .map(|(server_region, relay_addr, latency_ms)| {
             (server_region.clone(), *relay_addr, *latency_ms)
         })
         .collect()
+}
+
+fn sort_ranked_candidates(candidates: &mut [RankedRelayCandidate]) -> RelaySelectionSource {
+    let any_successful_probe = candidates
+        .iter()
+        .any(|candidate| candidate.probed_latency_ms.is_some());
+
+    candidates.sort_by(|a, b| {
+        if any_successful_probe {
+            let a_has_probe = a.probed_latency_ms.is_some();
+            let b_has_probe = b.probed_latency_ms.is_some();
+            a_has_probe
+                .cmp(&b_has_probe)
+                .reverse()
+                .then_with(|| {
+                    a.probed_latency_ms
+                        .unwrap_or(u32::MAX)
+                        .cmp(&b.probed_latency_ms.unwrap_or(u32::MAX))
+                })
+                .then_with(|| {
+                    a.cached_latency_ms
+                        .unwrap_or(u32::MAX)
+                        .cmp(&b.cached_latency_ms.unwrap_or(u32::MAX))
+                })
+                .then_with(|| a.region.cmp(&b.region))
+                .then_with(|| a.addr.to_string().cmp(&b.addr.to_string()))
+        } else {
+            let a_latency = a.cached_latency_ms.unwrap_or(u32::MAX);
+            let b_latency = b.cached_latency_ms.unwrap_or(u32::MAX);
+            a_latency
+                .cmp(&b_latency)
+                .then_with(|| a.region.cmp(&b.region))
+                .then_with(|| a.addr.to_string().cmp(&b.addr.to_string()))
+        }
+    });
+
+    if any_successful_probe {
+        RelaySelectionSource::FreshProbe
+    } else if candidates
+        .first()
+        .and_then(|candidate| candidate.cached_latency_ms)
+        .is_some()
+    {
+        RelaySelectionSource::CachedLatency
+    } else {
+        RelaySelectionSource::Deterministic
+    }
+}
+
+fn log_resolution_source(source: RelaySelectionSource, candidate: &RankedRelayCandidate) {
+    match source {
+        RelaySelectionSource::FreshProbe => {
+            if let Some(latency_ms) = candidate.probed_latency_ms {
+                log::info!(
+                    "Resolved via fresh probe to {} ({}) at {}ms",
+                    candidate.region,
+                    candidate.addr,
+                    latency_ms
+                );
+            }
+        }
+        RelaySelectionSource::CachedLatency => {
+            if let Some(latency_ms) = candidate.cached_latency_ms {
+                log::info!(
+                    "Resolved via cached latency to {} ({}) at {}ms",
+                    candidate.region,
+                    candidate.addr,
+                    latency_ms
+                );
+            }
+        }
+        RelaySelectionSource::Deterministic => {
+            log::info!(
+                "Resolved via deterministic fallback to {} ({})",
+                candidate.region,
+                candidate.addr
+            );
+        }
+    }
+}
+
+fn apply_probe_measurements(
+    candidates: &mut [RankedRelayCandidate],
+    probe_results: &[RelayProbeMeasurement],
+) {
+    for measurement in probe_results {
+        if let Some(candidate) = candidates.iter_mut().find(|candidate| {
+            candidate.region == measurement.region && candidate.addr == measurement.addr
+        }) {
+            candidate.probed_latency_ms = measurement.latency_ms;
+        }
+    }
+}
+
+fn ranked_candidates_from_raw(
+    candidates: Vec<(String, SocketAddr, Option<u32>)>,
+) -> Vec<RankedRelayCandidate> {
+    candidates
+        .into_iter()
+        .map(RankedRelayCandidate::from_candidate)
+        .collect()
+}
+
+async fn ranked_relay_candidates_for_region(
+    selected_region: &str,
+    available_servers: &[(String, SocketAddr, Option<u32>)],
+    forced_server: Option<&str>,
+) -> Vec<RankedRelayCandidate> {
+    let raw_candidates =
+        relay_candidates_for_region(selected_region, available_servers, forced_server);
+    let mut candidates = ranked_candidates_from_raw(raw_candidates);
+    if candidates.is_empty() {
+        return candidates;
+    }
+
+    if candidates.len() > 1 {
+        let probe_targets: Vec<(String, SocketAddr)> = candidates
+            .iter()
+            .map(|candidate| (candidate.region.clone(), candidate.addr))
+            .collect();
+        let probe_results = probe_relay_candidates(&probe_targets).await;
+        apply_probe_measurements(&mut candidates, &probe_results);
+    }
+
+    let source = sort_ranked_candidates(&mut candidates);
+    if let Some(candidate) = candidates.first() {
+        log_resolution_source(source, candidate);
+    }
+    candidates
 }
 
 fn sort_candidates_by_latency(candidates: &mut [(String, SocketAddr, Option<u32>)]) {
@@ -154,31 +312,17 @@ async fn ordered_relay_candidates_for_region(
     available_servers: &[(String, SocketAddr, Option<u32>)],
     forced_server: Option<&str>,
 ) -> Vec<(String, SocketAddr, Option<u32>)> {
-    let mut candidates =
-        relay_candidates_for_region(selected_region, available_servers, forced_server);
-    if candidates.is_empty() {
-        return candidates;
-    }
-
-    if should_probe_candidates(&candidates) {
-        let probe_targets: Vec<(String, SocketAddr)> = candidates
-            .iter()
-            .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
-            .collect();
-        if let Some((region, addr, latency_ms)) = ping_and_select_best(&probe_targets).await {
-            if let Some(candidate) = candidates
-                .iter_mut()
-                .find(|(server_region, relay_addr, _)| {
-                    *server_region == region && *relay_addr == addr
-                })
-            {
-                candidate.2 = Some(latency_ms);
-            }
-        }
-    }
-
-    sort_candidates_by_latency(&mut candidates);
-    candidates
+    ranked_relay_candidates_for_region(selected_region, available_servers, forced_server)
+        .await
+        .into_iter()
+        .map(|candidate| {
+            (
+                candidate.region,
+                candidate.addr,
+                candidate.effective_latency_ms(),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn resolve_relay_server_for_region(
@@ -186,16 +330,11 @@ pub(crate) fn resolve_relay_server_for_region(
     available_servers: &[(String, SocketAddr, Option<u32>)],
     forced_server: Option<&str>,
 ) -> Option<(String, SocketAddr)> {
-    let candidates = relay_candidates_for_region(selected_region, available_servers, forced_server);
+    let mut candidates =
+        relay_candidates_for_region(selected_region, available_servers, forced_server);
+    sort_candidates_by_latency(&mut candidates);
     pick_lowest_latency_server(candidates.iter())
         .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
-}
-
-fn should_probe_candidates(candidates: &[(String, SocketAddr, Option<u32>)]) -> bool {
-    candidates.len() > 1
-        && candidates
-            .iter()
-            .any(|(_, _, latency_ms)| latency_ms.is_none())
 }
 
 fn average_probe_latency(samples: &[u32]) -> Option<u32> {
@@ -208,67 +347,28 @@ fn average_probe_latency(samples: &[u32]) -> Option<u32> {
 }
 
 fn resolve_relay_server_from_candidates(
-    candidates: &[(String, SocketAddr, Option<u32>)],
-    probe_result: Option<(String, SocketAddr, u32)>,
+    candidates: &[RankedRelayCandidate],
 ) -> Option<(String, SocketAddr)> {
     if candidates.is_empty() {
         return None;
     }
 
     if candidates.len() == 1 {
-        let (server_region, relay_addr, _) = &candidates[0];
-        return Some((server_region.clone(), *relay_addr));
+        let candidate = &candidates[0];
+        return Some((candidate.region.clone(), candidate.addr));
     }
 
-    if should_probe_candidates(candidates) {
-        if let Some((server_region, relay_addr, latency_ms)) = probe_result {
-            log::info!(
-                "Resolved via active probe to {} ({}ms)",
-                server_region,
-                latency_ms
-            );
-            return Some((server_region, relay_addr));
-        }
-    }
-
-    pick_lowest_latency_server(candidates.iter())
-        .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
+    let mut sorted = candidates.to_vec();
+    let source = sort_ranked_candidates(&mut sorted);
+    sorted.first().map(|candidate| {
+        log_resolution_source(source, candidate);
+        (candidate.region.clone(), candidate.addr)
+    })
 }
 
-async fn resolve_relay_server_for_region_with_probing(
-    selected_region: &str,
-    available_servers: &[(String, SocketAddr, Option<u32>)],
-    forced_server: Option<&str>,
-) -> Option<(String, SocketAddr)> {
-    let candidates = relay_candidates_for_region(selected_region, available_servers, forced_server);
-    let needs_probe = should_probe_candidates(&candidates);
-
-    let probe_result = if needs_probe {
-        let probe_targets: Vec<(String, SocketAddr)> = candidates
-            .iter()
-            .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
-            .collect();
-        ping_and_select_best(&probe_targets).await
-    } else {
-        None
-    };
-
-    if needs_probe && probe_result.is_none() {
-        log::debug!(
-            "Probe for '{}' returned no data, falling back to cached latency/order",
-            selected_region
-        );
-    }
-
-    resolve_relay_server_from_candidates(&candidates, probe_result)
-}
-
-/// Probe candidate relay servers and return the best one.
-/// Pings all candidates in parallel using ICMP and averages 5 samples per candidate.
-/// Returns (region_name, addr, latency_ms) for the fastest average responder.
-async fn ping_and_select_best(
-    candidates: &[(String, SocketAddr)],
-) -> Option<(String, SocketAddr, u32)> {
+/// Probe candidate relay servers in parallel using ICMP and return their
+/// averaged measurements.
+async fn probe_relay_candidates(candidates: &[(String, SocketAddr)]) -> Vec<RelayProbeMeasurement> {
     use crate::vpn::servers::measure_latency_icmp;
 
     let mut tasks = Vec::new();
@@ -287,48 +387,54 @@ async fn ping_and_select_best(
                         samples.push(ms);
                     }
                 }
-                average_probe_latency(&samples).map(|avg| (avg, samples.len()))
+                (average_probe_latency(&samples), samples.len())
             })
             .await;
 
             match result {
-                Ok(Some((avg_ms, successful))) => {
-                    log::info!(
-                        "Auto-routing ping: {} ({}) = {}ms avg ({} of {} samples)",
+                Ok((latency_ms, successful)) => {
+                    match latency_ms {
+                        Some(latency_ms) => {
+                            log::info!(
+                                "Relay probe: {} ({}) = {}ms avg ({} of {} samples)",
+                                region,
+                                addr,
+                                latency_ms,
+                                successful,
+                                AUTO_ROUTING_PING_SAMPLES
+                            );
+                        }
+                        None => {
+                            log::info!(
+                                "Relay probe: {} ({}) = timeout (0 of {} samples)",
+                                region,
+                                addr,
+                                AUTO_ROUTING_PING_SAMPLES
+                            );
+                        }
+                    }
+                    RelayProbeMeasurement {
                         region,
                         addr,
-                        avg_ms,
-                        successful,
-                        AUTO_ROUTING_PING_SAMPLES
-                    );
-                    Some((region, addr, avg_ms))
+                        latency_ms,
+                    }
                 }
-                _ => {
-                    log::info!("Auto-routing ping: {} ({}) = timeout", region, addr);
-                    None
-                }
+                Err(_) => RelayProbeMeasurement {
+                    region,
+                    addr,
+                    latency_ms: None,
+                },
             }
         }));
     }
 
-    let mut best: Option<(String, SocketAddr, u32)> = None;
+    let mut results = Vec::with_capacity(tasks.len());
     for task in tasks {
-        if let Ok(Some((region, addr, ms))) = task.await {
-            if best.as_ref().map_or(true, |(_, _, best_ms)| ms < *best_ms) {
-                best = Some((region, addr, ms));
-            }
+        if let Ok(measurement) = task.await {
+            results.push(measurement);
         }
     }
-
-    if let Some((ref region, ref addr, ms)) = best {
-        log::info!(
-            "Auto-routing: Best candidate: {} ({}) at {}ms",
-            region,
-            addr,
-            ms
-        );
-    }
-    best
+    results
 }
 
 /// VPN connection state
@@ -1061,42 +1167,79 @@ impl VpnConnection {
                             if let Some((mut selected_region, mut selected_addr)) =
                                 router_for_lookup.get_best_server_for_region(&region)
                             {
-                                // Step 1b: If candidate latencies are incomplete, actively probe
-                                // candidates in this region so we don't fall back to list order.
+                                let mut latency_improvement_ms = None;
+
+                                // Step 1b: Actively probe all candidates in this region family so
+                                // selection is based on fresh measurements, not cached order.
                                 if let Some(target_region) = region.best_swifttunnel_region() {
                                     let forced_server =
                                         router_for_lookup.forced_server_for_region(target_region);
                                     let available_servers =
                                         router_for_lookup.available_servers_snapshot();
 
-                                    if let Some((probed_region, probed_addr)) =
-                                        resolve_relay_server_for_region_with_probing(
-                                            target_region,
-                                            &available_servers,
-                                            forced_server.as_deref(),
-                                        )
-                                        .await
-                                    {
-                                        if probed_region != selected_region
-                                            || probed_addr != selected_addr
+                                    let ranked_candidates = ranked_relay_candidates_for_region(
+                                        target_region,
+                                        &available_servers,
+                                        forced_server.as_deref(),
+                                    )
+                                    .await;
+
+                                    if let Some(best_candidate) = ranked_candidates.first() {
+                                        if best_candidate.region != selected_region
+                                            || best_candidate.addr != selected_addr
                                         {
                                             log::info!(
                                                 "Auto-routing: Probe refined '{}' selection {} ({}) -> {} ({})",
                                                 target_region,
                                                 selected_region,
                                                 selected_addr,
-                                                probed_region,
-                                                probed_addr
+                                                best_candidate.region,
+                                                best_candidate.addr
                                             );
-                                            selected_region = probed_region;
-                                            selected_addr = probed_addr;
+                                            selected_region = best_candidate.region.clone();
+                                            selected_addr = best_candidate.addr;
+                                        } else {
+                                            selected_region = best_candidate.region.clone();
+                                            selected_addr = best_candidate.addr;
+                                        }
+
+                                        if let Some((current_region, current_addr)) =
+                                            router_for_lookup.current_relay()
+                                        {
+                                            let current_candidate =
+                                                ranked_candidates.iter().find(|candidate| {
+                                                    candidate.region == current_region
+                                                        && candidate.addr == current_addr
+                                                });
+                                            if let (
+                                                Some(current_candidate),
+                                                Some(best_latency_ms),
+                                            ) = (
+                                                current_candidate,
+                                                best_candidate.probed_latency_ms,
+                                            ) {
+                                                if let Some(current_latency_ms) =
+                                                    current_candidate.probed_latency_ms
+                                                {
+                                                    if current_latency_ms > best_latency_ms {
+                                                        latency_improvement_ms = Some(
+                                                            current_latency_ms - best_latency_ms,
+                                                        );
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
 
                                 // Step 2: Commit the switch
                                 if let Some((new_addr, new_region)) = router_for_lookup
-                                    .commit_switch(region, selected_region, selected_addr)
+                                    .commit_switch(
+                                        region,
+                                        selected_region,
+                                        selected_addr,
+                                        latency_improvement_ms,
+                                    )
                                 {
                                     log::info!(
                                         "Auto-routing: SWITCHING relay {} -> {} (addr: {})",
@@ -1840,7 +1983,7 @@ mod tests {
         let resolved = resolve_relay_server_for_region("germany", &available_servers, None);
         assert_eq!(
             resolved,
-            Some(("germany".to_string(), parse_addr("10.0.0.1:51821")))
+            Some(("germany-01".to_string(), parse_addr("10.0.0.2:51821")))
         );
     }
 
@@ -2034,11 +2177,20 @@ mod tests {
             ("germany-01".to_string(), parse_addr("10.0.0.1:51821"), None),
             ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), None),
         ];
-        let candidates = relay_candidates_for_region("germany", &available_servers, None);
-        let probe_result = Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821"), 12));
-
-        assert!(should_probe_candidates(&candidates));
-        let resolved = resolve_relay_server_from_candidates(&candidates, probe_result);
+        let mut candidates = ranked_candidates_from_raw(relay_candidates_for_region(
+            "germany",
+            &available_servers,
+            None,
+        ));
+        apply_probe_measurements(
+            &mut candidates,
+            &[RelayProbeMeasurement {
+                region: "germany-02".to_string(),
+                addr: parse_addr("10.0.0.2:51821"),
+                latency_ms: Some(12),
+            }],
+        );
+        let resolved = resolve_relay_server_from_candidates(&candidates);
 
         assert_eq!(
             resolved,
@@ -2056,11 +2208,20 @@ mod tests {
             ),
             ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), None),
         ];
-        let candidates = relay_candidates_for_region("germany", &available_servers, None);
-        let probe_result = Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821"), 5));
-
-        assert!(should_probe_candidates(&candidates));
-        let resolved = resolve_relay_server_from_candidates(&candidates, probe_result);
+        let mut candidates = ranked_candidates_from_raw(relay_candidates_for_region(
+            "germany",
+            &available_servers,
+            None,
+        ));
+        apply_probe_measurements(
+            &mut candidates,
+            &[RelayProbeMeasurement {
+                region: "germany-02".to_string(),
+                addr: parse_addr("10.0.0.2:51821"),
+                latency_ms: Some(5),
+            }],
+        );
+        let resolved = resolve_relay_server_from_candidates(&candidates);
 
         assert_eq!(
             resolved,
@@ -2082,15 +2243,114 @@ mod tests {
                 Some(6),
             ),
         ];
-        let candidates = relay_candidates_for_region("germany", &available_servers, None);
-        let probe_result = Some(("germany-01".to_string(), parse_addr("10.0.0.1:51821"), 1));
-
-        assert!(!should_probe_candidates(&candidates));
-        let resolved = resolve_relay_server_from_candidates(&candidates, probe_result);
+        let candidates = ranked_candidates_from_raw(relay_candidates_for_region(
+            "germany",
+            &available_servers,
+            None,
+        ));
+        let resolved = resolve_relay_server_from_candidates(&candidates);
 
         assert_eq!(
             resolved,
             Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821")))
+        );
+    }
+
+    #[test]
+    fn test_relay_candidates_for_region_merges_exact_and_sibling_servers() {
+        let available_servers = vec![
+            (
+                "singapore".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(20),
+            ),
+            (
+                "singapore-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                Some(9),
+            ),
+            ("tokyo".to_string(), parse_addr("10.0.1.1:51821"), Some(30)),
+        ];
+
+        let candidates = relay_candidates_for_region("singapore", &available_servers, None);
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .any(|(region, _, _)| region == "singapore")
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|(region, _, _)| region == "singapore-02")
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_prefers_sibling_over_canonical_when_latency_lower() {
+        let available_servers = vec![
+            (
+                "singapore".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(20),
+            ),
+            (
+                "singapore-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                Some(9),
+            ),
+        ];
+
+        let resolved = resolve_relay_server_for_region("singapore", &available_servers, None);
+        assert_eq!(
+            resolved,
+            Some(("singapore-02".to_string(), parse_addr("10.0.0.2:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_falls_back_to_cached_latency_when_all_probes_fail() {
+        let available_servers = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(14),
+            ),
+            (
+                "germany-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                Some(8),
+            ),
+        ];
+        let candidates = ranked_candidates_from_raw(relay_candidates_for_region(
+            "germany",
+            &available_servers,
+            None,
+        ));
+
+        let resolved = resolve_relay_server_from_candidates(&candidates);
+        assert_eq!(
+            resolved,
+            Some(("germany-02".to_string(), parse_addr("10.0.0.2:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolve_relay_server_falls_back_to_deterministic_order_when_no_latency_exists() {
+        let available_servers = vec![
+            ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), None),
+            ("germany-01".to_string(), parse_addr("10.0.0.1:51821"), None),
+        ];
+        let candidates = ranked_candidates_from_raw(relay_candidates_for_region(
+            "germany",
+            &available_servers,
+            None,
+        ));
+
+        let resolved = resolve_relay_server_from_candidates(&candidates);
+        assert_eq!(
+            resolved,
+            Some(("germany-01".to_string(), parse_addr("10.0.0.1:51821")))
         );
     }
 
