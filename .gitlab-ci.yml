@@ -17,6 +17,9 @@ build:
     - node --version
     - makensis /VERSION
 
+    # Fix NSIS stub: replace 2.5KB launcher stub with real compiler from Bin\
+    - Copy-Item "C:\Program Files (x86)\NSIS\Bin\makensis.exe" "C:\Program Files (x86)\NSIS\makensis.exe" -Force
+
     # Resolve and verify version
     - |
       $tag = $env:CI_COMMIT_TAG
