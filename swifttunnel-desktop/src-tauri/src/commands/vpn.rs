@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use tauri::{AppHandle, Emitter, State};
 
@@ -468,57 +468,133 @@ pub struct LatencyEntry {
     pub latency_ms: Option<u32>,
 }
 
+const LATENCY_PROBE_CONCURRENCY: usize = 8;
+
+fn build_latency_probe_targets(
+    sl: &swifttunnel_core::vpn::servers::DynamicServerList,
+) -> Vec<(String, String, u16)> {
+    sl.servers()
+        .iter()
+        .map(|server| (server.region.clone(), server.ip.clone(), server.port))
+        .collect()
+}
+
+fn apply_latency_measurements(
+    sl: &mut swifttunnel_core::vpn::servers::DynamicServerList,
+    measurements: &[(String, Option<u32>)],
+) -> Vec<LatencyEntry> {
+    for (server_id, latency) in measurements {
+        sl.set_latency(server_id, *latency);
+    }
+
+    sl.regions()
+        .iter()
+        .map(|region| LatencyEntry {
+            region: region.id.clone(),
+            latency_ms: sl.get_region_best_latency(&region.id),
+        })
+        .collect()
+}
+
+fn select_best_server_in_region(
+    sl: &swifttunnel_core::vpn::servers::DynamicServerList,
+    region_id: &str,
+) -> Option<String> {
+    let region = sl.get_region(region_id)?;
+    let mut best: Option<(String, u32)> = None;
+    for server_id in &region.servers {
+        if let Some(latency) = sl.get_latency(server_id) {
+            if best.as_ref().is_none_or(|(_, best_ms)| latency < *best_ms) {
+                best = Some((server_id.clone(), latency));
+            }
+        }
+    }
+    best.map(|(id, _)| id)
+        .or_else(|| region.servers.first().cloned())
+}
+
 #[tauri::command]
 pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<LatencyEntry>, String> {
-    let probes: Vec<(String, String, u16, String)> = {
+    let probes = {
         let sl = state.server_list.lock();
-        sl.regions()
-            .iter()
-            .filter_map(|region| {
-                let server_id = region.servers.first()?.clone();
-                let server = sl.get_server(&server_id)?;
-                Some((region.id.clone(), server.ip.clone(), server.port, server_id))
-            })
-            .collect()
+        build_latency_probe_targets(&sl)
     };
 
     let mut tasks = tokio::task::JoinSet::new();
-    for (region_id, ip, port, server_id) in probes {
+    let mut measured: Vec<(String, Option<u32>)> = Vec::with_capacity(probes.len());
+    for (server_id, ip, port) in probes {
+        if tasks.len() >= LATENCY_PROBE_CONCURRENCY {
+            if let Some(result) = tasks.join_next().await {
+                if let Ok((server_id, latency)) = result {
+                    measured.push((server_id, latency));
+                }
+            }
+        }
         tasks.spawn(async move {
             let endpoint = format!("{ip}:{port}");
             let latency = swifttunnel_core::vpn::servers::measure_latency(&endpoint)
                 .await
                 .or_else(|| swifttunnel_core::vpn::servers::measure_latency_icmp(&ip));
-            (region_id, server_id, latency)
+            (server_id, latency)
         });
     }
 
-    let mut measured: HashMap<String, (String, Option<u32>)> = HashMap::new();
     while let Some(result) = tasks.join_next().await {
-        if let Ok((region_id, server_id, latency)) = result {
-            measured.insert(region_id, (server_id, latency));
+        if let Ok((server_id, latency)) = result {
+            measured.push((server_id, latency));
         }
     }
 
     let mut sl = state.server_list.lock();
-    for (_region_id, (server_id, latency)) in measured {
-        sl.set_latency(&server_id, latency);
-    }
-
-    Ok(sl
-        .regions()
-        .iter()
-        .map(|r| LatencyEntry {
-            region: r.id.clone(),
-            latency_ms: sl.get_region_best_latency(&r.id),
-        })
-        .collect())
+    Ok(apply_latency_measurements(&mut sl, &measured))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+    use swifttunnel_core::vpn::servers::{
+        DynamicGamingRegion, DynamicServerInfo, DynamicServerList, ServerListSource,
+    };
+
+    fn make_server(region: &str, ip: &str) -> DynamicServerInfo {
+        DynamicServerInfo {
+            region: region.to_string(),
+            name: region.to_string(),
+            country_code: "XX".to_string(),
+            ip: ip.to_string(),
+            port: 51821,
+            phantun_available: false,
+            phantun_port: None,
+        }
+    }
+
+    fn make_region(id: &str, servers: &[&str]) -> DynamicGamingRegion {
+        DynamicGamingRegion {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: id.to_string(),
+            country_code: "XX".to_string(),
+            servers: servers.iter().map(|server| (*server).to_string()).collect(),
+        }
+    }
+
+    fn make_dynamic_server_list() -> DynamicServerList {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server("singapore", "1.1.1.1"),
+                make_server("singapore-02", "1.1.1.2"),
+                make_server("tokyo-01", "2.2.2.1"),
+            ],
+            vec![
+                make_region("singapore", &["singapore", "singapore-02"]),
+                make_region("tokyo", &["tokyo-01"]),
+            ],
+            ServerListSource::Api,
+        );
+        list
+    }
 
     #[test]
     fn apply_connected_session_settings_marks_resume_and_region() {
@@ -582,6 +658,63 @@ mod tests {
             "germany".to_string()
         );
     }
+
+    #[test]
+    fn build_latency_probe_targets_includes_every_server() {
+        let list = make_dynamic_server_list();
+        let probes = build_latency_probe_targets(&list);
+
+        assert_eq!(probes.len(), 3);
+        assert!(probes.contains(&("singapore".to_string(), "1.1.1.1".to_string(), 51821)));
+        assert!(probes.contains(&("singapore-02".to_string(), "1.1.1.2".to_string(), 51821)));
+        assert!(probes.contains(&("tokyo-01".to_string(), "2.2.2.1".to_string(), 51821)));
+    }
+
+    #[test]
+    fn apply_latency_measurements_updates_all_servers_and_region_best_latency() {
+        let mut list = make_dynamic_server_list();
+        let measurements = vec![
+            ("singapore".to_string(), Some(18)),
+            ("singapore-02".to_string(), Some(7)),
+            ("tokyo-01".to_string(), Some(40)),
+        ];
+
+        let latencies = apply_latency_measurements(&mut list, &measurements);
+
+        assert_eq!(list.get_latency("singapore"), Some(18));
+        assert_eq!(list.get_latency("singapore-02"), Some(7));
+        assert_eq!(list.get_region_best_latency("singapore"), Some(7));
+        assert_eq!(list.get_region_best_latency("tokyo"), Some(40));
+
+        assert!(
+            latencies
+                .iter()
+                .any(|entry| entry.region == "singapore" && entry.latency_ms == Some(7))
+        );
+        assert!(
+            latencies
+                .iter()
+                .any(|entry| entry.region == "tokyo" && entry.latency_ms == Some(40))
+        );
+    }
+
+    #[test]
+    fn select_best_server_in_region_prefers_lowest_latency() {
+        let mut list = make_dynamic_server_list();
+        list.set_latency("singapore", Some(22));
+        list.set_latency("singapore-02", Some(9));
+
+        let selected = select_best_server_in_region(&list, "singapore");
+        assert_eq!(selected.as_deref(), Some("singapore-02"));
+    }
+
+    #[test]
+    fn select_best_server_in_region_falls_back_to_first_server_without_latency() {
+        let list = make_dynamic_server_list();
+
+        let selected = select_best_server_in_region(&list, "singapore");
+        assert_eq!(selected.as_deref(), Some("singapore"));
+    }
 }
 
 #[tauri::command]
@@ -600,19 +733,5 @@ pub async fn server_refresh(state: State<'_, AppState>, app: AppHandle) -> Resul
 #[tauri::command]
 pub fn server_smart_select(state: State<'_, AppState>, region_id: String) -> Option<String> {
     let sl = state.server_list.lock();
-    // Find the server with lowest latency in the region
-    let region = sl.get_region(&region_id)?;
-    let mut best: Option<(String, u32)> = None;
-    for server_id in &region.servers {
-        if let Some(latency) = sl.get_latency(server_id) {
-            if best
-                .as_ref()
-                .map_or(true, |(_, best_ms)| latency < *best_ms)
-            {
-                best = Some((server_id.clone(), latency));
-            }
-        }
-    }
-    best.map(|(id, _)| id)
-        .or_else(|| region.servers.first().cloned())
+    select_best_server_in_region(&sl, &region_id)
 }

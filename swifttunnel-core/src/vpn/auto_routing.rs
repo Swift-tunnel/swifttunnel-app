@@ -7,6 +7,7 @@
 //! automatic region detection.
 
 use crate::geolocation::RobloxRegion;
+use crate::vpn::connection::region_family;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -18,6 +19,7 @@ const MIN_SWITCH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Maximum switches per minute
 const MAX_SWITCHES_PER_MINUTE: u32 = 3;
+const SAME_REGION_UPGRADE_THRESHOLD_MS: u32 = 10;
 
 /// Auto-routing state
 pub struct AutoRouter {
@@ -188,6 +190,11 @@ impl AutoRouter {
         self.current_st_region.read().clone()
     }
 
+    pub fn current_relay(&self) -> Option<(String, SocketAddr)> {
+        let addr = *self.current_relay_addr.read();
+        addr.map(|addr| (self.current_st_region.read().clone(), addr))
+    }
+
     /// Get recent auto-routing events for UI display
     pub fn recent_events(&self, max: usize) -> Vec<AutoRoutingEvent> {
         let events = self.event_log.read();
@@ -339,33 +346,35 @@ impl AutoRouter {
         self.auto_routing_bypassed.store(false, Ordering::Release);
 
         let best_st_region = game_region.best_swifttunnel_region()?;
-        let current_st_region = self.current_st_region.read().clone();
-
         // Check if the user has pinned a specific server for this region.
         // Clone so we don't hold the lock while resolving.
         let pinned_server = self.forced_servers.read().get(best_st_region).cloned();
         let pinned_server = pinned_server.as_deref();
 
         let servers = self.available_servers.read();
-        let (resolved_region, resolved_addr) =
-            match super::connection::resolve_relay_server_for_region(
+        let current_st_region = self.current_st_region.read().clone();
+        let current_relay_addr = *self.current_relay_addr.read();
+        let candidates =
+            super::connection::relay_candidates_for_region(best_st_region, &servers, pinned_server);
+        if candidates.is_empty() {
+            log::warn!(
+                "Auto-routing: No server found for region '{}' (game region: {})",
                 best_st_region,
-                &servers,
-                pinned_server,
-            ) {
-                Some(v) => v,
-                None => {
-                    log::warn!(
-                        "Auto-routing: No server found for region '{}' (game region: {})",
-                        best_st_region,
-                        game_region
-                    );
-                    return None;
-                }
-            };
+                game_region
+            );
+            return None;
+        }
 
-        // Check if we're already on the resolved best server
-        if current_st_region == resolved_region {
+        let (resolved_region, resolved_addr, _) = candidates
+            .iter()
+            .min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
+            .cloned()
+            .expect("candidates checked as non-empty");
+
+        if candidates.len() == 1
+            && current_st_region == resolved_region
+            && current_relay_addr == Some(resolved_addr)
+        {
             *self.current_game_region.write() = Some(game_region.clone());
             return None;
         }
@@ -382,6 +391,7 @@ impl AutoRouter {
         game_region: RobloxRegion,
         selected_region: String,
         selected_addr: SocketAddr,
+        latency_improvement_ms: Option<u32>,
     ) -> Option<(SocketAddr, String)> {
         let current_st_region = self.current_st_region.read().clone();
 
@@ -390,6 +400,7 @@ impl AutoRouter {
             &selected_region,
             &game_region,
             selected_addr,
+            latency_improvement_ms,
         ) {
             Some((selected_addr, selected_region))
         } else {
@@ -405,51 +416,77 @@ impl AutoRouter {
         to_region: &str,
         game_region: &RobloxRegion,
         new_addr: SocketAddr,
+        latency_improvement_ms: Option<u32>,
     ) -> bool {
-        // Idempotency: another worker may have already switched to this region
-        if *self.current_st_region.read() == to_region {
+        let current_region = self.current_st_region.read().clone();
+        let current_addr = *self.current_relay_addr.read();
+        if current_region == to_region && current_addr == Some(new_addr) {
             return false;
         }
 
+        let same_region_upgrade = region_family(from_region) == region_family(to_region)
+            && current_addr != Some(new_addr);
+        let allow_immediate_upgrade = same_region_upgrade
+            && latency_improvement_ms
+                .is_some_and(|delta| delta >= SAME_REGION_UPGRADE_THRESHOLD_MS);
         let now = Instant::now();
 
-        // Check minimum interval
-        if now.duration_since(*self.last_switch_time.read()) < MIN_SWITCH_INTERVAL {
-            log::debug!("Auto-routing: Rate limited (min interval), skipping switch");
+        if same_region_upgrade && !allow_immediate_upgrade {
+            log::debug!(
+                "Auto-routing: Rate limited (same-region upgrade below {}ms), skipping switch",
+                SAME_REGION_UPGRADE_THRESHOLD_MS
+            );
             return false;
         }
 
-        // Check per-minute limit under a single write lock
-        let mut window = self.switches_this_minute.write();
-        if now.duration_since(window.1) > Duration::from_secs(60) {
-            // Reset minute window
-            *window = (0, now);
+        if !allow_immediate_upgrade {
+            if now.duration_since(*self.last_switch_time.read()) < MIN_SWITCH_INTERVAL {
+                log::debug!("Auto-routing: Rate limited (min interval), skipping switch");
+                return false;
+            }
+
+            // Same-region upgrades that clear the threshold intentionally skip the churn
+            // counter so an immediate correction does not consume cross-region switch budget.
+            let mut window = self.switches_this_minute.write();
+            if now.duration_since(window.1) > Duration::from_secs(60) {
+                *window = (0, now);
+            }
+            if window.0 >= MAX_SWITCHES_PER_MINUTE {
+                log::debug!("Auto-routing: Rate limited (max per minute), skipping switch");
+                return false;
+            }
+            window.0 += 1;
         }
-        if window.0 >= MAX_SWITCHES_PER_MINUTE {
-            log::debug!("Auto-routing: Rate limited (max per minute), skipping switch");
-            return false;
-        }
-        // Rate limit passed - increment counter while we still hold the lock
-        window.0 += 1;
-        drop(window);
 
         *self.last_switch_time.write() = now;
         *self.current_st_region.write() = to_region.to_string();
         *self.current_relay_addr.write() = Some(new_addr);
         *self.current_game_region.write() = Some(game_region.clone());
 
-        // Add to event log (keep last 20 events)
+        let reason = if same_region_upgrade {
+            match latency_improvement_ms {
+                Some(delta) => format!(
+                    "Upgrade within region {} - {}ms faster",
+                    region_family(to_region),
+                    delta
+                ),
+                None => format!("Upgrade within region {}", region_family(to_region)),
+            }
+        } else {
+            format!(
+                "Game server moved to {} - switching from {} to {}",
+                game_region.display_name(),
+                from_region,
+                to_region
+            )
+        };
+
         let event = AutoRoutingEvent {
             timestamp: now,
             from_region: from_region.to_string(),
             to_region: to_region.to_string(),
             game_server_region: game_region.display_name().to_string(),
-            reason: format!(
-                "Game server moved to {} - switching from {} to {}",
-                game_region.display_name(),
-                from_region,
-                to_region
-            ),
+            reason,
         };
 
         let mut log = self.event_log.write();
@@ -458,12 +495,22 @@ impl AutoRouter {
             log.pop_front();
         }
 
-        log::info!(
-            "Auto-routing: Switched {} -> {} (game server in {})",
-            from_region,
-            to_region,
-            game_region.display_name()
-        );
+        if same_region_upgrade {
+            log::info!(
+                "Auto-routing: Upgraded within region {} {} -> {} ({:?}ms improvement)",
+                region_family(to_region),
+                from_region,
+                to_region,
+                latency_improvement_ms
+            );
+        } else {
+            log::info!(
+                "Auto-routing: Switched {} -> {} (game server in {})",
+                from_region,
+                to_region,
+                game_region.display_name()
+            );
+        }
 
         true
     }
@@ -579,7 +626,7 @@ mod tests {
         assert_eq!(addr, "108.61.7.6:51821".parse::<SocketAddr>().unwrap());
 
         // Commit the switch
-        let result = router.commit_switch(RobloxRegion::UsEast, region, addr);
+        let result = router.commit_switch(RobloxRegion::UsEast, region, addr, None);
         assert!(result.is_some());
         let (addr, region) = result.unwrap();
         assert_eq!(region, "us-east-nj");
@@ -587,14 +634,21 @@ mod tests {
     }
 
     #[test]
-    fn test_get_best_server_same_region_no_switch() {
+    fn test_get_best_server_same_region_still_returns_candidate_for_probe_refinement() {
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
         router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
 
-        // Already on Singapore — should return None (no candidates needed)
+        // Singapore has multiple candidate servers, so auto-routing should keep the region
+        // probeable even when the cached winner matches the current exact server.
         let best = router.get_best_server_for_region(&RobloxRegion::Singapore);
-        assert!(best.is_none());
+        assert_eq!(
+            best,
+            Some((
+                "singapore".to_string(),
+                "54.255.205.216:51821".parse::<SocketAddr>().unwrap()
+            ))
+        );
     }
 
     #[test]
@@ -753,6 +807,57 @@ mod tests {
 
         router.reset();
         assert!(!router.is_bypassed());
+    }
+
+    #[test]
+    fn test_commit_switch_allows_same_region_upgrade_inside_min_interval() {
+        let router = AutoRouter::new(true, "singapore-02");
+        router.set_current_relay("51.79.128.67:51821".parse().unwrap(), "singapore-02");
+        *router.last_switch_time.write() = Instant::now();
+
+        let result = router.commit_switch(
+            RobloxRegion::Singapore,
+            "singapore".to_string(),
+            "54.255.205.216:51821".parse().unwrap(),
+            Some(SAME_REGION_UPGRADE_THRESHOLD_MS + 2),
+        );
+
+        assert!(result.is_some());
+        assert_eq!(router.current_region(), "singapore");
+    }
+
+    #[test]
+    fn test_commit_switch_blocks_small_same_region_upgrade_inside_min_interval() {
+        let router = AutoRouter::new(true, "singapore-02");
+        router.set_current_relay("51.79.128.67:51821".parse().unwrap(), "singapore-02");
+        *router.last_switch_time.write() = Instant::now();
+
+        let result = router.commit_switch(
+            RobloxRegion::Singapore,
+            "singapore".to_string(),
+            "54.255.205.216:51821".parse().unwrap(),
+            Some(SAME_REGION_UPGRADE_THRESHOLD_MS - 1),
+        );
+
+        assert!(result.is_none());
+        assert_eq!(router.current_region(), "singapore-02");
+    }
+
+    #[test]
+    fn test_commit_switch_cross_region_still_respects_min_interval() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+        *router.last_switch_time.write() = Instant::now();
+
+        let result = router.commit_switch(
+            RobloxRegion::Tokyo,
+            "tokyo-02".to_string(),
+            "45.32.253.124:51821".parse().unwrap(),
+            Some(25),
+        );
+
+        assert!(result.is_none());
+        assert_eq!(router.current_region(), "singapore");
     }
 
     #[test]
