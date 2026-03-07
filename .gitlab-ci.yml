@@ -16,24 +16,7 @@ build:
     - rustc --version
     - node --version
 
-    # Fix NSIS: Tauri downloads NSIS to %LOCALAPPDATA%\tauri\NSIS\ with a 2.5KB
-    # stub that fails under SYSTEM. Replace the stub with the real compiler and
-    # copy Stubs/Plugins/Include one level up so ../Stubs/ resolves correctly.
-    - |
-      $tauriNsis = "$env:LOCALAPPDATA\tauri\NSIS"
-      if (Test-Path "$tauriNsis\Bin\makensis.exe") {
-        Copy-Item "$tauriNsis\Bin\makensis.exe" "$tauriNsis\makensis.exe" -Force
-        $parentDir = Split-Path $tauriNsis -Parent
-        foreach ($dir in @("Stubs", "Plugins", "Include", "Contrib")) {
-          if ((Test-Path "$tauriNsis\$dir") -and -not (Test-Path "$parentDir\$dir")) {
-            Copy-Item "$tauriNsis\$dir" "$parentDir\$dir" -Recurse -Force
-          }
-        }
-        & "$tauriNsis\makensis.exe" /VERSION
-        Write-Host "Fixed Tauri NSIS at $tauriNsis"
-      } else {
-        Write-Host "Tauri NSIS not found, will be downloaded during build"
-      }
+    - makensis /VERSION
 
     # Resolve and verify version
     - |
