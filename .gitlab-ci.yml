@@ -17,8 +17,16 @@ build:
     - node --version
     - makensis /VERSION
 
-    # Fix NSIS stub: replace 2.5KB launcher stub with real compiler from Bin\
-    - Copy-Item "C:\Program Files (x86)\NSIS\Bin\makensis.exe" "C:\Program Files (x86)\NSIS\makensis.exe" -Force
+    # Fix NSIS stub: Tauri downloads its own NSIS with a 2.5KB stub that can't
+    # find Bin\makensis.exe under the SYSTEM service account. Replace the stub.
+    - |
+      $tauriNsis = "$env:LOCALAPPDATA\tauri\NSIS"
+      if (Test-Path "$tauriNsis\makensis.exe") {
+        Copy-Item "$tauriNsis\Bin\makensis.exe" "$tauriNsis\makensis.exe" -Force
+        Write-Host "Fixed Tauri NSIS stub at $tauriNsis"
+      }
+      $systemNsis = "C:\Program Files (x86)\NSIS"
+      Copy-Item "$systemNsis\Bin\makensis.exe" "$systemNsis\makensis.exe" -Force
 
     # Resolve and verify version
     - |
