@@ -15,18 +15,22 @@ build:
     - rustup default stable
     - rustc --version
     - node --version
-    - makensis /VERSION
 
-    # Fix NSIS stub: Tauri downloads its own NSIS with a 2.5KB stub that can't
-    # find Bin\makensis.exe under the SYSTEM service account. Replace the stub.
+    # Fix NSIS: Tauri downloads its own NSIS to %LOCALAPPDATA%\tauri\NSIS\ with a
+    # 2.5KB stub launcher that fails under the SYSTEM service account. Replace the
+    # stub with the real compiler and set NSISDIR + NSIS_TOOLSET_PATH.
     - |
       $tauriNsis = "$env:LOCALAPPDATA\tauri\NSIS"
-      if (Test-Path "$tauriNsis\makensis.exe") {
+      if (Test-Path "$tauriNsis\Bin\makensis.exe") {
         Copy-Item "$tauriNsis\Bin\makensis.exe" "$tauriNsis\makensis.exe" -Force
-        Write-Host "Fixed Tauri NSIS stub at $tauriNsis"
+        $env:NSISDIR = $tauriNsis
+        $env:NSIS_TOOLSET_PATH = $tauriNsis
+        & "$tauriNsis\makensis.exe" /VERSION
+        Write-Host "Fixed Tauri NSIS at $tauriNsis"
+      } else {
+        Write-Host "Tauri NSIS not found, checking system NSIS..."
+        makensis /VERSION
       }
-      $systemNsis = "C:\Program Files (x86)\NSIS"
-      Copy-Item "$systemNsis\Bin\makensis.exe" "$systemNsis\makensis.exe" -Force
 
     # Resolve and verify version
     - |
