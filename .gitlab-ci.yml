@@ -87,34 +87,40 @@ release:
     - apk add --no-cache curl
   script:
     - echo "Creating release for ${CI_COMMIT_TAG}"
+    - export VERSION="${CI_COMMIT_TAG#v}"
+    - echo "VERSION=$VERSION"
     - |
-      VERSION="${CI_COMMIT_TAG#v}"
       for file in release-artifacts/*; do
         filename=$(basename "$file")
+        echo "Uploading $filename..."
         curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
           --upload-file "$file" \
           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${VERSION}/${filename}"
       done
+    - echo "RELEASE_VERSION=$VERSION" >> release.env
+  artifacts:
+    reports:
+      dotenv: release.env
   release:
     tag_name: $CI_COMMIT_TAG
-    name: "SwiftTunnel ${CI_COMMIT_TAG}"
+    name: "SwiftTunnel v${RELEASE_VERSION}"
     description: |
-      ## SwiftTunnel ${CI_COMMIT_TAG}
+      ## SwiftTunnel v${RELEASE_VERSION}
 
       ### Downloads
-      - [SwiftTunnel_${CI_COMMIT_TAG#v}_x64-setup.exe](${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${CI_COMMIT_TAG#v}/SwiftTunnel_${CI_COMMIT_TAG#v}_x64-setup.exe)
+      - [SwiftTunnel_${RELEASE_VERSION}_x64-setup.exe](${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${RELEASE_VERSION}/SwiftTunnel_${RELEASE_VERSION}_x64-setup.exe)
 
       ### Auto-updater
-      - [latest.json](${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${CI_COMMIT_TAG#v}/latest.json)
+      - [latest.json](${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${RELEASE_VERSION}/latest.json)
 
       ### Requirements
       - Windows 10/11 (64-bit)
       - Administrator privileges
     assets:
       links:
-        - name: "SwiftTunnel_${CI_COMMIT_TAG#v}_x64-setup.exe"
-          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${CI_COMMIT_TAG#v}/SwiftTunnel_${CI_COMMIT_TAG#v}_x64-setup.exe"
+        - name: "SwiftTunnel_${RELEASE_VERSION}_x64-setup.exe"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${RELEASE_VERSION}/SwiftTunnel_${RELEASE_VERSION}_x64-setup.exe"
           link_type: package
         - name: "latest.json"
-          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${CI_COMMIT_TAG#v}/latest.json"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${RELEASE_VERSION}/latest.json"
           link_type: other
