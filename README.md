@@ -13,14 +13,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases/latest">
-    <img src="https://img.shields.io/github/v/release/Swift-tunnel/swifttunnel-app?style=flat-square&color=blue" alt="Latest Release" />
+  <a href="https://gitlab.com/swifttunnel-group/swifttunnel-app/releases/latest">
+    <img src="https://img.shields.io/gitlab/v/release/swifttunnel-group/swifttunnel-app?style=flat-square&color=blue" alt="Latest Release" />
   </a>
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases">
-    <img src="https://img.shields.io/github/downloads/Swift-tunnel/swifttunnel-app/total?style=flat-square&color=green" alt="Downloads" />
+  <a href="https://gitlab.com/swifttunnel-group/swifttunnel-app/releases">
+    <img src="https://img.shields.io/badge/downloads-GitLab-green?style=flat-square" alt="Downloads" />
   </a>
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/Swift-tunnel/swifttunnel-app?style=flat-square" alt="License" />
+  <a href="https://gitlab.com/swifttunnel-group/swifttunnel-app/blob/main/LICENSE">
+    <img src="https://img.shields.io/gitlab/license/swifttunnel-group/swifttunnel-app?style=flat-square" alt="License" />
   </a>
 </p>
 
@@ -40,10 +40,10 @@
 Only game traffic is optimized through SwiftTunnel. Discord, Spotify, Chrome — everything else uses your normal internet. No bandwidth wasted.
 
 ### ⚡ Low Latency Gaming Servers
-28 gaming-optimized servers across 8 regions. Each server runs:
+28 gaming-optimized servers across 10 regions. Each server runs:
 - **BBR** congestion control for faster throughput
 - **fq_codel** queue management to eliminate bufferbloat
-- **WireGuard** protocol for minimal overhead
+- **V3 UDP relay** protocol for minimal overhead (~0.5-1ms)
 
 ### 🚀 PC Boosts
 Built-in performance optimizations:
@@ -65,7 +65,7 @@ Automatically detects which game server you're connecting to and routes through 
 ## Download
 
 <p align="center">
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases/latest">
+  <a href="https://gitlab.com/swifttunnel-group/swifttunnel-app/releases/latest">
     <img src="https://img.shields.io/badge/Download-Windows%20x64-blue?style=for-the-badge&logo=windows" alt="Download for Windows" />
   </a>
 </p>
@@ -75,7 +75,7 @@ Automatically detects which game server you're connecting to and routes through 
 - Administrator privileges (for network optimization)
 
 **Installation:**
-1. Download the Windows installer (`*.exe`) from [Releases](https://github.com/Swift-tunnel/swifttunnel-app/releases/latest)
+1. Download the Windows installer (`*.exe`) from [Releases](https://gitlab.com/swifttunnel-group/swifttunnel-app/releases/latest)
 2. Run the installer
 3. SwiftTunnel launches automatically after installation
 4. Sign in with your SwiftTunnel account
@@ -116,7 +116,8 @@ SwiftTunnel intercepts game traffic at the network layer. Only packets from your
 
 ```bash
 # Clone the repo
-git clone https://github.com/Swift-tunnel/swifttunnel-app.git
+git clone https://gitlab.com/swifttunnel-group/swifttunnel-app.git
+# Or: git clone git@gitlab.com:swifttunnel-group/swifttunnel-app.git
 cd swifttunnel-app/swifttunnel-desktop
 
 # Install frontend + Tauri CLI dependencies
@@ -140,9 +141,9 @@ Installer output:
 - `swifttunnel-desktop/src-tauri/target/release/bundle/nsis/*.exe`
 - Updater artifacts and signatures are generated when signing keys are configured.
 
-### Release Pipeline (GitHub Actions)
+### Release Pipeline
 
-The release workflow uses `tauri-apps/tauri-action` and requires these repository secrets:
+The release workflow requires these CI/CD variables:
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 - `TAURI_UPDATER_PUBLIC_KEY`
@@ -188,8 +189,7 @@ This runs formatter checks, region resolver tests, updater channel/security test
 | Component | Technology |
 |-----------|------------|
 | GUI | [Tauri v2](https://tauri.app/) + [React 19](https://react.dev/) + TypeScript |
-| Tunnel | [BoringTun](https://github.com/cloudflare/boringtun) (WireGuard) |
-| Network Adapter | [Wintun](https://www.wintun.net/) |
+| Tunnel | V3 UDP Relay (custom, ~0.5-1ms overhead) |
 | Split Tunnel | ndisapi (Windows Packet Filter) |
 | Installer | NSIS (Tauri bundler) |
 
