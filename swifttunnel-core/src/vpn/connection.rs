@@ -123,8 +123,25 @@ enum RelaySelectionSource {
     Deterministic,
 }
 
+pub(crate) fn region_family(region: &str) -> String {
+    let parts: Vec<&str> = region.split('-').collect();
+    if parts.len() >= 3 && parts.first() == Some(&"us") {
+        return format!("{}-{}", parts[0], parts[1]);
+    }
+    if parts.len() >= 2
+        && parts
+            .last()
+            .is_some_and(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        return parts[..parts.len() - 1].join("-");
+    }
+    region.to_string()
+}
+
 fn region_matches_candidate(selected_region: &str, server_region: &str) -> bool {
-    server_region == selected_region || server_region.starts_with(&format!("{selected_region}-"))
+    // `selected_region` is expected to be a canonical region id like `germany`,
+    // `singapore`, or `us-east`, not a broad prefix like `us`.
+    region_family(server_region) == selected_region
 }
 
 pub(crate) fn relay_candidates_for_region(
@@ -183,14 +200,16 @@ fn sort_ranked_candidates(candidates: &mut [RankedRelayCandidate]) -> RelaySelec
                         .cmp(&b.cached_latency_ms.unwrap_or(u32::MAX))
                 })
                 .then_with(|| a.region.cmp(&b.region))
-                .then_with(|| a.addr.to_string().cmp(&b.addr.to_string()))
+                .then_with(|| a.addr.ip().cmp(&b.addr.ip()))
+                .then_with(|| a.addr.port().cmp(&b.addr.port()))
         } else {
             let a_latency = a.cached_latency_ms.unwrap_or(u32::MAX);
             let b_latency = b.cached_latency_ms.unwrap_or(u32::MAX);
             a_latency
                 .cmp(&b_latency)
                 .then_with(|| a.region.cmp(&b.region))
-                .then_with(|| a.addr.to_string().cmp(&b.addr.to_string()))
+                .then_with(|| a.addr.ip().cmp(&b.addr.ip()))
+                .then_with(|| a.addr.port().cmp(&b.addr.port()))
         }
     });
 
@@ -296,7 +315,8 @@ fn sort_candidates_by_latency(candidates: &mut [(String, SocketAddr, Option<u32>
         a_latency
             .cmp(&b_latency)
             .then_with(|| a.0.cmp(&b.0))
-            .then_with(|| a.1.to_string().cmp(&b.1.to_string()))
+            .then_with(|| a.1.ip().cmp(&b.1.ip()))
+            .then_with(|| a.1.port().cmp(&b.1.port()))
     });
 }
 
@@ -358,12 +378,27 @@ fn resolve_relay_server_from_candidates(
         return Some((candidate.region.clone(), candidate.addr));
     }
 
+    // Most callers hand this helper an already-ranked list, but we sort again to keep
+    // the helper robust for tests and any future direct callers.
     let mut sorted = candidates.to_vec();
     let source = sort_ranked_candidates(&mut sorted);
     sorted.first().map(|candidate| {
         log_resolution_source(source, candidate);
         (candidate.region.clone(), candidate.addr)
     })
+}
+
+fn compute_latency_improvement(
+    ranked_candidates: &[RankedRelayCandidate],
+    current_relay: &(String, SocketAddr),
+) -> Option<u32> {
+    let best_candidate = ranked_candidates.first()?;
+    let current_candidate = ranked_candidates.iter().find(|candidate| {
+        candidate.region == current_relay.0 && candidate.addr == current_relay.1
+    })?;
+    let best_latency_ms = best_candidate.probed_latency_ms?;
+    let current_latency_ms = current_candidate.probed_latency_ms?;
+    (current_latency_ms > best_latency_ms).then_some(current_latency_ms - best_latency_ms)
 }
 
 /// Probe candidate relay servers in parallel using ICMP and return their
@@ -1196,39 +1231,18 @@ impl VpnConnection {
                                                 best_candidate.region,
                                                 best_candidate.addr
                                             );
-                                            selected_region = best_candidate.region.clone();
-                                            selected_addr = best_candidate.addr;
-                                        } else {
-                                            selected_region = best_candidate.region.clone();
-                                            selected_addr = best_candidate.addr;
                                         }
+                                        selected_region = best_candidate.region.clone();
+                                        selected_addr = best_candidate.addr;
 
-                                        if let Some((current_region, current_addr)) =
-                                            router_for_lookup.current_relay()
-                                        {
-                                            let current_candidate =
-                                                ranked_candidates.iter().find(|candidate| {
-                                                    candidate.region == current_region
-                                                        && candidate.addr == current_addr
-                                                });
-                                            if let (
-                                                Some(current_candidate),
-                                                Some(best_latency_ms),
-                                            ) = (
-                                                current_candidate,
-                                                best_candidate.probed_latency_ms,
-                                            ) {
-                                                if let Some(current_latency_ms) =
-                                                    current_candidate.probed_latency_ms
-                                                {
-                                                    if current_latency_ms > best_latency_ms {
-                                                        latency_improvement_ms = Some(
-                                                            current_latency_ms - best_latency_ms,
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        latency_improvement_ms = router_for_lookup
+                                            .current_relay()
+                                            .and_then(|current_relay| {
+                                                compute_latency_improvement(
+                                                    &ranked_candidates,
+                                                    &current_relay,
+                                                )
+                                            });
                                     }
                                 }
 

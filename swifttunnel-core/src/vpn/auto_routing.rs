@@ -7,6 +7,7 @@
 //! automatic region detection.
 
 use crate::geolocation::RobloxRegion;
+use crate::vpn::connection::region_family;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -75,21 +76,6 @@ pub struct AutoRoutingEvent {
 pub enum AutoRoutingAction {
     /// No action needed - current relay is optimal or conditions not met
     NoAction,
-}
-
-fn region_family(region: &str) -> String {
-    let parts: Vec<&str> = region.split('-').collect();
-    if parts.len() >= 3 && parts.first() == Some(&"us") {
-        return format!("{}-{}", parts[0], parts[1]);
-    }
-    if parts.len() >= 2
-        && parts
-            .last()
-            .is_some_and(|part| part.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        return parts[..parts.len() - 1].join("-");
-    }
-    region.to_string()
 }
 
 impl AutoRouter {
@@ -459,6 +445,8 @@ impl AutoRouter {
                 return false;
             }
 
+            // Same-region upgrades that clear the threshold intentionally skip the churn
+            // counter so an immediate correction does not consume cross-region switch budget.
             let mut window = self.switches_this_minute.write();
             if now.duration_since(window.1) > Duration::from_secs(60) {
                 *window = (0, now);
