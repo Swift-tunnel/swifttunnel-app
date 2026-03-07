@@ -11,23 +11,13 @@ build:
   script:
     - Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
 
-    # Install Rust
-    - Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile rustup-init.exe
-    - $ErrorActionPreference = 'Continue'
-    - .\rustup-init.exe -y --default-toolchain stable 2>&1 | ForEach-Object { "$_" }
-    - $ErrorActionPreference = 'Stop'
+    # Install Rust, Node, NSIS (cmd to avoid PowerShell stderr issues)
+    - cmd /c "curl -sSf -o rustup-init.exe https://win.rustup.rs/x86_64 && rustup-init.exe -y --default-toolchain stable"
     - $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
     - rustc --version
-
-    # Install Node
-    - choco install nodejs-lts -y --no-progress 2>&1 | ForEach-Object { "$_" }
-    - $env:PATH = "C:\Program Files\nodejs;$env:PATH"
-    - refreshenv
+    - cmd /c "choco install nodejs-lts nsis -y --no-progress"
+    - $env:PATH = "C:\Program Files\nodejs;C:\Program Files (x86)\NSIS;$env:PATH"
     - node --version
-
-    # Install NSIS
-    - choco install nsis -y --no-progress 2>&1 | ForEach-Object { "$_" }
-    - $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
     - makensis /VERSION
 
     # Resolve and verify version
