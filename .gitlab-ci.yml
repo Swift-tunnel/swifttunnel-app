@@ -52,6 +52,9 @@ build:
       $config.plugins.updater.pubkey = $env:TAURI_UPDATER_PUBLIC_KEY
       $config | ConvertTo-Json -Depth 32 | Set-Content -Path $confPath -Encoding utf8
 
+    # Ensure Rust toolchain is available
+    - rustup default stable
+
     # Install Tauri CLI and build
     - cargo install tauri-cli --version "^2" --locked
     - Set-Location swifttunnel-desktop
