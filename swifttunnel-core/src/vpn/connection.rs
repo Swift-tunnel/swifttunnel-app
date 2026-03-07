@@ -336,11 +336,8 @@ async fn ordered_relay_candidates_for_region(
         .await
         .into_iter()
         .map(|candidate| {
-            (
-                candidate.region,
-                candidate.addr,
-                candidate.effective_latency_ms(),
-            )
+            let latency_ms = candidate.effective_latency_ms();
+            (candidate.region, candidate.addr, latency_ms)
         })
         .collect()
 }
