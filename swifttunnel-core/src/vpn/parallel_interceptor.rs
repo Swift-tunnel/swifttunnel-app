@@ -112,11 +112,39 @@ impl DefaultRouteSource {
 #[derive(Debug, Clone)]
 struct PhysicalCandidate {
     idx: usize,
+    guid: String,
     friendly_name: String,
+    description: String,
+    kind: String,
     internal_name: String,
     if_index: Option<u32>,
     score: i32,
     is_up: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingStage {
+    ExactRouteMatch,
+    ManualPreference,
+    RememberedOverride,
+    WanFallback,
+    BridgeSibling,
+    SmartAuto,
+    Unrecoverable,
+}
+
+impl BindingStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactRouteMatch => "exact_route_match",
+            Self::ManualPreference => "manual_preference",
+            Self::RememberedOverride => "remembered_override",
+            Self::WanFallback => "wan_fallback",
+            Self::BridgeSibling => "bridge_sibling",
+            Self::SmartAuto => "smart_auto",
+            Self::Unrecoverable => "unrecoverable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +156,47 @@ pub struct NetworkAdapterInfo {
     pub is_up: bool,
     pub is_default_route: bool,
     pub kind: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingPreferenceSource {
+    Manual,
+    RememberedAuto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterBindingPreference {
+    pub guid: String,
+    pub source: BindingPreferenceSource,
+    pub network_signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BindingCandidateInfo {
+    pub guid: String,
+    pub friendly_name: String,
+    pub description: String,
+    pub if_index: Option<u32>,
+    pub is_up: bool,
+    pub is_default_route: bool,
+    pub kind: String,
+    pub stage: String,
+    pub reason: String,
+    pub score: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BindingPreflightInfo {
+    pub status: String,
+    pub reason: String,
+    pub network_signature: String,
+    pub route_resolution_source: String,
+    pub route_resolution_target_ip: Option<String>,
+    pub resolved_if_index: Option<u32>,
+    pub recommended_guid: Option<String>,
+    pub cached_override_used: bool,
+    pub binding_stage: Option<String>,
+    pub candidates: Vec<BindingCandidateInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +211,11 @@ pub struct SplitTunnelDiagnostics {
     pub route_resolution_source: String,
     pub route_resolution_target_ip: Option<String>,
     pub manual_binding_active: bool,
+    pub binding_reason: String,
+    pub binding_stage: String,
+    pub cached_override_used: bool,
+    pub network_signature: Option<String>,
+    pub last_validation_result: String,
 }
 
 fn pwstr_to_string(ptr: windows::core::PWSTR) -> String {
@@ -236,6 +310,45 @@ pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
 
         Ok(out)
     }
+}
+
+pub fn preflight_binding(
+    binding_preference: Option<AdapterBindingPreference>,
+) -> VpnResult<BindingPreflightInfo> {
+    let mut interceptor = ParallelInterceptor::new(Vec::new());
+    interceptor.binding_preference = binding_preference;
+
+    let result = interceptor.find_adapters("SwiftTunnel", 0);
+    let status = match (&result, interceptor.last_validation_result.as_str()) {
+        (Ok(_), _) => "ok",
+        (_, "ambiguous_requires_user_choice") => "ambiguous",
+        _ => "unrecoverable",
+    };
+
+    if interceptor.binding_reason.is_empty() {
+        interceptor.binding_reason = match status {
+            "ok" => "Split tunnel adapter binding validated.".to_string(),
+            "ambiguous" => {
+                "SwiftTunnel needs a one-time adapter choice for this network.".to_string()
+            }
+            _ => "SwiftTunnel could not validate a split-tunnel-capable adapter.".to_string(),
+        };
+    }
+
+    Ok(BindingPreflightInfo {
+        status: status.to_string(),
+        reason: interceptor.binding_reason,
+        network_signature: interceptor
+            .active_network_signature
+            .unwrap_or_else(|| "unresolved".to_string()),
+        route_resolution_source: interceptor.default_route_source.as_str().to_string(),
+        route_resolution_target_ip: interceptor.default_route_target_ip.map(|ip| ip.to_string()),
+        resolved_if_index: interceptor.default_route_if_index,
+        recommended_guid: interceptor.recommended_adapter_guid,
+        cached_override_used: interceptor.cached_override_used,
+        binding_stage: Some(interceptor.binding_stage),
+        candidates: interceptor.binding_candidates,
+    })
 }
 
 /// Detect whether the current active default route is point-to-point (PPP/PPPoE/WAN).
@@ -500,8 +613,22 @@ pub struct ParallelInterceptor {
     default_route_target_ip: Option<Ipv4Addr>,
     /// Whether the selected adapter came from an explicit user manual preference.
     manual_binding_active: bool,
-    /// Preferred physical adapter GUID for manual split-tunnel binding.
-    preferred_physical_adapter_guid: Option<String>,
+    /// Whether the selected adapter came from a remembered Smart Auto override.
+    cached_override_used: bool,
+    /// Preferred adapter binding for split-tunnel binding.
+    binding_preference: Option<AdapterBindingPreference>,
+    /// Stable network signature for the active adapter decision.
+    active_network_signature: Option<String>,
+    /// High-level reason for the current adapter decision.
+    binding_reason: String,
+    /// Selection stage for the active adapter decision.
+    binding_stage: String,
+    /// Last validation result recorded by preflight or configure.
+    last_validation_result: String,
+    /// Ranked candidates from the last adapter-binding decision.
+    binding_candidates: Vec<BindingCandidateInfo>,
+    /// Recommended adapter GUID from the last binding decision, if any.
+    recommended_adapter_guid: Option<String>,
     /// VPN adapter index
     vpn_adapter_idx: Option<usize>,
     /// Whether interceptor is active
@@ -572,7 +699,14 @@ impl ParallelInterceptor {
             default_route_source: DefaultRouteSource::Unresolved,
             default_route_target_ip: None,
             manual_binding_active: false,
-            preferred_physical_adapter_guid: None,
+            cached_override_used: false,
+            binding_preference: None,
+            active_network_signature: None,
+            binding_reason: "uninitialized".to_string(),
+            binding_stage: BindingStage::SmartAuto.as_str().to_string(),
+            last_validation_result: "not_run".to_string(),
+            binding_candidates: Vec::new(),
+            recommended_adapter_guid: None,
             vpn_adapter_idx: None,
             active: false,
             worker_stats,
@@ -666,6 +800,11 @@ impl ParallelInterceptor {
             route_resolution_source: self.default_route_source.as_str().to_string(),
             route_resolution_target_ip: self.default_route_target_ip.map(|ip| ip.to_string()),
             manual_binding_active: self.manual_binding_active,
+            binding_reason: self.binding_reason.clone(),
+            binding_stage: self.binding_stage.clone(),
+            cached_override_used: self.cached_override_used,
+            network_signature: self.active_network_signature.clone(),
+            last_validation_result: self.last_validation_result.clone(),
         }
     }
 
@@ -745,7 +884,7 @@ impl ParallelInterceptor {
         vpn_adapter_name: &str,
         tunnel_apps: Vec<String>,
         vpn_adapter_luid: u64,
-        preferred_physical_adapter_guid: Option<String>,
+        binding_preference: Option<AdapterBindingPreference>,
     ) -> VpnResult<()> {
         log::info!(
             "Configuring parallel interceptor for VPN adapter: {} (LUID: {})",
@@ -753,11 +892,16 @@ impl ParallelInterceptor {
             vpn_adapter_luid
         );
 
-        self.preferred_physical_adapter_guid = preferred_physical_adapter_guid
-            .as_deref()
-            .and_then(Self::extract_guid_ascii_lowercase);
-        if let Some(ref guid) = self.preferred_physical_adapter_guid {
-            log::info!("Preferred physical adapter GUID set: {}", guid);
+        self.binding_preference = binding_preference.map(|mut preference| {
+            preference.guid = preference.guid.to_ascii_lowercase();
+            preference
+        });
+        if let Some(ref preference) = self.binding_preference {
+            log::info!(
+                "Adapter binding preference set: {} ({:?})",
+                preference.guid,
+                preference.source
+            );
         }
 
         // Update tunnel apps in cache
@@ -1528,14 +1672,168 @@ impl ParallelInterceptor {
             || friendly_lower.starts_with("wan ")
     }
 
+    fn adapter_kind_from_if_type(if_type: u32) -> &'static str {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK,
+            IF_TYPE_TUNNEL,
+        };
+
+        match if_type {
+            IF_TYPE_IEEE80211 => "wifi",
+            IF_TYPE_ETHERNET_CSMACD => "ethernet",
+            IF_TYPE_PPP => "ppp",
+            IF_TYPE_SOFTWARE_LOOPBACK => "loopback",
+            IF_TYPE_TUNNEL => "tunnel",
+            _ => "other",
+        }
+    }
+
+    fn get_adapter_details_for_if_index(if_index: u32) -> Option<(String, String, String)> {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        };
+        use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+        unsafe {
+            let mut size: u32 = 0;
+            let _ = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                None,
+                &mut size,
+            );
+            if size == 0 {
+                return None;
+            }
+
+            let mut buffer = vec![0u8; size as usize];
+            let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+            if GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(adapter_addresses),
+                &mut size,
+            ) != 0
+            {
+                return None;
+            }
+
+            let mut current = adapter_addresses;
+            while !current.is_null() {
+                let adapter = &*current;
+                let a_if = adapter.Anonymous1.Anonymous.IfIndex;
+                let a_ipv6_if = adapter.Ipv6IfIndex;
+                if a_if == if_index || a_ipv6_if == if_index {
+                    return Some((
+                        pwstr_to_string(adapter.FriendlyName),
+                        pwstr_to_string(adapter.Description),
+                        Self::adapter_kind_from_if_type(adapter.IfType).to_string(),
+                    ));
+                }
+                current = adapter.Next;
+            }
+        }
+
+        None
+    }
+
+    fn is_bridge_or_hypervisor_owner(friendly_name: &str, description: &str, kind: &str) -> bool {
+        let combined = format!("{friendly_name} {description}").to_ascii_lowercase();
+        kind == "tunnel"
+            || combined.contains("hyper-v")
+            || combined.contains("vethernet")
+            || combined.contains("vmware")
+            || combined.contains("virtualbox")
+            || combined.contains("network bridge")
+            || combined.contains("bridge")
+            || combined.contains("npcap")
+            || combined.contains("container")
+            || combined.contains("wsl")
+            || combined.contains("switch")
+    }
+
+    fn list_up_adapter_guids_for_signature() -> Vec<String> {
+        let mut guids: Vec<String> = list_network_adapters()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|adapter| adapter.is_up)
+            .map(|adapter| adapter.guid)
+            .collect();
+        guids.sort();
+        guids
+    }
+
+    fn build_network_signature(
+        source: DefaultRouteSource,
+        default_route_if_index: Option<u32>,
+        default_route_next_hop: Option<u32>,
+    ) -> String {
+        let if_index = default_route_if_index
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let next_hop = default_route_next_hop
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let up_adapters = Self::list_up_adapter_guids_for_signature().join(",");
+        format!(
+            "source={};if_index={};next_hop={};up={}",
+            source.as_str(),
+            if_index,
+            next_hop,
+            up_adapters
+        )
+    }
+
+    fn select_bridge_sibling_candidate<'a>(
+        candidates: &'a [PhysicalCandidate],
+    ) -> Option<&'a PhysicalCandidate> {
+        let viable: Vec<&PhysicalCandidate> = candidates
+            .iter()
+            .filter(|candidate| candidate.is_up != Some(false))
+            .filter(|candidate| candidate.kind != "loopback")
+            .filter(|candidate| candidate.kind != "tunnel")
+            .filter(|candidate| !Self::is_wan_like_friendly_name(&candidate.friendly_name))
+            .collect();
+
+        if viable.len() == 1 {
+            return viable.into_iter().next();
+        }
+
+        None
+    }
+
+    fn to_binding_candidate_info(
+        candidate: &PhysicalCandidate,
+        default_route_if_index: Option<u32>,
+        stage: BindingStage,
+        reason: &str,
+    ) -> BindingCandidateInfo {
+        BindingCandidateInfo {
+            guid: candidate.guid.clone(),
+            friendly_name: candidate.friendly_name.clone(),
+            description: candidate.description.clone(),
+            if_index: candidate.if_index,
+            is_up: candidate.is_up != Some(false),
+            is_default_route: candidate.if_index.is_some()
+                && default_route_if_index.is_some()
+                && candidate.if_index == default_route_if_index,
+            kind: candidate.kind.clone(),
+            stage: stage.as_str().to_string(),
+            reason: reason.to_string(),
+            score: candidate.score,
+        }
+    }
+
     fn should_allow_virtual_default_route_candidate(
         is_virtual: bool,
         adapter_if_index: Option<u32>,
         default_route_if_index: Option<u32>,
-        manual_binding: bool,
+        has_explicit_preference: bool,
     ) -> bool {
         is_virtual
-            && !manual_binding
+            && !has_explicit_preference
             && adapter_if_index.is_some()
             && default_route_if_index.is_some()
             && adapter_if_index == default_route_if_index
@@ -1605,13 +1903,14 @@ impl ParallelInterceptor {
         candidates: &'a [PhysicalCandidate],
         default_route_if_index: Option<u32>,
         strict_default_route: bool,
-        preferred_guid: Option<&str>,
+        binding_preference: Option<&AdapterBindingPreference>,
     ) -> (Option<&'a PhysicalCandidate>, bool, bool) {
-        if let Some(guid) = preferred_guid {
+        if let Some(preference) = binding_preference {
             let preferred = candidates
                 .iter()
                 .filter(|c| {
-                    Self::extract_guid_ascii_lowercase(&c.internal_name).as_deref() == Some(guid)
+                    Self::extract_guid_ascii_lowercase(&c.internal_name).as_deref()
+                        == Some(preference.guid.as_str())
                 })
                 .max_by_key(|c| c.score);
             if preferred.is_some() {
@@ -1629,6 +1928,9 @@ impl ParallelInterceptor {
     }
 
     fn find_adapters(&mut self, vpn_adapter_name: &str, vpn_adapter_luid: u64) -> VpnResult<()> {
+        self.binding_candidates.clear();
+        self.recommended_adapter_guid = None;
+
         // Get default route interface first - this is the adapter we MUST intercept
         let observed_game_targets: Vec<Ipv4Addr> =
             self.detected_game_servers.read().iter().copied().collect();
@@ -1643,6 +1945,11 @@ impl ParallelInterceptor {
         self.default_route_target_ip = default_route_with_source.and_then(|(_, _, ip)| ip);
         self.default_route_if_index = default_route_if_index;
         self.default_route_next_hop = default_route_next_hop;
+        self.active_network_signature = Some(Self::build_network_signature(
+            self.default_route_source,
+            default_route_if_index,
+            default_route_next_hop,
+        ));
 
         // Treat gateway-backed default routes as "strict". PPP/point-to-point default routes
         // often have next-hop 0.0.0.0 and map to a WAN/PPP interface rather than the
@@ -1654,6 +1961,16 @@ impl ParallelInterceptor {
         } else {
             None
         };
+        let default_route_owner = default_route_if_index
+            .and_then(Self::get_adapter_details_for_if_index)
+            .map(|(friendly_name, description, kind)| {
+                let bridge_like =
+                    Self::is_bridge_or_hypervisor_owner(&friendly_name, &description, &kind);
+                (friendly_name, description, kind, bridge_like)
+            });
+        let route_owner_bridge_like = default_route_owner
+            .as_ref()
+            .is_some_and(|(_, _, _, bridge_like)| *bridge_like);
 
         if let Some(idx) = default_route_if_index {
             log::info!(
@@ -1675,6 +1992,15 @@ impl ParallelInterceptor {
                 log::info!(
                     "Route resolution source: {}",
                     self.default_route_source.as_str()
+                );
+            }
+            if let Some((friendly_name, description, kind, bridge_like)) = &default_route_owner {
+                log::info!(
+                    "Default-route owner: '{}' [{} / {}] bridge_like={}",
+                    friendly_name,
+                    kind,
+                    description,
+                    bridge_like
                 );
             }
         } else {
@@ -1773,10 +2099,10 @@ impl ParallelInterceptor {
             // VPN/virtual adapter, but only when it currently owns the default route.
             // This keeps behavior simple and deterministic without adding new UX modes.
             let internal_guid_lc = Self::extract_guid_ascii_lowercase(internal_name);
-            let matches_preferred_guid = self
-                .preferred_physical_adapter_guid
-                .as_deref()
-                .is_some_and(|preferred| internal_guid_lc.as_deref() == Some(preferred));
+            let matches_preferred_guid =
+                self.binding_preference.as_ref().is_some_and(|preferred| {
+                    internal_guid_lc.as_deref() == Some(preferred.guid.as_str())
+                });
             let guid_matches_default = strict_default_route
                 && default_route_guid_lc
                     .as_ref()
@@ -1791,6 +2117,19 @@ impl ParallelInterceptor {
             }
 
             let is_up = adapter_if_index.and_then(Self::is_interface_oper_up);
+            let (resolved_description, resolved_kind) = adapter_if_index
+                .and_then(Self::get_adapter_details_for_if_index)
+                .map(|(_, description, kind)| (description, kind))
+                .unwrap_or_else(|| {
+                    (
+                        friendly_name.clone(),
+                        if is_virtual {
+                            "tunnel".to_string()
+                        } else {
+                            "other".to_string()
+                        },
+                    )
+                });
             let has_default_route = strict_default_route
                 && adapter_if_index.is_some()
                 && default_route_if_index.is_some()
@@ -1800,7 +2139,7 @@ impl ParallelInterceptor {
                     is_virtual,
                     adapter_if_index,
                     default_route_if_index,
-                    self.preferred_physical_adapter_guid.is_some(),
+                    self.binding_preference.is_some(),
                 );
             let has_default_route_for_scoring =
                 has_default_route || virtual_default_route_candidate;
@@ -1831,7 +2170,10 @@ impl ParallelInterceptor {
                     );
                     physical_candidates.push(PhysicalCandidate {
                         idx,
+                        guid: internal_guid_lc.unwrap_or_default(),
                         friendly_name: friendly_name.clone(),
+                        description: resolved_description.clone(),
+                        kind: resolved_kind.clone(),
                         internal_name: internal_name.to_string(),
                         if_index: adapter_if_index,
                         score,
@@ -1843,7 +2185,10 @@ impl ParallelInterceptor {
                     );
                     physical_candidates.push(PhysicalCandidate {
                         idx,
+                        guid: internal_guid_lc.unwrap_or_default(),
                         friendly_name: friendly_name.clone(),
+                        description: resolved_description.clone(),
+                        kind: resolved_kind.clone(),
                         internal_name: internal_name.to_string(),
                         if_index: adapter_if_index,
                         score: 0,
@@ -1855,34 +2200,75 @@ impl ParallelInterceptor {
             }
         }
 
-        let preferred_guid = self.preferred_physical_adapter_guid.as_deref();
-        let (selected, used_wan_only_fallback, used_preferred_physical_adapter) =
+        let binding_preference = self.binding_preference.clone();
+        let (mut selected, used_wan_only_fallback, used_preferred_physical_adapter) =
             Self::select_best_physical_candidate_with_preference(
                 &physical_candidates,
                 default_route_if_index,
                 strict_default_route,
-                preferred_guid,
+                binding_preference.as_ref(),
             );
 
-        if let Some(guid) = preferred_guid {
+        if let Some(preference) = binding_preference.as_ref() {
             if used_preferred_physical_adapter {
                 if let Some(selected) = selected {
                     log::info!(
                         "Selected physical adapter via user preference GUID {}: '{}' (internal: '{}')",
-                        guid,
+                        preference.guid,
                         selected.friendly_name,
                         selected.internal_name
                     );
                 }
             } else {
-                log::warn!(
-                    "Preferred physical adapter GUID {} was not found in NDIS candidates; falling back to auto selection.",
-                    guid
-                );
+                match preference.source {
+                    BindingPreferenceSource::Manual => {
+                        self.binding_reason =
+                            "Selected manual adapter is not available on the current network."
+                                .to_string();
+                        self.binding_stage = BindingStage::Unrecoverable.as_str().to_string();
+                        self.last_validation_result = "manual_preference_missing".to_string();
+                        return Err(VpnError::SplitTunnel(self.binding_reason.clone()));
+                    }
+                    BindingPreferenceSource::RememberedAuto => {
+                        log::warn!(
+                            "Remembered adapter GUID {} was not found in NDIS candidates; falling back to auto selection.",
+                            preference.guid
+                        );
+                    }
+                }
             }
         }
 
-        self.manual_binding_active = used_preferred_physical_adapter;
+        let used_bridge_sibling =
+            if selected.is_none() && strict_default_route && route_owner_bridge_like {
+                selected = Self::select_bridge_sibling_candidate(&physical_candidates);
+                selected.is_some()
+            } else {
+                false
+            };
+
+        self.manual_binding_active = used_preferred_physical_adapter
+            && binding_preference
+                .as_ref()
+                .is_some_and(|preference| preference.source == BindingPreferenceSource::Manual);
+        self.cached_override_used = used_preferred_physical_adapter
+            && binding_preference.as_ref().is_some_and(|preference| {
+                preference.source == BindingPreferenceSource::RememberedAuto
+            });
+
+        let decision_stage = if self.manual_binding_active {
+            BindingStage::ManualPreference
+        } else if self.cached_override_used {
+            BindingStage::RememberedOverride
+        } else if used_bridge_sibling {
+            BindingStage::BridgeSibling
+        } else if used_wan_only_fallback {
+            BindingStage::WanFallback
+        } else if selected.is_some() {
+            BindingStage::ExactRouteMatch
+        } else {
+            BindingStage::Unrecoverable
+        };
 
         if strict_default_route && default_route_if_index.is_some() && selected.is_none() {
             let def = default_route_if_index.expect("checked is_some");
@@ -1894,6 +2280,46 @@ impl ParallelInterceptor {
                 ));
             }
 
+            self.binding_stage = if route_owner_bridge_like {
+                BindingStage::BridgeSibling.as_str().to_string()
+            } else {
+                BindingStage::Unrecoverable.as_str().to_string()
+            };
+            self.binding_reason = if route_owner_bridge_like {
+                "SwiftTunnel found multiple possible underlay adapters behind a bridge or hypervisor. User confirmation is required.".to_string()
+            } else {
+                format!(
+                    "SwiftTunnel could not prove which adapter owns the active route (default-route ifIndex {}).",
+                    def
+                )
+            };
+            self.last_validation_result = "ambiguous_requires_user_choice".to_string();
+            self.binding_candidates = physical_candidates
+                .iter()
+                .map(|candidate| {
+                    let candidate_stage = if candidate.if_index == default_route_if_index {
+                        BindingStage::ExactRouteMatch
+                    } else if route_owner_bridge_like {
+                        BindingStage::BridgeSibling
+                    } else if Self::is_wan_like_friendly_name(&candidate.friendly_name) {
+                        BindingStage::WanFallback
+                    } else {
+                        BindingStage::SmartAuto
+                    };
+                    Self::to_binding_candidate_info(
+                        candidate,
+                        default_route_if_index,
+                        candidate_stage,
+                        "Candidate available for Smart Auto binding",
+                    )
+                })
+                .collect();
+            self.recommended_adapter_guid = self
+                .binding_candidates
+                .iter()
+                .max_by_key(|candidate| candidate.score)
+                .map(|candidate| candidate.guid.clone());
+
             return Err(VpnError::SplitTunnel(format!(
                 "No NDIS adapter matched the default-route interface index {def}. Candidates: {}",
                 lines.join(", ")
@@ -1901,6 +2327,53 @@ impl ParallelInterceptor {
         }
 
         if let Some(selected) = selected {
+            self.binding_stage = decision_stage.as_str().to_string();
+            self.binding_reason = match decision_stage {
+                BindingStage::ManualPreference => {
+                    "Connected using the adapter selected in Manual mode.".to_string()
+                }
+                BindingStage::RememberedOverride => {
+                    "Connected using the remembered Smart Auto adapter for this network."
+                        .to_string()
+                }
+                BindingStage::BridgeSibling => {
+                    "Connected using the only viable underlay adapter behind the active bridge or hypervisor route owner.".to_string()
+                }
+                BindingStage::WanFallback => {
+                    "Connected using WAN fallback because the active route resolves through WAN pseudo-adapters.".to_string()
+                }
+                _ => "Connected using the active default-route adapter.".to_string(),
+            };
+            self.last_validation_result = format!("selected_{}", decision_stage.as_str());
+            self.recommended_adapter_guid = Some(selected.guid.clone());
+            let selected_binding_reason = self.binding_reason.clone();
+            self.binding_candidates = physical_candidates
+                .iter()
+                .map(|candidate| {
+                    let candidate_stage = if candidate.guid == selected.guid {
+                        decision_stage
+                    } else if candidate.if_index == default_route_if_index {
+                        BindingStage::ExactRouteMatch
+                    } else if Self::is_wan_like_friendly_name(&candidate.friendly_name) {
+                        BindingStage::WanFallback
+                    } else if route_owner_bridge_like {
+                        BindingStage::BridgeSibling
+                    } else {
+                        BindingStage::SmartAuto
+                    };
+                    let candidate_reason = if candidate.guid == selected.guid {
+                        selected_binding_reason.as_str()
+                    } else {
+                        "Candidate available for Smart Auto binding"
+                    };
+                    Self::to_binding_candidate_info(
+                        candidate,
+                        default_route_if_index,
+                        candidate_stage,
+                        candidate_reason,
+                    )
+                })
+                .collect();
             if used_wan_only_fallback {
                 log::warn!(
                     "No strict default-route IfIndex match was found. Falling back to WAN-only candidate selection."
@@ -1954,6 +2427,10 @@ impl ParallelInterceptor {
                 score
             );
         } else {
+            self.binding_stage = BindingStage::Unrecoverable.as_str().to_string();
+            self.binding_reason =
+                "No compatible split-tunnel adapter candidates were found.".to_string();
+            self.last_validation_result = "no_physical_adapter_found".to_string();
             return Err(VpnError::SplitTunnel(
                 "No physical adapter found".to_string(),
             ));
@@ -2570,6 +3047,11 @@ impl ParallelInterceptor {
             .map(|(_, source, _)| source)
             .unwrap_or(DefaultRouteSource::Unresolved);
         self.default_route_target_ip = new_default_with_source.and_then(|(_, _, ip)| ip);
+        let new_network_signature = Self::build_network_signature(
+            self.default_route_source,
+            new_default_if_index,
+            new_default_next_hop,
+        );
 
         let strict_default_route =
             new_default_next_hop.is_some() && new_default_next_hop != Some(0);
@@ -2587,7 +3069,19 @@ impl ParallelInterceptor {
             && new_default_if_index.is_some()
             && current_if_index != new_default_if_index;
 
-        let manual_binding = self.preferred_physical_adapter_guid.is_some();
+        if self.binding_preference.as_ref().is_some_and(|preference| {
+            preference.source == BindingPreferenceSource::RememberedAuto
+                && preference.network_signature.as_deref() != Some(new_network_signature.as_str())
+        }) {
+            log::info!("Network signature changed; clearing remembered adapter binding preference");
+            self.binding_preference = None;
+            self.cached_override_used = false;
+        }
+
+        let manual_binding = self
+            .binding_preference
+            .as_ref()
+            .is_some_and(|preference| preference.source == BindingPreferenceSource::Manual);
         let needs_rebind = if manual_binding {
             adapter_down
         } else {
@@ -2618,6 +3112,14 @@ impl ParallelInterceptor {
         let old_default_route_source = prev_default_source;
         let old_default_route_target_ip = prev_default_target_ip;
         let old_manual_binding_active = self.manual_binding_active;
+        let old_cached_override_used = self.cached_override_used;
+        let old_binding_preference = self.binding_preference.clone();
+        let old_network_signature = self.active_network_signature.clone();
+        let old_binding_reason = self.binding_reason.clone();
+        let old_binding_stage = self.binding_stage.clone();
+        let old_last_validation_result = self.last_validation_result.clone();
+        let old_binding_candidates = self.binding_candidates.clone();
+        let old_recommended_adapter_guid = self.recommended_adapter_guid.clone();
 
         self.stop();
 
@@ -2635,6 +3137,14 @@ impl ParallelInterceptor {
             self.default_route_source = old_default_route_source;
             self.default_route_target_ip = old_default_route_target_ip;
             self.manual_binding_active = old_manual_binding_active;
+            self.cached_override_used = old_cached_override_used;
+            self.binding_preference = old_binding_preference;
+            self.active_network_signature = old_network_signature;
+            self.binding_reason = old_binding_reason;
+            self.binding_stage = old_binding_stage;
+            self.last_validation_result = old_last_validation_result;
+            self.binding_candidates = old_binding_candidates;
+            self.recommended_adapter_guid = old_recommended_adapter_guid;
         }
 
         self.start()?;
@@ -5754,7 +6264,10 @@ mod tests {
         let candidates = vec![
             PhysicalCandidate {
                 idx: 0,
+                guid: "eth-guid".to_string(),
                 friendly_name: "Ethernet".to_string(),
+                description: "Ethernet".to_string(),
+                kind: "ethernet".to_string(),
                 internal_name: "eth".to_string(),
                 if_index: Some(11),
                 score: ethernet_score,
@@ -5762,7 +6275,10 @@ mod tests {
             },
             PhysicalCandidate {
                 idx: 1,
+                guid: "vpn-guid".to_string(),
                 friendly_name: "NordVPN Tunnel".to_string(),
+                description: "NordVPN Tunnel".to_string(),
+                kind: "tunnel".to_string(),
                 internal_name: "nordvpn".to_string(),
                 if_index: Some(77),
                 score: virtual_score,
@@ -5781,7 +6297,10 @@ mod tests {
         let candidates = vec![
             PhysicalCandidate {
                 idx: 0,
+                guid: "eth-guid".to_string(),
                 friendly_name: "Ethernet".to_string(),
+                description: "Ethernet".to_string(),
+                kind: "ethernet".to_string(),
                 internal_name: "eth".to_string(),
                 if_index: Some(20),
                 score: 9000,
@@ -5789,7 +6308,10 @@ mod tests {
             },
             PhysicalCandidate {
                 idx: 1,
+                guid: "wifi-guid".to_string(),
                 friendly_name: "Wi-Fi".to_string(),
+                description: "Wi-Fi".to_string(),
+                kind: "wifi".to_string(),
                 internal_name: "wifi".to_string(),
                 if_index: Some(11),
                 score: 1,
@@ -5809,7 +6331,10 @@ mod tests {
     fn test_select_best_physical_candidate_strict_default_returns_none_when_no_match() {
         let candidates = vec![PhysicalCandidate {
             idx: 0,
+            guid: "eth-guid".to_string(),
             friendly_name: "Ethernet".to_string(),
+            description: "Ethernet".to_string(),
+            kind: "ethernet".to_string(),
             internal_name: "eth".to_string(),
             if_index: Some(20),
             score: 9000,
@@ -5826,7 +6351,10 @@ mod tests {
         let candidates = vec![
             PhysicalCandidate {
                 idx: 0,
+                guid: "wan-bh".to_string(),
                 friendly_name: "WAN Network Interface (BH)".to_string(),
+                description: "WAN Network Interface (BH)".to_string(),
+                kind: "ppp".to_string(),
                 internal_name: "wan-bh".to_string(),
                 if_index: Some(17),
                 score: ParallelInterceptor::score_physical_candidate(
@@ -5839,7 +6367,10 @@ mod tests {
             },
             PhysicalCandidate {
                 idx: 1,
+                guid: "wan-ipv6".to_string(),
                 friendly_name: "WAN Network Interface (IPv6)".to_string(),
+                description: "WAN Network Interface (IPv6)".to_string(),
+                kind: "ppp".to_string(),
                 internal_name: "wan-ipv6".to_string(),
                 if_index: Some(18),
                 score: ParallelInterceptor::score_physical_candidate(
@@ -5852,7 +6383,10 @@ mod tests {
             },
             PhysicalCandidate {
                 idx: 2,
+                guid: "wan-ip".to_string(),
                 friendly_name: "WAN Network Interface (IP)".to_string(),
+                description: "WAN Network Interface (IP)".to_string(),
+                kind: "ppp".to_string(),
                 internal_name: "wan-ip".to_string(),
                 if_index: Some(10),
                 score: ParallelInterceptor::score_physical_candidate(
@@ -5883,7 +6417,10 @@ mod tests {
     fn test_select_best_physical_candidate_strict_non_wan_no_fallback() {
         let candidates = vec![PhysicalCandidate {
             idx: 0,
+            guid: "eth-guid".to_string(),
             friendly_name: "Ethernet".to_string(),
+            description: "Ethernet".to_string(),
+            kind: "ethernet".to_string(),
             internal_name: "eth".to_string(),
             if_index: Some(20),
             score: 9000,
@@ -5909,7 +6446,10 @@ mod tests {
         let candidates = vec![
             PhysicalCandidate {
                 idx: 0,
+                guid: "11111111-1111-1111-1111-111111111111".to_string(),
                 friendly_name: "Ethernet".to_string(),
+                description: "Ethernet".to_string(),
+                kind: "ethernet".to_string(),
                 internal_name: "\\\\DEVICE\\\\{11111111-1111-1111-1111-111111111111}".to_string(),
                 if_index: Some(20),
                 score: 9000,
@@ -5917,7 +6457,10 @@ mod tests {
             },
             PhysicalCandidate {
                 idx: 1,
+                guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
                 friendly_name: "Wi-Fi".to_string(),
+                description: "Wi-Fi".to_string(),
+                kind: "wifi".to_string(),
                 internal_name: "\\\\DEVICE\\\\{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}".to_string(),
                 if_index: Some(12),
                 score: 1,
@@ -5930,7 +6473,11 @@ mod tests {
                 &candidates,
                 Some(11),
                 true,
-                Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+                Some(&AdapterBindingPreference {
+                    guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+                    source: BindingPreferenceSource::Manual,
+                    network_signature: None,
+                }),
             );
 
         assert!(preferred_used);
@@ -5943,7 +6490,10 @@ mod tests {
         let candidates = vec![
             PhysicalCandidate {
                 idx: 0,
+                guid: "11111111-1111-1111-1111-111111111111".to_string(),
                 friendly_name: "Ethernet".to_string(),
+                description: "Ethernet".to_string(),
+                kind: "ethernet".to_string(),
                 internal_name: "\\\\DEVICE\\\\{11111111-1111-1111-1111-111111111111}".to_string(),
                 if_index: Some(20),
                 score: 9000,
@@ -5951,7 +6501,10 @@ mod tests {
             },
             PhysicalCandidate {
                 idx: 1,
+                guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
                 friendly_name: "Wi-Fi".to_string(),
+                description: "Wi-Fi".to_string(),
+                kind: "wifi".to_string(),
                 internal_name: "\\\\DEVICE\\\\{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}".to_string(),
                 if_index: Some(12),
                 score: 1,
@@ -5964,7 +6517,11 @@ mod tests {
                 &candidates,
                 None,
                 false,
-                Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                Some(&AdapterBindingPreference {
+                    guid: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".to_string(),
+                    source: BindingPreferenceSource::Manual,
+                    network_signature: None,
+                }),
             );
 
         assert!(!preferred_used);
@@ -5977,7 +6534,10 @@ mod tests {
         let candidates = vec![
             PhysicalCandidate {
                 idx: 0,
+                guid: "eth-guid".to_string(),
                 friendly_name: "Ethernet".to_string(),
+                description: "Ethernet".to_string(),
+                kind: "ethernet".to_string(),
                 internal_name: "eth".to_string(),
                 if_index: Some(20),
                 score: 9000,
@@ -5985,7 +6545,10 @@ mod tests {
             },
             PhysicalCandidate {
                 idx: 1,
+                guid: "wifi-guid".to_string(),
                 friendly_name: "Wi-Fi".to_string(),
+                description: "Wi-Fi".to_string(),
+                kind: "wifi".to_string(),
                 internal_name: "wifi".to_string(),
                 if_index: Some(11),
                 score: 1,
@@ -6005,7 +6568,10 @@ mod tests {
         let candidates = vec![
             PhysicalCandidate {
                 idx: 0,
+                guid: "eth-guid".to_string(),
                 friendly_name: "Ethernet".to_string(),
+                description: "Ethernet".to_string(),
+                kind: "ethernet".to_string(),
                 internal_name: "eth".to_string(),
                 if_index: Some(20),
                 score: 9000,
@@ -6013,7 +6579,10 @@ mod tests {
             },
             PhysicalCandidate {
                 idx: 1,
+                guid: "wifi-guid".to_string(),
                 friendly_name: "Wi-Fi".to_string(),
+                description: "Wi-Fi".to_string(),
+                kind: "wifi".to_string(),
                 internal_name: "wifi".to_string(),
                 if_index: Some(11),
                 score: 1,

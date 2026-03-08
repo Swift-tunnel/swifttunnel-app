@@ -14,6 +14,7 @@ import {
   systemInstallDriver,
   updaterCheckChannel,
   updaterInstallChannel,
+  vpnPreflightBinding,
   vpnGetPing,
   vpnListNetworkAdapters,
 } from "./commands";
@@ -83,6 +84,28 @@ describe("lib/commands", () => {
 
     await expect(vpnListNetworkAdapters()).resolves.toEqual(resp);
     expect(invoke).toHaveBeenCalledWith("vpn_list_network_adapters");
+  });
+
+  it("vpnPreflightBinding invokes backend with expected args", async () => {
+    const resp = {
+      status: "ok",
+      reason: "Split tunnel adapter binding validated.",
+      network_signature: "sig",
+      route_resolution_source: "internet_fallback",
+      route_resolution_target_ip: "8.8.8.8",
+      resolved_if_index: 7,
+      recommended_guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      cached_override_used: false,
+      binding_stage: "exact_route_match",
+      candidates: [],
+    };
+    invoke.mockResolvedValue(resp);
+
+    await expect(vpnPreflightBinding("singapore", ["roblox"])).resolves.toEqual(resp);
+    expect(invoke).toHaveBeenCalledWith("vpn_preflight_binding", {
+      region: "singapore",
+      gamePresets: ["roblox"],
+    });
   });
 
   it("settingsGenerateNetworkDiagnosticsBundle invokes backend with expected args", async () => {

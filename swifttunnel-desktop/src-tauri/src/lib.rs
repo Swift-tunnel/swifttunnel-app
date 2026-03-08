@@ -158,6 +158,7 @@ pub fn run() {
             commands::auth::auth_refresh_profile,
             // VPN
             commands::vpn::vpn_get_state,
+            commands::vpn::vpn_preflight_binding,
             commands::vpn::vpn_connect,
             commands::vpn::vpn_disconnect,
             commands::vpn::vpn_get_throughput,

@@ -449,6 +449,30 @@ export function SettingsTab() {
               </span>
             </span>
             <span>
+              Remembered override:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.cached_override_used ? "yes" : "no"}
+              </span>
+            </span>
+            <span>
+              Binding stage:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.binding_stage || "n/a"}
+              </span>
+            </span>
+            <span>
+              Validation:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.last_validation_result || "n/a"}
+              </span>
+            </span>
+            <span>
+              Binding reason:{" "}
+              <span className="text-text-primary">
+                {vpnDiagnostics?.binding_reason || "n/a"}
+              </span>
+            </span>
+            <span>
               Packets tunneled / bypassed:{" "}
               <span className="text-text-primary">
                 {vpnDiagnostics?.packets_tunneled ?? 0} /{" "}

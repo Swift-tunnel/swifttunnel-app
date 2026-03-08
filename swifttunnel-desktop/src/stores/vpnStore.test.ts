@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   vpnGetState,
+  vpnPreflightBinding,
   vpnConnect,
   vpnDisconnect,
   vpnGetThroughput,
@@ -11,6 +12,7 @@ const {
   systemInstallDriver,
 } = vi.hoisted(() => ({
   vpnGetState: vi.fn(),
+  vpnPreflightBinding: vi.fn(),
   vpnConnect: vi.fn(),
   vpnDisconnect: vi.fn(),
   vpnGetThroughput: vi.fn(),
@@ -26,6 +28,7 @@ const { notify } = vi.hoisted(() => ({
 
 vi.mock("../lib/commands", () => ({
   vpnGetState,
+  vpnPreflightBinding,
   vpnConnect,
   vpnDisconnect,
   vpnGetThroughput,
@@ -60,6 +63,7 @@ function connectedState(region: string) {
 describe("stores/vpnStore", () => {
   beforeEach(() => {
     vpnGetState.mockReset();
+    vpnPreflightBinding.mockReset();
     vpnConnect.mockReset();
     vpnDisconnect.mockReset();
     vpnGetThroughput.mockReset();
@@ -70,6 +74,18 @@ describe("stores/vpnStore", () => {
     notify.mockReset();
 
     vpnGetDiagnostics.mockResolvedValue(null);
+    vpnPreflightBinding.mockResolvedValue({
+      status: "ok",
+      reason: "validated",
+      network_signature: "sig",
+      route_resolution_source: "internet_fallback",
+      route_resolution_target_ip: "8.8.8.8",
+      resolved_if_index: 7,
+      recommended_guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      cached_override_used: false,
+      binding_stage: "exact_route_match",
+      candidates: [],
+    });
     notify.mockResolvedValue(undefined);
   });
 

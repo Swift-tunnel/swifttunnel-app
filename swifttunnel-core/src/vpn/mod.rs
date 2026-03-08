@@ -40,8 +40,9 @@ pub use config::{VpnConfigRequest, fetch_vpn_config, update_latency};
 pub use connection::{ConnectionState, VpnConnection};
 pub use error_messages::{short_error, user_friendly_error};
 pub use parallel_interceptor::{
+    AdapterBindingPreference, BindingCandidateInfo, BindingPreferenceSource, BindingPreflightInfo,
     NetworkAdapterInfo, ParallelInterceptor, SplitTunnelDiagnostics, ThroughputStats,
-    list_network_adapters,
+    list_network_adapters, preflight_binding,
 };
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
 pub use process_watcher::{ProcessStartEvent, ProcessWatcher};

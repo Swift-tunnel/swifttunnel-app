@@ -4,9 +4,11 @@ import type {
   VpnStateEvent,
   ThroughputEvent,
   DiagnosticsResponse,
+  BindingPreflightInfo,
 } from "../lib/types";
 import {
   vpnGetState,
+  vpnPreflightBinding,
   vpnConnect,
   vpnDisconnect,
   vpnGetThroughput,
@@ -16,6 +18,7 @@ import {
   systemInstallDriver,
 } from "../lib/commands";
 import { notify } from "../lib/notifications";
+import { useSettingsStore } from "./settingsStore";
 
 type DriverSetupState =
   | "idle"
@@ -63,12 +66,16 @@ interface VpnStore {
 
   // Diagnostics
   diagnostics: DiagnosticsResponse | null;
+  bindingPreflight: BindingPreflightInfo | null;
+  pendingConnectIntent: { region: string; gamePresets: string[] } | null;
 
   // Actions
   fetchState: () => Promise<void>;
   ensureDriverReady: () => Promise<void>;
   installDriver: () => Promise<void>;
   connect: (region: string, gamePresets: string[]) => Promise<void>;
+  resumeConnectWithAdapter: (guid: string) => Promise<void>;
+  dismissBindingChooser: () => void;
   disconnect: () => Promise<void>;
   fetchThroughput: () => Promise<void>;
   fetchPing: () => Promise<void>;
@@ -93,6 +100,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   packetsBypassed: 0,
   ping: null,
   diagnostics: null,
+  bindingPreflight: null,
+  pendingConnectIntent: null,
 
   fetchState: async () => {
     try {
@@ -169,6 +178,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         state: "fetching_config",
         error: null,
         driverSetupError: null,
+        bindingPreflight: null,
+        pendingConnectIntent: null,
       });
       await get().ensureDriverReady();
       set({
@@ -177,6 +188,25 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverSetupState: "idle",
         driverSetupError: null,
       });
+      const preflight = await vpnPreflightBinding(region, gamePresets);
+      if (preflight.status === "ambiguous") {
+        set({
+          state: "disconnected",
+          error: null,
+          bindingPreflight: preflight,
+          pendingConnectIntent: { region, gamePresets },
+        });
+        return;
+      }
+      if (preflight.status === "unrecoverable") {
+        set({
+          state: "error",
+          error: preflight.reason,
+          bindingPreflight: null,
+          pendingConnectIntent: null,
+        });
+        return;
+      }
       await vpnConnect(region, gamePresets);
       await get().fetchState();
       await get().fetchDiagnostics();
@@ -199,6 +229,38 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   },
 
+  resumeConnectWithAdapter: async (guid) => {
+    const preflight = get().bindingPreflight;
+    const pending = get().pendingConnectIntent;
+    if (!preflight || !pending) {
+      return;
+    }
+
+    const settingsStore = useSettingsStore.getState();
+    settingsStore.update({
+      network_binding_overrides: {
+        ...settingsStore.settings.network_binding_overrides,
+        [preflight.network_signature]: guid,
+      },
+    });
+    await settingsStore.save();
+
+    set({
+      bindingPreflight: null,
+      pendingConnectIntent: null,
+      error: null,
+    });
+
+    await get().connect(pending.region, pending.gamePresets);
+  },
+
+  dismissBindingChooser: () => {
+    set({
+      bindingPreflight: null,
+      pendingConnectIntent: null,
+    });
+  },
+
   disconnect: async () => {
     try {
       set({ state: "disconnecting" });
@@ -216,6 +278,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         packetsBypassed: 0,
         ping: null,
         diagnostics: null,
+        bindingPreflight: null,
+        pendingConnectIntent: null,
         driverSetupState: "idle",
         driverSetupError: null,
       });

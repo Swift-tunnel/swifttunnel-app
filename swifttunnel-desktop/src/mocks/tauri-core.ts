@@ -56,6 +56,9 @@ const MOCK_SETTINGS = {
   enable_discord_rpc: true,
   auto_routing_enabled: false,
   whitelisted_regions: [],
+  preferred_physical_adapter_guid: null,
+  network_binding_overrides: {},
+  adapter_binding_mode: "smart_auto",
   game_process_performance: {
     high_performance_gpu_binding: false,
     prefer_performance_cores: false,
@@ -108,6 +111,32 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     await new Promise((r) => setTimeout(r, 800));
   },
 
+  vpn_preflight_binding: () => ({
+    status: "ok",
+    reason: "Split tunnel adapter binding validated.",
+    network_signature: "source=internet_fallback;if_index=7;next_hop=1;up=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    route_resolution_source: "internet_fallback",
+    route_resolution_target_ip: "8.8.8.8",
+    resolved_if_index: 7,
+    recommended_guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    cached_override_used: false,
+    binding_stage: "exact_route_match",
+    candidates: [
+      {
+        guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        friendly_name: "Wi-Fi",
+        description: "Intel Wi-Fi Adapter",
+        if_index: 7,
+        is_up: true,
+        is_default_route: true,
+        kind: "wifi",
+        stage: "exact_route_match",
+        reason: "Active default-route adapter",
+        score: 1080,
+      },
+    ],
+  }),
+
   vpn_disconnect: async () => {
     mockVpnConnected = false;
     await new Promise((r) => setTimeout(r, 300));
@@ -137,6 +166,12 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
           route_resolution_source: "internet_fallback",
           route_resolution_target_ip: "8.8.8.8",
           manual_binding_active: false,
+          binding_reason: "Connected using the active default-route adapter.",
+          binding_stage: "exact_route_match",
+          cached_override_used: false,
+          network_signature:
+            "source=internet_fallback;if_index=7;next_hop=1;up=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          last_validation_result: "selected_exact_route_match",
           packets_tunneled: 42891,
           packets_bypassed: 128744,
         }

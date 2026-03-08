@@ -7,7 +7,8 @@
 //! - Connection state tracking
 
 use super::parallel_interceptor::{
-    QueueOverflowMode, ThroughputStats, is_point_to_point_default_route_context,
+    AdapterBindingPreference, QueueOverflowMode, ThroughputStats,
+    is_point_to_point_default_route_context,
 };
 use super::process_performance::{GameProcessPerformanceManager, GameProcessPerformancePolicy};
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
@@ -657,7 +658,7 @@ impl VpnConnection {
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
-        preferred_physical_adapter_guid: Option<String>,
+        binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
     ) -> VpnResult<()> {
         {
@@ -764,7 +765,7 @@ impl VpnConnection {
                     relay_candidates,
                     whitelisted_regions,
                     forced_servers,
-                    preferred_physical_adapter_guid.clone(),
+                    binding_preference.clone(),
                     process_performance_settings,
                 )
                 .await
@@ -827,7 +828,7 @@ impl VpnConnection {
         relay_candidates: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
-        preferred_physical_adapter_guid: Option<String>,
+        binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
     ) -> VpnResult<(Vec<String>, String, String, SocketAddr)> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
@@ -1325,11 +1326,8 @@ impl VpnConnection {
         );
 
         // Configure split tunnel driver (no Wintun LUID needed for UDP relay)
-        let split_config = SplitTunnelConfig::new(
-            tunnel_apps.clone(),
-            0,
-            preferred_physical_adapter_guid.clone(),
-        );
+        let split_config =
+            SplitTunnelConfig::new(tunnel_apps.clone(), 0, binding_preference.clone());
 
         driver.configure(split_config).map_err(|e| {
             let _ = driver.close();
