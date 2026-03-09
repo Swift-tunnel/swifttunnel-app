@@ -64,11 +64,32 @@ build:
     - |
       $bundleDir = "target/release/bundle/nsis"
       $outDir = "release-artifacts"
+      $exeName = "SwiftTunnel_${version}_x64-setup.exe"
+      $exePath = Join-Path $bundleDir $exeName
+      $sigPath = "$exePath.sig"
+      $latestJsonPath = Join-Path $outDir "latest.json"
       New-Item -ItemType Directory -Path $outDir -Force | Out-Null
       Copy-Item "$bundleDir/*.exe" $outDir/
       Copy-Item "$bundleDir/*.nsis.zip" $outDir/ -ErrorAction SilentlyContinue
       Copy-Item "$bundleDir/*.nsis.zip.sig" $outDir/ -ErrorAction SilentlyContinue
-      if (Test-Path "$bundleDir/latest.json") { Copy-Item "$bundleDir/latest.json" $outDir/ }
+      if (Test-Path "$bundleDir/latest.json") {
+        Copy-Item "$bundleDir/latest.json" $latestJsonPath
+      } elseif ((Test-Path $exePath) -and (Test-Path $sigPath)) {
+        $signature = (Get-Content $sigPath -Raw).Trim()
+        $exeUrl = "${env:CI_API_V4_URL}/projects/${env:CI_PROJECT_ID}/packages/generic/swifttunnel-app/${version}/${exeName}"
+        $latestManifest = [ordered]@{
+          version   = $version
+          notes     = "See release notes: https://gitlab.com/swifttunnel-group/swifttunnel-app/-/releases/v${version}"
+          pub_date  = (Get-Date).ToUniversalTime().ToString("o")
+          url       = $exeUrl
+          signature = $signature
+        } | ConvertTo-Json -Depth 4
+        [System.IO.File]::WriteAllText(
+          (Resolve-Path $outDir).Path + "\latest.json",
+          $latestManifest,
+          [System.Text.UTF8Encoding]::new($false)
+        )
+      }
       Get-ChildItem $outDir
   artifacts:
     paths:
