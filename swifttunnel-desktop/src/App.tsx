@@ -20,7 +20,8 @@ import { useUpdaterStore } from "./stores/updaterStore";
 import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { boostUpdateConfig } from "./lib/commands";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
-import { shouldAutoReconnectOnLaunch } from "./lib/startup";
+import { runAppBootstrap } from "./lib/appBootstrap";
+import { reportError } from "./lib/errors";
 import {
   ensureWindowStateVisible,
   isPersistableWindowSize,
@@ -166,39 +167,23 @@ function App() {
     let disposed = false;
 
     const init = async () => {
-      await initEventListeners();
-      await Promise.all([
-        fetchAuth(),
-        loadSettings(),
-        fetchServers(),
-        fetchSystemInfo(),
-        fetchVpnState(),
-      ]);
+      await runAppBootstrap({
+        initEventListeners,
+        fetchAuth,
+        loadSettings,
+        fetchServers,
+        fetchSystemInfo,
+        fetchVpnState,
+        getSettings: () => useSettingsStore.getState().settings,
+        getAuthState: () => useAuthStore.getState().state,
+        getVpnState: () => useVpnStore.getState().state,
+        applyBoostConfig: (config) => boostUpdateConfig(JSON.stringify(config)),
+        connectVpn,
+        checkForUpdates,
+      });
 
-      if (!disposed) {
-        const loadedSettings = useSettingsStore.getState().settings;
-        // Apply saved per-boost config on startup so enabled boosts are active
-        // without requiring a master toggle.
-        void boostUpdateConfig(JSON.stringify(loadedSettings.config)).catch((err) => {
-          console.warn("Failed to apply boost config on startup:", err);
-        });
-
-        if (
-          shouldAutoReconnectOnLaunch(
-            useAuthStore.getState().state,
-            useVpnStore.getState().state,
-            loadedSettings,
-          )
-        ) {
-          void connectVpn(
-            loadedSettings.selected_region,
-            loadedSettings.selected_game_presets,
-          );
-        }
-
-        if (loadedSettings.update_settings.auto_check) {
-          void checkForUpdates(false);
-        }
+      if (disposed) {
+        void cleanupEventListeners();
       }
     };
 
@@ -260,8 +245,10 @@ function App() {
           window_state: nextWindowState,
         });
         await saveSettings();
-      } catch {
-        // ignore transient window state errors
+      } catch (error) {
+        reportError("Failed to persist window state", error, {
+          dedupeKey: "app-window-persist",
+        });
       }
     };
 
@@ -316,8 +303,10 @@ function App() {
           } else {
             ws = next;
           }
-        } catch {
-          // ignore monitor detection errors (we'll fall back to the persisted position)
+        } catch (error) {
+          reportError("Failed to inspect monitor work areas", error, {
+            dedupeKey: "app-window-monitors",
+          });
         }
 
         if (ws.width > 0 && ws.height > 0) {
@@ -333,8 +322,10 @@ function App() {
         if (ws.maximized) {
           await appWindow.maximize();
         }
-      } catch {
-        // ignore restore errors for invalid/off-screen saved state
+      } catch (error) {
+        reportError("Failed to restore window state", error, {
+          dedupeKey: "app-window-restore",
+        });
       }
 
       if (disposed) return;

@@ -13,6 +13,7 @@ import {
   boostUpdateConfig,
   boostRestartRoblox,
 } from "../lib/commands";
+import { reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
 
 interface BoostStore {
@@ -87,8 +88,10 @@ export const useBoostStore = create<BoostStore>((set) => ({
         robloxRunning: m.roblox_running,
         processId: m.process_id,
       });
-    } catch {
-      // Silently ignore
+    } catch (error) {
+      reportError("Failed to fetch performance metrics", error, {
+        dedupeKey: "boost-fetch-metrics",
+      });
     }
   },
 
@@ -96,8 +99,10 @@ export const useBoostStore = create<BoostStore>((set) => ({
     try {
       const mem = await boostGetSystemMemory();
       set({ systemMem: mem });
-    } catch {
-      // Silently ignore
+    } catch (error) {
+      reportError("Failed to fetch system memory", error, {
+        dedupeKey: "boost-fetch-system-memory",
+      });
     }
   },
 
@@ -109,8 +114,10 @@ export const useBoostStore = create<BoostStore>((set) => ({
         osVersion: info.os_version,
         cpuCount: info.cpu_count,
       });
-    } catch {
-      // Silently ignore
+    } catch (error) {
+      reportError("Failed to fetch system info", error, {
+        dedupeKey: "boost-fetch-system-info",
+      });
     }
   },
 

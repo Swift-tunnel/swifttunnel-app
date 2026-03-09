@@ -603,6 +603,11 @@ pub fn system_cleanup() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn system_cleanup_hosts() -> Result<(), String> {
+    swifttunnel_core::roblox_proxy::hosts::remove_overrides()
+}
+
+#[tauri::command]
 pub fn system_open_url(url: String) -> Result<(), String> {
     swifttunnel_core::utils::open_url(&url);
     Ok(())

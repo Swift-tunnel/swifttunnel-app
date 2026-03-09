@@ -195,6 +195,7 @@ pub fn run() {
             commands::system::system_open_url,
             commands::system::system_restart_as_admin,
             commands::system::system_cleanup,
+            commands::system::system_cleanup_hosts,
             // Proxy
             commands::proxy::proxy_get_state,
             commands::proxy::proxy_toggle,

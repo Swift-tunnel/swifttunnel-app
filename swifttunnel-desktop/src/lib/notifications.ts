@@ -3,6 +3,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { reportError } from "./errors";
 
 let checkedPermission = false;
 let allowed = false;
@@ -16,7 +17,10 @@ async function ensurePermission(): Promise<boolean> {
       const permission = await requestPermission();
       allowed = permission === "granted";
     }
-  } catch {
+  } catch (error) {
+    reportError("Notification permission check failed", error, {
+      dedupeKey: "notifications-permission",
+    });
     allowed = false;
   } finally {
     checkedPermission = true;

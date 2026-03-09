@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_SETTINGS } from "../lib/settings";
+import type { AppSettings } from "../lib/types";
 
 const { settingsLoad, settingsSave } = vi.hoisted(() => ({
   settingsLoad: vi.fn(),
@@ -23,37 +25,17 @@ describe("stores/settingsStore", () => {
 
   it("loads settings and sets activeTab from current_tab", async () => {
     settingsLoad.mockResolvedValue({
-      json: JSON.stringify({
-        theme: "light",
-        config: {},
-        window_state: { x: null, y: null, width: 560, height: 750, maximized: false },
-        selected_region: "singapore",
-        selected_server: "singapore",
-        current_tab: "boost",
-        update_settings: { auto_check: true, last_check: null },
-        update_channel: "Stable",
-        minimize_to_tray: true,
-        run_on_startup: true,
-        auto_reconnect: true,
-        resume_vpn_on_startup: false,
-        last_connected_region: null,
-        expanded_boost_info: [],
-        selected_game_presets: ["roblox"],
-        forced_servers: {},
-        artificial_latency_ms: 0,
-        experimental_mode: false,
-        custom_relay_server: "",
-        enable_discord_rpc: true,
-        auto_routing_enabled: false,
-        whitelisted_regions: [],
-        preferred_physical_adapter_guid: null,
-        adapter_binding_mode: "smart_auto",
-        game_process_performance: {
-          high_performance_gpu_binding: true,
-          prefer_performance_cores: false,
-          unbind_cpu0: true,
-        },
-      }),
+      ...DEFAULT_SETTINGS,
+      theme: "light",
+      config: {},
+      current_tab: "boost",
+      minimize_to_tray: true,
+      game_process_performance: {
+        high_performance_gpu_binding: true,
+        prefer_performance_cores: false,
+        unbind_cpu0: true,
+      },
+      roblox_network_bypass: true,
     });
 
     const useSettingsStore = await loadStore();
@@ -69,7 +51,11 @@ describe("stores/settingsStore", () => {
     expect(
       useSettingsStore.getState().settings.game_process_performance.unbind_cpu0,
     ).toBe(true);
+    expect(useSettingsStore.getState().settings.roblox_network_bypass).toBe(true);
     expect(useSettingsStore.getState().activeTab).toBe("boost");
+    expect(
+      useSettingsStore.getState().settings.config.roblox_settings.window_width,
+    ).toBe(1280);
   });
 
   it("defaults minimize_to_tray to false when load fails", async () => {
@@ -123,22 +109,12 @@ describe("stores/settingsStore", () => {
     await useSettingsStore.getState().save();
 
     expect(settingsSave).toHaveBeenCalledTimes(1);
-    const payload = settingsSave.mock.calls[0]?.[0] as string;
-    const parsed = JSON.parse(payload) as {
-      current_tab?: string;
-      theme?: string;
-      config?: {
-        roblox_settings?: {
-          window_width?: number;
-          window_height?: number;
-          window_fullscreen?: boolean;
-        };
-      };
-    };
-    expect(parsed.current_tab).toBe("connect");
-    expect(parsed.theme).toBe("dark");
-    expect(parsed.config?.roblox_settings?.window_width).toBe(1280);
-    expect(parsed.config?.roblox_settings?.window_height).toBe(720);
-    expect(parsed.config?.roblox_settings?.window_fullscreen).toBe(false);
+    const payload = settingsSave.mock.calls[0]?.[0] as AppSettings;
+    expect(payload.current_tab).toBe("connect");
+    expect(payload.theme).toBe("dark");
+    expect(payload.config.roblox_settings.window_width).toBe(1280);
+    expect(payload.config.roblox_settings.window_height).toBe(720);
+    expect(payload.config.roblox_settings.window_fullscreen).toBe(false);
+    expect(payload.roblox_network_bypass).toBe(false);
   });
 });

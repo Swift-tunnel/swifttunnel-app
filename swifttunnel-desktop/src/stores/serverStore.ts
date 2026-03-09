@@ -6,6 +6,7 @@ import {
   serverRefresh,
   serverSmartSelect,
 } from "../lib/commands";
+import { reportError } from "../lib/errors";
 
 interface ServerStore {
   regions: ServerRegion[];
@@ -55,8 +56,10 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         latencies.set(entry.region, entry.latency_ms);
       }
       set({ latencies });
-    } catch {
-      // Silently ignore
+    } catch (error) {
+      reportError("Failed to fetch server latencies", error, {
+        dedupeKey: "server-fetch-latencies",
+      });
     }
   },
 

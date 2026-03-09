@@ -3,7 +3,9 @@
 //! Uses Windows Runtime (WinRT) for native Windows 10/11 style notifications.
 //! Similar to Bloxstrap's server location notifications.
 
+#[cfg(windows)]
 use std::path::Path;
+#[cfg(windows)]
 use winrt_notification::{Duration, IconCrop, Sound, Toast};
 
 /// SwiftTunnel's App User Model ID for Windows notifications.
@@ -11,6 +13,7 @@ use winrt_notification::{Duration, IconCrop, Sound, Toast};
 const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.GameBooster";
 
 /// Check if our custom AUMID is registered (Start menu shortcut exists)
+#[cfg(windows)]
 fn is_aumid_registered() -> bool {
     // Check for Start menu shortcut that registers our AUMID
     if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -28,6 +31,7 @@ fn is_aumid_registered() -> bool {
 /// Falls back to PowerShell's AUMID when our app isn't properly installed,
 /// which ensures notifications actually appear (at the cost of showing
 /// "Windows PowerShell" as the source instead of "SwiftTunnel").
+#[cfg(windows)]
 fn get_aumid() -> &'static str {
     if is_aumid_registered() {
         SWIFTTUNNEL_AUMID
@@ -37,6 +41,7 @@ fn get_aumid() -> &'static str {
 }
 
 /// Get the path to the SwiftTunnel icon
+#[cfg(windows)]
 fn get_icon_path() -> Option<std::path::PathBuf> {
     // Try installed location first
     let installed_path = Path::new(r"C:\Program Files\SwiftTunnel\swifttunnel.ico");
@@ -68,6 +73,7 @@ fn get_icon_path() -> Option<std::path::PathBuf> {
 /// # Arguments
 /// * `title` - The notification title (e.g., "Connected to server")
 /// * `message` - The notification body (e.g., "Location: Singapore, SG")
+#[cfg(windows)]
 pub fn show_notification(title: &str, message: &str) {
     // Run on a background thread to avoid blocking the GUI thread
     let title = title.to_string();
@@ -93,6 +99,9 @@ pub fn show_notification(title: &str, message: &str) {
         }
     });
 }
+
+#[cfg(not(windows))]
+pub fn show_notification(_title: &str, _message: &str) {}
 
 /// Show a relay switch notification (auto-routing)
 ///

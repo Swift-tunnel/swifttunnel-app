@@ -17,6 +17,7 @@ import {
   systemCheckDriver,
   systemInstallDriver,
 } from "../lib/commands";
+import { reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
 import { useSettingsStore } from "./settingsStore";
 
@@ -300,8 +301,10 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           packetsBypassed: stats.packets_bypassed,
         });
       }
-    } catch {
-      // Silently ignore throughput fetch errors
+    } catch (error) {
+      reportError("Failed to fetch VPN throughput", error, {
+        dedupeKey: "vpn-fetch-throughput",
+      });
     }
   },
 
@@ -309,8 +312,10 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     try {
       const ms = await vpnGetPing();
       set({ ping: ms });
-    } catch {
-      // Silently ignore ping errors
+    } catch (error) {
+      reportError("Failed to fetch VPN ping", error, {
+        dedupeKey: "vpn-fetch-ping",
+      });
     }
   },
 
@@ -318,8 +323,10 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     try {
       const diag = await vpnGetDiagnostics();
       set({ diagnostics: diag });
-    } catch {
-      // Silently ignore
+    } catch (error) {
+      reportError("Failed to fetch VPN diagnostics", error, {
+        dedupeKey: "vpn-fetch-diagnostics",
+      });
     }
   },
 

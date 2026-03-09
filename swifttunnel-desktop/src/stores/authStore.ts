@@ -9,6 +9,7 @@ import {
   authLogout,
   authRefreshProfile,
 } from "../lib/commands";
+import { reportError } from "../lib/errors";
 
 interface AuthStore {
   state: AuthState;
@@ -80,8 +81,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   cancelOAuth: async (reason = "Login cancelled.") => {
     try {
       await authCancelOAuth();
-    } catch {
-      // Best-effort cancel; local UI state still resets below.
+    } catch (error) {
+      reportError("Failed to cancel OAuth flow", error, {
+        dedupeKey: "auth-cancel-oauth",
+      });
     }
 
     set({

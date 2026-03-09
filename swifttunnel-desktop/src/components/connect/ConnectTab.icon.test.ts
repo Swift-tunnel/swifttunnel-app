@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import connectTabSource from "./ConnectTab.tsx?raw";
+import { resolveConnectStatus } from "./connectState";
 
 describe("ConnectTab power button icon", () => {
   it("uses a power glyph instead of the old wifi glyph", () => {
@@ -20,9 +21,21 @@ describe("ConnectTab power button icon", () => {
   });
 
   it("shows automatic split tunnel driver install status text", () => {
-    expect(connectTabSource).toContain("Checking split tunnel driver");
-    expect(connectTabSource).toContain(
-      "Installing required split tunnel driver",
-    );
+    expect(
+      resolveConnectStatus({
+        driverSetupState: "checking",
+        driverSetupError: null,
+        vpnError: null,
+        vpnState: "disconnected",
+      }).text,
+    ).toContain("Checking split tunnel driver");
+    expect(
+      resolveConnectStatus({
+        driverSetupState: "installing",
+        driverSetupError: null,
+        vpnError: null,
+        vpnState: "disconnected",
+      }).text,
+    ).toContain("Installing required split tunnel driver");
   });
 });

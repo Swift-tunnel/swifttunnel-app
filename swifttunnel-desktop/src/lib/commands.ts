@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppSettings,
   AuthStateResponse,
   OAuthPollResult,
   VpnStateResponse,
@@ -124,10 +125,10 @@ export const networkStartBufferbloatTest = () =>
 // ── Settings ──
 
 export const settingsLoad = () =>
-  invoke<{ json: string }>("settings_load");
+  invoke<AppSettings>("settings_load");
 
-export const settingsSave = (settingsJson: string) =>
-  invoke<void>("settings_save", { settingsJson });
+export const settingsSave = (settings: AppSettings) =>
+  invoke<void>("settings_save", { settings });
 
 export const settingsGenerateNetworkDiagnosticsBundle = () =>
   invoke<NetworkDiagnosticsBundleResponse>(

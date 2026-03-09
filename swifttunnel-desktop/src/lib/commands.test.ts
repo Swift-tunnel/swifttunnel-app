@@ -9,6 +9,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import {
+  settingsLoad,
+  settingsSave,
   settingsGenerateNetworkDiagnosticsBundle,
   systemRestartAsAdmin,
   systemInstallDriver,
@@ -18,6 +20,7 @@ import {
   vpnGetPing,
   vpnListNetworkAdapters,
 } from "./commands";
+import { DEFAULT_SETTINGS } from "./settings";
 
 describe("lib/commands", () => {
   beforeEach(() => {
@@ -119,5 +122,21 @@ describe("lib/commands", () => {
     expect(invoke).toHaveBeenCalledWith(
       "settings_generate_network_diagnostics_bundle",
     );
+  });
+
+  it("settingsLoad invokes backend with typed settings payload", async () => {
+    invoke.mockResolvedValue(DEFAULT_SETTINGS);
+
+    await expect(settingsLoad()).resolves.toEqual(DEFAULT_SETTINGS);
+    expect(invoke).toHaveBeenCalledWith("settings_load");
+  });
+
+  it("settingsSave invokes backend with typed settings payload", async () => {
+    invoke.mockResolvedValue(undefined);
+
+    await expect(settingsSave(DEFAULT_SETTINGS)).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("settings_save", {
+      settings: DEFAULT_SETTINGS,
+    });
   });
 });

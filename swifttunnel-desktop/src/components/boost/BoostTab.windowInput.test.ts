@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWindowDimensionInput } from "./BoostTab";
+import { parseWindowDimensionInput } from "./boostConfig";
 
 describe("BoostTab window input parsing", () => {
   it("falls back to minimum width when input is empty", () => {

@@ -1,3 +1,5 @@
+import { reportError } from "./errors";
+
 export type CloseRequestedEvent = {
   preventDefault: () => void;
 };
@@ -29,8 +31,10 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
 
     try {
       await deps.persistWindowState();
-    } catch {
-      // Persist failures shouldn't block close/hide.
+    } catch (error) {
+      reportError("Failed to persist window state before close", error, {
+        dedupeKey: "close-to-tray-persist",
+      });
     }
 
     const shouldMinimizeToTray = deps.shouldMinimizeToTray?.() ?? true;
@@ -39,7 +43,10 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
       closing = true;
       try {
         await deps.close();
-      } catch {
+      } catch (error) {
+        reportError("Failed to close window", error, {
+          dedupeKey: "close-to-tray-close",
+        });
         closing = false;
       }
       return;
@@ -47,12 +54,18 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
 
     try {
       await deps.hide();
-    } catch {
+    } catch (error) {
+      reportError("Failed to hide window to tray", error, {
+        dedupeKey: "close-to-tray-hide",
+      });
       // If we can't hide to tray, fall back to closing normally.
       closing = true;
       try {
         await deps.close();
-      } catch {
+      } catch (closeError) {
+        reportError("Failed to close window after tray hide fallback", closeError, {
+          dedupeKey: "close-to-tray-fallback-close",
+        });
         // If close fails (rare), allow future close attempts to retry.
         closing = false;
       }

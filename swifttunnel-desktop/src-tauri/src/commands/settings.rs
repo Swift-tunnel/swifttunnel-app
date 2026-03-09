@@ -1,14 +1,11 @@
-use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Output;
 use tauri::{AppHandle, Manager, State};
 
 use crate::state::AppState;
+use swifttunnel_core::settings::AppSettings;
 
-#[derive(Serialize)]
-pub struct SettingsResponse {
-    pub json: String,
-}
+use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct NetworkDiagnosticsBundleResponse {
@@ -43,22 +40,17 @@ struct BundleContext {
 }
 
 #[tauri::command]
-pub fn settings_load(state: State<'_, AppState>) -> Result<SettingsResponse, String> {
-    let settings = state.settings.lock();
-    let json = serde_json::to_string(&*settings).map_err(|e| format!("Serialize error: {}", e))?;
-    Ok(SettingsResponse { json })
+pub fn settings_load(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    Ok(state.settings.lock().clone())
 }
 
 #[tauri::command]
 pub fn settings_save(
     state: State<'_, AppState>,
     app: AppHandle,
-    settings_json: String,
+    settings: AppSettings,
 ) -> Result<(), String> {
-    let mut new_settings: swifttunnel_core::settings::AppSettings =
-        serde_json::from_str(&settings_json)
-            .map_err(|e| format!("Invalid settings JSON: {}", e))?;
-
+    let mut new_settings = settings;
     new_settings.sanitize_in_place();
     swifttunnel_core::settings::save_settings(&new_settings)?;
 
@@ -520,7 +512,7 @@ mod tests {
 
         let context = BundleContext {
             generated_at: "2026-02-19T15:45:00Z".to_string(),
-            app_version: "1.15.25".to_string(),
+            app_version: "1.21.0".to_string(),
             platform: "windows-x86_64".to_string(),
             settings,
             vpn_state: swifttunnel_core::vpn::ConnectionState::Connected {

@@ -6,39 +6,12 @@ import { useServerStore } from "../../stores/serverStore";
 import { countryFlag, getLatencyColor, formatBytes } from "../../lib/utils";
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
+import {
+  GAMES,
+  resolveConnectStatus,
+} from "./connectState";
 import type { ServerRegion } from "../../lib/types";
 import "./connect.css";
-
-const GAMES = [
-  { id: "roblox", name: "Roblox", icon: "\u{1F3AE}" },
-  { id: "valorant", name: "Valorant", icon: "\u{1F3AF}" },
-  { id: "fortnite", name: "Fortnite", icon: "\u{1F3D7}\uFE0F" },
-];
-
-function stateLabel(state: string): string {
-  switch (state) {
-    case "disconnected":
-      return "Ready to connect";
-    case "fetching_config":
-      return "Resolving relay\u2026";
-    case "creating_adapter":
-      return "Creating adapter\u2026";
-    case "connecting":
-      return "Establishing tunnel\u2026";
-    case "configuring_split_tunnel":
-      return "Configuring split tunnel\u2026";
-    case "configuring_routes":
-      return "Setting routes\u2026";
-    case "connected":
-      return "Connected";
-    case "disconnecting":
-      return "Disconnecting\u2026";
-    case "error":
-      return "Connection failed";
-    default:
-      return state;
-  }
-}
 
 // ── Main Component ──
 
@@ -158,11 +131,6 @@ export function ConnectTab() {
   const ringSpeed = isTransitioning ? 3.5 : 55;
   const innerSpeed = isTransitioning ? 2.8 : 38;
 
-  const driverMissing =
-    !!vpnError &&
-    vpnError.toLowerCase().includes("split tunnel driver not available") &&
-    vpnError.toLowerCase().includes("windows packet filter driver");
-
   async function handleInstallDriver() {
     try {
       await installDriver();
@@ -171,27 +139,18 @@ export function ConnectTab() {
     }
   }
 
+  const connectStatus = resolveConnectStatus({
+    driverSetupState,
+    driverSetupError,
+    vpnError,
+    vpnState,
+  });
+
   function renderStatusLine() {
-    if (driverSetupState === "checking") {
-      return "Checking split tunnel driver\u2026";
-    }
-
-    if (driverSetupState === "installing") {
-      return "Installing required split tunnel driver\u2026";
-    }
-
-    if (driverSetupState === "installed") {
-      return "Driver installed. Click Connect to retry.";
-    }
-
-    if (driverSetupState === "error") {
-      return driverSetupError || "Driver install failed.";
-    }
-
-    if (driverMissing) {
+    if (connectStatus.kind === "driver_missing") {
       return (
         <span className="inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
-          <span>Split tunnel driver not available. Install</span>
+          <span>{connectStatus.text}</span>
           <button
             type="button"
             onClick={() => void handleInstallDriver()}
@@ -210,7 +169,7 @@ export function ConnectTab() {
       );
     }
 
-    return vpnError || stateLabel(vpnState);
+    return connectStatus.text;
   }
 
   return (

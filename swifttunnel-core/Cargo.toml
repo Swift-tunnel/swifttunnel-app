@@ -44,7 +44,6 @@ windows = { version = "0.62", features = [
 
 # System utilities
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-winreg = "0.52"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "fs", "io-util", "macros"] }
@@ -99,9 +98,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # Lightweight HTTP server for OAuth callback
 tiny_http = "0.12"
 
-# Windows toast notifications (native Windows 10/11 style)
-winrt-notification = "0.5"
-
 # Fast mutex
 parking_lot = "0.12"
 
@@ -118,3 +114,7 @@ arrayvec = "0.7"
 
 # Discord Rich Presence for activity status
 discord-rich-presence = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+winrt-notification = "0.5"

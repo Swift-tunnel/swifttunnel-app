@@ -268,6 +268,31 @@ export interface SpeedResultResponse {
   server: string;
 }
 
+export interface PersistedStabilityResult {
+  avg_ping: number;
+  min_ping: number;
+  max_ping: number;
+  jitter: number;
+  packet_loss: number;
+  ping_spread: number;
+  quality: string;
+  sample_count: number;
+  ping_samples: PingSample[];
+  timestamp: string;
+}
+
+export interface PersistedSpeedResult {
+  download_mbps: number;
+  upload_mbps: number;
+  server: string;
+  timestamp: string;
+}
+
+export interface NetworkTestResultsCache {
+  last_stability: PersistedStabilityResult | null;
+  last_speed: PersistedSpeedResult | null;
+}
+
 export interface BufferbloatResultResponse {
   idle_latency: number;
   loaded_latency: number;
@@ -332,6 +357,7 @@ export interface AppSettings {
   last_connected_region: string | null;
   expanded_boost_info: string[];
   selected_game_presets: string[];
+  network_test_results: NetworkTestResultsCache;
   forced_servers: Record<string, string>;
   artificial_latency_ms: number;
   experimental_mode: boolean;
@@ -343,6 +369,8 @@ export interface AppSettings {
   network_binding_overrides: Record<string, string>;
   adapter_binding_mode: "smart_auto" | "manual";
   game_process_performance: GameProcessPerformanceSettings;
+  roblox_network_bypass: boolean;
+  roblox_network_bypass_sni_fragment: boolean;
 }
 
 // ── System ──
