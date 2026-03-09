@@ -819,6 +819,14 @@ impl SplitTunnelDriver {
         }
     }
 
+    pub fn register_udp_port_immediate(&self, local_port: u16) {
+        if let Some(ref interceptor) = self.parallel_interceptor {
+            interceptor.register_udp_port_immediate(local_port);
+        } else {
+            log::warn!("Cannot register UDP port: parallel interceptor not active");
+        }
+    }
+
     /// Switch relay address (proxy to ParallelInterceptor)
     pub fn switch_relay_addr(&self, new_addr: std::net::SocketAddr) -> bool {
         if let Some(ref interceptor) = self.parallel_interceptor {

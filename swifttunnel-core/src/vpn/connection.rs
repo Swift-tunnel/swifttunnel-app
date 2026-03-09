@@ -1746,6 +1746,36 @@ impl VpnConnection {
         self.split_tunnel.is_some()
     }
 
+    pub async fn register_tunnel_process(&self, pid: u32, exe_name: &str) -> VpnResult<()> {
+        if let Some(ref driver) = self.split_tunnel {
+            let guard = driver.lock().await;
+            guard.register_process_immediate(pid, exe_name.to_string());
+            Ok(())
+        } else {
+            Err(VpnError::SplitTunnel("Split tunnel not active".to_string()))
+        }
+    }
+
+    pub async fn register_tunnel_udp_port(&self, local_port: u16) -> VpnResult<()> {
+        if let Some(ref driver) = self.split_tunnel {
+            let guard = driver.lock().await;
+            guard.register_udp_port_immediate(local_port);
+            Ok(())
+        } else {
+            Err(VpnError::SplitTunnel("Split tunnel not active".to_string()))
+        }
+    }
+
+    pub async fn refresh_split_tunnel_cache(&self) -> VpnResult<()> {
+        if let Some(ref driver) = self.split_tunnel {
+            let mut guard = driver.lock().await;
+            guard.refresh_exclusions()?;
+            Ok(())
+        } else {
+            Err(VpnError::SplitTunnel("Split tunnel not active".to_string()))
+        }
+    }
+
     pub async fn add_tunnel_app(&mut self, exe_name: &str) -> VpnResult<()> {
         if let Some(ref driver) = self.split_tunnel {
             let mut guard = driver.lock().await;

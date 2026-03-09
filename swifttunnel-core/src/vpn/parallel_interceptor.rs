@@ -337,17 +337,18 @@ pub fn preflight_binding(
 
     Ok(BindingPreflightInfo {
         status: status.to_string(),
-        reason: interceptor.binding_reason,
+        reason: interceptor.binding_reason.clone(),
         network_signature: interceptor
             .active_network_signature
+            .clone()
             .unwrap_or_else(|| "unresolved".to_string()),
         route_resolution_source: interceptor.default_route_source.as_str().to_string(),
         route_resolution_target_ip: interceptor.default_route_target_ip.map(|ip| ip.to_string()),
         resolved_if_index: interceptor.default_route_if_index,
-        recommended_guid: interceptor.recommended_adapter_guid,
+        recommended_guid: interceptor.recommended_adapter_guid.clone(),
         cached_override_used: interceptor.cached_override_used,
-        binding_stage: Some(interceptor.binding_stage),
-        candidates: interceptor.binding_candidates,
+        binding_stage: Some(interceptor.binding_stage.clone()),
+        candidates: interceptor.binding_candidates.clone(),
     })
 }
 
@@ -3185,6 +3186,10 @@ impl ParallelInterceptor {
     /// - First packet arrives → process is already known → tunneled!
     pub fn register_process_immediate(&self, pid: u32, name: String) {
         self.process_cache.register_process_immediate(pid, name);
+    }
+
+    pub fn register_udp_port_immediate(&self, local_port: u16) {
+        self.process_cache.register_udp_port_immediate(local_port);
     }
 
     /// Create InboundConfig for the optimized inbound receiver
