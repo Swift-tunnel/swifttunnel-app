@@ -2,9 +2,11 @@ import { useEffect, useState, useCallback, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
+import { useToastStore } from "../../stores/toastStore";
 import { systemRestartAsAdmin } from "../../lib/commands";
 import { notify } from "../../lib/notifications";
 import { Toggle } from "../common/Toggle";
+import { Tooltip, InfoIcon } from "../common/Tooltip";
 import {
   PROFILES,
   configsEqual,
@@ -62,6 +64,7 @@ export function BoostTab() {
   const saveSettings = useSettingsStore((s) => s.save);
 
   const boost = useBoostStore();
+  const addToast = useToastStore((s) => s.addToast);
 
   const [restartAdminState, setRestartAdminState] = useState<
     "idle" | "restarting" | "error"
@@ -136,6 +139,7 @@ export function BoostTab() {
     if (hasConfigChanges) {
       await boost.updateConfig(JSON.stringify(draft));
     }
+    addToast({ type: "success", message: "Boost settings applied" });
   }, [
     draft,
     draftGameProcessPerformance,
@@ -144,6 +148,7 @@ export function BoostTab() {
     updateSettings,
     boost,
     windowValidationError,
+    addToast,
   ]);
 
   const restartAsAdmin = useCallback(async () => {
@@ -297,9 +302,7 @@ export function BoostTab() {
                     ? "linear-gradient(145deg, var(--color-accent-primary), var(--color-accent-cyan))"
                     : "transparent",
                   color: sel ? "#fff" : "var(--color-text-muted)",
-                  boxShadow: sel
-                    ? "0 2px 10px rgba(60,130,246,0.25)"
-                    : "none",
+                  boxShadow: sel ? "0 2px 10px rgba(60,130,246,0.25)" : "none",
                 }}
               >
                 {p.icon} {p.name}
@@ -371,12 +374,7 @@ export function BoostTab() {
       </OptGroup>
 
       {/* ── System ── */}
-      <OptGroup
-        title="System"
-        active={systemActive}
-        total={4}
-        accent="#3c82f6"
-      >
+      <OptGroup title="System" active={systemActive} total={4} accent="#3c82f6">
         <OptRow
           title="High Priority Mode"
           desc="Boost game process priority"
@@ -388,6 +386,7 @@ export function BoostTab() {
           title="0.5ms Timer Resolution"
           desc="Max precision frame pacing"
           impact="Smoother frames"
+          tooltip="Reduces the Windows timer interrupt interval to 0.5ms for more precise frame pacing and input polling. Slightly increases CPU usage."
           enabled={draft.system_optimization.timer_resolution_1ms}
           onChange={(v) => updateSysOpt({ timer_resolution_1ms: v })}
         />
@@ -395,6 +394,7 @@ export function BoostTab() {
           title="MMCSS Gaming Profile"
           desc="Better thread scheduling"
           impact="Stable frame times"
+          tooltip="Multimedia Class Scheduler Service — tells Windows to give game threads higher priority for CPU time, reducing stutters from background tasks."
           enabled={draft.system_optimization.mmcss_gaming_profile}
           onChange={(v) => updateSysOpt({ mmcss_gaming_profile: v })}
         />
@@ -452,6 +452,7 @@ export function BoostTab() {
           title="Disable Nagle's Algorithm"
           desc="Faster packet delivery"
           impact="-5-15ms"
+          tooltip="Nagle's algorithm batches small packets together to reduce overhead. Disabling it sends packets immediately, reducing latency for real-time games."
           enabled={draft.network_settings.disable_nagle}
           onChange={(v) => updateNetOpt({ disable_nagle: v })}
         />
@@ -459,6 +460,7 @@ export function BoostTab() {
           title="Disable Network Throttling"
           desc="Full bandwidth for games"
           impact="Less lag spikes"
+          tooltip="Windows throttles network I/O when multimedia is playing. Disabling this prevents sudden bandwidth drops during gaming."
           enabled={draft.network_settings.disable_network_throttling}
           onChange={(v) => updateNetOpt({ disable_network_throttling: v })}
         />
@@ -466,6 +468,7 @@ export function BoostTab() {
           title="Gaming QoS"
           desc="Prioritize Roblox + tunnel UDP"
           impact="-5-20ms"
+          tooltip="Quality of Service — marks game UDP packets as high priority so routers and Windows handle them before other traffic like downloads or streaming."
           enabled={draft.network_settings.gaming_qos}
           onChange={(v) => updateNetOpt({ gaming_qos: v })}
         />
@@ -538,8 +541,7 @@ export function BoostTab() {
                     disabled={isRestarting || Boolean(windowValidationError)}
                     className="rounded-lg px-6 py-2 text-xs font-bold text-white transition-all disabled:opacity-50"
                     style={{
-                      background:
-                        "linear-gradient(145deg, #3c82f6, #60a5ff)",
+                      background: "linear-gradient(145deg, #3c82f6, #60a5ff)",
                       boxShadow:
                         "0 2px 12px rgba(60, 130, 246, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1)",
                     }}
@@ -554,8 +556,7 @@ export function BoostTab() {
                     disabled={isRestarting || Boolean(windowValidationError)}
                     className="rounded-lg px-6 py-2 text-xs font-bold text-white transition-all disabled:opacity-50"
                     style={{
-                      background:
-                        "linear-gradient(145deg, #3c82f6, #60a5ff)",
+                      background: "linear-gradient(145deg, #3c82f6, #60a5ff)",
                       boxShadow:
                         "0 2px 12px rgba(60, 130, 246, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1)",
                     }}
@@ -699,7 +700,11 @@ function RamCleanerHero({
           animate={isCleaning ? { scale: [1, 1.03, 1] } : {}}
           transition={
             isCleaning
-              ? { repeat: Number.POSITIVE_INFINITY, duration: 2, ease: "easeInOut" }
+              ? {
+                  repeat: Number.POSITIVE_INFINITY,
+                  duration: 2,
+                  ease: "easeInOut",
+                }
               : {}
           }
           className="shrink-0"
@@ -943,9 +948,7 @@ function FpsSlider({
                 ? "var(--color-accent-primary)"
                 : "var(--color-bg-elevated)",
               color: isUncapped ? "#fff" : "var(--color-text-muted)",
-              boxShadow: isUncapped
-                ? "0 1px 6px rgba(60,130,246,0.3)"
-                : "none",
+              boxShadow: isUncapped ? "0 1px 6px rgba(60,130,246,0.3)" : "none",
             }}
           >
             MAX
@@ -1042,9 +1045,7 @@ function ResolutionRow({
           />
         </label>
       </div>
-      {error && (
-        <p className="mt-2 text-xs text-status-error">{error}</p>
-      )}
+      {error && <p className="mt-2 text-xs text-status-error">{error}</p>}
     </div>
   );
 }
@@ -1067,7 +1068,10 @@ function OptGroup({
   return (
     <section
       className="overflow-hidden rounded-xl border border-border-subtle bg-bg-card"
-      style={{ borderTopColor: allActive ? accent : undefined, borderTopWidth: allActive ? 2 : undefined }}
+      style={{
+        borderTopColor: allActive ? accent : undefined,
+        borderTopWidth: allActive ? 2 : undefined,
+      }}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2.5">
@@ -1098,6 +1102,7 @@ function OptRow({
   desc,
   impact,
   risk,
+  tooltip,
   enabled,
   onChange,
 }: {
@@ -1105,6 +1110,7 @@ function OptRow({
   desc: string;
   impact: string;
   risk?: string;
+  tooltip?: string;
   enabled: boolean;
   onChange: (v: boolean) => void;
 }) {
@@ -1125,8 +1131,13 @@ function OptRow({
 
       <div className="flex min-w-0 flex-col gap-0.5 pr-4">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[13px] font-medium text-text-primary">
+          <span className="flex items-center gap-1.5 text-[13px] font-medium text-text-primary">
             {title}
+            {tooltip && (
+              <Tooltip content={tooltip}>
+                <InfoIcon />
+              </Tooltip>
+            )}
           </span>
           <span
             className="rounded px-1.5 py-0.5 text-[10px] font-medium"

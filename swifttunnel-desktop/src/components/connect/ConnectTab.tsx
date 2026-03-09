@@ -3,13 +3,16 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
-import { countryFlag, getLatencyColor, formatBytes } from "../../lib/utils";
+import {
+  countryFlag,
+  getLatencyColor,
+  getLatencyLabel,
+  formatBytes,
+} from "../../lib/utils";
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import {
-  GAMES,
-  resolveConnectStatus,
-} from "./connectState";
+import { GAMES, resolveConnectStatus } from "./connectState";
+import { Tooltip, InfoIcon } from "../common/Tooltip";
 import type { ServerRegion } from "../../lib/types";
 import "./connect.css";
 
@@ -30,6 +33,7 @@ export function ConnectTab() {
   const disconnect = useVpnStore((s) => s.disconnect);
   const installDriver = useVpnStore((s) => s.installDriver);
   const ping = useVpnStore((s) => s.ping);
+  const connectedAt = useVpnStore((s) => s.connectedAt);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
   const fetchPing = useVpnStore((s) => s.fetchPing);
   const fetchVpnState = useVpnStore((s) => s.fetchState);
@@ -49,6 +53,20 @@ export function ConnectTab() {
   const isConnected = vpnState === "connected";
   const isIdle = vpnState === "disconnected" || vpnState === "error";
   const isTransitioning = !isConnected && !isIdle;
+
+  // Track previous state for success animation
+  const prevStateRef = useRef(vpnState);
+  const [showSuccess, setShowSuccess] = useState(false);
+
+  useEffect(() => {
+    if (prevStateRef.current !== "connected" && vpnState === "connected") {
+      setShowSuccess(true);
+      const timer = setTimeout(() => setShowSuccess(false), 1500);
+      prevStateRef.current = vpnState;
+      return () => clearTimeout(timer);
+    }
+    prevStateRef.current = vpnState;
+  }, [vpnState]);
 
   const selectedRegion = regions.find((r) => r.id === settings.selected_region);
   const selectedLatency = getLatency(settings.selected_region);
@@ -172,6 +190,49 @@ export function ConnectTab() {
     return connectStatus.text;
   }
 
+  // Button icon: checkmark during success animation, power icon otherwise
+  function renderButtonIcon() {
+    if (showSuccess) {
+      return (
+        <motion.svg
+          width="30"
+          height="30"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="white"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.15))" }}
+        >
+          <motion.path
+            d="M20 6 9 17l-5-5"
+            initial={{ pathLength: 0 }}
+            animate={{ pathLength: 1 }}
+            transition={{ duration: 0.4, ease: "easeOut" }}
+          />
+        </motion.svg>
+      );
+    }
+
+    return (
+      <svg
+        width="30"
+        height="30"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="white"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={{ filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.15))" }}
+      >
+        <path d="M12 2v10" />
+        <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+      </svg>
+    );
+  }
+
   return (
     <div className="connect-tab mx-auto flex w-full max-w-[640px] flex-col gap-5 pb-4">
       {/* ── Hero: Connect Core ── */}
@@ -181,9 +242,7 @@ export function ConnectTab() {
           className="pointer-events-none absolute inset-0"
           style={{
             background: `radial-gradient(ellipse at 50% 40%, ${
-              isConnected
-                ? "rgba(40,210,150,0.06)"
-                : "rgba(60,130,246,0.04)"
+              isConnected ? "rgba(40,210,150,0.06)" : "rgba(60,130,246,0.04)"
             }, transparent 70%)`,
           }}
         />
@@ -311,26 +370,16 @@ export function ConnectTab() {
                   ? "none"
                   : "0 0 30px rgba(60,130,246,0.12), inset 0 1px 0 rgba(255,255,255,0.08)",
               transition: "background 0.5s ease, box-shadow 0.5s ease",
+              animation: showSuccess
+                ? "connect-success-glow 0.8s ease-in-out"
+                : "none",
             }}
             aria-label={isConnected ? "Disconnect" : "Connect"}
           >
             {isTransitioning ? (
               <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
             ) : (
-              <svg
-                width="30"
-                height="30"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="white"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                style={{ filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.15))" }}
-              >
-                <path d="M12 2v10" />
-                <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
-              </svg>
+              renderButtonIcon()
             )}
           </motion.button>
         </div>
@@ -415,9 +464,7 @@ export function ConnectTab() {
                 <HudCell label="Server" value={connectedServerLabel} />
                 <HudCell
                   label="Ping"
-                  value={
-                    ping !== null ? `${ping}ms` : "\u2014"
-                  }
+                  value={ping !== null ? `${ping}ms` : "\u2014"}
                   mono
                 />
                 <HudCell
@@ -426,15 +473,8 @@ export function ConnectTab() {
                   accent={splitActive}
                 />
                 <HudCell label="Upload" value={formatBytes(bytesUp)} mono />
-                <HudCell
-                  label="Download"
-                  value={formatBytes(bytesDown)}
-                  mono
-                />
-                <HudCell
-                  label="Tunneled"
-                  value={`${tunneled.length} process${tunneled.length !== 1 ? "es" : ""}`}
-                />
+                <HudCell label="Download" value={formatBytes(bytesDown)} mono />
+                <SessionTimer connectedAt={connectedAt} />
               </div>
             </div>
 
@@ -523,169 +563,184 @@ export function ConnectTab() {
         </div>
 
         {regions.length === 0 ? (
-          <div className="rounded-[var(--radius-card)] border border-border-subtle bg-bg-card p-5">
-            <p className="text-sm text-text-secondary">
-              {serversLoading
-                ? "Loading regions\u2026"
+          <EmptyState
+            icon={
+              serversLoading
+                ? "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20"
+                : "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+            }
+            title={
+              serversLoading
+                ? "Loading regions..."
                 : serversError
-                  ? "Could not load regions."
-                  : "No regions available."}
-            </p>
-            {!serversLoading && (
-              <button
-                onClick={() => void refreshServers()}
-                className="mt-3 rounded-[var(--radius-button)] border border-border-default px-3 py-1 text-xs text-text-primary transition-colors hover:bg-bg-hover"
-              >
-                Retry
-              </button>
-            )}
-          </div>
+                  ? "Could not load regions"
+                  : "No regions available"
+            }
+            description={
+              serversLoading
+                ? "Fetching server list"
+                : serversError
+                  ? "Check your internet connection and try again"
+                  : "No server regions are currently available"
+            }
+            loading={serversLoading}
+            action={
+              !serversLoading
+                ? { label: "Retry", onClick: () => void refreshServers() }
+                : undefined
+            }
+          />
         ) : (
           <>
-          <div className="grid grid-cols-2 gap-2">
-            {/* Auto Route option */}
-            <motion.button
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.04, duration: 0.28 }}
-              onClick={selectAutoRoute}
-              disabled={isConnected}
-              className="col-span-2 relative rounded-[var(--radius-card)] border text-left transition-all disabled:opacity-50"
-              style={{
-                backgroundColor: settings.auto_routing_enabled
-                  ? "var(--color-accent-primary-soft-8)"
-                  : "var(--color-bg-card)",
-                borderColor: settings.auto_routing_enabled
-                  ? "var(--color-accent-primary)"
-                  : "var(--color-border-subtle)",
-                borderLeftWidth: settings.auto_routing_enabled ? 3 : 1,
-                padding: settings.auto_routing_enabled
-                  ? "12px 14px 12px 12px"
-                  : "12px 14px",
-              }}
-            >
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-2">
-                  <svg
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polyline points="16 3 21 3 21 8" />
-                    <line x1="4" y1="20" x2="21" y2="3" />
-                    <polyline points="21 16 21 21 16 21" />
-                    <line x1="15" y1="15" x2="21" y2="21" />
-                    <line x1="4" y1="4" x2="9" y2="9" />
-                  </svg>
-                  <span className="text-[13px] font-medium text-text-primary">
-                    Auto Route
-                  </span>
-                </span>
-                <span className="text-[11px] text-text-muted">
-                  Auto-switches to the best server for you
-                </span>
-              </div>
-            </motion.button>
-
-            {regions.map((r, i) => (
-              <RegionCard
-                key={r.id}
-                region={r}
-                selected={
-                  !settings.auto_routing_enabled &&
-                  settings.selected_region === r.id
-                }
-                lastUsed={settings.last_connected_region === r.id}
-                latency={getLatency(r.id)}
+            <div className="grid grid-cols-2 gap-2">
+              {/* Auto Route option */}
+              <motion.button
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.04, duration: 0.28 }}
+                onClick={selectAutoRoute}
                 disabled={isConnected}
-                index={i}
-                onSelect={() => selectRegion(r.id)}
-                forcedServer={settings.forced_servers[r.id]}
-                onForceServer={forceServer}
-              />
-            ))}
-          </div>
-
-          {/* Don't-tunnel panel (visible when auto routing is active) */}
-          {settings.auto_routing_enabled && (
-            <div className="mt-3 rounded-[var(--radius-card)] border border-border-subtle bg-bg-card p-4">
-              <div
-                className="text-[10px] font-medium uppercase text-text-muted"
-                style={{ letterSpacing: "0.08em" }}
+                className="col-span-2 relative rounded-[var(--radius-card)] border text-left transition-all disabled:opacity-50"
+                style={{
+                  backgroundColor: settings.auto_routing_enabled
+                    ? "var(--color-accent-primary-soft-8)"
+                    : "var(--color-bg-card)",
+                  borderColor: settings.auto_routing_enabled
+                    ? "var(--color-accent-primary)"
+                    : "var(--color-border-subtle)",
+                  borderLeftWidth: settings.auto_routing_enabled ? 3 : 1,
+                  padding: settings.auto_routing_enabled
+                    ? "12px 14px 12px 12px"
+                    : "12px 14px",
+                }}
               >
-                Direct Connect
-              </div>
-              <div className="mt-1 text-xs text-text-muted">
-                {"Don't tunnel for these regions during Auto Routing."}
-              </div>
-
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {regions.map((r) => {
-                  const active = settings.whitelisted_regions.includes(r.name);
-                  return (
-                    <button
-                      key={r.id}
-                      type="button"
-                      disabled={isConnected}
-                      onClick={() => {
-                        const next = active
-                          ? settings.whitelisted_regions.filter(
-                              (n) => n !== r.name,
-                            )
-                          : [...settings.whitelisted_regions, r.name];
-                        update({ whitelisted_regions: next });
-                        save();
-                      }}
-                      className="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60"
-                      style={{
-                        backgroundColor: active
-                          ? "var(--color-accent-primary-soft-15)"
-                          : "var(--color-bg-hover)",
-                        color: active
-                          ? "var(--color-accent-secondary)"
-                          : "var(--color-text-muted)",
-                      }}
-                      title={isConnected ? "Disconnect to edit" : undefined}
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-2">
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
                     >
-                      {active ? (
-                        <svg
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-                        </svg>
-                      ) : (
-                        <svg
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                        </svg>
-                      )}
-                      {r.name}
-                    </button>
-                  );
-                })}
-              </div>
+                      <polyline points="16 3 21 3 21 8" />
+                      <line x1="4" y1="20" x2="21" y2="3" />
+                      <polyline points="21 16 21 21 16 21" />
+                      <line x1="15" y1="15" x2="21" y2="21" />
+                      <line x1="4" y1="4" x2="9" y2="9" />
+                    </svg>
+                    <span className="text-[13px] font-medium text-text-primary">
+                      Auto Route
+                    </span>
+                    <Tooltip content="Automatically connects to the server closest to your game server for the lowest latency.">
+                      <InfoIcon />
+                    </Tooltip>
+                  </span>
+                  <span className="text-[11px] text-text-muted">
+                    Auto-switches to the best server for you
+                  </span>
+                </div>
+              </motion.button>
+
+              {regions.map((r, i) => (
+                <RegionCard
+                  key={r.id}
+                  region={r}
+                  selected={
+                    !settings.auto_routing_enabled &&
+                    settings.selected_region === r.id
+                  }
+                  lastUsed={settings.last_connected_region === r.id}
+                  latency={getLatency(r.id)}
+                  disabled={isConnected}
+                  index={i}
+                  onSelect={() => selectRegion(r.id)}
+                  forcedServer={settings.forced_servers[r.id]}
+                  onForceServer={forceServer}
+                />
+              ))}
             </div>
-          )}
+
+            {/* Don't-tunnel panel (visible when auto routing is active) */}
+            {settings.auto_routing_enabled && (
+              <div className="mt-3 rounded-[var(--radius-card)] border border-border-subtle bg-bg-card p-4">
+                <div
+                  className="text-[10px] font-medium uppercase text-text-muted"
+                  style={{ letterSpacing: "0.08em" }}
+                >
+                  Direct Connect
+                </div>
+                <div className="mt-1 text-xs text-text-muted">
+                  {"Don't tunnel for these regions during Auto Routing."}
+                </div>
+
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {regions.map((r) => {
+                    const active = settings.whitelisted_regions.includes(
+                      r.name,
+                    );
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        disabled={isConnected}
+                        onClick={() => {
+                          const next = active
+                            ? settings.whitelisted_regions.filter(
+                                (n) => n !== r.name,
+                              )
+                            : [...settings.whitelisted_regions, r.name];
+                          update({ whitelisted_regions: next });
+                          save();
+                        }}
+                        className="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                        style={{
+                          backgroundColor: active
+                            ? "var(--color-accent-primary-soft-15)"
+                            : "var(--color-bg-hover)",
+                          color: active
+                            ? "var(--color-accent-secondary)"
+                            : "var(--color-text-muted)",
+                        }}
+                        title={isConnected ? "Disconnect to edit" : undefined}
+                      >
+                        {active ? (
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+                          </svg>
+                        ) : (
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                          </svg>
+                        )}
+                        {r.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </>
         )}
       </section>
@@ -731,6 +786,38 @@ function HudCell({
   );
 }
 
+function useElapsedTime(startAt: number | null): number {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    if (startAt === null) {
+      setElapsed(0);
+      return;
+    }
+    setElapsed(Math.floor((Date.now() - startAt) / 1000));
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [startAt]);
+
+  return elapsed;
+}
+
+function formatElapsed(totalSecs: number): string {
+  const hours = Math.floor(totalSecs / 3600);
+  const mins = Math.floor((totalSecs % 3600) / 60);
+  const secs = totalSecs % 60;
+  return hours > 0
+    ? `${hours}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    : `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+function SessionTimer({ connectedAt }: { connectedAt: number | null }) {
+  const elapsed = useElapsedTime(connectedAt);
+  return <HudCell label="Session" value={formatElapsed(elapsed)} mono />;
+}
+
 function RegionCard({
   region,
   selected,
@@ -754,8 +841,8 @@ function RegionCard({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const barWidth =
-    latency !== null ? Math.max(8, 100 - latency / 2.5) : 0;
+  const barWidth = latency !== null ? Math.max(8, 100 - latency / 2.5) : 0;
+  const qualityLabel = getLatencyLabel(latency);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -797,12 +884,23 @@ function RegionCard({
         </span>
         <span className="flex items-center gap-1.5">
           {latency !== null && (
-            <span
-              className="connect-data text-xs font-medium"
-              style={{ color: getLatencyColor(latency) }}
-            >
-              {latency}ms
-            </span>
+            <>
+              <span
+                className="rounded-full px-1.5 py-0.5 text-[9px] font-semibold"
+                style={{
+                  backgroundColor: `${qualityLabel.color}15`,
+                  color: qualityLabel.color,
+                }}
+              >
+                {qualityLabel.text}
+              </span>
+              <span
+                className="connect-data text-xs font-medium"
+                style={{ color: getLatencyColor(latency) }}
+              >
+                {latency}ms
+              </span>
+            </>
           )}
           {/* Gear icon for server forcing */}
           {region.servers.length > 1 && (
@@ -961,14 +1059,18 @@ function RegionCard({
         <span className="text-[11px] text-text-muted">
           {forcedServer ? (
             <>
-              <span className="connect-data" style={{ color: "var(--color-accent-secondary)" }}>
+              <span
+                className="connect-data"
+                style={{ color: "var(--color-accent-secondary)" }}
+              >
                 {forcedServer}
-              </span>
-              {" "}· {region.servers.length} available
+              </span>{" "}
+              · {region.servers.length} available
             </>
           ) : (
             <>
-              {region.servers.length} server{region.servers.length !== 1 ? "s" : ""}
+              {region.servers.length} server
+              {region.servers.length !== 1 ? "s" : ""}
             </>
           )}
         </span>
@@ -998,6 +1100,54 @@ function RegionCard({
         />
       )}
     </motion.button>
+  );
+}
+
+function EmptyState({
+  icon,
+  title,
+  description,
+  loading,
+  action,
+}: {
+  icon: string;
+  title: string;
+  description: string;
+  loading?: boolean;
+  action?: { label: string; onClick: () => void };
+}) {
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-6 py-8">
+      <div
+        className={`flex h-10 w-10 items-center justify-center rounded-full ${loading ? "animate-pulse" : ""}`}
+        style={{ backgroundColor: "var(--color-bg-elevated)" }}
+      >
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="var(--color-text-muted)"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d={icon} />
+        </svg>
+      </div>
+      <div className="text-center">
+        <div className="text-sm font-medium text-text-primary">{title}</div>
+        <div className="mt-1 text-xs text-text-muted">{description}</div>
+      </div>
+      {action && (
+        <button
+          onClick={action.onClick}
+          className="rounded-[var(--radius-button)] border border-border-default px-3 py-1 text-xs text-text-primary transition-colors hover:bg-bg-hover"
+        >
+          {action.label}
+        </button>
+      )}
+    </div>
   );
 }
 

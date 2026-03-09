@@ -2,11 +2,31 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import type { TabId } from "../../lib/types";
 
-const tabs: { id: TabId; label: string; icon: string }[] = [
-  { id: "connect", label: "Connect", icon: "M5 12.55a11 11 0 0 1 14.08 0 M1.42 9a16 16 0 0 1 21.16 0 M8.53 16.11a6 6 0 0 1 6.95 0 M12 20h.01" },
-  { id: "boost", label: "Boost", icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z" },
-  { id: "network", label: "Network", icon: "M22 12h-4l-3 9L9 3l-3 9H2" },
-  { id: "settings", label: "Settings", icon: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" },
+const tabs: { id: TabId; label: string; shortcut: string; icon: string }[] = [
+  {
+    id: "connect",
+    label: "CONNECT",
+    shortcut: "Ctrl+1",
+    icon: "M5 12.55a11 11 0 0 1 14.08 0 M1.42 9a16 16 0 0 1 21.16 0 M8.53 16.11a6 6 0 0 1 6.95 0 M12 20h.01",
+  },
+  {
+    id: "boost",
+    label: "BOOST",
+    shortcut: "Ctrl+2",
+    icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
+  },
+  {
+    id: "network",
+    label: "NETWORK",
+    shortcut: "Ctrl+3",
+    icon: "M22 12h-4l-3 9L9 3l-3 9H2",
+  },
+  {
+    id: "settings",
+    label: "SETTINGS",
+    shortcut: "Ctrl+4",
+    icon: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z",
+  },
 ];
 
 function SidebarIcon({ path, isActive }: { path: string; isActive: boolean }) {
@@ -16,7 +36,9 @@ function SidebarIcon({ path, isActive }: { path: string; isActive: boolean }) {
       height="20"
       viewBox="0 0 24 24"
       fill="none"
-      stroke={isActive ? "var(--color-accent-primary)" : "var(--color-text-muted)"}
+      stroke={
+        isActive ? "var(--color-accent-primary)" : "var(--color-text-muted)"
+      }
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
@@ -57,31 +79,40 @@ export function Sidebar() {
             <button
               key={tab.id}
               onClick={() => setTab(tab.id)}
-              className="group relative flex h-10 w-10 items-center justify-center rounded-[var(--radius-button)] transition-colors duration-150"
+              className={`group relative flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-[var(--radius-button)] transition-colors duration-150 ${
+                isActive ? "" : "hover:bg-bg-hover"
+              }`}
               style={{
                 backgroundColor: isActive
                   ? "var(--color-accent-primary-soft-12)"
-                  : "transparent",
+                  : undefined,
               }}
-              onMouseEnter={(e) => {
-                if (!isActive)
-                  e.currentTarget.style.backgroundColor =
-                    "var(--color-bg-hover)";
-              }}
-              onMouseLeave={(e) => {
-                if (!isActive)
-                  e.currentTarget.style.backgroundColor = "transparent";
-              }}
-              title={tab.label}
+              title={`${tab.label} (${tab.shortcut})`}
               aria-label={tab.label}
               aria-current={isActive ? "page" : undefined}
             >
               <SidebarIcon path={tab.icon} isActive={isActive} />
+              <span
+                className="text-[9px] font-semibold leading-none"
+                style={{
+                  color: isActive
+                    ? "var(--color-accent-primary)"
+                    : "var(--color-text-dimmed)",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                {tab.label}
+              </span>
               {isActive && (
                 <div
                   className="absolute left-0 h-5 w-0.5 rounded-r"
                   style={{ backgroundColor: "var(--color-accent-primary)" }}
                 />
+              )}
+              {!isActive && (
+                <div className="pointer-events-none absolute top-1/2 left-full z-50 ml-1.5 -translate-y-1/2 rounded border border-border-subtle bg-bg-elevated px-1.5 py-0.5 text-[9px] font-medium whitespace-nowrap text-text-muted opacity-0 transition-opacity group-hover:opacity-100">
+                  {tab.shortcut}
+                </div>
               )}
             </button>
           );

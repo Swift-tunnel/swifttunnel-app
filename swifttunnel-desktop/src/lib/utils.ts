@@ -6,13 +6,26 @@ export function countryFlag(code: string): string {
     .join("");
 }
 
+const LATENCY_TIERS = [
+  { max: 30, text: "Excellent", color: "var(--color-latency-excellent)" },
+  { max: 60, text: "Good", color: "var(--color-latency-good)" },
+  { max: 100, text: "Fair", color: "var(--color-latency-fair)" },
+  { max: 150, text: "Poor", color: "var(--color-latency-poor)" },
+] as const;
+const LATENCY_BAD = { text: "Bad", color: "var(--color-latency-bad)" };
+const LATENCY_NULL = { text: "", color: "var(--color-text-muted)" };
+
 export function getLatencyColor(ms: number | null): string {
-  if (ms === null) return "var(--color-text-muted)";
-  if (ms < 30) return "var(--color-latency-excellent)";
-  if (ms < 60) return "var(--color-latency-good)";
-  if (ms < 100) return "var(--color-latency-fair)";
-  if (ms < 150) return "var(--color-latency-poor)";
-  return "var(--color-latency-bad)";
+  if (ms === null) return LATENCY_NULL.color;
+  return (LATENCY_TIERS.find((t) => ms < t.max) ?? LATENCY_BAD).color;
+}
+
+export function getLatencyLabel(ms: number | null): {
+  text: string;
+  color: string;
+} {
+  if (ms === null) return LATENCY_NULL;
+  return LATENCY_TIERS.find((t) => ms < t.max) ?? LATENCY_BAD;
 }
 
 export function formatBytes(bytes: number): string {

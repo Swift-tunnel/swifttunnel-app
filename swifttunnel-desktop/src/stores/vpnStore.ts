@@ -65,6 +65,9 @@ interface VpnStore {
   // Ping (real-time ICMP to relay)
   ping: number | null;
 
+  // Session timer
+  connectedAt: number | null;
+
   // Diagnostics
   diagnostics: DiagnosticsResponse | null;
   bindingPreflight: BindingPreflightInfo | null;
@@ -100,6 +103,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   packetsTunneled: 0,
   packetsBypassed: 0,
   ping: null,
+  connectedAt: null,
   diagnostics: null,
   bindingPreflight: null,
   pendingConnectIntent: null,
@@ -212,6 +216,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       await get().fetchState();
       await get().fetchDiagnostics();
       if (get().state === "connected") {
+        set({ connectedAt: Date.now() });
         await notify("SwiftTunnel", `Connected to ${get().region ?? region}`);
       }
       set({ driverSetupState: "idle", driverSetupError: null });
@@ -278,6 +283,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         packetsTunneled: 0,
         packetsBypassed: 0,
         ping: null,
+        connectedAt: null,
         diagnostics: null,
         bindingPreflight: null,
         pendingConnectIntent: null,

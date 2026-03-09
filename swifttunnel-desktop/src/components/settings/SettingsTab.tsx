@@ -3,13 +3,19 @@ import { useAuthStore } from "../../stores/authStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
 import { useVpnStore } from "../../stores/vpnStore";
+import { useToastStore } from "../../stores/toastStore";
 import { Toggle } from "../common/Toggle";
+import { Tooltip, InfoIcon } from "../common/Tooltip";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
   systemOpenUrl,
   vpnListNetworkAdapters,
 } from "../../lib/commands";
-import type { AppSettings, NetworkAdapterInfo, UpdateChannel } from "../../lib/types";
+import type {
+  AppSettings,
+  NetworkAdapterInfo,
+  UpdateChannel,
+} from "../../lib/types";
 
 declare const __APP_VERSION__: string;
 
@@ -35,13 +41,15 @@ export function SettingsTab() {
   const [isGeneratingDiagnostics, setIsGeneratingDiagnostics] = useState(false);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
-  const [networkAdapters, setNetworkAdapters] = useState<NetworkAdapterInfo[] | null>(
-    null,
-  );
+  const [networkAdapters, setNetworkAdapters] = useState<
+    NetworkAdapterInfo[] | null
+  >(null);
   const [networkAdaptersLoading, setNetworkAdaptersLoading] = useState(false);
-  const [networkAdaptersError, setNetworkAdaptersError] = useState<string | null>(
-    null,
-  );
+  const [networkAdaptersError, setNetworkAdaptersError] = useState<
+    string | null
+  >(null);
+  const addToast = useToastStore((s) => s.addToast);
+
   const adapterBindingMode = settings.adapter_binding_mode;
   const manualAdapterBinding = adapterBindingMode === "manual";
 
@@ -63,6 +71,7 @@ export function SettingsTab() {
   function set(partial: Partial<AppSettings>) {
     update(partial);
     save();
+    addToast({ type: "success", message: "Settings saved" });
   }
 
   useEffect(() => {
@@ -108,6 +117,7 @@ export function SettingsTab() {
     try {
       const response = await settingsGenerateNetworkDiagnosticsBundle();
       setDiagnosticsPath(response.file_path);
+      addToast({ type: "success", message: "Diagnostics bundle generated" });
 
       try {
         await systemOpenUrl(response.folder_path);
@@ -173,7 +183,11 @@ export function SettingsTab() {
 
       {/* ── General ── */}
       <Section title="General">
-        <Row label="Update Channel" desc="Stable for vetted releases, Live for pre-release">
+        <Row
+          label="Update Channel"
+          desc="Stable for vetted releases, Live for pre-release"
+          tooltip="Stable releases are tested and vetted. Live channel gets pre-release builds that may have bugs but include the newest features."
+        >
           <div className="flex gap-1">
             {(["Stable", "Live"] as UpdateChannel[]).map((ch) => (
               <button
@@ -196,7 +210,10 @@ export function SettingsTab() {
             ))}
           </div>
         </Row>
-        <Row label="Auto Update" desc="Check and install updates on app startup">
+        <Row
+          label="Auto Update"
+          desc="Check and install updates on app startup"
+        >
           <Toggle
             enabled={settings.update_settings.auto_check}
             onChange={(v) =>
@@ -209,7 +226,10 @@ export function SettingsTab() {
             }
           />
         </Row>
-        <Row label="Run on Startup" desc="Launch SwiftTunnel when you sign into Windows">
+        <Row
+          label="Run on Startup"
+          desc="Launch SwiftTunnel when you sign into Windows"
+        >
           <Toggle
             enabled={settings.run_on_startup}
             onChange={(v) => set({ run_on_startup: v })}
@@ -243,6 +263,7 @@ export function SettingsTab() {
         <Row
           label="Adapter Selection"
           desc="Smart Auto follows active route. Manual locks split tunnel to a specific adapter."
+          tooltip="Smart Auto detects your active network adapter from the OS routing table and rebinds automatically when you switch networks. Manual lets you pin a specific adapter."
         >
           <div className="flex gap-1">
             <button
@@ -292,8 +313,8 @@ export function SettingsTab() {
             onChange={(e) =>
               set({
                 preferred_physical_adapter_guid: e.target.value
-                    ? e.target.value
-                    : null,
+                  ? e.target.value
+                  : null,
               })
             }
             disabled={networkAdaptersLoading || !manualAdapterBinding}
@@ -309,7 +330,9 @@ export function SettingsTab() {
             }
           >
             <option value="">
-              {manualAdapterBinding ? "Auto fallback (Recommended)" : "Smart Auto"}
+              {manualAdapterBinding
+                ? "Auto fallback (Recommended)"
+                : "Smart Auto"}
             </option>
             {(networkAdapters || [])
               .slice()
@@ -339,15 +362,25 @@ export function SettingsTab() {
                 const ap = kindPriority(a.kind);
                 const bp = kindPriority(b.kind);
                 if (ap !== bp) return ap - bp;
-                const an = (a.friendly_name || a.description || a.guid).toLowerCase();
-                const bn = (b.friendly_name || b.description || b.guid).toLowerCase();
+                const an = (
+                  a.friendly_name ||
+                  a.description ||
+                  a.guid
+                ).toLowerCase();
+                const bn = (
+                  b.friendly_name ||
+                  b.description ||
+                  b.guid
+                ).toLowerCase();
                 return an.localeCompare(bn);
               })
               .map((adapter) => {
                 const label =
                   adapter.friendly_name || adapter.description || adapter.guid;
                 const tags = [
-                  adapter.kind && adapter.kind !== "other" ? adapter.kind : null,
+                  adapter.kind && adapter.kind !== "other"
+                    ? adapter.kind
+                    : null,
                   adapter.is_up ? "up" : "down",
                   adapter.is_default_route ? "default" : null,
                 ]
@@ -481,7 +514,6 @@ export function SettingsTab() {
             </span>
           </div>
         </details>
-
       </Section>
 
       {/* ── Updates ── */}
@@ -505,7 +537,9 @@ export function SettingsTab() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => void checkForUpdates(true)}
-              disabled={updaterStatus === "checking" || updaterStatus === "installing"}
+              disabled={
+                updaterStatus === "checking" || updaterStatus === "installing"
+              }
               className="rounded border border-border-subtle px-2.5 py-1 text-xs text-text-primary disabled:opacity-50"
             >
               Check Now
@@ -567,7 +601,10 @@ export function SettingsTab() {
               </div>
             </Row>
           )}
-          <Row label="Custom Relay Server" desc="Override relay endpoint (host:port)">
+          <Row
+            label="Custom Relay Server"
+            desc="Override relay endpoint (host:port)"
+          >
             <input
               type="text"
               value={settings.custom_relay_server}
@@ -644,13 +681,7 @@ export function SettingsTab() {
   );
 }
 
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section>
       <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-text-muted">
@@ -666,16 +697,25 @@ function Section({
 function Row({
   label,
   desc,
+  tooltip,
   children,
 }: {
   label: string;
   desc: string;
+  tooltip?: string;
   children: ReactNode;
 }) {
   return (
     <div className="flex items-center justify-between px-4 py-3">
       <div className="flex flex-col gap-0.5">
-        <span className="text-sm font-medium text-text-primary">{label}</span>
+        <span className="flex items-center gap-1.5 text-sm font-medium text-text-primary">
+          {label}
+          {tooltip && (
+            <Tooltip content={tooltip}>
+              <InfoIcon />
+            </Tooltip>
+          )}
+        </span>
         <span className="text-xs text-text-muted">{desc}</span>
       </div>
       {children}

@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import {
   availableMonitors,
@@ -22,12 +23,13 @@ import { boostUpdateConfig } from "./lib/commands";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { runAppBootstrap } from "./lib/appBootstrap";
 import { reportError } from "./lib/errors";
+import { ToastContainer } from "./components/common/Toast";
 import {
   ensureWindowStateVisible,
   isPersistableWindowSize,
   normalizeWindowState,
 } from "./lib/windowState";
-import type { BindingCandidateInfo } from "./lib/types";
+import type { BindingCandidateInfo, TabId } from "./lib/types";
 
 function BindingCandidateCard({
   candidate,
@@ -38,7 +40,8 @@ function BindingCandidateCard({
   recommended: boolean;
   onChoose: (guid: string) => void;
 }) {
-  const label = candidate.friendly_name || candidate.description || candidate.guid;
+  const label =
+    candidate.friendly_name || candidate.description || candidate.guid;
   const tags = [
     candidate.kind,
     candidate.is_up ? "up" : "down",
@@ -56,7 +59,9 @@ function BindingCandidateCard({
     >
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-text-primary">{label}</div>
+          <div className="truncate text-sm font-medium text-text-primary">
+            {label}
+          </div>
           <div className="mt-1 text-xs text-text-muted">{tags}</div>
           <div className="mt-1 text-[11px] text-text-dimmed">
             {candidate.stage.replace(/_/g, " ")} · {candidate.reason}
@@ -68,10 +73,8 @@ function BindingCandidateCard({
   );
 }
 
-function TabContent() {
-  const activeTab = useSettingsStore((s) => s.activeTab);
-
-  switch (activeTab) {
+function tabComponent(tab: TabId) {
+  switch (tab) {
     case "connect":
       return <ConnectTab />;
     case "boost":
@@ -85,19 +88,48 @@ function TabContent() {
   }
 }
 
+function TabContent() {
+  const activeTab = useSettingsStore((s) => s.activeTab);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo(0, 0);
+  }, [activeTab]);
+
+  return (
+    <div
+      ref={scrollRef}
+      className="flex-1 overflow-y-auto p-[var(--spacing-content)]"
+    >
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={activeTab}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2, ease: "easeOut" }}
+        >
+          {tabComponent(activeTab)}
+        </motion.div>
+      </AnimatePresence>
+    </div>
+  );
+}
+
 function AppShell() {
   const bindingPreflight = useVpnStore((s) => s.bindingPreflight);
-  const resumeConnectWithAdapter = useVpnStore((s) => s.resumeConnectWithAdapter);
+  const resumeConnectWithAdapter = useVpnStore(
+    (s) => s.resumeConnectWithAdapter,
+  );
   const dismissBindingChooser = useVpnStore((s) => s.dismissBindingChooser);
 
   return (
     <>
       <div className="flex h-screen w-screen overflow-hidden">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto p-[var(--spacing-content)]">
-          <TabContent />
-        </main>
+        <TabContent />
       </div>
+      <ToastContainer />
       {bindingPreflight && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(6,10,18,0.76)] p-4 backdrop-blur-sm">
           <div className="w-full max-w-xl rounded-2xl border border-border-subtle bg-bg-base p-5 shadow-2xl">
@@ -107,7 +139,8 @@ function AppShell() {
                   Choose Network Adapter
                 </div>
                 <div className="mt-1 text-sm text-text-muted">
-                  SwiftTunnel needs a one-time split tunnel choice for this network.
+                  SwiftTunnel needs a one-time split tunnel choice for this
+                  network.
                 </div>
               </div>
               <button
@@ -134,9 +167,14 @@ function AppShell() {
             <div className="mt-4 space-y-3">
               {bindingPreflight.candidates.map((candidate) => (
                 <BindingCandidateCard
-                  key={candidate.guid || `${candidate.friendly_name}-${candidate.if_index ?? "na"}`}
+                  key={
+                    candidate.guid ||
+                    `${candidate.friendly_name}-${candidate.if_index ?? "na"}`
+                  }
                   candidate={candidate}
-                  recommended={candidate.guid === bindingPreflight.recommended_guid}
+                  recommended={
+                    candidate.guid === bindingPreflight.recommended_guid
+                  }
                   onChoose={(guid) => void resumeConnectWithAdapter(guid)}
                 />
               ))}

@@ -1,7 +1,26 @@
 import { useEffect, useRef, useState } from "react";
+import { motion } from "framer-motion";
 import { useAuthStore } from "../../stores/authStore";
 
 const OAUTH_TIMEOUT_MS = 120_000;
+
+const FEATURES = [
+  {
+    icon: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
+    title: "Split Tunnel VPN",
+    desc: "Only game traffic is routed",
+  },
+  {
+    icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
+    title: "PC Optimization",
+    desc: "FPS unlock, RAM cleaner, QoS",
+  },
+  {
+    icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20",
+    title: "28 Servers, 12 Regions",
+    desc: "Low latency worldwide",
+  },
+];
 
 export function LoginScreen() {
   const { state, error, startOAuth, pollOAuth, cancelOAuth } = useAuthStore();
@@ -56,7 +75,13 @@ export function LoginScreen() {
   }, [cancelOAuth, isAwaiting, pollOAuth]);
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-bg-base">
+    <div
+      className="flex h-screen w-screen items-center justify-center bg-bg-base"
+      style={{
+        background:
+          "radial-gradient(ellipse at 50% 30%, rgba(60,130,246,0.06), var(--color-bg-base) 70%)",
+      }}
+    >
       <div className="flex w-full max-w-sm flex-col items-center gap-8 px-8">
         {/* Brand */}
         <div className="flex flex-col items-center gap-3">
@@ -104,7 +129,8 @@ export function LoginScreen() {
                 Complete sign-in in your browser to continue
               </p>
               <p className="text-xs text-text-dimmed">
-                Times out in {Math.max(0, Math.ceil((OAUTH_TIMEOUT_MS / 1000) - elapsedSecs))}s
+                Times out in{" "}
+                {Math.max(0, Math.ceil(OAUTH_TIMEOUT_MS / 1000 - elapsedSecs))}s
               </p>
               <button
                 onClick={() => void cancelOAuth()}
@@ -147,9 +173,49 @@ export function LoginScreen() {
           )}
         </div>
 
-        <p className="text-xs text-text-dimmed">
-          v{__APP_VERSION__}
-        </p>
+        {/* Feature highlights */}
+        <div className="flex w-full flex-col gap-2.5">
+          {FEATURES.map((feature, i) => (
+            <motion.div
+              key={feature.title}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.15 + i * 0.1, duration: 0.35 }}
+              className="flex items-center gap-3 rounded-[var(--radius-card)] border border-border-subtle px-4 py-3"
+              style={{ backgroundColor: "var(--color-bg-card)" }}
+            >
+              <div
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+                style={{
+                  backgroundColor: "var(--color-accent-primary-soft-10)",
+                }}
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="var(--color-accent-primary)"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d={feature.icon} />
+                </svg>
+              </div>
+              <div>
+                <div className="text-xs font-medium text-text-primary">
+                  {feature.title}
+                </div>
+                <div className="text-[11px] text-text-muted">
+                  {feature.desc}
+                </div>
+              </div>
+            </motion.div>
+          ))}
+        </div>
+
+        <p className="text-xs text-text-dimmed">v{__APP_VERSION__}</p>
       </div>
     </div>
   );

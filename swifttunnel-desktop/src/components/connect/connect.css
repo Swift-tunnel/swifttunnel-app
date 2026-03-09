@@ -33,3 +33,9 @@
   0%, 100% { opacity: 0.12; }
   50% { opacity: 0.4; }
 }
+
+@keyframes connect-success-glow {
+  0% { box-shadow: 0 0 35px rgba(40,210,150,0.18), inset 0 1px 0 rgba(255,255,255,0.1); }
+  50% { box-shadow: 0 0 50px rgba(40,210,150,0.35), inset 0 1px 0 rgba(255,255,255,0.15); }
+  100% { box-shadow: 0 0 35px rgba(40,210,150,0.18), inset 0 1px 0 rgba(255,255,255,0.1); }
+}
