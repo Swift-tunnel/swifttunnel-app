@@ -26,6 +26,46 @@ import {
   isPersistableWindowSize,
   normalizeWindowState,
 } from "./lib/windowState";
+import type { BindingCandidateInfo } from "./lib/types";
+
+function BindingCandidateCard({
+  candidate,
+  recommended,
+  onChoose,
+}: {
+  candidate: BindingCandidateInfo;
+  recommended: boolean;
+  onChoose: (guid: string) => void;
+}) {
+  const label = candidate.friendly_name || candidate.description || candidate.guid;
+  const tags = [
+    candidate.kind,
+    candidate.is_up ? "up" : "down",
+    candidate.is_default_route ? "default" : null,
+    recommended ? "recommended" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <button
+      type="button"
+      onClick={() => onChoose(candidate.guid)}
+      className="w-full rounded-xl border border-border-subtle bg-bg-card px-4 py-3 text-left transition-colors hover:bg-bg-hover"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-text-primary">{label}</div>
+          <div className="mt-1 text-xs text-text-muted">{tags}</div>
+          <div className="mt-1 text-[11px] text-text-dimmed">
+            {candidate.stage.replace(/_/g, " ")} · {candidate.reason}
+          </div>
+        </div>
+        <span className="shrink-0 text-xs text-accent-secondary">Use</span>
+      </div>
+    </button>
+  );
+}
 
 function TabContent() {
   const activeTab = useSettingsStore((s) => s.activeTab);
@@ -45,13 +85,65 @@ function TabContent() {
 }
 
 function AppShell() {
+  const bindingPreflight = useVpnStore((s) => s.bindingPreflight);
+  const resumeConnectWithAdapter = useVpnStore((s) => s.resumeConnectWithAdapter);
+  const dismissBindingChooser = useVpnStore((s) => s.dismissBindingChooser);
+
   return (
-    <div className="flex h-screen w-screen overflow-hidden">
-      <Sidebar />
-      <main className="flex-1 overflow-y-auto p-[var(--spacing-content)]">
-        <TabContent />
-      </main>
-    </div>
+    <>
+      <div className="flex h-screen w-screen overflow-hidden">
+        <Sidebar />
+        <main className="flex-1 overflow-y-auto p-[var(--spacing-content)]">
+          <TabContent />
+        </main>
+      </div>
+      {bindingPreflight && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(6,10,18,0.76)] p-4 backdrop-blur-sm">
+          <div className="w-full max-w-xl rounded-2xl border border-border-subtle bg-bg-base p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-lg font-semibold text-text-primary">
+                  Choose Network Adapter
+                </div>
+                <div className="mt-1 text-sm text-text-muted">
+                  SwiftTunnel needs a one-time split tunnel choice for this network.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={dismissBindingChooser}
+                className="text-sm text-text-muted transition-opacity hover:opacity-80"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-border-subtle bg-bg-card px-4 py-3 text-sm text-text-secondary">
+              <div>{bindingPreflight.reason}</div>
+              <div className="mt-2 text-xs text-text-dimmed">
+                Route source: {bindingPreflight.route_resolution_source}
+                {bindingPreflight.route_resolution_target_ip
+                  ? ` (${bindingPreflight.route_resolution_target_ip})`
+                  : ""}
+                {" · "}
+                ifIndex: {bindingPreflight.resolved_if_index ?? "n/a"}
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {bindingPreflight.candidates.map((candidate) => (
+                <BindingCandidateCard
+                  key={candidate.guid || `${candidate.friendly_name}-${candidate.if_index ?? "na"}`}
+                  candidate={candidate}
+                  recommended={candidate.guid === bindingPreflight.recommended_guid}
+                  onChoose={(guid) => void resumeConnectWithAdapter(guid)}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

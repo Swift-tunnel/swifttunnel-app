@@ -6,6 +6,9 @@ use tauri::{AppHandle, Emitter, State};
 use crate::events::{SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent};
 use crate::state::AppState;
 use swifttunnel_core::settings::AdapterBindingMode;
+use swifttunnel_core::vpn::{
+    AdapterBindingPreference, BindingPreferenceSource, BindingPreflightInfo, preflight_binding,
+};
 
 #[derive(Serialize)]
 pub struct VpnStateResponse {
@@ -121,6 +124,59 @@ fn parse_game_presets(game_presets: &[String]) -> HashSet<swifttunnel_core::vpn:
         .collect()
 }
 
+fn current_binding_preference(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+) -> Result<Option<AdapterBindingPreference>, String> {
+    match settings.adapter_binding_mode {
+        AdapterBindingMode::Manual => {
+            Ok(settings
+                .preferred_physical_adapter_guid
+                .clone()
+                .map(|guid| AdapterBindingPreference {
+                    guid,
+                    source: BindingPreferenceSource::Manual,
+                    network_signature: None,
+                }))
+        }
+        AdapterBindingMode::SmartAuto => {
+            let base = preflight_binding(None).map_err(|e| e.to_string())?;
+            let Some(guid) = settings
+                .network_binding_overrides
+                .get(&base.network_signature)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+
+            Ok(Some(AdapterBindingPreference {
+                guid,
+                source: BindingPreferenceSource::RememberedAuto,
+                network_signature: Some(base.network_signature),
+            }))
+        }
+    }
+}
+
+fn build_binding_preflight(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+) -> Result<BindingPreflightInfo, String> {
+    let binding_preference = current_binding_preference(settings)?;
+    let preflight = preflight_binding(binding_preference.clone()).map_err(|e| e.to_string())?;
+
+    if let Some(preference) = binding_preference {
+        if preference.source == BindingPreferenceSource::RememberedAuto
+            && !preflight.cached_override_used
+            && preflight.recommended_guid.as_deref() != Some(preference.guid.as_str())
+        {
+            settings
+                .network_binding_overrides
+                .remove(&preference.network_signature.unwrap_or_default());
+        }
+    }
+
+    Ok(preflight)
+}
+
 fn apply_connected_session_settings(
     settings: &mut swifttunnel_core::settings::AppSettings,
     region: &str,
@@ -172,6 +228,26 @@ pub async fn vpn_get_state(state: State<'_, AppState>) -> Result<VpnStateRespons
 }
 
 #[tauri::command]
+pub fn vpn_preflight_binding(
+    state: State<'_, AppState>,
+    _region: String,
+    _game_presets: Vec<String>,
+) -> Result<BindingPreflightInfo, String> {
+    let mut settings = state.settings.lock();
+    let previous_overrides = settings.network_binding_overrides.clone();
+    let preflight = build_binding_preflight(&mut settings)?;
+    let settings_snapshot = settings.clone();
+    let overrides_changed = previous_overrides != settings.network_binding_overrides;
+    drop(settings);
+
+    if overrides_changed {
+        swifttunnel_core::settings::save_settings(&settings_snapshot)?;
+    }
+
+    Ok(preflight)
+}
+
+#[tauri::command]
 pub async fn vpn_connect(
     state: State<'_, AppState>,
     app: AppHandle,
@@ -190,26 +266,36 @@ pub async fn vpn_connect(
         relay_qos_enabled,
         whitelisted_regions,
         forced_servers,
-        preferred_physical_adapter_guid,
+        binding_preference,
         game_process_performance,
     ) = {
-        let settings = state.settings.lock();
-        let preferred_physical_adapter_guid = match settings.adapter_binding_mode {
-            AdapterBindingMode::Manual => settings.preferred_physical_adapter_guid.clone(),
-            AdapterBindingMode::SmartAuto => None,
-        };
+        let mut settings = state.settings.lock();
+        let previous_overrides = settings.network_binding_overrides.clone();
+        let preflight = build_binding_preflight(&mut settings)?;
+        if preflight.status != "ok" {
+            return Err(preflight.reason);
+        }
+        let binding_preference = current_binding_preference(&mut settings)?;
+        let settings_snapshot = settings.clone();
+        let overrides_changed = previous_overrides != settings.network_binding_overrides;
+        drop(settings);
+
+        if overrides_changed {
+            swifttunnel_core::settings::save_settings(&settings_snapshot)?;
+        }
+
         (
-            if settings.custom_relay_server.is_empty() {
+            if settings_snapshot.custom_relay_server.is_empty() {
                 None
             } else {
-                Some(settings.custom_relay_server.clone())
+                Some(settings_snapshot.custom_relay_server.clone())
             },
-            settings.auto_routing_enabled,
-            settings.config.network_settings.gaming_qos,
-            settings.whitelisted_regions.clone(),
-            settings.forced_servers.clone(),
-            preferred_physical_adapter_guid,
-            settings.game_process_performance,
+            settings_snapshot.auto_routing_enabled,
+            settings_snapshot.config.network_settings.gaming_qos,
+            settings_snapshot.whitelisted_regions.clone(),
+            settings_snapshot.forced_servers.clone(),
+            binding_preference,
+            settings_snapshot.game_process_performance,
         )
     };
 
@@ -247,7 +333,7 @@ pub async fn vpn_connect(
             available_servers,
             whitelisted_regions,
             forced_servers,
-            preferred_physical_adapter_guid,
+            binding_preference,
             game_process_performance,
         )
         .await
@@ -374,6 +460,11 @@ pub struct DiagnosticsResponse {
     pub route_resolution_source: Option<String>,
     pub route_resolution_target_ip: Option<String>,
     pub manual_binding_active: bool,
+    pub binding_reason: String,
+    pub binding_stage: String,
+    pub cached_override_used: bool,
+    pub network_signature: Option<String>,
+    pub last_validation_result: String,
     pub packets_tunneled: u64,
     pub packets_bypassed: u64,
 }
@@ -394,6 +485,11 @@ pub async fn vpn_get_diagnostics(
             route_resolution_source: Some(diag.route_resolution_source),
             route_resolution_target_ip: diag.route_resolution_target_ip,
             manual_binding_active: diag.manual_binding_active,
+            binding_reason: diag.binding_reason,
+            binding_stage: diag.binding_stage,
+            cached_override_used: diag.cached_override_used,
+            network_signature: diag.network_signature,
+            last_validation_result: diag.last_validation_result,
             packets_tunneled: diag.packets_tunneled,
             packets_bypassed: diag.packets_bypassed,
         }))

@@ -158,6 +158,11 @@ pub struct AppSettings {
     /// Stored as lowercase `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
     #[serde(default)]
     pub preferred_physical_adapter_guid: Option<String>,
+    /// Per-network remembered split-tunnel adapter overrides for Smart Auto.
+    ///
+    /// Keyed by a stable network signature built from the active route plus UP adapters.
+    #[serde(default)]
+    pub network_binding_overrides: HashMap<String, String>,
     /// Physical adapter binding strategy for split tunnel interception.
     #[serde(default)]
     pub adapter_binding_mode: AdapterBindingMode,
@@ -266,6 +271,7 @@ impl Default for AppSettings {
             auto_routing_enabled: default_auto_routing(),
             whitelisted_regions: Vec::new(),
             preferred_physical_adapter_guid: None,
+            network_binding_overrides: HashMap::new(),
             adapter_binding_mode: AdapterBindingMode::SmartAuto,
             game_process_performance: GameProcessPerformanceSettings::default(),
             roblox_network_bypass: false,
@@ -281,6 +287,13 @@ impl AppSettings {
             .preferred_physical_adapter_guid
             .as_deref()
             .and_then(normalize_guid_ascii_lowercase);
+        self.network_binding_overrides = self
+            .network_binding_overrides
+            .drain()
+            .filter_map(|(signature, guid)| {
+                normalize_guid_ascii_lowercase(&guid).map(|normalized| (signature, normalized))
+            })
+            .collect();
     }
 }
 

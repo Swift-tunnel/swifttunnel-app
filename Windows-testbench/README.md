@@ -1,92 +1,57 @@
-# Windows Split Tunnel Test Tools
+# Windows Split Tunnel Testbench
 
-Pre-compiled CLI binaries for testing the split tunnel functionality on Windows.
+This folder is now a source-backed testbench for the current `ndisapi` / `NDISRD`
+split tunnel stack.
 
-## Contents
+The previous precompiled binaries were tied to the removed
+`MullvadSplitTunnel` interface and are no longer valid for release gating.
+Build the maintained testbench binaries from `swifttunnel-core` instead.
 
-| File | Description |
-|------|-------------|
-| `split_tunnel_integration_test.exe` | Full integration test with WFP + driver + routing verification |
-| `split_tunnel_test.exe` | Basic driver-only test (no VPN connection) |
-| `ip_checker.exe` | Simple IP checker for split tunnel verification |
-| `wintun.dll` | Wintun virtual network adapter (required) |
+## Binaries
 
-## Requirements
+`cargo build -p swifttunnel-core --release --bin split_tunnel_test`
 
-- Windows 10/11 (64-bit)
-- Administrator privileges
-- Mullvad split tunnel driver installed (`MullvadSplitTunnel` service)
+`cargo build -p swifttunnel-core --release --bin split_tunnel_integration_test`
 
-## Usage
+`cargo build -p swifttunnel-core --release --bin ip_checker`
 
-### Full Integration Test
+## Quick Start
 
-Tests complete split tunnel flow: WFP setup, driver configuration, and traffic routing.
+PowerShell:
 
 ```powershell
-# With API token (fetches config from swifttunnel.net)
-.\split_tunnel_integration_test.exe --token ACCESS_TOKEN --region singapore
+cd <repo-root>
 
-# With config file
-.\split_tunnel_integration_test.exe --config vpn_config.json
+.\\Windows-testbench\\run_split_tunnel_test.ps1
+.\\Windows-testbench\\run_split_tunnel_integration_test.ps1 `
+  -Email $env:SWIFTTUNNEL_TEST_EMAIL `
+  -Password $env:SWIFTTUNNEL_TEST_PASSWORD
 ```
 
-**Options:**
-- `--token, -t TOKEN` - Supabase access token for API auth
-- `--region, -r REGION` - VPN region (default: singapore)
-- `--config, -c FILE` - VPN config JSON file (alternative to --token)
-- `--test-exe, -e PATH` - Test executable (default: ip_checker.exe)
+If a valid SwiftTunnel auth session already exists on the machine, the
+integration test can reuse it and does not need explicit credentials.
 
-**Exit codes:**
-- `0` - Success (split tunnel routing verified)
-- `1` - Test failed
-- `2` - Usage error
+## Environment Variables
 
-### Basic Driver Test
+- `SWIFTTUNNEL_TEST_ACCESS_TOKEN`
+- `SWIFTTUNNEL_TEST_EMAIL`
+- `SWIFTTUNNEL_TEST_PASSWORD`
+- `SWIFTTUNNEL_TEST_REGION`
+- `SWIFTTUNNEL_TEST_ADAPTER_GUID`
 
-Tests driver IOCTL communication without full VPN setup.
+## What The Tests Validate
 
-```powershell
-.\split_tunnel_test.exe
-```
+`split_tunnel_test`
 
-### IP Checker
+- WinpkFilter / `NDISRD` driver is available
+- mandatory adapter binding preflight returns `ok`
 
-Simple utility to check your public IP.
+`split_tunnel_integration_test`
 
-```powershell
-.\ip_checker.exe
-```
+- binding preflight returns `ok`
+- the test process stays on the original public IP after connect
+- a selected helper process (`ip_checker.exe`) generates tunneled UDP packets
+- split tunnel diagnostics show tunneled packet counters increasing
 
-## Config File Format
-
-```json
-{
-  "region": "singapore",
-  "serverEndpoint": "server.ip:51820",
-  "serverPublicKey": "base64_encoded_key",
-  "privateKey": "base64_encoded_key",
-  "assignedIp": "10.0.0.77/16",
-  "dns": ["1.1.1.1"]
-}
-```
-
-## Troubleshooting
-
-### Driver not available
-```
-sc start MullvadSplitTunnel
-```
-
-### Driver fails with error 183 ("file already exists")
-This means WFP callouts are stuck. Reboot the machine:
-```powershell
-shutdown /r /t 0
-```
-
-### WFP setup fails
-Make sure you're running as Administrator.
-
-## Source
-
-These binaries are kept precompiled for convenience. The legacy egui app source they were originally built from has been removed from this repo.
+This matches the current V3 architecture more closely than the retired
+full-tunnel / Wintun-era harness.

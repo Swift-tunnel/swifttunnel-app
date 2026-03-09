@@ -16,7 +16,8 @@
 //! - No WFP complexity (callouts, filters, sublayers, providers)
 
 use super::parallel_interceptor::{
-    ParallelInterceptor, QueueOverflowMode, SplitTunnelDiagnostics, ThroughputStats,
+    AdapterBindingPreference, ParallelInterceptor, QueueOverflowMode, SplitTunnelDiagnostics,
+    ThroughputStats,
 };
 use super::{VpnError, VpnResult};
 use crate::utils::normalize_guid_ascii_lowercase;
@@ -138,22 +139,25 @@ pub struct SplitTunnelConfig {
     pub tunnel_apps: HashSet<String>,
     /// VPN interface LUID (for adapter identification)
     pub tunnel_interface_luid: u64,
-    /// Preferred physical adapter GUID (If set, binds split tunnel to this adapter)
-    pub preferred_physical_adapter_guid: Option<String>,
+    /// Explicit adapter binding preference for manual mode or remembered Smart Auto choices.
+    pub binding_preference: Option<AdapterBindingPreference>,
 }
 
 impl SplitTunnelConfig {
     pub fn new(
         tunnel_apps: Vec<String>,
         tunnel_interface_luid: u64,
-        preferred_physical_adapter_guid: Option<String>,
+        binding_preference: Option<AdapterBindingPreference>,
     ) -> Self {
         Self {
             tunnel_apps: tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect(),
             tunnel_interface_luid,
-            preferred_physical_adapter_guid: preferred_physical_adapter_guid
-                .as_deref()
-                .and_then(normalize_guid_ascii_lowercase),
+            binding_preference: binding_preference.map(|mut preference| {
+                preference.guid = normalize_guid_ascii_lowercase(&preference.guid)
+                    .unwrap_or(preference.guid)
+                    .to_string();
+                preference
+            }),
         }
     }
 
@@ -665,7 +669,7 @@ impl SplitTunnelDriver {
             "SwiftTunnel", // VPN adapter name
             config.tunnel_apps.iter().cloned().collect(),
             config.tunnel_interface_luid, // LUID for reliable detection
-            config.preferred_physical_adapter_guid.clone(),
+            config.binding_preference.clone(),
         )?;
 
         // Start packet interception
@@ -815,6 +819,14 @@ impl SplitTunnelDriver {
         }
     }
 
+    pub fn register_udp_port_immediate(&self, local_port: u16) {
+        if let Some(ref interceptor) = self.parallel_interceptor {
+            interceptor.register_udp_port_immediate(local_port);
+        } else {
+            log::warn!("Cannot register UDP port: parallel interceptor not active");
+        }
+    }
+
     /// Switch relay address (proxy to ParallelInterceptor)
     pub fn switch_relay_addr(&self, new_addr: std::net::SocketAddr) -> bool {
         if let Some(ref interceptor) = self.parallel_interceptor {
@@ -869,11 +881,18 @@ mod tests {
         let config = SplitTunnelConfig::new(
             vec!["robloxplayerbeta.exe".to_string()],
             12345,
-            Some("{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}".to_string()),
+            Some(AdapterBindingPreference {
+                guid: "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}".to_string(),
+                source: super::super::parallel_interceptor::BindingPreferenceSource::Manual,
+                network_signature: None,
+            }),
         );
         assert!(config.tunnel_apps.contains("robloxplayerbeta.exe"));
         assert_eq!(
-            config.preferred_physical_adapter_guid.as_deref(),
+            config
+                .binding_preference
+                .as_ref()
+                .map(|preference| preference.guid.as_str()),
             Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         );
     }

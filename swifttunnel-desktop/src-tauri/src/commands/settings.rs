@@ -322,9 +322,10 @@ fn format_settings_snapshot(settings: &swifttunnel_core::settings::AppSettings) 
         .preferred_physical_adapter_guid
         .as_deref()
         .unwrap_or("none");
+    let remembered_overrides = settings.network_binding_overrides.len();
 
     format!(
-        "selected_region: {}\nselected_game_presets: {}\nauto_routing_enabled: {}\nwhitelisted_regions: {}\nupdate_channel: {:?}\ncustom_relay_server: {}\nadapter_binding_mode: {}\npreferred_physical_adapter_guid: {}",
+        "selected_region: {}\nselected_game_presets: {}\nauto_routing_enabled: {}\nwhitelisted_regions: {}\nupdate_channel: {:?}\ncustom_relay_server: {}\nadapter_binding_mode: {}\npreferred_physical_adapter_guid: {}\nnetwork_binding_override_count: {}",
         settings.selected_region,
         selected_games,
         settings.auto_routing_enabled,
@@ -332,7 +333,8 @@ fn format_settings_snapshot(settings: &swifttunnel_core::settings::AppSettings) 
         settings.update_channel,
         custom_relay,
         adapter_binding_mode,
-        preferred_adapter
+        preferred_adapter,
+        remembered_overrides
     )
 }
 
@@ -375,7 +377,7 @@ fn format_split_tunnel_snapshot(
 ) -> String {
     match diag {
         Some(diag) => format!(
-            "adapter_name: {}\nadapter_guid: {}\nselected_if_index: {}\nresolved_if_index: {}\nhas_default_route: {}\nroute_resolution_source: {}\nroute_resolution_target_ip: {}\nmanual_binding_active: {}\npackets_tunneled: {}\npackets_bypassed: {}",
+            "adapter_name: {}\nadapter_guid: {}\nselected_if_index: {}\nresolved_if_index: {}\nhas_default_route: {}\nroute_resolution_source: {}\nroute_resolution_target_ip: {}\nmanual_binding_active: {}\nbinding_reason: {}\nbinding_stage: {}\ncached_override_used: {}\nnetwork_signature: {}\nlast_validation_result: {}\npackets_tunneled: {}\npackets_bypassed: {}",
             diag.adapter_name.unwrap_or_else(|| "unknown".to_string()),
             diag.adapter_guid.unwrap_or_else(|| "unknown".to_string()),
             diag.selected_if_index
@@ -389,6 +391,11 @@ fn format_split_tunnel_snapshot(
             diag.route_resolution_target_ip
                 .unwrap_or_else(|| "n/a".to_string()),
             diag.manual_binding_active,
+            diag.binding_reason,
+            diag.binding_stage,
+            diag.cached_override_used,
+            diag.network_signature.unwrap_or_else(|| "n/a".to_string()),
+            diag.last_validation_result,
             diag.packets_tunneled,
             diag.packets_bypassed
         ),
@@ -536,6 +543,11 @@ mod tests {
                 route_resolution_source: "game_route".to_string(),
                 route_resolution_target_ip: Some("128.116.1.1".to_string()),
                 manual_binding_active: false,
+                binding_reason: "Connected using the active default-route adapter.".to_string(),
+                binding_stage: "exact_route_match".to_string(),
+                cached_override_used: false,
+                network_signature: Some("sig".to_string()),
+                last_validation_result: "selected_exact_route_match".to_string(),
             }),
         };
 

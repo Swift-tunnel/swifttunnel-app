@@ -59,6 +59,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   auto_routing_enabled: false,
   whitelisted_regions: [],
   preferred_physical_adapter_guid: null,
+  network_binding_overrides: {},
   adapter_binding_mode: "smart_auto",
   game_process_performance: {
     high_performance_gpu_binding: false,

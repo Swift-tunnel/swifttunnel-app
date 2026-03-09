@@ -62,6 +62,11 @@ export interface DiagnosticsResponse {
   route_resolution_source: string | null;
   route_resolution_target_ip: string | null;
   manual_binding_active: boolean;
+  binding_reason: string;
+  binding_stage: string;
+  cached_override_used: boolean;
+  network_signature: string | null;
+  last_validation_result: string;
   packets_tunneled: number;
   packets_bypassed: number;
 }
@@ -74,6 +79,32 @@ export interface NetworkAdapterInfo {
   is_up: boolean;
   is_default_route: boolean;
   kind: string;
+}
+
+export interface BindingCandidateInfo {
+  guid: string;
+  friendly_name: string;
+  description: string;
+  if_index: number | null;
+  is_up: boolean;
+  is_default_route: boolean;
+  kind: string;
+  stage: string;
+  reason: string;
+  score: number;
+}
+
+export interface BindingPreflightInfo {
+  status: "ok" | "ambiguous" | "unrecoverable";
+  reason: string;
+  network_signature: string;
+  route_resolution_source: string;
+  route_resolution_target_ip: string | null;
+  resolved_if_index: number | null;
+  recommended_guid: string | null;
+  cached_override_used: boolean;
+  binding_stage: string | null;
+  candidates: BindingCandidateInfo[];
 }
 
 // ── Servers ──
@@ -309,6 +340,7 @@ export interface AppSettings {
   auto_routing_enabled: boolean;
   whitelisted_regions: string[];
   preferred_physical_adapter_guid: string | null;
+  network_binding_overrides: Record<string, string>;
   adapter_binding_mode: "smart_auto" | "manual";
   game_process_performance: GameProcessPerformanceSettings;
 }

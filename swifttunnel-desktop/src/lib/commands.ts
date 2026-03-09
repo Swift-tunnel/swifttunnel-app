@@ -5,6 +5,7 @@ import type {
   VpnStateResponse,
   ThroughputResponse,
   DiagnosticsResponse,
+  BindingPreflightInfo,
   NetworkAdapterInfo,
   ServerListResponse,
   LatencyEntry,
@@ -51,6 +52,9 @@ export const authRefreshProfile = () =>
 
 export const vpnGetState = () =>
   invoke<VpnStateResponse>("vpn_get_state");
+
+export const vpnPreflightBinding = (region: string, gamePresets: string[]) =>
+  invoke<BindingPreflightInfo>("vpn_preflight_binding", { region, gamePresets });
 
 export const vpnConnect = (region: string, gamePresets: string[]) =>
   invoke<void>("vpn_connect", { region, gamePresets });
