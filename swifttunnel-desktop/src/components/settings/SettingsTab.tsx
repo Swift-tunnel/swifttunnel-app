@@ -136,19 +136,64 @@ export function SettingsTab() {
     }
   }
 
+  const sortedAdapters = (networkAdapters || []).slice().sort((a, b) => {
+    if (a.is_default_route !== b.is_default_route)
+      return a.is_default_route ? -1 : 1;
+    if (a.is_up !== b.is_up) return a.is_up ? -1 : 1;
+    const kindPriority = (kind: string) => {
+      switch (kind) {
+        case "ethernet": return 0;
+        case "wifi": return 1;
+        case "ppp": return 2;
+        case "tunnel": return 3;
+        case "loopback": return 4;
+        default: return 5;
+      }
+    };
+    const ap = kindPriority(a.kind);
+    const bp = kindPriority(b.kind);
+    if (ap !== bp) return ap - bp;
+    const an = (a.friendly_name || a.description || a.guid).toLowerCase();
+    const bn = (b.friendly_name || b.description || b.guid).toLowerCase();
+    return an.localeCompare(bn);
+  });
+
+  const adapterMissing =
+    !networkAdaptersError &&
+    manualAdapterBinding &&
+    settings.preferred_physical_adapter_guid &&
+    networkAdapters &&
+    !networkAdapters.some(
+      (a) => a.guid === settings.preferred_physical_adapter_guid,
+    );
+
+  const updaterDesc =
+    updaterStatus === "checking"
+      ? "Checking for updates..."
+      : updaterStatus === "up_to_date"
+        ? "You are on the latest version"
+        : updaterStatus === "update_available"
+          ? `Version ${updaterVersion} is available`
+          : updaterStatus === "installing"
+            ? `Installing update... ${updaterProgress}%`
+            : updaterStatus === "error"
+              ? updaterError || "Update check failed"
+              : "Not checked yet";
+
   return (
-    <div className="flex flex-col gap-6">
+    <div className="mx-auto flex max-w-[660px] flex-col gap-4">
       {/* ── Account ── */}
       <Section title="Account">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-3">
             <div
-              className="flex h-10 w-10 items-center justify-center rounded-full"
-              style={{ backgroundColor: "var(--color-accent-primary-soft-20)" }}
+              className="flex h-9 w-9 items-center justify-center rounded-full text-sm font-medium"
+              style={{
+                backgroundColor: "var(--color-accent-primary-soft-20)",
+                color: "var(--color-accent-secondary)",
+              }}
             >
-              <span className="text-sm font-medium text-accent-secondary">
-                {email?.[0]?.toUpperCase() || "?"}
-              </span>
+              {email?.[0]?.toUpperCase() || "?"}
             </div>
             <div>
               <div className="text-sm font-medium text-text-primary">
@@ -186,74 +231,34 @@ export function SettingsTab() {
 
       {/* ── General ── */}
       <Section title="General">
-        <Row
-          label="Update Channel"
-          desc="Stable for vetted releases, Live for pre-release"
-          tooltip="Stable releases are tested and vetted. Live channel gets pre-release builds that may have bugs but include the newest features."
-        >
-          <div className="flex gap-1">
-            {(["Stable", "Live"] as UpdateChannel[]).map((ch) => (
-              <button
-                key={ch}
-                onClick={() => set({ update_channel: ch })}
-                className="rounded px-3 py-1 text-xs transition-colors"
-                style={{
-                  backgroundColor:
-                    settings.update_channel === ch
-                      ? "var(--color-accent-primary)"
-                      : "var(--color-bg-hover)",
-                  color:
-                    settings.update_channel === ch
-                      ? "white"
-                      : "var(--color-text-secondary)",
-                }}
-              >
-                {ch}
-              </button>
-            ))}
-          </div>
+        <Row label="Update Channel" desc="Stable for vetted releases, Live for pre-release">
+          <SegmentedPicker
+            options={["Stable", "Live"] as UpdateChannel[]}
+            value={settings.update_channel}
+            onChange={(ch) => set({ update_channel: ch })}
+          />
         </Row>
-        <Row
-          label="Auto Update"
-          desc="Check and install updates on app startup"
-        >
+        <Row label="Auto Update" desc="Check and install updates on startup">
           <Toggle
             enabled={settings.update_settings.auto_check}
             onChange={(v) =>
-              set({
-                update_settings: {
-                  ...settings.update_settings,
-                  auto_check: v,
-                },
-              })
+              set({ update_settings: { ...settings.update_settings, auto_check: v } })
             }
           />
         </Row>
-        <Row
-          label="Run on Startup"
-          desc="Launch SwiftTunnel when you sign into Windows"
-        >
+        <Row label="Run on Startup" desc="Launch SwiftTunnel when you sign into Windows">
           <Toggle
             enabled={settings.run_on_startup}
             onChange={(v) => set({ run_on_startup: v })}
           />
         </Row>
-        <Row
-          label="Auto Reconnect VPN"
-          desc="Reconnect automatically after restart if your last session was connected"
-        >
+        <Row label="Auto Reconnect Tunnel" desc="Reconnect after restart if last session was connected">
           <Toggle
             enabled={settings.auto_reconnect}
             onChange={(v) => set({ auto_reconnect: v })}
           />
         </Row>
-        <Row
-          label="Close Behavior"
-          desc="Closing the window sends SwiftTunnel to the tray. Use the tray menu Quit to exit."
-        >
-          <span className="text-xs text-text-muted">To tray</span>
-        </Row>
-        <Row label="Discord Rich Presence" desc="Show VPN status in Discord">
+        <Row label="Discord Rich Presence" desc="Show tunnel status in Discord">
           <Toggle
             enabled={settings.enable_discord_rpc}
             onChange={(v) => set({ enable_discord_rpc: v })}
@@ -265,125 +270,48 @@ export function SettingsTab() {
       <Section title="Tunnel">
         <Row
           label="Adapter Selection"
-          desc="Smart Auto follows active route. Manual locks split tunnel to a specific adapter."
-          tooltip="Smart Auto detects your active network adapter from the OS routing table and rebinds automatically when you switch networks. Manual lets you pin a specific adapter."
-        >
-          <div className="flex gap-1">
-            <button
-              onClick={() => set({ adapter_binding_mode: "smart_auto" })}
-              className="rounded px-3 py-1 text-xs transition-colors"
-              style={{
-                backgroundColor:
-                  adapterBindingMode === "smart_auto"
-                    ? "var(--color-accent-primary)"
-                    : "var(--color-bg-hover)",
-                color:
-                  adapterBindingMode === "smart_auto"
-                    ? "white"
-                    : "var(--color-text-secondary)",
-              }}
-            >
-              Smart Auto
-            </button>
-            <button
-              onClick={() => set({ adapter_binding_mode: "manual" })}
-              className="rounded px-3 py-1 text-xs transition-colors"
-              style={{
-                backgroundColor:
-                  adapterBindingMode === "manual"
-                    ? "var(--color-accent-primary)"
-                    : "var(--color-bg-hover)",
-                color:
-                  adapterBindingMode === "manual"
-                    ? "white"
-                    : "var(--color-text-secondary)",
-              }}
-            >
-              Manual
-            </button>
-          </div>
-        </Row>
-        <Row
-          label="Network Adapter"
           desc={
             manualAdapterBinding
-              ? "Pick your active Wi‑Fi/Ethernet adapter (applies on next connect)."
-              : "SwiftTunnel selects adapter from active route and rebinds automatically on network change."
+              ? "Manual — locked to a specific adapter"
+              : "Smart Auto — follows active route, rebinds on network change"
           }
+          tooltip="Smart Auto detects your active network adapter from the OS routing table and rebinds automatically when you switch networks. Manual lets you pin a specific adapter."
         >
-          <select
-            value={settings.preferred_physical_adapter_guid || ""}
-            onChange={(e) =>
-              set({
-                preferred_physical_adapter_guid: e.target.value
-                  ? e.target.value
-                  : null,
-              })
-            }
-            disabled={networkAdaptersLoading || !manualAdapterBinding}
-            className="w-64 rounded border bg-bg-input px-2 py-1 text-sm text-text-primary disabled:opacity-50"
-            style={{ borderColor: "var(--color-border-default)" }}
-            onFocus={(e) =>
-              (e.currentTarget.style.borderColor =
-                "var(--color-accent-primary)")
-            }
-            onBlur={(e) =>
-              (e.currentTarget.style.borderColor =
-                "var(--color-border-default)")
-            }
-          >
-            <option value="">
-              {manualAdapterBinding
-                ? "Auto fallback (Recommended)"
-                : "Smart Auto"}
-            </option>
-            {(networkAdapters || [])
-              .slice()
-              .sort((a, b) => {
-                if (a.is_default_route !== b.is_default_route) {
-                  return a.is_default_route ? -1 : 1;
-                }
-                if (a.is_up !== b.is_up) {
-                  return a.is_up ? -1 : 1;
-                }
-                const kindPriority = (kind: string) => {
-                  switch (kind) {
-                    case "ethernet":
-                      return 0;
-                    case "wifi":
-                      return 1;
-                    case "ppp":
-                      return 2;
-                    case "tunnel":
-                      return 3;
-                    case "loopback":
-                      return 4;
-                    default:
-                      return 5;
-                  }
-                };
-                const ap = kindPriority(a.kind);
-                const bp = kindPriority(b.kind);
-                if (ap !== bp) return ap - bp;
-                const an = (
-                  a.friendly_name ||
-                  a.description ||
-                  a.guid
-                ).toLowerCase();
-                const bn = (
-                  b.friendly_name ||
-                  b.description ||
-                  b.guid
-                ).toLowerCase();
-                return an.localeCompare(bn);
-              })
-              .map((adapter) => {
+          <SegmentedPicker
+            options={[
+              { value: "smart_auto" as const, label: "Smart Auto" },
+              { value: "manual" as const, label: "Manual" },
+            ]}
+            value={adapterBindingMode}
+            onChange={(mode) => set({ adapter_binding_mode: mode })}
+          />
+        </Row>
+
+        {manualAdapterBinding && (
+          <div className="px-4 pb-3">
+            <select
+              value={settings.preferred_physical_adapter_guid || ""}
+              onChange={(e) =>
+                set({
+                  preferred_physical_adapter_guid: e.target.value || null,
+                })
+              }
+              disabled={networkAdaptersLoading}
+              className="w-full rounded-lg border bg-bg-elevated px-3 py-2 text-sm text-text-primary disabled:opacity-50"
+              style={{ borderColor: "var(--color-border-default)" }}
+              onFocus={(e) =>
+                (e.currentTarget.style.borderColor = "var(--color-accent-primary)")
+              }
+              onBlur={(e) =>
+                (e.currentTarget.style.borderColor = "var(--color-border-default)")
+              }
+            >
+              <option value="">Auto fallback (Recommended)</option>
+              {sortedAdapters.map((adapter) => {
                 const label =
                   adapter.friendly_name || adapter.description || adapter.guid;
                 const tags = [
-                  adapter.kind && adapter.kind !== "other"
-                    ? adapter.kind
-                    : null,
+                  adapter.kind && adapter.kind !== "other" ? adapter.kind : null,
                   adapter.is_up ? "up" : "down",
                   adapter.is_default_route ? "default" : null,
                 ]
@@ -395,172 +323,86 @@ export function SettingsTab() {
                   </option>
                 );
               })}
-          </select>
-        </Row>
-        {!manualAdapterBinding && (
-          <div className="px-4 pb-2 text-xs text-text-muted">
-            Current adapter:{" "}
-            <span className="text-text-primary">
-              {vpnDiagnostics?.adapter_name || "Not resolved yet"}
-            </span>
-            {" · "}
-            Source:{" "}
-            <span className="text-text-primary">
-              {routeSourceLabel}
-              {vpnDiagnostics?.route_resolution_target_ip
-                ? ` (${vpnDiagnostics.route_resolution_target_ip})`
-                : ""}
-            </span>
+            </select>
+            {adapterMissing && (
+              <p className="mt-2 text-xs text-status-error">
+                Selected adapter not found. Choose Auto or another adapter.
+              </p>
+            )}
           </div>
         )}
+
+        {!manualAdapterBinding && (
+          <div className="px-4 pb-3 text-xs text-text-muted">
+            Current:{" "}
+            <span className="text-text-primary">
+              {vpnDiagnostics?.adapter_name || "Not resolved"}
+            </span>
+            {" \u00B7 "}
+            <span className="text-text-primary">{routeSourceLabel}</span>
+          </div>
+        )}
+
         {networkAdaptersError && (
           <div className="px-4 pb-3 text-xs text-status-error">
             Failed to load adapters: {networkAdaptersError}
           </div>
         )}
-        {!networkAdaptersError &&
-          manualAdapterBinding &&
-          settings.preferred_physical_adapter_guid &&
-          networkAdapters &&
-          !networkAdapters.some(
-            (a) => a.guid === settings.preferred_physical_adapter_guid,
-          ) && (
-            <div className="px-4 pb-3 text-xs text-status-error">
-              Selected adapter not found. Choose Auto (Recommended) or select
-              another adapter.
-            </div>
-          )}
-        <details className="mx-4 mb-3 rounded border border-border-subtle bg-bg-card p-3">
-          <summary className="cursor-pointer text-xs font-medium text-text-secondary">
-            Advanced Adapter Diagnostics
-          </summary>
-          <div className="mt-3 grid grid-cols-1 gap-1 text-[11px] text-text-muted">
-            <span>
-              State: <span className="text-text-primary">{vpnState}</span>
-            </span>
-            <span>
-              Selected adapter:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.adapter_name || "unknown"}
-              </span>
-            </span>
-            <span>
-              Adapter GUID:{" "}
-              <span className="font-mono text-text-primary">
-                {vpnDiagnostics?.adapter_guid || "unknown"}
-              </span>
-            </span>
-            <span>
-              Selected ifIndex:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.selected_if_index ?? "n/a"}
-              </span>
-            </span>
-            <span>
-              Resolved ifIndex:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.resolved_if_index ?? "n/a"}
-              </span>
-            </span>
-            <span>
-              Route source:{" "}
-              <span className="text-text-primary">{routeSourceLabel}</span>
-            </span>
-            <span>
-              Route target:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.route_resolution_target_ip || "n/a"}
-              </span>
-            </span>
-            <span>
-              Has resolved route:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.has_default_route ? "yes" : "no"}
-              </span>
-            </span>
-            <span>
-              Manual binding active:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.manual_binding_active ? "yes" : "no"}
-              </span>
-            </span>
-            <span>
-              Remembered override:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.cached_override_used ? "yes" : "no"}
-              </span>
-            </span>
-            <span>
-              Binding stage:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.binding_stage || "n/a"}
-              </span>
-            </span>
-            <span>
-              Validation:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.last_validation_result || "n/a"}
-              </span>
-            </span>
-            <span>
-              Binding reason:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.binding_reason || "n/a"}
-              </span>
-            </span>
-            <span>
-              Packets tunneled / bypassed:{" "}
-              <span className="text-text-primary">
-                {vpnDiagnostics?.packets_tunneled ?? 0} /{" "}
-                {vpnDiagnostics?.packets_bypassed ?? 0}
-              </span>
-            </span>
-          </div>
-        </details>
+
         <Row
           label="API Tunneling"
-          desc="Route game API calls (HTTPS) through the relay to bypass ISP blocking"
-          tooltip="When enabled, TCP traffic from game processes is also tunneled through the relay server, not just UDP game packets. This can help if your ISP blocks game API endpoints. Requires a TCP-capable relay server. Changes take effect on next connection."
+          desc="Route game API calls through relay to bypass ISP blocking"
+          tooltip="When enabled, TCP traffic from game processes is also tunneled through the relay server. Helps if your ISP blocks game API endpoints. Requires TCP-capable relay."
         >
           <Toggle
             enabled={settings.enable_api_tunneling}
             onChange={(v) => set({ enable_api_tunneling: v })}
           />
         </Row>
+
+        <details className="mx-4 mb-3 rounded-lg border border-border-subtle bg-bg-elevated">
+          <summary className="cursor-pointer px-3 py-2 text-[11px] font-medium text-text-muted">
+            Adapter Diagnostics
+          </summary>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 px-3 pb-3 text-[11px]">
+            <DiagItem label="State" value={vpnState} />
+            <DiagItem label="Adapter" value={vpnDiagnostics?.adapter_name} />
+            <DiagItem label="GUID" value={vpnDiagnostics?.adapter_guid} mono />
+            <DiagItem label="Selected ifIndex" value={vpnDiagnostics?.selected_if_index} />
+            <DiagItem label="Resolved ifIndex" value={vpnDiagnostics?.resolved_if_index} />
+            <DiagItem label="Route source" value={routeSourceLabel} />
+            <DiagItem label="Route target" value={vpnDiagnostics?.route_resolution_target_ip} />
+            <DiagItem label="Has route" value={vpnDiagnostics?.has_default_route ? "yes" : "no"} />
+            <DiagItem label="Manual binding" value={vpnDiagnostics?.manual_binding_active ? "yes" : "no"} />
+            <DiagItem label="Cached override" value={vpnDiagnostics?.cached_override_used ? "yes" : "no"} />
+            <DiagItem label="Binding stage" value={vpnDiagnostics?.binding_stage} />
+            <DiagItem label="Validation" value={vpnDiagnostics?.last_validation_result} />
+            <div className="col-span-2">
+              <DiagItem label="Binding reason" value={vpnDiagnostics?.binding_reason} />
+            </div>
+            <DiagItem
+              label="Packets"
+              value={`${vpnDiagnostics?.packets_tunneled ?? 0} tunneled / ${vpnDiagnostics?.packets_bypassed ?? 0} bypassed`}
+            />
+          </div>
+        </details>
       </Section>
 
       {/* ── Updates ── */}
       <Section title="Updates">
-        <Row
-          label="Update Status"
-          desc={
-            updaterStatus === "checking"
-              ? "Checking for updates..."
-              : updaterStatus === "up_to_date"
-                ? "You are on the latest version"
-                : updaterStatus === "update_available"
-                  ? `Version ${updaterVersion} is available`
-                  : updaterStatus === "installing"
-                    ? `Installing update... ${updaterProgress}%`
-                    : updaterStatus === "error"
-                      ? updaterError || "Update check failed"
-                      : "Not checked yet"
-          }
-        >
+        <Row label="Status" desc={updaterDesc}>
           <div className="flex items-center gap-2">
             <button
               onClick={() => void checkForUpdates(true)}
-              disabled={
-                updaterStatus === "checking" || updaterStatus === "installing"
-              }
-              className="rounded border border-border-subtle px-2.5 py-1 text-xs text-text-primary disabled:opacity-50"
+              disabled={updaterStatus === "checking" || updaterStatus === "installing"}
+              className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
             >
               Check Now
             </button>
             {updaterStatus === "update_available" && (
               <button
                 onClick={() => void installUpdate()}
-                className="rounded px-2.5 py-1 text-xs text-white"
+                className="rounded-[var(--radius-button)] px-3 py-1.5 text-xs font-medium text-white"
                 style={{ backgroundColor: "var(--color-accent-primary)" }}
               >
                 Install
@@ -568,16 +410,12 @@ export function SettingsTab() {
             )}
           </div>
         </Row>
-        <Row
-          label="Last Checked"
-          desc={
-            updaterLastChecked
-              ? new Date(updaterLastChecked * 1000).toLocaleString()
-              : "Never"
-          }
-        >
-          <span className="text-xs text-text-muted">Updater</span>
-        </Row>
+        <div className="px-4 pb-3 text-[11px] text-text-dimmed">
+          Last checked:{" "}
+          {updaterLastChecked
+            ? new Date(updaterLastChecked * 1000).toLocaleString()
+            : "Never"}
+        </div>
       </Section>
 
       {/* ── Experimental (tester-gated) ── */}
@@ -590,16 +428,15 @@ export function SettingsTab() {
             />
           </Row>
           {settings.experimental_mode && (
-            <Row
-              label="Artificial Latency"
-              desc={`+${settings.artificial_latency_ms}ms added delay`}
-            >
+            <div className="flex items-center justify-between px-4 pb-3">
+              <span className="text-xs text-text-muted">
+                Artificial Latency
+              </span>
               <div className="flex items-center gap-2">
                 <span className="font-mono text-xs text-accent-secondary">
-                  {settings.artificial_latency_ms}ms
+                  +{settings.artificial_latency_ms}ms
                 </span>
                 <input
-                  id="artificial-latency-slider"
                   type="range"
                   aria-label="Artificial latency"
                   min={0}
@@ -612,26 +449,21 @@ export function SettingsTab() {
                   className="w-28 accent-accent-primary"
                 />
               </div>
-            </Row>
+            </div>
           )}
-          <Row
-            label="Custom Relay Server"
-            desc="Override relay endpoint (host:port)"
-          >
+          <Row label="Custom Relay Server" desc="Override relay endpoint (host:port)">
             <input
               type="text"
               value={settings.custom_relay_server}
               onChange={(e) => set({ custom_relay_server: e.target.value })}
               placeholder="auto"
-              className="w-40 rounded border bg-bg-input px-2 py-1 text-sm text-text-primary placeholder:text-text-dimmed focus:outline-none"
+              className="w-36 rounded-lg border bg-bg-elevated px-2 py-1.5 text-sm text-text-primary placeholder:text-text-dimmed focus:outline-none"
               style={{ borderColor: "var(--color-border-default)" }}
               onFocus={(e) =>
-                (e.currentTarget.style.borderColor =
-                  "var(--color-accent-primary)")
+                (e.currentTarget.style.borderColor = "var(--color-accent-primary)")
               }
               onBlur={(e) => {
-                e.currentTarget.style.borderColor =
-                  "var(--color-border-default)";
+                e.currentTarget.style.borderColor = "var(--color-border-default)";
                 save();
               }}
             />
@@ -642,23 +474,23 @@ export function SettingsTab() {
       {/* ── Support ── */}
       <Section title="Support">
         <Row
-          label="Generate Network Diagnostics"
-          desc="Create a support-ready .txt with ISP, routing, and split tunnel diagnostics"
+          label="Network Diagnostics"
+          desc="Generate a support-ready bundle with ISP, routing, and split tunnel info"
         >
           <button
             onClick={() => void generateDiagnosticsBundle()}
             disabled={isGeneratingDiagnostics}
-            className="rounded border border-border-subtle px-2.5 py-1 text-xs text-text-primary disabled:opacity-50"
+            className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
           >
-            {isGeneratingDiagnostics ? "Generating..." : "Generate Bundle"}
+            {isGeneratingDiagnostics ? "Generating..." : "Generate"}
           </button>
         </Row>
         {diagnosticsPath && (
           <div className="px-4 pb-3 text-xs text-text-muted">
-            Saved to:
-            <div className="mt-1 break-all font-mono text-[11px] text-text-secondary">
+            Saved to:{" "}
+            <span className="break-all font-mono text-[11px] text-text-secondary">
               {diagnosticsPath}
-            </div>
+            </span>
           </div>
         )}
         {diagnosticsError && (
@@ -670,33 +502,27 @@ export function SettingsTab() {
 
       {/* ── About ── */}
       <Section title="About">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between px-4 py-3">
           <span className="text-sm text-text-secondary">
             SwiftTunnel Desktop v{__APP_VERSION__}
           </span>
           <div className="flex gap-3">
-            <button
-              onClick={() => systemOpenUrl("https://swifttunnel.net")}
-              className="text-xs text-accent-secondary transition-opacity hover:opacity-80"
-            >
+            <LinkButton onClick={() => systemOpenUrl("https://swifttunnel.net")}>
               Website
-            </button>
-            <button
-              onClick={() => systemOpenUrl("https://discord.gg/swifttunnel")}
-              className="text-xs text-accent-secondary transition-opacity hover:opacity-80"
-            >
+            </LinkButton>
+            <LinkButton onClick={() => systemOpenUrl("https://discord.gg/swifttunnel")}>
               Discord
-            </button>
+            </LinkButton>
           </div>
         </div>
         <div className="flex items-center justify-between px-4 py-3">
-          <div className="flex flex-col gap-0.5">
-            <span className="text-sm font-medium text-text-primary">
+          <div>
+            <div className="text-sm font-medium text-text-primary">
               Uninstall SwiftTunnel
-            </span>
-            <span className="text-xs text-text-muted">
-              Remove SwiftTunnel and revert all system changes
-            </span>
+            </div>
+            <div className="text-xs text-text-muted">
+              Remove app and revert all system changes
+            </div>
           </div>
           <button
             onClick={async () => {
@@ -710,15 +536,10 @@ export function SettingsTab() {
               }
             }}
             disabled={isUninstalling}
-            className="rounded-[var(--radius-button)] border px-3 py-1.5 text-xs font-medium text-white transition-colors disabled:opacity-50"
-            style={{
-              backgroundColor: "var(--color-status-error)",
-              borderColor: "var(--color-status-error)",
-            }}
+            className="rounded-[var(--radius-button)] px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-50"
+            style={{ backgroundColor: "var(--color-status-error)" }}
             onMouseEnter={(e) => {
-              if (!isUninstalling) {
-                e.currentTarget.style.opacity = "0.85";
-              }
+              if (!isUninstalling) e.currentTarget.style.opacity = "0.85";
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.opacity = "1";
@@ -737,14 +558,16 @@ export function SettingsTab() {
   );
 }
 
+// ── Sub-components ──
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section>
-      <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-text-muted">
+      <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-dimmed">
         {title}
-      </h3>
-      <div className="flex flex-col gap-2 rounded-[var(--radius-card)] border border-border-subtle bg-bg-card">
-        {children}
+      </div>
+      <div className="overflow-hidden rounded-[var(--radius-card)] border border-border-subtle bg-bg-card">
+        <div className="divide-y divide-border-subtle">{children}</div>
       </div>
     </section>
   );
@@ -763,7 +586,7 @@ function Row({
 }) {
   return (
     <div className="flex items-center justify-between px-4 py-3">
-      <div className="flex flex-col gap-0.5">
+      <div className="flex min-w-0 flex-col gap-0.5 pr-4">
         <span className="flex items-center gap-1.5 text-sm font-medium text-text-primary">
           {label}
           {tooltip && (
@@ -776,5 +599,78 @@ function Row({
       </div>
       {children}
     </div>
+  );
+}
+
+function SegmentedPicker<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: T[] | { value: T; label: string }[];
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  const items = options.map((o) =>
+    typeof o === "string" ? { value: o, label: o } : o,
+  );
+  return (
+    <div className="flex gap-1">
+      {items.map((item) => (
+        <button
+          key={item.value}
+          onClick={() => onChange(item.value)}
+          className="rounded px-3 py-1 text-xs transition-colors"
+          style={{
+            backgroundColor:
+              value === item.value
+                ? "var(--color-accent-primary)"
+                : "var(--color-bg-hover)",
+            color:
+              value === item.value ? "white" : "var(--color-text-secondary)",
+          }}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function DiagItem({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string | number | null | undefined;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-text-dimmed">{label}</span>
+      <span
+        className={`text-text-primary ${mono ? "font-mono" : ""}`}
+      >
+        {value ?? "n/a"}
+      </span>
+    </div>
+  );
+}
+
+function LinkButton({
+  onClick,
+  children,
+}: {
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="text-xs text-accent-secondary transition-opacity hover:opacity-80"
+    >
+      {children}
+    </button>
   );
 }
