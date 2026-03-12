@@ -1332,16 +1332,17 @@ impl VpnConnection {
         let split_config =
             SplitTunnelConfig::new(tunnel_apps.clone(), 0, binding_preference.clone());
 
-        driver.configure(split_config).map_err(|e| {
-            let _ = driver.close();
-            VpnError::SplitTunnelSetupFailed(format!("Failed to configure V3 split tunnel: {}", e))
-        })?;
-
-        // Enable TCP API tunneling if the user toggled it on.
+        // Set TCP API tunneling flag before configure() spawns the reader
+        // thread, so the flag is visible from the very first packet batch.
         if enable_api_tunneling {
             driver.set_api_tunneling_enabled(true);
             log::info!("V3: API tunneling (TCP) enabled");
         }
+
+        driver.configure(split_config).map_err(|e| {
+            let _ = driver.close();
+            VpnError::SplitTunnelSetupFailed(format!("Failed to configure V3 split tunnel: {}", e))
+        })?;
 
         let process_performance_policy =
             GameProcessPerformancePolicy::from(process_performance_settings);
