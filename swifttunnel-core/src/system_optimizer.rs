@@ -649,3 +649,65 @@ impl Default for SystemOptimizer {
         Self::new()
     }
 }
+
+/// Restore all system optimizer changes for uninstall.
+///
+/// Reverses MMCSS profile, Game Bar, fullscreen optimizations, Game Mode,
+/// and power plan to Windows defaults. Uses `let _ =` for each operation
+/// so individual failures never short-circuit the rest.
+pub fn cleanup_for_uninstall() {
+    info!("System optimizer: cleaning up for uninstall");
+
+    // 1. Restore MMCSS profile to Windows defaults
+    let optimizer = SystemOptimizer::new();
+    let _ = optimizer.restore_mmcss_profile();
+
+    // 2. Delete Game Bar override (let Windows use its default)
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\GameDVR",
+            "/v",
+            "AppCaptureEnabled",
+            "/f",
+        ])
+        .output();
+
+    // 3. Delete fullscreen optimization override
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            r"HKCU\System\GameConfigStore",
+            "/v",
+            "GameDVR_FSEBehaviorMode",
+            "/f",
+        ])
+        .output();
+
+    // 4. Delete Game Mode overrides
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            r"HKCU\Software\Microsoft\GameBar",
+            "/v",
+            "AllowAutoGameMode",
+            "/f",
+        ])
+        .output();
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            r"HKCU\Software\Microsoft\GameBar",
+            "/v",
+            "AutoGameModeEnabled",
+            "/f",
+        ])
+        .output();
+
+    // 5. Restore Balanced power plan
+    let _ = hidden_command("powercfg")
+        .args(["/setactive", "381b4222-f694-41f0-9685-ff5bb260df2e"])
+        .output();
+
+    info!("System optimizer: uninstall cleanup completed");
+}

@@ -324,6 +324,7 @@ pub async fn connect_vpn(
         settings.forced_servers.clone(),
         binding_preference,
         settings.game_process_performance,
+        false, // enable_api_tunneling
     )
     .await
     .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))

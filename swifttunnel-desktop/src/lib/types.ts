@@ -371,6 +371,7 @@ export interface AppSettings {
   game_process_performance: GameProcessPerformanceSettings;
   roblox_network_bypass: boolean;
   roblox_network_bypass_sni_fragment: boolean;
+  enable_api_tunneling: boolean;
 }
 
 // ── System ──

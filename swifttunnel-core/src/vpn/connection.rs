@@ -660,6 +660,7 @@ impl VpnConnection {
         forced_servers: std::collections::HashMap<String, String>,
         binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
+        enable_api_tunneling: bool,
     ) -> VpnResult<()> {
         {
             let state = self.state.lock().await;
@@ -767,6 +768,7 @@ impl VpnConnection {
                     forced_servers,
                     binding_preference.clone(),
                     process_performance_settings,
+                    enable_api_tunneling,
                 )
                 .await
             {
@@ -830,6 +832,7 @@ impl VpnConnection {
         forced_servers: std::collections::HashMap<String, String>,
         binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
+        enable_api_tunneling: bool,
     ) -> VpnResult<(Vec<String>, String, String, SocketAddr)> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -1333,6 +1336,12 @@ impl VpnConnection {
             let _ = driver.close();
             VpnError::SplitTunnelSetupFailed(format!("Failed to configure V3 split tunnel: {}", e))
         })?;
+
+        // Enable TCP API tunneling if the user toggled it on.
+        if enable_api_tunneling {
+            driver.set_api_tunneling_enabled(true);
+            log::info!("V3: API tunneling (TCP) enabled");
+        }
 
         let process_performance_policy =
             GameProcessPerformancePolicy::from(process_performance_settings);

@@ -32,6 +32,7 @@ const RUST_SETTINGS_FIELDS = [
   "game_process_performance",
   "roblox_network_bypass",
   "roblox_network_bypass_sni_fragment",
+  "enable_api_tunneling",
 ];
 
 function extractInterfaceFields(source: string, interfaceName: string): string[] {

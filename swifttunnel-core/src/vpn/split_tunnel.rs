@@ -577,6 +577,61 @@ impl SplitTunnelDriver {
         log::info!("Stale state cleanup complete");
     }
 
+    /// Stop and delete the NDISRD driver service from SCM for uninstall.
+    ///
+    /// This removes the kernel driver registration so no artifacts remain.
+    /// Individual errors are ignored so the rest of uninstall can proceed.
+    pub fn cleanup_driver_service_for_uninstall() {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Services::*;
+
+        const SERVICE_NAME: &str = "NDISRD";
+
+        log::info!("Cleaning up NDISRD driver service for uninstall");
+
+        unsafe {
+            let scm = match OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS) {
+                Ok(scm) => scm,
+                Err(e) => {
+                    log::warn!("Failed to open SCM for driver cleanup: {}", e);
+                    return;
+                }
+            };
+
+            let service_name_wide: Vec<u16> = SERVICE_NAME
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+
+            match OpenServiceW(
+                scm,
+                PCWSTR(service_name_wide.as_ptr()),
+                SERVICE_ALL_ACCESS,
+            ) {
+                Ok(service) => {
+                    // Stop the service first (ignore error — may already be stopped)
+                    let mut status = SERVICE_STATUS::default();
+                    let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
+
+                    // Delete the service from SCM
+                    match DeleteService(service) {
+                        Ok(_) => log::info!("NDISRD service deleted from SCM"),
+                        Err(e) => log::warn!("Failed to delete NDISRD service: {}", e),
+                    }
+
+                    let _ = CloseServiceHandle(service);
+                }
+                Err(_) => {
+                    log::debug!("NDISRD service not found (already removed or never installed)");
+                }
+            }
+
+            let _ = CloseServiceHandle(scm);
+        }
+
+        log::info!("NDISRD driver service cleanup completed");
+    }
+
     /// Open the driver
     pub fn open(&mut self) -> VpnResult<()> {
         if self.parallel_interceptor.is_some() {
@@ -842,6 +897,13 @@ impl SplitTunnelDriver {
         self.parallel_interceptor
             .as_ref()
             .and_then(|p| p.current_relay_addr())
+    }
+
+    /// Enable or disable TCP API tunneling (proxy to ParallelInterceptor).
+    pub fn set_api_tunneling_enabled(&self, enabled: bool) {
+        if let Some(ref interceptor) = self.parallel_interceptor {
+            interceptor.set_api_tunneling_enabled(enabled);
+        }
     }
 
     /// Trigger immediate cache refresh (called by ETW when game process detected)

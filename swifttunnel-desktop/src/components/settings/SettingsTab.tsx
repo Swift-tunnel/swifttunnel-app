@@ -514,6 +514,16 @@ export function SettingsTab() {
             </span>
           </div>
         </details>
+        <Row
+          label="API Tunneling"
+          desc="Route game API calls (HTTPS) through the relay to bypass ISP blocking"
+          tooltip="When enabled, TCP traffic from game processes is also tunneled through the relay server, not just UDP game packets. This can help if your ISP blocks game API endpoints. Requires a TCP-capable relay server."
+        >
+          <Toggle
+            enabled={settings.enable_api_tunneling}
+            onChange={(v) => set({ enable_api_tunneling: v })}
+          />
+        </Row>
       </Section>
 
       {/* ── Updates ── */}

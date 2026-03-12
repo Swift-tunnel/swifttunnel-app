@@ -268,6 +268,7 @@ pub async fn vpn_connect(
         forced_servers,
         binding_preference,
         game_process_performance,
+        enable_api_tunneling,
     ) = {
         let mut settings = state.settings.lock();
         let previous_overrides = settings.network_binding_overrides.clone();
@@ -296,6 +297,7 @@ pub async fn vpn_connect(
             settings_snapshot.forced_servers.clone(),
             binding_preference,
             settings_snapshot.game_process_performance,
+            settings_snapshot.enable_api_tunneling,
         )
     };
 
@@ -335,6 +337,7 @@ pub async fn vpn_connect(
             forced_servers,
             binding_preference,
             game_process_performance,
+            enable_api_tunneling,
         )
         .await
         .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));

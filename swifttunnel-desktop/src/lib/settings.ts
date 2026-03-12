@@ -69,6 +69,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   roblox_network_bypass: false,
   roblox_network_bypass_sni_fragment: false,
+  enable_api_tunneling: false,
 };
 
 export function mergeAppSettings(

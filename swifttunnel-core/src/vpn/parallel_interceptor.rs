@@ -657,6 +657,8 @@ pub struct ParallelInterceptor {
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     /// Queue overflow policy used by reader thread when worker channels are full.
     queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
+    /// Whether TCP API tunneling is enabled (tunnel TCP from game processes too).
+    api_tunneling_enabled: Arc<AtomicBool>,
     /// Sampled event counter for queue-full handling.
     queue_full_events: Arc<AtomicU64>,
     /// Last time we attempted to rebind adapters due to default-route changes.
@@ -726,6 +728,7 @@ impl ParallelInterceptor {
             queue_overflow_mode: Arc::new(std::sync::atomic::AtomicU8::new(
                 QueueOverflowMode::Bypass as u8,
             )),
+            api_tunneling_enabled: Arc::new(AtomicBool::new(false)),
             queue_full_events: Arc::new(AtomicU64::new(0)),
             last_rebind_at: None,
         }
@@ -854,6 +857,16 @@ impl ParallelInterceptor {
         self.queue_overflow_mode
             .store(mode as u8, Ordering::Relaxed);
         log::info!("Queue overflow mode set to {:?}", mode);
+    }
+
+    /// Enable or disable TCP API tunneling.
+    ///
+    /// When enabled, TCP traffic from tunnel apps (e.g. Roblox) will also be
+    /// routed through the VPN relay, not just UDP. This is useful for tunneling
+    /// game API/matchmaking calls that use HTTPS.
+    pub fn set_api_tunneling_enabled(&self, enabled: bool) {
+        self.api_tunneling_enabled.store(enabled, Ordering::Relaxed);
+        log::info!("API tunneling (TCP) set to {}", enabled);
     }
 
     /// Check if driver is available
@@ -2902,6 +2915,7 @@ impl ParallelInterceptor {
         let reader_worker_stats = self.worker_stats.clone();
         let reader_auto_router = self.auto_router.clone();
         let reader_queue_overflow_mode = Arc::clone(&self.queue_overflow_mode);
+        let reader_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
         let reader_queue_full_events = Arc::clone(&self.queue_full_events);
         let physical_name =
             Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
@@ -2917,6 +2931,7 @@ impl ParallelInterceptor {
                 reader_worker_stats,
                 reader_auto_router,
                 reader_queue_overflow_mode,
+                reader_api_tunneling,
                 reader_queue_full_events,
                 reader_stop,
                 num_workers,
@@ -3349,6 +3364,7 @@ fn run_packet_reader(
     worker_stats: Vec<Arc<WorkerStats>>,
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
+    api_tunneling_enabled: Arc<AtomicBool>,
     queue_full_events: Arc<AtomicU64>,
     stop_flag: Arc<AtomicBool>,
     num_workers: usize,
@@ -3458,6 +3474,9 @@ fn run_packet_reader(
         }
         snapshot = new_snapshot;
 
+        // Load api_tunneling setting once per batch (cheap atomic load).
+        let api_tunneling = api_tunneling_enabled.load(Ordering::Relaxed);
+
         // Prepare passthrough queues
         passthrough_to_adapter = EthMRequest::new(physical_handle);
         passthrough_to_mstcp = EthMRequest::new(physical_handle);
@@ -3476,7 +3495,7 @@ fn run_packet_reader(
 
                     // Decide routing here to keep bypass traffic out of the workers.
                     let should_tunnel =
-                        should_route_to_vpn_with_inline_cache(data, &snapshot, &mut inline_cache);
+                        should_route_to_vpn_with_inline_cache(data, &snapshot, &mut inline_cache, api_tunneling);
 
                     // Auto-routing whitelist bypass: if bypass is active, tunnel-eligible packets
                     // should be passed through to the physical adapter instead.
@@ -4541,6 +4560,7 @@ fn should_route_to_vpn_with_inline_cache(
     data: &[u8],
     snapshot: &ProcessSnapshot,
     inline_cache: &mut InlineCache,
+    api_tunneling: bool,
 ) -> bool {
     // Thread-local counters for debugging
     thread_local! {
@@ -4638,7 +4658,7 @@ fn should_route_to_vpn_with_inline_cache(
     // is handled below so we can seed the inline cache for game-server hits.
     if snapshot.should_tunnel(src_ip, src_port, protocol) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
-        let result = super::process_cache::is_likely_game_traffic(dst_port, protocol);
+        let result = super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
         if protocol == Protocol::Udp && more_fragments {
             FRAGMENT_DECISIONS.with(|cache| {
                 let mut cache = cache.borrow_mut();
@@ -4657,7 +4677,7 @@ fn should_route_to_vpn_with_inline_cache(
     let cache_key = (src_ip, src_port, protocol);
     if inline_cache.contains_key(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        let result = super::process_cache::is_likely_game_traffic(dst_port, protocol);
+        let result = super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
         if protocol == Protocol::Udp && more_fragments {
             FRAGMENT_DECISIONS.with(|cache| {
                 let mut cache = cache.borrow_mut();
@@ -4674,7 +4694,9 @@ fn should_route_to_vpn_with_inline_cache(
     // Handles cache misses caused by local IP representation drift while keeping
     // routing decision tied to known tunnel-owned ports.
     let mut is_tunnel_app = false;
-    if protocol == Protocol::Udp && snapshot.should_tunnel_by_port_fallback(src_port, protocol) {
+    if (protocol == Protocol::Udp || (protocol == Protocol::Tcp && api_tunneling))
+        && snapshot.should_tunnel_by_port_fallback(src_port, protocol, api_tunneling)
+    {
         is_tunnel_app = true;
         PORT_FALLBACK_HITS.with(|c| c.set(c.get() + 1));
     }
@@ -4707,7 +4729,7 @@ fn should_route_to_vpn_with_inline_cache(
         // 1. Only game traffic goes to these IP ranges
         // 2. If somehow non-game traffic hits these IPs, tunneling is harmless
         // 3. Subsequent packets will be correctly identified once cache is populated
-        let is_game_dst = super::process_cache::is_game_server(dst_ip, dst_port, protocol);
+        let is_game_dst = super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
         if is_game_dst {
             // Log speculative tunneling for debugging (first 20 times only)
             thread_local! {
@@ -4742,8 +4764,8 @@ fn should_route_to_vpn_with_inline_cache(
             false
         }
     } else {
-        // Process IS a tunnel app - trust it, tunnel all its UDP
-        super::process_cache::is_likely_game_traffic(dst_port, protocol)
+        // Process IS a tunnel app - trust it, tunnel all its game traffic
+        super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
     };
 
     if protocol == Protocol::Udp && more_fragments {
@@ -4818,7 +4840,7 @@ fn should_route_to_vpn_with_inline_cache(
                 dst_ip,
                 dst_port,
                 is_tunnel_app,
-                super::process_cache::is_roblox_game_server(dst_ip, dst_port, protocol)
+                super::process_cache::is_roblox_game_server(dst_ip, dst_port, protocol, api_tunneling)
             );
         }
     }
@@ -6783,6 +6805,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -6793,7 +6816,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(
             inline_cache.is_empty(),
@@ -6819,6 +6843,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -6829,7 +6854,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(inline_cache.is_empty());
     }
@@ -6852,6 +6878,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -6862,7 +6889,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(inline_cache.is_empty());
     }
@@ -6885,6 +6913,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -6895,7 +6924,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(inline_cache.is_empty());
     }
@@ -6918,6 +6948,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -6928,7 +6959,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(inline_cache.is_empty());
     }
@@ -6951,6 +6983,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -6961,7 +6994,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &packet,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(inline_cache.is_empty());
     }
@@ -6984,6 +7018,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -6997,12 +7032,14 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &first_fragment,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(should_route_to_vpn_with_inline_cache(
             &next_fragment,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
     }
 
@@ -7024,6 +7061,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7035,7 +7073,8 @@ mod tests {
         assert!(!should_route_to_vpn_with_inline_cache(
             &next_fragment,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
     }
 
@@ -7188,6 +7227,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7203,7 +7243,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &first_fragment,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(
             parse_ports(&short_tail_fragment).is_none(),
@@ -7212,7 +7253,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &short_tail_fragment,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
 
         let worker = select_worker_id_for_outbound_packet(&short_tail_fragment, 4);
@@ -7299,6 +7341,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7309,7 +7352,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(inline_cache.contains_key(&(packet_ip, src_port, Protocol::Udp)));
     }
@@ -7331,6 +7375,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7341,7 +7386,8 @@ mod tests {
         assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(!inline_cache.contains_key(&(packet_ip, src_port, Protocol::Udp)));
     }
@@ -7398,6 +7444,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7448,7 +7495,7 @@ mod tests {
         for (name, frame) in frames {
             let mut inline_cache: InlineCache = HashMap::new();
             assert!(
-                should_route_to_vpn_with_inline_cache(&frame, &snapshot, &mut inline_cache),
+                should_route_to_vpn_with_inline_cache(&frame, &snapshot, &mut inline_cache, false),
                 "expected tunneled routing for {}",
                 name
             );
@@ -7473,6 +7520,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7483,7 +7531,8 @@ mod tests {
         assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(inline_cache.is_empty());
     }
@@ -7500,6 +7549,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7511,7 +7561,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
     }
 
@@ -7527,6 +7578,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7537,7 +7589,8 @@ mod tests {
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(
             inline_cache.contains_key(&(src_ip, src_port, Protocol::Udp)),
@@ -7557,6 +7610,7 @@ mod tests {
             pid_names: HashMap::new(),
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7567,7 +7621,8 @@ mod tests {
         assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
-            &mut inline_cache
+            &mut inline_cache,
+            false,
         ));
         assert!(inline_cache.is_empty());
     }
@@ -7668,5 +7723,141 @@ mod tests {
 
         interceptor.physical_adapter_if_index = None;
         assert!(!interceptor.get_diagnostics().has_default_route);
+    }
+
+    #[test]
+    fn test_api_tunneling_enabled_defaults_to_false() {
+        let interceptor = ParallelInterceptor::new(Vec::new());
+        assert!(!interceptor.api_tunneling_enabled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_api_tunneling_enabled_setter() {
+        let interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.set_api_tunneling_enabled(true);
+        assert!(interceptor.api_tunneling_enabled.load(Ordering::Relaxed));
+        interceptor.set_api_tunneling_enabled(false);
+        assert!(!interceptor.api_tunneling_enabled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_tcp_tunneled_with_api_tunneling_enabled() {
+        // TCP from a Roblox process should be tunneled when api_tunneling is enabled
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 50000;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(6, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        // Without api_tunneling: TCP should NOT be tunneled
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            false,
+        ));
+
+        // With api_tunneling: TCP SHOULD be tunneled
+        inline_cache.clear();
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+    }
+
+    #[test]
+    fn test_tcp_speculative_game_server_with_api_tunneling() {
+        // TCP to a Roblox game server IP should be speculatively tunneled
+        // when api_tunneling is enabled, even without a process match
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 40001;
+        let dst_port = 443;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(6, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        // Without api_tunneling: TCP should NOT be speculatively tunneled
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            false,
+        ));
+
+        // With api_tunneling: TCP SHOULD be speculatively tunneled to game server
+        inline_cache.clear();
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+    }
+
+    #[test]
+    fn test_udp_unaffected_by_api_tunneling_flag() {
+        // UDP routing should be identical regardless of api_tunneling flag
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50000;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+
+        let mut cache_a: InlineCache = HashMap::new();
+        let result_a = should_route_to_vpn_with_inline_cache(&frame, &snapshot, &mut cache_a, false);
+
+        let mut cache_b: InlineCache = HashMap::new();
+        let result_b = should_route_to_vpn_with_inline_cache(&frame, &snapshot, &mut cache_b, true);
+
+        assert_eq!(result_a, result_b, "UDP routing must be identical regardless of api_tunneling");
+        assert!(result_a, "UDP from tunnel app should always be tunneled");
     }
 }

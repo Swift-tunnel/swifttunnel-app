@@ -934,6 +934,29 @@ pub fn cleanup_all_system_state() {
     // 9. Remove the snapshot file itself
     NetworkBooster::clear_snapshot();
 
+    // 10. Restore system optimizer settings (MMCSS, Game Bar, fullscreen opts, Game Mode, power plan)
+    crate::system_optimizer::cleanup_for_uninstall();
+
+    // 11. NDISRD driver service: intentionally NOT deleted here.
+    // Stopping/deleting the NDIS filter driver mid-session unbinds it from
+    // network adapters and can kill the user's internet. The NSIS uninstaller
+    // removes the driver files; the orphaned service entry is cleaned up on
+    // reboot automatically.
+
+    // 12. Remove Roblox FFlag entries from ClientAppSettings.json
+    crate::roblox_optimizer::RobloxOptimizer::cleanup_for_uninstall();
+
+    // 13. Delete autostart Run key
+    let _ = hidden_command("reg")
+        .args([
+            "delete",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "SwiftTunnel",
+            "/f",
+        ])
+        .output();
+
     info!("Full system cleanup completed");
 }
 

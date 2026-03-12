@@ -101,10 +101,11 @@ fn ip_in_range(ip: Ipv4Addr, network: u32, mask: u32) -> bool {
 /// - IP is in known Roblox server ranges
 /// - Protocol is UDP
 #[inline(always)]
-pub fn is_roblox_game_server(dst_ip: Ipv4Addr, _dst_port: u16, protocol: Protocol) -> bool {
-    // Must be UDP for game traffic
-    if protocol != Protocol::Udp {
-        return false;
+pub fn is_roblox_game_server(dst_ip: Ipv4Addr, _dst_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
+    match protocol {
+        Protocol::Udp => {}
+        Protocol::Tcp if api_tunneling => {}
+        _ => return false,
     }
 
     // Check IP ranges
@@ -132,17 +133,19 @@ pub fn is_roblox_game_server(dst_ip: Ipv4Addr, _dst_port: u16, protocol: Protoco
 /// - Voice chat
 /// - Any other UDP the game needs
 #[inline(always)]
-pub fn is_likely_game_traffic(_dst_port: u16, protocol: Protocol) -> bool {
-    // Trust the process - if it's Roblox, tunnel ALL its UDP traffic
-    // TCP is intentionally not tunneled (web API calls don't need VPN routing)
-    protocol == Protocol::Udp
+pub fn is_likely_game_traffic(_dst_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
+    match protocol {
+        Protocol::Udp => true,
+        Protocol::Tcp => api_tunneling,
+        _ => false,
+    }
 }
 
 /// Check if destination is any known game server (extensible for future games)
 #[inline(always)]
-pub fn is_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bool {
+pub fn is_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
     // Currently only Roblox, but can add Valorant, Fortnite, etc.
-    is_roblox_game_server(dst_ip, dst_port, protocol)
+    is_roblox_game_server(dst_ip, dst_port, protocol, api_tunneling)
 }
 
 // ============================================================================
@@ -438,9 +441,14 @@ impl ProcessSnapshot {
     /// fails but we still want to recover tunnel routing for packets emitted by a
     /// known tunnel app that may have shifted local IP representation.
     #[inline]
-    pub fn should_tunnel_by_port_fallback(&self, local_port: u16, protocol: Protocol) -> bool {
+    pub fn should_tunnel_by_port_fallback(&self, local_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
         if protocol == Protocol::Udp && self.explicit_tunnel_udp_ports.contains(&local_port) {
             return true;
+        }
+
+        let protocol_ok = protocol == Protocol::Udp || (protocol == Protocol::Tcp && api_tunneling);
+        if !protocol_ok {
+            return false;
         }
 
         self.connections.iter().any(|(key, pid)| {
@@ -466,6 +474,7 @@ impl ProcessSnapshot {
         protocol: Protocol,
         dst_ip: Ipv4Addr,
         dst_port: u16,
+        api_tunneling: bool,
     ) -> bool {
         // First check: Is this from a tunnel app?
         let is_tunnel_app = self.is_tunnel_connection(local_ip, local_port, protocol);
@@ -474,12 +483,12 @@ impl ProcessSnapshot {
         // even if the destination IP isn't in our known list.
         // This handles new Roblox server deployments gracefully.
         if is_tunnel_app {
-            return is_likely_game_traffic(dst_port, protocol);
+            return is_likely_game_traffic(dst_port, protocol, api_tunneling);
         }
 
         // Process not detected - use strict IP range check for speculative tunneling
         // This catches first packets before process cache is populated
-        is_game_server(dst_ip, dst_port, protocol)
+        is_game_server(dst_ip, dst_port, protocol, api_tunneling)
     }
 
     /// Check if connection belongs to a tunnel app (internal helper)
@@ -885,7 +894,8 @@ mod tests {
             50000,
             Protocol::Udp,
             Ipv4Addr::new(128, 116, 50, 100),
-            55000 // Roblox game server
+            55000, // Roblox game server
+            false,
         ));
 
         // Should NOT tunnel TCP (web API calls don't need VPN routing)
@@ -894,7 +904,8 @@ mod tests {
             50000,
             Protocol::Tcp,
             Ipv4Addr::new(128, 116, 50, 100),
-            55000
+            55000,
+            false,
         ));
 
         // Permissive: SHOULD tunnel UDP to non-game IP from tunnel app
@@ -904,7 +915,8 @@ mod tests {
             50000,
             Protocol::Udp,
             Ipv4Addr::new(1, 1, 1, 1),
-            443
+            443,
+            false,
         ));
     }
 
@@ -1092,8 +1104,8 @@ mod tests {
         cache.update(connections, pid_names);
         let snap = cache.get_snapshot();
 
-        assert!(snap.should_tunnel_by_port_fallback(55000, Protocol::Udp));
-        assert!(!snap.should_tunnel_by_port_fallback(55001, Protocol::Udp));
+        assert!(snap.should_tunnel_by_port_fallback(55000, Protocol::Udp, false));
+        assert!(!snap.should_tunnel_by_port_fallback(55001, Protocol::Udp, false));
     }
 
     #[test]
@@ -1111,6 +1123,92 @@ mod tests {
         cache.update(connections, pid_names);
         let snap = cache.get_snapshot();
 
-        assert!(!snap.should_tunnel_by_port_fallback(56000, Protocol::Udp));
+        assert!(!snap.should_tunnel_by_port_fallback(56000, Protocol::Udp, false));
+    }
+
+    #[test]
+    fn test_api_tunneling_enables_tcp() {
+        assert!(is_likely_game_traffic(443, Protocol::Tcp, true));
+        assert!(!is_likely_game_traffic(443, Protocol::Tcp, false));
+        assert!(is_likely_game_traffic(443, Protocol::Udp, false));
+        assert!(is_likely_game_traffic(443, Protocol::Udp, true));
+    }
+
+    #[test]
+    fn test_roblox_game_server_tcp_with_api_tunneling() {
+        let roblox_ip = Ipv4Addr::new(128, 116, 50, 100);
+        assert!(is_roblox_game_server(roblox_ip, 443, Protocol::Tcp, true));
+        assert!(!is_roblox_game_server(roblox_ip, 443, Protocol::Tcp, false));
+        assert!(is_roblox_game_server(roblox_ip, 55000, Protocol::Udp, false));
+    }
+
+    #[test]
+    fn test_game_server_tcp_with_api_tunneling() {
+        let roblox_ip = Ipv4Addr::new(128, 116, 50, 100);
+        assert!(is_game_server(roblox_ip, 443, Protocol::Tcp, true));
+        assert!(!is_game_server(roblox_ip, 443, Protocol::Tcp, false));
+        assert!(is_game_server(roblox_ip, 55000, Protocol::Udp, false));
+        assert!(is_game_server(roblox_ip, 55000, Protocol::Udp, true));
+    }
+
+    #[test]
+    fn test_should_tunnel_v2_with_api_tunneling() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Tcp),
+            1234,
+        );
+
+        let mut pid_names = HashMap::new();
+        pid_names.insert(1234, "RobloxPlayerBeta.exe".to_string());
+
+        cache.update(connections, pid_names);
+
+        let snap = cache.get_snapshot();
+
+        // TCP from tunnel app should be tunneled when api_tunneling is enabled
+        assert!(snap.should_tunnel_v2(
+            Ipv4Addr::new(192, 168, 1, 100),
+            50000,
+            Protocol::Tcp,
+            Ipv4Addr::new(128, 116, 50, 100),
+            443,
+            true,
+        ));
+
+        // TCP from tunnel app should NOT be tunneled when api_tunneling is disabled
+        assert!(!snap.should_tunnel_v2(
+            Ipv4Addr::new(192, 168, 1, 100),
+            50000,
+            Protocol::Tcp,
+            Ipv4Addr::new(128, 116, 50, 100),
+            443,
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_should_tunnel_by_port_fallback_tcp_with_api_tunneling() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 10), 55000, Protocol::Tcp),
+            7001,
+        );
+        let mut pid_names = HashMap::new();
+        pid_names.insert(7001, "RobloxPlayerBeta.exe".to_string());
+
+        cache.update(connections, pid_names);
+        let snap = cache.get_snapshot();
+
+        // TCP port fallback should work when api_tunneling is enabled
+        assert!(snap.should_tunnel_by_port_fallback(55000, Protocol::Tcp, true));
+        // TCP port fallback should NOT work when api_tunneling is disabled
+        assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Tcp, false));
+        // UDP port fallback is unchanged regardless of api_tunneling
+        assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Udp, false));
     }
 }

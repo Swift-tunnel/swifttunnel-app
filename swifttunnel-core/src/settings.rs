@@ -184,6 +184,13 @@ pub struct AppSettings {
     /// Only effective when `roblox_network_bypass` is also enabled.
     #[serde(default)]
     pub roblox_network_bypass_sni_fragment: bool,
+
+    /// Route game TCP/HTTPS traffic through the relay to bypass ISP blocking.
+    ///
+    /// When enabled, TCP packets from tunnel apps are forwarded through the
+    /// V3 relay alongside UDP game traffic. Off by default.
+    #[serde(default)]
+    pub enable_api_tunneling: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -276,6 +283,7 @@ impl Default for AppSettings {
             game_process_performance: GameProcessPerformanceSettings::default(),
             roblox_network_bypass: false,
             roblox_network_bypass_sni_fragment: false,
+            enable_api_tunneling: false,
         }
     }
 }
@@ -524,6 +532,22 @@ mod tests {
                 .contains(&"Singapore".to_string())
         );
         assert!(loaded.whitelisted_regions.contains(&"US East".to_string()));
+    }
+
+    #[test]
+    fn test_settings_api_tunneling_default() {
+        let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
+        let loaded: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!loaded.enable_api_tunneling);
+    }
+
+    #[test]
+    fn test_settings_api_tunneling_roundtrip() {
+        let mut settings = AppSettings::default();
+        settings.enable_api_tunneling = true;
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert!(loaded.enable_api_tunneling);
     }
 
     #[test]

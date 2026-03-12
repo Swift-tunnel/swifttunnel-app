@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_network_boosts_count() {
-        assert_eq!(boost_info::network_boosts().len(), 5);
+        assert_eq!(boost_info::network_boosts().len(), 4);
     }
 
     #[test]

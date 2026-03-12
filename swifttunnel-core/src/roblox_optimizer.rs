@@ -873,6 +873,22 @@ impl Default for RobloxOptimizer {
     }
 }
 
+impl RobloxOptimizer {
+    /// Remove all SwiftTunnel FFlag entries for uninstall.
+    ///
+    /// Constructs a temporary instance and delegates to the private
+    /// `remove_all_fflags` method. Individual errors are logged but
+    /// never propagate so the rest of uninstall can proceed.
+    pub fn cleanup_for_uninstall() {
+        info!("Roblox optimizer: cleaning up FFlags for uninstall");
+        let optimizer = Self::new();
+        if let Err(e) = optimizer.remove_all_fflags() {
+            warn!("Failed to remove Roblox FFlags during uninstall: {e}");
+        }
+        info!("Roblox optimizer: uninstall cleanup completed");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
