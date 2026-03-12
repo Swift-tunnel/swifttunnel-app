@@ -195,10 +195,6 @@ pub fn run() {
             commands::system::system_open_url,
             commands::system::system_restart_as_admin,
             commands::system::system_cleanup,
-            commands::system::system_cleanup_hosts,
-            // Proxy
-            commands::proxy::proxy_get_state,
-            commands::proxy::proxy_toggle,
         ])
         .setup(move |app| {
             info!("SwiftTunnel desktop app starting up");
@@ -211,7 +207,7 @@ pub fn run() {
             let runtime =
                 Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
 
-            // Clean up any leftover hosts-file entries from a previous crash
+            // Clean up any stale hosts-file entries from old proxy versions
             swifttunnel_core::roblox_proxy::hosts::recover_stale();
 
             let app_state = AppState::new(runtime.clone()).expect("Failed to initialize app state");
@@ -223,8 +219,6 @@ pub fn run() {
             // used store=persistent which broke WiFi on some drivers).
             swifttunnel_core::network_booster::fix_mtu_on_upgrade();
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
-            let proxy_enabled = app_state.settings.lock().roblox_network_bypass;
-            let proxy_sni_frag = app_state.settings.lock().roblox_network_bypass_sni_fragment;
             app.manage(app_state);
 
             if let Err(e) = autostart::sync_run_on_startup(app.handle(), run_on_startup_enabled) {
@@ -266,19 +260,6 @@ pub fn run() {
                 }
             });
 
-            // Start Roblox network bypass proxy if enabled
-            if proxy_enabled {
-                let app_handle = app.handle().clone();
-                runtime.spawn(async move {
-                    if let Some(state) = app_handle.try_state::<AppState>() {
-                        let mut proxy = state.roblox_proxy.lock().await;
-                        if let Err(e) = proxy.start(proxy_sni_frag).await {
-                            log::error!("Failed to start Roblox proxy on startup: {}", e);
-                        }
-                    }
-                });
-            }
-
             // Spawn background task to refresh auth profile
             let app_handle = app.handle().clone();
             runtime.spawn(async move {
@@ -299,7 +280,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
-                // Ensure hosts file is cleaned up on exit
+                // Clean up any stale hosts-file entries from old proxy versions
                 swifttunnel_core::roblox_proxy::hosts::recover_stale();
                 // Restore network booster modifications (registry, MTU, firewall, QoS)
                 if let Some(state) = _app.try_state::<crate::state::AppState>() {

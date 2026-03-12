@@ -369,8 +369,6 @@ export interface AppSettings {
   network_binding_overrides: Record<string, string>;
   adapter_binding_mode: "smart_auto" | "manual";
   game_process_performance: GameProcessPerformanceSettings;
-  roblox_network_bypass: boolean;
-  roblox_network_bypass_sni_fragment: boolean;
   enable_api_tunneling: boolean;
 }
 
@@ -427,18 +425,6 @@ export interface RamCleanProgressEvent {
   trimmed_count: number;
   current_process: string | null;
   warning: string | null;
-}
-
-// ── Proxy ──
-
-export type ProxyState = "stopped" | "starting" | "running" | "error";
-
-export interface ProxyStateResponse {
-  state: ProxyState;
-  error: string | null;
-  active_connections: number;
-  total_connections: number;
-  bytes_relayed: number;
 }
 
 // ── Tabs ──

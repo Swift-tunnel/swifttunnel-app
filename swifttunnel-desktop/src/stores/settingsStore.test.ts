@@ -35,7 +35,6 @@ describe("stores/settingsStore", () => {
         prefer_performance_cores: false,
         unbind_cpu0: true,
       },
-      roblox_network_bypass: true,
     });
 
     const useSettingsStore = await loadStore();
@@ -51,7 +50,6 @@ describe("stores/settingsStore", () => {
     expect(
       useSettingsStore.getState().settings.game_process_performance.unbind_cpu0,
     ).toBe(true);
-    expect(useSettingsStore.getState().settings.roblox_network_bypass).toBe(true);
     expect(useSettingsStore.getState().activeTab).toBe("boost");
     expect(
       useSettingsStore.getState().settings.config.roblox_settings.window_width,
@@ -115,6 +113,5 @@ describe("stores/settingsStore", () => {
     expect(payload.config.roblox_settings.window_width).toBe(1280);
     expect(payload.config.roblox_settings.window_height).toBe(720);
     expect(payload.config.roblox_settings.window_fullscreen).toBe(false);
-    expect(payload.roblox_network_bypass).toBe(false);
   });
 });

@@ -67,8 +67,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
     prefer_performance_cores: false,
     unbind_cpu0: false,
   },
-  roblox_network_bypass: false,
-  roblox_network_bypass_sni_fragment: false,
   enable_api_tunneling: false,
 };
 

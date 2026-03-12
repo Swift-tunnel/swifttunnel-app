@@ -30,8 +30,6 @@ const RUST_SETTINGS_FIELDS = [
   "preferred_physical_adapter_guid",
   "adapter_binding_mode",
   "game_process_performance",
-  "roblox_network_bypass",
-  "roblox_network_bypass_sni_fragment",
   "enable_api_tunneling",
 ];
 
