@@ -1,6 +1,8 @@
 // Mock @tauri-apps/api/core for browser preview
 
-const MOCK_SETTINGS = {
+import type { AppSettings } from "../lib/types";
+
+const MOCK_SETTINGS: AppSettings = {
   theme: "dark",
   config: {
     profile: "Balanced",
@@ -30,7 +32,6 @@ const MOCK_SETTINGS = {
       prioritize_roblox_traffic: true,
       disable_nagle: true,
       disable_network_throttling: true,
-
       gaming_qos: true,
     },
     auto_start_with_roblox: false,
@@ -39,8 +40,8 @@ const MOCK_SETTINGS = {
   window_state: { x: null, y: null, width: 560, height: 750, maximized: false },
   selected_region: "singapore",
   selected_server: "singapore",
-  current_tab: "connect",
-  update_settings: { auto_check: true, last_check: 1739350000 },
+  current_tab: "boost",
+  update_settings: { auto_check: true, last_check: 1739350000, dismissed_version: null },
   update_channel: "Stable",
   minimize_to_tray: false,
   run_on_startup: true,
@@ -49,6 +50,10 @@ const MOCK_SETTINGS = {
   last_connected_region: "singapore",
   expanded_boost_info: [],
   selected_game_presets: ["roblox", "valorant"],
+  network_test_results: {
+    last_stability: null,
+    last_speed: null,
+  },
   forced_servers: {},
   artificial_latency_ms: 0,
   experimental_mode: false,
@@ -64,6 +69,7 @@ const MOCK_SETTINGS = {
     prefer_performance_cores: false,
     unbind_cpu0: false,
   },
+  enable_api_tunneling: false,
 };
 
 let mockVpnConnected = false;
@@ -325,7 +331,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     };
   },
 
-  settings_load: () => ({ json: JSON.stringify(MOCK_SETTINGS) }),
+  settings_load: () => MOCK_SETTINGS,
   settings_save: () => {},
 
   updater_check_channel: (args: unknown) => {
