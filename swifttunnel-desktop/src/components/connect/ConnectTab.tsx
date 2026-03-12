@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -587,7 +587,6 @@ function RegionCard({
               open={menuOpen}
               onToggle={() => setMenuOpen((v) => !v)}
               servers={region.servers}
-              regionId={region.id}
               forcedServer={forcedServer}
               onForceServer={(srv) => { onForceServer(region.id, srv); setMenuOpen(false); }}
             />
@@ -624,13 +623,12 @@ function RegionCard({
 }
 
 const ServerMenu = ({
-  ref, open, onToggle, servers, regionId, forcedServer, onForceServer,
+  ref, open, onToggle, servers, forcedServer, onForceServer,
 }: {
   ref: React.Ref<HTMLDivElement>;
   open: boolean;
   onToggle: () => void;
   servers: string[];
-  regionId: string;
   forcedServer: string | undefined;
   onForceServer: (server: string | null) => void;
 }) => (
