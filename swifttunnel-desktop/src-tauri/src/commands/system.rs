@@ -637,6 +637,11 @@ pub fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn system_show_notification(title: String, body: String) {
+    swifttunnel_core::notification::show_notification(&title, &body);
+}
+
+#[tauri::command]
 pub fn system_open_url(url: String) -> Result<(), String> {
     swifttunnel_core::utils::open_url(&url);
     Ok(())

@@ -937,16 +937,20 @@ pub fn cleanup_all_system_state() {
     // 10. Restore system optimizer settings (MMCSS, Game Bar, fullscreen opts, Game Mode, power plan)
     crate::system_optimizer::cleanup_for_uninstall();
 
-    // 11. NDISRD driver service: intentionally NOT deleted here.
+    // 11. Recover TSO/IPv6 adapter settings if they were left disabled by a crash
+    crate::vpn::recover_tso_on_startup();
+    crate::vpn::recover_ipv6_on_startup();
+
+    // 12. NDISRD driver service: intentionally NOT deleted here.
     // Stopping/deleting the NDIS filter driver mid-session unbinds it from
     // network adapters and can kill the user's internet. The NSIS uninstaller
     // removes the driver files; the orphaned service entry is cleaned up on
     // reboot automatically.
 
-    // 12. Remove Roblox FFlag entries from ClientAppSettings.json
+    // 13. Remove Roblox FFlag entries from ClientAppSettings.json
     crate::roblox_optimizer::RobloxOptimizer::cleanup_for_uninstall();
 
-    // 13. Delete autostart Run key
+    // 14. Delete autostart Run key
     let _ = hidden_command("reg")
         .args([
             "delete",

@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "1.21.12"
+version = "1.21.13"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel desktop app - Tauri v2 frontend"
@@ -9,7 +9,6 @@ description = "SwiftTunnel desktop app - Tauri v2 frontend"
 swifttunnel-core = { path = "../../swifttunnel-core" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
-tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }

@@ -57,6 +57,7 @@ use serde::Serialize;
 
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
+use super::ipv6_recovery::{delete_ipv6_marker, write_ipv6_marker};
 use super::tso_recovery::{delete_tso_marker, write_tso_marker};
 use super::{VpnError, VpnResult};
 use crate::geolocation::is_roblox_game_server_ip;
@@ -2748,6 +2749,7 @@ impl ParallelInterceptor {
                 friendly_name
             );
             self.ipv6_was_disabled = true;
+            write_ipv6_marker(&friendly_name);
             return Ok(());
         }
 
@@ -2830,6 +2832,7 @@ impl ParallelInterceptor {
         }
 
         self.ipv6_was_disabled = false;
+        delete_ipv6_marker();
     }
 
     /// Start parallel interception

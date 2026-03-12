@@ -42,7 +42,10 @@ impl RobloxOptimizer {
 
         Self {
             settings_path,
-            backup_path: PathBuf::from("./roblox_settings_backup.xml"),
+            backup_path: dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("SwiftTunnel")
+                .join("roblox_settings_backup.xml"),
         }
     }
 

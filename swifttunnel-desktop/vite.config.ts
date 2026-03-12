@@ -33,7 +33,6 @@ export default defineConfig(({ command }) => {
             "@tauri-apps/api/dpi": path.resolve(__dirname, "src/mocks/tauri-dpi.ts"),
             "@tauri-apps/plugin-shell": path.resolve(__dirname, "src/mocks/tauri-plugin-shell.ts"),
             "@tauri-apps/plugin-updater": path.resolve(__dirname, "src/mocks/tauri-plugin-updater.ts"),
-            "@tauri-apps/plugin-notification": path.resolve(__dirname, "src/mocks/tauri-plugin-notification.ts"),
           },
         }
       : {},

@@ -23,6 +23,7 @@ pub mod auto_routing;
 pub mod config;
 pub mod connection;
 pub mod error_messages;
+pub mod ipv6_recovery;
 pub mod parallel_interceptor;
 pub mod process_cache;
 pub mod process_performance;
@@ -53,6 +54,7 @@ pub use split_tunnel::{
     GamePreset, SplitTunnelConfig, SplitTunnelDriver, get_apps_for_preset_set,
     get_apps_for_presets, get_tunnel_apps_for_presets,
 };
+pub use ipv6_recovery::recover_ipv6_on_startup;
 pub use tso_recovery::{emergency_tso_restore, recover_tso_on_startup};
 pub use udp_relay::{RelayAuthAckStatus, RelayContext, RelayPingSnapshot, UdpRelay};
 

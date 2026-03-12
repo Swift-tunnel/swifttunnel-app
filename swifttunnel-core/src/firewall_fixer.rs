@@ -127,22 +127,7 @@ impl FirewallFixer {
             }
         }
 
-        // 3. Reset Winsock catalog
-        let output = hidden_command("netsh").args(["winsock", "reset"]).output();
-        match output {
-            Ok(result) if result.status.success() => {
-                info!("Winsock catalog reset (reboot required for full effect)");
-                warn!("Winsock reset requires a system reboot to fully take effect");
-            }
-            Ok(_) => {
-                warn!("Failed to reset Winsock catalog");
-            }
-            Err(e) => {
-                warn!("Failed to reset Winsock catalog: {}", e);
-            }
-        }
-
-        // 4. Flush ARP cache
+        // 3. Flush ARP cache
         let output = hidden_command("netsh")
             .args(["interface", "ip", "delete", "arpcache"])
             .output();

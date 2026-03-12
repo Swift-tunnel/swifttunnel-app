@@ -144,7 +144,6 @@ pub fn run() {
                 restore_main_window(&window);
             }
         }))
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -194,6 +193,7 @@ pub fn run() {
             commands::system::system_install_driver,
             commands::system::system_open_url,
             commands::system::system_restart_as_admin,
+            commands::system::system_show_notification,
             commands::system::system_cleanup,
             commands::system::system_uninstall,
         ])
@@ -215,6 +215,10 @@ pub fn run() {
 
             // Recover network booster state from persisted snapshot (crash recovery)
             app_state.network_booster.lock().recover_from_snapshot();
+
+            // Recover TSO/IPv6 adapter settings if the app crashed while connected
+            swifttunnel_core::vpn::recover_tso_on_startup();
+            swifttunnel_core::vpn::recover_ipv6_on_startup();
 
             // One-time fix: reset MTU on all adapters (the removed MTU optimizer
             // used store=persistent which broke WiFi on some drivers).
