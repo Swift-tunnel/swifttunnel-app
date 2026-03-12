@@ -261,8 +261,8 @@ export function SettingsTab() {
         </Row>
       </Section>
 
-      {/* ── VPN ── */}
-      <Section title="VPN">
+      {/* ── Tunnel ── */}
+      <Section title="Tunnel">
         <Row
           label="Adapter Selection"
           desc="Smart Auto follows active route. Manual locks split tunnel to a specific adapter."
