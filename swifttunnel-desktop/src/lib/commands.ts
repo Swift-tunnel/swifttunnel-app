@@ -164,3 +164,6 @@ export const systemOpenUrl = (url: string) =>
 
 export const systemRestartAsAdmin = () =>
   invoke<void>("system_restart_as_admin");
+
+export const systemUninstall = () =>
+  invoke<void>("system_uninstall");

@@ -9,6 +9,7 @@ import { Tooltip, InfoIcon } from "../common/Tooltip";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
   systemOpenUrl,
+  systemUninstall,
   vpnListNetworkAdapters,
 } from "../../lib/commands";
 import type {
@@ -49,6 +50,8 @@ export function SettingsTab() {
     string | null
   >(null);
   const addToast = useToastStore((s) => s.addToast);
+  const [isUninstalling, setIsUninstalling] = useState(false);
+  const [uninstallError, setUninstallError] = useState<string | null>(null);
 
   const adapterBindingMode = settings.adapter_binding_mode;
   const manualAdapterBinding = adapterBindingMode === "manual";
@@ -686,6 +689,49 @@ export function SettingsTab() {
             </button>
           </div>
         </div>
+        <div className="flex items-center justify-between px-4 py-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm font-medium text-text-primary">
+              Uninstall SwiftTunnel
+            </span>
+            <span className="text-xs text-text-muted">
+              Remove SwiftTunnel and revert all system changes
+            </span>
+          </div>
+          <button
+            onClick={async () => {
+              setIsUninstalling(true);
+              setUninstallError(null);
+              try {
+                await systemUninstall();
+              } catch (e) {
+                setUninstallError(String(e));
+                setIsUninstalling(false);
+              }
+            }}
+            disabled={isUninstalling}
+            className="rounded-[var(--radius-button)] border px-3 py-1.5 text-xs font-medium text-white transition-colors disabled:opacity-50"
+            style={{
+              backgroundColor: "var(--color-status-error)",
+              borderColor: "var(--color-status-error)",
+            }}
+            onMouseEnter={(e) => {
+              if (!isUninstalling) {
+                e.currentTarget.style.opacity = "0.85";
+              }
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.opacity = "1";
+            }}
+          >
+            {isUninstalling ? "Uninstalling..." : "Uninstall"}
+          </button>
+        </div>
+        {uninstallError && (
+          <div className="px-4 pb-3 text-xs text-status-error">
+            {uninstallError}
+          </div>
+        )}
       </Section>
     </div>
   );

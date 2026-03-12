@@ -603,6 +603,40 @@ pub fn system_cleanup() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
+    // Run cleanup first to revert all system modifications
+    swifttunnel_core::network_booster::cleanup_all_system_state();
+
+    #[cfg(windows)]
+    {
+        // Find and launch the NSIS uninstaller
+        let exe_path =
+            std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {e}"))?;
+        let install_dir = exe_path
+            .parent()
+            .ok_or("Failed to resolve install directory")?;
+        let uninstaller = install_dir.join("uninstall.exe");
+
+        if !uninstaller.exists() {
+            return Err("Uninstaller not found. The app may not have been installed via the installer.".to_string());
+        }
+
+        std::process::Command::new(&uninstaller)
+            .spawn()
+            .map_err(|e| format!("Failed to launch uninstaller: {e}"))?;
+
+        app.exit(0);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("Uninstall is only supported on Windows".to_string())
+    }
+}
+
+#[tauri::command]
 pub fn system_open_url(url: String) -> Result<(), String> {
     swifttunnel_core::utils::open_url(&url);
     Ok(())
