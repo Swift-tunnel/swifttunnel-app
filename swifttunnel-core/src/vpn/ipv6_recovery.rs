@@ -8,7 +8,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Marker file name stored in %LOCALAPPDATA%/SwiftTunnel/
 const IPV6_MARKER_FILE: &str = "ipv6_disabled.marker";
@@ -58,7 +57,7 @@ pub fn query_ipv6_binding_enabled(adapter_name: &str) -> Option<bool> {
         adapter_name.replace('\'', "''")
     );
 
-    let output = Command::new("powershell")
+    let output = crate::hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .ok()?;
@@ -149,7 +148,7 @@ fn build_restore_script(marker: &Ipv6Marker) -> String {
 
 fn restore_ipv6_for_marker(marker: &Ipv6Marker) -> bool {
     let script = build_restore_script(marker);
-    match Command::new("powershell")
+    match crate::hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
     {

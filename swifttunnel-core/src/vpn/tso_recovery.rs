@@ -8,7 +8,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Marker file name stored in %LOCALAPPDATA%/SwiftTunnel/
 const TSO_MARKER_FILE: &str = "tso_disabled.marker";
@@ -90,7 +89,7 @@ fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32>
         keyword
     );
 
-    let output = Command::new("powershell")
+    let output = crate::hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .ok()?;
@@ -196,7 +195,7 @@ fn build_restore_script(marker: &TsoMarker) -> String {
 
 fn restore_tso_for_marker(marker: &TsoMarker) -> bool {
     let script = build_restore_script(marker);
-    match Command::new("powershell")
+    match crate::hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
     {
@@ -254,7 +253,7 @@ pub fn recover_tso_on_startup() {
 pub fn emergency_tso_restore() {
     if let Some(marker) = read_tso_marker() {
         let script = build_restore_script(&marker);
-        let _ = Command::new("powershell")
+        let _ = crate::hidden_command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output();
     }
