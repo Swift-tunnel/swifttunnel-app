@@ -1,13 +1,133 @@
-workflow:
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "push"
-    - if: $CI_PIPELINE_SOURCE == "web"
-
 stages:
-  - mirror
+  - build
+  - release
 
-mirror_notice:
-  stage: mirror
+build:
+  stage: build
+  tags:
+    - shared-windows
+    - windows
+    - windows-1809
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
   script:
-    - echo "GitHub is the source of truth for SwiftTunnel releases."
-    - echo "This GitLab project is kept as a read-only mirror only."
+    - Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+    - rustup default stable
+    - rustc --version
+    - node --version
+
+    - makensis /VERSION
+
+    - |
+      $tag = $env:CI_COMMIT_TAG
+      $version = $tag.Substring(1)
+      Write-Host "Building version $version from tag $tag"
+      $cargoContent = Get-Content "swifttunnel-desktop/src-tauri/Cargo.toml" -Raw
+      $cargoMatch = [regex]::Match($cargoContent, '(?m)^version\s*=\s*"([^"]+)"')
+      $cargoVersion = $cargoMatch.Groups[1].Value
+      $tauriConfig = Get-Content "swifttunnel-desktop/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+      $tauriVersion = [string]$tauriConfig.version
+      if ($cargoVersion -ne $version) { throw "Version mismatch: tag=$version cargo=$cargoVersion" }
+      if ($tauriVersion -ne $version) { throw "Version mismatch: tag=$version tauri.conf=$tauriVersion" }
+
+    - Set-Location swifttunnel-desktop
+    - npm ci
+    - Set-Location ..
+
+    - |
+      $driversDir = "swifttunnel-desktop/src-tauri/resources/drivers"
+      New-Item -ItemType Directory -Path $driversDir -Force | Out-Null
+      $msiPath = Join-Path $driversDir "WinpkFilter-x64.msi"
+      if (-not (Test-Path $msiPath)) {
+        Invoke-WebRequest -Uri "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi" -OutFile $msiPath
+        $size = (Get-Item $msiPath).Length
+        if ($size -lt 500000) { throw "WinpkFilter MSI is suspiciously small ($size bytes)" }
+      }
+
+    - |
+      $confPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
+      $content = Get-Content $confPath -Raw -Encoding UTF8
+      $content = $content.Replace("REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY", $env:TAURI_UPDATER_PUBLIC_KEY)
+      [System.IO.File]::WriteAllText((Resolve-Path $confPath).Path, $content, [System.Text.UTF8Encoding]::new($false))
+
+    - cargo install tauri-cli --version "^2" --locked
+    - Set-Location swifttunnel-desktop
+    - cargo tauri build --bundles nsis
+    - Set-Location ..
+
+    - |
+      $bundleDir = "target/release/bundle/nsis"
+      $outDir = "release-artifacts"
+      $exeName = "SwiftTunnel_${version}_x64-setup.exe"
+      $exePath = Join-Path $bundleDir $exeName
+      $sigPath = "$exePath.sig"
+      $latestJsonPath = Join-Path $outDir "latest.json"
+      New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+      Copy-Item "$bundleDir/*.exe" $outDir/
+      Copy-Item "$bundleDir/*.nsis.zip" $outDir/ -ErrorAction SilentlyContinue
+      Copy-Item "$bundleDir/*.nsis.zip.sig" $outDir/ -ErrorAction SilentlyContinue
+      if (Test-Path "$bundleDir/latest.json") {
+        Copy-Item "$bundleDir/latest.json" $latestJsonPath
+      } elseif ((Test-Path $exePath) -and (Test-Path $sigPath)) {
+        $signature = (Get-Content $sigPath -Raw).Trim()
+        $exeUrl = "${env:CI_API_V4_URL}/projects/${env:CI_PROJECT_ID}/packages/generic/swifttunnel-app/${version}/${exeName}"
+        $latestManifest = [ordered]@{
+          version   = $version
+          notes     = "See release notes: https://gitlab.com/swifttunnel-group/swifttunnel-app/-/releases/v${version}"
+          pub_date  = (Get-Date).ToUniversalTime().ToString("o")
+          url       = $exeUrl
+          signature = $signature
+        } | ConvertTo-Json -Depth 4
+        [System.IO.File]::WriteAllText(
+          (Resolve-Path $outDir).Path + "\latest.json",
+          $latestManifest,
+          [System.Text.UTF8Encoding]::new($false)
+        )
+      }
+      Get-ChildItem $outDir
+  artifacts:
+    paths:
+      - release-artifacts/
+    expire_in: 1 week
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: build
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - echo "Creating release for ${CI_COMMIT_TAG}"
+    - export VERSION="${CI_COMMIT_TAG#v}"
+    - echo "VERSION=$VERSION"
+    - |
+      for file in release-artifacts/*; do
+        filename=$(basename "$file")
+        echo "Uploading $filename..."
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "$file" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${VERSION}/${filename}"
+      done
+    - |
+      EXE_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${VERSION}/SwiftTunnel_${VERSION}_x64-setup.exe"
+      JSON_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/swifttunnel-app/${VERSION}/latest.json"
+      release-cli create \
+        --name "SwiftTunnel v${VERSION}" \
+        --tag-name "$CI_COMMIT_TAG" \
+        --description "## SwiftTunnel v${VERSION}
+
+      ### Downloads
+      - [SwiftTunnel_${VERSION}_x64-setup.exe](${EXE_URL})
+
+      ### Auto-updater
+      - [latest.json](${JSON_URL})
+
+      ### Requirements
+      - Windows 10/11 (64-bit)
+      - Administrator privileges" \
+        --assets-link "{\"name\":\"SwiftTunnel_${VERSION}_x64-setup.exe\",\"url\":\"${EXE_URL}\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"latest.json\",\"url\":\"${JSON_URL}\",\"link_type\":\"other\"}"
