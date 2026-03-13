@@ -13,14 +13,14 @@
 </p>
 
 <p align="center">
-  <a href="https://gitlab.com/swifttunnel-group/swifttunnel-app/releases/latest">
-    <img src="https://img.shields.io/gitlab/v/release/swifttunnel-group/swifttunnel-app?style=flat-square&color=blue" alt="Latest Release" />
+  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases/latest">
+    <img src="https://img.shields.io/github/v/release/Swift-tunnel/swifttunnel-app?display_name=tag&style=flat-square&color=blue" alt="Latest Release" />
   </a>
-  <a href="https://gitlab.com/swifttunnel-group/swifttunnel-app/releases">
-    <img src="https://img.shields.io/badge/downloads-GitLab-green?style=flat-square" alt="Downloads" />
+  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases">
+    <img src="https://img.shields.io/badge/downloads-GitHub-green?style=flat-square" alt="Downloads" />
   </a>
-  <a href="https://gitlab.com/swifttunnel-group/swifttunnel-app/blob/main/LICENSE">
-    <img src="https://img.shields.io/gitlab/license/swifttunnel-group/swifttunnel-app?style=flat-square" alt="License" />
+  <a href="https://github.com/Swift-tunnel/swifttunnel-app/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/Swift-tunnel/swifttunnel-app?style=flat-square" alt="License" />
   </a>
 </p>
 
@@ -65,7 +65,7 @@ Automatically detects which game server you're connecting to and routes through 
 ## Download
 
 <p align="center">
-  <a href="https://gitlab.com/swifttunnel-group/swifttunnel-app/releases/latest">
+  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases/latest">
     <img src="https://img.shields.io/badge/Download-Windows%20x64-blue?style=for-the-badge&logo=windows" alt="Download for Windows" />
   </a>
 </p>
@@ -75,7 +75,7 @@ Automatically detects which game server you're connecting to and routes through 
 - Administrator privileges (for network optimization)
 
 **Installation:**
-1. Download the Windows installer (`*.exe`) from [Releases](https://gitlab.com/swifttunnel-group/swifttunnel-app/releases/latest)
+1. Download the Windows installer (`*.exe`) from [Releases](https://github.com/Swift-tunnel/swifttunnel-app/releases/latest)
 2. Run the installer
 3. SwiftTunnel launches automatically after installation
 4. Sign in with your SwiftTunnel account
@@ -116,8 +116,8 @@ SwiftTunnel intercepts game traffic at the network layer. Only packets from your
 
 ```bash
 # Clone the repo
-git clone https://gitlab.com/swifttunnel-group/swifttunnel-app.git
-# Or: git clone git@gitlab.com:swifttunnel-group/swifttunnel-app.git
+git clone https://github.com/Swift-tunnel/swifttunnel-app.git
+# Or: git clone git@github.com:Swift-tunnel/swifttunnel-app.git
 cd swifttunnel-app/swifttunnel-desktop
 
 # Install frontend + Tauri CLI dependencies
@@ -147,6 +147,7 @@ The release workflow requires these CI/CD variables:
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 - `TAURI_UPDATER_PUBLIC_KEY`
+- `TAURI_UPDATER_LEGACY_PUBLIC_KEY` (optional, only for staged key migration)
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY`
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64`
 
@@ -155,11 +156,20 @@ Notes:
 - `vX.Y.Z-*` publishes as prerelease (`Live` channel).
 - `vX.Y.Z` publishes as stable release (`Stable` channel).
 - `TAURI_UPDATER_PUBLIC_KEY` is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
+- If `TAURI_UPDATER_LEGACY_PUBLIC_KEY` is configured, shipped apps can retry updater verification with the legacy Tauri key during a staged migration.
 - `WinpkFilter-x64.msi` is fetched in CI and bundled into NSIS resources.
 - Runtime driver install is bundle-first with pinned fallback download (`Windows.Packet.Filter.3.6.2.1.x64.msi`) plus SHA-256 verification if bundled MSI is missing.
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
 - `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
+- GitLab is maintained as a mirror only. If you want automatic mirroring from GitHub, configure `GITLAB_MIRROR_PUSH_URL` in GitHub Actions.
+
+### GitHub Cutover Notes
+
+- GitHub is the canonical source for releases and updater assets.
+- GitLab should mirror `main` and release tags only.
+- If older installed builds still trust a legacy GitHub-era Tauri key, ship a bridge release signed with the legacy private key while embedding the current updater public key in the app.
+- Do not publish a higher stable GitHub version signed only with the current key until that bridge window is complete, or legacy clients will select the newer tag and fail signature verification.
 
 ### Installer Validation Checklist (Clean Windows 10/11)
 

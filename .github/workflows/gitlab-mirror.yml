@@ -1,0 +1,56 @@
+name: Mirror To GitLab
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure GitLab mirror remote
+        env:
+          GITLAB_MIRROR_PUSH_URL: ${{ secrets.GITLAB_MIRROR_PUSH_URL }}
+        run: |
+          if [ -z "${GITLAB_MIRROR_PUSH_URL}" ]; then
+            echo "GITLAB_MIRROR_PUSH_URL is not configured; skipping mirror push."
+            exit 0
+          fi
+
+          git remote add gitlab-mirror "${GITLAB_MIRROR_PUSH_URL}"
+
+      - name: Push main branch to GitLab mirror
+        if: github.ref_type == 'branch'
+        env:
+          GITLAB_MIRROR_PUSH_URL: ${{ secrets.GITLAB_MIRROR_PUSH_URL }}
+        run: |
+          if [ -z "${GITLAB_MIRROR_PUSH_URL}" ]; then
+            exit 0
+          fi
+
+          git push gitlab-mirror HEAD:refs/heads/main
+
+      - name: Push release tag to GitLab mirror
+        if: github.ref_type == 'tag'
+        env:
+          GITLAB_MIRROR_PUSH_URL: ${{ secrets.GITLAB_MIRROR_PUSH_URL }}
+        run: |
+          if [ -z "${GITLAB_MIRROR_PUSH_URL}" ]; then
+            exit 0
+          fi
+
+          git push gitlab-mirror refs/heads/main:refs/heads/main
+          git push gitlab-mirror "refs/tags/${GITHUB_REF_NAME}"

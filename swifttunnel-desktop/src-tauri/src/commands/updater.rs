@@ -20,6 +20,8 @@ const UPDATE_MANIFEST_FILE_NAME: &str = "swifttunnel-update-manifest.json";
 const UPDATE_MANIFEST_SIGNATURE_FILE_NAME: &str = "swifttunnel-update-manifest.sig";
 const UPDATE_MANIFEST_PUBLIC_KEY_PLACEHOLDER: &str =
     "REPLACE_WITH_SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64";
+const LEGACY_TAURI_UPDATER_PUBLIC_KEY_PLACEHOLDER: &str =
+    "REPLACE_WITH_LEGACY_TAURI_UPDATER_PUBLIC_KEY";
 
 #[derive(Debug, Serialize)]
 pub struct UpdaterCheckResponse {
@@ -80,6 +82,26 @@ fn update_manifest_public_key_b64() -> Result<String, String> {
         return Err("Updater manifest public key is not configured".to_string());
     }
     Ok(key)
+}
+
+fn legacy_tauri_updater_public_key() -> Option<String> {
+    let runtime_key = std::env::var("TAURI_UPDATER_LEGACY_PUBLIC_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let key = runtime_key.unwrap_or_else(|| {
+        option_env!("TAURI_UPDATER_LEGACY_PUBLIC_KEY")
+            .unwrap_or(LEGACY_TAURI_UPDATER_PUBLIC_KEY_PLACEHOLDER)
+            .trim()
+            .to_string()
+    });
+
+    if key.is_empty() || key == LEGACY_TAURI_UPDATER_PUBLIC_KEY_PLACEHOLDER {
+        None
+    } else {
+        Some(key)
+    }
 }
 
 fn channel_name(channel: UpdateChannel) -> &'static str {
@@ -363,13 +385,44 @@ async fn check_update_for_manifest(
     app: &AppHandle,
     manifest: &SignedUpdateManifest,
 ) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    match check_update_for_manifest_with_pubkey(app, manifest, None).await {
+        Ok(update) => Ok(update),
+        Err(primary_error) => {
+            let Some(legacy_pubkey) = legacy_tauri_updater_public_key() else {
+                return Err(primary_error);
+            };
+
+            if !should_try_legacy_tauri_pubkey(&primary_error) {
+                return Err(primary_error);
+            }
+
+            check_update_for_manifest_with_pubkey(app, manifest, Some(&legacy_pubkey))
+                .await
+                .map_err(|legacy_error| {
+                    format!(
+                        "Updater check failed with the configured key ({primary_error}) and the legacy key fallback also failed ({legacy_error})"
+                    )
+                })
+        }
+    }
+}
+
+async fn check_update_for_manifest_with_pubkey(
+    app: &AppHandle,
+    manifest: &SignedUpdateManifest,
+    pubkey: Option<&str>,
+) -> Result<Option<tauri_plugin_updater::Update>, String> {
     let endpoint = Url::parse(&manifest.latest_json_url)
         .map_err(|e| format!("Invalid latest.json endpoint URL: {}", e))?;
 
-    let builder = app
+    let mut builder = app
         .updater_builder()
         .endpoints(vec![endpoint])
         .map_err(|e| format!("Failed to configure updater endpoint: {}", e))?;
+
+    if let Some(pubkey) = pubkey {
+        builder = builder.pubkey(pubkey.to_string());
+    }
 
     let updater = builder
         .build()
@@ -379,6 +432,14 @@ async fn check_update_for_manifest(
         .check()
         .await
         .map_err(|e| format!("Updater check failed: {}", e))
+}
+
+fn should_try_legacy_tauri_pubkey(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("signature")
+        || normalized.contains("pubkey")
+        || normalized.contains("verify")
+        || normalized.contains("cryptographic")
 }
 
 #[tauri::command]
@@ -619,6 +680,19 @@ mod tests {
     fn normalize_sha256_strips_prefix_and_lowercases() {
         let normalized = normalize_sha256("SHA256:ABCDEF1234");
         assert_eq!(normalized, "abcdef1234");
+    }
+
+    #[test]
+    fn should_try_legacy_tauri_pubkey_only_for_signature_like_failures() {
+        assert!(should_try_legacy_tauri_pubkey(
+            "Updater check failed: failed to verify signature"
+        ));
+        assert!(should_try_legacy_tauri_pubkey(
+            "cryptographic verification error"
+        ));
+        assert!(!should_try_legacy_tauri_pubkey(
+            "Updater check failed: network timeout"
+        ));
     }
 
     #[test]
