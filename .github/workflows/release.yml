@@ -42,6 +42,115 @@ jobs:
           "prerelease=$isPrerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "channel_class=$(if ($isPrerelease -eq 'true') { 'live' } else { 'stable' })" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
+      - name: Select updater signing key
+        shell: pwsh
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          CURRENT_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          CURRENT_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          LEGACY_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_LEGACY_PRIVATE_KEY }}
+          LEGACY_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_LEGACY_PRIVATE_KEY_PASSWORD }}
+        run: |
+          function Add-MultilineEnv {
+            param(
+              [string]$Name,
+              [string]$Value
+            )
+
+            $delimiter = "EOF_$([Guid]::NewGuid().ToString('N'))"
+            "$Name<<$delimiter" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            $Value | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            $delimiter | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+          function Get-TomlSectionBody {
+            param(
+              [string]$Content,
+              [string]$SectionName
+            )
+
+            $escapedName = [regex]::Escape($SectionName)
+            $match = [regex]::Match($Content, "(?ms)^\[$escapedName\]\s*(?<body>.*?)(?:^\[|\z)")
+            if ($match.Success) {
+              return $match.Groups["body"].Value
+            }
+
+            return $null
+          }
+
+          function Get-TomlStringValue {
+            param(
+              [string]$SectionBody,
+              [string]$Key
+            )
+
+            if ([string]::IsNullOrWhiteSpace($SectionBody)) {
+              return $null
+            }
+
+            $escapedKey = [regex]::Escape($Key)
+            $match = [regex]::Match($SectionBody, '(?m)^\s*' + $escapedKey + '\s*=\s*"([^"]+)"')
+            if ($match.Success) {
+              return $match.Groups[1].Value.Trim()
+            }
+
+            return $null
+          }
+
+          $legacyTags = @()
+          $currentUpdaterKeyId = $null
+          $legacyUpdaterKeyId = $null
+          $configPath = "release-signing.toml"
+          if (Test-Path $configPath) {
+            $content = Get-Content $configPath -Raw
+            $currentSectionBody = Get-TomlSectionBody -Content $content -SectionName "current"
+            $legacySectionBody = Get-TomlSectionBody -Content $content -SectionName "legacy_bridge"
+
+            $currentUpdaterKeyId = Get-TomlStringValue -SectionBody $currentSectionBody -Key "updater_key_id"
+            $legacyUpdaterKeyId = Get-TomlStringValue -SectionBody $legacySectionBody -Key "updater_key_id"
+
+            if (-not [string]::IsNullOrWhiteSpace($legacySectionBody)) {
+              $legacyTags = [regex]::Matches($legacySectionBody, '"([^"]+)"') |
+                ForEach-Object { $_.Groups[1].Value.Trim() } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($currentUpdaterKeyId)) {
+            throw "release-signing.toml is missing [current].updater_key_id"
+          }
+          if ([string]::IsNullOrWhiteSpace($legacyUpdaterKeyId)) {
+            throw "release-signing.toml is missing [legacy_bridge].updater_key_id"
+          }
+
+          $useLegacySigning = $legacyTags -contains $env:TAG
+
+          "SWIFTTUNNEL_CURRENT_UPDATER_KEY_ID=$currentUpdaterKeyId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SWIFTTUNNEL_LEGACY_UPDATER_KEY_ID=$legacyUpdaterKeyId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          if ($useLegacySigning) {
+            if ([string]::IsNullOrWhiteSpace($env:LEGACY_TAURI_SIGNING_PRIVATE_KEY)) {
+              throw "Missing required secret for legacy bridge tag $env:TAG: TAURI_SIGNING_LEGACY_PRIVATE_KEY"
+            }
+            Add-MultilineEnv "TAURI_SIGNING_PRIVATE_KEY" $env:LEGACY_TAURI_SIGNING_PRIVATE_KEY
+
+            if (-not [string]::IsNullOrEmpty($env:LEGACY_TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+              "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$env:LEGACY_TAURI_SIGNING_PRIVATE_KEY_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+
+            "SWIFTTUNNEL_SIGNING_SLOT=legacy" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "SWIFTTUNNEL_REQUIRE_LEGACY_UPDATER_PUBLIC_KEY=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            Add-MultilineEnv "TAURI_SIGNING_PRIVATE_KEY" $env:CURRENT_TAURI_SIGNING_PRIVATE_KEY
+
+            if (-not [string]::IsNullOrEmpty($env:CURRENT_TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+              "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$env:CURRENT_TAURI_SIGNING_PRIVATE_KEY_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+
+            "SWIFTTUNNEL_SIGNING_SLOT=current" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "SWIFTTUNNEL_REQUIRE_LEGACY_UPDATER_PUBLIC_KEY=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
       - name: Ensure tag commit is on main history
         shell: bash
         run: |
@@ -51,37 +160,19 @@ jobs:
             exit 1
           fi
 
-      - name: Enforce version consistency
-        shell: pwsh
-        env:
-          EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
-        run: |
-          $cargoPath = "swifttunnel-desktop/src-tauri/Cargo.toml"
-          $tauriPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
-
-          $cargoContent = Get-Content $cargoPath -Raw
-          $cargoMatch = [regex]::Match($cargoContent, '(?m)^version\s*=\s*"([^"]+)"')
-          if (-not $cargoMatch.Success) {
-            throw "Could not read version from $cargoPath"
-          }
-          $cargoVersion = $cargoMatch.Groups[1].Value
-
-          $tauriConfig = Get-Content $tauriPath -Raw | ConvertFrom-Json
-          $tauriVersion = [string]$tauriConfig.version
-
-          if ($cargoVersion -ne $env:EXPECTED_VERSION) {
-            throw "Version mismatch: tag=$env:EXPECTED_VERSION cargo=$cargoVersion"
-          }
-          if ($tauriVersion -ne $env:EXPECTED_VERSION) {
-            throw "Version mismatch: tag=$env:EXPECTED_VERSION tauri.conf=$tauriVersion"
-          }
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
           cache: npm
           cache-dependency-path: swifttunnel-desktop/package-lock.json
+
+      - name: Enforce version consistency
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          node scripts/check-desktop-version-sync.mjs $env:EXPECTED_VERSION
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -112,17 +203,45 @@ jobs:
       - name: Verify updater signing secrets
         shell: pwsh
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
           TAURI_UPDATER_LEGACY_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_LEGACY_PUBLIC_KEY }}
           SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY }}
           SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
         run: |
+          function Get-MinisignKeyId {
+            param([string]$EncodedKey)
+
+            $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($EncodedKey.Trim()))
+            $firstLine = ($decoded -split "\r?\n")[0].Trim()
+            $match = [regex]::Match($firstLine, '([0-9A-F]{16})$')
+            if (-not $match.Success) {
+              throw "Unable to determine minisign key id from updater public key comment"
+            }
+
+            return $match.Groups[1].Value
+          }
+
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
-            throw "Missing required secret: TAURI_SIGNING_PRIVATE_KEY"
+            throw "Missing selected signing private key for slot '$env:SWIFTTUNNEL_SIGNING_SLOT'"
           }
           if ([string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_PUBLIC_KEY)) {
             throw "Missing required secret: TAURI_UPDATER_PUBLIC_KEY"
+          }
+          $currentUpdaterKeyId = Get-MinisignKeyId $env:TAURI_UPDATER_PUBLIC_KEY
+          if ($currentUpdaterKeyId -ne $env:SWIFTTUNNEL_CURRENT_UPDATER_KEY_ID) {
+            throw "TAURI_UPDATER_PUBLIC_KEY is key id '$currentUpdaterKeyId' but release-signing.toml expects '$env:SWIFTTUNNEL_CURRENT_UPDATER_KEY_ID'"
+          }
+          if (
+            $env:SWIFTTUNNEL_REQUIRE_LEGACY_UPDATER_PUBLIC_KEY -eq "true" -and
+            [string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_LEGACY_PUBLIC_KEY)
+          ) {
+            throw "Missing required secret for legacy bridge signing: TAURI_UPDATER_LEGACY_PUBLIC_KEY"
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_LEGACY_PUBLIC_KEY)) {
+            $legacyUpdaterKeyId = Get-MinisignKeyId $env:TAURI_UPDATER_LEGACY_PUBLIC_KEY
+            if ($legacyUpdaterKeyId -ne $env:SWIFTTUNNEL_LEGACY_UPDATER_KEY_ID) {
+              throw "TAURI_UPDATER_LEGACY_PUBLIC_KEY is key id '$legacyUpdaterKeyId' but release-signing.toml expects '$env:SWIFTTUNNEL_LEGACY_UPDATER_KEY_ID'"
+            }
           }
           if ([string]::IsNullOrWhiteSpace($env:SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY)) {
             throw "Missing required secret: SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY"
@@ -145,8 +264,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TAURI_UPDATER_LEGACY_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_LEGACY_PUBLIC_KEY }}
           SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
         with:
