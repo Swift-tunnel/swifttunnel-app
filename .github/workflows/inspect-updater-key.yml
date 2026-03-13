@@ -10,18 +10,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Show updater public key fingerprint
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Verify old and current updater signatures
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
         run: |
-          python - <<'PY'
-          import hashlib
-          import os
+          set -euo pipefail
 
-          key = os.environ["TAURI_UPDATER_PUBLIC_KEY"].strip()
-          normalized = "\n".join(line.rstrip() for line in key.splitlines()).strip() + "\n"
-          print("BEGIN_TAURI_UPDATER_PUBLIC_KEY")
-          print(normalized, end="")
-          print("END_TAURI_UPDATER_PUBLIC_KEY")
-          print("SHA256=" + hashlib.sha256(normalized.encode("utf-8")).hexdigest())
-          PY
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+
+          printf '%s\n' "$TAURI_UPDATER_PUBLIC_KEY" > tauri-updater.pub
+
+          curl -fsSL -o github-latest.json \
+            https://github.com/Swift-tunnel/swifttunnel-app/releases/download/v1.20.18/latest.json
+          curl -fsSL -o github-1.20.18.exe \
+            https://github.com/Swift-tunnel/swifttunnel-app/releases/download/v1.20.18/SwiftTunnel_1.20.18_x64-setup.exe
+          jq -r '.platforms["windows-x86_64-nsis"].signature' github-latest.json | base64 -d > github-1.20.18.sig
+
+          curl -fsSL -o gitlab-latest.json \
+            https://gitlab.com/api/v4/projects/80054502/packages/generic/swifttunnel-app/1.21.16/latest.json
+          curl -fsSL -o gitlab-1.21.16.exe "$(jq -r '.url' gitlab-latest.json)"
+          jq -r '.signature' gitlab-latest.json | base64 -d > gitlab-1.21.16.sig
+
+          echo "Verifying GitHub v1.20.18 with current GitHub updater public key"
+          minisign -Vm github-1.20.18.exe -p tauri-updater.pub -x github-1.20.18.sig
+
+          echo "Verifying GitLab 1.21.16 with current GitHub updater public key"
+          minisign -Vm gitlab-1.21.16.exe -p tauri-updater.pub -x gitlab-1.21.16.sig
+
+          echo "Both releases verify with the current GitHub updater public key."
