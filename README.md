@@ -158,7 +158,7 @@ Notes:
 - `vX.Y.Z-*` publishes as prerelease (`Live` channel).
 - `vX.Y.Z` publishes as stable release (`Stable` channel).
 - Any tag listed in `release-signing.toml` under `legacy_bridge.tags` is signed with the legacy Tauri private key instead of the current key.
-- `TAURI_UPDATER_PUBLIC_KEY` is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
+- `TAURI_UPDATER_PUBLIC_KEY` is the base64-encoded contents of the minisign updater public key file, and it is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
 - If `TAURI_UPDATER_LEGACY_PUBLIC_KEY` is configured, shipped apps can retry updater verification with the legacy Tauri key during a staged migration.
 - `node scripts/check-desktop-version-sync.mjs` verifies `swifttunnel-desktop/src-tauri/Cargo.toml` and `swifttunnel-desktop/src-tauri/tauri.conf.json` stay on the same version, and CI now enforces it on pushes and PRs.
 - `WinpkFilter-x64.msi` is fetched in CI and bundled into NSIS resources.
@@ -172,6 +172,8 @@ Notes:
 
 - GitHub is the canonical source for releases and updater assets.
 - GitLab should mirror `main` and release tags only.
+- The existing GitHub updater secret currently matches the legacy GitHub trust root used by `v1.20.18` (`A943D352BDA748D5`), while GitLab `1.21.16` uses key id `436B4C95C608A09A`.
+- Before enabling GitHub releases, move the current GitHub Tauri secrets into the `*_LEGACY_*` slots and replace the primary slots with the GitLab-era current keypair.
 - If older installed builds still trust a legacy GitHub-era Tauri key, add the bridge tag to `release-signing.toml` before cutting it so the GitHub release workflow signs that one tag with the legacy private key while still embedding the current updater public key in the app.
 - Do not publish a higher stable GitHub version signed only with the current key until that bridge window is complete, or legacy clients will select the newer tag and fail signature verification.
 
