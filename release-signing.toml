@@ -1,4 +1,10 @@
+[current]
+# Current GitLab-era updater trust root used by release artifacts after the cutover.
+updater_key_id = "436B4C95C608A09A"
+
 [legacy_bridge]
+# Legacy GitHub updater trust root used by GitHub releases through v1.20.18.
+updater_key_id = "A943D352BDA748D5"
 # Stable tags listed here are signed with the legacy Tauri private key.
 # Leave this empty for normal releases.
 tags = []

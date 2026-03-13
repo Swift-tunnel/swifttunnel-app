@@ -60,7 +60,7 @@ The shipped updater code selects the highest semver release in the GitHub releas
 
 That means the migration must be staged.
 
-Bridge tags are controlled by the checked-in [`release-signing.toml`](../release-signing.toml) allowlist. Normal tags use the current signing key automatically. Any stable tag listed under `legacy_bridge.tags` is signed with the legacy Tauri private key instead.
+Bridge tags are controlled by the checked-in [`release-signing.toml`](../release-signing.toml) allowlist. Normal tags use the current signing key automatically. Any stable tag listed under `legacy_bridge.tags` is signed with the legacy Tauri private key instead. The same file also records the expected updater key ids, and the GitHub release workflow validates the configured secrets against those ids before building.
 
 ## Safe Migration Sequence
 

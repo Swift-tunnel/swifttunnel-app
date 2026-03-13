@@ -63,19 +63,71 @@ jobs:
             $delimiter | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
 
+          function Get-TomlSectionBody {
+            param(
+              [string]$Content,
+              [string]$SectionName
+            )
+
+            $escapedName = [regex]::Escape($SectionName)
+            $match = [regex]::Match($Content, "(?ms)^\[$escapedName\]\s*(?<body>.*?)(?:^\[|\z)")
+            if ($match.Success) {
+              return $match.Groups["body"].Value
+            }
+
+            return $null
+          }
+
+          function Get-TomlStringValue {
+            param(
+              [string]$SectionBody,
+              [string]$Key
+            )
+
+            if ([string]::IsNullOrWhiteSpace($SectionBody)) {
+              return $null
+            }
+
+            $escapedKey = [regex]::Escape($Key)
+            $match = [regex]::Match($SectionBody, '(?m)^\s*' + $escapedKey + '\s*=\s*"([^"]+)"')
+            if ($match.Success) {
+              return $match.Groups[1].Value.Trim()
+            }
+
+            return $null
+          }
+
           $legacyTags = @()
+          $currentUpdaterKeyId = $null
+          $legacyUpdaterKeyId = $null
           $configPath = "release-signing.toml"
           if (Test-Path $configPath) {
             $content = Get-Content $configPath -Raw
-            $legacySection = [regex]::Match($content, '(?ms)^\[legacy_bridge\]\s*(?<body>.*?)(?:^\[|\z)')
-            if ($legacySection.Success) {
-              $legacyTags = [regex]::Matches($legacySection.Groups["body"].Value, '"([^"]+)"') |
+            $currentSectionBody = Get-TomlSectionBody -Content $content -SectionName "current"
+            $legacySectionBody = Get-TomlSectionBody -Content $content -SectionName "legacy_bridge"
+
+            $currentUpdaterKeyId = Get-TomlStringValue -SectionBody $currentSectionBody -Key "updater_key_id"
+            $legacyUpdaterKeyId = Get-TomlStringValue -SectionBody $legacySectionBody -Key "updater_key_id"
+
+            if (-not [string]::IsNullOrWhiteSpace($legacySectionBody)) {
+              $legacyTags = [regex]::Matches($legacySectionBody, '"([^"]+)"') |
                 ForEach-Object { $_.Groups[1].Value.Trim() } |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
             }
           }
 
+          if ([string]::IsNullOrWhiteSpace($currentUpdaterKeyId)) {
+            throw "release-signing.toml is missing [current].updater_key_id"
+          }
+          if ([string]::IsNullOrWhiteSpace($legacyUpdaterKeyId)) {
+            throw "release-signing.toml is missing [legacy_bridge].updater_key_id"
+          }
+
           $useLegacySigning = $legacyTags -contains $env:TAG
+
+          "SWIFTTUNNEL_CURRENT_UPDATER_KEY_ID=$currentUpdaterKeyId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SWIFTTUNNEL_LEGACY_UPDATER_KEY_ID=$legacyUpdaterKeyId" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
           if ($useLegacySigning) {
             if ([string]::IsNullOrWhiteSpace($env:LEGACY_TAURI_SIGNING_PRIVATE_KEY)) {
               throw "Missing required secret for legacy bridge tag $env:TAG: TAURI_SIGNING_LEGACY_PRIVATE_KEY"
@@ -156,17 +208,40 @@ jobs:
           SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY }}
           SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
         run: |
+          function Get-MinisignKeyId {
+            param([string]$EncodedKey)
+
+            $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($EncodedKey.Trim()))
+            $firstLine = ($decoded -split "\r?\n")[0].Trim()
+            $match = [regex]::Match($firstLine, '([0-9A-F]{16})$')
+            if (-not $match.Success) {
+              throw "Unable to determine minisign key id from updater public key comment"
+            }
+
+            return $match.Groups[1].Value
+          }
+
           if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
             throw "Missing selected signing private key for slot '$env:SWIFTTUNNEL_SIGNING_SLOT'"
           }
           if ([string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_PUBLIC_KEY)) {
             throw "Missing required secret: TAURI_UPDATER_PUBLIC_KEY"
           }
+          $currentUpdaterKeyId = Get-MinisignKeyId $env:TAURI_UPDATER_PUBLIC_KEY
+          if ($currentUpdaterKeyId -ne $env:SWIFTTUNNEL_CURRENT_UPDATER_KEY_ID) {
+            throw "TAURI_UPDATER_PUBLIC_KEY is key id '$currentUpdaterKeyId' but release-signing.toml expects '$env:SWIFTTUNNEL_CURRENT_UPDATER_KEY_ID'"
+          }
           if (
             $env:SWIFTTUNNEL_REQUIRE_LEGACY_UPDATER_PUBLIC_KEY -eq "true" -and
             [string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_LEGACY_PUBLIC_KEY)
           ) {
             throw "Missing required secret for legacy bridge signing: TAURI_UPDATER_LEGACY_PUBLIC_KEY"
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_UPDATER_LEGACY_PUBLIC_KEY)) {
+            $legacyUpdaterKeyId = Get-MinisignKeyId $env:TAURI_UPDATER_LEGACY_PUBLIC_KEY
+            if ($legacyUpdaterKeyId -ne $env:SWIFTTUNNEL_LEGACY_UPDATER_KEY_ID) {
+              throw "TAURI_UPDATER_LEGACY_PUBLIC_KEY is key id '$legacyUpdaterKeyId' but release-signing.toml expects '$env:SWIFTTUNNEL_LEGACY_UPDATER_KEY_ID'"
+            }
           }
           if ([string]::IsNullOrWhiteSpace($env:SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY)) {
             throw "Missing required secret: SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY"

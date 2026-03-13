@@ -157,7 +157,7 @@ Notes:
 - Releases are tag-driven from `main` only (`v*` tags).
 - `vX.Y.Z-*` publishes as prerelease (`Live` channel).
 - `vX.Y.Z` publishes as stable release (`Stable` channel).
-- Any tag listed in `release-signing.toml` under `legacy_bridge.tags` is signed with the legacy Tauri private key instead of the current key.
+- Any tag listed in `release-signing.toml` under `legacy_bridge.tags` is signed with the legacy Tauri private key instead of the current key, and the workflow verifies that the configured updater public keys match the expected key ids recorded in that file.
 - `TAURI_UPDATER_PUBLIC_KEY` is the base64-encoded contents of the minisign updater public key file, and it is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
 - If `TAURI_UPDATER_LEGACY_PUBLIC_KEY` is configured, shipped apps can retry updater verification with the legacy Tauri key during a staged migration.
 - `node scripts/check-desktop-version-sync.mjs` verifies `swifttunnel-desktop/src-tauri/Cargo.toml` and `swifttunnel-desktop/src-tauri/tauri.conf.json` stay on the same version, and CI now enforces it on pushes and PRs.
