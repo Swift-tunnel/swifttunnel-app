@@ -147,7 +147,9 @@ The release workflow requires these CI/CD variables:
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 - `TAURI_UPDATER_PUBLIC_KEY`
-- `TAURI_UPDATER_LEGACY_PUBLIC_KEY` (optional, only for staged key migration)
+- `TAURI_SIGNING_LEGACY_PRIVATE_KEY` (required only for a legacy bridge tag)
+- `TAURI_SIGNING_LEGACY_PRIVATE_KEY_PASSWORD` (required only for a legacy bridge tag)
+- `TAURI_UPDATER_LEGACY_PUBLIC_KEY` (required only for a legacy bridge tag)
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY`
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64`
 
@@ -155,8 +157,10 @@ Notes:
 - Releases are tag-driven from `main` only (`v*` tags).
 - `vX.Y.Z-*` publishes as prerelease (`Live` channel).
 - `vX.Y.Z` publishes as stable release (`Stable` channel).
+- Any tag listed in `release-signing.toml` under `legacy_bridge.tags` is signed with the legacy Tauri private key instead of the current key.
 - `TAURI_UPDATER_PUBLIC_KEY` is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
 - If `TAURI_UPDATER_LEGACY_PUBLIC_KEY` is configured, shipped apps can retry updater verification with the legacy Tauri key during a staged migration.
+- `node scripts/check-desktop-version-sync.mjs` verifies `swifttunnel-desktop/src-tauri/Cargo.toml` and `swifttunnel-desktop/src-tauri/tauri.conf.json` stay on the same version, and CI now enforces it on pushes and PRs.
 - `WinpkFilter-x64.msi` is fetched in CI and bundled into NSIS resources.
 - Runtime driver install is bundle-first with pinned fallback download (`Windows.Packet.Filter.3.6.2.1.x64.msi`) plus SHA-256 verification if bundled MSI is missing.
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
@@ -168,7 +172,7 @@ Notes:
 
 - GitHub is the canonical source for releases and updater assets.
 - GitLab should mirror `main` and release tags only.
-- If older installed builds still trust a legacy GitHub-era Tauri key, ship a bridge release signed with the legacy private key while embedding the current updater public key in the app.
+- If older installed builds still trust a legacy GitHub-era Tauri key, add the bridge tag to `release-signing.toml` before cutting it so the GitHub release workflow signs that one tag with the legacy private key while still embedding the current updater public key in the app.
 - Do not publish a higher stable GitHub version signed only with the current key until that bridge window is complete, or legacy clients will select the newer tag and fail signature verification.
 
 ### Installer Validation Checklist (Clean Windows 10/11)

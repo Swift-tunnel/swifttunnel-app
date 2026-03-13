@@ -1,0 +1,4 @@
+[legacy_bridge]
+# Stable tags listed here are signed with the legacy Tauri private key.
+# Leave this empty for normal releases.
+tags = []
