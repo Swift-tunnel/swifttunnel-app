@@ -7,6 +7,9 @@ pub const DRIVER_PACKAGE_RELATIVE_DIR: &str = "winpkfilter/win10";
 pub const DRIVER_INF_NAME: &str = "ndisrd_lwf.inf";
 pub const DRIVER_SYS_NAME: &str = "ndisrd.sys";
 pub const DRIVER_CAT_NAME: &str = "ndisrd.cat";
+const DRIVER_INF_MIN_SIZE_BYTES: u64 = 256;
+const DRIVER_SYS_MIN_SIZE_BYTES: u64 = 4 * 1024;
+const DRIVER_CAT_MIN_SIZE_BYTES: u64 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverPackage {
@@ -15,6 +18,26 @@ pub struct DriverPackage {
     pub sys_path: PathBuf,
     pub cat_path: PathBuf,
 }
+
+struct DriverPackageFileSpec {
+    name: &'static str,
+    min_size_bytes: u64,
+}
+
+const DRIVER_PACKAGE_FILE_SPECS: [DriverPackageFileSpec; 3] = [
+    DriverPackageFileSpec {
+        name: DRIVER_INF_NAME,
+        min_size_bytes: DRIVER_INF_MIN_SIZE_BYTES,
+    },
+    DriverPackageFileSpec {
+        name: DRIVER_SYS_NAME,
+        min_size_bytes: DRIVER_SYS_MIN_SIZE_BYTES,
+    },
+    DriverPackageFileSpec {
+        name: DRIVER_CAT_NAME,
+        min_size_bytes: DRIVER_CAT_MIN_SIZE_BYTES,
+    },
+];
 
 pub fn driver_package_not_found_message() -> String {
     "WinpkFilter driver package not found in app resources.".to_string()
@@ -84,21 +107,39 @@ pub fn validate_driver_package_dir(package_dir: &Path) -> Result<DriverPackage, 
     let cat_path = package_dir.join(DRIVER_CAT_NAME);
 
     let mut missing = Vec::new();
-    if !inf_path.exists() {
-        missing.push(DRIVER_INF_NAME);
-    }
-    if !sys_path.exists() {
-        missing.push(DRIVER_SYS_NAME);
-    }
-    if !cat_path.exists() {
-        missing.push(DRIVER_CAT_NAME);
+    let mut undersized = Vec::new();
+
+    for spec in DRIVER_PACKAGE_FILE_SPECS {
+        let path = package_dir.join(spec.name);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                if metadata.len() < spec.min_size_bytes {
+                    undersized.push(format!(
+                        "{} ({} bytes, expected at least {} bytes)",
+                        spec.name,
+                        metadata.len(),
+                        spec.min_size_bytes
+                    ));
+                }
+            }
+            Ok(_) => missing.push(spec.name),
+            Err(_) => missing.push(spec.name),
+        }
     }
 
-    if !missing.is_empty() {
+    if !missing.is_empty() || !undersized.is_empty() {
+        let mut reasons = Vec::new();
+        if !missing.is_empty() {
+            reasons.push(format!("missing: {}", missing.join(", ")));
+        }
+        if !undersized.is_empty() {
+            reasons.push(format!("undersized: {}", undersized.join(", ")));
+        }
+
         return Err(format!(
-            "Incomplete WinpkFilter driver package in {} (missing: {}).",
+            "Incomplete WinpkFilter driver package in {} ({}).",
             package_dir.display(),
-            missing.join(", ")
+            reasons.join("; ")
         ));
     }
 
@@ -212,11 +253,7 @@ fn parse_enum_drivers_output(output: &str, original_name: &str) -> Option<String
         }
     }
 
-    if current_original_name.as_deref() == Some(target_name.as_str()) {
-        published_name
-    } else {
-        None
-    }
+    None
 }
 
 #[cfg(windows)]
@@ -299,19 +336,32 @@ mod tests {
         dir
     }
 
-    fn touch(path: &Path) {
+    fn write_file_with_size(path: &Path, size: usize) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create parent dirs");
         }
-        fs::write(path, b"test").expect("write temp file");
+        fs::write(path, vec![b'x'; size]).expect("write temp file");
+    }
+
+    fn write_valid_driver_package(dir: &Path) {
+        write_file_with_size(
+            &dir.join(DRIVER_INF_NAME),
+            DRIVER_INF_MIN_SIZE_BYTES as usize,
+        );
+        write_file_with_size(
+            &dir.join(DRIVER_SYS_NAME),
+            DRIVER_SYS_MIN_SIZE_BYTES as usize,
+        );
+        write_file_with_size(
+            &dir.join(DRIVER_CAT_NAME),
+            DRIVER_CAT_MIN_SIZE_BYTES as usize,
+        );
     }
 
     #[test]
     fn validate_driver_package_dir_accepts_complete_package() {
         let base = unique_temp_dir("winpkfilter_package_ok");
-        touch(&base.join(DRIVER_INF_NAME));
-        touch(&base.join(DRIVER_SYS_NAME));
-        touch(&base.join(DRIVER_CAT_NAME));
+        write_valid_driver_package(&base);
 
         let package = validate_driver_package_dir(&base).expect("package should validate");
         let root_dir = package.root_dir.clone();
@@ -324,9 +374,28 @@ mod tests {
     #[test]
     fn validate_driver_package_dir_rejects_missing_files() {
         let base = unique_temp_dir("winpkfilter_package_missing");
-        touch(&base.join(DRIVER_INF_NAME));
+        write_file_with_size(
+            &base.join(DRIVER_INF_NAME),
+            DRIVER_INF_MIN_SIZE_BYTES as usize,
+        );
 
         let err = validate_driver_package_dir(&base).expect_err("package should be incomplete");
+        assert!(err.contains(DRIVER_SYS_NAME));
+        assert!(err.contains(DRIVER_CAT_NAME));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn validate_driver_package_dir_rejects_undersized_files() {
+        let base = unique_temp_dir("winpkfilter_package_undersized");
+        write_file_with_size(&base.join(DRIVER_INF_NAME), 1);
+        write_file_with_size(&base.join(DRIVER_SYS_NAME), 1);
+        write_file_with_size(&base.join(DRIVER_CAT_NAME), 1);
+
+        let err = validate_driver_package_dir(&base).expect_err("package should reject stubs");
+        assert!(err.contains("undersized"));
+        assert!(err.contains(DRIVER_INF_NAME));
         assert!(err.contains(DRIVER_SYS_NAME));
         assert!(err.contains(DRIVER_CAT_NAME));
 
@@ -346,9 +415,7 @@ mod tests {
         let fallback = exe_dir.join("drivers").join(DRIVER_PACKAGE_RELATIVE_DIR);
 
         for dir in [&preferred, &fallback] {
-            touch(&dir.join(DRIVER_INF_NAME));
-            touch(&dir.join(DRIVER_SYS_NAME));
-            touch(&dir.join(DRIVER_CAT_NAME));
+            write_valid_driver_package(dir);
         }
 
         let package = find_bundled_driver_package(

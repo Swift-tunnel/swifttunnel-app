@@ -225,7 +225,6 @@ jobs:
           }
           New-Item -ItemType Directory -Path $winpkfilterWin10Dir -Force | Out-Null
           Copy-Item (Join-Path $sourceWin10Dir "*") $winpkfilterWin10Dir -Recurse -Force
-          Remove-Item (Join-Path $driversDir "WinpkFilter-x64.msi") -Force -ErrorAction SilentlyContinue
 
       - name: Verify updater signing secrets
         shell: pwsh
