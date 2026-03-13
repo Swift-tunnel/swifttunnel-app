@@ -1,7 +1,9 @@
 name: Inspect Updater Key
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - inspect-updater-key
 
 jobs:
   inspect:
