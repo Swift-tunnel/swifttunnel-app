@@ -1,0 +1,25 @@
+name: Inspect Updater Key
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Show updater public key fingerprint
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import os
+
+          key = os.environ["TAURI_UPDATER_PUBLIC_KEY"].strip()
+          normalized = "\n".join(line.rstrip() for line in key.splitlines()).strip() + "\n"
+          print("BEGIN_TAURI_UPDATER_PUBLIC_KEY")
+          print(normalized, end="")
+          print("END_TAURI_UPDATER_PUBLIC_KEY")
+          print("SHA256=" + hashlib.sha256(normalized.encode("utf-8")).hexdigest())
+          PY
