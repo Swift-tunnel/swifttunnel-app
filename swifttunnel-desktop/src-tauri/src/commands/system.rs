@@ -497,6 +497,31 @@ pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn decode_single_quoted_powershell_assignment(script: &str, variable_name: &str) -> String {
+        let marker = format!("{variable_name}='");
+        let start = script
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing assignment marker: {marker}"))
+            + marker.len();
+        let remainder = &script[start..];
+        let mut decoded = String::new();
+        let mut chars = remainder.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    decoded.push('\'');
+                    chars.next();
+                    continue;
+                }
+                return decoded;
+            }
+            decoded.push(ch);
+        }
+
+        panic!("missing assignment terminator for: {variable_name}");
+    }
+
     #[test]
     fn driver_install_success_exit_code_accepts_expected_codes() {
         for code in [0, 3010] {
@@ -579,12 +604,13 @@ mod tests {
             "C:\\path\\ev'elyn\\ndisrd_lwf.inf",
             "C:\\Temp\\log's\\pnputil.txt",
         );
-        assert!(script.contains("ev''elyn"));
-        assert!(script.contains("log''s"));
+        let inner = decode_single_quoted_powershell_assignment(&script, "$inner");
+        assert!(inner.contains("ev''elyn"));
+        assert!(inner.contains("log''s"));
         assert!(script.contains("Start-Process"));
-        assert!(script.contains("pnputil.exe"));
-        assert!(script.contains("/add-driver"));
-        assert!(script.contains("/install"));
+        assert!(inner.contains("pnputil.exe"));
+        assert!(inner.contains("/add-driver"));
+        assert!(inner.contains("/install"));
         assert!(script.contains("-WindowStyle Hidden"));
     }
 
