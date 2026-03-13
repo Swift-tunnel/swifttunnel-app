@@ -1,6 +1,5 @@
-import type { AppSettings, AuthState, Config, VpnState } from "./types";
+import type { AppSettings, AuthState, VpnState } from "./types";
 import { shouldAutoReconnectOnLaunch } from "./startup";
-import { reportError } from "./errors";
 
 type AppBootstrapDeps = {
   initEventListeners: () => Promise<void>;
@@ -12,7 +11,6 @@ type AppBootstrapDeps = {
   getSettings: () => AppSettings;
   getAuthState: () => AuthState;
   getVpnState: () => VpnState;
-  applyBoostConfig: (config: Config) => Promise<void>;
   connectVpn: (region: string, gamePresets: string[]) => Promise<void>;
   checkForUpdates: (showNoUpdatesMessage: boolean) => Promise<void>;
 };
@@ -28,13 +26,6 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
   ]);
 
   const loadedSettings = deps.getSettings();
-
-  try {
-    await deps.applyBoostConfig(loadedSettings.config);
-  } catch (error) {
-    reportError("Failed to apply boost config on startup", error);
-  }
-
   if (
     shouldAutoReconnectOnLaunch(
       deps.getAuthState(),

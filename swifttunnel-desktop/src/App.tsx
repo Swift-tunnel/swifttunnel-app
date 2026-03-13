@@ -19,7 +19,6 @@ import { useBoostStore } from "./stores/boostStore";
 import { useVpnStore } from "./stores/vpnStore";
 import { useUpdaterStore } from "./stores/updaterStore";
 import { cleanupEventListeners, initEventListeners } from "./lib/events";
-import { boostUpdateConfig } from "./lib/commands";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { runAppBootstrap } from "./lib/appBootstrap";
 import { reportError } from "./lib/errors";
@@ -215,7 +214,6 @@ function App() {
         getSettings: () => useSettingsStore.getState().settings,
         getAuthState: () => useAuthStore.getState().state,
         getVpnState: () => useVpnStore.getState().state,
-        applyBoostConfig: (config) => boostUpdateConfig(JSON.stringify(config)),
         connectVpn,
         checkForUpdates,
       });
@@ -376,6 +374,8 @@ function App() {
             persistWindowState,
             hide: () => appWindow.hide(),
             close: () => appWindow.close(),
+            shouldMinimizeToTray: () =>
+              useSettingsStore.getState().settings.minimize_to_tray,
             isDisposed: () => disposed,
           }),
         ),

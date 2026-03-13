@@ -820,8 +820,9 @@ impl NetworkBooster {
 /// Does not rely on in-memory snapshots — scans the system for known
 /// SwiftTunnel artifacts and removes them. Used by `--cleanup` (NSIS
 /// uninstaller) and the `system_cleanup` Tauri command.
-pub fn cleanup_all_system_state() {
+pub fn cleanup_all_system_state() -> Result<()> {
     info!("Running full stateless system cleanup");
+    let mut critical_errors: Vec<String> = Vec::new();
 
     // 1. Remove hosts file entries
     if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
@@ -905,22 +906,11 @@ pub fn cleanup_all_system_state() {
         ])
         .output();
 
-    // 6. Remove firewall rules (instance-based + PowerShell fallback)
+    // 6. Remove firewall rules.
     let mut firewall = FirewallFixer::new();
     let _ = firewall.restore();
-    // PowerShell fallback: remove any remaining rules matching the prefix
-    let _ = hidden_command("powershell")
-        .args([
-            "-Command",
-            "Get-NetFirewallRule -DisplayName 'SwiftTunnel - Roblox*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue",
-        ])
-        .output();
 
-    // 7. Reset MTU to 1500 on all adapters (cleans up damage from the
-    //    removed MTU optimizer which set store=persistent on WiFi adapters).
-    reset_mtu_all_adapters();
-
-    // 8. Delete legacy RobloxPriority QoS policy
+    // 7. Delete legacy RobloxPriority QoS policy
     let _ = hidden_command("powershell")
         .args([
             "-Command",
@@ -931,26 +921,26 @@ pub fn cleanup_all_system_state() {
         ])
         .output();
 
-    // 9. Remove the snapshot file itself
+    // 8. Remove the snapshot file itself
     NetworkBooster::clear_snapshot();
 
-    // 10. Restore system optimizer settings (MMCSS, Game Bar, fullscreen opts, Game Mode, power plan)
+    // 9. Restore system optimizer settings (MMCSS, Game Bar, fullscreen opts, Game Mode, power plan)
     crate::system_optimizer::cleanup_for_uninstall();
 
-    // 11. Recover TSO/IPv6 adapter settings if they were left disabled by a crash
+    // 10. Recover TSO/IPv6 adapter settings if they were left disabled by a crash
     crate::vpn::recover_tso_on_startup();
     crate::vpn::recover_ipv6_on_startup();
 
-    // 12. NDISRD driver service: intentionally NOT deleted here.
-    // Stopping/deleting the NDIS filter driver mid-session unbinds it from
-    // network adapters and can kill the user's internet. The NSIS uninstaller
-    // removes the driver files; the orphaned service entry is cleaned up on
-    // reboot automatically.
+    // 11. Remove the WinpkFilter driver package and NDISRD service during
+    // uninstall/explicit cleanup so the app does not leave kernel artifacts behind.
+    if let Err(e) = crate::vpn::split_tunnel::SplitTunnelDriver::remove_driver_for_uninstall() {
+        critical_errors.push(format!("driver cleanup failed: {}", e));
+    }
 
-    // 13. Remove Roblox FFlag entries from ClientAppSettings.json
+    // 12. Remove Roblox FFlag entries from ClientAppSettings.json
     crate::roblox_optimizer::RobloxOptimizer::cleanup_for_uninstall();
 
-    // 14. Delete autostart Run key
+    // 13. Delete autostart Run key
     let _ = hidden_command("reg")
         .args([
             "delete",
@@ -961,7 +951,17 @@ pub fn cleanup_all_system_state() {
         ])
         .output();
 
-    info!("Full system cleanup completed");
+    if critical_errors.is_empty() {
+        info!("Full system cleanup completed");
+        Ok(())
+    } else {
+        let message = critical_errors.join("; ");
+        warn!(
+            "Full system cleanup completed with critical errors: {}",
+            message
+        );
+        Err(anyhow::anyhow!(message))
+    }
 }
 
 /// Reset MTU to 1500 on all active network adapters.
@@ -999,26 +999,8 @@ fn reset_mtu_all_adapters() {
     }
 }
 
-/// One-time migration: undo persistent MTU changes from the removed optimizer.
-///
-/// Call on app startup. Uses a marker file so it only runs once.
 pub fn fix_mtu_on_upgrade() {
-    let Some(config_dir) = dirs::config_dir() else {
-        return;
-    };
-    let marker = config_dir.join("SwiftTunnel").join(".mtu_fix_applied");
-    if marker.exists() {
-        return;
-    }
-
-    info!("Running one-time MTU fix for upgrade (resetting all adapters to MTU 1500)");
-    reset_mtu_all_adapters();
-
-    // Write marker so this doesn't run again
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&marker, "1");
+    info!("Legacy MTU repair is disabled by default to avoid overwriting user adapter settings");
 }
 
 impl Default for NetworkBooster {

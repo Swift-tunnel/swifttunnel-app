@@ -218,11 +218,11 @@ fn default_minimize_to_tray() -> bool {
 }
 
 fn default_run_on_startup() -> bool {
-    true
+    false
 }
 
 fn default_auto_reconnect() -> bool {
-    true
+    false
 }
 
 fn default_region() -> String {
@@ -269,7 +269,7 @@ impl Default for AppSettings {
             network_binding_overrides: HashMap::new(),
             adapter_binding_mode: AdapterBindingMode::SmartAuto,
             game_process_performance: GameProcessPerformanceSettings::default(),
-            enable_api_tunneling: true,
+            enable_api_tunneling: false,
         }
     }
 }
@@ -389,8 +389,8 @@ mod tests {
             !settings.minimize_to_tray,
             "Default should allow closing via X; tray behavior is opt-in"
         );
-        assert!(settings.run_on_startup);
-        assert!(settings.auto_reconnect);
+        assert!(!settings.run_on_startup);
+        assert!(!settings.auto_reconnect);
         assert!(!settings.resume_vpn_on_startup);
         assert!(settings.preferred_physical_adapter_guid.is_none());
         assert_eq!(settings.adapter_binding_mode, AdapterBindingMode::SmartAuto);
@@ -490,8 +490,8 @@ mod tests {
     fn test_settings_startup_reconnect_defaults() {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(loaded.run_on_startup);
-        assert!(loaded.auto_reconnect);
+        assert!(!loaded.run_on_startup);
+        assert!(!loaded.auto_reconnect);
         assert!(!loaded.resume_vpn_on_startup);
     }
 
@@ -524,7 +524,7 @@ mod tests {
     fn test_settings_api_tunneling_default() {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(loaded.enable_api_tunneling);
+        assert!(!loaded.enable_api_tunneling);
     }
 
     #[test]

@@ -220,9 +220,6 @@ pub fn run() {
             swifttunnel_core::vpn::recover_tso_on_startup();
             swifttunnel_core::vpn::recover_ipv6_on_startup();
 
-            // One-time fix: reset MTU on all adapters (the removed MTU optimizer
-            // used store=persistent which broke WiFi on some drivers).
-            swifttunnel_core::network_booster::fix_mtu_on_upgrade();
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
             app.manage(app_state);
 
@@ -289,6 +286,13 @@ pub fn run() {
                 swifttunnel_core::roblox_proxy::hosts::recover_stale();
                 // Restore network booster modifications (registry, MTU, firewall, QoS)
                 if let Some(state) = _app.try_state::<crate::state::AppState>() {
+                    let roblox_pid = {
+                        let mut monitor = state.performance_monitor.lock();
+                        monitor.get_roblox_pid().unwrap_or(0)
+                    };
+                    if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
+                        log::warn!("Failed to restore system settings on exit: {e}");
+                    }
                     if let Err(e) = state.network_booster.lock().restore() {
                         log::warn!("Failed to restore network settings on exit: {e}");
                     }

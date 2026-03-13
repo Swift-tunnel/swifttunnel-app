@@ -16,9 +16,37 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+const GAME_BAR_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\GameDVR";
+const GAME_BAR_VALUE: &str = "AppCaptureEnabled";
+const FULLSCREEN_KEY: &str = r"HKCU\System\GameConfigStore";
+const FULLSCREEN_VALUE: &str = "GameDVR_FSEBehaviorMode";
+const GAME_MODE_KEY: &str = r"HKCU\Software\Microsoft\GameBar";
+const GAME_MODE_ALLOW_AUTO_VALUE: &str = "AllowAutoGameMode";
+const GAME_MODE_ENABLED_VALUE: &str = "AutoGameModeEnabled";
+const MMCSS_GAMES_KEY: &str =
+    r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games";
+const MMCSS_SYSTEM_PROFILE_KEY: &str =
+    r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MmcssSnapshot {
+    scheduling_category: Option<String>,
+    sfio_priority: Option<String>,
+    background_only: Option<String>,
+    priority: Option<u32>,
+    clock_rate: Option<u32>,
+    system_responsiveness: Option<u32>,
+}
+
 pub struct SystemOptimizer {
     original_priority: Option<u32>,
     timer_resolution_active: bool,
+    original_power_plan_guid: Option<Option<String>>,
+    game_bar_snapshot: Option<Option<u32>>,
+    fullscreen_optimization_snapshot: Option<Option<u32>>,
+    game_mode_allow_auto_snapshot: Option<Option<u32>>,
+    game_mode_enabled_snapshot: Option<Option<u32>>,
+    mmcss_snapshot: Option<MmcssSnapshot>,
 }
 
 impl SystemOptimizer {
@@ -26,7 +54,253 @@ impl SystemOptimizer {
         Self {
             original_priority: None,
             timer_resolution_active: false,
+            original_power_plan_guid: None,
+            game_bar_snapshot: None,
+            fullscreen_optimization_snapshot: None,
+            game_mode_allow_auto_snapshot: None,
+            game_mode_enabled_snapshot: None,
+            mmcss_snapshot: None,
         }
+    }
+
+    fn parse_registry_dword(token: &str) -> Option<u32> {
+        let raw = token.trim();
+        if raw.is_empty() {
+            return None;
+        }
+
+        if let Some(hex) = raw.strip_prefix("0x") {
+            return u32::from_str_radix(hex, 16).ok();
+        }
+
+        raw.parse::<u32>().ok()
+    }
+
+    fn query_registry_dword(key_path: &str, value_name: &str) -> Option<u32> {
+        let output = hidden_command("reg")
+            .args(["query", key_path, "/v", value_name])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        for line in output_str.lines() {
+            if !line.contains(value_name) || !line.contains("REG_DWORD") {
+                continue;
+            }
+
+            let value = line
+                .split_once("REG_DWORD")
+                .map(|(_, tail)| tail.trim())
+                .unwrap_or_default();
+            if let Some(parsed) = Self::parse_registry_dword(value) {
+                return Some(parsed);
+            }
+        }
+
+        None
+    }
+
+    fn query_registry_string(key_path: &str, value_name: &str) -> Option<String> {
+        let output = hidden_command("reg")
+            .args(["query", key_path, "/v", value_name])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        for line in output_str.lines() {
+            if !line.contains(value_name) || !line.contains("REG_SZ") {
+                continue;
+            }
+
+            let value = line
+                .split_once("REG_SZ")
+                .map(|(_, tail)| tail.trim())
+                .unwrap_or_default();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+
+        None
+    }
+
+    fn set_registry_dword(key_path: &str, value_name: &str, value: u32) {
+        let value_str = value.to_string();
+        let output = hidden_command("reg")
+            .args([
+                "add",
+                key_path,
+                "/v",
+                value_name,
+                "/t",
+                "REG_DWORD",
+                "/d",
+                &value_str,
+                "/f",
+            ])
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => {}
+            Ok(_) => warn!("Failed to set {}\\{} to {}", key_path, value_name, value),
+            Err(e) => warn!(
+                "Failed to set {}\\{} to {}: {}",
+                key_path, value_name, value, e
+            ),
+        }
+    }
+
+    fn set_registry_string(key_path: &str, value_name: &str, value: &str) {
+        let output = hidden_command("reg")
+            .args([
+                "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value, "/f",
+            ])
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => {}
+            Ok(_) => warn!("Failed to set {}\\{} to {}", key_path, value_name, value),
+            Err(e) => warn!(
+                "Failed to set {}\\{} to {}: {}",
+                key_path, value_name, value, e
+            ),
+        }
+    }
+
+    fn restore_registry_dword(key_path: &str, value_name: &str, snapshot: Option<u32>) {
+        match snapshot {
+            Some(value) => Self::set_registry_dword(key_path, value_name, value),
+            None => {
+                let _ = hidden_command("reg")
+                    .args(["delete", key_path, "/v", value_name, "/f"])
+                    .output();
+            }
+        }
+    }
+
+    fn restore_registry_string(key_path: &str, value_name: &str, snapshot: Option<String>) {
+        match snapshot {
+            Some(value) => Self::set_registry_string(key_path, value_name, &value),
+            None => {
+                let _ = hidden_command("reg")
+                    .args(["delete", key_path, "/v", value_name, "/f"])
+                    .output();
+            }
+        }
+    }
+
+    fn capture_dword_snapshot(slot: &mut Option<Option<u32>>, key_path: &str, value_name: &str) {
+        if slot.is_none() {
+            *slot = Some(Self::query_registry_dword(key_path, value_name));
+        }
+    }
+
+    fn parse_guid_from_output(output: &str) -> Option<String> {
+        output
+            .split(|c: char| !c.is_ascii_hexdigit() && c != '-')
+            .find(|token| token.len() == 36 && token.matches('-').count() == 4)
+            .map(|token| token.to_ascii_lowercase())
+    }
+
+    fn active_power_plan_guid() -> Option<String> {
+        let output = hidden_command("powercfg")
+            .args(["/GETACTIVESCHEME"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        Self::parse_guid_from_output(&output_str)
+    }
+
+    fn set_active_power_plan_guid(guid: &str) {
+        let output = hidden_command("powercfg")
+            .args(["/setactive", guid])
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => {}
+            Ok(_) => warn!("Failed to restore power plan {}", guid),
+            Err(e) => warn!("Failed to restore power plan {}: {}", guid, e),
+        }
+    }
+
+    fn capture_system_state_snapshots(&mut self, config: &SystemOptimizationConfig) {
+        if config.disable_game_bar {
+            Self::capture_dword_snapshot(&mut self.game_bar_snapshot, GAME_BAR_KEY, GAME_BAR_VALUE);
+        }
+
+        if config.disable_fullscreen_optimization {
+            Self::capture_dword_snapshot(
+                &mut self.fullscreen_optimization_snapshot,
+                FULLSCREEN_KEY,
+                FULLSCREEN_VALUE,
+            );
+        }
+
+        if config.game_mode_enabled {
+            Self::capture_dword_snapshot(
+                &mut self.game_mode_allow_auto_snapshot,
+                GAME_MODE_KEY,
+                GAME_MODE_ALLOW_AUTO_VALUE,
+            );
+            Self::capture_dword_snapshot(
+                &mut self.game_mode_enabled_snapshot,
+                GAME_MODE_KEY,
+                GAME_MODE_ENABLED_VALUE,
+            );
+        }
+
+        if config.mmcss_gaming_profile && self.mmcss_snapshot.is_none() {
+            self.mmcss_snapshot = Some(MmcssSnapshot {
+                scheduling_category: Self::query_registry_string(
+                    MMCSS_GAMES_KEY,
+                    "Scheduling Category",
+                ),
+                sfio_priority: Self::query_registry_string(MMCSS_GAMES_KEY, "SFIO Priority"),
+                background_only: Self::query_registry_string(MMCSS_GAMES_KEY, "Background Only"),
+                priority: Self::query_registry_dword(MMCSS_GAMES_KEY, "Priority"),
+                clock_rate: Self::query_registry_dword(MMCSS_GAMES_KEY, "Clock Rate"),
+                system_responsiveness: Self::query_registry_dword(
+                    MMCSS_SYSTEM_PROFILE_KEY,
+                    "SystemResponsiveness",
+                ),
+            });
+        }
+
+        if !matches!(config.power_plan, PowerPlan::Balanced)
+            && self.original_power_plan_guid.is_none()
+        {
+            self.original_power_plan_guid = Some(Self::active_power_plan_guid());
+        }
+    }
+
+    fn restore_mmcss_snapshot(snapshot: MmcssSnapshot) {
+        Self::restore_registry_string(
+            MMCSS_GAMES_KEY,
+            "Scheduling Category",
+            snapshot.scheduling_category,
+        );
+        Self::restore_registry_string(MMCSS_GAMES_KEY, "SFIO Priority", snapshot.sfio_priority);
+        Self::restore_registry_string(MMCSS_GAMES_KEY, "Background Only", snapshot.background_only);
+        Self::restore_registry_dword(MMCSS_GAMES_KEY, "Priority", snapshot.priority);
+        Self::restore_registry_dword(MMCSS_GAMES_KEY, "Clock Rate", snapshot.clock_rate);
+        Self::restore_registry_dword(
+            MMCSS_SYSTEM_PROFILE_KEY,
+            "SystemResponsiveness",
+            snapshot.system_responsiveness,
+        );
     }
 
     /// Apply all system optimizations
@@ -39,6 +313,8 @@ impl SystemOptimizer {
             "Applying system optimizations for process ID: {}",
             process_id
         );
+
+        self.capture_system_state_snapshots(config);
 
         if config.set_high_priority {
             if process_id == 0 {
@@ -168,9 +444,9 @@ impl SystemOptimizer {
         let output = hidden_command("reg")
             .args([
                 "add",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR",
+                GAME_BAR_KEY,
                 "/v",
-                "AppCaptureEnabled",
+                GAME_BAR_VALUE,
                 "/t",
                 "REG_DWORD",
                 "/d",
@@ -200,9 +476,9 @@ impl SystemOptimizer {
         let output = hidden_command("reg")
             .args([
                 "add",
-                "HKCU\\System\\GameConfigStore",
+                FULLSCREEN_KEY,
                 "/v",
-                "GameDVR_FSEBehaviorMode",
+                FULLSCREEN_VALUE,
                 "/t",
                 "REG_DWORD",
                 "/d",
@@ -224,7 +500,7 @@ impl SystemOptimizer {
     }
 
     /// Set Windows power plan
-    fn set_power_plan(&self, plan: &PowerPlan) -> Result<()> {
+    fn set_power_plan(&mut self, plan: &PowerPlan) -> Result<()> {
         let guid = match plan {
             PowerPlan::Balanced => "381b4222-f694-41f0-9685-ff5bb260df2e",
             PowerPlan::HighPerformance => "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
@@ -327,15 +603,7 @@ impl SystemOptimizer {
         ];
 
         for (key_path, value_name, value_data) in mmcss_keys.iter() {
-            let output = hidden_command("reg")
-                .args([
-                    "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value_data, "/f",
-                ])
-                .output();
-
-            if let Err(e) = output {
-                warn!("Failed to set MMCSS key {}: {}", value_name, e);
-            }
+            Self::set_registry_string(key_path, value_name, value_data);
         }
 
         // Set DWORD values separately
@@ -358,22 +626,8 @@ impl SystemOptimizer {
         ];
 
         for (key_path, value_name, value_data) in dword_keys.iter() {
-            let output = hidden_command("reg")
-                .args([
-                    "add",
-                    key_path,
-                    "/v",
-                    value_name,
-                    "/t",
-                    "REG_DWORD",
-                    "/d",
-                    value_data,
-                    "/f",
-                ])
-                .output();
-
-            if let Err(e) = output {
-                warn!("Failed to set MMCSS DWORD {}: {}", value_name, e);
+            if let Ok(value) = value_data.parse::<u32>() {
+                Self::set_registry_dword(key_path, value_name, value);
             }
         }
 
@@ -382,80 +636,20 @@ impl SystemOptimizer {
     }
 
     /// Restore MMCSS profile to Windows defaults
-    pub fn restore_mmcss_profile(&self) -> Result<()> {
+    pub fn restore_mmcss_profile(&mut self) -> Result<()> {
+        if let Some(snapshot) = self.mmcss_snapshot.take() {
+            info!("Restoring MMCSS profile from snapshot");
+            Self::restore_mmcss_snapshot(snapshot);
+            return Ok(());
+        }
+
         info!("Restoring MMCSS profile to defaults");
-
-        // Restore default MMCSS string values
-        let mmcss_keys = [
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "Scheduling Category",
-                "Medium",
-            ),
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "SFIO Priority",
-                "Normal",
-            ),
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "Background Only",
-                "True",
-            ),
-        ];
-
-        for (key_path, value_name, value_data) in mmcss_keys.iter() {
-            let output = hidden_command("reg")
-                .args([
-                    "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value_data, "/f",
-                ])
-                .output();
-
-            if let Err(e) = output {
-                warn!("Failed to restore MMCSS key {}: {}", value_name, e);
-            }
-        }
-
-        // Restore default DWORD values
-        let dword_keys = [
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "Priority",
-                "2",
-            ),
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "Clock Rate",
-                "10000",
-            ),
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
-                "SystemResponsiveness",
-                "20",
-            ),
-        ];
-
-        for (key_path, value_name, value_data) in dword_keys.iter() {
-            let output = hidden_command("reg")
-                .args([
-                    "add",
-                    key_path,
-                    "/v",
-                    value_name,
-                    "/t",
-                    "REG_DWORD",
-                    "/d",
-                    value_data,
-                    "/f",
-                ])
-                .output();
-
-            if let Err(e) = output {
-                warn!("Failed to restore MMCSS DWORD {}: {}", value_name, e);
-            }
-        }
-
-        info!("MMCSS profile restored to defaults");
+        Self::set_registry_string(MMCSS_GAMES_KEY, "Scheduling Category", "Medium");
+        Self::set_registry_string(MMCSS_GAMES_KEY, "SFIO Priority", "Normal");
+        Self::set_registry_string(MMCSS_GAMES_KEY, "Background Only", "True");
+        Self::set_registry_dword(MMCSS_GAMES_KEY, "Priority", 2);
+        Self::set_registry_dword(MMCSS_GAMES_KEY, "Clock Rate", 10000);
+        Self::set_registry_dword(MMCSS_SYSTEM_PROFILE_KEY, "SystemResponsiveness", 20);
         Ok(())
     }
 
@@ -464,34 +658,13 @@ impl SystemOptimizer {
         info!("Enabling Windows Game Mode");
 
         let game_mode_keys = [
-            (r"HKCU\Software\Microsoft\GameBar", "AllowAutoGameMode", "1"),
-            (
-                r"HKCU\Software\Microsoft\GameBar",
-                "AutoGameModeEnabled",
-                "1",
-            ),
+            (GAME_MODE_KEY, GAME_MODE_ALLOW_AUTO_VALUE, "1"),
+            (GAME_MODE_KEY, GAME_MODE_ENABLED_VALUE, "1"),
         ];
 
         for (key_path, value_name, value_data) in game_mode_keys.iter() {
-            let output = hidden_command("reg")
-                .args([
-                    "add",
-                    key_path,
-                    "/v",
-                    value_name,
-                    "/t",
-                    "REG_DWORD",
-                    "/d",
-                    value_data,
-                    "/f",
-                ])
-                .output();
-
-            match output {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("Failed to set Game Mode key {}: {}", value_name, e);
-                }
+            if let Ok(value) = value_data.parse::<u32>() {
+                Self::set_registry_dword(key_path, value_name, value);
             }
         }
 
@@ -504,34 +677,13 @@ impl SystemOptimizer {
         info!("Disabling Windows Game Mode");
 
         let game_mode_keys = [
-            (r"HKCU\Software\Microsoft\GameBar", "AllowAutoGameMode", "0"),
-            (
-                r"HKCU\Software\Microsoft\GameBar",
-                "AutoGameModeEnabled",
-                "0",
-            ),
+            (GAME_MODE_KEY, GAME_MODE_ALLOW_AUTO_VALUE, "0"),
+            (GAME_MODE_KEY, GAME_MODE_ENABLED_VALUE, "0"),
         ];
 
         for (key_path, value_name, value_data) in game_mode_keys.iter() {
-            let output = hidden_command("reg")
-                .args([
-                    "add",
-                    key_path,
-                    "/v",
-                    value_name,
-                    "/t",
-                    "REG_DWORD",
-                    "/d",
-                    value_data,
-                    "/f",
-                ])
-                .output();
-
-            match output {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("Failed to disable Game Mode key {}: {}", value_name, e);
-                }
+            if let Ok(value) = value_data.parse::<u32>() {
+                Self::set_registry_dword(key_path, value_name, value);
             }
         }
 
@@ -624,7 +776,7 @@ impl SystemOptimizer {
             self.set_timer_resolution(false)?;
         }
 
-        if let Some(priority) = self.original_priority {
+        if let Some(priority) = self.original_priority.take() {
             unsafe {
                 if let Ok(handle) = OpenProcess(PROCESS_SET_INFORMATION, false, process_id) {
                     if !handle.is_invalid() {
@@ -632,6 +784,32 @@ impl SystemOptimizer {
                         let _ = CloseHandle(handle);
                     }
                 }
+            }
+        }
+
+        if let Some(snapshot) = self.mmcss_snapshot.take() {
+            Self::restore_mmcss_snapshot(snapshot);
+        }
+
+        if let Some(snapshot) = self.game_mode_enabled_snapshot.take() {
+            Self::restore_registry_dword(GAME_MODE_KEY, GAME_MODE_ENABLED_VALUE, snapshot);
+        }
+
+        if let Some(snapshot) = self.game_mode_allow_auto_snapshot.take() {
+            Self::restore_registry_dword(GAME_MODE_KEY, GAME_MODE_ALLOW_AUTO_VALUE, snapshot);
+        }
+
+        if let Some(snapshot) = self.fullscreen_optimization_snapshot.take() {
+            Self::restore_registry_dword(FULLSCREEN_KEY, FULLSCREEN_VALUE, snapshot);
+        }
+
+        if let Some(snapshot) = self.game_bar_snapshot.take() {
+            Self::restore_registry_dword(GAME_BAR_KEY, GAME_BAR_VALUE, snapshot);
+        }
+
+        if let Some(snapshot) = self.original_power_plan_guid.take() {
+            if let Some(guid) = snapshot {
+                Self::set_active_power_plan_guid(&guid);
             }
         }
 
@@ -659,7 +837,7 @@ pub fn cleanup_for_uninstall() {
     info!("System optimizer: cleaning up for uninstall");
 
     // 1. Restore MMCSS profile to Windows defaults
-    let optimizer = SystemOptimizer::new();
+    let mut optimizer = SystemOptimizer::new();
     let _ = optimizer.restore_mmcss_profile();
 
     // 2. Delete Game Bar override (let Windows use its default)

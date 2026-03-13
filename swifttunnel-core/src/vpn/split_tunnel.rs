@@ -307,47 +307,7 @@ impl SplitTunnelDriver {
 
     /// Try to install the driver from bundled MSI
     fn install_driver_from_msi() -> Result<(), String> {
-        // Look for bundled MSI in common locations
-        let msi_paths = [
-            // Same directory as exe (for portable/dev)
-            std::env::current_exe().ok().and_then(|p| {
-                p.parent()
-                    .map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))
-            }),
-            // Tauri bundles assets under a sibling `resources/` directory.
-            std::env::current_exe().ok().and_then(|p| {
-                p.parent().map(|d| {
-                    d.join("resources")
-                        .join("drivers")
-                        .join("WinpkFilter-x64.msi")
-                })
-            }),
-            std::env::current_exe().ok().and_then(|p| {
-                p.parent()
-                    .map(|d| d.join("resources").join("WinpkFilter-x64.msi"))
-            }),
-            // Program Files installation
-            Some(PathBuf::from(
-                r"C:\Program Files\SwiftTunnel\drivers\WinpkFilter-x64.msi",
-            )),
-            Some(PathBuf::from(
-                r"C:\Program Files\SwiftTunnel\resources\drivers\WinpkFilter-x64.msi",
-            )),
-        ];
-
-        let mut msi_path = None;
-        for path_opt in &msi_paths {
-            if let Some(path) = path_opt {
-                if path.exists() {
-                    msi_path = Some(path.clone());
-                    break;
-                }
-            }
-        }
-
-        let msi_path = msi_path.ok_or_else(|| {
-            "WinpkFilter-x64.msi not found. Please download from: https://github.com/wiresock/ndisapi/releases".to_string()
-        })?;
+        let msi_path = Self::find_driver_msi().ok_or_else(Self::driver_msi_not_found_message)?;
 
         log::info!("Installing WinpkFilter from: {}", msi_path.display());
 
@@ -528,6 +488,86 @@ impl SplitTunnelDriver {
         Ok(())
     }
 
+    fn driver_msi_not_found_message() -> String {
+        "WinpkFilter-x64.msi not found. Please download from: https://github.com/wiresock/ndisapi/releases".to_string()
+    }
+
+    fn find_driver_msi() -> Option<PathBuf> {
+        let msi_paths = [
+            // Same directory as exe (for portable/dev)
+            std::env::current_exe().ok().and_then(|p| {
+                p.parent()
+                    .map(|d| d.join("drivers").join("WinpkFilter-x64.msi"))
+            }),
+            // Tauri bundles assets under a sibling `resources/` directory.
+            std::env::current_exe().ok().and_then(|p| {
+                p.parent().map(|d| {
+                    d.join("resources")
+                        .join("drivers")
+                        .join("WinpkFilter-x64.msi")
+                })
+            }),
+            std::env::current_exe().ok().and_then(|p| {
+                p.parent()
+                    .map(|d| d.join("resources").join("WinpkFilter-x64.msi"))
+            }),
+            // Program Files installation
+            Some(PathBuf::from(
+                r"C:\Program Files\SwiftTunnel\drivers\WinpkFilter-x64.msi",
+            )),
+            Some(PathBuf::from(
+                r"C:\Program Files\SwiftTunnel\resources\drivers\WinpkFilter-x64.msi",
+            )),
+        ];
+
+        msi_paths.into_iter().flatten().find(|path| path.exists())
+    }
+
+    fn driver_uninstall_success_exit_code(code: i32) -> bool {
+        matches!(code, 0 | 1605 | 1614 | 1641 | 3010)
+    }
+
+    pub fn remove_driver_for_uninstall() -> Result<(), String> {
+        let mut issues = Vec::new();
+
+        if let Some(msi_path) = Self::find_driver_msi() {
+            log::info!("Uninstalling WinpkFilter MSI from: {}", msi_path.display());
+
+            match std::process::Command::new("msiexec")
+                .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
+                .output()
+            {
+                Ok(output) => {
+                    let code = output.status.code().unwrap_or(-1);
+                    if Self::driver_uninstall_success_exit_code(code) {
+                        log::info!("WinpkFilter MSI uninstall completed with code {}", code);
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        issues.push(format!(
+                            "Driver MSI uninstall failed with code {}: {}",
+                            code, stderr
+                        ));
+                    }
+                }
+                Err(e) => issues.push(format!("Failed to run driver MSI uninstall: {}", e)),
+            }
+        } else {
+            log::warn!(
+                "Bundled WinpkFilter MSI not found during uninstall; falling back to service cleanup only"
+            );
+        }
+
+        if let Err(e) = Self::cleanup_driver_service_for_uninstall() {
+            issues.push(e);
+        }
+
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(issues.join("; "))
+        }
+    }
+
     /// Stop the driver service
     pub fn stop_driver_service() -> Result<(), String> {
         use windows::Win32::System::Services::*;
@@ -581,9 +621,9 @@ impl SplitTunnelDriver {
     ///
     /// This removes the kernel driver registration so no artifacts remain.
     /// Individual errors are ignored so the rest of uninstall can proceed.
-    pub fn cleanup_driver_service_for_uninstall() {
-        use windows::core::PCWSTR;
+    pub fn cleanup_driver_service_for_uninstall() -> Result<(), String> {
         use windows::Win32::System::Services::*;
+        use windows::core::PCWSTR;
 
         const SERVICE_NAME: &str = "NDISRD";
 
@@ -593,8 +633,9 @@ impl SplitTunnelDriver {
             let scm = match OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS) {
                 Ok(scm) => scm,
                 Err(e) => {
-                    log::warn!("Failed to open SCM for driver cleanup: {}", e);
-                    return;
+                    let message = format!("Failed to open SCM for driver cleanup: {}", e);
+                    log::warn!("{}", message);
+                    return Err(message);
                 }
             };
 
@@ -603,11 +644,7 @@ impl SplitTunnelDriver {
                 .chain(std::iter::once(0))
                 .collect();
 
-            match OpenServiceW(
-                scm,
-                PCWSTR(service_name_wide.as_ptr()),
-                SERVICE_ALL_ACCESS,
-            ) {
+            match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_ALL_ACCESS) {
                 Ok(service) => {
                     // Stop the service first (ignore error — may already be stopped)
                     let mut status = SERVICE_STATUS::default();
@@ -616,7 +653,13 @@ impl SplitTunnelDriver {
                     // Delete the service from SCM
                     match DeleteService(service) {
                         Ok(_) => log::info!("NDISRD service deleted from SCM"),
-                        Err(e) => log::warn!("Failed to delete NDISRD service: {}", e),
+                        Err(e) => {
+                            let message = format!("Failed to delete NDISRD service: {}", e);
+                            log::warn!("{}", message);
+                            let _ = CloseServiceHandle(service);
+                            let _ = CloseServiceHandle(scm);
+                            return Err(message);
+                        }
                     }
 
                     let _ = CloseServiceHandle(service);
@@ -630,6 +673,7 @@ impl SplitTunnelDriver {
         }
 
         log::info!("NDISRD driver service cleanup completed");
+        Ok(())
     }
 
     /// Open the driver

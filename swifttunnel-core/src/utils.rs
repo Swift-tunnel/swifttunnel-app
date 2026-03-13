@@ -442,6 +442,72 @@ pub fn relaunch_elevated_with_args() -> std::io::Result<()> {
     ))
 }
 
+#[cfg(windows)]
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(windows)]
+fn build_elevated_wait_script(exe_path: &str, args: &[String]) -> String {
+    let escaped_exe = escape_powershell_single_quoted(exe_path);
+    let arg_list = if args.is_empty() {
+        "$argList=@(); ".to_string()
+    } else {
+        let rendered_args = args
+            .iter()
+            .map(|arg| format!("'{}'", escape_powershell_single_quoted(arg)))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("$argList=@({rendered_args}); ")
+    };
+
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         {arg_list}\
+         $p=Start-Process -FilePath '{escaped_exe}' -Verb RunAs -ArgumentList $argList -Wait -PassThru; \
+         exit $p.ExitCode"
+    )
+}
+
+/// Relaunch the current process elevated and wait for the elevated child to exit.
+///
+/// Returns the elevated process exit code. This is used for flows such as
+/// uninstall cleanup where the caller must not continue until the privileged
+/// work has definitely completed.
+#[cfg(windows)]
+pub fn relaunch_elevated_with_args_and_wait() -> std::io::Result<i32> {
+    let exe_path = std::env::current_exe()?;
+    let exe_path_str = exe_path.to_string_lossy().to_string();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let script = build_elevated_wait_script(&exe_path_str, &args);
+
+    let output = hidden_command("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()?;
+
+    let exit_code = output.status.code().unwrap_or(1);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+
+    if !output.status.success() && !detail.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Failed to elevate and wait: {detail}"),
+        ));
+    }
+
+    Ok(exit_code)
+}
+
+#[cfg(not(windows))]
+pub fn relaunch_elevated_with_args_and_wait() -> std::io::Result<i32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Elevation not supported on this platform",
+    ))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  RETRY UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -651,6 +717,26 @@ mod tests {
     fn test_relaunch_elevated_with_args_is_linked() {
         // Verify the symbol exists without invoking it
         let _f: fn() -> std::io::Result<()> = relaunch_elevated_with_args;
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_relaunch_elevated_with_args_and_wait_is_linked() {
+        let _f: fn() -> std::io::Result<i32> = relaunch_elevated_with_args_and_wait;
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_build_elevated_wait_script_escapes_single_quotes() {
+        let script = build_elevated_wait_script(
+            "C:\\Program Files\\Swift'Tunnel\\swifttunnel-desktop.exe",
+            &["--cleanup".to_string(), "O'Hara".to_string()],
+        );
+        assert!(script.contains("Swift''Tunnel"));
+        assert!(script.contains("'--cleanup'"));
+        assert!(script.contains("'O''Hara'"));
+        assert!(script.contains("Start-Process -FilePath"));
+        assert!(script.contains("-Wait -PassThru"));
     }
 
     #[test]

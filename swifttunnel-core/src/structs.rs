@@ -78,17 +78,17 @@ fn default_roblox_window_fullscreen() -> bool {
 impl Default for SystemOptimizationConfig {
     fn default() -> Self {
         Self {
-            set_high_priority: true,
+            set_high_priority: false,
             set_cpu_affinity: false,
             cpu_cores: vec![],
-            disable_fullscreen_optimization: true,
-            clear_standby_memory: true,
-            disable_game_bar: true,
-            power_plan: PowerPlan::HighPerformance,
-            // Tier 1 boosts enabled by default
-            timer_resolution_1ms: true,
-            mmcss_gaming_profile: true,
-            game_mode_enabled: true,
+            disable_fullscreen_optimization: false,
+            clear_standby_memory: false,
+            disable_game_bar: false,
+            power_plan: PowerPlan::Balanced,
+            // Tier 1 boosts are opt-in by default.
+            timer_resolution_1ms: false,
+            mmcss_gaming_profile: false,
+            game_mode_enabled: false,
         }
     }
 }
@@ -121,8 +121,8 @@ pub struct RobloxSettingsConfig {
 impl Default for RobloxSettingsConfig {
     fn default() -> Self {
         Self {
-            graphics_quality: GraphicsQuality::Manual,
-            unlock_fps: true,
+            graphics_quality: GraphicsQuality::Automatic,
+            unlock_fps: false,
             target_fps: 144,
             window_width: default_roblox_window_width(),
             window_height: default_roblox_window_height(),
@@ -207,12 +207,12 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            enable_network_boost: true,
-            prioritize_roblox_traffic: true,
-            // Tier 1 network boosts enabled by default
-            disable_nagle: true,
-            disable_network_throttling: true,
-            gaming_qos: true,    // Enabled by default
+            enable_network_boost: false,
+            prioritize_roblox_traffic: false,
+            // Tier 1 network boosts are opt-in by default.
+            disable_nagle: false,
+            disable_network_throttling: false,
+            gaming_qos: false,
             firewall_fix: false, // Off by default, one-click fix for Roblox launch crashes
         }
     }
@@ -482,34 +482,34 @@ mod tests {
     #[test]
     fn test_system_optimization_config_default() {
         let cfg = SystemOptimizationConfig::default();
-        assert!(cfg.set_high_priority);
+        assert!(!cfg.set_high_priority);
         assert!(!cfg.set_cpu_affinity);
         assert!(cfg.cpu_cores.is_empty());
-        assert!(cfg.disable_fullscreen_optimization);
-        assert!(cfg.clear_standby_memory);
-        assert!(cfg.disable_game_bar);
-        assert_eq!(cfg.power_plan, PowerPlan::HighPerformance);
-        assert!(cfg.timer_resolution_1ms);
-        assert!(cfg.mmcss_gaming_profile);
-        assert!(cfg.game_mode_enabled);
+        assert!(!cfg.disable_fullscreen_optimization);
+        assert!(!cfg.clear_standby_memory);
+        assert!(!cfg.disable_game_bar);
+        assert_eq!(cfg.power_plan, PowerPlan::Balanced);
+        assert!(!cfg.timer_resolution_1ms);
+        assert!(!cfg.mmcss_gaming_profile);
+        assert!(!cfg.game_mode_enabled);
     }
 
     #[test]
     fn test_network_config_default() {
         let cfg = NetworkConfig::default();
-        assert!(cfg.enable_network_boost);
-        assert!(cfg.prioritize_roblox_traffic);
-        assert!(cfg.disable_nagle);
-        assert!(cfg.disable_network_throttling);
-        assert!(cfg.gaming_qos);
+        assert!(!cfg.enable_network_boost);
+        assert!(!cfg.prioritize_roblox_traffic);
+        assert!(!cfg.disable_nagle);
+        assert!(!cfg.disable_network_throttling);
+        assert!(!cfg.gaming_qos);
         assert!(!cfg.firewall_fix);
     }
 
     #[test]
     fn test_roblox_settings_config_default() {
         let cfg = RobloxSettingsConfig::default();
-        assert_eq!(cfg.graphics_quality, GraphicsQuality::Manual);
-        assert!(cfg.unlock_fps);
+        assert_eq!(cfg.graphics_quality, GraphicsQuality::Automatic);
+        assert!(!cfg.unlock_fps);
         assert_eq!(cfg.target_fps, 144);
         assert_eq!(cfg.window_width, 1280);
         assert_eq!(cfg.window_height, 720);

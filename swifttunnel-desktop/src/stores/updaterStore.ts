@@ -15,6 +15,7 @@ type UpdaterStatus =
 
 interface PendingUpdate {
   version: string;
+  channel: "Stable" | "Live";
 }
 
 let pendingUpdate: PendingUpdate | null = null;
@@ -31,7 +32,7 @@ interface UpdaterStore {
   installUpdate: () => Promise<void>;
 }
 
-export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
+export const useUpdaterStore = create<UpdaterStore>((set) => ({
   status: "idle",
   currentVersion: __APP_VERSION__,
   availableVersion: null,
@@ -73,6 +74,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
 
       pendingUpdate = {
         version: update.available_version,
+        channel,
       };
       set({
         status: "update_available",
@@ -90,8 +92,10 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
         return;
       }
 
-      // Startup/background checks should install immediately without extra clicks.
-      await get().installUpdate();
+      await notify(
+        "Update Available",
+        `Version ${update.available_version} is ready to install.`,
+      );
     } catch (e) {
       set({
         status: "error",
@@ -106,9 +110,8 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     try {
       set({ status: "installing", progressPercent: 0, error: null });
 
-      const settingsStore = useSettingsStore.getState();
-      const channel = settingsStore.settings.update_channel;
-      await updaterInstallChannel(channel, pendingUpdate.version);
+      const { channel, version } = pendingUpdate;
+      await updaterInstallChannel(channel, version);
 
       pendingUpdate = null;
       set({

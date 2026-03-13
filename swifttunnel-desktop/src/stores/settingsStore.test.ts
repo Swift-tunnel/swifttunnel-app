@@ -54,6 +54,12 @@ describe("stores/settingsStore", () => {
     expect(
       useSettingsStore.getState().settings.config.roblox_settings.window_width,
     ).toBe(1280);
+    expect(
+      useSettingsStore.getState().settings.config.roblox_settings.graphics_quality,
+    ).toBe("Automatic");
+    expect(
+      useSettingsStore.getState().settings.config.roblox_settings.unlock_fps,
+    ).toBe(false);
   });
 
   it("defaults minimize_to_tray to false when load fails", async () => {
@@ -64,8 +70,8 @@ describe("stores/settingsStore", () => {
 
     expect(useSettingsStore.getState().isLoaded).toBe(true);
     expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(false);
-    expect(useSettingsStore.getState().settings.run_on_startup).toBe(true);
-    expect(useSettingsStore.getState().settings.auto_reconnect).toBe(true);
+    expect(useSettingsStore.getState().settings.run_on_startup).toBe(false);
+    expect(useSettingsStore.getState().settings.auto_reconnect).toBe(false);
     expect(useSettingsStore.getState().settings.resume_vpn_on_startup).toBe(false);
     expect(useSettingsStore.getState().settings.preferred_physical_adapter_guid).toBe(
       null,
@@ -87,6 +93,12 @@ describe("stores/settingsStore", () => {
     expect(useSettingsStore.getState().settings.config.roblox_settings.window_width).toBe(
       1280,
     );
+    expect(
+      useSettingsStore.getState().settings.config.roblox_settings.graphics_quality,
+    ).toBe("Automatic");
+    expect(
+      useSettingsStore.getState().settings.config.roblox_settings.unlock_fps,
+    ).toBe(false);
     expect(useSettingsStore.getState().settings.config.roblox_settings.window_height).toBe(
       720,
     );

@@ -40,6 +40,7 @@ pub use auto_routing::{AutoRouter, AutoRoutingAction, AutoRoutingEvent};
 pub use config::{VpnConfigRequest, fetch_vpn_config, update_latency};
 pub use connection::{ConnectionState, VpnConnection};
 pub use error_messages::{short_error, user_friendly_error};
+pub use ipv6_recovery::recover_ipv6_on_startup;
 pub use parallel_interceptor::{
     AdapterBindingPreference, BindingCandidateInfo, BindingPreferenceSource, BindingPreflightInfo,
     NetworkAdapterInfo, ParallelInterceptor, SplitTunnelDiagnostics, ThroughputStats,
@@ -54,7 +55,6 @@ pub use split_tunnel::{
     GamePreset, SplitTunnelConfig, SplitTunnelDriver, get_apps_for_preset_set,
     get_apps_for_presets, get_tunnel_apps_for_presets,
 };
-pub use ipv6_recovery::recover_ipv6_on_startup;
 pub use tso_recovery::{emergency_tso_restore, recover_tso_on_startup};
 pub use udp_relay::{RelayAuthAckStatus, RelayContext, RelayPingSnapshot, UdpRelay};
 

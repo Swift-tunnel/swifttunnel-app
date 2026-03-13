@@ -598,14 +598,14 @@ mod tests {
 
 #[tauri::command]
 pub fn system_cleanup() -> Result<(), String> {
-    swifttunnel_core::network_booster::cleanup_all_system_state();
-    Ok(())
+    swifttunnel_core::network_booster::cleanup_all_system_state().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
     // Run cleanup first to revert all system modifications
-    swifttunnel_core::network_booster::cleanup_all_system_state();
+    swifttunnel_core::network_booster::cleanup_all_system_state()
+        .map_err(|e| format!("Cleanup failed before uninstall: {}", e))?;
 
     #[cfg(windows)]
     {
@@ -618,7 +618,10 @@ pub fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
         let uninstaller = install_dir.join("uninstall.exe");
 
         if !uninstaller.exists() {
-            return Err("Uninstaller not found. The app may not have been installed via the installer.".to_string());
+            return Err(
+                "Uninstaller not found. The app may not have been installed via the installer."
+                    .to_string(),
+            );
         }
 
         std::process::Command::new(&uninstaller)

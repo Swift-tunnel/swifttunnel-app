@@ -115,7 +115,7 @@ describe("stores/updaterStore", () => {
     );
   });
 
-  it("auto-installs available updates during background checks", async () => {
+  it("surfaces available updates during background checks without auto-installing", async () => {
     updaterCheckChannel.mockResolvedValue({
       current_version: "1.0.0",
       available_version: "1.5.1",
@@ -130,9 +130,13 @@ describe("stores/updaterStore", () => {
     const useUpdaterStore = await loadStore();
     await useUpdaterStore.getState().checkForUpdates(false);
 
-    expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
-    expect(useUpdaterStore.getState().status).toBe("up_to_date");
-    expect(useUpdaterStore.getState().availableVersion).toBeNull();
+    expect(updaterInstallChannel).not.toHaveBeenCalled();
+    expect(useUpdaterStore.getState().status).toBe("update_available");
+    expect(useUpdaterStore.getState().availableVersion).toBe("1.5.1");
+    expect(notify).toHaveBeenCalledWith(
+      "Update Available",
+      "Version 1.5.1 is ready to install.",
+    );
   });
 
   it("uses Live channel when selected in settings", async () => {
@@ -149,6 +153,27 @@ describe("stores/updaterStore", () => {
     await useUpdaterStore.getState().checkForUpdates(false);
 
     expect(updaterCheckChannel).toHaveBeenCalledWith("Live");
+  });
+
+  it("installs using the channel that was checked, even if settings change later", async () => {
+    updaterCheckChannel.mockResolvedValue({
+      current_version: "1.0.0",
+      available_version: "1.5.1",
+      release_tag: "v1.5.1",
+      channel: "Stable",
+    });
+    updaterInstallChannel.mockResolvedValue({
+      installed_version: "1.5.1",
+      release_tag: "v1.5.1",
+    });
+
+    const useUpdaterStore = await loadStore();
+    await useUpdaterStore.getState().checkForUpdates(true);
+
+    mockSettingsStore.settings.update_channel = "Live";
+    await useUpdaterStore.getState().installUpdate();
+
+    expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
   });
 
   it("transitions to error state when check fails", async () => {

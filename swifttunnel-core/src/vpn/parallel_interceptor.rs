@@ -55,10 +55,12 @@ use std::time::{Duration, Instant};
 use arrayvec::ArrayVec;
 use serde::Serialize;
 
+use super::ipv6_recovery::{
+    delete_ipv6_marker, query_ipv6_binding_enabled, restore_ipv6_from_marker, write_ipv6_marker,
+};
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
-use super::ipv6_recovery::{delete_ipv6_marker, write_ipv6_marker};
-use super::tso_recovery::{delete_tso_marker, write_tso_marker};
+use super::tso_recovery::{delete_tso_marker, restore_tso_from_marker, write_tso_marker};
 use super::{VpnError, VpnResult};
 use crate::geolocation::is_roblox_game_server_ip;
 
@@ -2618,13 +2620,14 @@ impl ParallelInterceptor {
             friendly_name.replace("'", "''") // Escape single quotes
         );
 
+        // Capture original adapter state before changing anything so disconnect/crash
+        // recovery can restore the exact prior values.
+        write_tso_marker(&friendly_name);
+        self.tso_was_disabled = true;
+
         // 5 second timeout to prevent indefinite hangs
         if Self::run_powershell_with_timeout(&script, 5) {
             log::info!("TSO/LSO disabled successfully on {}", friendly_name);
-            // Write marker file BEFORE setting flag - ensures recovery works if we crash
-            // between these two operations (marker exists = TSO was disabled)
-            write_tso_marker(&friendly_name);
-            self.tso_was_disabled = true;
         } else {
             log::warn!(
                 "Failed to disable TSO (non-fatal) - adapter may not support these settings"
@@ -2650,35 +2653,42 @@ impl ParallelInterceptor {
 
         log::info!("Re-enabling TSO/LSO on adapter: {}", friendly_name);
 
-        let script = format!(
-            r#"
-            $ErrorActionPreference = 'SilentlyContinue'
-            $adapter = '{}'
+        match restore_tso_from_marker() {
+            Some(true) => {
+                log::info!("TSO/LSO restored to original state on {}", friendly_name);
+                delete_tso_marker();
+            }
+            Some(false) => {
+                log::warn!("Failed to restore TSO - will retry on next launch");
+            }
+            None => {
+                let script = format!(
+                    r#"
+                    $ErrorActionPreference = 'SilentlyContinue'
+                    $adapter = '{}'
 
-            # Re-enable LSO v2
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4' -RegistryValue 1 2>$null
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 1 2>$null
+                    # Re-enable LSO v2
+                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4' -RegistryValue 1 2>$null
+                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 1 2>$null
 
-            # Re-enable checksum offload
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv4' -RegistryValue 3 2>$null
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv4' -RegistryValue 3 2>$null
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv6' -RegistryValue 3 2>$null
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv6' -RegistryValue 3 2>$null
+                    # Re-enable checksum offload
+                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv4' -RegistryValue 3 2>$null
+                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv4' -RegistryValue 3 2>$null
+                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv6' -RegistryValue 3 2>$null
+                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv6' -RegistryValue 3 2>$null
 
-            Write-Host 'Offload enabled'
-            "#,
-            friendly_name.replace("'", "''")
-        );
+                    Write-Host 'Offload enabled'
+                    "#,
+                    friendly_name.replace("'", "''")
+                );
 
-        // 5 second timeout
-        if Self::run_powershell_with_timeout(&script, 5) {
-            log::info!("TSO/LSO re-enabled on {}", friendly_name);
-            // Delete marker file - TSO successfully restored
-            delete_tso_marker();
-        } else {
-            log::warn!("Failed to re-enable TSO - manual re-enable may be needed");
-            // Still delete marker to avoid repeated restore attempts on next startup
-            delete_tso_marker();
+                if Self::run_powershell_with_timeout(&script, 5) {
+                    log::info!("TSO/LSO re-enabled on {}", friendly_name);
+                    delete_tso_marker();
+                } else {
+                    log::warn!("Failed to re-enable TSO - manual re-enable may be needed");
+                }
+            }
         }
 
         self.tso_was_disabled = false;
@@ -2735,6 +2745,19 @@ impl ParallelInterceptor {
             friendly_name
         );
 
+        if matches!(query_ipv6_binding_enabled(&friendly_name), Some(false)) {
+            log::info!(
+                "IPv6 was already disabled on adapter {} before SwiftTunnel; leaving it unchanged",
+                friendly_name
+            );
+            self.ipv6_was_disabled = false;
+            delete_ipv6_marker();
+            return Ok(());
+        }
+
+        write_ipv6_marker(&friendly_name);
+        self.ipv6_was_disabled = true;
+
         // Disable IPv6 binding on the adapter.
         // This prevents Roblox/Windows from preferring IPv6 and bypassing our IPv4-only tunnel.
         let script = Self::build_disable_ipv6_script(&friendly_name);
@@ -2748,8 +2771,6 @@ impl ParallelInterceptor {
                 "IPv6 disabled successfully on {} - all traffic will use IPv4",
                 friendly_name
             );
-            self.ipv6_was_disabled = true;
-            write_ipv6_marker(&friendly_name);
             return Ok(());
         }
 
@@ -2810,29 +2831,40 @@ impl ParallelInterceptor {
 
         log::info!("Re-enabling IPv6 on adapter: {}", friendly_name);
 
-        let script = format!(
-            r#"
-            $ErrorActionPreference = 'SilentlyContinue'
-            $adapter = '{}'
+        match restore_ipv6_from_marker() {
+            Some(true) => {
+                log::info!("IPv6 restored to original state on {}", friendly_name);
+                delete_ipv6_marker();
+            }
+            Some(false) => {
+                log::warn!("Failed to restore IPv6 state - will retry on next launch if needed");
+            }
+            None => {
+                let script = format!(
+                    r#"
+                    $ErrorActionPreference = 'SilentlyContinue'
+                    $adapter = '{}'
 
-            # Re-enable IPv6 binding on the adapter
-            Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null
+                    # Re-enable IPv6 binding on the adapter
+                    Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null
 
-            Write-Host 'IPv6 enabled'
-            "#,
-            friendly_name.replace("'", "''")
-        );
+                    Write-Host 'IPv6 enabled'
+                    "#,
+                    friendly_name.replace("'", "''")
+                );
 
-        if Self::run_powershell_with_timeout(&script, 5) {
-            log::info!("IPv6 re-enabled on {}", friendly_name);
-        } else {
-            log::warn!(
-                "Failed to re-enable IPv6 - manual re-enable may be needed via Network Settings"
-            );
+                if Self::run_powershell_with_timeout(&script, 5) {
+                    log::info!("IPv6 re-enabled on {}", friendly_name);
+                    delete_ipv6_marker();
+                } else {
+                    log::warn!(
+                        "Failed to re-enable IPv6 - manual re-enable may be needed via Network Settings"
+                    );
+                }
+            }
         }
 
         self.ipv6_was_disabled = false;
-        delete_ipv6_marker();
     }
 
     /// Start parallel interception
@@ -3497,8 +3529,12 @@ fn run_packet_reader(
                     let packet_len = data.len() as u64;
 
                     // Decide routing here to keep bypass traffic out of the workers.
-                    let should_tunnel =
-                        should_route_to_vpn_with_inline_cache(data, &snapshot, &mut inline_cache, api_tunneling);
+                    let should_tunnel = should_route_to_vpn_with_inline_cache(
+                        data,
+                        &snapshot,
+                        &mut inline_cache,
+                        api_tunneling,
+                    );
 
                     // Auto-routing whitelist bypass: if bypass is active, tunnel-eligible packets
                     // should be passed through to the physical adapter instead.
@@ -4661,7 +4697,8 @@ fn should_route_to_vpn_with_inline_cache(
     // is handled below so we can seed the inline cache for game-server hits.
     if snapshot.should_tunnel(src_ip, src_port, protocol) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
-        let result = super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
+        let result =
+            super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
         if protocol == Protocol::Udp && more_fragments {
             FRAGMENT_DECISIONS.with(|cache| {
                 let mut cache = cache.borrow_mut();
@@ -4680,7 +4717,8 @@ fn should_route_to_vpn_with_inline_cache(
     let cache_key = (src_ip, src_port, protocol);
     if inline_cache.contains_key(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
-        let result = super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
+        let result =
+            super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
         if protocol == Protocol::Udp && more_fragments {
             FRAGMENT_DECISIONS.with(|cache| {
                 let mut cache = cache.borrow_mut();
@@ -4732,7 +4770,8 @@ fn should_route_to_vpn_with_inline_cache(
         // 1. Only game traffic goes to these IP ranges
         // 2. If somehow non-game traffic hits these IPs, tunneling is harmless
         // 3. Subsequent packets will be correctly identified once cache is populated
-        let is_game_dst = super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
+        let is_game_dst =
+            super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
         if is_game_dst {
             // Log speculative tunneling for debugging (first 20 times only)
             thread_local! {
@@ -4843,7 +4882,12 @@ fn should_route_to_vpn_with_inline_cache(
                 dst_ip,
                 dst_port,
                 is_tunnel_app,
-                super::process_cache::is_roblox_game_server(dst_ip, dst_port, protocol, api_tunneling)
+                super::process_cache::is_roblox_game_server(
+                    dst_ip,
+                    dst_port,
+                    protocol,
+                    api_tunneling
+                )
             );
         }
     }
@@ -7660,6 +7704,7 @@ mod tests {
 
     #[test]
     fn test_disable_ipv6_sets_flag_on_success() {
+        delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         interceptor
@@ -7672,10 +7717,12 @@ mod tests {
             })
             .unwrap();
         assert!(interceptor.ipv6_was_disabled);
+        delete_ipv6_marker();
     }
 
     #[test]
-    fn test_disable_ipv6_failure_is_non_fatal() {
+    fn test_disable_ipv6_failure_preserves_restore_state() {
+        delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         interceptor
@@ -7687,7 +7734,8 @@ mod tests {
                 stderr: "Access is denied.".to_string(),
             })
             .unwrap();
-        assert!(!interceptor.ipv6_was_disabled);
+        assert!(interceptor.ipv6_was_disabled);
+        delete_ipv6_marker();
     }
 
     #[test]
@@ -7855,12 +7903,16 @@ mod tests {
         let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
 
         let mut cache_a: InlineCache = HashMap::new();
-        let result_a = should_route_to_vpn_with_inline_cache(&frame, &snapshot, &mut cache_a, false);
+        let result_a =
+            should_route_to_vpn_with_inline_cache(&frame, &snapshot, &mut cache_a, false);
 
         let mut cache_b: InlineCache = HashMap::new();
         let result_b = should_route_to_vpn_with_inline_cache(&frame, &snapshot, &mut cache_b, true);
 
-        assert_eq!(result_a, result_b, "UDP routing must be identical regardless of api_tunneling");
+        assert_eq!(
+            result_a, result_b,
+            "UDP routing must be identical regardless of api_tunneling"
+        );
         assert!(result_a, "UDP from tunnel app should always be tunneled");
     }
 }

@@ -3,14 +3,13 @@ import { DEFAULT_SETTINGS } from "./settings";
 import { runAppBootstrap } from "./appBootstrap";
 
 describe("app bootstrap", () => {
-  it("loads dependencies, applies boost config, reconnects, and checks updates", async () => {
+  it("loads dependencies, reconnects, and checks updates", async () => {
     const initEventListeners = vi.fn().mockResolvedValue(undefined);
     const fetchAuth = vi.fn().mockResolvedValue(undefined);
     const loadSettings = vi.fn().mockResolvedValue(undefined);
     const fetchServers = vi.fn().mockResolvedValue(undefined);
     const fetchSystemInfo = vi.fn().mockResolvedValue(undefined);
     const fetchVpnState = vi.fn().mockResolvedValue(undefined);
-    const applyBoostConfig = vi.fn().mockResolvedValue(undefined);
     const connectVpn = vi.fn().mockResolvedValue(undefined);
     const checkForUpdates = vi.fn().mockResolvedValue(undefined);
 
@@ -28,7 +27,6 @@ describe("app bootstrap", () => {
       }),
       getAuthState: () => "logged_in",
       getVpnState: () => "disconnected",
-      applyBoostConfig,
       connectVpn,
       checkForUpdates,
     });
@@ -39,7 +37,6 @@ describe("app bootstrap", () => {
     expect(fetchServers).toHaveBeenCalledTimes(1);
     expect(fetchSystemInfo).toHaveBeenCalledTimes(1);
     expect(fetchVpnState).toHaveBeenCalledTimes(1);
-    expect(applyBoostConfig).toHaveBeenCalledWith(DEFAULT_SETTINGS.config);
     expect(connectVpn).toHaveBeenCalledWith("singapore", ["roblox"]);
     expect(checkForUpdates).toHaveBeenCalledWith(false);
   });
@@ -61,7 +58,6 @@ describe("app bootstrap", () => {
       }),
       getAuthState: () => "logged_out",
       getVpnState: () => "connected",
-      applyBoostConfig: vi.fn().mockResolvedValue(undefined),
       connectVpn,
       checkForUpdates,
     });

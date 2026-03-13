@@ -101,7 +101,12 @@ fn ip_in_range(ip: Ipv4Addr, network: u32, mask: u32) -> bool {
 /// - IP is in known Roblox server ranges
 /// - Protocol is UDP
 #[inline(always)]
-pub fn is_roblox_game_server(dst_ip: Ipv4Addr, _dst_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
+pub fn is_roblox_game_server(
+    dst_ip: Ipv4Addr,
+    _dst_port: u16,
+    protocol: Protocol,
+    api_tunneling: bool,
+) -> bool {
     match protocol {
         Protocol::Udp => {}
         Protocol::Tcp if api_tunneling => {}
@@ -143,7 +148,12 @@ pub fn is_likely_game_traffic(_dst_port: u16, protocol: Protocol, api_tunneling:
 
 /// Check if destination is any known game server (extensible for future games)
 #[inline(always)]
-pub fn is_game_server(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
+pub fn is_game_server(
+    dst_ip: Ipv4Addr,
+    dst_port: u16,
+    protocol: Protocol,
+    api_tunneling: bool,
+) -> bool {
     // Currently only Roblox, but can add Valorant, Fortnite, etc.
     is_roblox_game_server(dst_ip, dst_port, protocol, api_tunneling)
 }
@@ -441,7 +451,12 @@ impl ProcessSnapshot {
     /// fails but we still want to recover tunnel routing for packets emitted by a
     /// known tunnel app that may have shifted local IP representation.
     #[inline]
-    pub fn should_tunnel_by_port_fallback(&self, local_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
+    pub fn should_tunnel_by_port_fallback(
+        &self,
+        local_port: u16,
+        protocol: Protocol,
+        api_tunneling: bool,
+    ) -> bool {
         if protocol == Protocol::Udp && self.explicit_tunnel_udp_ports.contains(&local_port) {
             return true;
         }
@@ -1139,7 +1154,12 @@ mod tests {
         let roblox_ip = Ipv4Addr::new(128, 116, 50, 100);
         assert!(is_roblox_game_server(roblox_ip, 443, Protocol::Tcp, true));
         assert!(!is_roblox_game_server(roblox_ip, 443, Protocol::Tcp, false));
-        assert!(is_roblox_game_server(roblox_ip, 55000, Protocol::Udp, false));
+        assert!(is_roblox_game_server(
+            roblox_ip,
+            55000,
+            Protocol::Udp,
+            false
+        ));
     }
 
     #[test]

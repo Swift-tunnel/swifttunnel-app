@@ -23,6 +23,15 @@ impl FirewallFixer {
         }
     }
 
+    fn remove_swifttunnel_rules_by_prefix() {
+        let _ = hidden_command("powershell")
+            .args([
+                "-Command",
+                "Get-NetFirewallRule -DisplayName 'SwiftTunnel - Roblox*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue",
+            ])
+            .output();
+    }
+
     /// Apply firewall fixes: add allow rules for Roblox, flush DNS, reset Winsock, clear ARP.
     pub fn apply(&mut self) -> Result<()> {
         if self.rules_applied {
@@ -151,8 +160,7 @@ impl FirewallFixer {
     /// Restore: remove all SwiftTunnel Roblox firewall rules.
     pub fn restore(&mut self) -> Result<()> {
         if !self.rules_applied {
-            info!("No firewall rules to restore");
-            return Ok(());
+            info!("Firewall fixer had no in-memory state; removing any stale SwiftTunnel rules");
         }
 
         info!("Removing SwiftTunnel Roblox firewall rules");
@@ -188,6 +196,8 @@ impl FirewallFixer {
 
             info!("Removed firewall rules for {}", exe_name);
         }
+
+        Self::remove_swifttunnel_rules_by_prefix();
 
         self.rules_applied = false;
         info!("SwiftTunnel Roblox firewall rules removed");

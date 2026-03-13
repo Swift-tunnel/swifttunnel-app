@@ -31,6 +31,7 @@ pub use utils::pending_connection_path;
 pub use utils::quote_windows_arg;
 pub use utils::relaunch_elevated;
 pub use utils::relaunch_elevated_with_args;
+pub use utils::relaunch_elevated_with_args_and_wait;
 pub use utils::rotate_log_if_needed;
 pub use utils::save_pending_connection;
 pub use utils::with_retry;
