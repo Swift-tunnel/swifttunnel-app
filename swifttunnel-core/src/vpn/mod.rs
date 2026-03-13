@@ -35,6 +35,7 @@ pub mod split_tunnel;
 pub mod tso_recovery;
 pub mod udp_relay;
 pub mod wfp_block;
+pub mod winpkfilter;
 
 pub use auto_routing::{AutoRouter, AutoRoutingAction, AutoRoutingEvent};
 pub use config::{VpnConfigRequest, fetch_vpn_config, update_latency};

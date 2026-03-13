@@ -17,10 +17,70 @@ const APP_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/ic
 #[cfg(windows)]
 fn sync_runtime_assets(app: &tauri::App) {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn first_existing(candidates: Vec<PathBuf>) -> Option<PathBuf> {
         candidates.into_iter().find(|p| p.exists())
+    }
+
+    fn sync_file(source: &Path, destination: &Path) -> Result<bool, String> {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create asset directory {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+
+        let should_copy = match (fs::metadata(source), fs::metadata(destination)) {
+            (Ok(src), Ok(dst)) => src.len() != dst.len(),
+            (Ok(_), Err(_)) => true,
+            (Err(e), _) => {
+                return Err(format!("Failed to inspect {}: {}", source.display(), e));
+            }
+        };
+
+        if !should_copy {
+            return Ok(false);
+        }
+
+        fs::copy(source, destination).map_err(|e| {
+            format!(
+                "Failed to stage runtime asset {} -> {}: {}",
+                source.display(),
+                destination.display(),
+                e
+            )
+        })?;
+        Ok(true)
+    }
+
+    fn sync_entry(source: &Path, destination: &Path) -> Result<usize, String> {
+        if source.is_dir() {
+            fs::create_dir_all(destination).map_err(|e| {
+                format!(
+                    "Failed to create asset directory {}: {}",
+                    destination.display(),
+                    e
+                )
+            })?;
+
+            let mut copied_files = 0;
+            for entry in fs::read_dir(source).map_err(|e| {
+                format!("Failed to read asset directory {}: {}", source.display(), e)
+            })? {
+                let entry = entry
+                    .map_err(|e| format!("Failed to read entry in {}: {}", source.display(), e))?;
+                copied_files += sync_entry(&entry.path(), &destination.join(entry.file_name()))?;
+            }
+            Ok(copied_files)
+        } else if sync_file(source, destination)? {
+            Ok(1)
+        } else {
+            Ok(0)
+        }
     }
 
     let resource_dir = match app.path().resource_dir() {
@@ -52,12 +112,12 @@ fn sync_runtime_assets(app: &tauri::App) {
             exe_dir.join("wintun.dll"),
         ),
         (
-            "WinpkFilter-x64.msi",
+            "winpkfilter",
             first_existing(vec![
-                resource_dir.join("drivers").join("WinpkFilter-x64.msi"),
-                resource_dir.join("WinpkFilter-x64.msi"),
+                resource_dir.join("drivers").join("winpkfilter"),
+                resource_dir.join("winpkfilter"),
             ]),
-            exe_dir.join("drivers").join("WinpkFilter-x64.msi"),
+            exe_dir.join("drivers").join("winpkfilter"),
         ),
         (
             "winfw.dll",
@@ -77,9 +137,9 @@ fn sync_runtime_assets(app: &tauri::App) {
 
     for (name, source, destination) in targets {
         let Some(source) = source else {
-            if name == "WinpkFilter-x64.msi" {
+            if name == "winpkfilter" {
                 log::warn!(
-                    "Bundled runtime asset not found: {} (runtime fallback download will be used)",
+                    "Bundled runtime asset not found: {} (runtime fallback download/extraction will be used)",
                     name
                 );
             } else {
@@ -88,39 +148,15 @@ fn sync_runtime_assets(app: &tauri::App) {
             continue;
         };
 
-        if let Some(parent) = destination.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                log::warn!(
-                    "Failed to create asset directory {}: {}",
-                    parent.display(),
-                    e
-                );
-                continue;
-            }
-        }
-
-        let should_copy = match (fs::metadata(&source), fs::metadata(&destination)) {
-            (Ok(src), Ok(dst)) => src.len() != dst.len(),
-            (Ok(_), Err(_)) => true,
-            (Err(e), _) => {
-                log::warn!("Failed to inspect {}: {}", source.display(), e);
-                false
-            }
-        };
-
-        if should_copy {
-            match fs::copy(&source, &destination) {
-                Ok(_) => info!(
-                    "Staged runtime asset {} -> {}",
-                    source.display(),
-                    destination.display()
-                ),
-                Err(e) => log::warn!(
-                    "Failed to stage runtime asset {} -> {}: {}",
-                    source.display(),
-                    destination.display(),
-                    e
-                ),
+        match sync_entry(&source, &destination) {
+            Ok(copied) if copied > 0 => info!(
+                "Staged runtime asset {} -> {}",
+                source.display(),
+                destination.display()
+            ),
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("{}", e);
             }
         }
     }
