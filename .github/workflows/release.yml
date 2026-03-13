@@ -31,15 +31,17 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}".Trim()
-          if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?$') {
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?(?:\+[0-9A-Za-z\.-]+)?$') {
             throw "Tag '$tag' is not valid semver with v-prefix"
           }
 
           $version = $tag.Substring(1)
-          $isPrerelease = if ($version.Contains("-")) { "true" } else { "false" }
+          $appVersion = ($version -split '\+', 2)[0]
+          $isPrerelease = if ($appVersion.Contains("-")) { "true" } else { "false" }
 
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "app_version=$appVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "prerelease=$isPrerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "channel_class=$(if ($isPrerelease -eq 'true') { 'live' } else { 'stable' })" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
@@ -171,7 +173,7 @@ jobs:
       - name: Enforce version consistency
         shell: pwsh
         env:
-          EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
+          EXPECTED_VERSION: ${{ steps.meta.outputs.app_version }}
         run: |
           node scripts/check-desktop-version-sync.mjs $env:EXPECTED_VERSION
 
