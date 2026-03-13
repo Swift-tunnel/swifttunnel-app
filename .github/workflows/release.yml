@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -215,9 +216,19 @@ jobs:
             throw "msiexec /a failed with code $LASTEXITCODE"
           }
 
-          $sourceWin10Dir = Join-Path $extractRoot "PFiles64\Windows Packet Filter\drivers\win10"
-          if (-not (Test-Path (Join-Path $sourceWin10Dir "ndisrd_lwf.inf"))) {
+          $sourceInf = Get-ChildItem -Path $extractRoot -Recurse -File -Filter "ndisrd_lwf.inf" |
+            Where-Object { $_.DirectoryName -match '[\\/](win10)$' } |
+            Select-Object -First 1
+          if (-not $sourceInf) {
             throw "Extracted WinpkFilter driver package is incomplete"
+          }
+
+          $sourceWin10Dir = Split-Path -Parent $sourceInf.FullName
+          $requiredDriverFiles = @("ndisrd_lwf.inf", "ndisrd.sys", "ndisrd.cat")
+          $missingDriverFiles = $requiredDriverFiles |
+            Where-Object { -not (Test-Path (Join-Path $sourceWin10Dir $_)) }
+          if ($missingDriverFiles.Count -gt 0) {
+            throw "Extracted WinpkFilter driver package is incomplete in $sourceWin10Dir (missing: $($missingDriverFiles -join ', '))"
           }
 
           if (Test-Path $winpkfilterDir) {
