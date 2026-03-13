@@ -24,7 +24,19 @@ jobs:
           workdir="$(mktemp -d)"
           cd "$workdir"
 
-          printf '%s\n' "$TAURI_UPDATER_PUBLIC_KEY" > tauri-updater.pub
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          raw = os.environ["TAURI_UPDATER_PUBLIC_KEY"].replace("\\n", "\n")
+          normalized = "\n".join(line.rstrip() for line in raw.splitlines()).strip()
+          if not normalized:
+            raise SystemExit("TAURI_UPDATER_PUBLIC_KEY is empty after normalization")
+
+          Path("tauri-updater.pub").write_text(normalized + "\n", encoding="utf-8")
+          Path("tauri-updater.keyline").write_text(normalized.splitlines()[-1] + "\n", encoding="utf-8")
+          print(f"Normalized updater public key into {len(normalized.splitlines())} line(s).")
+          PY
 
           curl -fsSL -o github-latest.json \
             https://github.com/Swift-tunnel/swifttunnel-app/releases/download/v1.20.18/latest.json
@@ -37,10 +49,21 @@ jobs:
           curl -fsSL -o gitlab-1.21.16.exe "$(jq -r '.url' gitlab-latest.json)"
           jq -r '.signature' gitlab-latest.json | base64 -d > gitlab-1.21.16.sig
 
-          echo "Verifying GitHub v1.20.18 with current GitHub updater public key"
-          minisign -Vm github-1.20.18.exe -p tauri-updater.pub -x github-1.20.18.sig
+          verify_with_secret() {
+            local artifact="$1"
+            local sig="$2"
+            local label="$3"
 
-          echo "Verifying GitLab 1.21.16 with current GitHub updater public key"
-          minisign -Vm gitlab-1.21.16.exe -p tauri-updater.pub -x gitlab-1.21.16.sig
+            echo "Verifying ${label} with file-form updater key"
+            if minisign -Vm "$artifact" -p tauri-updater.pub -x "$sig"; then
+              return 0
+            fi
+
+            echo "Falling back to inline updater key for ${label}"
+            minisign -Vm "$artifact" -P "$(tr -d '\r\n' < tauri-updater.keyline)" -x "$sig"
+          }
+
+          verify_with_secret github-1.20.18.exe github-1.20.18.sig "GitHub v1.20.18"
+          verify_with_secret gitlab-1.21.16.exe gitlab-1.21.16.sig "GitLab 1.21.16"
 
           echo "Both releases verify with the current GitHub updater public key."
