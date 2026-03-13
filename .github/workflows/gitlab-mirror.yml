@@ -52,5 +52,4 @@ jobs:
             exit 0
           fi
 
-          git push gitlab-mirror refs/heads/main:refs/heads/main
           git push gitlab-mirror "refs/tags/${GITHUB_REF_NAME}"
