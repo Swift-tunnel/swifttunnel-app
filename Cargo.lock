@@ -4211,7 +4211,7 @@ dependencies = [
 
 [[package]]
 name = "swifttunnel-desktop"
-version = "1.21.12"
+version = "1.21.15"
 dependencies = [
  "base64 0.22.1",
  "chrono",
