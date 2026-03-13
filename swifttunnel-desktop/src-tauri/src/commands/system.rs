@@ -183,12 +183,10 @@ fn extract_driver_package_from_msi(
     extract_root: &Path,
 ) -> Result<swifttunnel_core::vpn::winpkfilter::DriverPackage, String> {
     let package_dir = extracted_driver_package_dir(extract_root);
-    if let Ok(package) =
-        swifttunnel_core::vpn::winpkfilter::validate_driver_package_dir(&package_dir)
-    {
-        return Ok(package);
-    }
 
+    // Always re-extract from the pinned MSI in fallback mode instead of trusting
+    // cached extraction output, which is harder to validate if a prior attempt
+    // was interrupted.
     if extract_root.exists() {
         fs::remove_dir_all(extract_root).map_err(|e| {
             format!(
@@ -264,16 +262,6 @@ fn resolve_winpkfilter_driver_package(
     );
     let cache_path = resolve_winpkfilter_cache_path(app)?;
     let extract_root = resolve_winpkfilter_extract_root(app)?;
-
-    if let Ok(package) = swifttunnel_core::vpn::winpkfilter::validate_driver_package_dir(
-        &extracted_driver_package_dir(&extract_root),
-    ) {
-        log::info!(
-            "Using cached extracted WinpkFilter driver package from {}",
-            package.root_dir.display()
-        );
-        return Ok(package);
-    }
 
     if cache_path.exists() {
         if validate_winpkfilter_file(&cache_path).is_ok() {
