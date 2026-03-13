@@ -33,7 +33,7 @@ jobs:
           git remote add gitlab-mirror "${GITLAB_MIRROR_PUSH_URL}"
 
       - name: Push main branch to GitLab mirror
-        if: github.ref_type == 'branch'
+        if: github.ref_type == 'branch' && github.ref_name == 'main'
         env:
           GITLAB_MIRROR_PUSH_URL: ${{ secrets.GITLAB_MIRROR_PUSH_URL }}
         run: |
