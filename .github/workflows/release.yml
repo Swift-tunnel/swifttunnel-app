@@ -189,6 +189,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          function Get-DriverPackageDir {
+            param([string]$Root)
+
+            $requiredDriverFiles = @("ndisrd_lwf.inf", "ndisrd.sys", "ndisrd.cat")
+            $candidateDirs = Get-ChildItem -Path $Root -Recurse -Directory -ErrorAction SilentlyContinue |
+              Sort-Object FullName
+
+            foreach ($dir in $candidateDirs) {
+              $missingDriverFiles = $requiredDriverFiles |
+                Where-Object { -not (Test-Path (Join-Path $dir.FullName $_)) }
+              if ($missingDriverFiles.Count -eq 0) {
+                return $dir.FullName
+              }
+            }
+
+            return $null
+          }
+
           $driversDir = "swifttunnel-desktop/src-tauri/resources/drivers"
           $winpkfilterDir = Join-Path $driversDir "winpkfilter"
           $winpkfilterWin10Dir = Join-Path $winpkfilterDir "win10"
@@ -213,31 +231,32 @@ jobs:
           }
           New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
 
-          & msiexec.exe /a $msiPath /qn "TARGETDIR=$extractRoot"
-          if ($LASTEXITCODE -ne 0) {
-            throw "msiexec /a failed with code $LASTEXITCODE"
+          $process = Start-Process -FilePath msiexec.exe -ArgumentList @("/a", $msiPath, "/qn", "TARGETDIR=$extractRoot") -NoNewWindow -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "msiexec /a failed with code $($process.ExitCode)"
           }
 
-          $sourceInf = Get-ChildItem -Path $extractRoot -Recurse -File -Filter "ndisrd_lwf.inf" |
-            Where-Object { $_.DirectoryName -match '[\\/](win10)$' } |
-            Select-Object -First 1
-          if (-not $sourceInf) {
+          $sourceDriverDir = $null
+          for ($attempt = 0; $attempt -lt 10 -and -not $sourceDriverDir; $attempt++) {
+            $sourceDriverDir = Get-DriverPackageDir -Root $extractRoot
+            if (-not $sourceDriverDir) {
+              Start-Sleep -Seconds 2
+            }
+          }
+
+          if (-not $sourceDriverDir) {
+            Write-Host "Extract root contents:"
+            Get-ChildItem -Path $extractRoot -Recurse -File -ErrorAction SilentlyContinue |
+              Sort-Object FullName |
+              Select-Object -ExpandProperty FullName
             throw "Extracted WinpkFilter driver package is incomplete"
-          }
-
-          $sourceWin10Dir = Split-Path -Parent $sourceInf.FullName
-          $requiredDriverFiles = @("ndisrd_lwf.inf", "ndisrd.sys", "ndisrd.cat")
-          $missingDriverFiles = $requiredDriverFiles |
-            Where-Object { -not (Test-Path (Join-Path $sourceWin10Dir $_)) }
-          if ($missingDriverFiles.Count -gt 0) {
-            throw "Extracted WinpkFilter driver package is incomplete in $sourceWin10Dir (missing: $($missingDriverFiles -join ', '))"
           }
 
           if (Test-Path $winpkfilterDir) {
             Remove-Item $winpkfilterDir -Recurse -Force
           }
           New-Item -ItemType Directory -Path $winpkfilterWin10Dir -Force | Out-Null
-          Copy-Item (Join-Path $sourceWin10Dir "*") $winpkfilterWin10Dir -Recurse -Force
+          Copy-Item (Join-Path $sourceDriverDir "*") $winpkfilterWin10Dir -Recurse -Force
 
       - name: Verify updater signing secrets
         shell: pwsh
