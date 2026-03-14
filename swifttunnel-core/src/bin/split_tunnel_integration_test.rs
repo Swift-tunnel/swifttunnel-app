@@ -22,6 +22,7 @@ fn print_usage() {
         "  split_tunnel_integration_test.exe --test-exe path\\to\\ip_checker.exe --udp-target {} --udp-count {}",
         DEFAULT_UDP_PROBE_TARGET, DEFAULT_UDP_PROBE_COUNT
     );
+    println!("  split_tunnel_integration_test.exe --custom-relay 45.32.115.254:51821");
     println!();
     println!("Environment:");
     println!("  SWIFTTUNNEL_TEST_ACCESS_TOKEN");
@@ -29,6 +30,8 @@ fn print_usage() {
     println!("  SWIFTTUNNEL_TEST_PASSWORD");
     println!("  SWIFTTUNNEL_TEST_REGION");
     println!("  SWIFTTUNNEL_TEST_ADAPTER_GUID");
+    println!("  SWIFTTUNNEL_TEST_CUSTOM_RELAY");
+    println!("  SWIFTTUNNEL_TEST_ENABLE_API_TUNNELING");
 }
 
 #[tokio::main(flavor = "current_thread")]

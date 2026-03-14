@@ -109,7 +109,9 @@ fn resolve_discord_region(
     }
 }
 
-fn parse_game_presets(game_presets: &[String]) -> HashSet<swifttunnel_core::vpn::GamePreset> {
+pub(crate) fn parse_game_presets(
+    game_presets: &[String],
+) -> HashSet<swifttunnel_core::vpn::GamePreset> {
     game_presets
         .iter()
         .filter_map(|preset| {
@@ -124,7 +126,7 @@ fn parse_game_presets(game_presets: &[String]) -> HashSet<swifttunnel_core::vpn:
         .collect()
 }
 
-fn current_binding_preference(
+pub(crate) fn current_binding_preference(
     settings: &mut swifttunnel_core::settings::AppSettings,
 ) -> Result<Option<AdapterBindingPreference>, String> {
     match settings.adapter_binding_mode {
@@ -157,7 +159,7 @@ fn current_binding_preference(
     }
 }
 
-fn build_binding_preflight(
+pub(crate) fn build_binding_preflight(
     settings: &mut swifttunnel_core::settings::AppSettings,
 ) -> Result<BindingPreflightInfo, String> {
     let binding_preference = current_binding_preference(settings)?;

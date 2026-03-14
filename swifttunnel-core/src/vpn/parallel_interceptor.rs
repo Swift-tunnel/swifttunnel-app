@@ -43,7 +43,7 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::Ipv4Addr;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -132,6 +132,7 @@ enum BindingStage {
     RememberedOverride,
     WanFallback,
     BridgeSibling,
+    RouteOwnerFallback,
     SmartAuto,
     Unrecoverable,
 }
@@ -144,6 +145,7 @@ impl BindingStage {
             Self::RememberedOverride => "remembered_override",
             Self::WanFallback => "wan_fallback",
             Self::BridgeSibling => "bridge_sibling",
+            Self::RouteOwnerFallback => "route_owner_fallback",
             Self::SmartAuto => "smart_auto",
             Self::Unrecoverable => "unrecoverable",
         }
@@ -1821,6 +1823,68 @@ impl ParallelInterceptor {
         None
     }
 
+    fn normalize_binding_match_value(value: &str) -> Option<String> {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    }
+
+    fn select_route_owner_named_candidate<'a>(
+        candidates: &'a [PhysicalCandidate],
+        route_owner: Option<&(String, String, String, bool)>,
+    ) -> Option<&'a PhysicalCandidate> {
+        let Some((owner_friendly_name, owner_description, _, _)) = route_owner else {
+            return None;
+        };
+
+        let owner_labels: BTreeSet<String> = [
+            Self::normalize_binding_match_value(owner_friendly_name),
+            Self::normalize_binding_match_value(owner_description),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if owner_labels.is_empty() {
+            return None;
+        }
+
+        let any_up = candidates
+            .iter()
+            .any(|candidate| candidate.is_up == Some(true));
+        let mut matches: Vec<&PhysicalCandidate> = candidates
+            .iter()
+            .filter(|candidate| !any_up || candidate.is_up != Some(false))
+            .filter(|candidate| {
+                Self::normalize_binding_match_value(&candidate.friendly_name)
+                    .is_some_and(|value| owner_labels.contains(&value))
+                    || Self::normalize_binding_match_value(&candidate.description)
+                        .is_some_and(|value| owner_labels.contains(&value))
+            })
+            .collect();
+
+        if matches.len() == 1 {
+            return matches.pop();
+        }
+
+        matches.sort_by_key(|candidate| candidate.score);
+        matches.reverse();
+
+        let best = matches.first().copied()?;
+        let ambiguous_top_score = matches
+            .iter()
+            .skip(1)
+            .any(|candidate| candidate.score == best.score);
+        if ambiguous_top_score {
+            return None;
+        }
+
+        Some(best)
+    }
+
     fn to_binding_candidate_info(
         candidate: &PhysicalCandidate,
         default_route_if_index: Option<u32>,
@@ -2023,6 +2087,19 @@ impl ParallelInterceptor {
         } else {
             log::warn!("Could not determine default route interface - will use name-based scoring");
         }
+
+        if let Err(err) = Self::ensure_winpkfilter_binding_for_adapter(
+            default_route_if_index,
+            default_route_owner
+                .as_ref()
+                .map(|(friendly_name, _, _, _)| friendly_name.as_str()),
+        ) {
+            log::warn!(
+                "WinpkFilter binding check on default-route adapter failed before enumeration: {}",
+                err
+            );
+        }
+
         // Find adapters
         let driver = ndisapi::Ndisapi::new("NDISRD")
             .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
@@ -2263,6 +2340,15 @@ impl ParallelInterceptor {
             } else {
                 false
             };
+        let used_route_owner_fallback = if selected.is_none() && strict_default_route {
+            selected = Self::select_route_owner_named_candidate(
+                &physical_candidates,
+                default_route_owner.as_ref(),
+            );
+            selected.is_some()
+        } else {
+            false
+        };
 
         self.manual_binding_active = used_preferred_physical_adapter
             && binding_preference
@@ -2279,6 +2365,8 @@ impl ParallelInterceptor {
             BindingStage::RememberedOverride
         } else if used_bridge_sibling {
             BindingStage::BridgeSibling
+        } else if used_route_owner_fallback {
+            BindingStage::RouteOwnerFallback
         } else if used_wan_only_fallback {
             BindingStage::WanFallback
         } else if selected.is_some() {
@@ -2355,6 +2443,9 @@ impl ParallelInterceptor {
                 }
                 BindingStage::BridgeSibling => {
                     "Connected using the only viable underlay adapter behind the active bridge or hypervisor route owner.".to_string()
+                }
+                BindingStage::RouteOwnerFallback => {
+                    "Connected using the adapter whose name matches the Windows default-route owner when the interface index did not map back into NDIS.".to_string()
                 }
                 BindingStage::WanFallback => {
                     "Connected using WAN fallback because the active route resolves through WAN pseudo-adapters.".to_string()
@@ -2572,6 +2663,103 @@ impl ParallelInterceptor {
     /// Returns true if command succeeded, false otherwise.
     fn run_powershell_with_timeout(script: &str, timeout_secs: u64) -> bool {
         Self::run_powershell_with_timeout_capture(script, timeout_secs).success
+    }
+
+    /// Ensure the WinpkFilter lightweight filter is enabled on a target adapter.
+    ///
+    /// Without the `nt_ndisrd` binding on the active adapter, split tunneling can
+    /// appear connected while capturing zero packets because NDISRD never attaches
+    /// to the adapter carrying the real traffic.
+    fn ensure_winpkfilter_binding_for_adapter(
+        if_index: Option<u32>,
+        adapter_name_hint: Option<&str>,
+    ) -> VpnResult<()> {
+        let adapter_label = adapter_name_hint.unwrap_or("selected adapter");
+
+        let adapter_lookup = if let Some(if_index) = if_index {
+            format!(
+                "$adapter = Get-NetAdapter -InterfaceIndex {} -ErrorAction Stop",
+                if_index
+            )
+        } else if let Some(name) = adapter_name_hint {
+            format!(
+                "$adapter = Get-NetAdapter -Name '{}' -ErrorAction Stop",
+                name.replace('\'', "''")
+            )
+        } else {
+            return Err(VpnError::SplitTunnel(
+                "Physical adapter not configured for WinpkFilter validation".to_string(),
+            ));
+        };
+
+        log::info!("Ensuring WinpkFilter binding on adapter: {}", adapter_label);
+
+        let script = format!(
+            r#"
+            $ErrorActionPreference = 'Stop'
+            {}
+
+            $binding = Get-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+
+            if (-not $binding) {{
+                Write-Error ('WinpkFilter binding nt_ndisrd is not installed on adapter: ' + $adapter.Name)
+                exit 1
+            }}
+
+            if (-not $binding.Enabled) {{
+                Enable-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -Confirm:$false | Out-Null
+                Start-Sleep -Seconds 1
+                $binding = Get-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -ErrorAction Stop |
+                    Select-Object -First 1
+                if (-not $binding.Enabled) {{
+                    Write-Error ('WinpkFilter binding nt_ndisrd is still disabled on adapter: ' + $adapter.Name)
+                    exit 1
+                }}
+                Write-Output ('WinpkFilter binding enabled on adapter: ' + $adapter.Name)
+                exit 0
+            }}
+
+            Write-Output ('WinpkFilter binding already enabled on adapter: ' + $adapter.Name)
+            "#,
+            adapter_lookup
+        );
+
+        let output = Self::run_powershell_with_timeout_capture(&script, 8);
+        if output.success {
+            let details = output.stdout.trim();
+            if details.is_empty() {
+                log::info!(
+                    "WinpkFilter binding verified on adapter '{}'",
+                    adapter_label
+                );
+            } else {
+                log::info!("{}", details);
+            }
+            return Ok(());
+        }
+
+        let mut details = output.stderr.trim().to_string();
+        if details.is_empty() {
+            details = output.stdout.trim().to_string();
+        }
+        if details.is_empty() {
+            details = "unknown PowerShell failure".to_string();
+        }
+
+        Err(VpnError::SplitTunnel(format!(
+            "Failed to ensure WinpkFilter binding on adapter '{}': {}",
+            adapter_label, details
+        )))
+    }
+
+    fn ensure_winpkfilter_binding(&self) -> VpnResult<()> {
+        Self::ensure_winpkfilter_binding_for_adapter(
+            self.physical_adapter_if_index,
+            self.physical_adapter_friendly_name
+                .as_deref()
+                .or(self.physical_adapter_name.as_deref()),
+        )
     }
 
     /// Disable TCP Segmentation Offload (TSO/LSO) on the physical adapter
@@ -2882,6 +3070,8 @@ impl ParallelInterceptor {
             self.num_workers
         );
 
+        self.ensure_winpkfilter_binding()?;
+
         // Disable TSO/LSO on physical adapter BEFORE starting packet capture
         // This prevents the NIC from creating super-packets that exceed our buffer size
         self.disable_adapter_offload()?;
@@ -3133,11 +3323,13 @@ impl ParallelInterceptor {
             .binding_preference
             .as_ref()
             .is_some_and(|preference| preference.source == BindingPreferenceSource::Manual);
-        let needs_rebind = if manual_binding {
-            adapter_down
-        } else {
-            adapter_down || default_changed || default_mismatch
-        };
+        let needs_rebind = Self::should_rebind_on_route_change(
+            manual_binding,
+            adapter_down,
+            default_changed,
+            default_mismatch,
+            &self.binding_stage,
+        );
 
         if !needs_rebind {
             return Ok(false);
@@ -3211,6 +3403,22 @@ impl ParallelInterceptor {
             }
         }
         Ok(true)
+    }
+
+    fn should_rebind_on_route_change(
+        manual_binding: bool,
+        adapter_down: bool,
+        default_changed: bool,
+        default_mismatch: bool,
+        binding_stage: &str,
+    ) -> bool {
+        if manual_binding {
+            return adapter_down;
+        }
+
+        let mismatch_is_actionable = binding_stage == BindingStage::ExactRouteMatch.as_str();
+
+        adapter_down || default_changed || (default_mismatch && mismatch_is_actionable)
     }
 
     /// Check if active
@@ -4759,19 +4967,18 @@ fn should_route_to_vpn_with_inline_cache(
         inline_cache.insert(cache_key, true);
     }
 
-    // Apply V2 destination filter if needed
+    // Apply destination-based speculation if needed.
     let result = if !is_tunnel_app {
         // Phase 4: SPECULATIVE TUNNELING for first-packet guarantee
         // If destination is a known game server IP, tunnel it anyway even if we
         // couldn't identify the source process. This catches first packets sent
         // before the UDP table is populated (0.5-2ms race window).
         //
-        // This is safe because:
-        // 1. Only game traffic goes to these IP ranges
-        // 2. If somehow non-game traffic hits these IPs, tunneling is harmless
-        // 3. Subsequent packets will be correctly identified once cache is populated
-        let is_game_dst =
-            super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
+        // This is intentionally UDP-only. TCP "API tunneling" must remain scoped
+        // to Roblox-owned connections; speculating TCP by destination IP would
+        // route browser / launcher Roblox web traffic through the relay too.
+        let is_game_dst = protocol == Protocol::Udp
+            && super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
         if is_game_dst {
             // Log speculative tunneling for debugging (first 20 times only)
             thread_local! {
@@ -6516,6 +6723,127 @@ mod tests {
     }
 
     #[test]
+    fn test_should_rebind_on_route_change_rebinds_exact_match_mismatch() {
+        assert!(ParallelInterceptor::should_rebind_on_route_change(
+            false,
+            false,
+            false,
+            true,
+            BindingStage::ExactRouteMatch.as_str(),
+        ));
+    }
+
+    #[test]
+    fn test_should_rebind_on_route_change_ignores_wan_fallback_mismatch() {
+        assert!(!ParallelInterceptor::should_rebind_on_route_change(
+            false,
+            false,
+            false,
+            true,
+            BindingStage::WanFallback.as_str(),
+        ));
+    }
+
+    #[test]
+    fn test_should_rebind_on_route_change_still_rebinds_when_route_changes() {
+        assert!(ParallelInterceptor::should_rebind_on_route_change(
+            false,
+            false,
+            true,
+            true,
+            BindingStage::WanFallback.as_str(),
+        ));
+    }
+
+    #[test]
+    fn test_select_route_owner_named_candidate_uses_unique_owner_name_match() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                guid: "wifi-guid".to_string(),
+                friendly_name: "Wi-Fi".to_string(),
+                description: "Intel(R) Wi-Fi 6 AX201 160MHz".to_string(),
+                kind: "wifi".to_string(),
+                internal_name: "wifi".to_string(),
+                if_index: None,
+                score: 120,
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                guid: "eth-guid".to_string(),
+                friendly_name: "Ethernet".to_string(),
+                description: "Realtek PCIe GbE Family Controller".to_string(),
+                kind: "ethernet".to_string(),
+                internal_name: "ethernet".to_string(),
+                if_index: Some(12),
+                score: 110,
+                is_up: Some(false),
+            },
+        ];
+        let route_owner = Some((
+            "Wi-Fi".to_string(),
+            "Intel(R) Wi-Fi 6 AX201 160MHz".to_string(),
+            "wifi".to_string(),
+            false,
+        ));
+
+        let selected = ParallelInterceptor::select_route_owner_named_candidate(
+            &candidates,
+            route_owner.as_ref(),
+        );
+
+        assert_eq!(
+            selected.map(|candidate| candidate.guid.as_str()),
+            Some("wifi-guid")
+        );
+    }
+
+    #[test]
+    fn test_select_route_owner_named_candidate_rejects_ambiguous_matches() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                guid: "eth-a".to_string(),
+                friendly_name: "Ethernet".to_string(),
+                description: "USB Ethernet".to_string(),
+                kind: "ethernet".to_string(),
+                internal_name: "eth-a".to_string(),
+                if_index: Some(21),
+                score: 100,
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                guid: "eth-b".to_string(),
+                friendly_name: "Ethernet".to_string(),
+                description: "Dock Ethernet".to_string(),
+                kind: "ethernet".to_string(),
+                internal_name: "eth-b".to_string(),
+                if_index: Some(22),
+                score: 100,
+                is_up: Some(true),
+            },
+        ];
+        let route_owner = Some((
+            "Ethernet".to_string(),
+            "Ethernet".to_string(),
+            "ethernet".to_string(),
+            false,
+        ));
+
+        let selected = ParallelInterceptor::select_route_owner_named_candidate(
+            &candidates,
+            route_owner.as_ref(),
+        );
+
+        assert!(
+            selected.is_none(),
+            "ambiguous owner-name matches must not auto-select"
+        );
+    }
+
+    #[test]
     fn test_select_best_physical_candidate_with_preference_selects_matching_guid() {
         let candidates = vec![
             PhysicalCandidate {
@@ -7837,9 +8165,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_speculative_game_server_with_api_tunneling() {
-        // TCP to a Roblox game server IP should be speculatively tunneled
-        // when api_tunneling is enabled, even without a process match
+    fn test_tcp_api_tunneling_does_not_speculate_without_process_match() {
+        // TCP API tunneling must stay process-scoped. Roblox destination IPs
+        // alone are not enough to route arbitrary TCP through the relay.
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40001;
@@ -7858,7 +8186,7 @@ mod tests {
         let frame = build_ipv4_frame(6, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
 
-        // Without api_tunneling: TCP should NOT be speculatively tunneled
+        // Without api_tunneling: TCP should NOT be tunneled
         assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
@@ -7866,14 +8194,60 @@ mod tests {
             false,
         ));
 
-        // With api_tunneling: TCP SHOULD be speculatively tunneled to game server
+        // With api_tunneling: TCP still should NOT be tunneled without a Roblox process match
         inline_cache.clear();
-        assert!(should_route_to_vpn_with_inline_cache(
+        assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
             &mut inline_cache,
             true,
         ));
+        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_port_fallback_tunnels_with_api_tunneling() {
+        // TCP still tunnels when we can tie the source port back to a Roblox-owned
+        // connection, even if the exact local IP tuple is stale.
+        let cached_ip = Ipv4Addr::new(10, 10, 10, 10);
+        let packet_ip = Ipv4Addr::new(10, 10, 10, 11);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 53001;
+        let dst_port = 443;
+        let pid = 5555;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(cached_ip, src_port, Protocol::Tcp), pid);
+        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_pids,
+            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(6, packet_ip, dst_ip, src_port, dst_port);
+
+        let mut cache_without_api: InlineCache = HashMap::new();
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut cache_without_api,
+            false,
+        ));
+
+        let mut cache_with_api: InlineCache = HashMap::new();
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut cache_with_api,
+            true,
+        ));
+        assert!(cache_with_api.contains_key(&(packet_ip, src_port, Protocol::Tcp)));
     }
 
     #[test]

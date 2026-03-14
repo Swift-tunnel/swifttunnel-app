@@ -501,9 +501,11 @@ impl ProcessSnapshot {
             return is_likely_game_traffic(dst_port, protocol, api_tunneling);
         }
 
-        // Process not detected - use strict IP range check for speculative tunneling
-        // This catches first packets before process cache is populated
-        is_game_server(dst_ip, dst_port, protocol, api_tunneling)
+        // Process not detected - use strict IP range check for speculative tunneling.
+        // This remains UDP-only. TCP API tunneling must be tied to a detected
+        // tunnel process or a tunnel-owned source port, otherwise arbitrary
+        // Roblox web traffic from other apps can be routed through the relay.
+        protocol == Protocol::Udp && is_game_server(dst_ip, dst_port, protocol, api_tunneling)
     }
 
     /// Check if connection belongs to a tunnel app (internal helper)
@@ -1230,5 +1232,20 @@ mod tests {
         assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Tcp, false));
         // UDP port fallback is unchanged regardless of api_tunneling
         assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Udp, false));
+    }
+
+    #[test]
+    fn test_should_tunnel_v2_does_not_speculate_tcp_without_process_match() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+        let snap = cache.get_snapshot();
+
+        assert!(!snap.should_tunnel_v2(
+            Ipv4Addr::new(10, 0, 0, 2),
+            40001,
+            Protocol::Tcp,
+            Ipv4Addr::new(128, 116, 50, 100),
+            443,
+            true,
+        ));
     }
 }

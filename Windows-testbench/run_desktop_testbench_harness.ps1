@@ -6,8 +6,10 @@ param(
     [string]$AdapterGuid,
     [string]$CustomRelay,
     [switch]$EnableApiTunneling,
-    [string]$UdpTarget,
-    [int]$UdpCount
+    [string[]]$GamePreset,
+    [string]$ReportPath,
+    [int]$ConnectWaitMs,
+    [switch]$Connect
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +18,7 @@ Set-Location (Join-Path $PSScriptRoot "..")
 
 Ensure-WinpkFilterBinding -AdapterGuid $AdapterGuid | Out-Null
 
-cargo build -p swifttunnel-core --release --bin split_tunnel_integration_test --bin ip_checker
+cargo build -p swifttunnel-desktop --release --bin desktop_testbench_harness
 
 $argsList = @()
 if ($Region) { $argsList += @("--region", $Region) }
@@ -26,8 +28,14 @@ if ($Password) { $argsList += @("--password", $Password) }
 if ($AdapterGuid) { $argsList += @("--adapter-guid", $AdapterGuid) }
 if ($CustomRelay) { $argsList += @("--custom-relay", $CustomRelay) }
 if ($EnableApiTunneling) { $argsList += "--enable-api-tunneling" }
-if ($UdpTarget) { $argsList += @("--udp-target", $UdpTarget) }
-if ($UdpCount) { $argsList += @("--udp-count", $UdpCount) }
+if ($GamePreset) {
+  foreach ($preset in $GamePreset) {
+    $argsList += @("--game-preset", $preset)
+  }
+}
+if ($ReportPath) { $argsList += @("--report", $ReportPath) }
+if ($ConnectWaitMs) { $argsList += @("--connect-wait-ms", $ConnectWaitMs) }
+if ($Connect) { $argsList += "--connect" }
 
-& ".\target\release\split_tunnel_integration_test.exe" @argsList
+& ".\target\release\desktop_testbench_harness.exe" @argsList
 exit $LASTEXITCODE

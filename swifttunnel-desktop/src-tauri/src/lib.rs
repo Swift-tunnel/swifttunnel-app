@@ -1,6 +1,7 @@
 mod autostart;
 mod commands;
 mod events;
+mod harness;
 mod state;
 mod tray;
 mod window_restore;
@@ -335,4 +336,8 @@ pub fn run() {
                 }
             }
         });
+}
+
+pub fn run_testbench_harness(args: &[String]) -> i32 {
+    harness::run_testbench_harness(args)
 }

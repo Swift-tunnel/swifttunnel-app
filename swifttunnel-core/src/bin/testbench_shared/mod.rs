@@ -25,6 +25,8 @@ pub struct CommonCliOptions {
     pub test_exe: Option<PathBuf>,
     pub udp_target: Option<String>,
     pub udp_count: Option<usize>,
+    pub custom_relay_server: Option<String>,
+    pub enable_api_tunneling: bool,
 }
 
 pub fn init_logging() {
@@ -64,6 +66,8 @@ pub fn parse_common_cli_options(args: &[String]) -> Result<CommonCliOptions, Str
                     .map_err(|_| format!("Invalid integer for {}: {}", flag, raw))?;
                 opts.udp_count = Some(count);
             }
+            "--custom-relay" => opts.custom_relay_server = Some(next(flag, &mut idx)?),
+            "--enable-api-tunneling" => opts.enable_api_tunneling = true,
             "--help" | "-h" => return Err("help".to_string()),
             other => return Err(format!("Unknown argument: {}", other)),
         }
@@ -77,6 +81,41 @@ pub fn resolve_region(opts: &CommonCliOptions) -> String {
         .clone()
         .or_else(|| std::env::var("SWIFTTUNNEL_TEST_REGION").ok())
         .unwrap_or_else(|| DEFAULT_REGION.to_string())
+}
+
+fn parse_env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+pub fn resolve_custom_relay_server(
+    opts: &CommonCliOptions,
+    settings: &AppSettings,
+) -> Option<String> {
+    opts.custom_relay_server
+        .clone()
+        .or_else(|| {
+            std::env::var("SWIFTTUNNEL_TEST_CUSTOM_RELAY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            let custom = settings.custom_relay_server.trim();
+            (!custom.is_empty()).then(|| custom.to_string())
+        })
+}
+
+pub fn resolve_enable_api_tunneling(opts: &CommonCliOptions, settings: &AppSettings) -> bool {
+    opts.enable_api_tunneling
+        || parse_env_flag("SWIFTTUNNEL_TEST_ENABLE_API_TUNNELING")
+        || settings.enable_api_tunneling
 }
 
 pub fn resolve_binding_preference(
@@ -316,7 +355,7 @@ pub async fn connect_vpn(
         &access_token,
         &region,
         vec!["ip_checker.exe".to_string()],
-        None,
+        resolve_custom_relay_server(opts, settings),
         false,
         settings.config.network_settings.gaming_qos,
         available_servers,
@@ -324,7 +363,7 @@ pub async fn connect_vpn(
         settings.forced_servers.clone(),
         binding_preference,
         settings.game_process_performance,
-        false, // enable_api_tunneling
+        resolve_enable_api_tunneling(opts, settings),
     )
     .await
     .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))
