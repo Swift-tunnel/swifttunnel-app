@@ -991,7 +991,11 @@ impl UdpRelay {
                                             pkt[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5]
                                                 .copy_from_slice(&rtt_us.to_be_bytes());
                                         }
-                                        let job = OutboundJob { addr: from, buf_idx, len: RTT_REPORT_LEN };
+                                        let job = OutboundJob {
+                                            addr: from,
+                                            buf_idx,
+                                            len: RTT_REPORT_LEN,
+                                        };
                                         if self.outbound_tx.try_send(job).is_err() {
                                             self.outbound_pool.release(buf_idx);
                                         }
