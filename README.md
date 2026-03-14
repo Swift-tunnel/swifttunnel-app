@@ -166,7 +166,9 @@ Notes:
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
 - `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
+- Windows CI and release packaging run on the self-hosted `testbench` GitHub runner so GitHub uses the same Windows environment we already trust for real builds.
 - GitLab is maintained as a mirror only. If you want automatic mirroring from GitHub, configure `GITLAB_MIRROR_PUSH_URL` in GitHub Actions.
+- A scheduled GitHub reconciliation workflow backfills a missing GitHub semver tag or release if GitLab somehow gets tagged first, then dispatches the normal GitHub `Release` workflow for that tag.
 
 ### GitHub Cutover Notes
 
