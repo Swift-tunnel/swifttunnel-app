@@ -402,7 +402,8 @@ jobs:
             latest_json_sha256 = $latestSha
           } | ConvertTo-Json -Depth 8
 
-          Set-Content -Path $manifestPath -Value $manifest -Encoding utf8NoBOM
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($manifestPath, $manifest, $utf8NoBom)
 
           $env:MANIFEST_PATH = $manifestPath
           $env:SIGNATURE_PATH = $signaturePath
