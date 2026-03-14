@@ -349,7 +349,8 @@ jobs:
           $confPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
           $config = Get-Content $confPath -Raw | ConvertFrom-Json
           $config.plugins.updater.pubkey = $env:TAURI_UPDATER_PUBLIC_KEY
-          $config | ConvertTo-Json -Depth 32 | Set-Content -Path $confPath -Encoding utf8
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($confPath, ($config | ConvertTo-Json -Depth 32), $utf8NoBom)
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
