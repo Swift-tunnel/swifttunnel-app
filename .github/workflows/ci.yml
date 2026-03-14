@@ -55,7 +55,8 @@ jobs:
 
   rust:
     name: Rust Check (Windows)
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows, x64, testbench]
+    timeout-minutes: 60
 
     steps:
       - name: Checkout code

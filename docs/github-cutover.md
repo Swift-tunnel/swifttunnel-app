@@ -85,3 +85,16 @@ The desktop version must stay aligned between:
 - `swifttunnel-desktop/src-tauri/tauri.conf.json`
 
 GitHub CI now checks this on every push and pull request with `node scripts/check-desktop-version-sync.mjs`, and the release workflow verifies the same check against the pushed tag version before building.
+
+## Release Reconciliation
+
+GitHub Actions also runs a scheduled reconciliation workflow. If the newest semver tag exists on GitLab but is missing on GitHub, the workflow fetches that tag from GitLab, verifies that the tagged commit is already on `origin/main`, pushes the missing tag to GitHub, and lets the normal `Release` workflow publish the assets. If the newest GitHub tag already exists but the release entry is missing, the same reconciler dispatches the `Release` workflow manually for that tag.
+
+The reconciler only considers the newest semver tag across GitHub and GitLab, so it repairs the current release without trying to rebuild ancient historical tags.
+
+## Testbench Runner
+
+GitHub Windows jobs now target the self-hosted `testbench` runner via `runs-on: [self-hosted, windows, x64, testbench]`.
+
+- `CI / Rust Check (Windows)` uses the testbench box instead of `windows-latest`.
+- `Release / Build & Publish (Tauri)` uses the same runner so GitHub packaging stays aligned with the Windows machine we already trust for validation.
