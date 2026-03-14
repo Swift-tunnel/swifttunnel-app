@@ -28,6 +28,7 @@ const AUTH_HELLO_FRAME_TYPE: u8 = 0xA1;
 const AUTH_ACK_FRAME_TYPE: u8 = 0xA2;
 const PING_FRAME_TYPE: u8 = 0xA3;
 const PONG_FRAME_TYPE: u8 = 0xA4;
+const RTT_REPORT_FRAME_TYPE: u8 = 0xA5;
 const PING_FRAME_LEN: usize = SESSION_ID_LEN + 1 + 4 + 8;
 const PONG_FRAME_LEN: usize = SESSION_ID_LEN + 1 + 4 + 8 + 8;
 // Slightly longer handshake budget improves reliability on congested/PPPoE paths
@@ -977,6 +978,15 @@ impl UdpRelay {
                                 if now_ms >= client_ts_mono_ms {
                                     let rtt_ms = (now_ms - client_ts_mono_ms) as u32;
                                     self.ping.record_rtt_ms(rtt_ms);
+
+                                    // Report RTT to relay for admin monitoring
+                                    let rtt_us = rtt_ms.saturating_mul(1000);
+                                    let mut report = [0u8; 13]; // SESSION_ID_LEN(8) + 1 + 4
+                                    report[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
+                                    report[SESSION_ID_LEN] = RTT_REPORT_FRAME_TYPE;
+                                    report[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5]
+                                        .copy_from_slice(&rtt_us.to_be_bytes());
+                                    let _ = self.socket.send_to(&report, **self.relay_addr.load());
                                 }
                             }
                             return Ok(None);
