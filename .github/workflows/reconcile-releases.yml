@@ -47,29 +47,30 @@ jobs:
           mapfile -t gitlab_tags < <(
             git ls-remote --tags --refs "${GITLAB_REPO_URL}" "v*" |
               awk '{print $2}' |
-              sed 's#refs/tags/##' |
-              sort -V
+              sed 's#refs/tags/##'
           )
 
-          latest_gitlab_tag=""
-          if [[ "${#gitlab_tags[@]}" -gt 0 ]]; then
-            latest_gitlab_tag="${gitlab_tags[-1]}"
-          fi
+          latest_gitlab_tag="$(
+            printf '%s\n' "${gitlab_tags[@]}" |
+              python3 scripts/select_latest_semver_tag.py
+          )"
 
-          latest_github_tag="$(
+          mapfile -t github_tags < <(
             git for-each-ref \
               --merged=origin/main \
-              --sort=version:refname \
               --format='%(refname:strip=2)' \
-              refs/tags/v* |
-              tail -n 1
+              refs/tags/v*
+          )
+
+          latest_github_tag="$(
+            printf '%s\n' "${github_tags[@]}" |
+              python3 scripts/select_latest_semver_tag.py
           )"
 
           target_tag="$(
             printf '%s\n' "${latest_gitlab_tag}" "${latest_github_tag}" |
               awk 'NF > 0' |
-              sort -V |
-              tail -n 1
+              python3 scripts/select_latest_semver_tag.py
           )"
 
           if [[ -z "${target_tag}" ]]; then
@@ -93,7 +94,8 @@ jobs:
             fi
 
             git push origin "refs/tags/${missing_github_tag}"
-            echo "Pushed ${missing_github_tag} to GitHub; the Release workflow will publish assets."
+            echo "Dispatching Release workflow for backfilled GitHub tag ${missing_github_tag}"
+            gh workflow run Release --repo "${GITHUB_REPOSITORY}" -f tag="${missing_github_tag}"
             exit 0
           fi
 
