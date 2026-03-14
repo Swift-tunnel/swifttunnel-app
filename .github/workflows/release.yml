@@ -40,7 +40,7 @@ jobs:
           ref: ${{ github.event.inputs.tag != '' && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
 
       - name: Ensure Git Bash
-        shell: pwsh
+        shell: powershell
         run: |
           $gitBashPaths = @(
             'C:\Program Files\Git\bin',
@@ -60,7 +60,7 @@ jobs:
 
       - name: Resolve tag metadata
         id: meta
-        shell: pwsh
+        shell: powershell
         run: |
           $tag = "${{ github.event.inputs.tag != '' && github.event.inputs.tag || github.ref_name }}".Trim()
           if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?(?:\+[0-9A-Za-z\.-]+)?$') {
@@ -78,7 +78,7 @@ jobs:
           "channel_class=$(if ($isPrerelease -eq 'true') { 'live' } else { 'stable' })" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Select updater signing key
-        shell: pwsh
+        shell: powershell
         env:
           TAG: ${{ steps.meta.outputs.tag }}
           CURRENT_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -204,7 +204,7 @@ jobs:
           cache-dependency-path: swifttunnel-desktop/package-lock.json
 
       - name: Enforce version consistency
-        shell: pwsh
+        shell: powershell
         env:
           EXPECTED_VERSION: ${{ steps.meta.outputs.app_version }}
         run: |
@@ -218,7 +218,7 @@ jobs:
         run: npm ci
 
       - name: Prepare bundled driver payloads
-        shell: pwsh
+        shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -292,7 +292,7 @@ jobs:
           Copy-Item (Join-Path $sourceDriverDir "*") $winpkfilterWin10Dir -Recurse -Force
 
       - name: Verify updater signing secrets
-        shell: pwsh
+        shell: powershell
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
           TAURI_UPDATER_LEGACY_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_LEGACY_PUBLIC_KEY }}
@@ -342,7 +342,7 @@ jobs:
           }
 
       - name: Inject updater public key
-        shell: pwsh
+        shell: powershell
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
         run: |
@@ -369,7 +369,7 @@ jobs:
           updaterJsonPreferNsis: true
 
       - name: Generate and upload signed release manifest
-        shell: pwsh
+        shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.meta.outputs.tag }}
