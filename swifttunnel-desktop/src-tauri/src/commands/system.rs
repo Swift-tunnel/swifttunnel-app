@@ -454,25 +454,19 @@ pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
             return Err(message);
         }
 
-        if let Err(e) = swifttunnel_core::vpn::SplitTunnelDriver::restart_driver_service() {
-            log::warn!(
-                "Failed to restart WinpkFilter driver service after install: {}",
+        match swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
+            Duration::from_secs(20),
+        ) {
+            Ok(()) => Ok(()),
+            Err(e) if exit_code == 3010 => Err(format!(
+                "Driver installation completed and Windows requested a reboot before the driver became available. Please reboot and try again. {}",
                 e
-            );
+            )),
+            Err(e) => Err(format!(
+                "Driver installation completed, but the driver is still not available after service repair attempts. {}",
+                e
+            )),
         }
-
-        // Post-install: poll driver availability briefly so the UI can proceed immediately.
-        for _ in 0..10 {
-            if swifttunnel_core::vpn::SplitTunnelDriver::is_available() {
-                return Ok(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-
-        Err(
-            "Driver installation completed, but the driver is still not available. Please reboot and try again."
-                .to_string(),
-        )
     }
 
     #[cfg(not(windows))]

@@ -26,6 +26,13 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+const DRIVER_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const DRIVER_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const DRIVER_READY_TIMEOUT: Duration = Duration::from_secs(20);
+const SERVICE_NAME: &str = "NDISRD";
+const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  GAME PRESETS
@@ -302,14 +309,16 @@ impl SplitTunnelDriver {
         };
 
         if installed_driver_package {
-            // Try to start the driver service
-            if let Err(e) = Self::ensure_driver_service() {
-                log::error!("Failed to ensure driver service: {}", e);
-            } else {
-                // Check again after service start
-                if ParallelInterceptor::check_driver_available() {
-                    log::info!("Windows Packet Filter driver available after service start");
+            match Self::repair_and_wait_until_available(DRIVER_READY_TIMEOUT) {
+                Ok(()) => {
+                    log::info!("Windows Packet Filter driver available after service repair/start");
                     return true;
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to repair driver service after package detection: {}",
+                        e
+                    );
                 }
             }
         }
@@ -319,15 +328,17 @@ impl SplitTunnelDriver {
         if let Err(e) = Self::install_driver_from_package() {
             log::warn!("Failed to install bundled driver package: {}", e);
         } else {
-            if let Err(e) = Self::ensure_driver_service() {
-                log::warn!("Failed to ensure driver service after install: {}", e);
-            }
-
-            // Check again after driver install
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if ParallelInterceptor::check_driver_available() {
-                log::info!("Windows Packet Filter driver available after package install");
-                return true;
+            match Self::repair_and_wait_until_available(DRIVER_READY_TIMEOUT) {
+                Ok(()) => {
+                    log::info!("Windows Packet Filter driver available after package install");
+                    return true;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Driver install succeeded, but readiness repair failed: {}",
+                        e
+                    );
+                }
             }
         }
 
@@ -380,14 +391,74 @@ impl SplitTunnelDriver {
         None
     }
 
+    pub fn repair_and_wait_until_available(timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let mut last_error: Option<String> = None;
+        let mut first_attempt = true;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            if ParallelInterceptor::check_driver_available() {
+                return Ok(());
+            }
+
+            let result = if first_attempt {
+                Self::repair_driver_service_registration(remaining)
+            } else {
+                Self::ensure_driver_service(remaining)
+            };
+            first_attempt = false;
+
+            if let Err(err) = result {
+                log::warn!("NDISRD readiness repair attempt failed: {}", err);
+                last_error = Some(err);
+            }
+
+            if ParallelInterceptor::check_driver_available() {
+                return Ok(());
+            }
+
+            if Instant::now() >= deadline {
+                break;
+            }
+
+            std::thread::sleep(DRIVER_READY_POLL_INTERVAL);
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            format!(
+                "Windows Packet Filter driver did not become available within {} seconds.",
+                timeout.as_secs()
+            )
+        }))
+    }
+
+    fn repair_driver_service_registration(timeout: Duration) -> Result<(), String> {
+        log::info!("Repairing NDISRD driver service registration");
+        Self::cleanup_driver_service_for_uninstall()?;
+        let sleep_for = DRIVER_READY_POLL_INTERVAL.min(timeout);
+        if !sleep_for.is_zero() {
+            std::thread::sleep(sleep_for);
+        }
+
+        let remaining = timeout.saturating_sub(sleep_for);
+        if remaining.is_zero() {
+            return Err("Timed out while repairing NDISRD service registration.".to_string());
+        }
+
+        Self::ensure_driver_service(remaining)
+    }
+
     /// Ensure the driver service exists and is started
     ///
     /// Requires administrator privileges to create or start the driver service.
-    fn ensure_driver_service() -> Result<(), String> {
+    fn ensure_driver_service(timeout: Duration) -> Result<(), String> {
         use windows::Win32::System::Services::*;
         use windows::core::PCWSTR;
-
-        const SERVICE_NAME: &str = "NDISRD";
 
         // Check for administrator privileges first
         if !crate::utils::is_administrator() {
@@ -402,6 +473,45 @@ impl SplitTunnelDriver {
         let driver_path = Self::get_driver_path();
 
         unsafe {
+            let wait_for_running = |service, wait_timeout: Duration| -> Result<(), String> {
+                let effective_timeout = wait_timeout.min(DRIVER_SERVICE_START_TIMEOUT);
+                if effective_timeout.is_zero() {
+                    return Err(format!(
+                        "Timed out waiting for {} service to reach RUNNING state.",
+                        SERVICE_NAME
+                    ));
+                }
+
+                let deadline = Instant::now() + effective_timeout;
+
+                loop {
+                    let mut status = SERVICE_STATUS::default();
+                    QueryServiceStatus(service, &mut status).map_err(|e| {
+                        format!("Failed to query {} service status: {}", SERVICE_NAME, e)
+                    })?;
+
+                    if status.dwCurrentState == SERVICE_RUNNING {
+                        return Ok(());
+                    }
+
+                    if status.dwCurrentState != SERVICE_START_PENDING {
+                        return Err(format!(
+                            "{} service is not running (state {}).",
+                            SERVICE_NAME, status.dwCurrentState.0
+                        ));
+                    }
+
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "Timed out waiting for {} service to reach RUNNING state.",
+                            SERVICE_NAME
+                        ));
+                    }
+
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            };
+
             // Open Service Control Manager
             let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
                 .map_err(|e| format!("Failed to open SCM: {}", e))?;
@@ -412,90 +522,98 @@ impl SplitTunnelDriver {
                 .collect();
 
             // Try to open existing service
-            match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_ALL_ACCESS) {
-                Ok(service) => {
-                    log::info!("NDISRD service exists, checking status...");
+            let result =
+                match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_ALL_ACCESS) {
+                    Ok(service) => {
+                        log::info!("NDISRD service exists, checking status...");
 
-                    // Query status
-                    let mut status = SERVICE_STATUS::default();
-                    if let Ok(_) = QueryServiceStatus(service, &mut status) {
-                        if status.dwCurrentState == SERVICE_RUNNING {
+                        let result = (|| -> Result<(), String> {
+                            let mut status = SERVICE_STATUS::default();
+                            QueryServiceStatus(service, &mut status).map_err(|e| {
+                                format!("Failed to query NDISRD service status: {}", e)
+                            })?;
+
+                            if status.dwCurrentState == SERVICE_RUNNING {
+                                log::info!("NDISRD service is running");
+                                return Ok(());
+                            }
+
+                            if status.dwCurrentState != SERVICE_START_PENDING {
+                                log::info!("Starting NDISRD service...");
+                                StartServiceW(service, None).map_err(|e| {
+                                    format!("Failed to start NDISRD service: {}", e)
+                                })?;
+                            }
+
+                            wait_for_running(service, timeout)?;
                             log::info!("NDISRD service is running");
-                            let _ = CloseServiceHandle(service);
-                            let _ = CloseServiceHandle(scm);
-                            return Ok(());
-                        }
-
-                        // Try to start it
-                        log::info!("Starting NDISRD service...");
-                        match StartServiceW(service, None) {
-                            Ok(_) => {
-                                log::info!("NDISRD service started");
-                                std::thread::sleep(std::time::Duration::from_millis(500));
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to start NDISRD service: {}", e);
-                            }
-                        }
+                            Ok(())
+                        })();
+                        let _ = CloseServiceHandle(service);
+                        result
                     }
+                    Err(_) => {
+                        log::info!("NDISRD service does not exist");
 
-                    let _ = CloseServiceHandle(service);
-                }
-                Err(_) => {
-                    log::info!("NDISRD service does not exist");
+                        (|| -> Result<(), String> {
+                            let driver_path = driver_path.as_ref().ok_or_else(|| {
+                                "Driver file not found, cannot create NDISRD service".to_string()
+                            })?;
 
-                    // Only try to create if we have the driver file
-                    if let Some(driver_path) = driver_path {
-                        log::info!(
-                            "Creating NDISRD service with driver: {}",
-                            driver_path.display()
-                        );
+                            log::info!(
+                                "Creating NDISRD service with driver: {}",
+                                driver_path.display()
+                            );
 
-                        let display_name_wide: Vec<u16> = "Windows Packet Filter"
-                            .encode_utf16()
-                            .chain(std::iter::once(0))
-                            .collect();
-                        let binary_path_wide: Vec<u16> = driver_path
-                            .to_string_lossy()
-                            .encode_utf16()
-                            .chain(std::iter::once(0))
-                            .collect();
+                            let display_name_wide: Vec<u16> = SERVICE_DISPLAY_NAME
+                                .encode_utf16()
+                                .chain(std::iter::once(0))
+                                .collect();
+                            let binary_path_wide: Vec<u16> = driver_path
+                                .to_string_lossy()
+                                .encode_utf16()
+                                .chain(std::iter::once(0))
+                                .collect();
 
-                        match CreateServiceW(
-                            scm,
-                            PCWSTR(service_name_wide.as_ptr()),
-                            PCWSTR(display_name_wide.as_ptr()),
-                            SERVICE_ALL_ACCESS,
-                            SERVICE_KERNEL_DRIVER,
-                            SERVICE_DEMAND_START,
-                            SERVICE_ERROR_NORMAL,
-                            PCWSTR(binary_path_wide.as_ptr()),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        ) {
-                            Ok(service) => {
-                                log::info!("NDISRD service created, starting...");
-                                let _ = StartServiceW(service, None);
-                                std::thread::sleep(std::time::Duration::from_millis(500));
-                                let _ = CloseServiceHandle(service);
+                            match CreateServiceW(
+                                scm,
+                                PCWSTR(service_name_wide.as_ptr()),
+                                PCWSTR(display_name_wide.as_ptr()),
+                                SERVICE_ALL_ACCESS,
+                                SERVICE_KERNEL_DRIVER,
+                                SERVICE_DEMAND_START,
+                                SERVICE_ERROR_NORMAL,
+                                PCWSTR(binary_path_wide.as_ptr()),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ) {
+                                Ok(service) => {
+                                    let result = (|| -> Result<(), String> {
+                                        log::info!("NDISRD service created, starting...");
+                                        StartServiceW(service, None).map_err(|e| {
+                                            format!(
+                                                "Failed to start newly created NDISRD service: {}",
+                                                e
+                                            )
+                                        })?;
+                                        wait_for_running(service, timeout)?;
+                                        Ok(())
+                                    })();
+                                    let _ = CloseServiceHandle(service);
+                                    result
+                                }
+                                Err(e) => Err(format!("Failed to create NDISRD service: {}", e)),
                             }
-                            Err(e) => {
-                                log::error!("Failed to create NDISRD service: {}", e);
-                            }
-                        }
-                    } else {
-                        log::warn!("Driver file not found, cannot create service");
+                        })()
                     }
-                }
-            }
+                };
 
             let _ = CloseServiceHandle(scm);
+            result
         }
-
-        Ok(())
     }
 
     pub fn remove_driver_for_uninstall() -> Result<(), String> {
@@ -520,8 +638,6 @@ impl SplitTunnelDriver {
     pub fn stop_driver_service() -> Result<(), String> {
         use windows::Win32::System::Services::*;
         use windows::core::PCWSTR;
-
-        const SERVICE_NAME: &str = "NDISRD";
 
         unsafe {
             let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
@@ -554,7 +670,7 @@ impl SplitTunnelDriver {
     pub fn restart_driver_service() -> Result<(), String> {
         Self::stop_driver_service()?;
         std::thread::sleep(std::time::Duration::from_millis(500));
-        Self::ensure_driver_service()
+        Self::ensure_driver_service(DRIVER_SERVICE_START_TIMEOUT)
     }
 
     /// Cleanup stale state from previous sessions
@@ -572,8 +688,6 @@ impl SplitTunnelDriver {
     pub fn cleanup_driver_service_for_uninstall() -> Result<(), String> {
         use windows::Win32::System::Services::*;
         use windows::core::PCWSTR;
-
-        const SERVICE_NAME: &str = "NDISRD";
 
         log::info!("Cleaning up NDISRD driver service for uninstall");
 
