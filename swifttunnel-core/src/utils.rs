@@ -17,12 +17,67 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// This is essential for GUI apps to prevent scary command prompts
 /// from flashing when running shell commands in the background.
 pub fn hidden_command(program: &str) -> Command {
+    #[cfg(windows)]
+    let mut cmd = Command::new(resolve_windows_command_path(program));
+
+    #[cfg(not(windows))]
     let mut cmd = Command::new(program);
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     cmd
+}
+
+#[cfg(windows)]
+fn is_powershell_program(program: &str) -> bool {
+    program.eq_ignore_ascii_case("powershell") || program.eq_ignore_ascii_case("powershell.exe")
+}
+
+#[cfg(windows)]
+fn resolve_windows_command_path(program: &str) -> PathBuf {
+    let system_root = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("WINDIR"))
+        .map(PathBuf::from);
+
+    resolve_windows_command_path_with_root(program, system_root.as_deref())
+}
+
+#[cfg(windows)]
+fn resolve_windows_command_path_with_root(
+    program: &str,
+    system_root: Option<&std::path::Path>,
+) -> PathBuf {
+    if !is_powershell_program(program) {
+        return PathBuf::from(program);
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(root) = system_root {
+        candidates.push(
+            root.join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
+        candidates.push(
+            root.join("Sysnative")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
+        candidates.push(
+            root.join("SysWOW64")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe"),
+        );
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(program))
 }
 
 /// Normalize a GUID string to lowercase canonical form.
@@ -650,12 +705,46 @@ pub fn rotate_log_if_needed(log_path: &std::path::Path) -> std::io::Result<bool>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::fs;
 
     #[test]
     fn test_hidden_command() {
         let cmd = hidden_command("echo");
         // Just verify it creates a command without panicking
         assert!(format!("{:?}", cmd).contains("echo"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_windows_command_path_prefers_absolute_powershell() {
+        let root = std::env::temp_dir().join(format!(
+            "swifttunnel_test_windows_root_{}",
+            std::process::id()
+        ));
+        let powershell = root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+
+        if let Some(parent) = powershell.parent() {
+            fs::create_dir_all(parent).expect("create fake powershell parent");
+        }
+        fs::write(&powershell, b"").expect("create fake powershell");
+
+        let resolved = resolve_windows_command_path_with_root("powershell", Some(root.as_path()));
+        assert_eq!(resolved, powershell);
+
+        fs::remove_file(&powershell).ok();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_windows_command_path_leaves_other_programs_unchanged() {
+        let resolved = resolve_windows_command_path_with_root("cmd", None);
+        assert_eq!(resolved, PathBuf::from("cmd"));
     }
 
     #[tokio::test]

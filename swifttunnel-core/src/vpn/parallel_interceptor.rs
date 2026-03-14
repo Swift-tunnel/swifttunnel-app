@@ -2577,9 +2577,8 @@ impl ParallelInterceptor {
             out
         }
 
-        let mut child = match std::process::Command::new("powershell")
+        let mut child = match crate::hidden_command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
