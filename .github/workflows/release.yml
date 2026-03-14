@@ -39,6 +39,25 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag != '' && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
 
+      - name: Ensure Git Bash
+        shell: pwsh
+        run: |
+          $gitBashPaths = @(
+            'C:\Program Files\Git\bin',
+            'C:\Program Files\Git\usr\bin'
+          ) | Where-Object { Test-Path $_ }
+
+          if ($gitBashPaths.Count -eq 0) {
+            throw 'Git Bash was not found on the testbench runner.'
+          }
+
+          foreach ($path in $gitBashPaths) {
+            $path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            $env:Path = "$path;$env:Path"
+          }
+
+          bash --version
+
       - name: Resolve tag metadata
         id: meta
         shell: pwsh
