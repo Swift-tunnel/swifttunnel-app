@@ -600,6 +600,8 @@ impl SplitTunnelDriver {
     }
 
     pub fn remove_driver_for_uninstall() -> Result<(), String> {
+        Self::disable_winpkfilter_bindings_for_uninstall()?;
+
         let mut issues = Vec::new();
 
         if let Some(msi_path) = Self::find_driver_msi() {
@@ -674,6 +676,98 @@ impl SplitTunnelDriver {
 
     fn driver_uninstall_success_exit_code(code: i32) -> bool {
         matches!(code, 0 | 1605 | 1614 | 1641 | 3010)
+    }
+
+    fn build_winpkfilter_binding_cleanup_script() -> &'static str {
+        r#"
+        $ErrorActionPreference = 'Stop'
+        $bindings = @(
+            Get-NetAdapterBinding -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Enabled -eq $true } |
+                Sort-Object -Property Name -Unique
+        )
+
+        if ($bindings.Count -eq 0) {
+            Write-Output 'No enabled WinpkFilter bindings found during uninstall cleanup.'
+            exit 0
+        }
+
+        $disabled = New-Object System.Collections.Generic.List[string]
+        $failures = New-Object System.Collections.Generic.List[string]
+
+        foreach ($binding in $bindings) {
+            $adapterName = [string]$binding.Name
+            if ([string]::IsNullOrWhiteSpace($adapterName)) {
+                continue
+            }
+
+            try {
+                Disable-NetAdapterBinding -Name $adapterName -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
+                Start-Sleep -Milliseconds 500
+                $verification = Get-NetAdapterBinding -Name $adapterName -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+
+                if ($verification -and $verification.Enabled) {
+                    $failures.Add($adapterName + ': binding still enabled after Disable-NetAdapterBinding')
+                    continue
+                }
+
+                $disabled.Add($adapterName)
+            } catch {
+                $failures.Add($adapterName + ': ' + $_.Exception.Message)
+            }
+        }
+
+        if ($disabled.Count -gt 0) {
+            Write-Output ('Disabled WinpkFilter binding on adapters: ' + ($disabled -join ', '))
+        }
+
+        if ($failures.Count -gt 0) {
+            Write-Error ('Failed to disable WinpkFilter binding on adapters: ' + ($failures -join '; '))
+            exit 1
+        }
+        "#
+    }
+
+    fn disable_winpkfilter_bindings_for_uninstall() -> Result<(), String> {
+        log::info!("Disabling WinpkFilter adapter bindings before uninstall");
+
+        let output = crate::hidden_command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                Self::build_winpkfilter_binding_cleanup_script(),
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run WinpkFilter binding cleanup: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        if output.status.success() {
+            if stdout.is_empty() {
+                log::info!("WinpkFilter binding cleanup completed");
+            } else {
+                log::info!("{}", stdout);
+            }
+            return Ok(());
+        }
+
+        let details = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!(
+                "PowerShell exited with code {}",
+                output.status.code().unwrap_or(-1)
+            )
+        };
+
+        Err(format!(
+            "Failed to disable WinpkFilter bindings before uninstall: {}",
+            details
+        ))
     }
 
     /// Stop the driver service
@@ -1111,5 +1205,12 @@ mod tests {
     fn test_driver_state() {
         let driver = SplitTunnelDriver::new();
         assert_eq!(*driver.state(), DriverState::NotAvailable);
+    }
+
+    #[test]
+    fn test_binding_cleanup_script_disables_nt_ndisrd() {
+        let script = SplitTunnelDriver::build_winpkfilter_binding_cleanup_script();
+        assert!(script.contains("Disable-NetAdapterBinding"));
+        assert!(script.contains("nt_ndisrd"));
     }
 }
