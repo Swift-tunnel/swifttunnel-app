@@ -24,14 +24,20 @@ const WINPKFILTER_MIN_SIZE_BYTES: usize = 500_000;
 #[cfg(windows)]
 fn driver_install_success_exit_code(code: i32) -> bool {
     // 0 = success
-    // 3010 = success, reboot required
-    matches!(code, 0 | 3010)
+    // 1638 = another version already installed
+    // 1641/3010 = success, restart required
+    matches!(code, 0 | 1638 | 1641 | 3010)
 }
 
 #[cfg(windows)]
 fn driver_install_failure_message(code: i32) -> String {
     match code {
         1223 | 1602 => "Driver installation was canceled at the UAC/installer prompt.".to_string(),
+        1618 => "Another installer is already running. Close it and retry.".to_string(),
+        1625 => "Windows blocked this installer by policy. Contact support.".to_string(),
+        1639 => {
+            "Driver installer received invalid command-line arguments (msiexec 1639).".to_string()
+        }
         _ => format!("Driver install failed with code {}", code),
     }
 }
@@ -44,6 +50,54 @@ fn is_probable_uac_cancel_message(message: &str) -> bool {
         || normalized.contains("requires elevation")
         || normalized.contains("access is denied")
         || normalized.contains("uac")
+}
+
+#[cfg(windows)]
+fn winpkfilter_msi_candidate_paths(
+    resource_dir: Option<&Path>,
+    exe_dir: Option<&Path>,
+    program_files_dir: &Path,
+) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = resource_dir {
+        candidates.push(dir.join("drivers").join(WINPKFILTER_MSI_NAME));
+        candidates.push(dir.join(WINPKFILTER_MSI_NAME));
+    }
+
+    if let Some(dir) = exe_dir {
+        candidates.push(dir.join("drivers").join(WINPKFILTER_MSI_NAME));
+        candidates.push(
+            dir.join("resources")
+                .join("drivers")
+                .join(WINPKFILTER_MSI_NAME),
+        );
+        candidates.push(dir.join("resources").join(WINPKFILTER_MSI_NAME));
+    }
+
+    let install_root = program_files_dir.join("SwiftTunnel");
+    candidates.push(
+        install_root
+            .join("resources")
+            .join("drivers")
+            .join(WINPKFILTER_MSI_NAME),
+    );
+    candidates.push(install_root.join("drivers").join(WINPKFILTER_MSI_NAME));
+
+    candidates
+}
+
+#[cfg(windows)]
+fn find_winpkfilter_msi(
+    resource_dir: Option<&Path>,
+    exe_dir: Option<&Path>,
+    program_files_dir: &Path,
+) -> Result<PathBuf, String> {
+    let candidates = winpkfilter_msi_candidate_paths(resource_dir, exe_dir, program_files_dir);
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| "WinpkFilter-x64.msi not found in app resources.".to_string())
 }
 
 #[cfg(windows)]
@@ -89,45 +143,12 @@ fn validate_winpkfilter_file(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn command_output_detail(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if !stderr.is_empty() && !stdout.is_empty() {
-        format!("{stderr}; {stdout}")
-    } else if !stderr.is_empty() {
-        stderr
-    } else {
-        stdout
-    }
-}
-
-#[cfg(windows)]
-fn resolve_winpkfilter_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn resolve_winpkfilter_cache_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
-    Ok(app_data_dir.join("drivers"))
-}
-
-#[cfg(windows)]
-fn resolve_winpkfilter_cache_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(resolve_winpkfilter_cache_dir(app)?.join(WINPKFILTER_MSI_NAME))
-}
-
-#[cfg(windows)]
-fn resolve_winpkfilter_extract_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(resolve_winpkfilter_cache_dir(app)?.join("winpkfilter-extracted"))
-}
-
-#[cfg(windows)]
-fn extracted_driver_package_dir(extract_root: &Path) -> PathBuf {
-    extract_root
-        .join("PFiles64")
-        .join("Windows Packet Filter")
-        .join("drivers")
-        .join("win10")
+    Ok(app_data_dir.join("drivers").join(WINPKFILTER_MSI_NAME))
 }
 
 #[cfg(windows)]
@@ -178,95 +199,26 @@ fn download_winpkfilter_msi(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn extract_driver_package_from_msi(
-    msi_path: &Path,
-    extract_root: &Path,
-) -> Result<swifttunnel_core::vpn::winpkfilter::DriverPackage, String> {
-    let package_dir = extracted_driver_package_dir(extract_root);
-
-    // Always re-extract from the pinned MSI in fallback mode instead of trusting
-    // cached extraction output, which is harder to validate if a prior attempt
-    // was interrupted.
-    if extract_root.exists() {
-        fs::remove_dir_all(extract_root).map_err(|e| {
-            format!(
-                "Failed to clear previous WinpkFilter extraction {}: {}",
-                extract_root.display(),
-                e
-            )
-        })?;
-    }
-    fs::create_dir_all(extract_root).map_err(|e| {
-        format!(
-            "Failed to create WinpkFilter extraction directory {}: {}",
-            extract_root.display(),
-            e
-        )
-    })?;
-
-    let extract_log = default_driver_install_log_path().with_extension("extract.log");
-    let msi_string = msi_path.to_string_lossy().to_string();
-    let extract_log_string = extract_log.to_string_lossy().to_string();
-    let target_dir_arg = format!("TARGETDIR={}", extract_root.to_string_lossy());
-    let output = swifttunnel_core::hidden_command("msiexec")
-        .args([
-            "/a",
-            &msi_string,
-            "/qn",
-            &target_dir_arg,
-            "/L*V",
-            &extract_log_string,
-        ])
-        .output()
-        .map_err(|e| format!("Failed to extract WinpkFilter MSI: {}", e))?;
-
-    if !output.status.success() {
-        let code = output.status.code().unwrap_or(-1);
-        let detail = command_output_detail(&output);
-        let mut message = if detail.is_empty() {
-            format!("Failed to extract WinpkFilter MSI (code {})", code)
-        } else {
-            format!(
-                "Failed to extract WinpkFilter MSI (code {}): {}",
-                code, detail
-            )
-        };
-        message.push_str(". Extract log: ");
-        message.push_str(&extract_log.to_string_lossy());
-        return Err(message);
-    }
-
-    let package = swifttunnel_core::vpn::winpkfilter::validate_driver_package_dir(&package_dir)?;
-    let _ = fs::remove_file(&extract_log);
-    Ok(package)
-}
-
-#[cfg(windows)]
-fn resolve_winpkfilter_driver_package(
+fn resolve_winpkfilter_msi(
     app: &tauri::AppHandle,
     resource_dir: Option<&Path>,
     exe_dir: Option<&Path>,
     program_files_dir: &Path,
-) -> Result<swifttunnel_core::vpn::winpkfilter::DriverPackage, String> {
-    if let Ok(package) = swifttunnel_core::vpn::winpkfilter::find_bundled_driver_package(
-        resource_dir,
-        exe_dir,
-        program_files_dir,
-    ) {
-        return Ok(package);
+) -> Result<PathBuf, String> {
+    if let Ok(path) = find_winpkfilter_msi(resource_dir, exe_dir, program_files_dir) {
+        return Ok(path);
     }
 
     log::warn!(
-        "Bundled WinpkFilter driver package is missing; downloading pinned MSI fallback from {}",
+        "Bundled WinpkFilter MSI is missing; downloading pinned fallback from {}",
         WINPKFILTER_PINNED_URL
     );
     let cache_path = resolve_winpkfilter_cache_path(app)?;
-    let extract_root = resolve_winpkfilter_extract_root(app)?;
 
     if cache_path.exists() {
         if validate_winpkfilter_file(&cache_path).is_ok() {
             log::info!("Using cached WinpkFilter MSI from {}", cache_path.display());
-            return extract_driver_package_from_msi(&cache_path, &extract_root);
+            return Ok(cache_path);
         }
 
         log::warn!(
@@ -284,7 +236,7 @@ fn resolve_winpkfilter_driver_package(
 
     download_winpkfilter_msi(&cache_path)?;
     log::info!("Downloaded WinpkFilter MSI to {}", cache_path.display());
-    extract_driver_package_from_msi(&cache_path, &extract_root)
+    Ok(cache_path)
 }
 
 #[cfg(windows)]
@@ -297,23 +249,16 @@ fn default_driver_install_log_path() -> PathBuf {
 }
 
 #[cfg(windows)]
-fn build_elevated_pnputil_script(inf_path: &str, output_path: &str) -> String {
+fn build_elevated_msiexec_script(msi_path: &str, log_path: &str, passive: bool) -> String {
     // PowerShell single-quote escaping.
-    let escaped_inf = inf_path.replace('\'', "''");
-    let escaped_output = output_path.replace('\'', "''");
-    let inner_script = format!(
-        "$ErrorActionPreference='Stop'; \
-         $rendered=(& pnputil.exe /add-driver '{escaped_inf}' /install 2>&1 | Out-String); \
-         [IO.File]::WriteAllText('{escaped_output}',$rendered); \
-         exit $LASTEXITCODE"
-    );
-    let escaped_inner = inner_script.replace('\'', "''");
+    let escaped_msi = msi_path.replace('\'', "''");
+    let escaped_log = log_path.replace('\'', "''");
+    let ui_flag = if passive { "/passive" } else { "/qn" };
 
     format!(
         "$ErrorActionPreference='Stop'; \
-         $inner='{escaped_inner}'; \
-         $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner)); \
-         $p=Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @('-NoProfile','-EncodedCommand',$enc) -Wait -PassThru; \
+         $args=@('/i','{escaped_msi}','{ui_flag}','/norestart','/L*V','{escaped_log}'); \
+         $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -ArgumentList $args -Wait -PassThru; \
          exit $p.ExitCode"
     )
 }
@@ -393,51 +338,63 @@ pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
-        let driver_package = resolve_winpkfilter_driver_package(
+        let program_files_dir = PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
+        );
+        let msi_path = resolve_winpkfilter_msi(
             &app,
             resource_dir.as_deref(),
             exe_dir.as_deref(),
-            program_files_dir.as_path(),
+            &program_files_dir,
         )?;
 
-        let inf_string = driver_package.inf_path.to_string_lossy().to_string();
-        let install_output_path = default_driver_install_log_path().with_extension("txt");
-        let install_output_string = install_output_path.to_string_lossy().to_string();
+        let msi_string = msi_path.to_string_lossy().to_string();
+        let first_log_path = default_driver_install_log_path();
+        let first_log_string = first_log_path.to_string_lossy().to_string();
+        let retry_log_path = first_log_path.with_extension("retry.log");
+        let retry_log_string = retry_log_path.to_string_lossy().to_string();
 
-        // If we are elevated already, run pnputil directly and capture output.
+        // If we are elevated already, run msiexec directly and capture output.
         // Otherwise, use Start-Process -Verb RunAs to trigger a UAC prompt.
-        let run_install = || -> Result<(i32, String), String> {
+        let run_install = |passive: bool, log_string: &str| -> Result<(i32, String), String> {
             if swifttunnel_core::is_administrator() {
-                let output = swifttunnel_core::hidden_command("pnputil")
-                    .args(["/add-driver", &inf_string, "/install"])
+                let ui_flag = if passive { "/passive" } else { "/qn" };
+                let output = swifttunnel_core::hidden_command("msiexec")
+                    .args(["/i", &msi_string, ui_flag, "/norestart", "/L*V", log_string])
                     .output()
-                    .map_err(|e| format!("Failed to run pnputil: {}", e))?;
+                    .map_err(|e| format!("Failed to run msiexec: {}", e))?;
                 Ok((
                     output.status.code().unwrap_or(-1),
-                    command_output_detail(&output),
+                    String::from_utf8_lossy(&output.stderr).trim().to_string(),
                 ))
             } else {
-                let _ = fs::remove_file(&install_output_path);
-                let script = build_elevated_pnputil_script(&inf_string, &install_output_string);
+                let script = build_elevated_msiexec_script(&msi_string, log_string, passive);
 
                 let output = swifttunnel_core::hidden_command("powershell")
                     .args(["-NoProfile", "-Command", &script])
                     .output()
                     .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
 
-                let detail = fs::read_to_string(&install_output_path)
-                    .unwrap_or_else(|_| command_output_detail(&output));
-                let _ = fs::remove_file(&install_output_path);
-
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 Ok((
                     output.status.code().unwrap_or(-1),
-                    detail.trim().to_string(),
+                    if !stderr.is_empty() { stderr } else { stdout },
                 ))
             }
         };
 
-        let (exit_code, output_error) = run_install()?;
+        let (mut exit_code, mut output_error) = run_install(true, &first_log_string)?;
+        let mut retry_attempted = false;
+
+        // Some systems return 1639 with /passive. Retry once with /qn.
+        if exit_code == 1639 {
+            retry_attempted = true;
+            log::warn!("WinpkFilter install returned 1639 with /passive; retrying with /qn");
+            let (retry_code, retry_error) = run_install(false, &retry_log_string)?;
+            exit_code = retry_code;
+            output_error = retry_error;
+        }
 
         if !driver_install_success_exit_code(exit_code) {
             let mut message = if is_probable_uac_cancel_message(&output_error) {
@@ -449,16 +406,24 @@ pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
                 message.push_str(": ");
                 message.push_str(&output_error);
             }
-            message.push_str(". Driver package: ");
-            message.push_str(&driver_package.root_dir.to_string_lossy());
+            message.push_str(". Installer log: ");
+            message.push_str(&first_log_string);
+            if retry_attempted {
+                message.push_str(". Retry log: ");
+                message.push_str(&retry_log_string);
+            }
             return Err(message);
         }
 
         match swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
             Duration::from_secs(20),
         ) {
-            Ok(()) => Ok(()),
-            Err(e) if exit_code == 3010 => Err(format!(
+            Ok(()) => {
+                let _ = fs::remove_file(&first_log_path);
+                let _ = fs::remove_file(&retry_log_path);
+                Ok(())
+            }
+            Err(e) if matches!(exit_code, 1641 | 3010) => Err(format!(
                 "Driver installation completed and Windows requested a reboot before the driver became available. Please reboot and try again. {}",
                 e
             )),
@@ -478,35 +443,28 @@ pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn decode_single_quoted_powershell_assignment(script: &str, variable_name: &str) -> String {
-        let marker = format!("{variable_name}='");
-        let start = script
-            .find(&marker)
-            .unwrap_or_else(|| panic!("missing assignment marker: {marker}"))
-            + marker.len();
-        let remainder = &script[start..];
-        let mut decoded = String::new();
-        let mut chars = remainder.chars().peekable();
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("swifttunnel_{label}_{nanos}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 
-        while let Some(ch) = chars.next() {
-            if ch == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    decoded.push('\'');
-                    chars.next();
-                    continue;
-                }
-                return decoded;
-            }
-            decoded.push(ch);
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dirs");
         }
-
-        panic!("missing assignment terminator for: {variable_name}");
+        fs::write(path, b"").expect("write temp file");
     }
 
     #[test]
     fn driver_install_success_exit_code_accepts_expected_codes() {
-        for code in [0, 3010] {
+        for code in [0, 1638, 1641, 3010] {
             assert!(driver_install_success_exit_code(code));
         }
         assert!(!driver_install_success_exit_code(1));
@@ -516,6 +474,8 @@ mod tests {
     fn driver_install_failure_message_maps_common_codes() {
         assert!(driver_install_failure_message(1223).contains("canceled"));
         assert!(driver_install_failure_message(1602).contains("canceled"));
+        assert!(driver_install_failure_message(1618).contains("Another installer"));
+        assert!(driver_install_failure_message(1639).contains("invalid command-line"));
         assert_eq!(
             driver_install_failure_message(42),
             "Driver install failed with code 42"
@@ -567,33 +527,61 @@ mod tests {
     }
 
     #[test]
-    fn extracted_driver_package_dir_matches_vendor_layout() {
-        let root = PathBuf::from(r"C:\Temp\SwiftTunnel");
-        let package_dir = extracted_driver_package_dir(&root);
-        assert_eq!(
-            package_dir,
-            PathBuf::from(r"C:\Temp\SwiftTunnel")
-                .join("PFiles64")
-                .join("Windows Packet Filter")
-                .join("drivers")
-                .join("win10")
-        );
+    fn find_winpkfilter_msi_prefers_first_existing_candidate() {
+        let base = unique_temp_dir("winpkfilter_candidates");
+        let resource_dir = base.join("resources");
+        let exe_dir = base.join("exe");
+        let program_files_dir = base.join("ProgramFiles");
+
+        let preferred = resource_dir.join("drivers").join("WinpkFilter-x64.msi");
+        let fallback = exe_dir.join("drivers").join("WinpkFilter-x64.msi");
+
+        touch(&preferred);
+        touch(&fallback);
+
+        let found = find_winpkfilter_msi(
+            Some(resource_dir.as_path()),
+            Some(exe_dir.as_path()),
+            program_files_dir.as_path(),
+        )
+        .expect("should resolve msi path");
+
+        assert_eq!(found, preferred);
+
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
-    fn build_elevated_pnputil_script_escapes_single_quotes() {
-        let script = build_elevated_pnputil_script(
-            "C:\\path\\ev'elyn\\ndisrd_lwf.inf",
-            "C:\\Temp\\log's\\pnputil.txt",
+    fn find_winpkfilter_msi_returns_error_when_missing() {
+        let base = unique_temp_dir("winpkfilter_missing");
+        let resource_dir = base.join("resources");
+        let program_files_dir = base.join("ProgramFiles");
+
+        let err = find_winpkfilter_msi(
+            Some(resource_dir.as_path()),
+            None,
+            program_files_dir.as_path(),
+        )
+        .expect_err("should error when no msi exists");
+
+        assert!(err.contains("WinpkFilter-x64.msi not found"));
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn build_elevated_msiexec_script_escapes_single_quotes() {
+        let script = build_elevated_msiexec_script(
+            "C:\\path\\ev'elyn\\WinpkFilter-x64.msi",
+            "C:\\Temp\\log's\\winpk.log",
+            true,
         );
-        let inner = decode_single_quoted_powershell_assignment(&script, "$inner");
-        assert!(inner.contains("ev''elyn"));
-        assert!(inner.contains("log''s"));
+        assert!(script.contains("ev''elyn"));
+        assert!(script.contains("log''s"));
         assert!(script.contains("Start-Process"));
-        assert!(inner.contains("pnputil.exe"));
-        assert!(inner.contains("/add-driver"));
-        assert!(inner.contains("/install"));
-        assert!(script.contains("-WindowStyle Hidden"));
+        assert!(script.contains("msiexec.exe"));
+        assert!(script.contains("/passive"));
+        assert!(script.contains("/L*V"));
     }
 
     #[test]

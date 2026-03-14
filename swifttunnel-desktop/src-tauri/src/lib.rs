@@ -113,12 +113,12 @@ fn sync_runtime_assets(app: &tauri::App) {
             exe_dir.join("wintun.dll"),
         ),
         (
-            "winpkfilter",
+            "WinpkFilter-x64.msi",
             first_existing(vec![
-                resource_dir.join("drivers").join("winpkfilter"),
-                resource_dir.join("winpkfilter"),
+                resource_dir.join("drivers").join("WinpkFilter-x64.msi"),
+                resource_dir.join("WinpkFilter-x64.msi"),
             ]),
-            exe_dir.join("drivers").join("winpkfilter"),
+            exe_dir.join("drivers").join("WinpkFilter-x64.msi"),
         ),
         (
             "winfw.dll",
@@ -138,9 +138,9 @@ fn sync_runtime_assets(app: &tauri::App) {
 
     for (name, source, destination) in targets {
         let Some(source) = source else {
-            if name == "winpkfilter" {
+            if name == "WinpkFilter-x64.msi" {
                 log::warn!(
-                    "Bundled runtime asset not found: {} (runtime fallback download/extraction will be used)",
+                    "Bundled runtime asset not found: {} (runtime fallback download will be used)",
                     name
                 );
             } else {

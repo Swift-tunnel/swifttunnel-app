@@ -222,74 +222,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          function Get-DriverPackageDir {
-            param([string]$Root)
-
-            $requiredDriverFiles = @("ndisrd_lwf.inf", "ndisrd.sys", "ndisrd.cat")
-            $candidateDirs = Get-ChildItem -Path $Root -Recurse -Directory -ErrorAction SilentlyContinue |
-              Sort-Object FullName
-
-            foreach ($dir in $candidateDirs) {
-              $missingDriverFiles = $requiredDriverFiles |
-                Where-Object { -not (Test-Path (Join-Path $dir.FullName $_)) }
-              if ($missingDriverFiles.Count -eq 0) {
-                return $dir.FullName
-              }
-            }
-
-            return $null
-          }
-
           $driversDir = "swifttunnel-desktop/src-tauri/resources/drivers"
-          $winpkfilterDir = Join-Path $driversDir "winpkfilter"
-          $winpkfilterWin10Dir = Join-Path $winpkfilterDir "win10"
-          $msiDownloadDir = Join-Path $env:RUNNER_TEMP "winpkfilter_download"
-          $extractRoot = Join-Path $env:RUNNER_TEMP "winpkfilter_extract"
           New-Item -ItemType Directory -Path $driversDir -Force | Out-Null
-          New-Item -ItemType Directory -Path $msiDownloadDir -Force | Out-Null
-
-          $msiPath = Join-Path $msiDownloadDir "WinpkFilter-x64.msi"
+          $msiPath = Join-Path $driversDir "WinpkFilter-x64.msi"
           if (-not (Test-Path $msiPath)) {
-            gh release download v3.6.2 --repo wiresock/ndisapi --pattern "Windows.Packet.Filter.3.6.2.1.x64.msi" --dir $msiDownloadDir --clobber
-            Rename-Item (Join-Path $msiDownloadDir "Windows.Packet.Filter.3.6.2.1.x64.msi") "WinpkFilter-x64.msi" -Force
+            gh release download v3.6.2 --repo wiresock/ndisapi --pattern "Windows.Packet.Filter.3.6.2.1.x64.msi" --dir $driversDir --clobber
+            Rename-Item (Join-Path $driversDir "Windows.Packet.Filter.3.6.2.1.x64.msi") "WinpkFilter-x64.msi" -Force
           }
 
           $size = (Get-Item $msiPath).Length
           if ($size -lt 500000) {
             throw "Downloaded WinpkFilter MSI is suspiciously small ($size bytes)"
           }
-
-          if (Test-Path $extractRoot) {
-            Remove-Item $extractRoot -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-
-          $process = Start-Process -FilePath msiexec.exe -ArgumentList @("/a", $msiPath, "/qn", "TARGETDIR=$extractRoot") -NoNewWindow -Wait -PassThru
-          if ($process.ExitCode -ne 0) {
-            throw "msiexec /a failed with code $($process.ExitCode)"
-          }
-
-          $sourceDriverDir = $null
-          for ($attempt = 0; $attempt -lt 10 -and -not $sourceDriverDir; $attempt++) {
-            $sourceDriverDir = Get-DriverPackageDir -Root $extractRoot
-            if (-not $sourceDriverDir) {
-              Start-Sleep -Seconds 2
-            }
-          }
-
-          if (-not $sourceDriverDir) {
-            Write-Host "Extract root contents:"
-            Get-ChildItem -Path $extractRoot -Recurse -File -ErrorAction SilentlyContinue |
-              Sort-Object FullName |
-              Select-Object -ExpandProperty FullName
-            throw "Extracted WinpkFilter driver package is incomplete"
-          }
-
-          if (Test-Path $winpkfilterDir) {
-            Remove-Item $winpkfilterDir -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $winpkfilterWin10Dir -Force | Out-Null
-          Copy-Item (Join-Path $sourceDriverDir "*") $winpkfilterWin10Dir -Recurse -Force
 
       - name: Verify updater signing secrets
         shell: powershell
