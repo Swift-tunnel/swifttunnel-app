@@ -44,40 +44,62 @@ fn resolve_windows_command_path(program: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
+fn is_system32_program(program: &str) -> bool {
+    matches!(
+        program.to_ascii_lowercase().as_str(),
+        "pnputil" | "pnputil.exe" | "msiexec" | "msiexec.exe"
+    )
+}
+
+#[cfg(windows)]
 fn resolve_windows_command_path_with_root(
     program: &str,
     system_root: Option<&std::path::Path>,
 ) -> PathBuf {
-    if !is_powershell_program(program) {
-        return PathBuf::from(program);
+    if is_powershell_program(program) {
+        let mut candidates = Vec::new();
+        if let Some(root) = system_root {
+            candidates.push(
+                root.join("System32")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe"),
+            );
+            candidates.push(
+                root.join("Sysnative")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe"),
+            );
+            candidates.push(
+                root.join("SysWOW64")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe"),
+            );
+        }
+
+        return candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| PathBuf::from(program));
     }
 
-    let mut candidates = Vec::new();
-    if let Some(root) = system_root {
-        candidates.push(
-            root.join("System32")
-                .join("WindowsPowerShell")
-                .join("v1.0")
-                .join("powershell.exe"),
-        );
-        candidates.push(
-            root.join("Sysnative")
-                .join("WindowsPowerShell")
-                .join("v1.0")
-                .join("powershell.exe"),
-        );
-        candidates.push(
-            root.join("SysWOW64")
-                .join("WindowsPowerShell")
-                .join("v1.0")
-                .join("powershell.exe"),
-        );
+    if is_system32_program(program) {
+        if let Some(root) = system_root {
+            let exe_name = if program.ends_with(".exe") {
+                program.to_string()
+            } else {
+                format!("{program}.exe")
+            };
+            let candidate = root.join("System32").join(&exe_name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
     }
 
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| PathBuf::from(program))
+    PathBuf::from(program)
 }
 
 /// Normalize a GUID string to lowercase canonical form.
@@ -745,6 +767,37 @@ mod tests {
     fn test_resolve_windows_command_path_leaves_other_programs_unchanged() {
         let resolved = resolve_windows_command_path_with_root("cmd", None);
         assert_eq!(resolved, PathBuf::from("cmd"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_windows_command_path_resolves_system32_programs() {
+        let root = std::env::temp_dir().join(format!(
+            "swifttunnel_test_sys32_{}",
+            std::process::id()
+        ));
+        let pnputil = root.join("System32").join("pnputil.exe");
+        let msiexec = root.join("System32").join("msiexec.exe");
+
+        fs::create_dir_all(pnputil.parent().unwrap()).expect("create System32 dir");
+        fs::write(&pnputil, b"").expect("create fake pnputil");
+        fs::write(&msiexec, b"").expect("create fake msiexec");
+
+        assert_eq!(
+            resolve_windows_command_path_with_root("pnputil", Some(root.as_path())),
+            pnputil
+        );
+        assert_eq!(
+            resolve_windows_command_path_with_root("msiexec", Some(root.as_path())),
+            msiexec
+        );
+        // Without .exe suffix should also work
+        assert_eq!(
+            resolve_windows_command_path_with_root("pnputil", Some(root.as_path())),
+            pnputil
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]
