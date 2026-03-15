@@ -8306,9 +8306,7 @@ mod tests {
         assert!(
             script.contains("Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint")
         );
-        assert!(script.contains(
-            "Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value"
-        ));
+        assert!(script.contains("Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value"));
         assert!(script.contains("Write-Error ('WinpkFilter binding validation failed for adapter ' + $adapterLabel + ': ' + $errorText)"));
     }
 

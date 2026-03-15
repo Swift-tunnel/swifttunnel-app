@@ -251,7 +251,12 @@ pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String>
             Ok(output) => output,
             Err(e) => {
                 last_error = format!("Failed to run pnputil: {}", e);
-                log::warn!("{} (attempt {}/{})", last_error, attempt, PNPUTIL_INSTALL_MAX_ATTEMPTS);
+                log::warn!(
+                    "{} (attempt {}/{})",
+                    last_error,
+                    attempt,
+                    PNPUTIL_INSTALL_MAX_ATTEMPTS
+                );
                 continue;
             }
         };
@@ -290,7 +295,12 @@ pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String>
             format!("pnputil failed with code {}: {}", code, detail)
         };
 
-        log::warn!("{} (attempt {}/{})", last_error, attempt, PNPUTIL_INSTALL_MAX_ATTEMPTS);
+        log::warn!(
+            "{} (attempt {}/{})",
+            last_error,
+            attempt,
+            PNPUTIL_INSTALL_MAX_ATTEMPTS
+        );
 
         // Only retry on transient failure codes.
         if !pnputil_retryable_exit_code(code) {

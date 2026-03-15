@@ -519,55 +519,46 @@ impl SplitTunnelDriver {
 
             // Start the service, handling ERROR_SERVICE_ALREADY_RUNNING and
             // ERROR_SERVICE_DISABLED gracefully.
-            let start_service_resilient =
-                |service| -> Result<(), String> {
-                    match StartServiceW(service, None) {
-                        Ok(()) => Ok(()),
-                        Err(e) => {
-                            let code = Self::win32_error_code(&e);
+            let start_service_resilient = |service| -> Result<(), String> {
+                match StartServiceW(service, None) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        let code = Self::win32_error_code(&e);
 
-                            if code == ERROR_SERVICE_ALREADY_RUNNING {
-                                log::info!("NDISRD service is already running");
-                                return Ok(());
-                            }
-
-                            if code == ERROR_SERVICE_DISABLED {
-                                log::warn!(
-                                    "NDISRD service is disabled; re-enabling to DEMAND_START"
-                                );
-                                // Re-enable the service and retry start.
-                                let no_change_str = PCWSTR::null();
-                                if let Err(ce) = ChangeServiceConfigW(
-                                    service,
-                                    SERVICE_NO_CHANGE,
-                                    SERVICE_DEMAND_START,
-                                    SERVICE_NO_CHANGE,
-                                    no_change_str,
-                                    no_change_str,
-                                    None,
-                                    no_change_str,
-                                    no_change_str,
-                                    no_change_str,
-                                    no_change_str,
-                                ) {
-                                    return Err(format!(
-                                        "Failed to re-enable NDISRD service: {}",
-                                        ce
-                                    ));
-                                }
-                                // Retry start after re-enabling.
-                                return StartServiceW(service, None).map_err(|e2| {
-                                    format!(
-                                        "Failed to start NDISRD service after re-enabling: {}",
-                                        e2
-                                    )
-                                });
-                            }
-
-                            Err(format!("Failed to start NDISRD service: {}", e))
+                        if code == ERROR_SERVICE_ALREADY_RUNNING {
+                            log::info!("NDISRD service is already running");
+                            return Ok(());
                         }
+
+                        if code == ERROR_SERVICE_DISABLED {
+                            log::warn!("NDISRD service is disabled; re-enabling to DEMAND_START");
+                            // Re-enable the service and retry start.
+                            let no_change_str = PCWSTR::null();
+                            if let Err(ce) = ChangeServiceConfigW(
+                                service,
+                                SERVICE_NO_CHANGE,
+                                SERVICE_DEMAND_START,
+                                SERVICE_NO_CHANGE,
+                                no_change_str,
+                                no_change_str,
+                                None,
+                                no_change_str,
+                                no_change_str,
+                                no_change_str,
+                                no_change_str,
+                            ) {
+                                return Err(format!("Failed to re-enable NDISRD service: {}", ce));
+                            }
+                            // Retry start after re-enabling.
+                            return StartServiceW(service, None).map_err(|e2| {
+                                format!("Failed to start NDISRD service after re-enabling: {}", e2)
+                            });
+                        }
+
+                        Err(format!("Failed to start NDISRD service: {}", e))
                     }
-                };
+                }
+            };
 
             // Open Service Control Manager
             let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
@@ -583,11 +574,8 @@ impl SplitTunnelDriver {
                 let mut last_open_err = None;
                 let mut opened = None;
                 for attempt in 0..3u32 {
-                    match OpenServiceW(
-                        scm,
-                        PCWSTR(service_name_wide.as_ptr()),
-                        SERVICE_ALL_ACCESS,
-                    ) {
+                    match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_ALL_ACCESS)
+                    {
                         Ok(service) => {
                             opened = Some(service);
                             break;
@@ -624,9 +612,8 @@ impl SplitTunnelDriver {
                         }
 
                         let mut status = SERVICE_STATUS::default();
-                        QueryServiceStatus(service, &mut status).map_err(|e| {
-                            format!("Failed to query NDISRD service status: {}", e)
-                        })?;
+                        QueryServiceStatus(service, &mut status)
+                            .map_err(|e| format!("Failed to query NDISRD service status: {}", e))?;
 
                         if status.dwCurrentState == SERVICE_RUNNING {
                             log::info!("NDISRD service is running");
@@ -737,13 +724,7 @@ impl SplitTunnelDriver {
 
         let mut buf = vec![0u8; bytes_needed as usize];
         let config_ptr = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
-        if QueryServiceConfigW(
-            service,
-            Some(config_ptr),
-            bytes_needed,
-            &mut bytes_needed,
-        )
-        .is_err()
+        if QueryServiceConfigW(service, Some(config_ptr), bytes_needed, &mut bytes_needed).is_err()
         {
             log::warn!("Could not query NDISRD service config for binary path verification");
             return;

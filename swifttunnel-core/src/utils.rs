@@ -772,10 +772,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_resolve_windows_command_path_resolves_system32_programs() {
-        let root = std::env::temp_dir().join(format!(
-            "swifttunnel_test_sys32_{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("swifttunnel_test_sys32_{}", std::process::id()));
         let pnputil = root.join("System32").join("pnputil.exe");
         let msiexec = root.join("System32").join("msiexec.exe");
 
