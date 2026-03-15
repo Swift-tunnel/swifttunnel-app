@@ -517,10 +517,10 @@ impl SplitTunnelDriver {
                 }
             };
 
-            /// Start the service, handling ERROR_SERVICE_ALREADY_RUNNING and
-            /// ERROR_SERVICE_DISABLED gracefully.
+            // Start the service, handling ERROR_SERVICE_ALREADY_RUNNING and
+            // ERROR_SERVICE_DISABLED gracefully.
             let start_service_resilient =
-                |service, scm_for_reopen: Option<_>| -> Result<(), String> {
+                |service| -> Result<(), String> {
                     match StartServiceW(service, None) {
                         Ok(()) => Ok(()),
                         Err(e) => {
