@@ -581,6 +581,24 @@ impl PowerShellRunOutput {
         }
         None
     }
+
+    fn summarize_failure(&self, timeout_secs: u64) -> String {
+        if self.timed_out {
+            return format!("PowerShell timed out after {timeout_secs}s.");
+        }
+
+        if let Some(text) = self.best_error_text() {
+            return text.trim().replace("\r\n", "\n");
+        }
+
+        if let Some(code) = self.exit_code {
+            return format!(
+                "PowerShell exited with code {code} without emitting an error message."
+            );
+        }
+
+        "PowerShell exited without emitting an error message.".to_string()
+    }
 }
 
 /// Parallel packet interceptor
@@ -2664,6 +2682,206 @@ impl ParallelInterceptor {
         Self::run_powershell_with_timeout_capture(script, timeout_secs).success
     }
 
+    fn build_ensure_winpkfilter_binding_script(
+        if_index: Option<u32>,
+        adapter_name_hint: Option<&str>,
+    ) -> VpnResult<String> {
+        let adapter_label = adapter_name_hint.unwrap_or("selected adapter");
+        let adapter_hint_assignment = match adapter_name_hint {
+            Some(name) => format!("$adapterHint = '{}'", name.replace('\'', "''")),
+            None => "$adapterHint = $null".to_string(),
+        };
+        let adapter_if_index_assignment = match if_index {
+            Some(if_index) => format!("$adapterIfIndex = {if_index}"),
+            None => "$adapterIfIndex = $null".to_string(),
+        };
+
+        if if_index.is_none() && adapter_name_hint.is_none() {
+            return Err(VpnError::SplitTunnel(
+                "Physical adapter not configured for WinpkFilter validation".to_string(),
+            ));
+        }
+
+        Ok(format!(
+            r#"
+            $ErrorActionPreference = 'Stop'
+            $adapterLabel = '{}'
+            {}
+            {}
+
+            function Add-BindingCandidate([System.Collections.Generic.List[object]]$Candidates, [string]$Selector, [string]$Value, [string]$DisplayName) {{
+                if ([string]::IsNullOrWhiteSpace($Value)) {{
+                    return
+                }}
+
+                $normalizedKey = ($Selector + '|' + $Value).ToLowerInvariant()
+                foreach ($candidate in $Candidates) {{
+                    if ($candidate.Key -eq $normalizedKey) {{
+                        return
+                    }}
+                }}
+
+                $Candidates.Add([PSCustomObject]@{{
+                    Selector = $Selector
+                    Value = $Value
+                    DisplayName = $DisplayName
+                    Key = $normalizedKey
+                }}) | Out-Null
+            }}
+
+            function Get-LegacyAdapterMetadata {{
+                if ($null -eq $adapterIfIndex) {{
+                    return $null
+                }}
+
+                $legacyAdapter = $null
+                try {{
+                    $legacyAdapter = Get-CimInstance -ClassName Win32_NetworkAdapter -Filter ('InterfaceIndex = ' + $adapterIfIndex) -ErrorAction Stop |
+                        Select-Object -First 1
+                }} catch {{
+                    try {{
+                        $legacyAdapter = Get-WmiObject Win32_NetworkAdapter -Filter ('InterfaceIndex = ' + $adapterIfIndex) -ErrorAction Stop |
+                            Select-Object -First 1
+                    }} catch {{
+                        $legacyAdapter = $null
+                    }}
+                }}
+
+                if (-not $legacyAdapter) {{
+                    return $null
+                }}
+
+                return [PSCustomObject]@{{
+                    Name = [string]$legacyAdapter.NetConnectionID
+                    InterfaceDescription = [string]$legacyAdapter.Name
+                    IfIndex = $legacyAdapter.InterfaceIndex
+                }}
+            }}
+
+            function Resolve-WinpkFilterCandidates {{
+                $candidates = [System.Collections.Generic.List[object]]::new()
+
+                if (-not [string]::IsNullOrWhiteSpace($adapterHint)) {{
+                    Add-BindingCandidate $candidates 'Name' $adapterHint $adapterHint
+                    Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint $adapterHint
+                }}
+
+                $legacyAdapter = Get-LegacyAdapterMetadata
+                if ($legacyAdapter) {{
+                    $displayName = if (-not [string]::IsNullOrWhiteSpace($legacyAdapter.Name)) {{
+                        $legacyAdapter.Name
+                    }} elseif (-not [string]::IsNullOrWhiteSpace($legacyAdapter.InterfaceDescription)) {{
+                        $legacyAdapter.InterfaceDescription
+                    }} else {{
+                        $adapterLabel
+                    }}
+
+                    Add-BindingCandidate $candidates 'Name' $legacyAdapter.Name $displayName
+                    Add-BindingCandidate $candidates 'InterfaceDescription' $legacyAdapter.InterfaceDescription $displayName
+                }}
+
+                return $candidates
+            }}
+
+            function Get-WinpkFilterBinding([object]$Candidate) {{
+                if ($Candidate.Selector -eq 'Name') {{
+                    return Get-NetAdapterBinding -Name $Candidate.Value -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+                }}
+
+                if ($Candidate.Selector -eq 'InterfaceDescription') {{
+                    return Get-NetAdapterBinding -InterfaceDescription $Candidate.Value -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+                }}
+
+                return $null
+            }}
+
+            function Enable-WinpkFilterBinding([object]$Candidate) {{
+                if ($Candidate.Selector -eq 'Name') {{
+                    Enable-NetAdapterBinding -Name $Candidate.Value -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
+                    return
+                }}
+
+                if ($Candidate.Selector -eq 'InterfaceDescription') {{
+                    Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
+                    return
+                }}
+
+                throw ('Unsupported WinpkFilter binding selector: ' + $Candidate.Selector)
+            }}
+
+            try {{
+                $candidates = Resolve-WinpkFilterCandidates
+                if ($candidates.Count -eq 0) {{
+                    throw ('Could not resolve any adapter identifiers for WinpkFilter validation. ifIndex=' + $adapterIfIndex + ', hint=' + $adapterLabel)
+                }}
+
+                $bindingCandidate = $null
+                $binding = $null
+                foreach ($candidate in $candidates) {{
+                    $binding = Get-WinpkFilterBinding $candidate
+                    if ($binding) {{
+                        $bindingCandidate = $candidate
+                        break
+                    }}
+                }}
+
+                if (-not $bindingCandidate) {{
+                    throw ('WinpkFilter binding nt_ndisrd is not installed on adapter: ' + $adapterLabel)
+                }}
+
+                $adapterName = if ($binding.Name) {{ [string]$binding.Name }} elseif ($bindingCandidate.DisplayName) {{ [string]$bindingCandidate.DisplayName }} else {{ $adapterLabel }}
+                $adapterDescription = if ($binding.InterfaceDescription) {{ [string]$binding.InterfaceDescription }} else {{ '' }}
+                Write-Output ('Using adapter ''' + $adapterName + ''' via ' + $bindingCandidate.Selector + ' (ifIndex=' + $adapterIfIndex + ', description=' + $adapterDescription + ') for WinpkFilter validation')
+
+                if (-not $binding.Enabled) {{
+                    Write-Output ('Enabling WinpkFilter binding on adapter: ' + $adapterName)
+                    Enable-WinpkFilterBinding $bindingCandidate
+                    Start-Sleep -Seconds 1
+                    $binding = Get-WinpkFilterBinding $bindingCandidate
+
+                    if (-not $binding) {{
+                        throw ('WinpkFilter binding nt_ndisrd could not be queried after enabling on adapter: ' + $adapterName)
+                    }}
+
+                    if (-not $binding.Enabled) {{
+                        throw ('WinpkFilter binding nt_ndisrd is still disabled on adapter: ' + $adapterName)
+                    }}
+
+                    Write-Output ('WinpkFilter binding enabled on adapter: ' + $adapterName)
+                }} else {{
+                    Write-Output ('WinpkFilter binding already enabled on adapter: ' + $adapterName)
+                }}
+            }} catch {{
+                $errorText = $_.Exception.Message
+                if ([string]::IsNullOrWhiteSpace($errorText)) {{
+                    $errorText = ($_ | Out-String).Trim()
+                }}
+                if ([string]::IsNullOrWhiteSpace($errorText)) {{
+                    $errorText = 'PowerShell command failed without an exception message.'
+                }}
+
+                Write-Error ('WinpkFilter binding validation failed for adapter ' + $adapterLabel + ': ' + $errorText)
+                exit 1
+            }}
+            "#,
+            adapter_label.replace('\'', "''"),
+            adapter_hint_assignment,
+            adapter_if_index_assignment
+        ))
+    }
+
+    fn is_nonfatal_winpkfilter_validation_failure(details: &str) -> bool {
+        let details = details.to_ascii_lowercase();
+
+        details.contains("invalid class")
+            || details.contains("0x80041010")
+            || (details.contains("get-netadapter") && details.contains("not recognized"))
+            || (details.contains("get-netadapterbinding") && details.contains("not recognized"))
+            || (details.contains("enable-netadapterbinding") && details.contains("not recognized"))
+    }
+
     /// Ensure the WinpkFilter lightweight filter is enabled on a target adapter.
     ///
     /// Without the `nt_ndisrd` binding on the active adapter, split tunneling can
@@ -2675,56 +2893,11 @@ impl ParallelInterceptor {
     ) -> VpnResult<()> {
         let adapter_label = adapter_name_hint.unwrap_or("selected adapter");
 
-        let adapter_lookup = if let Some(if_index) = if_index {
-            format!(
-                "$adapter = Get-NetAdapter -InterfaceIndex {} -ErrorAction Stop",
-                if_index
-            )
-        } else if let Some(name) = adapter_name_hint {
-            format!(
-                "$adapter = Get-NetAdapter -Name '{}' -ErrorAction Stop",
-                name.replace('\'', "''")
-            )
-        } else {
-            return Err(VpnError::SplitTunnel(
-                "Physical adapter not configured for WinpkFilter validation".to_string(),
-            ));
-        };
-
         log::info!("Ensuring WinpkFilter binding on adapter: {}", adapter_label);
 
-        let script = format!(
-            r#"
-            $ErrorActionPreference = 'Stop'
-            {}
-
-            $binding = Get-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-
-            if (-not $binding) {{
-                Write-Error ('WinpkFilter binding nt_ndisrd is not installed on adapter: ' + $adapter.Name)
-                exit 1
-            }}
-
-            if (-not $binding.Enabled) {{
-                Enable-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -Confirm:$false | Out-Null
-                Start-Sleep -Seconds 1
-                $binding = Get-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -ErrorAction Stop |
-                    Select-Object -First 1
-                if (-not $binding.Enabled) {{
-                    Write-Error ('WinpkFilter binding nt_ndisrd is still disabled on adapter: ' + $adapter.Name)
-                    exit 1
-                }}
-                Write-Output ('WinpkFilter binding enabled on adapter: ' + $adapter.Name)
-                exit 0
-            }}
-
-            Write-Output ('WinpkFilter binding already enabled on adapter: ' + $adapter.Name)
-            "#,
-            adapter_lookup
-        );
-
-        let output = Self::run_powershell_with_timeout_capture(&script, 8);
+        let script = Self::build_ensure_winpkfilter_binding_script(if_index, adapter_name_hint)?;
+        let timeout_secs = 8;
+        let output = Self::run_powershell_with_timeout_capture(&script, timeout_secs);
         if output.success {
             let details = output.stdout.trim();
             if details.is_empty() {
@@ -2738,12 +2911,24 @@ impl ParallelInterceptor {
             return Ok(());
         }
 
-        let mut details = output.stderr.trim().to_string();
-        if details.is_empty() {
-            details = output.stdout.trim().to_string();
-        }
-        if details.is_empty() {
-            details = "unknown PowerShell failure".to_string();
+        log::warn!(
+            "WinpkFilter binding validation failed for '{}' (exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
+            adapter_label,
+            output.exit_code,
+            output.timed_out,
+            output.stdout.trim(),
+            output.stderr.trim()
+        );
+
+        let details = output.summarize_failure(timeout_secs);
+
+        if Self::is_nonfatal_winpkfilter_validation_failure(&details) {
+            log::warn!(
+                "Skipping WinpkFilter binding validation on adapter '{}' because Windows NetAdapter CIM support is unavailable: {}",
+                adapter_label,
+                details
+            );
+            return Ok(());
         }
 
         Err(VpnError::SplitTunnel(format!(
@@ -2961,14 +3146,11 @@ impl ParallelInterceptor {
             return Ok(());
         }
 
-        let mut details = String::new();
-        if output.timed_out {
-            details = format!("PowerShell timed out after {timeout_secs}s.");
-        } else if let Some(text) = output.best_error_text() {
-            // Keep the surfaced text short (UI + logs); include full details in debug logs.
-            let trimmed = text.trim().replace("\r\n", "\n");
-            details = trimmed.chars().take(240).collect();
-        }
+        let details: String = output
+            .summarize_failure(timeout_secs)
+            .chars()
+            .take(240)
+            .collect();
 
         log::warn!(
             "Failed to disable IPv6 on {} (exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
@@ -8063,6 +8245,71 @@ mod tests {
             .unwrap();
         assert!(interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
+    }
+
+    #[test]
+    fn test_summarize_powershell_failure_uses_exit_code_when_output_is_empty() {
+        let output = PowerShellRunOutput {
+            success: false,
+            timed_out: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+
+        assert_eq!(
+            output.summarize_failure(8),
+            "PowerShell exited with code 1 without emitting an error message."
+        );
+    }
+
+    #[test]
+    fn test_build_ensure_winpkfilter_binding_script_resolves_hint_by_name_or_description() {
+        let script = ParallelInterceptor::build_ensure_winpkfilter_binding_script(
+            None,
+            Some("Intel(R) Wi-Fi 6E AX211 160MHz"),
+        )
+        .unwrap();
+
+        assert!(script.contains("Add-BindingCandidate $candidates 'Name' $adapterHint"));
+        assert!(
+            script.contains("Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint")
+        );
+        assert!(script.contains(
+            "Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value"
+        ));
+        assert!(script.contains("Write-Error ('WinpkFilter binding validation failed for adapter ' + $adapterLabel + ': ' + $errorText)"));
+    }
+
+    #[test]
+    fn test_build_ensure_winpkfilter_binding_script_uses_interface_index_when_available() {
+        let script =
+            ParallelInterceptor::build_ensure_winpkfilter_binding_script(Some(54), Some("Wi-Fi"))
+                .unwrap();
+
+        assert!(script.contains("$adapterIfIndex = 54"));
+        assert!(script.contains(
+            "Get-CimInstance -ClassName Win32_NetworkAdapter -Filter ('InterfaceIndex = ' + $adapterIfIndex)"
+        ));
+    }
+
+    #[test]
+    fn test_winpkfilter_invalid_class_failure_is_nonfatal() {
+        assert!(
+            ParallelInterceptor::is_nonfatal_winpkfilter_validation_failure(
+                "Get-NetAdapter : Invalid class HRESULT 0x80041010"
+            )
+        );
+        assert!(
+            ParallelInterceptor::is_nonfatal_winpkfilter_validation_failure(
+                "Get-NetAdapterBinding : The term 'Get-NetAdapterBinding' is not recognized"
+            )
+        );
+        assert!(
+            !ParallelInterceptor::is_nonfatal_winpkfilter_validation_failure(
+                "WinpkFilter binding nt_ndisrd is still disabled on adapter: Ethernet"
+            )
+        );
     }
 
     #[test]
