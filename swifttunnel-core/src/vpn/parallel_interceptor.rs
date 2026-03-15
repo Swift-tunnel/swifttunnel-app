@@ -2887,6 +2887,13 @@ impl ParallelInterceptor {
     /// Without the `nt_ndisrd` binding on the active adapter, split tunneling can
     /// appear connected while capturing zero packets because NDISRD never attaches
     /// to the adapter carrying the real traffic.
+    /// Maximum attempts for WinpkFilter binding enablement.
+    const BINDING_MAX_ATTEMPTS: u32 = 3;
+    /// Per-attempt timeout for the PowerShell binding script (seconds).
+    const BINDING_TIMEOUT_SECS: u64 = 15;
+    /// Delay between binding retry attempts.
+    const BINDING_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
     fn ensure_winpkfilter_binding_for_adapter(
         if_index: Option<u32>,
         adapter_name_hint: Option<&str>,
@@ -2896,44 +2903,68 @@ impl ParallelInterceptor {
         log::info!("Ensuring WinpkFilter binding on adapter: {}", adapter_label);
 
         let script = Self::build_ensure_winpkfilter_binding_script(if_index, adapter_name_hint)?;
-        let timeout_secs = 8;
-        let output = Self::run_powershell_with_timeout_capture(&script, timeout_secs);
-        if output.success {
-            let details = output.stdout.trim();
-            if details.is_empty() {
+        let mut last_details = String::new();
+
+        for attempt in 1..=Self::BINDING_MAX_ATTEMPTS {
+            if attempt > 1 {
                 log::info!(
-                    "WinpkFilter binding verified on adapter '{}'",
-                    adapter_label
+                    "Retrying WinpkFilter binding on '{}' (attempt {}/{}), waiting {}ms...",
+                    adapter_label,
+                    attempt,
+                    Self::BINDING_MAX_ATTEMPTS,
+                    Self::BINDING_RETRY_DELAY.as_millis()
                 );
-            } else {
-                log::info!("{}", details);
+                std::thread::sleep(Self::BINDING_RETRY_DELAY);
             }
-            return Ok(());
-        }
 
-        log::warn!(
-            "WinpkFilter binding validation failed for '{}' (exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
-            adapter_label,
-            output.exit_code,
-            output.timed_out,
-            output.stdout.trim(),
-            output.stderr.trim()
-        );
+            let output =
+                Self::run_powershell_with_timeout_capture(&script, Self::BINDING_TIMEOUT_SECS);
+            if output.success {
+                let details = output.stdout.trim();
+                if details.is_empty() {
+                    log::info!(
+                        "WinpkFilter binding verified on adapter '{}'",
+                        adapter_label
+                    );
+                } else {
+                    log::info!("{}", details);
+                }
+                return Ok(());
+            }
 
-        let details = output.summarize_failure(timeout_secs);
-
-        if Self::is_nonfatal_winpkfilter_validation_failure(&details) {
             log::warn!(
-                "Skipping WinpkFilter binding validation on adapter '{}' because Windows NetAdapter CIM support is unavailable: {}",
+                "WinpkFilter binding validation failed for '{}' (attempt {}/{}, exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
                 adapter_label,
-                details
+                attempt,
+                Self::BINDING_MAX_ATTEMPTS,
+                output.exit_code,
+                output.timed_out,
+                output.stdout.trim(),
+                output.stderr.trim()
             );
-            return Ok(());
+
+            last_details = output.summarize_failure(Self::BINDING_TIMEOUT_SECS);
+
+            // Nonfatal failures (missing CIM support) should not be retried.
+            if Self::is_nonfatal_winpkfilter_validation_failure(&last_details) {
+                log::warn!(
+                    "Skipping WinpkFilter binding validation on adapter '{}' because Windows NetAdapter CIM support is unavailable: {}",
+                    adapter_label,
+                    last_details
+                );
+                return Ok(());
+            }
+
+            // Only retry on timeouts or transient failures, not on permanent ones
+            // like "binding not installed". Check for permanent failure indicators.
+            if last_details.contains("is not installed on adapter") {
+                break;
+            }
         }
 
         Err(VpnError::SplitTunnel(format!(
             "Failed to ensure WinpkFilter binding on adapter '{}': {}",
-            adapter_label, details
+            adapter_label, last_details
         )))
     }
 
@@ -8275,9 +8306,7 @@ mod tests {
         assert!(
             script.contains("Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint")
         );
-        assert!(script.contains(
-            "Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value"
-        ));
+        assert!(script.contains("Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value"));
         assert!(script.contains("Write-Error ('WinpkFilter binding validation failed for adapter ' + $adapterLabel + ': ' + $errorText)"));
     }
 

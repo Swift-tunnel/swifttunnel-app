@@ -22,7 +22,7 @@ use super::parallel_interceptor::{
 use super::{VpnError, VpnResult};
 use crate::utils::normalize_guid_ascii_lowercase;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -436,12 +436,34 @@ impl SplitTunnelDriver {
         Self::ensure_driver_service(remaining)
     }
 
+    /// Extract Win32 error code from a `windows::core::Error`.
+    ///
+    /// The `windows` crate wraps Win32 errors as HRESULT values of the form
+    /// `0x8007_XXXX`. This extracts the lower 16 bits (the Win32 code).
+    fn win32_error_code(err: &windows::core::Error) -> u32 {
+        let hr = err.code().0 as u32;
+        if (hr & 0xFFFF_0000) == 0x8007_0000 {
+            hr & 0xFFFF
+        } else {
+            hr
+        }
+    }
+
     /// Ensure the driver service exists and is started
     ///
     /// Requires administrator privileges to create or start the driver service.
+    /// Handles common edge cases:
+    /// - `ERROR_SERVICE_MARKED_FOR_DELETE` (1072): waits and retries
+    /// - `ERROR_SERVICE_ALREADY_RUNNING` (1056): treats as success
+    /// - `ERROR_SERVICE_DISABLED` (1058): re-enables and retries start
+    /// - Stale binary path: detects and corrects via `ChangeServiceConfigW`
     fn ensure_driver_service(timeout: Duration) -> Result<(), String> {
         use windows::Win32::System::Services::*;
         use windows::core::PCWSTR;
+
+        const ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
+        const ERROR_SERVICE_DISABLED: u32 = 1058;
+        const ERROR_SERVICE_MARKED_FOR_DELETE: u32 = 1072;
 
         // Check for administrator privileges first
         if !crate::utils::is_administrator() {
@@ -495,6 +517,49 @@ impl SplitTunnelDriver {
                 }
             };
 
+            // Start the service, handling ERROR_SERVICE_ALREADY_RUNNING and
+            // ERROR_SERVICE_DISABLED gracefully.
+            let start_service_resilient = |service| -> Result<(), String> {
+                match StartServiceW(service, None) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        let code = Self::win32_error_code(&e);
+
+                        if code == ERROR_SERVICE_ALREADY_RUNNING {
+                            log::info!("NDISRD service is already running");
+                            return Ok(());
+                        }
+
+                        if code == ERROR_SERVICE_DISABLED {
+                            log::warn!("NDISRD service is disabled; re-enabling to DEMAND_START");
+                            // Re-enable the service and retry start.
+                            let no_change_str = PCWSTR::null();
+                            if let Err(ce) = ChangeServiceConfigW(
+                                service,
+                                ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
+                                SERVICE_DEMAND_START,
+                                SERVICE_ERROR(SERVICE_NO_CHANGE),
+                                no_change_str,
+                                no_change_str,
+                                None,
+                                no_change_str,
+                                no_change_str,
+                                no_change_str,
+                                no_change_str,
+                            ) {
+                                return Err(format!("Failed to re-enable NDISRD service: {}", ce));
+                            }
+                            // Retry start after re-enabling.
+                            return StartServiceW(service, None).map_err(|e2| {
+                                format!("Failed to start NDISRD service after re-enabling: {}", e2)
+                            });
+                        }
+
+                        Err(format!("Failed to start NDISRD service: {}", e))
+                    }
+                }
+            };
+
             // Open Service Control Manager
             let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
                 .map_err(|e| format!("Failed to open SCM: {}", e))?;
@@ -504,98 +569,217 @@ impl SplitTunnelDriver {
                 .chain(std::iter::once(0))
                 .collect();
 
-            // Try to open existing service
-            let result =
-                match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_ALL_ACCESS) {
-                    Ok(service) => {
-                        log::info!("NDISRD service exists, checking status...");
-
-                        let result = (|| -> Result<(), String> {
-                            let mut status = SERVICE_STATUS::default();
-                            QueryServiceStatus(service, &mut status).map_err(|e| {
-                                format!("Failed to query NDISRD service status: {}", e)
-                            })?;
-
-                            if status.dwCurrentState == SERVICE_RUNNING {
-                                log::info!("NDISRD service is running");
-                                return Ok(());
+            // Try to open existing service, with retry for MARKED_FOR_DELETE
+            let open_result = {
+                let mut last_open_err = None;
+                let mut opened = None;
+                for attempt in 0..3u32 {
+                    match OpenServiceW(scm, PCWSTR(service_name_wide.as_ptr()), SERVICE_ALL_ACCESS)
+                    {
+                        Ok(service) => {
+                            opened = Some(service);
+                            break;
+                        }
+                        Err(e) => {
+                            let code = Self::win32_error_code(&e);
+                            if code == ERROR_SERVICE_MARKED_FOR_DELETE && attempt < 2 {
+                                log::warn!(
+                                    "NDISRD service is marked for delete; waiting 2s before retry (attempt {}/3)",
+                                    attempt + 1
+                                );
+                                std::thread::sleep(Duration::from_secs(2));
+                                continue;
                             }
+                            last_open_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                match opened {
+                    Some(s) => Ok(s),
+                    None => Err(last_open_err),
+                }
+            };
 
-                            if status.dwCurrentState != SERVICE_START_PENDING {
-                                log::info!("Starting NDISRD service...");
-                                StartServiceW(service, None).map_err(|e| {
-                                    format!("Failed to start NDISRD service: {}", e)
-                                })?;
-                            }
+            let result = match open_result {
+                Ok(service) => {
+                    log::info!("NDISRD service exists, checking status...");
 
-                            wait_for_running(service, timeout)?;
+                    let result = (|| -> Result<(), String> {
+                        // Verify and fix the binary path if we know the correct driver location.
+                        if let Some(expected_path) = &driver_path {
+                            Self::verify_and_fix_service_binary_path(service, expected_path);
+                        }
+
+                        let mut status = SERVICE_STATUS::default();
+                        QueryServiceStatus(service, &mut status)
+                            .map_err(|e| format!("Failed to query NDISRD service status: {}", e))?;
+
+                        if status.dwCurrentState == SERVICE_RUNNING {
                             log::info!("NDISRD service is running");
-                            Ok(())
-                        })();
-                        let _ = CloseServiceHandle(service);
-                        result
-                    }
-                    Err(_) => {
-                        log::info!("NDISRD service does not exist");
+                            return Ok(());
+                        }
 
-                        (|| -> Result<(), String> {
-                            let driver_path = driver_path.as_ref().ok_or_else(|| {
-                                "Driver file not found, cannot create NDISRD service".to_string()
-                            })?;
+                        if status.dwCurrentState != SERVICE_START_PENDING {
+                            log::info!("Starting NDISRD service...");
+                            start_service_resilient(service)?;
+                        }
 
-                            log::info!(
-                                "Creating NDISRD service with driver: {}",
-                                driver_path.display()
-                            );
+                        wait_for_running(service, timeout)?;
+                        log::info!("NDISRD service is running");
+                        Ok(())
+                    })();
+                    let _ = CloseServiceHandle(service);
+                    result
+                }
+                Err(_) => {
+                    log::info!("NDISRD service does not exist, creating...");
 
-                            let display_name_wide: Vec<u16> = SERVICE_DISPLAY_NAME
-                                .encode_utf16()
-                                .chain(std::iter::once(0))
-                                .collect();
-                            let binary_path_wide: Vec<u16> = driver_path
-                                .to_string_lossy()
-                                .encode_utf16()
-                                .chain(std::iter::once(0))
-                                .collect();
+                    (|| -> Result<(), String> {
+                        let driver_path = driver_path.as_ref().ok_or_else(|| {
+                            "Driver file not found, cannot create NDISRD service".to_string()
+                        })?;
 
-                            match CreateServiceW(
-                                scm,
-                                PCWSTR(service_name_wide.as_ptr()),
-                                PCWSTR(display_name_wide.as_ptr()),
-                                SERVICE_ALL_ACCESS,
-                                SERVICE_KERNEL_DRIVER,
-                                SERVICE_DEMAND_START,
-                                SERVICE_ERROR_NORMAL,
-                                PCWSTR(binary_path_wide.as_ptr()),
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                            ) {
-                                Ok(service) => {
-                                    let result = (|| -> Result<(), String> {
-                                        log::info!("NDISRD service created, starting...");
-                                        StartServiceW(service, None).map_err(|e| {
-                                            format!(
-                                                "Failed to start newly created NDISRD service: {}",
-                                                e
-                                            )
-                                        })?;
-                                        wait_for_running(service, timeout)?;
-                                        Ok(())
-                                    })();
-                                    let _ = CloseServiceHandle(service);
-                                    result
-                                }
-                                Err(e) => Err(format!("Failed to create NDISRD service: {}", e)),
+                        log::info!(
+                            "Creating NDISRD service with driver: {}",
+                            driver_path.display()
+                        );
+
+                        let display_name_wide: Vec<u16> = SERVICE_DISPLAY_NAME
+                            .encode_utf16()
+                            .chain(std::iter::once(0))
+                            .collect();
+                        let binary_path_wide: Vec<u16> = driver_path
+                            .to_string_lossy()
+                            .encode_utf16()
+                            .chain(std::iter::once(0))
+                            .collect();
+
+                        let create_result = CreateServiceW(
+                            scm,
+                            PCWSTR(service_name_wide.as_ptr()),
+                            PCWSTR(display_name_wide.as_ptr()),
+                            SERVICE_ALL_ACCESS,
+                            SERVICE_KERNEL_DRIVER,
+                            SERVICE_DEMAND_START,
+                            SERVICE_ERROR_NORMAL,
+                            PCWSTR(binary_path_wide.as_ptr()),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        );
+
+                        match create_result {
+                            Ok(service) => {
+                                let result = (|| -> Result<(), String> {
+                                    log::info!("NDISRD service created, starting...");
+                                    start_service_resilient(service)?;
+                                    wait_for_running(service, timeout)?;
+                                    Ok(())
+                                })();
+                                let _ = CloseServiceHandle(service);
+                                result
                             }
-                        })()
-                    }
-                };
+                            Err(e) => {
+                                let code = Self::win32_error_code(&e);
+                                if code == ERROR_SERVICE_MARKED_FOR_DELETE {
+                                    Err(format!(
+                                        "Cannot create NDISRD service: previous instance is \
+                                         still marked for deletion. A reboot may be required. ({})",
+                                        e
+                                    ))
+                                } else {
+                                    Err(format!("Failed to create NDISRD service: {}", e))
+                                }
+                            }
+                        }
+                    })()
+                }
+            };
 
             let _ = CloseServiceHandle(scm);
             result
+        }
+    }
+
+    /// Check the service's binary path and update it if it points to the wrong location.
+    ///
+    /// This handles the case where a previous install left a stale service entry pointing
+    /// to a deleted or moved driver binary.
+    unsafe fn verify_and_fix_service_binary_path(
+        service: windows::Win32::System::Services::SC_HANDLE,
+        expected_path: &Path,
+    ) {
+        use windows::Win32::System::Services::*;
+        use windows::core::PCWSTR;
+
+        // Query the current service config to get the binary path.
+        let mut bytes_needed = 0u32;
+        let _ = QueryServiceConfigW(service, None, 0, &mut bytes_needed);
+        if bytes_needed == 0 {
+            return;
+        }
+
+        let mut buf = vec![0u8; bytes_needed as usize];
+        let config_ptr = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+        if QueryServiceConfigW(service, Some(config_ptr), bytes_needed, &mut bytes_needed).is_err()
+        {
+            log::warn!("Could not query NDISRD service config for binary path verification");
+            return;
+        }
+
+        let config = &*config_ptr;
+        let current_path_raw = config.lpBinaryPathName;
+        if current_path_raw.is_null() {
+            return;
+        }
+
+        let current_path_str = current_path_raw.to_string().unwrap_or_default();
+        let expected_str = expected_path.to_string_lossy();
+
+        if current_path_str.eq_ignore_ascii_case(&expected_str) {
+            return;
+        }
+
+        if !expected_path.exists() {
+            // Don't update to a path that doesn't exist.
+            log::debug!(
+                "NDISRD service binary path mismatch but expected path does not exist: current='{}', expected='{}'",
+                current_path_str,
+                expected_str
+            );
+            return;
+        }
+
+        log::warn!(
+            "NDISRD service binary path mismatch: current='{}', expected='{}'; updating",
+            current_path_str,
+            expected_str
+        );
+
+        let new_path_wide: Vec<u16> = expected_str
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let no_change_str = PCWSTR::null();
+        if let Err(e) = ChangeServiceConfigW(
+            service,
+            ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
+            SERVICE_START_TYPE(SERVICE_NO_CHANGE),
+            SERVICE_ERROR(SERVICE_NO_CHANGE),
+            PCWSTR(new_path_wide.as_ptr()),
+            no_change_str,
+            None,
+            no_change_str,
+            no_change_str,
+            no_change_str,
+            no_change_str,
+        ) {
+            log::warn!("Failed to update NDISRD service binary path: {}", e);
+        } else {
+            log::info!("NDISRD service binary path updated to '{}'", expected_str);
         }
     }
 

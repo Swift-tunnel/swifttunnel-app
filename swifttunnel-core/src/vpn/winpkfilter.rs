@@ -195,27 +195,120 @@ fn pnputil_output_detail(output: &std::process::Output) -> String {
     }
 }
 
+/// Exit codes from pnputil that indicate a transient/retryable failure.
+///
+/// - `2` (`ERROR_FILE_NOT_FOUND`): can happen transiently when the driver store is
+///   being reorganized or another installer holds a lock.
+/// - `5` (`ERROR_ACCESS_DENIED`): can occur if another process briefly holds the
+///   driver store lock.
+#[cfg(windows)]
+fn pnputil_retryable_exit_code(code: i32) -> bool {
+    matches!(code, 2 | 5)
+}
+
+/// Maximum number of pnputil install attempts before giving up.
+const PNPUTIL_INSTALL_MAX_ATTEMPTS: u32 = 3;
+
 #[cfg(windows)]
 pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String> {
     let package = validate_driver_package_dir(package_dir)?;
     let inf_path = package.inf_path.to_string_lossy().to_string();
 
-    let output = hidden_command("pnputil")
-        .args(["/add-driver", &inf_path, "/install"])
-        .output()
-        .map_err(|e| format!("Failed to run pnputil: {}", e))?;
-
-    let code = output.status.code().unwrap_or(-1);
-    if pnputil_success_exit_code(code) {
-        return Ok(());
+    // Idempotency: skip install if the driver is already in the store.
+    match find_installed_driver_published_name() {
+        Ok(Some(published)) => {
+            log::info!(
+                "WinpkFilter driver already present in driver store as {}; skipping install",
+                published
+            );
+            return Ok(());
+        }
+        Ok(None) => {} // Not installed yet — proceed.
+        Err(e) => {
+            // Non-fatal: if we can't query the store, proceed with install anyway.
+            log::warn!("Could not query driver store before install: {}", e);
+        }
     }
 
-    let detail = pnputil_output_detail(&output);
-    if detail.is_empty() {
-        Err(format!("pnputil failed with code {}", code))
-    } else {
-        Err(format!("pnputil failed with code {}: {}", code, detail))
+    let mut last_error = String::new();
+
+    for attempt in 1..=PNPUTIL_INSTALL_MAX_ATTEMPTS {
+        if attempt > 1 {
+            let delay_ms = 1000 * (attempt - 1);
+            log::info!(
+                "Retrying pnputil install (attempt {}/{}), waiting {}ms...",
+                attempt,
+                PNPUTIL_INSTALL_MAX_ATTEMPTS,
+                delay_ms
+            );
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+        }
+
+        let output = match hidden_command("pnputil")
+            .args(["/add-driver", &inf_path, "/install"])
+            .output()
+        {
+            Ok(output) => output,
+            Err(e) => {
+                last_error = format!("Failed to run pnputil: {}", e);
+                log::warn!(
+                    "{} (attempt {}/{})",
+                    last_error,
+                    attempt,
+                    PNPUTIL_INSTALL_MAX_ATTEMPTS
+                );
+                continue;
+            }
+        };
+
+        let code = output.status.code().unwrap_or(-1);
+        if pnputil_success_exit_code(code) {
+            // Verify the driver actually appeared in the store.
+            match find_installed_driver_published_name() {
+                Ok(Some(published)) => {
+                    log::info!(
+                        "WinpkFilter driver installed and verified in store as {}",
+                        published
+                    );
+                }
+                Ok(None) => {
+                    log::warn!(
+                        "pnputil exited with code {} but driver not found in store; \
+                         proceeding anyway (driver may appear after binding)",
+                        code
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Could not verify driver store after install: {}; proceeding anyway",
+                        e
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        let detail = pnputil_output_detail(&output);
+        last_error = if detail.is_empty() {
+            format!("pnputil failed with code {}", code)
+        } else {
+            format!("pnputil failed with code {}: {}", code, detail)
+        };
+
+        log::warn!(
+            "{} (attempt {}/{})",
+            last_error,
+            attempt,
+            PNPUTIL_INSTALL_MAX_ATTEMPTS
+        );
+
+        // Only retry on transient failure codes.
+        if !pnputil_retryable_exit_code(code) {
+            break;
+        }
     }
+
+    Err(last_error)
 }
 
 #[cfg(not(windows))]
@@ -449,6 +542,65 @@ Original Name:      something_else.inf
                 parse_enum_drivers_output(output, DRIVER_INF_NAME).as_deref(),
                 Some("oem7.inf")
             );
+        }
+    }
+
+    #[test]
+    fn parse_enum_drivers_output_returns_none_for_empty_output() {
+        #[cfg(windows)]
+        {
+            assert_eq!(parse_enum_drivers_output("", DRIVER_INF_NAME), None);
+            assert_eq!(
+                parse_enum_drivers_output("Microsoft PnP Utility\n\n", DRIVER_INF_NAME),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn parse_enum_drivers_output_returns_none_when_no_match() {
+        #[cfg(windows)]
+        {
+            let output = r"
+Microsoft PnP Utility
+
+Published Name:     oem5.inf
+Original Name:      some_other_driver.inf
+Provider Name:      OtherVendor
+
+Published Name:     oem6.inf
+Original Name:      yet_another.inf
+Provider Name:      AnotherVendor
+";
+            assert_eq!(parse_enum_drivers_output(output, DRIVER_INF_NAME), None);
+        }
+    }
+
+    #[test]
+    fn parse_enum_drivers_output_case_insensitive_original_name() {
+        #[cfg(windows)]
+        {
+            let output = r"
+Published Name:     oem12.inf
+Original Name:      NDISRD_LWF.INF
+Provider Name:      NDISAPI
+";
+            assert_eq!(
+                parse_enum_drivers_output(output, DRIVER_INF_NAME).as_deref(),
+                Some("oem12.inf")
+            );
+        }
+    }
+
+    #[test]
+    fn pnputil_retryable_exit_codes() {
+        #[cfg(windows)]
+        {
+            assert!(pnputil_retryable_exit_code(2));
+            assert!(pnputil_retryable_exit_code(5));
+            assert!(!pnputil_retryable_exit_code(0));
+            assert!(!pnputil_retryable_exit_code(1));
+            assert!(!pnputil_retryable_exit_code(3010));
         }
     }
 }
