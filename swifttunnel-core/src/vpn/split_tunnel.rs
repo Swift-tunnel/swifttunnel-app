@@ -722,7 +722,10 @@ impl SplitTunnelDriver {
             return;
         }
 
-        let mut buf = vec![0u8; bytes_needed as usize];
+        // Use Vec<u64> instead of Vec<u8> to guarantee pointer-width alignment,
+        // which QUERY_SERVICE_CONFIGW requires (it contains pointer fields).
+        let u64_len = (bytes_needed as usize + 7) / 8;
+        let mut buf = vec![0u64; u64_len];
         let config_ptr = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
         if QueryServiceConfigW(service, Some(config_ptr), bytes_needed, &mut bytes_needed).is_err()
         {
