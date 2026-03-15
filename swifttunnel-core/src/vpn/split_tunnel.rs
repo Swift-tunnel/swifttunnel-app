@@ -22,7 +22,7 @@ use super::parallel_interceptor::{
 use super::{VpnError, VpnResult};
 use crate::utils::normalize_guid_ascii_lowercase;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -536,9 +536,9 @@ impl SplitTunnelDriver {
                             let no_change_str = PCWSTR::null();
                             if let Err(ce) = ChangeServiceConfigW(
                                 service,
-                                SERVICE_NO_CHANGE,
+                                ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
                                 SERVICE_DEMAND_START,
-                                SERVICE_NO_CHANGE,
+                                SERVICE_ERROR(SERVICE_NO_CHANGE),
                                 no_change_str,
                                 no_change_str,
                                 None,
@@ -622,7 +622,7 @@ impl SplitTunnelDriver {
 
                         if status.dwCurrentState != SERVICE_START_PENDING {
                             log::info!("Starting NDISRD service...");
-                            start_service_resilient(service, Option::<()>::None)?;
+                            start_service_resilient(service)?;
                         }
 
                         wait_for_running(service, timeout)?;
@@ -675,7 +675,7 @@ impl SplitTunnelDriver {
                             Ok(service) => {
                                 let result = (|| -> Result<(), String> {
                                     log::info!("NDISRD service created, starting...");
-                                    start_service_resilient(service, Option::<()>::None)?;
+                                    start_service_resilient(service)?;
                                     wait_for_running(service, timeout)?;
                                     Ok(())
                                 })();
@@ -766,9 +766,9 @@ impl SplitTunnelDriver {
         let no_change_str = PCWSTR::null();
         if let Err(e) = ChangeServiceConfigW(
             service,
-            SERVICE_NO_CHANGE,
-            SERVICE_NO_CHANGE,
-            SERVICE_NO_CHANGE,
+            ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
+            SERVICE_START_TYPE(SERVICE_NO_CHANGE),
+            SERVICE_ERROR(SERVICE_NO_CHANGE),
             PCWSTR(new_path_wide.as_ptr()),
             no_change_str,
             None,
