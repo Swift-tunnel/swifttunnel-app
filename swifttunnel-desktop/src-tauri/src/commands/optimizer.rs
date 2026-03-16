@@ -135,47 +135,6 @@ pub fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, String>
     }
 }
 
-fn reconcile_boosts(state: &AppState, config: &swifttunnel_core::structs::Config) -> Vec<String> {
-    let mut warnings = Vec::new();
-    // Resolve Roblox PID from performance monitor (needed for process-specific boosts)
-    let roblox_pid = {
-        let mut monitor = state.performance_monitor.lock();
-        monitor.get_roblox_pid().unwrap_or(0)
-    };
-
-    // Restore first, then apply the current per-boost config so disabled toggles are respected.
-    {
-        let mut system_optimizer = state.system_optimizer.lock();
-        if let Err(e) = system_optimizer.restore(roblox_pid) {
-            warnings.push(format!("System optimizer restore: {}", e));
-        }
-        if let Err(e) =
-            system_optimizer.apply_optimizations(&config.system_optimization, roblox_pid)
-        {
-            warnings.push(format!("System optimizer: {}", e));
-        }
-    }
-
-    {
-        let mut network_booster = state.network_booster.lock();
-        if let Err(e) = network_booster.reconcile_optimizations(&config.network_settings) {
-            warnings.push(format!("Network booster: {}", e));
-        }
-    }
-
-    {
-        let roblox_optimizer = state.roblox_optimizer.lock();
-        if let Err(e) = roblox_optimizer.restore_settings() {
-            warnings.push(format!("Roblox optimizer restore: {}", e));
-        }
-        if let Err(e) = roblox_optimizer.apply_optimizations(&config.roblox_settings) {
-            warnings.push(format!("Roblox optimizer: {}", e));
-        }
-    }
-
-    warnings
-}
-
 #[tauri::command]
 pub async fn boost_update_config(
     state: State<'_, AppState>,

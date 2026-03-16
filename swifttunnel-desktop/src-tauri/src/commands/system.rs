@@ -341,16 +341,14 @@ pub async fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> 
         let program_files_dir = PathBuf::from(
             std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
         );
-        let msi_path = resolve_winpkfilter_msi(
-            &app,
-            resource_dir.as_deref(),
-            exe_dir.as_deref(),
-            &program_files_dir,
-        )?;
-
-        let msi_string = msi_path.to_string_lossy().to_string();
-
         tauri::async_runtime::spawn_blocking(move || {
+            let msi_path = resolve_winpkfilter_msi(
+                &app,
+                resource_dir.as_deref(),
+                exe_dir.as_deref(),
+                &program_files_dir,
+            )?;
+            let msi_string = msi_path.to_string_lossy().to_string();
             let first_log_path = default_driver_install_log_path();
             let first_log_string = first_log_path.to_string_lossy().to_string();
             let retry_log_path = first_log_path.with_extension("retry.log");
