@@ -1,7 +1,10 @@
 //! IP Geolocation module
 //!
-//! Uses ipinfo.io to get location information for game server IPs.
-//! Similar to Bloxstrap's server location feature.
+//! Uses a hardcoded IP table (sourced from BTRoblox) as the primary region
+//! lookup, with ipinfo.io as a fallback for unknown IPs. This two-tier
+//! approach avoids the known inaccuracy of geo-IP services for Roblox's
+//! 128.116.0.0/17 range (they often return Roblox's HQ city "San Mateo"
+//! instead of the actual server location).
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -38,11 +41,13 @@ fn get_semaphore() -> &'static Semaphore {
 }
 
 /// Response from ipinfo.io API
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct IpInfoResponse {
     pub city: Option<String>,
     pub region: Option<String>,
     pub country: Option<String>,
+    /// Latitude,Longitude string e.g. "37.3860,-122.0838"
+    pub loc: Option<String>,
 }
 
 /// Get location for an IP address
@@ -233,11 +238,22 @@ impl std::fmt::Display for RobloxRegion {
     }
 }
 
-/// Determine Roblox game server region from ipinfo.io city/country fields.
+/// Determine Roblox game server region from an ipinfo.io response.
 ///
-/// This is the runtime counterpart to the hardcoded `roblox_ip_to_region()` table.
-/// Used by auto-routing and toast notifications for accurate region detection.
-pub fn ipinfo_to_roblox_region(city: &str, country: &str) -> RobloxRegion {
+/// Uses a multi-tier fallback for US sub-region classification:
+/// 1. City name matching (most specific)
+/// 2. Coordinate-based longitude classification (from `loc` field)
+/// 3. US state/region name matching (from `region` field)
+/// 4. Default to UsEast (majority of Roblox US servers are East Coast)
+///
+/// For non-US countries, the country code alone determines the region.
+pub fn ipinfo_to_roblox_region(info: &IpInfoResponse) -> RobloxRegion {
+    let country = match info.country.as_deref() {
+        Some(c) => c,
+        None => return RobloxRegion::Unknown,
+    };
+    let city = info.city.as_deref().unwrap_or("");
+
     match country {
         "SG" => RobloxRegion::Singapore,
         "JP" => RobloxRegion::Tokyo,
@@ -249,80 +265,199 @@ pub fn ipinfo_to_roblox_region(city: &str, country: &str) -> RobloxRegion {
         "FR" => RobloxRegion::Paris,
         "PL" => RobloxRegion::Warsaw,
         "DE" => RobloxRegion::Frankfurt,
-        "US" => {
-            // Determine US sub-region from city name
-            let city_lower = city.to_lowercase();
-            if city_lower.contains("chicago")
-                || city_lower.contains("elk grove")
-                || city_lower.contains("dallas")
-                || city_lower.contains("houston")
-            {
-                RobloxRegion::UsCentral
-            } else if city_lower.contains("ashburn")
-                || city_lower.contains("leesburg")
-                || city_lower.contains("sterling")
-                || city_lower.contains("reston")
-                || city_lower.contains("new york")
-                || city_lower.contains("secaucus")
-                || city_lower.contains("newark")
-                || city_lower.contains("atlanta")
-                || city_lower.contains("miami")
-                || city_lower.contains("jacksonville")
-                || city_lower.contains("fort lauderdale")
-            {
-                RobloxRegion::UsEast
-            } else {
-                // Default US to West (LA, San Jose, Seattle, San Mateo all West Coast)
-                RobloxRegion::UsWest
-            }
-        }
+        "US" => us_region_from_ipinfo(city, info),
         _ => RobloxRegion::Unknown,
     }
 }
 
-/// Look up a game server IP's region via ipinfo.io (async).
+/// Classify a US IP into East/Central/West using a multi-tier fallback.
+fn us_region_from_ipinfo(city: &str, info: &IpInfoResponse) -> RobloxRegion {
+    // Tier 1: City name matching
+    let city_lower = city.to_lowercase();
+
+    // US Central cities
+    if city_lower.contains("chicago")
+        || city_lower.contains("elk grove")
+        || city_lower.contains("dallas")
+        || city_lower.contains("houston")
+        || city_lower.contains("kansas city")
+        || city_lower.contains("san antonio")
+        || city_lower.contains("minneapolis")
+        || city_lower.contains("columbus")
+        || city_lower.contains("indianapolis")
+        || city_lower.contains("nashville")
+        || city_lower.contains("memphis")
+        || city_lower.contains("st. louis")
+        || city_lower.contains("omaha")
+    {
+        return RobloxRegion::UsCentral;
+    }
+
+    // US East cities
+    if city_lower.contains("ashburn")
+        || city_lower.contains("leesburg")
+        || city_lower.contains("sterling")
+        || city_lower.contains("reston")
+        || city_lower.contains("manassas")
+        || city_lower.contains("herndon")
+        || city_lower.contains("chantilly")
+        || city_lower.contains("dulles")
+        || city_lower.contains("new york")
+        || city_lower.contains("secaucus")
+        || city_lower.contains("newark")
+        || city_lower.contains("atlanta")
+        || city_lower.contains("miami")
+        || city_lower.contains("jacksonville")
+        || city_lower.contains("fort lauderdale")
+        || city_lower.contains("charlotte")
+        || city_lower.contains("philadelphia")
+        || city_lower.contains("washington")
+        || city_lower.contains("boston")
+        || city_lower.contains("tampa")
+        || city_lower.contains("orlando")
+    {
+        return RobloxRegion::UsEast;
+    }
+
+    // US West cities (explicit match to avoid false-positive from default)
+    if city_lower.contains("los angeles")
+        || city_lower.contains("san jose")
+        || city_lower.contains("santa clara")
+        || city_lower.contains("san mateo")
+        || city_lower.contains("fremont")
+        || city_lower.contains("san francisco")
+        || city_lower.contains("seattle")
+        || city_lower.contains("portland")
+        || city_lower.contains("boardman")
+        || city_lower.contains("phoenix")
+        || city_lower.contains("las vegas")
+        || city_lower.contains("salt lake")
+        || city_lower.contains("denver")
+    {
+        return RobloxRegion::UsWest;
+    }
+
+    // Tier 2: Coordinate-based classification using ipinfo `loc` field
+    if let Some(region) = us_region_from_coordinates(info) {
+        return region;
+    }
+
+    // Tier 3: US state/region name matching
+    if let Some(state) = info.region.as_deref() {
+        if let Some(region) = us_region_from_state(state) {
+            return region;
+        }
+    }
+
+    // Tier 4: Default to UsEast (majority of Roblox US servers are East Coast)
+    log::warn!(
+        "ipinfo US region fallback: city={:?}, region={:?}, loc={:?} — defaulting to UsEast",
+        info.city,
+        info.region,
+        info.loc,
+    );
+    RobloxRegion::UsEast
+}
+
+/// Classify US sub-region from ipinfo.io `loc` field (lat,lon).
+///
+/// Longitude boundaries:
+/// - East: longitude >= -82 (east of roughly Atlanta/Pittsburgh)
+/// - Central: longitude between -105 and -82
+/// - West: longitude < -105
+fn us_region_from_coordinates(info: &IpInfoResponse) -> Option<RobloxRegion> {
+    let loc = info.loc.as_deref()?;
+    let mut parts = loc.split(',');
+    let _lat: f64 = parts.next()?.trim().parse().ok()?;
+    let lon: f64 = parts.next()?.trim().parse().ok()?;
+
+    Some(if lon >= -82.0 {
+        RobloxRegion::UsEast
+    } else if lon >= -105.0 {
+        RobloxRegion::UsCentral
+    } else {
+        RobloxRegion::UsWest
+    })
+}
+
+/// Classify US sub-region from ipinfo.io `region` field (US state name).
+fn us_region_from_state(state: &str) -> Option<RobloxRegion> {
+    match state {
+        // East Coast
+        "Virginia" | "New York" | "New Jersey" | "Georgia" | "Florida" | "Pennsylvania"
+        | "Massachusetts" | "Maryland" | "Connecticut" | "Delaware" | "District of Columbia"
+        | "Maine" | "New Hampshire" | "North Carolina" | "South Carolina" | "Rhode Island"
+        | "Vermont" | "West Virginia" => Some(RobloxRegion::UsEast),
+
+        // Central
+        "Illinois" | "Texas" | "Ohio" | "Indiana" | "Tennessee" | "Minnesota" | "Missouri"
+        | "Iowa" | "Kansas" | "Nebraska" | "Oklahoma" | "Wisconsin" | "Michigan"
+        | "Arkansas" | "Louisiana" | "Mississippi" | "Alabama" | "Kentucky"
+        | "North Dakota" | "South Dakota" => Some(RobloxRegion::UsCentral),
+
+        // West Coast
+        "California" | "Washington" | "Oregon" | "Arizona" | "Nevada" | "Utah" | "Colorado"
+        | "Idaho" | "Montana" | "Wyoming" | "New Mexico" | "Hawaii" | "Alaska" => {
+            Some(RobloxRegion::UsWest)
+        }
+
+        _ => None,
+    }
+}
+
+/// Look up a game server IP's region.
+///
+/// Uses a two-tier strategy:
+/// 1. **Hardcoded IP table** (from BTRoblox verified data) — instant, no network.
+///    Used as the primary source for 128.116.x.x IPs with known /24 mappings.
+/// 2. **ipinfo.io API** — fallback for unknown IPs or for the display location string.
 ///
 /// Returns `(RobloxRegion, location_string)` where location_string is like "Singapore, SG".
-/// Used by auto-routing for accurate runtime region detection.
 pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
-    let _permit = get_semaphore().acquire().await.ok()?;
+    // Tier 1: Try hardcoded IP table first (instant, no network needed)
+    let ip_table_region = roblox_ip_to_region(ip);
 
-    // Check cache first
-    let cached_location = {
-        let cache = get_cache();
-        cache.lock().ok().and_then(|c| c.get(&ip).cloned())
-    };
+    if ip_table_region != RobloxRegion::Unknown {
+        // We have a verified region from the IP table. Still fetch ipinfo for the
+        // display location string, but don't block on it for the region decision.
+        let location = match fetch_ipinfo(ip).await {
+            Some(info) => {
+                // Log if ipinfo disagrees with the IP table (helps detect stale entries)
+                let ipinfo_region = ipinfo_to_roblox_region(&info);
+                if ipinfo_region != RobloxRegion::Unknown && ipinfo_region != ip_table_region {
+                    log::warn!(
+                        "Region disagreement for {}: IP table={}, ipinfo={} (city={:?}, country={:?})",
+                        ip,
+                        ip_table_region.display_name(),
+                        ipinfo_region.display_name(),
+                        info.city,
+                        info.country,
+                    );
+                }
+                format_location(&info).unwrap_or_else(|| ip_table_region.display_name().to_string())
+            }
+            None => {
+                // ipinfo unavailable — use region display name as location
+                ip_table_region.display_name().to_string()
+            }
+        };
 
-    let (city, country, location) = if let Some(loc) = cached_location {
-        // Parse cached "City, Country" or "City, Region, Country" string
-        let parts: Vec<&str> = loc.split(", ").collect();
-        let city = parts.first().unwrap_or(&"").to_string();
-        let country = parts.last().unwrap_or(&"").to_string();
-        (city, country, loc)
-    } else {
-        let url = format!("https://ipinfo.io/{}/json", ip);
-        let client = geo_http_client();
-        let response = client.get(&url).send().await.ok()?;
-        if !response.status().is_success() {
-            log::warn!("ipinfo.io returned status {} for {}", response.status(), ip);
-            return None;
-        }
-        let info: IpInfoResponse = response.json().await.ok()?;
-        let city = info.city.clone().unwrap_or_default();
-        let country = info.country.clone().unwrap_or_default();
-        let location = format_location(&info)?;
+        log::info!(
+            "Geo lookup: {} -> {} ({}) [IP table]",
+            ip,
+            location,
+            ip_table_region.display_name()
+        );
+        return Some((ip_table_region, location));
+    }
 
-        // Cache the result
-        if let Ok(mut cache) = get_cache().lock() {
-            cache.insert(ip, location.clone());
-        }
+    // Tier 2: IP not in hardcoded table — fall back to ipinfo.io
+    let info = fetch_ipinfo(ip).await?;
+    let location = format_location(&info)?;
+    let region = ipinfo_to_roblox_region(&info);
 
-        (city, country, location)
-    };
-
-    let region = ipinfo_to_roblox_region(&city, &country);
     log::info!(
-        "Geo lookup: {} -> {} ({})",
+        "Geo lookup: {} -> {} ({}) [ipinfo fallback]",
         ip,
         location,
         region.display_name()
@@ -330,16 +465,65 @@ pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, St
     Some((region, location))
 }
 
+/// Fetch ipinfo.io data for an IP, using the cache and semaphore.
+async fn fetch_ipinfo(ip: Ipv4Addr) -> Option<IpInfoResponse> {
+    let _permit = get_semaphore().acquire().await.ok()?;
+
+    // Check cache for a previously fetched location string
+    let cached_location = {
+        let cache = get_cache();
+        cache.lock().ok().and_then(|c| c.get(&ip).cloned())
+    };
+
+    if let Some(loc) = cached_location {
+        // Parse cached "City, Country" or "City, Region, Country" string back
+        let parts: Vec<&str> = loc.split(", ").collect();
+        let city = parts.first().unwrap_or(&"").to_string();
+        let region = if parts.len() == 3 {
+            Some(parts[1].to_string())
+        } else {
+            None
+        };
+        let country = parts.last().unwrap_or(&"").to_string();
+        return Some(IpInfoResponse {
+            city: Some(city),
+            region,
+            country: Some(country),
+            loc: None, // not available from cache
+        });
+    }
+
+    let url = format!("https://ipinfo.io/{}/json", ip);
+    let client = geo_http_client();
+    let response = client.get(&url).send().await.ok()?;
+    if !response.status().is_success() {
+        log::warn!("ipinfo.io returned status {} for {}", response.status(), ip);
+        return None;
+    }
+    let info: IpInfoResponse = response.json().await.ok()?;
+
+    // Cache the formatted location string
+    if let Some(location) = format_location(&info) {
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(ip, location);
+        }
+    }
+
+    Some(info)
+}
+
 /// Map a Roblox game server IP to its geographic region.
 ///
-/// Uses hard-coded /24 subnet mappings based on Roblox's AS22697 infrastructure.
-/// Primary source: BTRoblox extension (most widely-used, community-validated).
-/// Cross-referenced with ipinfo.io geolocation and DevForum posts.
+/// Uses hard-coded /24 subnet mappings based on BTRoblox's verified
+/// `serverRegionsByIp` table (the most widely-used, community-validated source).
+///
+/// Only includes octets that BTRoblox has explicitly verified. Unverified octets
+/// return `Unknown` to avoid silent misrouting — the caller should fall back to
+/// ipinfo.io for those IPs.
 ///
 /// Sources:
-/// - BTRoblox extension (background.js) - complete 0-127 octet mapping
+/// - BTRoblox extension (js/feat/serverdetails.js) `serverRegionsByIp`
 /// - https://devforum.roblox.com/t/roblox-server-region-a-list-of-roblox-ip-ranges/3094401
-/// - ipinfo.io AS22697 geolocation lookups
 pub fn roblox_ip_to_region(ip: Ipv4Addr) -> RobloxRegion {
     let octets = ip.octets();
 
@@ -348,49 +532,33 @@ pub fn roblox_ip_to_region(ip: Ipv4Addr) -> RobloxRegion {
         return RobloxRegion::Unknown;
     }
 
-    // Map by third octet (/24 blocks)
+    // Map by third octet (/24 blocks) — BTRoblox verified entries only
     match octets[2] {
         // ── Asia-Pacific ──────────────────────────────────────────────
-        50 | 79 | 97 => RobloxRegion::Singapore,
-        6 | 55 | 58 | 59 | 60 | 82 | 83 | 120 => RobloxRegion::Tokyo,
-        7 | 9 | 104 => RobloxRegion::Mumbai,
+        46 | 50 | 54 | 97 => RobloxRegion::Singapore,
+        55 | 120 => RobloxRegion::Tokyo,
+        104 => RobloxRegion::Mumbai,
         51 => RobloxRegion::Sydney,
 
         // ── Europe ────────────────────────────────────────────────────
-        33 | 35 | 36 | 72 | 73 | 89 | 119 => RobloxRegion::London,
-        13 | 21 | 54 | 121 => RobloxRegion::Amsterdam,
-        4 | 19 | 20 | 26 | 122 => RobloxRegion::Paris,
-        5 | 8 | 39 | 40 | 41 | 42 | 43 | 44 | 123 => RobloxRegion::Frankfurt,
-        2 | 3 | 31 | 124 => RobloxRegion::Warsaw,
+        33 | 35 | 119 => RobloxRegion::London,
+        21 => RobloxRegion::Amsterdam,
+        13 => RobloxRegion::Paris,
+        5 | 44 | 123 => RobloxRegion::Frankfurt,
 
-        // ── US East ──────────────────────────────────────────────────
-        // Ashburn / Virginia
-        10 | 11 | 52 | 53 | 56 | 70 | 71 | 74 | 75 | 76 | 77 | 78 | 80 | 87 | 96 | 102 | 114 => {
+        // ── Americas ──────────────────────────────────────────────────
+        86 => RobloxRegion::Brazil,
+
+        // US East (Ashburn, NYC, Atlanta, Miami)
+        0 | 11 | 22 | 32 | 45 | 53 | 56 | 74 | 80 | 87 | 99 | 102 | 127 => {
             RobloxRegion::UsEast
         }
-        // NYC / Secaucus NJ
-        15 | 16 | 17 | 23 | 32 | 65 | 66 | 126 => RobloxRegion::UsEast,
-        // Atlanta
-        22 | 24 | 25 | 99 => RobloxRegion::UsEast,
-        // Miami
-        18 | 37 | 38 | 45 | 85 | 127 => RobloxRegion::UsEast,
 
-        // ── US Central ───────────────────────────────────────────────
-        // Chicago / Elk Grove Village
-        27 | 28 | 29 | 34 | 46 | 47 | 48 | 84 | 88 | 101 | 112 | 113 => RobloxRegion::UsCentral,
-        // Dallas
-        95 => RobloxRegion::UsCentral,
+        // US Central (Chicago, Dallas)
+        48 | 84 | 88 | 95 => RobloxRegion::UsCentral,
 
-        // ── US West ──────────────────────────────────────────────────
-        // Los Angeles
-        1 | 49 | 63 | 116 => RobloxRegion::UsWest,
-        // Seattle
-        62 | 115 => RobloxRegion::UsWest,
-        // San Jose / Santa Clara
-        57 | 67 | 68 | 69 | 81 | 105 | 117 => RobloxRegion::UsWest,
-        // San Mateo (Roblox HQ area - may be infra but in Bay Area)
-        12 | 61 | 64 | 86 | 90 | 91 | 92 | 93 | 94 | 98 | 100 | 103 | 106 | 107 | 108 | 109
-        | 110 | 111 | 125 => RobloxRegion::UsWest,
+        // US West (LA, Seattle, San Jose)
+        1 | 57 | 63 | 67 | 81 | 105 | 115 | 116 | 117 => RobloxRegion::UsWest,
 
         _ => RobloxRegion::Unknown,
     }
@@ -418,6 +586,7 @@ mod tests {
             city: Some("Singapore".to_string()),
             region: Some("Singapore".to_string()),
             country: Some("SG".to_string()),
+            loc: None,
         };
         assert_eq!(format_location(&info), Some("Singapore, SG".to_string()));
 
@@ -426,12 +595,15 @@ mod tests {
             city: Some("Ashburn".to_string()),
             region: Some("Virginia".to_string()),
             country: Some("US".to_string()),
+            loc: None,
         };
         assert_eq!(
             format_location(&info),
             Some("Ashburn, Virginia, US".to_string())
         );
     }
+
+    // ── roblox_ip_to_region tests (BTRoblox verified entries) ─────────
 
     #[test]
     fn test_roblox_ip_to_region_singapore() {
@@ -440,8 +612,14 @@ mod tests {
             RobloxRegion::Singapore
         );
         assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 79, 50)),
-            RobloxRegion::Singapore
+            roblox_ip_to_region(Ipv4Addr::new(128, 116, 46, 1)),
+            RobloxRegion::Singapore,
+            "Octet 46 is Singapore per BTRoblox (was incorrectly UsCentral)"
+        );
+        assert_eq!(
+            roblox_ip_to_region(Ipv4Addr::new(128, 116, 54, 1)),
+            RobloxRegion::Singapore,
+            "Octet 54 is Singapore per BTRoblox (was incorrectly Amsterdam)"
         );
         assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 97, 50)),
@@ -452,15 +630,7 @@ mod tests {
     #[test]
     fn test_roblox_ip_to_region_tokyo() {
         assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 6, 1)),
-            RobloxRegion::Tokyo
-        );
-        assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 55, 1)),
-            RobloxRegion::Tokyo
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 82, 1)),
             RobloxRegion::Tokyo
         );
         assert_eq!(
@@ -489,10 +659,6 @@ mod tests {
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 21, 1)),
             RobloxRegion::Amsterdam
         );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 54, 1)),
-            RobloxRegion::Amsterdam
-        );
         // Frankfurt
         assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 5, 1)),
@@ -502,20 +668,34 @@ mod tests {
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 44, 1)),
             RobloxRegion::Frankfurt
         );
-        // Warsaw
         assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 31, 1)),
-            RobloxRegion::Warsaw
+            roblox_ip_to_region(Ipv4Addr::new(128, 116, 123, 1)),
+            RobloxRegion::Frankfurt
         );
+        // Paris
         assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 124, 1)),
-            RobloxRegion::Warsaw
+            roblox_ip_to_region(Ipv4Addr::new(128, 116, 13, 1)),
+            RobloxRegion::Paris
+        );
+    }
+
+    #[test]
+    fn test_roblox_ip_to_region_brazil() {
+        assert_eq!(
+            roblox_ip_to_region(Ipv4Addr::new(128, 116, 86, 1)),
+            RobloxRegion::Brazil,
+            "Octet 86 is São Paulo/Brazil per BTRoblox (was incorrectly UsWest)"
         );
     }
 
     #[test]
     fn test_roblox_ip_to_region_us_east() {
         // Ashburn
+        assert_eq!(
+            roblox_ip_to_region(Ipv4Addr::new(128, 116, 0, 1)),
+            RobloxRegion::UsEast,
+            "Octet 0 is Ashburn/UsEast per BTRoblox (was incorrectly Unknown)"
+        );
         assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 102, 1)),
             RobloxRegion::UsEast
@@ -527,10 +707,6 @@ mod tests {
         // NYC
         assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 32, 200)),
-            RobloxRegion::UsEast
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 65, 1)),
             RobloxRegion::UsEast
         );
         // Atlanta
@@ -554,10 +730,6 @@ mod tests {
         // Chicago
         assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 48, 1)),
-            RobloxRegion::UsCentral
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 101, 1)),
             RobloxRegion::UsCentral
         );
         assert_eq!(
@@ -599,23 +771,26 @@ mod tests {
     }
 
     #[test]
-    fn test_roblox_ip_to_region_unknown() {
+    fn test_roblox_ip_to_region_unknown_for_unverified_octets() {
+        // Non-Roblox IPs
         assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(1, 1, 1, 1)),
             RobloxRegion::Unknown
         );
+        // Above /17 range
         assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 200, 1)),
             RobloxRegion::Unknown
         );
-        // Decommissioned Hong Kong ranges → Unknown
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 0, 1)),
-            RobloxRegion::Unknown
-        );
+        // Unverified octets within /17 (not in BTRoblox table) → Unknown
         assert_eq!(
             roblox_ip_to_region(Ipv4Addr::new(128, 116, 14, 1)),
             RobloxRegion::Unknown
+        );
+        assert_eq!(
+            roblox_ip_to_region(Ipv4Addr::new(128, 116, 30, 1)),
+            RobloxRegion::Unknown,
+            "Octets not in BTRoblox should return Unknown"
         );
     }
 
@@ -642,5 +817,140 @@ mod tests {
             Some("germany")
         );
         assert_eq!(RobloxRegion::Unknown.best_swifttunnel_region(), None);
+    }
+
+    // ── ipinfo_to_roblox_region tests ─────────────────────────────────
+
+    fn make_ipinfo(city: &str, region: &str, country: &str, loc: Option<&str>) -> IpInfoResponse {
+        IpInfoResponse {
+            city: Some(city.to_string()),
+            region: Some(region.to_string()),
+            country: Some(country.to_string()),
+            loc: loc.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_ipinfo_non_us_countries() {
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("Singapore", "Singapore", "SG", None)),
+            RobloxRegion::Singapore
+        );
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("Tokyo", "Tokyo", "JP", None)),
+            RobloxRegion::Tokyo
+        );
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("São Paulo", "São Paulo", "BR", None)),
+            RobloxRegion::Brazil
+        );
+    }
+
+    #[test]
+    fn test_ipinfo_us_city_matching() {
+        // Known US East cities
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("Ashburn", "Virginia", "US", None)),
+            RobloxRegion::UsEast
+        );
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("Manassas", "Virginia", "US", None)),
+            RobloxRegion::UsEast,
+            "Manassas should match UsEast (new city)"
+        );
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("Atlanta", "Georgia", "US", None)),
+            RobloxRegion::UsEast
+        );
+
+        // Known US Central cities
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("Chicago", "Illinois", "US", None)),
+            RobloxRegion::UsCentral
+        );
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("Dallas", "Texas", "US", None)),
+            RobloxRegion::UsCentral
+        );
+
+        // Known US West cities
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("San Mateo", "California", "US", None)),
+            RobloxRegion::UsWest,
+            "San Mateo (Roblox HQ) should explicitly match UsWest"
+        );
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("Los Angeles", "California", "US", None)),
+            RobloxRegion::UsWest
+        );
+    }
+
+    #[test]
+    fn test_ipinfo_us_coordinate_fallback() {
+        // Unknown city, but coordinates place it in US East (Ashburn area, lon ~-77.5)
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo(
+                "SomeUnknownCity",
+                "Virginia",
+                "US",
+                Some("39.0438,-77.4874")
+            )),
+            RobloxRegion::UsEast
+        );
+
+        // Unknown city, coordinates in US Central (Chicago area, lon ~-87.6)
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo(
+                "SomeUnknownCity",
+                "Illinois",
+                "US",
+                Some("41.8781,-87.6298")
+            )),
+            RobloxRegion::UsCentral
+        );
+
+        // Unknown city, coordinates in US West (LA area, lon ~-118.2)
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo(
+                "SomeUnknownCity",
+                "California",
+                "US",
+                Some("34.0522,-118.2437")
+            )),
+            RobloxRegion::UsWest
+        );
+    }
+
+    #[test]
+    fn test_ipinfo_us_state_fallback() {
+        // Unknown city, no coordinates, but state is known
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("SomeCity", "Virginia", "US", None)),
+            RobloxRegion::UsEast
+        );
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("SomeCity", "Illinois", "US", None)),
+            RobloxRegion::UsCentral
+        );
+        assert_eq!(
+            ipinfo_to_roblox_region(&make_ipinfo("SomeCity", "California", "US", None)),
+            RobloxRegion::UsWest
+        );
+    }
+
+    #[test]
+    fn test_ipinfo_us_defaults_to_east() {
+        // No city, no coordinates, unknown state → defaults to UsEast
+        let info = IpInfoResponse {
+            city: None,
+            region: None,
+            country: Some("US".to_string()),
+            loc: None,
+        };
+        assert_eq!(
+            ipinfo_to_roblox_region(&info),
+            RobloxRegion::UsEast,
+            "Default US should be UsEast, not UsWest"
+        );
     }
 }
