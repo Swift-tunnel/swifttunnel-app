@@ -410,6 +410,11 @@ export function SettingsTab() {
                     <path d="M12 19V5M5 12l7-7 7 7" />
                   </svg>
                 )}
+                {updaterStatus === "installing" && (
+                  <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="var(--color-accent-primary)" strokeWidth="2.5" strokeDasharray="50" strokeLinecap="round" />
+                  </svg>
+                )}
                 {updaterStatus === "error" && (
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-error)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M18 6 6 18M6 6l12 12" />
@@ -419,7 +424,7 @@ export function SettingsTab() {
                   className="text-xs font-medium"
                   style={{
                     color:
-                      updaterStatus === "checking"
+                      updaterStatus === "checking" || updaterStatus === "installing"
                         ? "var(--color-accent-primary)"
                         : updaterStatus === "up_to_date"
                           ? "var(--color-status-connected)"
@@ -456,7 +461,7 @@ export function SettingsTab() {
                   Update Now
                 </button>
               )}
-              {updaterStatus === "error" && (
+              {updaterStatus === "error" ? (
                 <button
                   onClick={() => void checkForUpdates(true)}
                   className="rounded-[var(--radius-button)] border px-3 py-1.5 text-xs transition-colors hover:bg-bg-hover"
@@ -467,14 +472,15 @@ export function SettingsTab() {
                 >
                   Retry
                 </button>
+              ) : (
+                <button
+                  onClick={() => void checkForUpdates(true)}
+                  disabled={updaterStatus === "checking" || updaterStatus === "installing"}
+                  className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
+                >
+                  Check Now
+                </button>
               )}
-              <button
-                onClick={() => void checkForUpdates(true)}
-                disabled={updaterStatus === "checking" || updaterStatus === "installing"}
-                className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
-              >
-                Check Now
-              </button>
             </div>
           </div>
 
