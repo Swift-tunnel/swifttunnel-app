@@ -294,12 +294,20 @@ async fn ranked_relay_candidates_for_region(
     }
 
     if candidates.len() > 1 {
-        let probe_targets: Vec<(String, SocketAddr)> = candidates
-            .iter()
-            .map(|candidate| (candidate.region.clone(), candidate.addr))
-            .collect();
-        let probe_results = probe_relay_candidates(&probe_targets).await;
-        apply_probe_measurements(&mut candidates, &probe_results);
+        let all_have_cached = candidates.iter().all(|c| c.cached_latency_ms.is_some());
+        if all_have_cached {
+            log::info!(
+                "Skipping relay probing — all {} candidates have cached latency",
+                candidates.len()
+            );
+        } else {
+            let probe_targets: Vec<(String, SocketAddr)> = candidates
+                .iter()
+                .map(|candidate| (candidate.region.clone(), candidate.addr))
+                .collect();
+            let probe_results = probe_relay_candidates(&probe_targets).await;
+            apply_probe_measurements(&mut candidates, &probe_results);
+        }
     }
 
     let source = sort_ranked_candidates(&mut candidates);
@@ -1199,71 +1207,26 @@ impl VpnConnection {
                             );
                             let old_region = router_for_lookup.current_region();
 
-                            // Step 1: Resolve relay using cached latency and routing policy.
-                            if let Some((mut selected_region, mut selected_addr)) =
+                            // Step 1: Resolve relay using cached latency (instant, no probing).
+                            // Switch immediately so packets can be released ASAP.
+                            if let Some((selected_region, selected_addr)) =
                                 router_for_lookup.get_best_server_for_region(&region)
                             {
-                                let mut latency_improvement_ms = None;
-
-                                // Step 1b: Actively probe all candidates in this region family so
-                                // selection is based on fresh measurements, not cached order.
-                                if let Some(target_region) = region.best_swifttunnel_region() {
-                                    let forced_server =
-                                        router_for_lookup.forced_server_for_region(target_region);
-                                    let available_servers =
-                                        router_for_lookup.available_servers_snapshot();
-
-                                    let ranked_candidates = ranked_relay_candidates_for_region(
-                                        target_region,
-                                        &available_servers,
-                                        forced_server.as_deref(),
-                                    )
-                                    .await;
-
-                                    if let Some(best_candidate) = ranked_candidates.first() {
-                                        if best_candidate.region != selected_region
-                                            || best_candidate.addr != selected_addr
-                                        {
-                                            log::info!(
-                                                "Auto-routing: Probe refined '{}' selection {} ({}) -> {} ({})",
-                                                target_region,
-                                                selected_region,
-                                                selected_addr,
-                                                best_candidate.region,
-                                                best_candidate.addr
-                                            );
-                                        }
-                                        selected_region = best_candidate.region.clone();
-                                        selected_addr = best_candidate.addr;
-
-                                        latency_improvement_ms = router_for_lookup
-                                            .current_relay()
-                                            .and_then(|current_relay| {
-                                                compute_latency_improvement(
-                                                    &ranked_candidates,
-                                                    &current_relay,
-                                                )
-                                            });
-                                    }
-                                }
-
-                                // Step 2: Commit the switch
                                 if let Some((new_addr, new_region)) = router_for_lookup
                                     .commit_switch(
-                                        region,
+                                        region.clone(),
                                         selected_region,
                                         selected_addr,
-                                        latency_improvement_ms,
+                                        None,
                                     )
                                 {
                                     log::info!(
-                                        "Auto-routing: SWITCHING relay {} -> {} (addr: {})",
+                                        "Auto-routing: SWITCHING relay {} -> {} (addr: {}) [cached latency, pre-probe]",
                                         old_region,
                                         new_region,
                                         new_addr
                                     );
                                     relay_for_lookup.switch_relay(new_addr);
-                                    // Keep UI state in sync (shows the actual server id and endpoint).
                                     {
                                         let mut state = state_for_lookup.lock().await;
                                         if let ConnectionState::Connected {
@@ -1276,9 +1239,6 @@ impl VpnConnection {
                                             *server_endpoint = new_addr.to_string();
                                         }
                                     }
-                                    // Send burst of keepalives to new relay to:
-                                    // 1. Establish session on new relay ASAP
-                                    // 2. Punch through NAT/firewall quickly (3 packets at 50ms intervals)
                                     if let Err(e) = relay_for_lookup.send_keepalive_burst() {
                                         log::warn!(
                                             "Auto-routing: Failed to send keepalive burst to new relay: {}",
@@ -1301,8 +1261,78 @@ impl VpnConnection {
                                     location
                                 );
                             }
-                            // Release held packets — lookup is done, relay is now correct
+
+                            // Step 2: Release held packets NOW — relay is set to best-known server
+                            // via cached latency. Don't wait for probing.
                             router_for_lookup.clear_pending_lookup(ip);
+
+                            // Step 3: Deferred probe refinement — packets are already flowing,
+                            // probe candidates in the background and switch if a better one is found.
+                            if let Some(target_region) = region.best_swifttunnel_region() {
+                                let forced_server =
+                                    router_for_lookup.forced_server_for_region(target_region);
+                                let available_servers =
+                                    router_for_lookup.available_servers_snapshot();
+
+                                let ranked_candidates = ranked_relay_candidates_for_region(
+                                    target_region,
+                                    &available_servers,
+                                    forced_server.as_deref(),
+                                )
+                                .await;
+
+                                if let Some(best_candidate) = ranked_candidates.first() {
+                                    if let Some(current_relay) = router_for_lookup.current_relay() {
+                                        if best_candidate.region != current_relay.0
+                                            || best_candidate.addr != current_relay.1
+                                        {
+                                            let latency_improvement_ms =
+                                                compute_latency_improvement(
+                                                    &ranked_candidates,
+                                                    &current_relay,
+                                                );
+                                            if let Some((new_addr, new_region)) = router_for_lookup
+                                                .commit_switch(
+                                                    region,
+                                                    best_candidate.region.clone(),
+                                                    best_candidate.addr,
+                                                    latency_improvement_ms,
+                                                )
+                                            {
+                                                log::info!(
+                                                    "Auto-routing: Probe refinement {} -> {} ({}ms improvement)",
+                                                    current_relay.0,
+                                                    new_region,
+                                                    latency_improvement_ms.unwrap_or(0)
+                                                );
+                                                relay_for_lookup.switch_relay(new_addr);
+                                                {
+                                                    let mut state =
+                                                        state_for_lookup.lock().await;
+                                                    if let ConnectionState::Connected {
+                                                        ref mut server_region,
+                                                        ref mut server_endpoint,
+                                                        ..
+                                                    } = *state
+                                                    {
+                                                        *server_region = new_region.clone();
+                                                        *server_endpoint =
+                                                            new_addr.to_string();
+                                                    }
+                                                }
+                                                if let Err(e) =
+                                                    relay_for_lookup.send_keepalive_burst()
+                                                {
+                                                    log::warn!(
+                                                        "Auto-routing: Failed to send keepalive burst after probe refinement: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         None => {
                             log::warn!(
