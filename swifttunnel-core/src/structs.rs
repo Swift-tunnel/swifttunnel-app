@@ -51,16 +51,12 @@ pub struct SystemOptimizationConfig {
     pub disable_game_bar: bool,
     pub power_plan: PowerPlan,
     // Tier 1 (Safe) Boosts
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub timer_resolution_1ms: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub mmcss_gaming_profile: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub game_mode_enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_roblox_window_width() -> u32 {
@@ -192,12 +188,12 @@ pub struct NetworkConfig {
     pub enable_network_boost: bool,
     pub prioritize_roblox_traffic: bool,
     // Tier 1 (Safe) Network Boosts
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub disable_nagle: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub disable_network_throttling: bool,
     /// Gaming QoS - Marks Roblox and relay tunnel UDP packets with DSCP EF (46)
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub gaming_qos: bool,
     /// Firewall Fix - Adds Windows Firewall allow rules for Roblox, flushes DNS, resets Winsock
     #[serde(default)]
