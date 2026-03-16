@@ -38,7 +38,7 @@ describe("app bootstrap", () => {
     expect(fetchSystemInfo).toHaveBeenCalledTimes(1);
     expect(fetchVpnState).toHaveBeenCalledTimes(1);
     expect(connectVpn).toHaveBeenCalledWith("singapore", ["roblox"]);
-    expect(checkForUpdates).toHaveBeenCalledWith(false);
+    expect(checkForUpdates).toHaveBeenCalledWith(false, true);
   });
 
   it("skips reconnect and update check when startup conditions are not met", async () => {
