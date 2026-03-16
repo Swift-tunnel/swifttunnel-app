@@ -1231,10 +1231,10 @@ impl VpnConnection {
                             {
                                 // Compute cached latency delta so same-region upgrades are not
                                 // silently rejected by the rate-limiter in commit_switch.
-                                let cached_improvement = router_for_lookup
-                                    .current_relay()
-                                    .and_then(|current| {
-                                        let servers = router_for_lookup.available_servers_snapshot();
+                                let cached_improvement =
+                                    router_for_lookup.current_relay().and_then(|current| {
+                                        let servers =
+                                            router_for_lookup.available_servers_snapshot();
                                         compute_cached_latency_improvement(
                                             &servers,
                                             selected_addr,
