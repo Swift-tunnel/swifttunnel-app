@@ -139,6 +139,45 @@ describe("stores/updaterStore", () => {
     );
   });
 
+  it("auto-installs when autoInstall flag is true and update is available", async () => {
+    updaterCheckChannel.mockResolvedValue({
+      current_version: "1.0.0",
+      available_version: "1.5.1",
+      release_tag: "v1.5.1",
+      channel: "Stable",
+    });
+    updaterInstallChannel.mockResolvedValue({
+      installed_version: "1.5.1",
+      release_tag: "v1.5.1",
+    });
+
+    const useUpdaterStore = await loadStore();
+    await useUpdaterStore.getState().checkForUpdates(false, true);
+
+    expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
+    expect(useUpdaterStore.getState().status).toBe("up_to_date");
+    expect(useUpdaterStore.getState().progressPercent).toBe(100);
+    expect(notify).toHaveBeenCalledWith(
+      "SwiftTunnel Update",
+      "Updating to v1.5.1, restarting...",
+    );
+  });
+
+  it("does not auto-install when autoInstall is false even on background check", async () => {
+    updaterCheckChannel.mockResolvedValue({
+      current_version: "1.0.0",
+      available_version: "1.5.1",
+      release_tag: "v1.5.1",
+      channel: "Stable",
+    });
+
+    const useUpdaterStore = await loadStore();
+    await useUpdaterStore.getState().checkForUpdates(false, false);
+
+    expect(updaterInstallChannel).not.toHaveBeenCalled();
+    expect(useUpdaterStore.getState().status).toBe("update_available");
+  });
+
   it("uses Live channel when selected in settings", async () => {
     mockSettingsStore.settings.update_channel = "Live";
 

@@ -167,19 +167,6 @@ export function SettingsTab() {
       (a) => a.guid === settings.preferred_physical_adapter_guid,
     );
 
-  const updaterDesc =
-    updaterStatus === "checking"
-      ? "Checking for updates..."
-      : updaterStatus === "up_to_date"
-        ? "You are on the latest version"
-        : updaterStatus === "update_available"
-          ? `Version ${updaterVersion} is available`
-          : updaterStatus === "installing"
-            ? `Installing update... ${updaterProgress}%`
-            : updaterStatus === "error"
-              ? updaterError || "Update check failed"
-              : "Not checked yet";
-
   return (
     <div className="mx-auto flex max-w-[660px] flex-col gap-4">
       {/* ── Account ── */}
@@ -231,21 +218,6 @@ export function SettingsTab() {
 
       {/* ── General ── */}
       <Section title="General">
-        <Row label="Update Channel" desc="Stable for vetted releases, Live for pre-release">
-          <SegmentedPicker
-            options={["Stable", "Live"] as UpdateChannel[]}
-            value={settings.update_channel}
-            onChange={(ch) => set({ update_channel: ch })}
-          />
-        </Row>
-        <Row label="Auto Update" desc="Check and install updates on startup">
-          <Toggle
-            enabled={settings.update_settings.auto_check}
-            onChange={(v) =>
-              set({ update_settings: { ...settings.update_settings, auto_check: v } })
-            }
-          />
-        </Row>
         <Row label="Run on Startup" desc="Launch SwiftTunnel when you sign into Windows">
           <Toggle
             enabled={settings.run_on_startup}
@@ -390,27 +362,165 @@ export function SettingsTab() {
 
       {/* ── Updates ── */}
       <Section title="Updates">
-        <Row label="Status" desc={updaterDesc}>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => void checkForUpdates(true)}
-              disabled={updaterStatus === "checking" || updaterStatus === "installing"}
-              className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
-            >
-              Check Now
-            </button>
-            {updaterStatus === "update_available" && (
-              <button
-                onClick={() => void installUpdate()}
-                className="rounded-[var(--radius-button)] px-3 py-1.5 text-xs font-medium text-white"
-                style={{ backgroundColor: "var(--color-accent-primary)" }}
-              >
-                Install
-              </button>
-            )}
-          </div>
+        <Row label="Update Channel" desc="Stable for vetted releases, Live for pre-release">
+          <SegmentedPicker
+            options={["Stable", "Live"] as UpdateChannel[]}
+            value={settings.update_channel}
+            onChange={(ch) => set({ update_channel: ch })}
+          />
         </Row>
-        <div className="px-4 pb-3 text-[11px] text-text-dimmed">
+        <Row label="Auto Update" desc="Automatically check and install updates on startup">
+          <Toggle
+            enabled={settings.update_settings.auto_check}
+            onChange={(v) =>
+              set({ update_settings: { ...settings.update_settings, auto_check: v } })
+            }
+          />
+        </Row>
+
+        {/* Version + Status */}
+        <div className="px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {/* Version badge */}
+              <span
+                className="rounded-md px-2 py-1 text-xs font-semibold"
+                style={{
+                  backgroundColor: "var(--color-bg-elevated)",
+                  color: "var(--color-text-primary)",
+                }}
+              >
+                v{__APP_VERSION__}
+              </span>
+
+              {/* Status indicator */}
+              <div className="flex items-center gap-1.5">
+                {updaterStatus === "checking" && (
+                  <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="var(--color-accent-primary)" strokeWidth="2.5" strokeDasharray="50" strokeLinecap="round" />
+                  </svg>
+                )}
+                {updaterStatus === "up_to_date" && (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-connected)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                )}
+                {updaterStatus === "update_available" && (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 19V5M5 12l7-7 7 7" />
+                  </svg>
+                )}
+                {updaterStatus === "installing" && (
+                  <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="var(--color-accent-primary)" strokeWidth="2.5" strokeDasharray="50" strokeLinecap="round" />
+                  </svg>
+                )}
+                {updaterStatus === "error" && (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-error)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 6 6 18M6 6l12 12" />
+                  </svg>
+                )}
+                <span
+                  className="text-xs font-medium"
+                  style={{
+                    color:
+                      updaterStatus === "checking" || updaterStatus === "installing"
+                        ? "var(--color-accent-primary)"
+                        : updaterStatus === "up_to_date"
+                          ? "var(--color-status-connected)"
+                          : updaterStatus === "update_available"
+                            ? "var(--color-accent-primary)"
+                            : updaterStatus === "error"
+                              ? "var(--color-status-error)"
+                              : "var(--color-text-muted)",
+                  }}
+                >
+                  {updaterStatus === "checking"
+                    ? "Checking for updates..."
+                    : updaterStatus === "up_to_date"
+                      ? "You're up to date"
+                      : updaterStatus === "update_available"
+                        ? `v${updaterVersion} available`
+                        : updaterStatus === "installing"
+                          ? `Installing v${updaterVersion}...`
+                          : updaterStatus === "error"
+                            ? (updaterError || "Update check failed")
+                            : "Not checked yet"}
+                </span>
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex items-center gap-2">
+              {updaterStatus === "update_available" && (
+                <button
+                  onClick={() => void installUpdate()}
+                  className="rounded-[var(--radius-button)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
+                  style={{ backgroundColor: "var(--color-accent-primary)" }}
+                >
+                  Update Now
+                </button>
+              )}
+              {updaterStatus === "error" ? (
+                <button
+                  onClick={() => void checkForUpdates(true)}
+                  className="rounded-[var(--radius-button)] border px-3 py-1.5 text-xs transition-colors hover:bg-bg-hover"
+                  style={{
+                    borderColor: "var(--color-status-error-soft-20)",
+                    color: "var(--color-status-error)",
+                  }}
+                >
+                  Retry
+                </button>
+              ) : (
+                <button
+                  onClick={() => void checkForUpdates(true)}
+                  disabled={updaterStatus === "checking" || updaterStatus === "installing"}
+                  className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
+                >
+                  Check Now
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Update available: version arrow */}
+          {updaterStatus === "update_available" && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-text-muted">
+              <span>v{__APP_VERSION__}</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M5 12h14M12 5l7 7-7 7" />
+              </svg>
+              <span style={{ color: "var(--color-accent-primary)" }} className="font-medium">
+                v{updaterVersion}
+              </span>
+            </div>
+          )}
+
+          {/* Progress bar for installing */}
+          {updaterStatus === "installing" && (
+            <div className="mt-3">
+              <div
+                className="h-1.5 w-full overflow-hidden rounded-full"
+                style={{ backgroundColor: "var(--color-bg-hover)" }}
+              >
+                <div
+                  className="h-full rounded-full transition-all duration-300 ease-out"
+                  style={{
+                    width: `${updaterProgress}%`,
+                    backgroundColor: "var(--color-accent-primary)",
+                  }}
+                />
+              </div>
+              <div className="mt-1 text-right text-[11px] text-text-dimmed">
+                {updaterProgress}%
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Last checked */}
+        <div className="border-t border-border-subtle px-4 py-2.5 text-[11px] text-text-dimmed">
           Last checked:{" "}
           {updaterLastChecked
             ? new Date(updaterLastChecked * 1000).toLocaleString()
