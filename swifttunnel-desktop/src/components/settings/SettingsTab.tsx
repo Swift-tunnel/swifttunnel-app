@@ -167,19 +167,6 @@ export function SettingsTab() {
       (a) => a.guid === settings.preferred_physical_adapter_guid,
     );
 
-  const updaterDesc =
-    updaterStatus === "checking"
-      ? "Checking for updates..."
-      : updaterStatus === "up_to_date"
-        ? "You are on the latest version"
-        : updaterStatus === "update_available"
-          ? `Version ${updaterVersion} is available`
-          : updaterStatus === "installing"
-            ? `Installing update... ${updaterProgress}%`
-            : updaterStatus === "error"
-              ? updaterError || "Update check failed"
-              : "Not checked yet";
-
   return (
     <div className="mx-auto flex max-w-[660px] flex-col gap-4">
       {/* ── Account ── */}
