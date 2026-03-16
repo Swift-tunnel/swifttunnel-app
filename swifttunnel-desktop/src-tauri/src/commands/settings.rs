@@ -457,7 +457,9 @@ pub async fn settings_generate_network_diagnostics_bundle(
         split_tunnel_diag,
     };
 
-    let command_sections = run_windows_diagnostics_sections();
+    let command_sections = tauri::async_runtime::spawn_blocking(run_windows_diagnostics_sections)
+        .await
+        .map_err(|e| format!("Diagnostics task failed: {}", e))?;
     let bundle_text = compose_bundle_text(&bundle_context, &command_sections);
 
     let output_dir = resolve_output_dir(&app);

@@ -327,7 +327,7 @@ pub fn system_check_driver() -> DriverCheckResponse {
 }
 
 #[tauri::command]
-pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
         if swifttunnel_core::vpn::SplitTunnelDriver::is_available() {
@@ -349,89 +349,105 @@ pub fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
         )?;
 
         let msi_string = msi_path.to_string_lossy().to_string();
-        let first_log_path = default_driver_install_log_path();
-        let first_log_string = first_log_path.to_string_lossy().to_string();
-        let retry_log_path = first_log_path.with_extension("retry.log");
-        let retry_log_string = retry_log_path.to_string_lossy().to_string();
 
-        // If we are elevated already, run msiexec directly and capture output.
-        // Otherwise, use Start-Process -Verb RunAs to trigger a UAC prompt.
-        let run_install = |passive: bool, log_string: &str| -> Result<(i32, String), String> {
-            if swifttunnel_core::is_administrator() {
-                let ui_flag = if passive { "/passive" } else { "/qn" };
-                let output = swifttunnel_core::hidden_command("msiexec")
-                    .args(["/i", &msi_string, ui_flag, "/norestart", "/L*V", log_string])
-                    .output()
-                    .map_err(|e| format!("Failed to run msiexec: {}", e))?;
-                Ok((
-                    output.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                ))
-            } else {
-                let script = build_elevated_msiexec_script(&msi_string, log_string, passive);
+        tauri::async_runtime::spawn_blocking(move || {
+            let first_log_path = default_driver_install_log_path();
+            let first_log_string = first_log_path.to_string_lossy().to_string();
+            let retry_log_path = first_log_path.with_extension("retry.log");
+            let retry_log_string = retry_log_path.to_string_lossy().to_string();
 
-                let output = swifttunnel_core::hidden_command("powershell")
-                    .args(["-NoProfile", "-Command", &script])
-                    .output()
-                    .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
+            let run_install =
+                |passive: bool, log_string: &str| -> Result<(i32, String), String> {
+                    if swifttunnel_core::is_administrator() {
+                        let ui_flag = if passive { "/passive" } else { "/qn" };
+                        let output = swifttunnel_core::hidden_command("msiexec")
+                            .args([
+                                "/i",
+                                &msi_string,
+                                ui_flag,
+                                "/norestart",
+                                "/L*V",
+                                log_string,
+                            ])
+                            .output()
+                            .map_err(|e| format!("Failed to run msiexec: {}", e))?;
+                        Ok((
+                            output.status.code().unwrap_or(-1),
+                            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                        ))
+                    } else {
+                        let script =
+                            build_elevated_msiexec_script(&msi_string, log_string, passive);
 
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                Ok((
-                    output.status.code().unwrap_or(-1),
-                    if !stderr.is_empty() { stderr } else { stdout },
-                ))
+                        let output = swifttunnel_core::hidden_command("powershell")
+                            .args(["-NoProfile", "-Command", &script])
+                            .output()
+                            .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
+
+                        let stderr =
+                            String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        let stdout =
+                            String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        Ok((
+                            output.status.code().unwrap_or(-1),
+                            if !stderr.is_empty() { stderr } else { stdout },
+                        ))
+                    }
+                };
+
+            let (mut exit_code, mut output_error) = run_install(true, &first_log_string)?;
+            let mut retry_attempted = false;
+
+            // Some systems return 1639 with /passive. Retry once with /qn.
+            if exit_code == 1639 {
+                retry_attempted = true;
+                log::warn!(
+                    "WinpkFilter install returned 1639 with /passive; retrying with /qn"
+                );
+                let (retry_code, retry_error) = run_install(false, &retry_log_string)?;
+                exit_code = retry_code;
+                output_error = retry_error;
             }
-        };
 
-        let (mut exit_code, mut output_error) = run_install(true, &first_log_string)?;
-        let mut retry_attempted = false;
-
-        // Some systems return 1639 with /passive. Retry once with /qn.
-        if exit_code == 1639 {
-            retry_attempted = true;
-            log::warn!("WinpkFilter install returned 1639 with /passive; retrying with /qn");
-            let (retry_code, retry_error) = run_install(false, &retry_log_string)?;
-            exit_code = retry_code;
-            output_error = retry_error;
-        }
-
-        if !driver_install_success_exit_code(exit_code) {
-            let mut message = if is_probable_uac_cancel_message(&output_error) {
-                "Driver installation was canceled at the UAC/installer prompt.".to_string()
-            } else {
-                driver_install_failure_message(exit_code)
-            };
-            if !output_error.is_empty() {
-                message.push_str(": ");
-                message.push_str(&output_error);
+            if !driver_install_success_exit_code(exit_code) {
+                let mut message = if is_probable_uac_cancel_message(&output_error) {
+                    "Driver installation was canceled at the UAC/installer prompt.".to_string()
+                } else {
+                    driver_install_failure_message(exit_code)
+                };
+                if !output_error.is_empty() {
+                    message.push_str(": ");
+                    message.push_str(&output_error);
+                }
+                message.push_str(". Installer log: ");
+                message.push_str(&first_log_string);
+                if retry_attempted {
+                    message.push_str(". Retry log: ");
+                    message.push_str(&retry_log_string);
+                }
+                return Err(message);
             }
-            message.push_str(". Installer log: ");
-            message.push_str(&first_log_string);
-            if retry_attempted {
-                message.push_str(". Retry log: ");
-                message.push_str(&retry_log_string);
-            }
-            return Err(message);
-        }
 
-        match swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
-            Duration::from_secs(20),
-        ) {
-            Ok(()) => {
-                let _ = fs::remove_file(&first_log_path);
-                let _ = fs::remove_file(&retry_log_path);
-                Ok(())
+            match swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
+                Duration::from_secs(20),
+            ) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&first_log_path);
+                    let _ = fs::remove_file(&retry_log_path);
+                    Ok(())
+                }
+                Err(e) if matches!(exit_code, 1641 | 3010) => Err(format!(
+                    "Driver installation completed and Windows requested a reboot before the driver became available. Please reboot and try again. {}",
+                    e
+                )),
+                Err(e) => Err(format!(
+                    "Driver installation completed, but the driver is still not available after service repair attempts. {}",
+                    e
+                )),
             }
-            Err(e) if matches!(exit_code, 1641 | 3010) => Err(format!(
-                "Driver installation completed and Windows requested a reboot before the driver became available. Please reboot and try again. {}",
-                e
-            )),
-            Err(e) => Err(format!(
-                "Driver installation completed, but the driver is still not available after service repair attempts. {}",
-                e
-            )),
-        }
+        })
+        .await
+        .map_err(|e| format!("Driver install task failed: {}", e))?
     }
 
     #[cfg(not(windows))]
@@ -598,15 +614,23 @@ mod tests {
 }
 
 #[tauri::command]
-pub fn system_cleanup() -> Result<(), String> {
-    swifttunnel_core::network_booster::cleanup_all_system_state().map_err(|e| e.to_string())
+pub async fn system_cleanup() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        swifttunnel_core::network_booster::cleanup_all_system_state().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Cleanup task failed: {}", e))?
 }
 
 #[tauri::command]
-pub fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
-    // Run cleanup first to revert all system modifications
-    swifttunnel_core::network_booster::cleanup_all_system_state()
-        .map_err(|e| format!("Cleanup failed before uninstall: {}", e))?;
+pub async fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
+    // Run cleanup first to revert all system modifications (blocking work offloaded)
+    tauri::async_runtime::spawn_blocking(|| {
+        swifttunnel_core::network_booster::cleanup_all_system_state()
+            .map_err(|e| format!("Cleanup failed before uninstall: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Cleanup task failed: {}", e))??;
 
     #[cfg(windows)]
     {
@@ -652,7 +676,7 @@ pub fn system_open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn system_restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn system_restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
         if swifttunnel_core::is_administrator() {
@@ -664,10 +688,14 @@ pub fn system_restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
         let exe = exe_path.to_string_lossy().to_string();
         let script = build_restart_as_admin_script(&exe, std::process::id());
 
-        let output = swifttunnel_core::hidden_command("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output()
-            .map_err(|e| format!("Failed to launch elevated restart helper: {}", e))?;
+        let output = tauri::async_runtime::spawn_blocking(move || {
+            swifttunnel_core::hidden_command("powershell")
+                .args(["-NoProfile", "-Command", &script])
+                .output()
+                .map_err(|e| format!("Failed to launch elevated restart helper: {}", e))
+        })
+        .await
+        .map_err(|e| format!("Restart-as-admin task failed: {}", e))??;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
