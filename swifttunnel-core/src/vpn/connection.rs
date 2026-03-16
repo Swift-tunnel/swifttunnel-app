@@ -1234,8 +1234,7 @@ impl VpnConnection {
                                 let cached_improvement = router_for_lookup
                                     .current_relay()
                                     .and_then(|current| {
-                                        let servers =
-                                            router_for_lookup.available_servers_snapshot();
+                                        let servers = router_for_lookup.available_servers_snapshot();
                                         compute_cached_latency_improvement(
                                             &servers,
                                             selected_addr,
@@ -1357,8 +1356,7 @@ impl VpnConnection {
                                                         } = *state
                                                         {
                                                             *server_region = new_region.clone();
-                                                            *server_endpoint =
-                                                                new_addr.to_string();
+                                                            *server_endpoint = new_addr.to_string();
                                                         }
                                                     }
                                                     if let Err(e) =
