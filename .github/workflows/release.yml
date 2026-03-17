@@ -224,15 +224,27 @@ jobs:
         run: |
           $driversDir = "swifttunnel-desktop/src-tauri/resources/drivers"
           New-Item -ItemType Directory -Path $driversDir -Force | Out-Null
-          $msiPath = Join-Path $driversDir "WinpkFilter-x64.msi"
-          if (-not (Test-Path $msiPath)) {
+
+          # x64 MSI
+          $x64Path = Join-Path $driversDir "WinpkFilter-x64.msi"
+          if (-not (Test-Path $x64Path)) {
             gh release download v3.6.2 --repo wiresock/ndisapi --pattern "Windows.Packet.Filter.3.6.2.1.x64.msi" --dir $driversDir --clobber
             Rename-Item (Join-Path $driversDir "Windows.Packet.Filter.3.6.2.1.x64.msi") "WinpkFilter-x64.msi" -Force
           }
 
-          $size = (Get-Item $msiPath).Length
-          if ($size -lt 500000) {
-            throw "Downloaded WinpkFilter MSI is suspiciously small ($size bytes)"
+          # ARM64 MSI
+          $arm64Path = Join-Path $driversDir "WinpkFilter-arm64.msi"
+          if (-not (Test-Path $arm64Path)) {
+            gh release download v3.6.2 --repo wiresock/ndisapi --pattern "Windows.Packet.Filter.3.6.2.1.ARM64.msi" --dir $driversDir --clobber
+            Rename-Item (Join-Path $driversDir "Windows.Packet.Filter.3.6.2.1.ARM64.msi") "WinpkFilter-arm64.msi" -Force
+          }
+
+          # Validate both MSIs
+          foreach ($msiPath in @($x64Path, $arm64Path)) {
+            $size = (Get-Item $msiPath).Length
+            if ($size -lt 500000) {
+              throw "Downloaded WinpkFilter MSI $msiPath is suspiciously small ($size bytes)"
+            }
           }
 
       - name: Verify updater signing secrets
