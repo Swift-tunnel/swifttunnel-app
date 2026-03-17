@@ -28,7 +28,7 @@ interface UpdaterStore {
   lastChecked: number | null;
   error: string | null;
 
-  checkForUpdates: (manual?: boolean) => Promise<void>;
+  checkForUpdates: (manual?: boolean, autoInstall?: boolean) => Promise<void>;
   installUpdate: () => Promise<void>;
 }
 
@@ -40,7 +40,7 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
   lastChecked: null,
   error: null,
 
-  checkForUpdates: async (manual = false) => {
+  checkForUpdates: async (manual = false, autoInstall = false) => {
     try {
       set({ status: "checking", error: null });
 
@@ -83,6 +83,15 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
         progressPercent: 0,
         lastChecked: checkedAt,
       });
+
+      if (autoInstall) {
+        await notify(
+          "SwiftTunnel Update",
+          `Updating to v${update.available_version}, restarting...`,
+        );
+        await useUpdaterStore.getState().installUpdate();
+        return;
+      }
 
       if (manual) {
         await notify(

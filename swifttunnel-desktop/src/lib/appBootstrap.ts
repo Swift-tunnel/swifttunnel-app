@@ -12,7 +12,7 @@ type AppBootstrapDeps = {
   getAuthState: () => AuthState;
   getVpnState: () => VpnState;
   connectVpn: (region: string, gamePresets: string[]) => Promise<void>;
-  checkForUpdates: (showNoUpdatesMessage: boolean) => Promise<void>;
+  checkForUpdates: (showNoUpdatesMessage: boolean, autoInstall?: boolean) => Promise<void>;
 };
 
 export async function runAppBootstrap(deps: AppBootstrapDeps) {
@@ -40,6 +40,6 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
   }
 
   if (loadedSettings.update_settings.auto_check) {
-    void deps.checkForUpdates(false);
+    void deps.checkForUpdates(false, true);
   }
 }
