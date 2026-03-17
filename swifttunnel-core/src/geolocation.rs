@@ -384,16 +384,30 @@ fn us_region_from_coordinates(info: &IpInfoResponse) -> Option<RobloxRegion> {
 fn us_region_from_state(state: &str) -> Option<RobloxRegion> {
     match state {
         // East Coast
-        "Virginia" | "New York" | "New Jersey" | "Georgia" | "Florida" | "Pennsylvania"
-        | "Massachusetts" | "Maryland" | "Connecticut" | "Delaware" | "District of Columbia"
-        | "Maine" | "New Hampshire" | "North Carolina" | "South Carolina" | "Rhode Island"
-        | "Vermont" | "West Virginia" => Some(RobloxRegion::UsEast),
+        "Virginia"
+        | "New York"
+        | "New Jersey"
+        | "Georgia"
+        | "Florida"
+        | "Pennsylvania"
+        | "Massachusetts"
+        | "Maryland"
+        | "Connecticut"
+        | "Delaware"
+        | "District of Columbia"
+        | "Maine"
+        | "New Hampshire"
+        | "North Carolina"
+        | "South Carolina"
+        | "Rhode Island"
+        | "Vermont"
+        | "West Virginia" => Some(RobloxRegion::UsEast),
 
         // Central
         "Illinois" | "Texas" | "Ohio" | "Indiana" | "Tennessee" | "Minnesota" | "Missouri"
-        | "Iowa" | "Kansas" | "Nebraska" | "Oklahoma" | "Wisconsin" | "Michigan"
-        | "Arkansas" | "Louisiana" | "Mississippi" | "Alabama" | "Kentucky"
-        | "North Dakota" | "South Dakota" => Some(RobloxRegion::UsCentral),
+        | "Iowa" | "Kansas" | "Nebraska" | "Oklahoma" | "Wisconsin" | "Michigan" | "Arkansas"
+        | "Louisiana" | "Mississippi" | "Alabama" | "Kentucky" | "North Dakota"
+        | "South Dakota" => Some(RobloxRegion::UsCentral),
 
         // West Coast
         "California" | "Washington" | "Oregon" | "Arizona" | "Nevada" | "Utah" | "Colorado"
@@ -550,9 +564,7 @@ pub fn roblox_ip_to_region(ip: Ipv4Addr) -> RobloxRegion {
         86 => RobloxRegion::Brazil,
 
         // US East (Ashburn, NYC, Atlanta, Miami)
-        0 | 11 | 22 | 32 | 45 | 53 | 56 | 74 | 80 | 87 | 99 | 102 | 127 => {
-            RobloxRegion::UsEast
-        }
+        0 | 11 | 22 | 32 | 45 | 53 | 56 | 74 | 80 | 87 | 99 | 102 | 127 => RobloxRegion::UsEast,
 
         // US Central (Chicago, Dallas)
         48 | 84 | 88 | 95 => RobloxRegion::UsCentral,
