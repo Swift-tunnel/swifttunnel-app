@@ -2,6 +2,11 @@ use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 use crate::hidden_command;
+#[cfg(windows)]
+use windows::Win32::System::{
+    SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN,
+    Threading::{GetCurrentProcess, IsWow64Process2},
+};
 
 pub const DRIVER_PACKAGE_RELATIVE_DIR: &str = "winpkfilter/win10";
 pub const DRIVER_INF_NAME: &str = "ndisrd_lwf.inf";
@@ -11,6 +16,8 @@ pub const DRIVER_MSI_MIN_SIZE_BYTES: usize = 500_000;
 const DRIVER_INF_MIN_SIZE_BYTES: u64 = 256;
 const DRIVER_SYS_MIN_SIZE_BYTES: u64 = 4 * 1024;
 const DRIVER_CAT_MIN_SIZE_BYTES: u64 = 256;
+const IMAGE_FILE_MACHINE_AMD64_CODE: u16 = 0x8664;
+const IMAGE_FILE_MACHINE_ARM64_CODE: u16 = 0xAA64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverMsiArchitecture {
@@ -72,10 +79,45 @@ fn parse_processor_architecture(value: &str) -> Option<DriverMsiArchitecture> {
     }
 }
 
-fn driver_msi_package_for_env_values(
+fn machine_architecture(machine: u16) -> Option<DriverMsiArchitecture> {
+    match machine {
+        IMAGE_FILE_MACHINE_ARM64_CODE => Some(DriverMsiArchitecture::Arm64),
+        IMAGE_FILE_MACHINE_AMD64_CODE => Some(DriverMsiArchitecture::X64),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn native_driver_msi_architecture() -> Option<DriverMsiArchitecture> {
+    let mut process_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+    let mut native_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+
+    unsafe {
+        IsWow64Process2(
+            GetCurrentProcess(),
+            &mut process_machine,
+            Some(&mut native_machine as *mut _),
+        )
+        .ok()?;
+    }
+
+    machine_architecture(native_machine.0).or_else(|| machine_architecture(process_machine.0))
+}
+
+#[cfg(not(windows))]
+fn native_driver_msi_architecture() -> Option<DriverMsiArchitecture> {
+    None
+}
+
+fn driver_msi_package_for_detected_architecture(
+    native_architecture: Option<DriverMsiArchitecture>,
     processor_arch_w6432: Option<&str>,
     processor_arch: Option<&str>,
 ) -> DriverMsiPackage {
+    if let Some(architecture) = native_architecture {
+        return driver_msi_package_for_arch(architecture);
+    }
+
     if let Some(architecture) = processor_arch_w6432.and_then(parse_processor_architecture) {
         return driver_msi_package_for_arch(architecture);
     }
@@ -90,7 +132,11 @@ fn driver_msi_package_for_env_values(
 pub fn current_driver_msi_package() -> DriverMsiPackage {
     let processor_arch_w6432 = std::env::var("PROCESSOR_ARCHITEW6432").ok();
     let processor_arch = std::env::var("PROCESSOR_ARCHITECTURE").ok();
-    driver_msi_package_for_env_values(processor_arch_w6432.as_deref(), processor_arch.as_deref())
+    driver_msi_package_for_detected_architecture(
+        native_driver_msi_architecture(),
+        processor_arch_w6432.as_deref(),
+        processor_arch.as_deref(),
+    )
 }
 
 pub fn driver_msi_packages_for_cleanup() -> Vec<DriverMsiPackage> {
@@ -691,19 +737,31 @@ Provider Name:      NDISAPI
 
     #[test]
     fn driver_msi_package_prefers_native_arch_from_w6432() {
-        let package = driver_msi_package_for_env_values(Some("ARM64"), Some("AMD64"));
+        let package =
+            driver_msi_package_for_detected_architecture(None, Some("ARM64"), Some("AMD64"));
+        assert_eq!(package, DRIVER_MSI_ARM64);
+    }
+
+    #[test]
+    fn driver_msi_package_prefers_detected_native_architecture() {
+        let package = driver_msi_package_for_detected_architecture(
+            Some(DriverMsiArchitecture::Arm64),
+            None,
+            Some("AMD64"),
+        );
         assert_eq!(package, DRIVER_MSI_ARM64);
     }
 
     #[test]
     fn driver_msi_package_uses_processor_arch_when_native() {
-        let package = driver_msi_package_for_env_values(None, Some("ARM64"));
+        let package = driver_msi_package_for_detected_architecture(None, None, Some("ARM64"));
         assert_eq!(package, DRIVER_MSI_ARM64);
     }
 
     #[test]
     fn driver_msi_package_defaults_to_x64_for_unknown_architecture() {
-        let package = driver_msi_package_for_env_values(Some("mips"), Some("sparc"));
+        let package =
+            driver_msi_package_for_detected_architecture(None, Some("mips"), Some("sparc"));
         assert_eq!(package, DRIVER_MSI_X64);
     }
 

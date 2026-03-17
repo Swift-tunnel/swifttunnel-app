@@ -319,7 +319,8 @@ impl SplitTunnelDriver {
 
     /// Try to install the driver from the bundled MSI.
     fn install_driver_from_msi() -> Result<(), String> {
-        let msi_path = Self::find_driver_msi().ok_or_else(Self::driver_msi_not_found_message)?;
+        let msi_path =
+            Self::find_driver_msi_for_install().ok_or_else(Self::driver_msi_not_found_message)?;
 
         log::info!("Installing WinpkFilter from: {}", msi_path.display());
 
@@ -790,32 +791,41 @@ impl SplitTunnelDriver {
         Self::disable_winpkfilter_bindings_for_uninstall()?;
 
         let mut issues = Vec::new();
+        let uninstall_msi_paths = Self::find_driver_msis_for_uninstall();
 
-        if let Some(msi_path) = Self::find_driver_msi() {
-            log::info!("Uninstalling WinpkFilter MSI from: {}", msi_path.display());
-
-            match std::process::Command::new("msiexec")
-                .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
-                .output()
-            {
-                Ok(output) => {
-                    let code = output.status.code().unwrap_or(-1);
-                    if Self::driver_uninstall_success_exit_code(code) {
-                        log::info!("WinpkFilter MSI uninstall completed with code {}", code);
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        issues.push(format!(
-                            "Driver MSI uninstall failed with code {}: {}",
-                            code, stderr
-                        ));
-                    }
-                }
-                Err(e) => issues.push(format!("Failed to run driver MSI uninstall: {}", e)),
-            }
-        } else {
+        if uninstall_msi_paths.is_empty() {
             log::warn!(
                 "Bundled WinpkFilter MSI not found during uninstall; falling back to service cleanup only"
             );
+        } else {
+            for msi_path in uninstall_msi_paths {
+                log::info!("Uninstalling WinpkFilter MSI from: {}", msi_path.display());
+
+                match std::process::Command::new("msiexec")
+                    .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
+                    .output()
+                {
+                    Ok(output) => {
+                        let code = output.status.code().unwrap_or(-1);
+                        if Self::driver_uninstall_success_exit_code(code) {
+                            log::info!("WinpkFilter MSI uninstall completed with code {}", code);
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            issues.push(format!(
+                                "Driver MSI uninstall failed for {} with code {}: {}",
+                                msi_path.display(),
+                                code,
+                                stderr
+                            ));
+                        }
+                    }
+                    Err(e) => issues.push(format!(
+                        "Failed to run driver MSI uninstall for {}: {}",
+                        msi_path.display(),
+                        e
+                    )),
+                }
+            }
         }
 
         if let Err(e) = Self::cleanup_driver_service_for_uninstall() {
@@ -837,42 +847,63 @@ impl SplitTunnelDriver {
         )
     }
 
-    fn find_driver_msi() -> Option<PathBuf> {
-        let mut msi_paths: Vec<PathBuf> = Vec::new();
+    fn find_driver_msi_for_install() -> Option<PathBuf> {
+        let exe_dir = Self::driver_msi_exe_dir();
+        let msi_package = crate::vpn::winpkfilter::current_driver_msi_package();
+        Self::find_driver_msi_path_for_package(msi_package, exe_dir.as_deref())
+    }
 
-        for msi_package in crate::vpn::winpkfilter::driver_msi_packages_for_cleanup() {
-            msi_paths.extend(
-                [
-                    std::env::current_exe().ok().and_then(|path| {
-                        path.parent()
-                            .map(|dir| dir.join("drivers").join(msi_package.bundled_name))
-                    }),
-                    std::env::current_exe().ok().and_then(|path| {
-                        path.parent().map(|dir| {
-                            dir.join("resources")
-                                .join("drivers")
-                                .join(msi_package.bundled_name)
-                        })
-                    }),
-                    std::env::current_exe().ok().and_then(|path| {
-                        path.parent()
-                            .map(|dir| dir.join("resources").join(msi_package.bundled_name))
-                    }),
-                    Some(PathBuf::from(format!(
-                        r"C:\Program Files\SwiftTunnel\drivers\{}",
-                        msi_package.bundled_name
-                    ))),
-                    Some(PathBuf::from(format!(
-                        r"C:\Program Files\SwiftTunnel\resources\drivers\{}",
-                        msi_package.bundled_name
-                    ))),
-                ]
-                .into_iter()
-                .flatten(),
+    fn find_driver_msis_for_uninstall() -> Vec<PathBuf> {
+        let exe_dir = Self::driver_msi_exe_dir();
+        crate::vpn::winpkfilter::driver_msi_packages_for_cleanup()
+            .into_iter()
+            .filter_map(|msi_package| {
+                Self::find_driver_msi_path_for_package(msi_package, exe_dir.as_deref())
+            })
+            .collect()
+    }
+
+    fn driver_msi_exe_dir() -> Option<PathBuf> {
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+    }
+
+    fn find_driver_msi_path_for_package(
+        msi_package: crate::vpn::winpkfilter::DriverMsiPackage,
+        exe_dir: Option<&Path>,
+    ) -> Option<PathBuf> {
+        Self::driver_msi_candidate_paths(msi_package, exe_dir)
+            .into_iter()
+            .find(|path| path.exists())
+    }
+
+    fn driver_msi_candidate_paths(
+        msi_package: crate::vpn::winpkfilter::DriverMsiPackage,
+        exe_dir: Option<&Path>,
+    ) -> Vec<PathBuf> {
+        let mut msi_paths = Vec::new();
+
+        if let Some(dir) = exe_dir {
+            msi_paths.push(dir.join("drivers").join(msi_package.bundled_name));
+            msi_paths.push(
+                dir.join("resources")
+                    .join("drivers")
+                    .join(msi_package.bundled_name),
             );
+            msi_paths.push(dir.join("resources").join(msi_package.bundled_name));
         }
 
-        msi_paths.into_iter().find(|path| path.exists())
+        let install_root = crate::vpn::winpkfilter::default_program_files_dir().join("SwiftTunnel");
+        msi_paths.push(install_root.join("drivers").join(msi_package.bundled_name));
+        msi_paths.push(
+            install_root
+                .join("resources")
+                .join("drivers")
+                .join(msi_package.bundled_name),
+        );
+
+        msi_paths
     }
 
     fn driver_uninstall_success_exit_code(code: i32) -> bool {
