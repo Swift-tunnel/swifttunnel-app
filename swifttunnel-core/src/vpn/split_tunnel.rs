@@ -830,35 +830,49 @@ impl SplitTunnelDriver {
     }
 
     fn driver_msi_not_found_message() -> String {
-        "WinpkFilter-x64.msi not found. Please download from: https://github.com/wiresock/ndisapi/releases".to_string()
+        let msi_package = crate::vpn::winpkfilter::current_driver_msi_package();
+        format!(
+            "{} not found. Please download from: https://github.com/wiresock/ndisapi/releases",
+            msi_package.bundled_name
+        )
     }
 
     fn find_driver_msi() -> Option<PathBuf> {
-        let msi_paths = [
-            std::env::current_exe().ok().and_then(|path| {
-                path.parent()
-                    .map(|dir| dir.join("drivers").join("WinpkFilter-x64.msi"))
-            }),
-            std::env::current_exe().ok().and_then(|path| {
-                path.parent().map(|dir| {
-                    dir.join("resources")
-                        .join("drivers")
-                        .join("WinpkFilter-x64.msi")
-                })
-            }),
-            std::env::current_exe().ok().and_then(|path| {
-                path.parent()
-                    .map(|dir| dir.join("resources").join("WinpkFilter-x64.msi"))
-            }),
-            Some(PathBuf::from(
-                r"C:\Program Files\SwiftTunnel\drivers\WinpkFilter-x64.msi",
-            )),
-            Some(PathBuf::from(
-                r"C:\Program Files\SwiftTunnel\resources\drivers\WinpkFilter-x64.msi",
-            )),
-        ];
+        let mut msi_paths: Vec<PathBuf> = Vec::new();
 
-        msi_paths.into_iter().flatten().find(|path| path.exists())
+        for msi_package in crate::vpn::winpkfilter::driver_msi_packages_for_cleanup() {
+            msi_paths.extend(
+                [
+                    std::env::current_exe().ok().and_then(|path| {
+                        path.parent()
+                            .map(|dir| dir.join("drivers").join(msi_package.bundled_name))
+                    }),
+                    std::env::current_exe().ok().and_then(|path| {
+                        path.parent().map(|dir| {
+                            dir.join("resources")
+                                .join("drivers")
+                                .join(msi_package.bundled_name)
+                        })
+                    }),
+                    std::env::current_exe().ok().and_then(|path| {
+                        path.parent()
+                            .map(|dir| dir.join("resources").join(msi_package.bundled_name))
+                    }),
+                    Some(PathBuf::from(format!(
+                        r"C:\Program Files\SwiftTunnel\drivers\{}",
+                        msi_package.bundled_name
+                    ))),
+                    Some(PathBuf::from(format!(
+                        r"C:\Program Files\SwiftTunnel\resources\drivers\{}",
+                        msi_package.bundled_name
+                    ))),
+                ]
+                .into_iter()
+                .flatten(),
+            );
+        }
+
+        msi_paths.into_iter().find(|path| path.exists())
     }
 
     fn driver_uninstall_success_exit_code(code: i32) -> bool {

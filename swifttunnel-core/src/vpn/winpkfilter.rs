@@ -7,9 +7,43 @@ pub const DRIVER_PACKAGE_RELATIVE_DIR: &str = "winpkfilter/win10";
 pub const DRIVER_INF_NAME: &str = "ndisrd_lwf.inf";
 pub const DRIVER_SYS_NAME: &str = "ndisrd.sys";
 pub const DRIVER_CAT_NAME: &str = "ndisrd.cat";
+pub const DRIVER_MSI_MIN_SIZE_BYTES: usize = 500_000;
 const DRIVER_INF_MIN_SIZE_BYTES: u64 = 256;
 const DRIVER_SYS_MIN_SIZE_BYTES: u64 = 4 * 1024;
 const DRIVER_CAT_MIN_SIZE_BYTES: u64 = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverMsiArchitecture {
+    X64,
+    Arm64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriverMsiPackage {
+    pub architecture: DriverMsiArchitecture,
+    pub bundled_name: &'static str,
+    pub release_asset_name: &'static str,
+    pub download_url: &'static str,
+    pub sha256: &'static str,
+}
+
+pub const DRIVER_MSI_X64: DriverMsiPackage = DriverMsiPackage {
+    architecture: DriverMsiArchitecture::X64,
+    bundled_name: "WinpkFilter-x64.msi",
+    release_asset_name: "Windows.Packet.Filter.3.6.2.1.x64.msi",
+    download_url: "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi",
+    sha256: "9c388c0b7f189f7fa98720bae2caecf7d64f30910838b80b438ecf8956b8502c",
+};
+
+pub const DRIVER_MSI_ARM64: DriverMsiPackage = DriverMsiPackage {
+    architecture: DriverMsiArchitecture::Arm64,
+    bundled_name: "WinpkFilter-arm64.msi",
+    release_asset_name: "Windows.Packet.Filter.3.6.2.1.ARM64.msi",
+    download_url: "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.ARM64.msi",
+    sha256: "b13c6832c9e5c0c14948bbf5c17ccbe65dff55c0f6069df01494d97ebd1f3d69",
+};
+
+const DRIVER_MSI_PACKAGES: [DriverMsiPackage; 2] = [DRIVER_MSI_X64, DRIVER_MSI_ARM64];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverPackage {
@@ -17,6 +51,57 @@ pub struct DriverPackage {
     pub inf_path: PathBuf,
     pub sys_path: PathBuf,
     pub cat_path: PathBuf,
+}
+
+pub fn driver_msi_packages() -> &'static [DriverMsiPackage] {
+    &DRIVER_MSI_PACKAGES
+}
+
+pub fn driver_msi_package_for_arch(architecture: DriverMsiArchitecture) -> DriverMsiPackage {
+    match architecture {
+        DriverMsiArchitecture::X64 => DRIVER_MSI_X64,
+        DriverMsiArchitecture::Arm64 => DRIVER_MSI_ARM64,
+    }
+}
+
+fn parse_processor_architecture(value: &str) -> Option<DriverMsiArchitecture> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "ARM64" | "AARCH64" => Some(DriverMsiArchitecture::Arm64),
+        "AMD64" | "X86_64" | "X64" => Some(DriverMsiArchitecture::X64),
+        _ => None,
+    }
+}
+
+fn driver_msi_package_for_env_values(
+    processor_arch_w6432: Option<&str>,
+    processor_arch: Option<&str>,
+) -> DriverMsiPackage {
+    if let Some(architecture) = processor_arch_w6432.and_then(parse_processor_architecture) {
+        return driver_msi_package_for_arch(architecture);
+    }
+
+    if let Some(architecture) = processor_arch.and_then(parse_processor_architecture) {
+        return driver_msi_package_for_arch(architecture);
+    }
+
+    DRIVER_MSI_X64
+}
+
+pub fn current_driver_msi_package() -> DriverMsiPackage {
+    let processor_arch_w6432 = std::env::var("PROCESSOR_ARCHITEW6432").ok();
+    let processor_arch = std::env::var("PROCESSOR_ARCHITECTURE").ok();
+    driver_msi_package_for_env_values(processor_arch_w6432.as_deref(), processor_arch.as_deref())
+}
+
+pub fn driver_msi_packages_for_cleanup() -> Vec<DriverMsiPackage> {
+    let preferred = current_driver_msi_package();
+    let mut packages = vec![preferred];
+    packages.extend(
+        DRIVER_MSI_PACKAGES
+            .into_iter()
+            .filter(|package| package.architecture != preferred.architecture),
+    );
+    packages
 }
 
 struct DriverPackageFileSpec {
@@ -602,5 +687,33 @@ Provider Name:      NDISAPI
             assert!(!pnputil_retryable_exit_code(1));
             assert!(!pnputil_retryable_exit_code(3010));
         }
+    }
+
+    #[test]
+    fn driver_msi_package_prefers_native_arch_from_w6432() {
+        let package = driver_msi_package_for_env_values(Some("ARM64"), Some("AMD64"));
+        assert_eq!(package, DRIVER_MSI_ARM64);
+    }
+
+    #[test]
+    fn driver_msi_package_uses_processor_arch_when_native() {
+        let package = driver_msi_package_for_env_values(None, Some("ARM64"));
+        assert_eq!(package, DRIVER_MSI_ARM64);
+    }
+
+    #[test]
+    fn driver_msi_package_defaults_to_x64_for_unknown_architecture() {
+        let package = driver_msi_package_for_env_values(Some("mips"), Some("sparc"));
+        assert_eq!(package, DRIVER_MSI_X64);
+    }
+
+    #[test]
+    fn driver_msi_packages_for_cleanup_prefers_current_package() {
+        let packages = driver_msi_packages_for_cleanup();
+        assert_eq!(
+            packages.first().copied(),
+            Some(current_driver_msi_package())
+        );
+        assert_eq!(packages.len(), DRIVER_MSI_PACKAGES.len());
     }
 }
