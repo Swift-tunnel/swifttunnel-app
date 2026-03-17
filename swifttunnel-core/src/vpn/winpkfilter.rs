@@ -77,7 +77,7 @@ pub fn detect_native_arch() -> WinpkFilterMsiArch {
         if IsWow64Process2(
             GetCurrentProcess(),
             &mut process_machine,
-            &mut native_machine,
+            Some(&mut native_machine),
         )
         .is_ok()
         {
