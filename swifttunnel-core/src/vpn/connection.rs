@@ -713,6 +713,7 @@ impl VpnConnection {
         // Step 1: Resolve initial relay endpoint from available servers
         self.set_state(ConnectionState::FetchingConfig).await;
         let forced_for_region = forced_servers.get(region).map(|s| s.as_str());
+        let has_forced_server = forced_for_region.is_some();
         let relay_candidates =
             ordered_relay_candidates_for_region(region, &available_servers, forced_for_region)
                 .await;
@@ -791,6 +792,7 @@ impl VpnConnection {
                     relay_candidates,
                     whitelisted_regions,
                     forced_servers,
+                    has_forced_server,
                     binding_preference.clone(),
                     process_performance_settings,
                     enable_api_tunneling,
@@ -855,6 +857,7 @@ impl VpnConnection {
         relay_candidates: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
+        has_forced_server: bool,
         binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
@@ -984,6 +987,8 @@ impl VpnConnection {
 
         let mut relay_auth_mode = if custom_relay_server.is_some() {
             "custom_legacy".to_string()
+        } else if has_forced_server {
+            "forced_server_legacy".to_string()
         } else {
             "legacy_fallback".to_string()
         };
@@ -991,6 +996,10 @@ impl VpnConnection {
 
         if custom_relay_server.is_some() {
             log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
+        } else if has_forced_server {
+            log::info!(
+                "V3: Forced server selected, skipping relay ticket bootstrap for direct connection"
+            );
         } else {
             let auth_client = AuthClient::new();
             let session_id_hex = relay.session_id_hex();
