@@ -112,14 +112,17 @@ fn sync_runtime_assets(app: &tauri::App) {
             ]),
             exe_dir.join("wintun.dll"),
         ),
-        (
-            "WinpkFilter-x64.msi",
-            first_existing(vec![
-                resource_dir.join("drivers").join("WinpkFilter-x64.msi"),
-                resource_dir.join("WinpkFilter-x64.msi"),
-            ]),
-            exe_dir.join("drivers").join("WinpkFilter-x64.msi"),
-        ),
+        {
+            let msi_name = swifttunnel_core::vpn::winpkfilter::native_msi_package().msi_name;
+            (
+                msi_name,
+                first_existing(vec![
+                    resource_dir.join("drivers").join(msi_name),
+                    resource_dir.join(msi_name),
+                ]),
+                exe_dir.join("drivers").join(msi_name),
+            )
+        },
         (
             "winfw.dll",
             first_existing(vec![resource_dir.join("drivers").join("winfw.dll")]),
@@ -138,7 +141,7 @@ fn sync_runtime_assets(app: &tauri::App) {
 
     for (name, source, destination) in targets {
         let Some(source) = source else {
-            if name == "WinpkFilter-x64.msi" {
+            if name.starts_with("WinpkFilter-") {
                 log::warn!(
                     "Bundled runtime asset not found: {} (runtime fallback download will be used)",
                     name

@@ -790,31 +790,50 @@ impl SplitTunnelDriver {
         Self::disable_winpkfilter_bindings_for_uninstall()?;
 
         let mut issues = Vec::new();
+        let mut any_msi_found = false;
 
-        if let Some(msi_path) = Self::find_driver_msi() {
-            log::info!("Uninstalling WinpkFilter MSI from: {}", msi_path.display());
+        // Try to uninstall all known MSI variants (handles machines that may
+        // have had either or both architectures installed at some point).
+        for pkg in super::winpkfilter::ALL_MSI_PACKAGES {
+            if let Some(msi_path) = Self::find_driver_msi_by_name(pkg.msi_name) {
+                any_msi_found = true;
+                log::info!(
+                    "Uninstalling WinpkFilter MSI ({}) from: {}",
+                    pkg.arch,
+                    msi_path.display()
+                );
 
-            match std::process::Command::new("msiexec")
-                .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
-                .output()
-            {
-                Ok(output) => {
-                    let code = output.status.code().unwrap_or(-1);
-                    if Self::driver_uninstall_success_exit_code(code) {
-                        log::info!("WinpkFilter MSI uninstall completed with code {}", code);
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        issues.push(format!(
-                            "Driver MSI uninstall failed with code {}: {}",
-                            code, stderr
-                        ));
+                match std::process::Command::new("msiexec")
+                    .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
+                    .output()
+                {
+                    Ok(output) => {
+                        let code = output.status.code().unwrap_or(-1);
+                        if Self::driver_uninstall_success_exit_code(code) {
+                            log::info!(
+                                "WinpkFilter MSI ({}) uninstall completed with code {}",
+                                pkg.arch,
+                                code
+                            );
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            issues.push(format!(
+                                "Driver MSI ({}) uninstall failed with code {}: {}",
+                                pkg.arch, code, stderr
+                            ));
+                        }
                     }
+                    Err(e) => issues.push(format!(
+                        "Failed to run driver MSI ({}) uninstall: {}",
+                        pkg.arch, e
+                    )),
                 }
-                Err(e) => issues.push(format!("Failed to run driver MSI uninstall: {}", e)),
             }
-        } else {
+        }
+
+        if !any_msi_found {
             log::warn!(
-                "Bundled WinpkFilter MSI not found during uninstall; falling back to service cleanup only"
+                "No WinpkFilter MSI found during uninstall; falling back to service cleanup only"
             );
         }
 
@@ -830,35 +849,40 @@ impl SplitTunnelDriver {
     }
 
     fn driver_msi_not_found_message() -> String {
-        "WinpkFilter-x64.msi not found. Please download from: https://github.com/wiresock/ndisapi/releases".to_string()
+        let pkg = super::winpkfilter::native_msi_package();
+        format!(
+            "{} not found. Please download from: https://github.com/wiresock/ndisapi/releases",
+            pkg.msi_name
+        )
     }
 
-    fn find_driver_msi() -> Option<PathBuf> {
+    fn find_driver_msi_by_name(msi_name: &str) -> Option<PathBuf> {
         let msi_paths = [
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|dir| dir.join("drivers").join(msi_name))),
             std::env::current_exe().ok().and_then(|path| {
                 path.parent()
-                    .map(|dir| dir.join("drivers").join("WinpkFilter-x64.msi"))
-            }),
-            std::env::current_exe().ok().and_then(|path| {
-                path.parent().map(|dir| {
-                    dir.join("resources")
-                        .join("drivers")
-                        .join("WinpkFilter-x64.msi")
-                })
+                    .map(|dir| dir.join("resources").join("drivers").join(msi_name))
             }),
             std::env::current_exe().ok().and_then(|path| {
                 path.parent()
-                    .map(|dir| dir.join("resources").join("WinpkFilter-x64.msi"))
+                    .map(|dir| dir.join("resources").join(msi_name))
             }),
-            Some(PathBuf::from(
-                r"C:\Program Files\SwiftTunnel\drivers\WinpkFilter-x64.msi",
-            )),
-            Some(PathBuf::from(
-                r"C:\Program Files\SwiftTunnel\resources\drivers\WinpkFilter-x64.msi",
-            )),
+            Some(PathBuf::from(format!(
+                r"C:\Program Files\SwiftTunnel\drivers\{msi_name}"
+            ))),
+            Some(PathBuf::from(format!(
+                r"C:\Program Files\SwiftTunnel\resources\drivers\{msi_name}"
+            ))),
         ];
 
         msi_paths.into_iter().flatten().find(|path| path.exists())
+    }
+
+    fn find_driver_msi() -> Option<PathBuf> {
+        let pkg = super::winpkfilter::native_msi_package();
+        Self::find_driver_msi_by_name(pkg.msi_name)
     }
 
     fn driver_uninstall_success_exit_code(code: i32) -> bool {

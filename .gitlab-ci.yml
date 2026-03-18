@@ -37,11 +37,21 @@ build:
     - |
       $driversDir = "swifttunnel-desktop/src-tauri/resources/drivers"
       New-Item -ItemType Directory -Path $driversDir -Force | Out-Null
-      $msiPath = Join-Path $driversDir "WinpkFilter-x64.msi"
-      if (-not (Test-Path $msiPath)) {
-        Invoke-WebRequest -Uri "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi" -OutFile $msiPath
-        $size = (Get-Item $msiPath).Length
-        if ($size -lt 500000) { throw "WinpkFilter MSI is suspiciously small ($size bytes)" }
+
+      # x64 MSI
+      $x64Path = Join-Path $driversDir "WinpkFilter-x64.msi"
+      if (-not (Test-Path $x64Path)) {
+        Invoke-WebRequest -Uri "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi" -OutFile $x64Path
+        $size = (Get-Item $x64Path).Length
+        if ($size -lt 500000) { throw "WinpkFilter x64 MSI is suspiciously small ($size bytes)" }
+      }
+
+      # ARM64 MSI
+      $arm64Path = Join-Path $driversDir "WinpkFilter-arm64.msi"
+      if (-not (Test-Path $arm64Path)) {
+        Invoke-WebRequest -Uri "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.ARM64.msi" -OutFile $arm64Path
+        $size = (Get-Item $arm64Path).Length
+        if ($size -lt 500000) { throw "WinpkFilter ARM64 MSI is suspiciously small ($size bytes)" }
       }
 
     - |

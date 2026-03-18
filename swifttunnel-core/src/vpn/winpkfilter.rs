@@ -3,6 +3,119 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use crate::hidden_command;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  MSI PACKAGE METADATA & ARCHITECTURE DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Native machine architecture relevant for WinpkFilter MSI selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WinpkFilterMsiArch {
+    X64,
+    Arm64,
+}
+
+impl std::fmt::Display for WinpkFilterMsiArch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WinpkFilterMsiArch::X64 => f.write_str("x64"),
+            WinpkFilterMsiArch::Arm64 => f.write_str("arm64"),
+        }
+    }
+}
+
+/// Metadata for an architecture-specific WinpkFilter MSI installer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WinpkFilterMsiPackage {
+    pub arch: WinpkFilterMsiArch,
+    /// Bundled filename used locally (e.g. `WinpkFilter-x64.msi`).
+    pub msi_name: &'static str,
+    /// GitHub release asset name for download.
+    pub asset_name: &'static str,
+    /// Pinned download URL.
+    pub download_url: &'static str,
+    /// Expected SHA-256 hex digest.
+    pub sha256: &'static str,
+    /// Minimum acceptable file size in bytes.
+    pub min_size_bytes: usize,
+}
+
+pub const MSI_PACKAGE_X64: WinpkFilterMsiPackage = WinpkFilterMsiPackage {
+    arch: WinpkFilterMsiArch::X64,
+    msi_name: "WinpkFilter-x64.msi",
+    asset_name: "Windows.Packet.Filter.3.6.2.1.x64.msi",
+    download_url: "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi",
+    sha256: "9c388c0b7f189f7fa98720bae2caecf7d64f30910838b80b438ecf8956b8502c",
+    min_size_bytes: 500_000,
+};
+
+pub const MSI_PACKAGE_ARM64: WinpkFilterMsiPackage = WinpkFilterMsiPackage {
+    arch: WinpkFilterMsiArch::Arm64,
+    msi_name: "WinpkFilter-arm64.msi",
+    asset_name: "Windows.Packet.Filter.3.6.2.1.ARM64.msi",
+    download_url: "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.ARM64.msi",
+    sha256: "b13c6832c9e5c0c14948bbf5c17ccbe65dff55c0f6069df01494d97ebd1f3d69",
+    min_size_bytes: 500_000,
+};
+
+/// All known MSI packages. Used during uninstall to clean up any variant.
+pub const ALL_MSI_PACKAGES: &[&WinpkFilterMsiPackage] = &[&MSI_PACKAGE_X64, &MSI_PACKAGE_ARM64];
+
+/// Detect the native machine architecture using `IsWow64Process2`, with an
+/// environment-variable fallback (`PROCESSOR_ARCHITECTURE`).
+#[cfg(windows)]
+pub fn detect_native_arch() -> WinpkFilterMsiArch {
+    use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+
+    let mut process_machine: windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE =
+        Default::default();
+    let mut native_machine: windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE =
+        Default::default();
+
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that does not need closing.
+    // IsWow64Process2 writes into the two out-params we provide.
+    unsafe {
+        if IsWow64Process2(
+            GetCurrentProcess(),
+            &mut process_machine,
+            Some(&mut native_machine),
+        )
+        .is_ok()
+        {
+            // IMAGE_FILE_MACHINE_ARM64 = 0xAA64
+            if native_machine.0 == 0xAA64 {
+                return WinpkFilterMsiArch::Arm64;
+            }
+            return WinpkFilterMsiArch::X64;
+        }
+    }
+
+    // Fallback: PROCESSOR_ARCHITECTURE env var.
+    if let Ok(arch) = std::env::var("PROCESSOR_ARCHITECTURE") {
+        if arch.eq_ignore_ascii_case("ARM64") {
+            return WinpkFilterMsiArch::Arm64;
+        }
+    }
+
+    WinpkFilterMsiArch::X64
+}
+
+#[cfg(not(windows))]
+pub fn detect_native_arch() -> WinpkFilterMsiArch {
+    WinpkFilterMsiArch::X64
+}
+
+/// Return the MSI package matching the native machine architecture.
+pub fn native_msi_package() -> &'static WinpkFilterMsiPackage {
+    match detect_native_arch() {
+        WinpkFilterMsiArch::X64 => &MSI_PACKAGE_X64,
+        WinpkFilterMsiArch::Arm64 => &MSI_PACKAGE_ARM64,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  DRIVER PACKAGE (INF/SYS/CAT) UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
 pub const DRIVER_PACKAGE_RELATIVE_DIR: &str = "winpkfilter/win10";
 pub const DRIVER_INF_NAME: &str = "ndisrd_lwf.inf";
 pub const DRIVER_SYS_NAME: &str = "ndisrd.sys";
@@ -602,5 +715,68 @@ Provider Name:      NDISAPI
             assert!(!pnputil_retryable_exit_code(1));
             assert!(!pnputil_retryable_exit_code(3010));
         }
+    }
+
+    // ── MSI package metadata & arch detection tests ──
+
+    #[test]
+    fn detect_native_arch_returns_valid_variant() {
+        let arch = detect_native_arch();
+        assert!(
+            arch == WinpkFilterMsiArch::X64 || arch == WinpkFilterMsiArch::Arm64,
+            "unexpected arch: {:?}",
+            arch
+        );
+    }
+
+    #[test]
+    fn native_msi_package_has_valid_metadata() {
+        let pkg = native_msi_package();
+        assert!(!pkg.msi_name.is_empty());
+        assert!(!pkg.download_url.is_empty());
+        assert_eq!(pkg.sha256.len(), 64); // hex SHA-256 is 64 chars
+        assert!(pkg.min_size_bytes > 0);
+    }
+
+    #[test]
+    fn all_msi_packages_have_unique_names() {
+        let names: Vec<&str> = ALL_MSI_PACKAGES.iter().map(|p| p.msi_name).collect();
+        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "duplicate MSI names: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn all_msi_packages_have_unique_sha256() {
+        let shas: Vec<&str> = ALL_MSI_PACKAGES.iter().map(|p| p.sha256).collect();
+        let unique: std::collections::HashSet<&str> = shas.iter().copied().collect();
+        assert_eq!(shas.len(), unique.len(), "duplicate SHA-256 values");
+    }
+
+    #[test]
+    fn msi_arch_display() {
+        assert_eq!(WinpkFilterMsiArch::X64.to_string(), "x64");
+        assert_eq!(WinpkFilterMsiArch::Arm64.to_string(), "arm64");
+    }
+
+    #[test]
+    fn x64_package_has_expected_name() {
+        assert_eq!(MSI_PACKAGE_X64.msi_name, "WinpkFilter-x64.msi");
+    }
+
+    #[test]
+    fn arm64_package_has_expected_name() {
+        assert_eq!(MSI_PACKAGE_ARM64.msi_name, "WinpkFilter-arm64.msi");
+    }
+
+    #[test]
+    fn native_msi_package_matches_detect_native_arch() {
+        let arch = detect_native_arch();
+        let pkg = native_msi_package();
+        assert_eq!(pkg.arch, arch);
     }
 }

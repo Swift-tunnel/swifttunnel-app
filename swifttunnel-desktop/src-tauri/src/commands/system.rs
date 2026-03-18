@@ -12,16 +12,6 @@ use std::time::Duration;
 use tauri::Manager;
 
 #[cfg(windows)]
-const WINPKFILTER_MSI_NAME: &str = "WinpkFilter-x64.msi";
-#[cfg(windows)]
-const WINPKFILTER_PINNED_URL: &str = "https://github.com/wiresock/ndisapi/releases/download/v3.6.2/Windows.Packet.Filter.3.6.2.1.x64.msi";
-#[cfg(windows)]
-const WINPKFILTER_PINNED_SHA256: &str =
-    "9c388c0b7f189f7fa98720bae2caecf7d64f30910838b80b438ecf8956b8502c";
-#[cfg(windows)]
-const WINPKFILTER_MIN_SIZE_BYTES: usize = 500_000;
-
-#[cfg(windows)]
 fn driver_install_success_exit_code(code: i32) -> bool {
     // 0 = success
     // 1638 = another version already installed
@@ -54,6 +44,7 @@ fn is_probable_uac_cancel_message(message: &str) -> bool {
 
 #[cfg(windows)]
 fn winpkfilter_msi_candidate_paths(
+    msi_name: &str,
     resource_dir: Option<&Path>,
     exe_dir: Option<&Path>,
     program_files_dir: &Path,
@@ -61,18 +52,14 @@ fn winpkfilter_msi_candidate_paths(
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Some(dir) = resource_dir {
-        candidates.push(dir.join("drivers").join(WINPKFILTER_MSI_NAME));
-        candidates.push(dir.join(WINPKFILTER_MSI_NAME));
+        candidates.push(dir.join("drivers").join(msi_name));
+        candidates.push(dir.join(msi_name));
     }
 
     if let Some(dir) = exe_dir {
-        candidates.push(dir.join("drivers").join(WINPKFILTER_MSI_NAME));
-        candidates.push(
-            dir.join("resources")
-                .join("drivers")
-                .join(WINPKFILTER_MSI_NAME),
-        );
-        candidates.push(dir.join("resources").join(WINPKFILTER_MSI_NAME));
+        candidates.push(dir.join("drivers").join(msi_name));
+        candidates.push(dir.join("resources").join("drivers").join(msi_name));
+        candidates.push(dir.join("resources").join(msi_name));
     }
 
     let install_root = program_files_dir.join("SwiftTunnel");
@@ -80,24 +67,26 @@ fn winpkfilter_msi_candidate_paths(
         install_root
             .join("resources")
             .join("drivers")
-            .join(WINPKFILTER_MSI_NAME),
+            .join(msi_name),
     );
-    candidates.push(install_root.join("drivers").join(WINPKFILTER_MSI_NAME));
+    candidates.push(install_root.join("drivers").join(msi_name));
 
     candidates
 }
 
 #[cfg(windows)]
 fn find_winpkfilter_msi(
+    msi_name: &str,
     resource_dir: Option<&Path>,
     exe_dir: Option<&Path>,
     program_files_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let candidates = winpkfilter_msi_candidate_paths(resource_dir, exe_dir, program_files_dir);
+    let candidates =
+        winpkfilter_msi_candidate_paths(msi_name, resource_dir, exe_dir, program_files_dir);
     candidates
         .into_iter()
         .find(|path| path.exists())
-        .ok_or_else(|| "WinpkFilter-x64.msi not found in app resources.".to_string())
+        .ok_or_else(|| format!("{} not found in app resources.", msi_name))
 }
 
 #[cfg(windows)]
@@ -132,34 +121,46 @@ fn validate_payload_sha256(
 }
 
 #[cfg(windows)]
-fn validate_winpkfilter_payload(data: &[u8]) -> Result<(), String> {
-    validate_payload_sha256(data, WINPKFILTER_PINNED_SHA256, WINPKFILTER_MIN_SIZE_BYTES)
+fn validate_winpkfilter_payload(
+    data: &[u8],
+    pkg: &swifttunnel_core::vpn::winpkfilter::WinpkFilterMsiPackage,
+) -> Result<(), String> {
+    validate_payload_sha256(data, pkg.sha256, pkg.min_size_bytes)
 }
 
 #[cfg(windows)]
-fn validate_winpkfilter_file(path: &Path) -> Result<(), String> {
+fn validate_winpkfilter_file(
+    path: &Path,
+    pkg: &swifttunnel_core::vpn::winpkfilter::WinpkFilterMsiPackage,
+) -> Result<(), String> {
     let data = fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    validate_winpkfilter_payload(&data)
+    validate_winpkfilter_payload(&data, pkg)
 }
 
 #[cfg(windows)]
-fn resolve_winpkfilter_cache_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn resolve_winpkfilter_cache_path(
+    app: &tauri::AppHandle,
+    msi_name: &str,
+) -> Result<PathBuf, String> {
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
-    Ok(app_data_dir.join("drivers").join(WINPKFILTER_MSI_NAME))
+    Ok(app_data_dir.join("drivers").join(msi_name))
 }
 
 #[cfg(windows)]
-fn download_winpkfilter_msi(path: &Path) -> Result<(), String> {
+fn download_winpkfilter_msi(
+    path: &Path,
+    pkg: &swifttunnel_core::vpn::winpkfilter::WinpkFilterMsiPackage,
+) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(45))
         .build()
         .map_err(|e| format!("Failed to create HTTP client for driver download: {}", e))?;
 
     let response = client
-        .get(WINPKFILTER_PINNED_URL)
+        .get(pkg.download_url)
         .header(reqwest::header::USER_AGENT, "SwiftTunnel/driver-installer")
         .send()
         .map_err(|e| format!("Failed to download WinpkFilter MSI: {}", e))?;
@@ -175,7 +176,7 @@ fn download_winpkfilter_msi(path: &Path) -> Result<(), String> {
         .bytes()
         .map_err(|e| format!("Failed to read WinpkFilter download bytes: {}", e))?;
 
-    validate_winpkfilter_payload(&data)?;
+    validate_winpkfilter_payload(&data, pkg)?;
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -205,18 +206,21 @@ fn resolve_winpkfilter_msi(
     exe_dir: Option<&Path>,
     program_files_dir: &Path,
 ) -> Result<PathBuf, String> {
-    if let Ok(path) = find_winpkfilter_msi(resource_dir, exe_dir, program_files_dir) {
+    let pkg = swifttunnel_core::vpn::winpkfilter::native_msi_package();
+
+    if let Ok(path) = find_winpkfilter_msi(pkg.msi_name, resource_dir, exe_dir, program_files_dir) {
         return Ok(path);
     }
 
     log::warn!(
-        "Bundled WinpkFilter MSI is missing; downloading pinned fallback from {}",
-        WINPKFILTER_PINNED_URL
+        "Bundled WinpkFilter MSI ({}) is missing; downloading pinned fallback from {}",
+        pkg.msi_name,
+        pkg.download_url
     );
-    let cache_path = resolve_winpkfilter_cache_path(app)?;
+    let cache_path = resolve_winpkfilter_cache_path(app, pkg.msi_name)?;
 
     if cache_path.exists() {
-        if validate_winpkfilter_file(&cache_path).is_ok() {
+        if validate_winpkfilter_file(&cache_path, pkg).is_ok() {
             log::info!("Using cached WinpkFilter MSI from {}", cache_path.display());
             return Ok(cache_path);
         }
@@ -234,7 +238,7 @@ fn resolve_winpkfilter_msi(
         }
     }
 
-    download_winpkfilter_msi(&cache_path)?;
+    download_winpkfilter_msi(&cache_path, pkg)?;
     log::info!("Downloaded WinpkFilter MSI to {}", cache_path.display());
     Ok(cache_path)
 }
@@ -542,18 +546,20 @@ mod tests {
 
     #[test]
     fn find_winpkfilter_msi_prefers_first_existing_candidate() {
+        let pkg = swifttunnel_core::vpn::winpkfilter::native_msi_package();
         let base = unique_temp_dir("winpkfilter_candidates");
         let resource_dir = base.join("resources");
         let exe_dir = base.join("exe");
         let program_files_dir = base.join("ProgramFiles");
 
-        let preferred = resource_dir.join("drivers").join("WinpkFilter-x64.msi");
-        let fallback = exe_dir.join("drivers").join("WinpkFilter-x64.msi");
+        let preferred = resource_dir.join("drivers").join(pkg.msi_name);
+        let fallback = exe_dir.join("drivers").join(pkg.msi_name);
 
         touch(&preferred);
         touch(&fallback);
 
         let found = find_winpkfilter_msi(
+            pkg.msi_name,
             Some(resource_dir.as_path()),
             Some(exe_dir.as_path()),
             program_files_dir.as_path(),
@@ -567,20 +573,45 @@ mod tests {
 
     #[test]
     fn find_winpkfilter_msi_returns_error_when_missing() {
+        let pkg = swifttunnel_core::vpn::winpkfilter::native_msi_package();
         let base = unique_temp_dir("winpkfilter_missing");
         let resource_dir = base.join("resources");
         let program_files_dir = base.join("ProgramFiles");
 
         let err = find_winpkfilter_msi(
+            pkg.msi_name,
             Some(resource_dir.as_path()),
             None,
             program_files_dir.as_path(),
         )
         .expect_err("should error when no msi exists");
 
-        assert!(err.contains("WinpkFilter-x64.msi not found"));
+        assert!(err.contains("not found in app resources"));
 
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn find_winpkfilter_msi_works_for_both_arch_variants() {
+        for pkg in swifttunnel_core::vpn::winpkfilter::ALL_MSI_PACKAGES {
+            let base = unique_temp_dir(&format!("winpkfilter_{}", pkg.arch));
+            let resource_dir = base.join("resources");
+            let program_files_dir = base.join("ProgramFiles");
+
+            let expected = resource_dir.join("drivers").join(pkg.msi_name);
+            touch(&expected);
+
+            let found = find_winpkfilter_msi(
+                pkg.msi_name,
+                Some(resource_dir.as_path()),
+                None,
+                program_files_dir.as_path(),
+            )
+            .expect("should resolve msi path");
+            assert_eq!(found, expected);
+
+            let _ = fs::remove_dir_all(base);
+        }
     }
 
     #[test]
