@@ -1041,6 +1041,10 @@ mod tests {
     /// Verify apply_optimizations returns Ok even when individual optimizations
     /// fail (e.g. no PowerShell, non-Windows host).
     #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mutates real system network settings on elevated Windows runners"
+    )]
     fn apply_optimizations_succeeds_despite_individual_failures() {
         let mut booster = NetworkBooster::new();
         let config = NetworkConfig {
@@ -1062,6 +1066,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mutates real system network settings on elevated Windows runners"
+    )]
     fn apply_optimizations_with_nothing_enabled() {
         let mut booster = NetworkBooster::new();
         let config = NetworkConfig {
