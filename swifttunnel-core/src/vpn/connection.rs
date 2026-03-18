@@ -982,8 +982,18 @@ impl VpnConnection {
             }
         };
 
+        // Derive forced-server flag from the actual relay candidates to avoid skipping
+        // auth when a pinned server is stale and candidates fell back to latency-based selection.
+        let has_forced_server = forced_servers.values().any(|pinned| {
+            relay_candidates
+                .iter()
+                .any(|(candidate_region, _, _)| candidate_region == pinned)
+        });
+
         let mut relay_auth_mode = if custom_relay_server.is_some() {
             "custom_legacy".to_string()
+        } else if has_forced_server {
+            "forced_server_legacy".to_string()
         } else {
             "legacy_fallback".to_string()
         };
@@ -991,6 +1001,10 @@ impl VpnConnection {
 
         if custom_relay_server.is_some() {
             log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
+        } else if has_forced_server {
+            log::info!(
+                "V3: Forced server selected, skipping relay ticket bootstrap for direct connection"
+            );
         } else {
             let auth_client = AuthClient::new();
             let session_id_hex = relay.session_id_hex();
