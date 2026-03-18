@@ -570,6 +570,12 @@ impl ProcessSnapshot {
         self.pid_names.get(&pid).map(|s| s.as_str())
     }
 
+    /// Check whether the snapshot already has at least one cached endpoint for a PID.
+    #[inline]
+    pub fn has_connection_for_pid(&self, pid: u32) -> bool {
+        self.connections.values().any(|owner_pid| *owner_pid == pid)
+    }
+
     /// Get stats
     pub fn stats(&self) -> TrackerStats {
         TrackerStats {
@@ -1105,6 +1111,28 @@ mod tests {
         );
         assert!(snap.is_tunnel_pid_public(pid));
         assert!(snap.tunnel_pids.contains(&pid));
+    }
+
+    #[test]
+    fn test_has_connection_for_pid_detects_owned_endpoints() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 10), 55000, Protocol::Udp),
+            7001,
+        );
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 10), 55001, Protocol::Tcp),
+            7002,
+        );
+
+        cache.update(connections, HashMap::new());
+        let snap = cache.get_snapshot();
+
+        assert!(snap.has_connection_for_pid(7001));
+        assert!(snap.has_connection_for_pid(7002));
+        assert!(!snap.has_connection_for_pid(7003));
     }
 
     #[test]

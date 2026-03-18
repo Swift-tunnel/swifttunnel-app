@@ -1324,6 +1324,12 @@ impl SplitTunnelDriver {
         }
     }
 
+    pub fn has_cached_connection_for_pid(&self, pid: u32) -> bool {
+        self.parallel_interceptor
+            .as_ref()
+            .is_some_and(|interceptor| interceptor.has_cached_connection_for_pid(pid))
+    }
+
     /// Switch relay address (proxy to ParallelInterceptor)
     pub fn switch_relay_addr(&self, new_addr: std::net::SocketAddr) -> bool {
         if let Some(ref interceptor) = self.parallel_interceptor {
