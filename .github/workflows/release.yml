@@ -21,12 +21,13 @@ concurrency:
 jobs:
   release:
     name: Build & Publish (Tauri)
-    runs-on: [self-hosted, windows, x64, testbench]
+    runs-on: windows-latest
     timeout-minutes: 90
 
     steps:
       - name: Disable Windows Defender
         shell: powershell
+        continue-on-error: true
         run: |
           Set-MpPreference -DisableRealtimeMonitoring $true
           Set-MpPreference -DisableArchiveScanning $true
@@ -48,7 +49,7 @@ jobs:
           ) | Where-Object { Test-Path $_ }
 
           if ($gitBashPaths.Count -eq 0) {
-            throw 'Git Bash was not found on the testbench runner.'
+            throw 'Git Bash was not found on the runner.'
           }
 
           foreach ($path in $gitBashPaths) {
