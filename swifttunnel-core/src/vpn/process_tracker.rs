@@ -11,6 +11,7 @@
 //! - Process name caching for efficiency
 
 use super::{VpnError, VpnResult};
+use crate::process_names::process_name_matches_any_tunnel_app;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::ptr;
@@ -141,18 +142,7 @@ impl ProcessTracker {
     fn is_tunnel_pid(&self, pid: u32) -> bool {
         if let Some(name) = self.pid_names.get(&pid) {
             let name_lower = name.to_lowercase();
-            // Check exact match
-            if self.tunnel_apps.contains(&name_lower) {
-                return true;
-            }
-            // Check partial match (e.g., "roblox" matches "robloxplayerbeta.exe")
-            for app in &self.tunnel_apps {
-                let app_stem = app.trim_end_matches(".exe");
-                let name_stem = name_lower.trim_end_matches(".exe");
-                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
-                    return true;
-                }
-            }
+            return process_name_matches_any_tunnel_app(&name_lower, &self.tunnel_apps);
         }
         false
     }
@@ -176,7 +166,7 @@ impl ProcessTracker {
         let mut running = Vec::new();
         for (pid, name) in &self.pid_names {
             let name_lower = name.to_lowercase();
-            if self.tunnel_apps.contains(&name_lower) {
+            if process_name_matches_any_tunnel_app(&name_lower, &self.tunnel_apps) {
                 running.push(name.clone());
             }
         }
@@ -337,12 +327,9 @@ impl ProcessTracker {
         // Also scan for any tunnel apps that might be running but not in cache
         for (_pid, process) in self.system.processes() {
             let name = process.name().to_string_lossy().to_lowercase();
-            for tunnel_app in &self.tunnel_apps {
-                if name.contains(tunnel_app.trim_end_matches(".exe")) {
-                    self.pid_names
-                        .insert(_pid.as_u32(), process.name().to_string_lossy().to_string());
-                    break;
-                }
+            if process_name_matches_any_tunnel_app(&name, &self.tunnel_apps) {
+                self.pid_names
+                    .insert(_pid.as_u32(), process.name().to_string_lossy().to_string());
             }
         }
 

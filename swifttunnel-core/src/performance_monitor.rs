@@ -1,10 +1,10 @@
+use crate::process_names::is_roblox_process_name;
 use crate::structs::*;
 use std::time::Duration;
 use sysinfo::{Process, ProcessesToUpdate, System};
 
 pub struct PerformanceMonitor {
     system: System,
-    roblox_process_name: String,
 }
 
 impl PerformanceMonitor {
@@ -14,10 +14,7 @@ impl PerformanceMonitor {
         system.refresh_memory();
         system.refresh_cpu_all();
 
-        Self {
-            system,
-            roblox_process_name: "RobloxPlayerBeta.exe".to_string(),
-        }
+        Self { system }
     }
 
     /// Update performance metrics
@@ -64,11 +61,7 @@ impl PerformanceMonitor {
     fn find_roblox_process(&self) -> Option<(u32, &Process)> {
         for (pid, process) in self.system.processes() {
             let process_name = process.name().to_string_lossy();
-
-            if process_name.contains("RobloxPlayerBeta")
-                || process_name.contains("RobloxPlayer")
-                || process_name.contains("Roblox")
-            {
+            if is_roblox_process_name(&process_name) {
                 return Some((pid.as_u32(), process));
             }
         }

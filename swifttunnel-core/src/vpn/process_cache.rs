@@ -14,6 +14,7 @@
 //! both process ownership AND destination IP ranges.
 
 use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
+use crate::process_names::process_name_matches_any_tunnel_app;
 use arc_swap::ArcSwap;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -403,14 +404,8 @@ impl ProcessSnapshot {
                 continue;
             }
 
-            // Partial match (for cases like "robloxplayerbeta" matching "roblox")
-            let name_stem = name.trim_end_matches(".exe");
-            for app in tunnel_apps {
-                let app_stem = app.trim_end_matches(".exe");
-                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
-                    tunnel_pids.insert(pid);
-                    break;
-                }
+            if process_name_matches_any_tunnel_app(name, tunnel_apps) {
+                tunnel_pids.insert(pid);
             }
         }
 
@@ -1015,17 +1010,7 @@ mod tests {
 
         for (name, expected) in test_cases {
             let name_lower = name.to_lowercase();
-            let name_stem = name_lower.trim_end_matches(".exe");
-
-            let mut matched = false;
-            for app in &snap.tunnel_apps {
-                let app_stem = app.trim_end_matches(".exe");
-                if name_stem.contains(app_stem) || app_stem.contains(name_stem) {
-                    matched = true;
-                    break;
-                }
-            }
-
+            let matched = process_name_matches_any_tunnel_app(&name_lower, &snap.tunnel_apps);
             assert_eq!(
                 matched, expected,
                 "Process '{}' match failed: expected {}, got {}",
@@ -1104,6 +1089,22 @@ mod tests {
         );
         assert!(snap1.is_tunnel_pid_public(pid));
         assert!(snap1.tunnel_pids.contains(&pid));
+    }
+
+    #[test]
+    fn test_register_process_immediate_populates_tunnel_pids_for_robloxapp_exact_name() {
+        let cache = LockFreeProcessCache::new(vec!["robloxapp.exe".to_string()]);
+        let pid = 3333;
+
+        cache.register_process_immediate(pid, "RobloxApp.exe".to_string());
+
+        let snap = cache.get_snapshot();
+        assert_eq!(
+            snap.pid_names.get(&pid).map(|s| s.as_str()),
+            Some("robloxapp.exe")
+        );
+        assert!(snap.is_tunnel_pid_public(pid));
+        assert!(snap.tunnel_pids.contains(&pid));
     }
 
     #[test]
