@@ -330,6 +330,17 @@ fn sort_candidates_by_latency(candidates: &mut [(String, SocketAddr, Option<u32>
     });
 }
 
+fn resolved_forced_server(
+    forced_for_region: Option<&str>,
+    relay_candidates: &[(String, SocketAddr, Option<u32>)],
+) -> Option<String> {
+    let forced = forced_for_region?;
+    relay_candidates
+        .iter()
+        .find(|(candidate_region, _, _)| candidate_region == forced)
+        .map(|(candidate_region, _, _)| candidate_region.clone())
+}
+
 fn dedupe_process_names(processes: &[(u32, String)]) -> Vec<String> {
     let mut names: Vec<String> = processes.iter().map(|(_, name)| name.clone()).collect();
     names.sort();
@@ -712,10 +723,13 @@ impl VpnConnection {
 
         // Step 1: Resolve initial relay endpoint from available servers
         self.set_state(ConnectionState::FetchingConfig).await;
-        let forced_for_region = forced_servers.get(region).map(|s| s.as_str());
-        let relay_candidates =
-            ordered_relay_candidates_for_region(region, &available_servers, forced_for_region)
-                .await;
+        let forced_for_region = forced_servers.get(region).cloned();
+        let relay_candidates = ordered_relay_candidates_for_region(
+            region,
+            &available_servers,
+            forced_for_region.as_deref(),
+        )
+        .await;
         let (resolved_server_region, selected_relay_addr) = match relay_candidates
             .first()
             .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
@@ -785,6 +799,7 @@ impl VpnConnection {
                     &config,
                     tunnel_apps.clone(),
                     custom_relay_server,
+                    forced_for_region,
                     auto_routing_enabled,
                     relay_qos_enabled,
                     available_servers,
@@ -849,6 +864,7 @@ impl VpnConnection {
         config: &VpnConfig,
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
+        forced_for_region: Option<String>,
         auto_routing_enabled: bool,
         relay_qos_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
@@ -982,13 +998,9 @@ impl VpnConnection {
             }
         };
 
-        // Derive forced-server flag from the actual relay candidates to avoid skipping
-        // auth when a pinned server is stale and candidates fell back to latency-based selection.
-        let has_forced_server = forced_servers.values().any(|pinned| {
-            relay_candidates
-                .iter()
-                .any(|(candidate_region, _, _)| candidate_region == pinned)
-        });
+        let resolved_forced_server =
+            resolved_forced_server(forced_for_region.as_deref(), &relay_candidates);
+        let has_forced_server = resolved_forced_server.is_some();
 
         let mut relay_auth_mode = if custom_relay_server.is_some() {
             "custom_legacy".to_string()
@@ -1003,7 +1015,8 @@ impl VpnConnection {
             log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
         } else if has_forced_server {
             log::info!(
-                "V3: Forced server selected, skipping relay ticket bootstrap for direct connection"
+                "V3: Forced server '{}' selected, skipping relay ticket bootstrap for direct connection",
+                resolved_forced_server.as_deref().unwrap_or("unknown")
             );
         } else {
             let auth_client = AuthClient::new();
@@ -2239,6 +2252,55 @@ mod tests {
         assert_eq!(
             resolved,
             Some(("germany-01".to_string(), parse_addr("10.0.0.1:51821")))
+        );
+    }
+
+    #[test]
+    fn test_resolved_forced_server_matches_selected_region_pin() {
+        let relay_candidates = vec![(
+            "germany-02".to_string(),
+            parse_addr("10.0.0.2:51821"),
+            Some(20),
+        )];
+
+        assert_eq!(
+            resolved_forced_server(Some("germany-02"), &relay_candidates),
+            Some("germany-02".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolved_forced_server_ignores_stale_pin_after_fallback() {
+        let relay_candidates = vec![
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                Some(5),
+            ),
+            (
+                "germany-02".to_string(),
+                parse_addr("10.0.0.2:51821"),
+                Some(20),
+            ),
+        ];
+
+        assert_eq!(
+            resolved_forced_server(Some("germany-99"), &relay_candidates),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolved_forced_server_does_not_treat_unrelated_pin_as_active() {
+        let relay_candidates = vec![(
+            "germany-02".to_string(),
+            parse_addr("10.0.0.2:51821"),
+            Some(20),
+        )];
+
+        assert_eq!(
+            resolved_forced_server(Some("singapore-01"), &relay_candidates),
+            None
         );
     }
 
