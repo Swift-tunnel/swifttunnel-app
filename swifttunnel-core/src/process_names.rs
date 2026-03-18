@@ -21,11 +21,11 @@ fn process_stem(name: &str) -> &str {
 }
 
 fn is_roblox_process_name_lowercase(process_name_lower: &str) -> bool {
-    let process_stem = process_stem(process_name_lower);
+    let stem = process_stem(process_name_lower);
     ROBLOX_PROCESS_NAMES
         .iter()
         .map(|candidate| process_stem(candidate))
-        .any(|candidate_stem| candidate_stem == process_stem)
+        .any(|candidate_stem| candidate_stem == stem)
 }
 
 pub fn process_name_matches_alias(process_name: &str, alias: &str) -> bool {
@@ -54,8 +54,9 @@ pub fn process_name_matches_any_tunnel_app(
 }
 
 pub fn is_roblox_process_name(process_name: &str) -> bool {
-    let process_name = basename(process_name).to_ascii_lowercase();
-    is_roblox_process_name_lowercase(&process_name)
+    ROBLOX_PROCESS_NAMES
+        .iter()
+        .any(|candidate| process_name_matches_alias(process_name, candidate))
 }
 
 #[cfg(test)]
