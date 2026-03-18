@@ -20,6 +20,7 @@ use super::parallel_interceptor::{
     ThroughputStats,
 };
 use super::{VpnError, VpnResult};
+use crate::process_names::ROBLOX_PROCESS_NAMES;
 use crate::utils::normalize_guid_ascii_lowercase;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -56,19 +57,7 @@ impl GamePreset {
     /// Process names that should use VPN
     pub fn process_names(&self) -> &'static [&'static str] {
         match self {
-            GamePreset::Roblox => &[
-                // Main game client (most common)
-                "robloxplayerbeta.exe",
-                "robloxplayer.exe",       // Some users don't have "beta" suffix
-                "windows10universal.exe", // Microsoft Store version
-                // Launchers
-                "robloxplayerlauncher.exe",
-                // Studio
-                "robloxstudiobeta.exe",
-                "robloxstudio.exe", // Some users don't have "beta" suffix
-                "robloxstudiolauncherbeta.exe",
-                "robloxstudiolauncher.exe",
-            ],
+            GamePreset::Roblox => ROBLOX_PROCESS_NAMES,
             GamePreset::Valorant => &[
                 "valorant-win64-shipping.exe",
                 "valorant.exe",
@@ -1365,6 +1354,11 @@ mod tests {
         assert!(!GamePreset::Roblox.process_names().is_empty());
         assert!(!GamePreset::Valorant.process_names().is_empty());
         assert!(!GamePreset::Fortnite.process_names().is_empty());
+        assert!(
+            GamePreset::Roblox
+                .process_names()
+                .contains(&"robloxapp.exe")
+        );
     }
 
     #[test]
