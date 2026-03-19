@@ -280,7 +280,7 @@ async fn run_harness(runtime: Arc<tokio::runtime::Runtime>, cli: &HarnessCli) ->
 
     swifttunnel_core::roblox_proxy::hosts::recover_stale();
 
-    let state = match AppState::new(Arc::clone(&runtime)) {
+    let state = match AppState::new(Arc::clone(&runtime), false) {
         Ok(state) => state,
         Err(err) => {
             return HarnessReport {
