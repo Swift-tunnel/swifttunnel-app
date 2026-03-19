@@ -40,38 +40,50 @@ struct BundleContext {
 }
 
 #[tauri::command]
-pub fn settings_load(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    Ok(state.settings.lock().clone())
+pub async fn settings_load(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(settings.lock().clone()))
+        .await
+        .map_err(|e| format!("Settings load task failed: {}", e))?
 }
 
 #[tauri::command]
-pub fn settings_save(
+pub async fn settings_save(
     state: State<'_, AppState>,
     app: AppHandle,
     settings: AppSettings,
 ) -> Result<(), String> {
-    let mut new_settings = settings;
-    new_settings.sanitize_in_place();
-    swifttunnel_core::settings::save_settings(&new_settings)?;
+    let settings_arc = state.settings.clone();
+    let discord_manager = state.discord_manager.clone();
+    let app_handle = app.clone();
 
-    {
-        let mut discord = state.discord_manager.lock();
-        discord.set_enabled(new_settings.enable_discord_rpc);
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut new_settings = settings;
+        new_settings.sanitize_in_place();
+        swifttunnel_core::settings::save_settings(&new_settings)?;
 
-    let mut settings = state.settings.lock();
-    *settings = new_settings;
-    let run_on_startup = settings.run_on_startup;
-    drop(settings);
+        {
+            let mut discord = discord_manager.lock();
+            discord.set_enabled(new_settings.enable_discord_rpc);
+        }
 
-    if let Err(e) = crate::autostart::sync_run_on_startup(&app, run_on_startup) {
-        log::warn!(
-            "Failed to sync startup registration after settings save: {}",
-            e
-        );
-    }
+        let run_on_startup = {
+            let mut s = settings_arc.lock();
+            *s = new_settings;
+            s.run_on_startup
+        };
 
-    Ok(())
+        if let Err(e) = crate::autostart::sync_run_on_startup(&app_handle, run_on_startup) {
+            log::warn!(
+                "Failed to sync startup registration after settings save: {}",
+                e
+            );
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Settings save task failed: {}", e))?
 }
 
 fn current_timestamp_utc() -> String {

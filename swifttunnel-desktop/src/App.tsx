@@ -22,6 +22,7 @@ import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { runAppBootstrap } from "./lib/appBootstrap";
 import { reportError } from "./lib/errors";
+import { systemLaunchedFromStartup } from "./lib/commands";
 import { ToastContainer } from "./components/common/Toast";
 import {
   ensureWindowStateVisible,
@@ -217,6 +218,20 @@ function App() {
         connectVpn,
         checkForUpdates,
       });
+
+      // Window starts hidden (visible: false in tauri.conf.json) to prevent
+      // ghost tab / white flash after updates. Show it now that React is ready.
+      if (!disposed) {
+        try {
+          const fromStartup = await systemLaunchedFromStartup();
+          if (!fromStartup) {
+            await getCurrentWindow().show();
+          }
+        } catch {
+          // Fallback: show window even if the check fails
+          await getCurrentWindow().show();
+        }
+      }
 
       if (disposed) {
         void cleanupEventListeners();
