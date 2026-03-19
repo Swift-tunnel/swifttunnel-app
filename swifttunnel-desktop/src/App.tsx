@@ -224,12 +224,14 @@ function App() {
       if (!disposed) {
         try {
           const fromStartup = await systemLaunchedFromStartup();
-          if (!fromStartup) {
+          if (!fromStartup && !disposed) {
             await getCurrentWindow().show();
           }
         } catch {
           // Fallback: show window even if the check fails
-          await getCurrentWindow().show();
+          if (!disposed) {
+            await getCurrentWindow().show();
+          }
         }
       }
 
