@@ -573,6 +573,8 @@ impl ProcessSnapshot {
     /// Check whether the snapshot already has at least one cached endpoint for a PID.
     #[inline]
     pub fn has_connection_for_pid(&self, pid: u32) -> bool {
+        // O(n) over tracked connections. Acceptable here because ETW readiness polling
+        // runs on a tiny set of launch events, not on the packet hot path.
         self.connections.values().any(|owner_pid| *owner_pid == pid)
     }
 

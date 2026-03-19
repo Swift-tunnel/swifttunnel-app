@@ -95,6 +95,15 @@ async fn wait_for_tunnel_process_connections(
     let deadline = Instant::now() + Duration::from_millis(ETW_CONNECTION_READY_TIMEOUT_MS);
     let poll_interval = Duration::from_millis(ETW_CONNECTION_READY_POLL_MS);
     loop {
+        if Instant::now() >= deadline {
+            let driver_guard = driver.lock().await;
+            return events
+                .iter()
+                .filter(|event| !driver_guard.has_cached_connection_for_pid(event.pid))
+                .map(|event| (event.pid, event.name.clone()))
+                .collect();
+        }
+
         let mut driver_guard = driver.lock().await;
         if let Err(e) = driver_guard.refresh_exclusions() {
             log::warn!("V3: Refresh during ETW hold failed: {}", e);
@@ -1597,6 +1606,7 @@ impl VpnConnection {
                         match event {
                             Some(first_event) => {
                                 let mut etw_events_received = false;
+                                let mut blocked_events: Vec<ProcessStartEvent> = Vec::new();
                                 let mut blocked_paths: Vec<String> = Vec::new();
 
                                 // Process the first event (if any) and drain remaining queued events.
@@ -1625,6 +1635,7 @@ impl VpnConnection {
                                                 e
                                             );
                                         } else {
+                                            blocked_events.push(event.clone());
                                             blocked_paths.push(event.image_path.clone());
                                         }
                                     } else {
@@ -1656,7 +1667,7 @@ impl VpnConnection {
                                             .map(|event| (event.pid, event.name.clone()))
                                             .collect::<Vec<_>>()
                                     } else {
-                                        wait_for_tunnel_process_connections(&driver, &pending_events).await
+                                        wait_for_tunnel_process_connections(&driver, &blocked_events).await
                                     };
 
                                     if pending_after_wait.is_empty() {

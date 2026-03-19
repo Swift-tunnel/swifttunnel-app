@@ -21,7 +21,7 @@
 //! - Administrator privileges (for kernel-level ETW provider)
 //! - Windows 10 or later
 
-use crate::process_names::process_name_matches_any_tunnel_app;
+use crate::process_names::{is_roblox_process_name, process_name_matches_alias};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::RwLock;
 use std::collections::HashSet;
@@ -368,7 +368,11 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
 }
 
 fn should_watch_process(process_name_lower: &str, watch_list: &HashSet<String>) -> bool {
-    process_name_matches_any_tunnel_app(process_name_lower, watch_list)
+    watch_list.iter().any(|watched_process| {
+        process_name_matches_alias(process_name_lower, watched_process)
+            || (is_roblox_process_name(process_name_lower)
+                && is_roblox_process_name(watched_process))
+    })
 }
 
 /// Parse process start event from EVENT_RECORD
@@ -514,5 +518,6 @@ mod tests {
             &watch_list
         ));
         assert!(!should_watch_process("chrome.exe", &watch_list));
+        assert!(!should_watch_process("player.exe", &watch_list));
     }
 }
