@@ -45,7 +45,7 @@ function extractInterfaceFields(source: string, interfaceName: string): string[]
 describe("settings contract", () => {
   it("uses typed settings payloads at the Tauri boundary", () => {
     expect(backendSettingsSource).toMatch(
-      /pub fn settings_load\(state: State<'_, AppState>\) -> Result<AppSettings, String>/,
+      /pub async fn settings_load\(state: State<'_, AppState>\) -> Result<AppSettings, String>/,
     );
     expect(backendSettingsSource).toContain("settings: swifttunnel_core::settings::AppSettings");
     expect(backendSettingsSource).not.toContain("settings_json: String");

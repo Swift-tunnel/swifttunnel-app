@@ -539,9 +539,7 @@ pub struct ServerListResponse {
 }
 
 #[tauri::command]
-pub async fn server_get_list(
-    state: State<'_, AppState>,
-) -> Result<ServerListResponse, String> {
+pub async fn server_get_list(state: State<'_, AppState>) -> Result<ServerListResponse, String> {
     let server_list = state.server_list.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let sl = server_list.lock();
