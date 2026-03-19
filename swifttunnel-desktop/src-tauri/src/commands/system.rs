@@ -307,26 +307,30 @@ pub struct DriverCheckResponse {
 }
 
 #[tauri::command]
-pub fn system_check_driver() -> DriverCheckResponse {
+pub async fn system_check_driver() -> Result<DriverCheckResponse, String> {
     #[cfg(windows)]
     {
-        let available = swifttunnel_core::vpn::SplitTunnelDriver::is_available();
-        DriverCheckResponse {
-            installed: available,
-            version: if available {
-                Some("Windows Packet Filter".to_string())
-            } else {
-                None
-            },
-        }
+        tauri::async_runtime::spawn_blocking(|| {
+            let available = swifttunnel_core::vpn::SplitTunnelDriver::is_available();
+            DriverCheckResponse {
+                installed: available,
+                version: if available {
+                    Some("Windows Packet Filter".to_string())
+                } else {
+                    None
+                },
+            }
+        })
+        .await
+        .map_err(|e| format!("Driver check task failed: {}", e))
     }
 
     #[cfg(not(windows))]
     {
-        DriverCheckResponse {
+        Ok(DriverCheckResponse {
             installed: false,
             version: None,
-        }
+        })
     }
 }
 
@@ -691,6 +695,11 @@ pub async fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
         let _ = app;
         Err("Uninstall is only supported on Windows".to_string())
     }
+}
+
+#[tauri::command]
+pub fn system_launched_from_startup(state: tauri::State<'_, crate::state::AppState>) -> bool {
+    state.launched_from_startup
 }
 
 #[tauri::command]

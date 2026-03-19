@@ -230,23 +230,28 @@ pub async fn vpn_get_state(state: State<'_, AppState>) -> Result<VpnStateRespons
 }
 
 #[tauri::command]
-pub fn vpn_preflight_binding(
+pub async fn vpn_preflight_binding(
     state: State<'_, AppState>,
     _region: String,
     _game_presets: Vec<String>,
 ) -> Result<BindingPreflightInfo, String> {
-    let mut settings = state.settings.lock();
-    let previous_overrides = settings.network_binding_overrides.clone();
-    let preflight = build_binding_preflight(&mut settings)?;
-    let settings_snapshot = settings.clone();
-    let overrides_changed = previous_overrides != settings.network_binding_overrides;
-    drop(settings);
+    let settings_arc = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = settings_arc.lock();
+        let previous_overrides = settings.network_binding_overrides.clone();
+        let preflight = build_binding_preflight(&mut settings)?;
+        let settings_snapshot = settings.clone();
+        let overrides_changed = previous_overrides != settings.network_binding_overrides;
+        drop(settings);
 
-    if overrides_changed {
-        swifttunnel_core::settings::save_settings(&settings_snapshot)?;
-    }
+        if overrides_changed {
+            swifttunnel_core::settings::save_settings(&settings_snapshot)?;
+        }
 
-    Ok(preflight)
+        Ok(preflight)
+    })
+    .await
+    .map_err(|e| format!("Preflight binding task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -534,33 +539,38 @@ pub struct ServerListResponse {
 }
 
 #[tauri::command]
-pub fn server_get_list(state: State<'_, AppState>) -> ServerListResponse {
-    let sl = state.server_list.lock();
-    ServerListResponse {
-        regions: sl
-            .regions()
-            .iter()
-            .map(|r| ServerRegionResponse {
-                id: r.id.clone(),
-                name: r.name.clone(),
-                description: r.description.clone(),
-                country_code: r.country_code.clone(),
-                servers: r.servers.clone(),
-            })
-            .collect(),
-        servers: sl
-            .servers()
-            .iter()
-            .map(|s| ServerInfoResponse {
-                region: s.region.clone(),
-                name: s.name.clone(),
-                country_code: s.country_code.clone(),
-                ip: s.ip.clone(),
-                port: s.port,
-            })
-            .collect(),
-        source: sl.source.to_string(),
-    }
+pub async fn server_get_list(state: State<'_, AppState>) -> Result<ServerListResponse, String> {
+    let server_list = state.server_list.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let sl = server_list.lock();
+        ServerListResponse {
+            regions: sl
+                .regions()
+                .iter()
+                .map(|r| ServerRegionResponse {
+                    id: r.id.clone(),
+                    name: r.name.clone(),
+                    description: r.description.clone(),
+                    country_code: r.country_code.clone(),
+                    servers: r.servers.clone(),
+                })
+                .collect(),
+            servers: sl
+                .servers()
+                .iter()
+                .map(|s| ServerInfoResponse {
+                    region: s.region.clone(),
+                    name: s.name.clone(),
+                    country_code: s.country_code.clone(),
+                    ip: s.ip.clone(),
+                    port: s.port,
+                })
+                .collect(),
+            source: sl.source.to_string(),
+        }
+    })
+    .await
+    .map_err(|e| format!("Server list task failed: {}", e))
 }
 
 #[derive(Serialize)]

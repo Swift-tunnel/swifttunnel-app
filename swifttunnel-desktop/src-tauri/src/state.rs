@@ -29,10 +29,14 @@ pub struct AppState {
     pub network_booster: Arc<Mutex<NetworkBooster>>,
     pub discord_manager: Arc<Mutex<DiscordManager>>,
     pub runtime: Arc<tokio::runtime::Runtime>,
+    pub launched_from_startup: bool,
 }
 
 impl AppState {
-    pub fn new(runtime: Arc<tokio::runtime::Runtime>) -> Result<Self, String> {
+    pub fn new(
+        runtime: Arc<tokio::runtime::Runtime>,
+        launched_from_startup: bool,
+    ) -> Result<Self, String> {
         let auth_manager = AuthManager::new().map_err(|e| format!("Failed to init auth: {}", e))?;
         let mut settings = swifttunnel_core::settings::load_settings();
         let roblox_optimizer = RobloxOptimizer::new();
@@ -63,6 +67,7 @@ impl AppState {
             network_booster: Arc::new(Mutex::new(NetworkBooster::new())),
             discord_manager: Arc::new(Mutex::new(DiscordManager::new(enable_discord_rpc))),
             runtime,
+            launched_from_startup,
         })
     }
 }

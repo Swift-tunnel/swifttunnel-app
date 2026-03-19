@@ -234,6 +234,7 @@ pub fn run() {
             commands::system::system_open_url,
             commands::system::system_restart_as_admin,
             commands::system::system_show_notification,
+            commands::system::system_launched_from_startup,
             commands::system::system_cleanup,
             commands::system::system_uninstall,
         ])
@@ -251,7 +252,8 @@ pub fn run() {
             // Clean up any stale hosts-file entries from old proxy versions
             swifttunnel_core::roblox_proxy::hosts::recover_stale();
 
-            let app_state = AppState::new(runtime.clone()).expect("Failed to initialize app state");
+            let app_state = AppState::new(runtime.clone(), launched_from_startup)
+                .expect("Failed to initialize app state");
 
             // Recover network booster state from persisted snapshot (crash recovery)
             app_state.network_booster.lock().recover_from_snapshot();
@@ -267,11 +269,9 @@ pub fn run() {
                 log::warn!("Failed to sync startup registration: {}", e);
             }
 
-            if launched_from_startup {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
-            }
+            // Window starts hidden via tauri.conf.json ("visible": false).
+            // The frontend will call getCurrentWindow().show() after React loads,
+            // unless launched_from_startup is true (user clicks tray to reveal).
 
             // Set up system tray
             if let Err(e) = tray::setup_tray(app.handle()) {

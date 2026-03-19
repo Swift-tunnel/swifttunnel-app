@@ -16,20 +16,27 @@ pub struct PerformanceMetricsResponse {
 }
 
 #[tauri::command]
-pub fn boost_get_metrics(state: State<'_, AppState>) -> PerformanceMetricsResponse {
-    let mut monitor = state.performance_monitor.lock();
-    let mut metrics = swifttunnel_core::structs::PerformanceMetrics::default();
-    monitor.update_metrics(&mut metrics);
+pub async fn boost_get_metrics(
+    state: State<'_, AppState>,
+) -> Result<PerformanceMetricsResponse, String> {
+    let performance_monitor = state.performance_monitor.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut monitor = performance_monitor.lock();
+        let mut metrics = swifttunnel_core::structs::PerformanceMetrics::default();
+        monitor.update_metrics(&mut metrics);
 
-    PerformanceMetricsResponse {
-        fps: metrics.fps,
-        cpu_usage: metrics.cpu_usage,
-        ram_usage: metrics.ram_usage,
-        ram_total: metrics.ram_total,
-        ping: metrics.ping,
-        roblox_running: metrics.roblox_running,
-        process_id: metrics.process_id,
-    }
+        PerformanceMetricsResponse {
+            fps: metrics.fps,
+            cpu_usage: metrics.cpu_usage,
+            ram_usage: metrics.ram_usage,
+            ram_total: metrics.ram_total,
+            ping: metrics.ping,
+            roblox_running: metrics.roblox_running,
+            process_id: metrics.process_id,
+        }
+    })
+    .await
+    .map_err(|e| format!("Metrics task failed: {}", e))
 }
 
 #[derive(Clone, Serialize)]
@@ -121,12 +128,16 @@ impl From<swifttunnel_core::ram_cleaner::RamCleanResult> for RamCleanResultRespo
 }
 
 #[tauri::command]
-pub fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, String> {
+pub async fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, String> {
     #[cfg(windows)]
     {
-        swifttunnel_core::ram_cleaner::get_system_memory_snapshot()
-            .map(SystemMemorySnapshotResponse::from)
-            .map_err(|e| e.to_string())
+        tauri::async_runtime::spawn_blocking(|| {
+            swifttunnel_core::ram_cleaner::get_system_memory_snapshot()
+                .map(SystemMemorySnapshotResponse::from)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| format!("System memory task failed: {}", e))?
     }
 
     #[cfg(not(windows))]

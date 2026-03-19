@@ -159,6 +159,9 @@ export const systemCheckDriver = () =>
 export const systemInstallDriver = () =>
   invoke<void>("system_install_driver");
 
+export const systemLaunchedFromStartup = () =>
+  invoke<boolean>("system_launched_from_startup");
+
 export const systemOpenUrl = (url: string) =>
   invoke<void>("system_open_url", { url });
 
