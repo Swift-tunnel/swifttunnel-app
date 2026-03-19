@@ -55,6 +55,8 @@ use std::time::{Duration, Instant};
 use arrayvec::ArrayVec;
 use serde::Serialize;
 
+use crate::process_names::process_name_matches_any_tunnel_app;
+
 use super::ipv6_recovery::{
     delete_ipv6_marker, query_ipv6_binding_enabled, restore_ipv6_from_marker, write_ipv6_marker,
 };
@@ -3662,6 +3664,12 @@ impl ParallelInterceptor {
         self.process_cache.register_udp_port_immediate(local_port);
     }
 
+    pub fn has_cached_connection_for_pid(&self, pid: u32) -> bool {
+        self.process_cache
+            .get_snapshot()
+            .has_connection_for_pid(pid)
+    }
+
     /// Create InboundConfig for the optimized inbound receiver
     ///
     /// Returns None if physical adapter cannot be found
@@ -4611,21 +4619,17 @@ fn run_cache_refresher(
             // Scan for tunnel apps
             for (_pid, process) in system.processes() {
                 let name = process.name().to_string_lossy().to_lowercase();
-                for app in tunnel_apps {
-                    if name.contains(app.trim_end_matches(".exe")) {
-                        let pid_u32 = _pid.as_u32();
-                        pid_names.insert(pid_u32, process.name().to_string_lossy().to_string());
-                        tunnel_pids_found
-                            .push((pid_u32, process.name().to_string_lossy().to_string()));
+                if process_name_matches_any_tunnel_app(&name, tunnel_apps) {
+                    let pid_u32 = _pid.as_u32();
+                    pid_names.insert(pid_u32, process.name().to_string_lossy().to_string());
+                    tunnel_pids_found.push((pid_u32, process.name().to_string_lossy().to_string()));
 
-                        if refresh_count < 10 {
-                            log::info!(
-                                "Cache refresher: Found tunnel app '{}' with PID {} (sysinfo)",
-                                process.name().to_string_lossy(),
-                                pid_u32
-                            );
-                        }
-                        break;
+                    if refresh_count < 10 {
+                        log::info!(
+                            "Cache refresher: Found tunnel app '{}' with PID {} (sysinfo)",
+                            process.name().to_string_lossy(),
+                            pid_u32
+                        );
                     }
                 }
             }

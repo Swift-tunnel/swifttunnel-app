@@ -28,6 +28,8 @@ use tokio::sync::Mutex;
 /// Lower = faster detection of new processes, slightly higher CPU
 /// 500ms balances detection speed with CPU usage
 const REFRESH_INTERVAL_MS: u64 = 500;
+const ETW_CONNECTION_READY_TIMEOUT_MS: u64 = 150;
+const ETW_CONNECTION_READY_POLL_MS: u64 = 5;
 /// Number of ICMP samples to collect per relay candidate when probing.
 const AUTO_ROUTING_PING_SAMPLES: usize = 5;
 const CONNECT_FAIL_HANDSHAKE_TIMEOUT: &str = "ST_CONNECT_HANDSHAKE_TIMEOUT";
@@ -84,6 +86,42 @@ fn pick_lowest_latency_server<'a>(
     candidates: impl Iterator<Item = &'a (String, SocketAddr, Option<u32>)>,
 ) -> Option<&'a (String, SocketAddr, Option<u32>)> {
     candidates.min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
+}
+
+async fn wait_for_tunnel_process_connections(
+    driver: &Arc<Mutex<SplitTunnelDriver>>,
+    events: &[ProcessStartEvent],
+) -> Vec<(u32, String)> {
+    let deadline = Instant::now() + Duration::from_millis(ETW_CONNECTION_READY_TIMEOUT_MS);
+    let poll_interval = Duration::from_millis(ETW_CONNECTION_READY_POLL_MS);
+    loop {
+        if Instant::now() >= deadline {
+            let driver_guard = driver.lock().await;
+            return events
+                .iter()
+                .filter(|event| !driver_guard.has_cached_connection_for_pid(event.pid))
+                .map(|event| (event.pid, event.name.clone()))
+                .collect();
+        }
+
+        let mut driver_guard = driver.lock().await;
+        if let Err(e) = driver_guard.refresh_exclusions() {
+            log::warn!("V3: Refresh during ETW hold failed: {}", e);
+        }
+
+        let pending: Vec<(u32, String)> = events
+            .iter()
+            .filter(|event| !driver_guard.has_cached_connection_for_pid(event.pid))
+            .map(|event| (event.pid, event.name.clone()))
+            .collect();
+        drop(driver_guard);
+
+        if pending.is_empty() || Instant::now() >= deadline {
+            return pending;
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1568,6 +1606,7 @@ impl VpnConnection {
                         match event {
                             Some(first_event) => {
                                 let mut etw_events_received = false;
+                                let mut blocked_events: Vec<ProcessStartEvent> = Vec::new();
                                 let mut blocked_paths: Vec<String> = Vec::new();
 
                                 // Process the first event (if any) and drain remaining queued events.
@@ -1579,7 +1618,7 @@ impl VpnConnection {
                                     }
                                 }
 
-                                for event in pending_events {
+                                for event in &pending_events {
                                     log::info!(
                                         "V3 ETW: Detected {} (PID: {}) - blocking and registering",
                                         event.name,
@@ -1596,8 +1635,15 @@ impl VpnConnection {
                                                 e
                                             );
                                         } else {
+                                            blocked_events.push(event.clone());
                                             blocked_paths.push(event.image_path.clone());
                                         }
+                                    } else {
+                                        log::warn!(
+                                            "V3: Missing image path for {} (PID: {}), cannot apply WFP hold",
+                                            event.name,
+                                            event.pid
+                                        );
                                     }
 
                                     // STEP 2: Register with the driver's process cache (also wakes cache refresher)
@@ -1610,20 +1656,36 @@ impl VpnConnection {
                                 // CRITICAL: If we received ETW events, IMMEDIATELY refresh connection tables
                                 // before releasing the WFP block, to guarantee first-packet tunneling.
                                 if etw_events_received {
-                                    let mut driver_guard = driver.lock().await;
-                                    let refresh_ok = driver_guard.refresh_exclusions().is_ok();
-                                    drop(driver_guard);
-
-                                    if refresh_ok {
-                                        log::info!("V3 ETW: Immediate connection table refresh completed");
+                                    let pending_after_wait = if blocked_paths.is_empty() {
+                                        let mut driver_guard = driver.lock().await;
+                                        if let Err(e) = driver_guard.refresh_exclusions() {
+                                            log::warn!("V3: Immediate refresh after ETW failed: {}", e);
+                                        }
+                                        pending_events
+                                            .iter()
+                                            .filter(|event| !driver_guard.has_cached_connection_for_pid(event.pid))
+                                            .map(|event| (event.pid, event.name.clone()))
+                                            .collect::<Vec<_>>()
                                     } else {
-                                        log::warn!("V3: Immediate refresh after ETW failed");
+                                        wait_for_tunnel_process_connections(&driver, &blocked_events).await
+                                    };
+
+                                    if pending_after_wait.is_empty() {
+                                        log::info!("V3 ETW: Cached process endpoints detected before unblock");
+                                    } else if blocked_paths.is_empty() {
+                                        log::warn!(
+                                            "V3: No WFP hold available; proceeding after single refresh with pending {:?}",
+                                            pending_after_wait
+                                        );
+                                    } else {
+                                        log::warn!(
+                                            "V3: Releasing ETW hold without cached endpoints after {}ms for {:?}",
+                                            ETW_CONNECTION_READY_TIMEOUT_MS,
+                                            pending_after_wait
+                                        );
                                     }
 
-                                    // Short sleep to allow process to initialize sockets, then refresh again
-                                    tokio::time::sleep(Duration::from_millis(2)).await;
                                     let mut driver_guard = driver.lock().await;
-                                    let _ = driver_guard.refresh_exclusions();
                                     let running_processes = driver_guard.get_running_tunnel_processes();
                                     let running_names = dedupe_process_names(&running_processes);
                                     drop(driver_guard);

@@ -21,6 +21,7 @@
 //! - Administrator privileges (for kernel-level ETW provider)
 //! - Windows 10 or later
 
+use crate::process_names::{is_roblox_process_name, process_name_matches_alias};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::RwLock;
 use std::collections::HashSet;
@@ -352,14 +353,7 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
         // Check if this process is in our watch list
         let name_lower = event.name.to_lowercase();
         let watch_list = ctx.watch_list.read();
-
-        let should_notify = watch_list.iter().any(|app| {
-            // Use exact matching to avoid false positives
-            // e.g., "player.exe" should NOT match "playerconfig.exe"
-            let app_stem = app.trim_end_matches(".exe");
-            let name_stem = name_lower.trim_end_matches(".exe");
-            app_stem == name_stem
-        });
+        let should_notify = should_watch_process(&name_lower, &watch_list);
 
         if should_notify {
             log::info!(
@@ -371,6 +365,14 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
             let _ = ctx.sender.try_send(event);
         }
     }
+}
+
+fn should_watch_process(process_name_lower: &str, watch_list: &HashSet<String>) -> bool {
+    watch_list.iter().any(|watched_process| {
+        process_name_matches_alias(process_name_lower, watched_process)
+            || (is_roblox_process_name(process_name_lower)
+                && is_roblox_process_name(watched_process))
+    })
 }
 
 /// Parse process start event from EVENT_RECORD
@@ -488,6 +490,7 @@ fn get_process_name_by_pid(pid: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_process_start_event() {
@@ -500,5 +503,21 @@ mod tests {
         assert_eq!(event.pid, 1234);
         assert_eq!(event.name, "RobloxPlayerBeta.exe");
         assert!(event.image_path.contains("RobloxPlayerBeta.exe"));
+    }
+
+    #[test]
+    fn test_should_watch_process_matches_aliases() {
+        let watch_list: HashSet<String> =
+            ["robloxplayerbeta.exe".to_string(), "roblox".to_string()]
+                .into_iter()
+                .collect();
+
+        assert!(should_watch_process("robloxapp.exe", &watch_list));
+        assert!(should_watch_process(
+            "robloxplayerlauncher.exe",
+            &watch_list
+        ));
+        assert!(!should_watch_process("chrome.exe", &watch_list));
+        assert!(!should_watch_process("player.exe", &watch_list));
     }
 }
