@@ -384,6 +384,12 @@ pub struct ProcessSnapshot {
     pub tunnel_pids: HashSet<u32>,
     /// UDP local ports explicitly marked as tunnel-owned.
     pub explicit_tunnel_udp_ports: HashSet<u16>,
+    /// TCP local ports explicitly marked as tunnel-owned (for API tunneling).
+    ///
+    /// When API tunneling is enabled, TCP ports belonging to Roblox processes
+    /// are registered here so they persist across snapshot refreshes and
+    /// don't rely on stale connection-table lookups.
+    pub explicit_tunnel_tcp_ports: HashSet<u16>,
     /// Snapshot version (monotonically increasing)
     pub version: u64,
     /// Timestamp when snapshot was created
@@ -420,6 +426,7 @@ impl ProcessSnapshot {
             tunnel_apps,
             tunnel_pids: HashSet::new(),
             explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         }
@@ -453,6 +460,12 @@ impl ProcessSnapshot {
         api_tunneling: bool,
     ) -> bool {
         if protocol == Protocol::Udp && self.explicit_tunnel_udp_ports.contains(&local_port) {
+            return true;
+        }
+        if protocol == Protocol::Tcp
+            && api_tunneling
+            && self.explicit_tunnel_tcp_ports.contains(&local_port)
+        {
             return true;
         }
 
@@ -617,6 +630,8 @@ pub struct LockFreeProcessCache {
     tunnel_apps: HashSet<String>,
     /// UDP ports explicitly registered as tunnel-owned.
     explicit_tunnel_udp_ports: Mutex<HashSet<u16>>,
+    /// TCP ports explicitly registered as tunnel-owned (API tunneling).
+    explicit_tunnel_tcp_ports: Mutex<HashSet<u16>>,
 }
 
 impl LockFreeProcessCache {
@@ -630,6 +645,7 @@ impl LockFreeProcessCache {
             version: AtomicU64::new(0),
             tunnel_apps: apps,
             explicit_tunnel_udp_ports: Mutex::new(HashSet::new()),
+            explicit_tunnel_tcp_ports: Mutex::new(HashSet::new()),
         }
     }
 
@@ -678,12 +694,19 @@ impl LockFreeProcessCache {
             .map(|ports| ports.clone())
             .unwrap_or_default();
 
+        let explicit_tunnel_tcp_ports = self
+            .explicit_tunnel_tcp_ports
+            .lock()
+            .map(|ports| ports.clone())
+            .unwrap_or_default();
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections,
             pid_names: pid_names_lower,
             tunnel_apps: self.tunnel_apps.clone(),
             tunnel_pids,
             explicit_tunnel_udp_ports,
+            explicit_tunnel_tcp_ports,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -714,12 +737,19 @@ impl LockFreeProcessCache {
             .map(|ports| ports.clone())
             .unwrap_or_default();
 
+        let explicit_tunnel_tcp_ports = self
+            .explicit_tunnel_tcp_ports
+            .lock()
+            .map(|ports| ports.clone())
+            .unwrap_or_default();
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections: old_snap.connections.clone(),
             pid_names: old_snap.pid_names.clone(),
             tunnel_apps: self.tunnel_apps.clone(), // Use NEW tunnel_apps
             tunnel_pids,
             explicit_tunnel_udp_ports,
+            explicit_tunnel_tcp_ports,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -772,12 +802,19 @@ impl LockFreeProcessCache {
             .map(|ports| ports.clone())
             .unwrap_or_default();
 
+        let explicit_tunnel_tcp_ports = self
+            .explicit_tunnel_tcp_ports
+            .lock()
+            .map(|ports| ports.clone())
+            .unwrap_or_default();
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections: old_snap.connections.clone(),
             pid_names,
             tunnel_apps: self.tunnel_apps.clone(),
             tunnel_pids,
             explicit_tunnel_udp_ports,
+            explicit_tunnel_tcp_ports,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -812,12 +849,19 @@ impl LockFreeProcessCache {
         let old_snap = self.get_snapshot();
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
+        let explicit_tunnel_tcp_ports = self
+            .explicit_tunnel_tcp_ports
+            .lock()
+            .map(|ports| ports.clone())
+            .unwrap_or_default();
+
         let new_snapshot = Arc::new(ProcessSnapshot {
             connections: old_snap.connections.clone(),
             pid_names: old_snap.pid_names.clone(),
             tunnel_apps: self.tunnel_apps.clone(),
             tunnel_pids: old_snap.tunnel_pids.clone(),
             explicit_tunnel_udp_ports,
+            explicit_tunnel_tcp_ports,
             version,
             created_at: std::time::Instant::now(),
         });
@@ -828,6 +872,31 @@ impl LockFreeProcessCache {
             "Registered UDP source port {} for immediate tunneling",
             local_port
         );
+    }
+
+    /// Register TCP source ports belonging to tunnel processes for API tunneling.
+    ///
+    /// Called from the cache refresher when API tunneling is enabled.
+    /// Persists TCP ports across snapshot refreshes so they don't rely on
+    /// stale connection-table lookups.
+    pub fn register_tcp_ports(&self, ports: &[u16]) {
+        if ports.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.explicit_tunnel_tcp_ports.lock() {
+            let before = guard.len();
+            for &port in ports {
+                guard.insert(port);
+            }
+            let added = guard.len() - before;
+            if added > 0 {
+                log::info!(
+                    "Registered {} new TCP port(s) for API tunneling ({} total)",
+                    added,
+                    guard.len()
+                );
+            }
+        }
     }
 }
 

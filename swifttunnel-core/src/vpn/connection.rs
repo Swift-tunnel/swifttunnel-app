@@ -558,6 +558,9 @@ pub enum ConnectionState {
         relay_auth_mode: String,
         split_tunnel_active: bool,
         tunneled_processes: Vec<String>,
+        /// Relay health status for UI display ("healthy", "stale", "dead").
+        /// None means healthy (default). Only set when degraded.
+        relay_status: Option<String>,
     },
     Disconnecting,
     Error(String),
@@ -881,6 +884,7 @@ impl VpnConnection {
             relay_auth_mode,
             split_tunnel_active,
             tunneled_processes,
+            relay_status: None,
         })
         .await;
 
@@ -1250,6 +1254,7 @@ impl VpnConnection {
         );
 
         let relay_for_lookup = Arc::clone(&relay);
+        let relay_for_health = Arc::clone(&relay);
         driver.set_relay_context(relay);
         log::info!("V3: UDP relay context set (auth mode: {})", relay_auth_mode);
         relay_for_lookup.set_ping_enabled(true);
@@ -1580,6 +1585,7 @@ impl VpnConnection {
         let state_handle = Arc::clone(&self.state);
         let auto_router_for_monitor = self.auto_router.clone();
         let process_performance_for_monitor = self.process_performance_manager.clone();
+        let relay_health_monitor = relay_for_health;
 
         tokio::spawn(async move {
             log::info!("V3: Process monitor started");
@@ -1772,6 +1778,35 @@ impl VpnConnection {
                                         current_auto_region
                                     );
                                     *server_region = current_auto_region;
+                                }
+                            }
+                        }
+
+                        // Check relay health and update connection state for UI visibility
+                        {
+                            use super::udp_relay::RelayHealthState;
+                            let health = relay_health_monitor.relay_health();
+                            let new_status = match health {
+                                RelayHealthState::Healthy => None,
+                                RelayHealthState::NoTrafficYet => None,
+                                RelayHealthState::Stale => Some("stale".to_string()),
+                                RelayHealthState::Dead => Some("dead".to_string()),
+                            };
+                            let mut state = state_handle.lock().await;
+                            if let ConnectionState::Connected { ref mut relay_status, .. } = *state {
+                                if *relay_status != new_status {
+                                    match &new_status {
+                                        Some(status) => log::warn!(
+                                            "V3: Relay health degraded to '{}' - updating UI state",
+                                            status
+                                        ),
+                                        None => {
+                                            if relay_status.is_some() {
+                                                log::info!("V3: Relay health recovered to healthy");
+                                            }
+                                        }
+                                    }
+                                    *relay_status = new_status;
                                 }
                             }
                         }
@@ -2039,6 +2074,7 @@ mod tests {
             relay_auth_mode: "authenticated".to_string(),
             split_tunnel_active: true,
             tunneled_processes: vec!["RobloxPlayerBeta.exe".to_string()],
+            relay_status: None,
         };
         assert!(state.is_connected());
     }
@@ -2072,6 +2108,7 @@ mod tests {
             relay_auth_mode: "legacy_fallback".to_string(),
             split_tunnel_active: false,
             tunneled_processes: vec![],
+            relay_status: None,
         };
         assert!(!connected.is_connecting());
     }
@@ -2107,6 +2144,7 @@ mod tests {
             relay_auth_mode: "legacy_fallback".to_string(),
             split_tunnel_active: false,
             tunneled_processes: vec![],
+            relay_status: None,
         };
         assert_eq!(connected.error_message(), None);
     }
@@ -2139,6 +2177,7 @@ mod tests {
             relay_auth_mode: "authenticated".to_string(),
             split_tunnel_active: true,
             tunneled_processes: vec![],
+            relay_status: None,
         };
         assert_eq!(connected.status_text(), "Connected");
     }

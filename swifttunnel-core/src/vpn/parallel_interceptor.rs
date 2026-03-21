@@ -3307,12 +3307,14 @@ impl ParallelInterceptor {
         let refresher_cache = Arc::clone(&self.process_cache);
         let refresh_now = Arc::clone(&self.refresh_now_flag);
         let refresh_condvar = Arc::clone(&self.refresh_condvar);
+        let refresher_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
         self.refresher_handle = Some(thread::spawn(move || {
             run_cache_refresher(
                 refresher_cache,
                 refresher_stop,
                 refresh_now,
                 refresh_condvar,
+                refresher_api_tunneling,
             );
         }));
 
@@ -4330,6 +4332,12 @@ fn run_packet_worker(
                                     e
                                 );
                             }
+                            // Escalate on high failure rate: if >50% of last 100 packets failed,
+                            // mark relay as stale so connection manager can take action.
+                            let total = relay_success + relay_fail;
+                            if total >= 100 && relay_fail * 2 > total {
+                                relay.check_health();
+                            }
                         }
                     }
                 } else {
@@ -4423,6 +4431,7 @@ fn run_cache_refresher(
     stop_flag: Arc<AtomicBool>,
     refresh_now: Arc<AtomicBool>,
     refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    api_tunneling_enabled: Arc<AtomicBool>,
 ) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
@@ -4665,6 +4674,23 @@ fn run_cache_refresher(
 
         // Update cache atomically
         cache.update(connections.clone(), pid_names.clone());
+
+        // Register TCP ports from tunnel processes for API tunneling.
+        // This ensures that TCP connections from Roblox are recognized even when
+        // the process snapshot is stale, by persisting their source ports.
+        if api_tunneling_enabled.load(Ordering::Relaxed) {
+            let snap = cache.get_snapshot();
+            let tcp_ports: Vec<u16> = connections
+                .iter()
+                .filter(|(key, pid)| {
+                    key.protocol == Protocol::Tcp && snap.tunnel_pids.contains(pid)
+                })
+                .map(|(key, _)| key.local_port)
+                .collect();
+            if !tcp_ports.is_empty() {
+                cache.register_tcp_ports(&tcp_ports);
+            }
+        }
 
         // Log tunnel app detection periodically
         refresh_count += 1;
@@ -6184,17 +6210,42 @@ fn run_v3_inbound_receiver(
             } else {
                 0
             };
+            // Evaluate relay health (updates shared atomic state)
+            relay.check_health();
+            let health = relay.relay_health();
+
             log::info!(
-                "V3 inbound health: {}s uptime, {} recv, {} injected, {} B/s avg, {} errors",
+                "V3 inbound health: {}s uptime, {} recv, {} injected, {} B/s avg, {} errors, health={}",
                 uptime_secs,
                 packets_received,
                 packets_injected,
                 rx_rate,
-                inject_errors
+                inject_errors,
+                health.as_str()
             );
+
+            // === STALE TRAFFIC DETECTION ===
+            // If relay was previously working but stopped sending traffic,
+            // increase keepalive frequency to recover the connection faster.
+            if let Some(last) = last_packet_time {
+                let silence_secs = now.duration_since(last).as_secs();
+                if silence_secs >= 30 && now.duration_since(last_keepalive).as_secs() >= 5 {
+                    // Send keepalive bursts every 5s (instead of normal 15s) while stale
+                    last_keepalive = now;
+                    if let Err(e) = relay.send_keepalive_burst() {
+                        log::warn!("V3 inbound receiver: stale keepalive burst failed: {}", e);
+                    } else {
+                        log::warn!(
+                            "V3 inbound receiver: {}s silence, sent recovery keepalive burst (health={})",
+                            silence_secs,
+                            health.as_str()
+                        );
+                    }
+                }
+            }
         }
 
-        // === KEEPALIVE (every 20 seconds) ===
+        // === KEEPALIVE (every 15 seconds) ===
         if now.duration_since(last_keepalive).as_secs() >= KEEPALIVE_INTERVAL_SECS {
             last_keepalive = now;
             if let Err(e) = relay.send_keepalive() {

@@ -537,6 +537,7 @@ mod tests {
                 relay_auth_mode: "preflight-ok".to_string(),
                 split_tunnel_active: true,
                 tunneled_processes: vec!["robloxplayerbeta.exe".to_string()],
+                relay_status: None,
             },
             split_tunnel_diag: Some(swifttunnel_core::vpn::SplitTunnelDiagnostics {
                 adapter_name: Some("Ethernet".to_string()),
