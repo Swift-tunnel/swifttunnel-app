@@ -15,8 +15,8 @@ use crossbeam_channel as channel;
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Session ID length in bytes
