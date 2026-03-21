@@ -880,21 +880,14 @@ impl LockFreeProcessCache {
     /// Persists TCP ports across snapshot refreshes so they don't rely on
     /// stale connection-table lookups.
     pub fn register_tcp_ports(&self, ports: &[u16]) {
-        if ports.is_empty() {
-            return;
-        }
         if let Ok(mut guard) = self.explicit_tunnel_tcp_ports.lock() {
-            let before = guard.len();
-            for &port in ports {
-                guard.insert(port);
-            }
-            let added = guard.len() - before;
-            if added > 0 {
+            let new_set: HashSet<u16> = ports.iter().copied().collect();
+            if *guard != new_set {
                 log::info!(
-                    "Registered {} new TCP port(s) for API tunneling ({} total)",
-                    added,
-                    guard.len()
+                    "Updated TCP ports for API tunneling: {} port(s)",
+                    new_set.len()
                 );
+                *guard = new_set;
             }
         }
     }

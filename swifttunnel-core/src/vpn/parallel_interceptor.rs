@@ -4334,9 +4334,14 @@ fn run_packet_worker(
                             }
                             // Escalate on high failure rate: if >50% of last 100 packets failed,
                             // mark relay as stale so connection manager can take action.
+                            // Counters reset after each window to keep the check meaningful.
                             let total = relay_success + relay_fail;
-                            if total >= 100 && relay_fail * 2 > total {
-                                relay.check_health();
+                            if total >= 100 {
+                                if relay_fail * 2 > total {
+                                    relay.check_health();
+                                }
+                                relay_success = 0;
+                                relay_fail = 0;
                             }
                         }
                     }

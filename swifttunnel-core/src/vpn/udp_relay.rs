@@ -1131,6 +1131,8 @@ impl UdpRelay {
                 }
             }
         }
+        // Count burst as unanswered keepalive so Dead state is reachable
+        self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = self.last_activity.lock() {
             *guard = Instant::now();
         }
