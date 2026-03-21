@@ -7453,6 +7453,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7491,6 +7492,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7526,6 +7528,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7561,6 +7564,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7596,6 +7600,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7631,6 +7636,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7666,6 +7672,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7709,6 +7716,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7875,6 +7883,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7989,6 +7998,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8023,6 +8033,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8092,6 +8103,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8168,6 +8180,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8197,6 +8210,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8226,6 +8240,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8258,6 +8273,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8474,6 +8490,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8514,6 +8531,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids: std::collections::HashSet::new(),
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8561,6 +8579,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8605,6 +8624,7 @@ mod tests {
             tunnel_apps: std::collections::HashSet::new(),
             tunnel_pids,
             explicit_tunnel_udp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
