@@ -462,16 +462,19 @@ impl ProcessSnapshot {
         if protocol == Protocol::Udp && self.explicit_tunnel_udp_ports.contains(&local_port) {
             return true;
         }
-        if protocol == Protocol::Tcp
-            && api_tunneling
-            && self.explicit_tunnel_tcp_ports.contains(&local_port)
-        {
-            return true;
-        }
-
         let protocol_ok = protocol == Protocol::Udp || (protocol == Protocol::Tcp && api_tunneling);
         if !protocol_ok {
             return false;
+        }
+
+        // For TCP ports in the explicit set, still verify PID ownership to avoid
+        // misrouting traffic from unrelated processes that reuse the same port.
+        if protocol == Protocol::Tcp && self.explicit_tunnel_tcp_ports.contains(&local_port) {
+            return self.connections.iter().any(|(key, pid)| {
+                key.protocol == Protocol::Tcp
+                    && key.local_port == local_port
+                    && self.tunnel_pids.contains(pid)
+            });
         }
 
         self.connections.iter().any(|(key, pid)| {
