@@ -16,7 +16,7 @@ use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Session ID length in bytes
@@ -100,6 +100,49 @@ const PING_SAMPLE_WINDOW: usize = 1024;
 /// Grace period after relay switch: accept packets from BOTH old and new relay.
 /// This eliminates the inbound blackout while the new relay establishes session.
 const RELAY_SWITCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
+
+/// After receiving traffic, if no inbound packet arrives for this long, declare relay stale.
+const RELAY_STALE_THRESHOLD: Duration = Duration::from_secs(30);
+/// After this many unanswered keepalives (~60s at 15s interval), declare relay dead.
+const RELAY_DEAD_KEEPALIVE_THRESHOLD: u32 = 4;
+
+/// Relay health states visible to the connection manager and UI.
+///
+/// Tracks the liveness of the relay connection so the system can detect
+/// silent disconnects and take corrective action.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayHealthState {
+    /// Relay is actively receiving traffic.
+    Healthy = 0,
+    /// Connected but no inbound packets received yet.
+    NoTrafficYet = 1,
+    /// Was receiving traffic, but stopped for >30s.
+    Stale = 2,
+    /// No response to multiple consecutive keepalives (~60s).
+    Dead = 3,
+}
+
+impl RelayHealthState {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Healthy,
+            1 => Self::NoTrafficYet,
+            2 => Self::Stale,
+            3 => Self::Dead,
+            _ => Self::NoTrafficYet,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::NoTrafficYet => "no_traffic_yet",
+            Self::Stale => "stale",
+            Self::Dead => "dead",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RelayPathContext {
@@ -333,6 +376,12 @@ pub struct UdpRelay {
     outbound_pool: Arc<OutboundPool>,
     outbound_tx: channel::Sender<OutboundJob>,
     ping: Arc<PingMetrics>,
+    /// Relay health state — shared with connection manager for silent disconnect detection.
+    relay_health: Arc<AtomicU8>,
+    /// Consecutive keepalives sent without receiving any inbound traffic.
+    unanswered_keepalives: AtomicU32,
+    /// Last time an inbound data packet was received (not control frames).
+    last_receive_time: std::sync::Mutex<Option<Instant>>,
 }
 
 impl UdpRelay {
@@ -606,6 +655,9 @@ impl UdpRelay {
             outbound_pool,
             outbound_tx,
             ping,
+            relay_health: Arc::new(AtomicU8::new(RelayHealthState::NoTrafficYet as u8)),
+            unanswered_keepalives: AtomicU32::new(0),
+            last_receive_time: std::sync::Mutex::new(None),
         })
     }
 
@@ -889,7 +941,14 @@ impl UdpRelay {
         let total_len = SESSION_ID_LEN + payload.len();
 
         let Some(buf_idx) = self.outbound_pool.try_acquire() else {
-            self.outbound_drops.fetch_add(1, Ordering::Relaxed);
+            let drops = self.outbound_drops.fetch_add(1, Ordering::Relaxed) + 1;
+            if drops <= 5 || drops.is_power_of_two() {
+                log::warn!(
+                    "UDP Relay: Outbound pool exhausted, dropping packet (drop #{}, {} bytes)",
+                    drops,
+                    payload.len()
+                );
+            }
             return Ok(0);
         };
 
@@ -905,7 +964,14 @@ impl UdpRelay {
             len: total_len,
         };
         if self.outbound_tx.try_send(job).is_err() {
-            self.outbound_drops.fetch_add(1, Ordering::Relaxed);
+            let drops = self.outbound_drops.fetch_add(1, Ordering::Relaxed) + 1;
+            if drops <= 5 || drops.is_power_of_two() {
+                log::warn!(
+                    "UDP Relay: Outbound send queue full, dropping packet (drop #{}, {} bytes)",
+                    drops,
+                    payload.len()
+                );
+            }
             self.outbound_pool.release(buf_idx);
             return Ok(0);
         }
@@ -1010,8 +1076,16 @@ impl UdpRelay {
 
                 buffer[..payload_len].copy_from_slice(&recv_buf[SESSION_ID_LEN..len]);
                 self.packets_received.fetch_add(1, Ordering::Relaxed);
+                let now = Instant::now();
                 if let Ok(mut guard) = self.last_activity.lock() {
-                    *guard = Instant::now();
+                    *guard = now;
+                }
+                // Mark relay as healthy on every successful data packet
+                self.relay_health
+                    .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
+                self.unanswered_keepalives.store(0, Ordering::Relaxed);
+                if let Ok(mut guard) = self.last_receive_time.lock() {
+                    *guard = Some(now);
                 }
 
                 Ok(Some(payload_len))
@@ -1057,6 +1131,8 @@ impl UdpRelay {
                 }
             }
         }
+        // Count burst as unanswered keepalive so Dead state is reachable
+        self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = self.last_activity.lock() {
             *guard = Instant::now();
         }
@@ -1068,7 +1144,10 @@ impl UdpRelay {
         Ok(())
     }
 
-    /// Send keepalive to maintain NAT binding
+    /// Send keepalive to maintain NAT binding.
+    ///
+    /// Also increments the unanswered keepalive counter. The counter is reset
+    /// to zero whenever an inbound data packet is received (in `receive_inbound`).
     pub fn send_keepalive(&self) -> Result<()> {
         let should_send = self
             .last_activity
@@ -1085,9 +1164,70 @@ impl UdpRelay {
             if let Ok(mut guard) = self.last_activity.lock() {
                 *guard = Instant::now();
             }
+            self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
             log::trace!("UDP Relay: Sent keepalive");
         }
         Ok(())
+    }
+
+    /// Get the current relay health state.
+    pub fn relay_health(&self) -> RelayHealthState {
+        RelayHealthState::from_u8(self.relay_health.load(Ordering::Relaxed))
+    }
+
+    /// Get an Arc to the relay health atomic for sharing with the connection manager.
+    pub fn relay_health_arc(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.relay_health)
+    }
+
+    /// Evaluate relay health based on inbound traffic silence and unanswered keepalives.
+    ///
+    /// Called periodically from the inbound receiver health check loop.
+    /// Updates the health state to Stale or Dead when the relay stops responding.
+    pub fn check_health(&self) {
+        let has_ever_received = self
+            .last_receive_time
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+
+        if !has_ever_received {
+            // Never received traffic - stay at NoTrafficYet (initial connect phase)
+            return;
+        }
+
+        let silence = self
+            .last_receive_time
+            .lock()
+            .map(|guard| guard.map(|t| t.elapsed()).unwrap_or(Duration::ZERO))
+            .unwrap_or(Duration::ZERO);
+
+        let unanswered = self.unanswered_keepalives.load(Ordering::Relaxed);
+        let current = self.relay_health();
+
+        if unanswered >= RELAY_DEAD_KEEPALIVE_THRESHOLD {
+            if current != RelayHealthState::Dead {
+                self.relay_health
+                    .store(RelayHealthState::Dead as u8, Ordering::Relaxed);
+                log::error!(
+                    "UDP Relay: Health -> DEAD ({} unanswered keepalives, {}s silence, session {:016x})",
+                    unanswered,
+                    silence.as_secs(),
+                    self.session_id_u64()
+                );
+            }
+        } else if silence >= RELAY_STALE_THRESHOLD {
+            if current == RelayHealthState::Healthy {
+                self.relay_health
+                    .store(RelayHealthState::Stale as u8, Ordering::Relaxed);
+                log::warn!(
+                    "UDP Relay: Health -> STALE ({}s since last inbound packet, {} unanswered keepalives, session {:016x})",
+                    silence.as_secs(),
+                    unanswered,
+                    self.session_id_u64()
+                );
+            }
+        }
     }
 
     /// Get statistics
@@ -1103,7 +1243,7 @@ impl UdpRelay {
         self.stop_flag.store(true, Ordering::Release);
         let ping = self.ping.snapshot();
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, send_errors: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, ping: {}/{} {:.1}% loss)",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, send_errors: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, health: {}, ping: {}/{} {:.1}% loss)",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
@@ -1112,6 +1252,7 @@ impl UdpRelay {
             self.send_errors.load(Ordering::Relaxed),
             self.point_to_point_mtu_clamp_active.load(Ordering::Acquire),
             self.point_to_point_mtu_clamp_events.load(Ordering::Relaxed),
+            self.relay_health().as_str(),
             ping.sent,
             ping.received,
             ping.loss_pct,
@@ -1141,6 +1282,10 @@ impl UdpRelay {
         self.relay_addr.store(Arc::new(new_addr));
         self.last_mtu_refresh_ms.store(0, Ordering::Relaxed);
         self.maybe_refresh_relay_path_mtu(new_addr);
+        // Reset health state for the new relay - give it a clean slate
+        self.relay_health
+            .store(RelayHealthState::NoTrafficYet as u8, Ordering::Relaxed);
+        self.unanswered_keepalives.store(0, Ordering::Relaxed);
         log::info!(
             "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
             old_addr,

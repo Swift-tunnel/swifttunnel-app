@@ -20,6 +20,8 @@ pub struct VpnStateResponse {
     pub split_tunnel_active: bool,
     pub tunneled_processes: Vec<String>,
     pub error: Option<String>,
+    /// Relay health status: None/absent = healthy, "stale" = no traffic 30s+, "dead" = no response 60s+
+    pub relay_status: Option<String>,
 }
 
 fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnStateResponse {
@@ -33,6 +35,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             split_tunnel_active: false,
             tunneled_processes: vec![],
             error: None,
+            relay_status: None,
         },
         swifttunnel_core::vpn::ConnectionState::FetchingConfig => VpnStateResponse {
             state: "fetching_config".to_string(),
@@ -43,6 +46,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             split_tunnel_active: false,
             tunneled_processes: vec![],
             error: None,
+            relay_status: None,
         },
         swifttunnel_core::vpn::ConnectionState::ConfiguringSplitTunnel => VpnStateResponse {
             state: "configuring_split_tunnel".to_string(),
@@ -53,6 +57,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             split_tunnel_active: false,
             tunneled_processes: vec![],
             error: None,
+            relay_status: None,
         },
         swifttunnel_core::vpn::ConnectionState::Connected {
             server_region,
@@ -61,6 +66,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             relay_auth_mode,
             split_tunnel_active,
             tunneled_processes,
+            relay_status,
             ..
         } => VpnStateResponse {
             state: "connected".to_string(),
@@ -71,6 +77,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             split_tunnel_active,
             tunneled_processes,
             error: None,
+            relay_status,
         },
         swifttunnel_core::vpn::ConnectionState::Disconnecting => VpnStateResponse {
             state: "disconnecting".to_string(),
@@ -81,6 +88,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             split_tunnel_active: false,
             tunneled_processes: vec![],
             error: None,
+            relay_status: None,
         },
         swifttunnel_core::vpn::ConnectionState::Error(msg) => VpnStateResponse {
             state: "error".to_string(),
@@ -91,6 +99,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             split_tunnel_active: false,
             tunneled_processes: vec![],
             error: Some(msg),
+            relay_status: None,
         },
     }
 }
@@ -733,6 +742,7 @@ mod tests {
             relay_auth_mode: "authenticated".to_string(),
             split_tunnel_active: true,
             tunneled_processes: vec!["RobloxPlayerBeta.exe".to_string()],
+            relay_status: None,
         };
 
         assert_eq!(
@@ -762,6 +772,7 @@ mod tests {
             relay_auth_mode: "authenticated".to_string(),
             split_tunnel_active: true,
             tunneled_processes: vec![],
+            relay_status: None,
         };
 
         assert_eq!(
