@@ -3307,14 +3307,12 @@ impl ParallelInterceptor {
         let refresher_cache = Arc::clone(&self.process_cache);
         let refresh_now = Arc::clone(&self.refresh_now_flag);
         let refresh_condvar = Arc::clone(&self.refresh_condvar);
-        let refresher_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
         self.refresher_handle = Some(thread::spawn(move || {
             run_cache_refresher(
                 refresher_cache,
                 refresher_stop,
                 refresh_now,
                 refresh_condvar,
-                refresher_api_tunneling,
             );
         }));
 
@@ -4436,7 +4434,6 @@ fn run_cache_refresher(
     stop_flag: Arc<AtomicBool>,
     refresh_now: Arc<AtomicBool>,
     refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-    api_tunneling_enabled: Arc<AtomicBool>,
 ) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
@@ -4679,25 +4676,9 @@ fn run_cache_refresher(
             }
         }
 
-        // Update cache atomically
-        cache.update(connections.clone(), pid_names.clone());
-
-        // Register TCP ports from tunnel processes for API tunneling.
-        // This ensures that TCP connections from Roblox are recognized even when
-        // the process snapshot is stale, by persisting their source ports.
-        if api_tunneling_enabled.load(Ordering::Relaxed) {
-            let snap = cache.get_snapshot();
-            let tcp_ports: Vec<u16> = connections
-                .iter()
-                .filter(|(key, pid)| {
-                    key.protocol == Protocol::Tcp && snap.tunnel_pids.contains(pid)
-                })
-                .map(|(key, _)| key.local_port)
-                .collect();
-            if !tcp_ports.is_empty() {
-                cache.register_tcp_ports(&tcp_ports);
-            }
-        }
+        // Update cache atomically. The snapshot precomputes tunnel-owned source ports
+        // so readers don't need to linearly scan the connection map on a miss.
+        cache.update(connections, pid_names);
 
         // Log tunnel app detection periodically
         refresh_count += 1;
@@ -4705,9 +4686,10 @@ fn run_cache_refresher(
             let snap = cache.get_snapshot();
 
             // Count connections for tunnel PIDs
-            let tunnel_connections: Vec<_> = connections
+            let tunnel_connections: Vec<_> = snap
+                .connections
                 .iter()
-                .filter(|(_, pid)| tunnel_pids_found.iter().any(|(tp, _)| tp == *pid))
+                .filter(|(_, pid)| snap.tunnel_pids.contains(pid))
                 .collect();
 
             if !tunnel_pids_found.is_empty() || tunnel_connections.len() > 0 {
@@ -7459,6 +7441,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: [src_port].into_iter().collect(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7498,6 +7482,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: [src_port].into_iter().collect(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7534,6 +7520,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7570,6 +7558,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7606,6 +7596,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7642,6 +7634,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7678,6 +7672,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7722,6 +7718,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7889,6 +7887,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8004,6 +8004,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8039,6 +8041,8 @@ mod tests {
             tunnel_pids: HashSet::new(),
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8109,6 +8113,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8186,6 +8192,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8216,6 +8224,8 @@ mod tests {
             tunnel_pids: HashSet::new(),
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8246,6 +8256,8 @@ mod tests {
             tunnel_pids: HashSet::new(),
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8279,6 +8291,8 @@ mod tests {
             tunnel_pids: HashSet::new(),
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8496,6 +8510,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8537,6 +8553,8 @@ mod tests {
             tunnel_pids: HashSet::new(),
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8585,6 +8603,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8630,6 +8650,8 @@ mod tests {
             tunnel_pids,
             explicit_tunnel_udp_ports: HashSet::new(),
             explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
