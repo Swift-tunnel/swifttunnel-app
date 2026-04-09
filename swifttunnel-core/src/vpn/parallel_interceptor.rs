@@ -4456,10 +4456,6 @@ fn run_cache_refresher(
     let mut refresh_count = 0u64;
     let mut first_run = true;
 
-    // OPTIMIZATION: Reuse HashMaps instead of recreating every iteration
-    let mut connections: ahash::AHashMap<ConnectionKey, u32> = ahash::AHashMap::with_capacity(2048);
-    let mut pid_names: ahash::AHashMap<u32, String> = ahash::AHashMap::with_capacity(512);
-
     loop {
         if stop_flag.load(Ordering::Relaxed) {
             break;
@@ -4502,9 +4498,8 @@ fn run_cache_refresher(
             }
         }
 
-        // OPTIMIZATION: Clear and reuse instead of reallocating
-        connections.clear();
-        pid_names.clear();
+        let mut connections: ahash::AHashMap<ConnectionKey, u32> = ahash::AHashMap::with_capacity(2048);
+        let mut pid_names: ahash::AHashMap<u32, String> = ahash::AHashMap::with_capacity(512);
 
         // Get TCP table
         unsafe {

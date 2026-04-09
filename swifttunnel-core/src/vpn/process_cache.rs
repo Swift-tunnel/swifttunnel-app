@@ -20,7 +20,7 @@ use arc_swap::ArcSwap;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -654,18 +654,8 @@ pub struct LockFreeProcessCache {
 
 impl LockFreeProcessCache {
     fn clone_explicit_ports(&self) -> (AHashSet<u16>, AHashSet<u16>) {
-        let explicit_tunnel_udp_ports = self
-            .explicit_tunnel_udp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
-
-        let explicit_tunnel_tcp_ports = self
-            .explicit_tunnel_tcp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
-
+        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
+        let explicit_tunnel_tcp_ports = self.explicit_tunnel_tcp_ports.lock().clone();
         (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports)
     }
 
@@ -856,28 +846,18 @@ impl LockFreeProcessCache {
     /// This is used by the Windows testbench helper so packet routing does not depend
     /// on connection-table timing races for short-lived probe processes.
     pub fn register_udp_port_immediate(&self, local_port: u16) {
-        let explicit_tunnel_udp_ports = match self.explicit_tunnel_udp_ports.lock() {
-            Ok(mut ports) => {
-                if !ports.insert(local_port) {
-                    return;
-                }
-                ports.clone()
+        let explicit_tunnel_udp_ports = {
+            let mut ports = self.explicit_tunnel_udp_ports.lock();
+            if !ports.insert(local_port) {
+                return;
             }
-            Err(_) => {
-                let mut ports = AHashSet::new();
-                ports.insert(local_port);
-                ports
-            }
+            ports.clone()
         };
 
         let old_snap = self.get_snapshot();
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
-        let explicit_tunnel_tcp_ports = self
-            .explicit_tunnel_tcp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
+        let explicit_tunnel_tcp_ports = self.explicit_tunnel_tcp_ports.lock().clone();
 
         let new_snapshot = self.snapshot_from_parts(
             old_snap.connections.clone(),
@@ -901,15 +881,14 @@ impl LockFreeProcessCache {
     /// Persists TCP ports across snapshot refreshes so they don't rely on
     /// stale connection-table lookups.
     pub fn register_tcp_ports(&self, ports: &[u16]) {
-        if let Ok(mut guard) = self.explicit_tunnel_tcp_ports.lock() {
-            let new_set: AHashSet<u16> = ports.iter().copied().collect();
-            if *guard != new_set {
-                log::info!(
-                    "Updated TCP ports for API tunneling: {} port(s)",
-                    new_set.len()
-                );
-                *guard = new_set;
-            }
+        let mut guard = self.explicit_tunnel_tcp_ports.lock();
+        let new_set: AHashSet<u16> = ports.iter().copied().collect();
+        if *guard != new_set {
+            log::info!(
+                "Updated TCP ports for API tunneling: {} port(s)",
+                new_set.len()
+            );
+            *guard = new_set;
         }
     }
 }
