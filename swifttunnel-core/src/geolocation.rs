@@ -485,7 +485,7 @@ async fn fetch_ipinfo(ip: Ipv4Addr) -> Option<IpInfoResponse> {
     // Check cache for a previously fetched location string
     let cached_location = {
         let cache = get_cache();
-        cache.lock().ok().and_then(|c| c.get(&ip).cloned())
+        cache.lock().get(&ip).cloned()
     };
 
     if let Some(loc) = cached_location {
