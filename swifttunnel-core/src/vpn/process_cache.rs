@@ -906,6 +906,7 @@ mod tests {
     use super::*;
     // Tests use AHashMap/AHashSet to match the production ProcessSnapshot types
     use ahash::AHashMap as HashMap;
+    use ahash::AHashSet as HashSet;
 
     #[test]
     fn test_lock_free_snapshot() {
