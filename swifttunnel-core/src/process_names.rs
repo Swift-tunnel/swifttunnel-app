@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 pub const ROBLOX_PROCESS_NAMES: &[&str] = &[
     "robloxplayerbeta.exe",
     "robloxplayer.exe",
@@ -44,12 +42,12 @@ pub fn process_name_matches_tunnel_app(process_name_lower: &str, tunnel_app_lowe
             && is_roblox_process_name_lowercase(tunnel_app_lower))
 }
 
-pub fn process_name_matches_any_tunnel_app(
+pub fn process_name_matches_any_tunnel_app<'a>(
     process_name_lower: &str,
-    tunnel_apps_lower: &HashSet<String>,
+    tunnel_apps_lower: impl IntoIterator<Item = &'a String>,
 ) -> bool {
     tunnel_apps_lower
-        .iter()
+        .into_iter()
         .any(|app| process_name_matches_tunnel_app(process_name_lower, app))
 }
 

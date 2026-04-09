@@ -15,6 +15,7 @@
 
 use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
 use crate::process_names::process_name_matches_any_tunnel_app;
+use ahash::{AHashMap, AHashSet};
 use arc_swap::ArcSwap;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
@@ -375,21 +376,22 @@ fn lookup_connection_pid(
 #[derive(Clone)]
 pub struct ProcessSnapshot {
     /// Connection cache: (local_ip, local_port, protocol) → PID
-    pub connections: HashMap<ConnectionKey, u32>,
+    /// Uses ahash for faster lookups on the packet hot path (~2-5x vs SipHash)
+    pub connections: AHashMap<ConnectionKey, u32>,
     /// PID → process name (lowercase)
-    pub pid_names: HashMap<u32, String>,
+    pub pid_names: AHashMap<u32, String>,
     /// Apps that should be tunneled (lowercase)
-    pub tunnel_apps: HashSet<String>,
+    pub tunnel_apps: AHashSet<String>,
     /// PIDs that belong to a tunnel app (precomputed from `pid_names` + `tunnel_apps`)
-    pub tunnel_pids: HashSet<u32>,
+    pub tunnel_pids: AHashSet<u32>,
     /// UDP local ports explicitly marked as tunnel-owned.
-    pub explicit_tunnel_udp_ports: HashSet<u16>,
+    pub explicit_tunnel_udp_ports: AHashSet<u16>,
     /// TCP local ports explicitly marked as tunnel-owned (for API tunneling).
     ///
     /// When API tunneling is enabled, TCP ports belonging to Roblox processes
     /// are registered here so they persist across snapshot refreshes and
     /// don't rely on stale connection-table lookups.
-    pub explicit_tunnel_tcp_ports: HashSet<u16>,
+    pub explicit_tunnel_tcp_ports: AHashSet<u16>,
     /// Snapshot version (monotonically increasing)
     pub version: u64,
     /// Timestamp when snapshot was created
@@ -398,10 +400,10 @@ pub struct ProcessSnapshot {
 
 impl ProcessSnapshot {
     fn compute_tunnel_pids(
-        pid_names: &HashMap<u32, String>,
-        tunnel_apps: &HashSet<String>,
-    ) -> HashSet<u32> {
-        let mut tunnel_pids = HashSet::new();
+        pid_names: &AHashMap<u32, String>,
+        tunnel_apps: &AHashSet<String>,
+    ) -> AHashSet<u32> {
+        let mut tunnel_pids = AHashSet::new();
 
         for (&pid, name) in pid_names {
             // Exact match - O(1) HashSet lookup
@@ -419,14 +421,14 @@ impl ProcessSnapshot {
     }
 
     /// Create empty snapshot
-    pub fn empty(tunnel_apps: HashSet<String>) -> Self {
+    pub fn empty(tunnel_apps: AHashSet<String>) -> Self {
         Self {
-            connections: HashMap::new(),
-            pid_names: HashMap::new(),
+            connections: AHashMap::new(),
+            pid_names: AHashMap::new(),
             tunnel_apps,
-            tunnel_pids: HashSet::new(),
-            explicit_tunnel_udp_ports: HashSet::new(),
-            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_pids: AHashSet::new(),
+            explicit_tunnel_udp_ports: AHashSet::new(),
+            explicit_tunnel_tcp_ports: AHashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         }
@@ -630,25 +632,25 @@ pub struct LockFreeProcessCache {
     /// Snapshot version counter
     version: AtomicU64,
     /// Apps to tunnel
-    tunnel_apps: HashSet<String>,
+    tunnel_apps: AHashSet<String>,
     /// UDP ports explicitly registered as tunnel-owned.
-    explicit_tunnel_udp_ports: Mutex<HashSet<u16>>,
+    explicit_tunnel_udp_ports: Mutex<AHashSet<u16>>,
     /// TCP ports explicitly registered as tunnel-owned (API tunneling).
-    explicit_tunnel_tcp_ports: Mutex<HashSet<u16>>,
+    explicit_tunnel_tcp_ports: Mutex<AHashSet<u16>>,
 }
 
 impl LockFreeProcessCache {
     /// Create new lock-free cache
     pub fn new(tunnel_apps: Vec<String>) -> Self {
-        let apps: HashSet<String> = tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect();
+        let apps: AHashSet<String> = tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect();
         let initial = Arc::new(ProcessSnapshot::empty(apps.clone()));
 
         Self {
             current: ArcSwap::from(initial),
             version: AtomicU64::new(0),
             tunnel_apps: apps,
-            explicit_tunnel_udp_ports: Mutex::new(HashSet::new()),
-            explicit_tunnel_tcp_ports: Mutex::new(HashSet::new()),
+            explicit_tunnel_udp_ports: Mutex::new(AHashSet::new()),
+            explicit_tunnel_tcp_ports: Mutex::new(AHashSet::new()),
         }
     }
 
@@ -678,13 +680,13 @@ impl LockFreeProcessCache {
     /// Memory is only freed when refcount reaches zero (all readers done).
     pub fn update(
         &self,
-        connections: HashMap<ConnectionKey, u32>,
-        pid_names: HashMap<u32, String>,
+        connections: AHashMap<ConnectionKey, u32>,
+        pid_names: AHashMap<u32, String>,
     ) {
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Pre-lowercase all names at insertion time (not in hot path!)
-        let pid_names_lower: HashMap<u32, String> = pid_names
+        let pid_names_lower: AHashMap<u32, String> = pid_names
             .into_iter()
             .map(|(k, v)| (k, v.to_lowercase()))
             .collect();
@@ -768,7 +770,7 @@ impl LockFreeProcessCache {
     }
 
     /// Get tunnel apps
-    pub fn tunnel_apps(&self) -> &HashSet<String> {
+    pub fn tunnel_apps(&self) -> &AHashSet<String> {
         &self.tunnel_apps
     }
 
@@ -844,7 +846,7 @@ impl LockFreeProcessCache {
                 ports.clone()
             })
             .unwrap_or_else(|_| {
-                let mut ports = HashSet::new();
+                let mut ports = AHashSet::new();
                 ports.insert(local_port);
                 ports
             });
@@ -884,7 +886,7 @@ impl LockFreeProcessCache {
     /// stale connection-table lookups.
     pub fn register_tcp_ports(&self, ports: &[u16]) {
         if let Ok(mut guard) = self.explicit_tunnel_tcp_ports.lock() {
-            let new_set: HashSet<u16> = ports.iter().copied().collect();
+            let new_set: AHashSet<u16> = ports.iter().copied().collect();
             if *guard != new_set {
                 log::info!(
                     "Updated TCP ports for API tunneling: {} port(s)",
@@ -902,6 +904,8 @@ impl LockFreeProcessCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Tests use AHashMap/AHashSet to match the production ProcessSnapshot types
+    use ahash::AHashMap as HashMap;
 
     #[test]
     fn test_lock_free_snapshot() {

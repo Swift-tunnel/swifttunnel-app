@@ -262,7 +262,7 @@ struct PingMetrics {
     sent: AtomicU64,
     received: AtomicU64,
     last_rtt_ms: AtomicU64,
-    samples: std::sync::Mutex<VecDeque<u32>>,
+    samples: parking_lot::Mutex<VecDeque<u32>>,
 }
 
 impl PingMetrics {
@@ -272,7 +272,7 @@ impl PingMetrics {
             sent: AtomicU64::new(0),
             received: AtomicU64::new(0),
             last_rtt_ms: AtomicU64::new(0),
-            samples: std::sync::Mutex::new(VecDeque::with_capacity(PING_SAMPLE_WINDOW)),
+            samples: parking_lot::Mutex::new(VecDeque::with_capacity(PING_SAMPLE_WINDOW)),
         }
     }
 
@@ -280,12 +280,11 @@ impl PingMetrics {
         self.received.fetch_add(1, Ordering::Relaxed);
         self.last_rtt_ms.store(rtt_ms as u64, Ordering::Relaxed);
 
-        if let Ok(mut samples) = self.samples.lock() {
-            if samples.len() >= PING_SAMPLE_WINDOW {
-                samples.pop_front();
-            }
-            samples.push_back(rtt_ms);
+        let mut samples = self.samples.lock();
+        if samples.len() >= PING_SAMPLE_WINDOW {
+            samples.pop_front();
         }
+        samples.push_back(rtt_ms);
     }
 
     fn snapshot(&self) -> RelayPingSnapshot {
@@ -309,7 +308,8 @@ impl PingMetrics {
         let mut p99_rtt_ms: Option<u32> = None;
         let mut sample_count = 0usize;
 
-        if let Ok(samples) = self.samples.lock() {
+        {
+            let samples = self.samples.lock();
             sample_count = samples.len();
             if sample_count > 0 {
                 let mut values: Vec<u32> = samples.iter().copied().collect();
@@ -371,8 +371,8 @@ pub struct UdpRelay {
     /// Number of times PPPoE/point-to-point MTU clamp has been applied.
     point_to_point_mtu_clamp_events: AtomicU64,
     /// Last activity time for keepalive
-    last_activity: std::sync::Mutex<Instant>,
-    sender_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    last_activity: parking_lot::Mutex<Instant>,
+    sender_handle: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
     outbound_pool: Arc<OutboundPool>,
     outbound_tx: channel::Sender<OutboundJob>,
     ping: Arc<PingMetrics>,
@@ -381,7 +381,7 @@ pub struct UdpRelay {
     /// Consecutive keepalives sent without receiving any inbound traffic.
     unanswered_keepalives: AtomicU32,
     /// Last time an inbound data packet was received (not control frames).
-    last_receive_time: std::sync::Mutex<Option<Instant>>,
+    last_receive_time: parking_lot::Mutex<Option<Instant>>,
 }
 
 impl UdpRelay {
@@ -650,14 +650,14 @@ impl UdpRelay {
                     0
                 },
             ),
-            last_activity: std::sync::Mutex::new(Instant::now()),
-            sender_handle: std::sync::Mutex::new(Some(sender_handle)),
+            last_activity: parking_lot::Mutex::new(Instant::now()),
+            sender_handle: parking_lot::Mutex::new(Some(sender_handle)),
             outbound_pool,
             outbound_tx,
             ping,
             relay_health: Arc::new(AtomicU8::new(RelayHealthState::NoTrafficYet as u8)),
             unanswered_keepalives: AtomicU32::new(0),
-            last_receive_time: std::sync::Mutex::new(None),
+            last_receive_time: parking_lot::Mutex::new(None),
         })
     }
 
@@ -977,7 +977,8 @@ impl UdpRelay {
         }
 
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut guard) = self.last_activity.lock() {
+        {
+            let mut guard = self.last_activity.lock();
             *guard = Instant::now();
         }
 
@@ -1077,14 +1078,16 @@ impl UdpRelay {
                 buffer[..payload_len].copy_from_slice(&recv_buf[SESSION_ID_LEN..len]);
                 self.packets_received.fetch_add(1, Ordering::Relaxed);
                 let now = Instant::now();
-                if let Ok(mut guard) = self.last_activity.lock() {
+                {
+                    let mut guard = self.last_activity.lock();
                     *guard = now;
                 }
                 // Mark relay as healthy on every successful data packet
                 self.relay_health
                     .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
                 self.unanswered_keepalives.store(0, Ordering::Relaxed);
-                if let Ok(mut guard) = self.last_receive_time.lock() {
+                {
+                    let mut guard = self.last_receive_time.lock();
                     *guard = Some(now);
                 }
 
@@ -1103,7 +1106,8 @@ impl UdpRelay {
         self.socket
             .send_to(&self.session_id, current_addr)
             .context("Failed to send immediate keepalive")?;
-        if let Ok(mut guard) = self.last_activity.lock() {
+        {
+            let mut guard = self.last_activity.lock();
             *guard = Instant::now();
         }
         log::info!(
@@ -1133,7 +1137,8 @@ impl UdpRelay {
         }
         // Count burst as unanswered keepalive so Dead state is reachable
         self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut guard) = self.last_activity.lock() {
+        {
+            let mut guard = self.last_activity.lock();
             *guard = Instant::now();
         }
         log::info!(
@@ -1149,11 +1154,7 @@ impl UdpRelay {
     /// Also increments the unanswered keepalive counter. The counter is reset
     /// to zero whenever an inbound data packet is received (in `receive_inbound`).
     pub fn send_keepalive(&self) -> Result<()> {
-        let should_send = self
-            .last_activity
-            .lock()
-            .map(|guard| guard.elapsed() >= KEEPALIVE_INTERVAL)
-            .unwrap_or(true); // If poisoned, send keepalive anyway
+        let should_send = self.last_activity.lock().elapsed() >= KEEPALIVE_INTERVAL;
 
         if should_send {
             // Send empty payload with just session ID
@@ -1161,7 +1162,8 @@ impl UdpRelay {
             self.socket
                 .send_to(&self.session_id, current_addr)
                 .context("Failed to send keepalive")?;
-            if let Ok(mut guard) = self.last_activity.lock() {
+            {
+                let mut guard = self.last_activity.lock();
                 *guard = Instant::now();
             }
             self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
@@ -1185,11 +1187,7 @@ impl UdpRelay {
     /// Called periodically from the inbound receiver health check loop.
     /// Updates the health state to Stale or Dead when the relay stops responding.
     pub fn check_health(&self) {
-        let has_ever_received = self
-            .last_receive_time
-            .lock()
-            .map(|guard| guard.is_some())
-            .unwrap_or(false);
+        let has_ever_received = self.last_receive_time.lock().is_some();
 
         if !has_ever_received {
             // Never received traffic - stay at NoTrafficYet (initial connect phase)
@@ -1199,7 +1197,7 @@ impl UdpRelay {
         let silence = self
             .last_receive_time
             .lock()
-            .map(|guard| guard.map(|t| t.elapsed()).unwrap_or(Duration::ZERO))
+            .map(|t| t.elapsed())
             .unwrap_or(Duration::ZERO);
 
         let unanswered = self.unanswered_keepalives.load(Ordering::Relaxed);
@@ -1305,11 +1303,7 @@ impl Drop for UdpRelay {
     fn drop(&mut self) {
         self.stop();
 
-        let handle = self
-            .sender_handle
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take());
+        let handle = self.sender_handle.lock().take();
         if let Some(handle) = handle {
             if let Err(panic) = handle.join() {
                 log::error!("UDP Relay: sender thread panicked: {:?}", panic);
