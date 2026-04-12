@@ -501,15 +501,7 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
 
     let available_servers = {
         let server_list = state.server_list.lock();
-        server_list
-            .servers()
-            .iter()
-            .filter_map(|server| {
-                let addr = format!("{}:{}", server.ip, 51821).parse().ok()?;
-                let latency = server_list.get_latency(&server.region);
-                Some((server.region.clone(), addr, latency))
-            })
-            .collect::<Vec<_>>()
+        crate::commands::vpn::build_available_servers(&server_list)
     };
 
     if available_servers.is_empty() {

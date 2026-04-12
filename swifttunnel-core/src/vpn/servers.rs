@@ -9,7 +9,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -30,41 +29,8 @@ pub struct ServerLatency {
     pub last_measured: Instant,
 }
 
-/// Measure latency to a server using UDP ping
-pub async fn measure_latency(endpoint: &str) -> Option<u32> {
-    use tokio::net::UdpSocket;
-    use tokio::time::timeout;
-
-    let addr: SocketAddr = match endpoint.parse() {
-        Ok(a) => a,
-        Err(_) => return None,
-    };
-
-    let socket = match UdpSocket::bind("0.0.0.0:0").await {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
-
-    // Send a small ping packet
-    let ping_data = [0u8; 1];
-    let start = Instant::now();
-
-    if socket.send_to(&ping_data, addr).await.is_err() {
-        return None;
-    }
-
-    // Wait for response with timeout
-    let mut buf = [0u8; 64];
-    match timeout(Duration::from_secs(2), socket.recv_from(&mut buf)).await {
-        Ok(Ok(_)) => {
-            let elapsed = start.elapsed();
-            Some(elapsed.as_millis() as u32)
-        }
-        _ => None,
-    }
-}
-
-/// Measure latency using ICMP ping (fallback)
+/// Measure latency to a relay using ICMP ping. The V3 relay protocol won't
+/// echo unauthenticated UDP probes, so this is the only signal we have.
 pub fn measure_latency_icmp(ip: &str) -> Option<u32> {
     use crate::hidden_command;
 
@@ -485,45 +451,6 @@ impl DynamicServerList {
         } else {
             None
         }
-    }
-
-    /// Find best server in a gaming region using multi-ping average
-    pub async fn find_best_server_in_region(&mut self, region_id: &str) -> Option<(String, u32)> {
-        let region = self.get_region(region_id)?;
-        let server_ids: Vec<String> = region.servers.clone();
-
-        let mut best_server: Option<String> = None;
-        let mut best_avg_latency = u32::MAX;
-
-        for server_id in &server_ids {
-            if let Some(server) = self.get_server(server_id) {
-                let endpoint = format!("{}:{}", server.ip, server.port);
-
-                // Perform 3 pings and average
-                let mut total_latency = 0u32;
-                let mut successful_pings = 0u32;
-
-                for _ in 0..3 {
-                    if let Some(latency) = measure_latency(&endpoint).await {
-                        total_latency += latency;
-                        successful_pings += 1;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-
-                if successful_pings > 0 {
-                    let avg = total_latency / successful_pings;
-                    self.set_latency(server_id, Some(avg));
-
-                    if avg < best_avg_latency {
-                        best_avg_latency = avg;
-                        best_server = Some(server_id.clone());
-                    }
-                }
-            }
-        }
-
-        best_server.map(|s| (s, best_avg_latency))
     }
 }
 

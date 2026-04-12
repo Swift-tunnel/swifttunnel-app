@@ -370,8 +370,10 @@ pub struct UdpRelay {
     point_to_point_mtu_clamp_active: AtomicBool,
     /// Number of times PPPoE/point-to-point MTU clamp has been applied.
     point_to_point_mtu_clamp_events: AtomicU64,
-    /// Last activity time for keepalive
-    last_activity: std::sync::Mutex<Instant>,
+    /// Last activity timestamp (monotonic milliseconds via `now_mono_ms`).
+    /// Read on the keepalive hot path so we use an AtomicU64 instead of
+    /// `Mutex<Instant>` — lock+drop dwarfs the actual atomic store.
+    last_activity_ms: AtomicU64,
     sender_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     outbound_pool: Arc<OutboundPool>,
     outbound_tx: channel::Sender<OutboundJob>,
@@ -650,7 +652,7 @@ impl UdpRelay {
                     0
                 },
             ),
-            last_activity: std::sync::Mutex::new(Instant::now()),
+            last_activity_ms: AtomicU64::new(now_mono_ms()),
             sender_handle: std::sync::Mutex::new(Some(sender_handle)),
             outbound_pool,
             outbound_tx,
@@ -845,7 +847,7 @@ impl UdpRelay {
                     if len < SESSION_ID_LEN + 2 {
                         continue;
                     }
-                    if &recv_buf[..SESSION_ID_LEN] != &self.session_id {
+                    if recv_buf[..SESSION_ID_LEN] != self.session_id {
                         continue;
                     }
                     if recv_buf[SESSION_ID_LEN] != AUTH_ACK_FRAME_TYPE {
@@ -977,9 +979,8 @@ impl UdpRelay {
         }
 
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut guard) = self.last_activity.lock() {
-            *guard = Instant::now();
-        }
+        self.last_activity_ms
+            .store(now_mono_ms(), Ordering::Relaxed);
 
         Ok(total_len)
     }
@@ -1010,7 +1011,7 @@ impl UdpRelay {
                 }
 
                 // Verify session ID matches
-                if &recv_buf[..SESSION_ID_LEN] != &self.session_id {
+                if recv_buf[..SESSION_ID_LEN] != self.session_id {
                     log::warn!("UDP Relay: Session ID mismatch, ignoring packet");
                     return Ok(None);
                 }
@@ -1077,9 +1078,8 @@ impl UdpRelay {
                 buffer[..payload_len].copy_from_slice(&recv_buf[SESSION_ID_LEN..len]);
                 self.packets_received.fetch_add(1, Ordering::Relaxed);
                 let now = Instant::now();
-                if let Ok(mut guard) = self.last_activity.lock() {
-                    *guard = now;
-                }
+                self.last_activity_ms
+                    .store(now_mono_ms(), Ordering::Relaxed);
                 // Mark relay as healthy on every successful data packet
                 self.relay_health
                     .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
@@ -1103,9 +1103,8 @@ impl UdpRelay {
         self.socket
             .send_to(&self.session_id, current_addr)
             .context("Failed to send immediate keepalive")?;
-        if let Ok(mut guard) = self.last_activity.lock() {
-            *guard = Instant::now();
-        }
+        self.last_activity_ms
+            .store(now_mono_ms(), Ordering::Relaxed);
         log::info!(
             "UDP Relay: Sent immediate keepalive to {} (session {:016x})",
             current_addr,
@@ -1117,6 +1116,11 @@ impl UdpRelay {
     /// Send a burst of keepalives to quickly establish NAT mapping and relay session.
     /// Sends 3 keepalives at 0ms, 50ms, 100ms spacing to punch through NAT/firewalls
     /// faster than a single packet. Used after auto-routing relay switch.
+    ///
+    /// SYNC version: blocks the calling thread for ~100ms. Only call this from
+    /// an `std::thread`-scope worker. Async callers must use
+    /// `send_keepalive_burst_async` instead — blocking the runtime through this
+    /// path froze every other Tokio task on the worker thread for 100ms.
     pub fn send_keepalive_burst(&self) -> Result<()> {
         let current_addr = **self.relay_addr.load();
         for i in 0..3 {
@@ -1133,11 +1137,39 @@ impl UdpRelay {
         }
         // Count burst as unanswered keepalive so Dead state is reachable
         self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut guard) = self.last_activity.lock() {
-            *guard = Instant::now();
-        }
+        self.last_activity_ms
+            .store(now_mono_ms(), Ordering::Relaxed);
         log::info!(
             "UDP Relay: Sent keepalive burst (3 packets) to {} (session {:016x})",
+            current_addr,
+            self.session_id_u64()
+        );
+        Ok(())
+    }
+
+    /// Async variant of `send_keepalive_burst` that yields between packets via
+    /// `tokio::time::sleep` instead of `std::thread::sleep`. The sync version
+    /// was being called from inside `tokio::spawn` blocks, which froze every
+    /// other task on the runtime worker for the full 100ms.
+    pub async fn send_keepalive_burst_async(&self) -> Result<()> {
+        let current_addr = **self.relay_addr.load();
+        for i in 0..3 {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            match self.socket.send_to(&self.session_id, current_addr) {
+                Ok(_) => {}
+                Err(e) if i == 0 => return Err(e.into()),
+                Err(e) => {
+                    log::warn!("UDP Relay: Keepalive burst #{} failed: {}", i + 1, e);
+                }
+            }
+        }
+        self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
+        self.last_activity_ms
+            .store(now_mono_ms(), Ordering::Relaxed);
+        log::info!(
+            "UDP Relay: Sent async keepalive burst (3 packets) to {} (session {:016x})",
             current_addr,
             self.session_id_u64()
         );
@@ -1149,21 +1181,16 @@ impl UdpRelay {
     /// Also increments the unanswered keepalive counter. The counter is reset
     /// to zero whenever an inbound data packet is received (in `receive_inbound`).
     pub fn send_keepalive(&self) -> Result<()> {
-        let should_send = self
-            .last_activity
-            .lock()
-            .map(|guard| guard.elapsed() >= KEEPALIVE_INTERVAL)
-            .unwrap_or(true); // If poisoned, send keepalive anyway
-
-        if should_send {
+        let now_ms = now_mono_ms();
+        let last_ms = self.last_activity_ms.load(Ordering::Relaxed);
+        let elapsed = Duration::from_millis(now_ms.saturating_sub(last_ms));
+        if elapsed >= KEEPALIVE_INTERVAL {
             // Send empty payload with just session ID
             let current_addr = **self.relay_addr.load();
             self.socket
                 .send_to(&self.session_id, current_addr)
                 .context("Failed to send keepalive")?;
-            if let Ok(mut guard) = self.last_activity.lock() {
-                *guard = Instant::now();
-            }
+            self.last_activity_ms.store(now_ms, Ordering::Relaxed);
             self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
             log::trace!("UDP Relay: Sent keepalive");
         }

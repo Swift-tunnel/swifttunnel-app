@@ -555,6 +555,7 @@ mod tests {
                 cached_override_used: false,
                 network_signature: Some("sig".to_string()),
                 last_validation_result: "selected_exact_route_match".to_string(),
+                leaked_worker_threads: 0,
             }),
         };
 

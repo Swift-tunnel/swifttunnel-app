@@ -9,24 +9,9 @@ use log::{debug, error, info, warn};
 use rand::Rng;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
+use url::form_urlencoded;
 
 const OAUTH_LOGIN_URL: &str = "https://swifttunnel.net/login";
-
-/// Percent-encode a string for use in URL query parameters (RFC 3986 unreserved chars)
-fn percent_encode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(byte as char);
-            }
-            _ => {
-                result.push_str(&format!("%{:02X}", byte));
-            }
-        }
-    }
-    result
-}
 
 /// Maximum number of token refresh retries
 const MAX_REFRESH_RETRIES: u32 = 3;
@@ -390,9 +375,18 @@ impl AuthManager {
         Ok(())
     }
 
-    /// Cancel login attempt
+    /// Cancel an in-flight login attempt regardless of which flow we're in.
+    /// Stops any running OAuth callback server so the next login can rebind
+    /// the localhost port.
     pub fn cancel_login(&self) {
         info!("Cancelling login");
+        let was_awaiting_oauth = matches!(
+            *self.state.lock().unwrap(),
+            AuthState::AwaitingOAuthCallback(_)
+        );
+        if was_awaiting_oauth {
+            self.stop_oauth_server();
+        }
         let mut state = self.state.lock().unwrap();
         *state = AuthState::LoggedOut;
     }
@@ -448,12 +442,13 @@ impl AuthManager {
             .collect();
 
         // Build the OAuth URL with the redirect port
-        let oauth_url = format!(
-            "{}?desktop=true&state={}&provider=google&redirect_port={}",
-            OAUTH_LOGIN_URL,
-            percent_encode(&state),
-            port
-        );
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("desktop", "true")
+            .append_pair("state", &state)
+            .append_pair("provider", "google")
+            .append_pair("redirect_port", &port.to_string())
+            .finish();
+        let oauth_url = format!("{}?{}", OAUTH_LOGIN_URL, query);
 
         info!("Opening browser to: {}", oauth_url);
 
@@ -513,7 +508,7 @@ impl AuthManager {
         exchange_token: &str,
         callback_state: &str,
     ) -> Result<(), AuthError> {
-        info!(
+        debug!(
             "Completing OAuth callback (exchange_token: {}..., state: {}...)",
             &exchange_token[..exchange_token.len().min(8)],
             &callback_state[..callback_state.len().min(8)]
@@ -592,10 +587,14 @@ impl AuthManager {
             }
         };
 
-        info!(
+        debug!(
             "Got magic link token for user: {} (token: {}...)",
             exchange_response.email,
             &exchange_response.token[..exchange_response.token.len().min(8)]
+        );
+        info!(
+            "Exchanged OAuth code for magic link ({})",
+            exchange_response.email
         );
 
         // Verify the magic link token to get access/refresh tokens
@@ -662,20 +661,6 @@ impl AuthManager {
         Ok(())
     }
 
-    /// Cancel OAuth flow and return to logged out state
-    pub fn cancel_oauth(&self) {
-        info!("Cancelling OAuth flow");
-
-        // Stop the OAuth server
-        self.stop_oauth_server();
-
-        // Clear state in memory
-        let mut state = self.state.lock().unwrap();
-        if matches!(*state, AuthState::AwaitingOAuthCallback(_)) {
-            *state = AuthState::LoggedOut;
-        }
-    }
-
     /// Stop the OAuth server if it's running
     fn stop_oauth_server(&self) {
         let mut server_guard = self.oauth_server.lock().unwrap();
@@ -707,42 +692,29 @@ impl Default for AuthManager {
 
 #[cfg(test)]
 mod tests {
-    use super::percent_encode;
+    use url::form_urlencoded;
 
     #[test]
-    fn test_unreserved_chars_pass_through() {
-        assert_eq!(percent_encode("ABCDEFghijklmnop"), "ABCDEFghijklmnop");
-        assert_eq!(percent_encode("0123456789"), "0123456789");
-        assert_eq!(percent_encode("-_.~"), "-_.~");
+    fn test_form_urlencoded_round_trip_state() {
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("desktop", "true")
+            .append_pair("state", "abc123XYZ_-.~")
+            .append_pair("provider", "google")
+            .append_pair("redirect_port", "17435")
+            .finish();
+        // url crate's form_urlencoded uses + for spaces and percent-encodes anything not unreserved
+        assert!(query.contains("desktop=true"));
+        assert!(query.contains("state=abc123XYZ_-.%7E"));
+        assert!(query.contains("provider=google"));
+        assert!(query.contains("redirect_port=17435"));
     }
 
     #[test]
-    fn test_reserved_chars_are_encoded() {
-        assert_eq!(percent_encode(" "), "%20");
-        assert_eq!(percent_encode("/"), "%2F");
-        assert_eq!(percent_encode("?"), "%3F");
-        assert_eq!(percent_encode("&"), "%26");
-        assert_eq!(percent_encode("="), "%3D");
-        assert_eq!(percent_encode("+"), "%2B");
-        assert_eq!(percent_encode("@"), "%40");
-    }
-
-    #[test]
-    fn test_empty_string() {
-        assert_eq!(percent_encode(""), "");
-    }
-
-    #[test]
-    fn test_mixed_url_encoding() {
-        assert_eq!(
-            percent_encode("hello world&foo=bar"),
-            "hello%20world%26foo%3Dbar"
-        );
-    }
-
-    #[test]
-    fn test_all_unreserved_rfc3986() {
-        let unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
-        assert_eq!(percent_encode(unreserved), unreserved);
+    fn test_form_urlencoded_handles_reserved_chars() {
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("state", "hello world&foo=bar")
+            .finish();
+        // Spaces become +, & and = get percent-encoded
+        assert_eq!(query, "state=hello+world%26foo%3Dbar");
     }
 }

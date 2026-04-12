@@ -132,8 +132,7 @@ impl ProcessWatcher {
         // Stop the ETW session to unblock ProcessTrace (it's a blocking call)
         stop_existing_session();
         if let Some(handle) = self.thread_handle.take() {
-            // Give the thread a moment to clean up after session stop
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // join() blocks until the worker exits — no need to sleep first.
             let _ = handle.join();
         }
     }

@@ -34,7 +34,6 @@ export function ConnectTab() {
   const connectedAt = useVpnStore((s) => s.connectedAt);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
   const fetchPing = useVpnStore((s) => s.fetchPing);
-  const fetchVpnState = useVpnStore((s) => s.fetchState);
 
   const settings = useSettingsStore((s) => s.settings);
   const update = useSettingsStore((s) => s.update);
@@ -54,6 +53,31 @@ export function ConnectTab() {
 
   const prevStateRef = useRef(vpnState);
   const [showSuccess, setShowSuccess] = useState(false);
+
+  // Debounce settings persistence so a burst of clicks (region picker, preset
+  // toggles, whitelist edits) collapses into a single disk write 500ms after
+  // the last change instead of one write per click. The local store update
+  // happens immediately so the UI still feels instant.
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function saveDebounced() {
+    if (saveTimeoutRef.current !== null) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+    saveTimeoutRef.current = setTimeout(() => {
+      saveTimeoutRef.current = null;
+      void save();
+    }, 500);
+  }
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current !== null) {
+        clearTimeout(saveTimeoutRef.current);
+        // Flush a pending write on unmount so the user doesn't lose changes
+        // they made right before navigating away.
+        void save();
+      }
+    };
+  }, [save]);
 
   useEffect(() => {
     if (prevStateRef.current !== "connected" && vpnState === "connected") {
@@ -83,11 +107,9 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [isConnected, fetchPing]);
 
-  useEffect(() => {
-    if (!isConnected) return;
-    const id = setInterval(fetchVpnState, 2000);
-    return () => clearInterval(id);
-  }, [isConnected, fetchVpnState]);
+  // VPN state is now pushed via the VPN_STATE_CHANGED Tauri event subscription
+  // wired up in lib/events.ts. No polling needed — the previous 2s setInterval
+  // was redundant and added delay to UI updates after a connect/disconnect.
 
   useEffect(() => {
     void fetchLatencies();
@@ -106,17 +128,17 @@ export function ConnectTab() {
       ? current.filter((p) => p !== presetId)
       : [...current, presetId];
     update({ selected_game_presets: next });
-    save();
+    saveDebounced();
   }
 
   function selectRegion(regionId: string) {
     update({ selected_region: regionId, auto_routing_enabled: false });
-    save();
+    saveDebounced();
   }
 
   function selectAutoRoute() {
     update({ auto_routing_enabled: true });
-    save();
+    saveDebounced();
   }
 
   function forceServer(regionId: string, server: string | null) {
@@ -124,7 +146,7 @@ export function ConnectTab() {
     if (server) current[regionId] = server;
     else delete current[regionId];
     update({ forced_servers: current });
-    save();
+    saveDebounced();
   }
 
   const ringColor = isConnected
@@ -341,7 +363,7 @@ export function ConnectTab() {
                 regions={regions}
                 whitelisted={settings.whitelisted_regions}
                 disabled={isConnected}
-                onChange={(next) => { update({ whitelisted_regions: next }); save(); }}
+                onChange={(next) => { update({ whitelisted_regions: next }); saveDebounced(); }}
               />
             )}
           </>

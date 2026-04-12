@@ -107,7 +107,7 @@ pub async fn auth_poll_oauth(state: State<'_, AppState>) -> Result<OAuthPollResu
 #[tauri::command]
 pub async fn auth_cancel_oauth(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let auth = state.auth_manager.lock().await;
-    auth.cancel_oauth();
+    auth.cancel_login();
     drop(auth);
     emit_auth_state(&app, &state).await;
     Ok(())

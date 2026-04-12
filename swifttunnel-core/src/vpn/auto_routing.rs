@@ -46,6 +46,9 @@ pub struct AutoRouter {
     /// IPs currently being looked up — packets to these are held (dropped) until
     /// the lookup completes, preventing the game server from seeing a relay IP change.
     pending_lookups: RwLock<HashSet<Ipv4Addr>>,
+    /// When each pending lookup was started, used to bound how long we hold
+    /// packets if ipinfo.io is slow or unreachable.
+    pending_lookup_started_at: RwLock<HashMap<Ipv4Addr, Instant>>,
     /// Fast-path hint: whether `pending_lookups` is non-empty.
     ///
     /// This avoids taking a lock for the common case where there are no pending lookups.
@@ -85,13 +88,20 @@ impl AutoRouter {
             current_game_region: RwLock::new(None),
             current_relay_addr: RwLock::new(None),
             current_st_region: RwLock::new(initial_region.to_string()),
-            last_switch_time: RwLock::new(Instant::now() - MIN_SWITCH_INTERVAL),
+            // checked_sub avoids a debug-build panic when the process has
+            // been alive for less than MIN_SWITCH_INTERVAL.
+            last_switch_time: RwLock::new(
+                Instant::now()
+                    .checked_sub(MIN_SWITCH_INTERVAL)
+                    .unwrap_or_else(Instant::now),
+            ),
             switches_this_minute: RwLock::new((0, Instant::now())),
             seen_game_servers: RwLock::new(HashSet::new()),
             available_servers: RwLock::new(Vec::new()),
             event_log: RwLock::new(VecDeque::new()),
             lookup_sender: RwLock::new(None),
             pending_lookups: RwLock::new(HashSet::new()),
+            pending_lookup_started_at: RwLock::new(HashMap::new()),
             pending_any: AtomicBool::new(false),
             whitelisted_regions: RwLock::new(HashSet::new()),
             auto_routing_bypassed: AtomicBool::new(false),
@@ -217,6 +227,12 @@ impl AutoRouter {
         // Fast path: bail if we've already seen this IP.
         // Use try_read() to avoid blocking the hot path. If contended, retry on a
         // later packet (RakNet is chatty, we'll see it again quickly).
+        //
+        // The read-then-write here is a deliberate TOCTOU: two workers can both
+        // pass the read check, but only one of them sees `insert(...) == true`
+        // on the write path below — the loser bails on `if !is_new_ip` without
+        // double-firing the lookup. Cheap by design; do not "fix" with a single
+        // upgradeable lock unless you've measured a contention regression.
         match self.seen_game_servers.try_read() {
             Some(seen) => {
                 if seen.contains(&game_server_ip) {
@@ -257,6 +273,9 @@ impl AutoRouter {
             pending.insert(game_server_ip);
             self.pending_any.store(true, Ordering::Release);
         }
+        self.pending_lookup_started_at
+            .write()
+            .insert(game_server_ip, Instant::now());
 
         if sender.send(game_server_ip).is_err() {
             log::warn!(
@@ -284,6 +303,25 @@ impl AutoRouter {
         self.pending_lookups.read().contains(&ip)
     }
 
+    /// Check if a lookup is pending AND was started less than `max_age` ago.
+    /// Used by the packet hot path to cap how long we hold game packets if
+    /// ipinfo.io is slow — better to leak one bad packet on the old relay than
+    /// drop voice chat for several seconds while a slow lookup completes.
+    pub fn is_lookup_pending_within(&self, ip: Ipv4Addr, max_age: Duration) -> bool {
+        if !self.pending_any.load(Ordering::Acquire) {
+            return false;
+        }
+        if !self.pending_lookups.read().contains(&ip) {
+            return false;
+        }
+        match self.pending_lookup_started_at.read().get(&ip).copied() {
+            Some(started) => started.elapsed() < max_age,
+            // Missing started_at means we lost the timestamp — release the
+            // packet rather than holding it indefinitely.
+            None => false,
+        }
+    }
+
     /// Clear a pending lookup (called when the ipinfo.io lookup completes).
     /// Uses write() (blocking) because this runs in the async background task,
     /// not the packet processing hot path. Must not fail silently or packets
@@ -293,6 +331,7 @@ impl AutoRouter {
         pending.remove(&ip);
         self.pending_any
             .store(!pending.is_empty(), Ordering::Release);
+        self.pending_lookup_started_at.write().remove(&ip);
         log::info!(
             "Auto-routing: Lookup complete for {}, releasing packets",
             ip
@@ -521,6 +560,7 @@ impl AutoRouter {
         *self.current_relay_addr.write() = None;
         self.seen_game_servers.write().clear();
         self.pending_lookups.write().clear();
+        self.pending_lookup_started_at.write().clear();
         self.pending_any.store(false, Ordering::Release);
         self.auto_routing_bypassed.store(false, Ordering::Release);
     }
@@ -923,5 +963,34 @@ mod tests {
             legacy_candidates.is_empty(),
             "No servers should match the legacy 'america' region name"
         );
+    }
+
+    #[test]
+    fn test_pending_lookup_expires_after_500ms() {
+        let router = AutoRouter::new(true, "singapore");
+        let ip = Ipv4Addr::new(128, 116, 1, 1);
+
+        // Insert a pending lookup directly with a stamp 600ms in the past so
+        // it falls outside the 500ms hold window.
+        router.pending_lookups.write().insert(ip);
+        router.pending_any.store(true, Ordering::Release);
+        router
+            .pending_lookup_started_at
+            .write()
+            .insert(ip, Instant::now() - Duration::from_millis(600));
+
+        // is_lookup_pending still returns true (we haven't cleared it)...
+        assert!(router.is_lookup_pending(ip));
+        // ...but the bounded check returns false because it expired.
+        assert!(!router.is_lookup_pending_within(ip, Duration::from_millis(500)));
+
+        // A fresh lookup is still held.
+        let fresh_ip = Ipv4Addr::new(128, 116, 1, 2);
+        router.pending_lookups.write().insert(fresh_ip);
+        router
+            .pending_lookup_started_at
+            .write()
+            .insert(fresh_ip, Instant::now());
+        assert!(router.is_lookup_pending_within(fresh_ip, Duration::from_millis(500)));
     }
 }

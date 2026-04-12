@@ -642,6 +642,14 @@ impl VpnConnection {
         Arc::clone(&self.state)
     }
 
+    /// Clone the inner split-tunnel driver handle so that command callers
+    /// can hit `try_lock` on the driver directly without taking the (much
+    /// hotter) `VpnConnection` mutex. Returns `None` until the driver has
+    /// been wired up by `connect()`.
+    pub fn split_tunnel_handle(&self) -> Option<Arc<Mutex<SplitTunnelDriver>>> {
+        self.split_tunnel.as_ref().map(Arc::clone)
+    }
+
     /// Get throughput stats for GUI display
     ///
     /// Returns the ThroughputStats handle if split tunnel is active and using parallel mode.
@@ -1339,7 +1347,9 @@ impl VpnConnection {
                                             *server_endpoint = new_addr.to_string();
                                         }
                                     }
-                                    if let Err(e) = relay_for_lookup.send_keepalive_burst() {
+                                    if let Err(e) =
+                                        relay_for_lookup.send_keepalive_burst_async().await
+                                    {
                                         log::warn!(
                                             "Auto-routing: Failed to send keepalive burst to new relay: {}",
                                             e
@@ -1429,8 +1439,9 @@ impl VpnConnection {
                                                             *server_endpoint = new_addr.to_string();
                                                         }
                                                     }
-                                                    if let Err(e) =
-                                                        relay_for_lookup.send_keepalive_burst()
+                                                    if let Err(e) = relay_for_lookup
+                                                        .send_keepalive_burst_async()
+                                                        .await
                                                     {
                                                         log::warn!(
                                                             "Auto-routing: Failed to send keepalive burst after probe refinement: {}",

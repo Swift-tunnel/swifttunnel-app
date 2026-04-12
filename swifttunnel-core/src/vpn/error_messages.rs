@@ -19,7 +19,9 @@ pub fn user_friendly_error(error: &VpnError) -> String {
 
         VpnError::SplitTunnelSetupFailed(msg) => {
             let lc = msg.to_lowercase();
-            if lc.contains("timed out") || lc.contains("timeout") {
+            if lc.contains("ipv6-only") {
+                "SwiftTunnel needs IPv4 connectivity to tunnel game traffic. Your network appears to be IPv6-only and is not supported.\n\nIf you're on a mobile hotspot or carrier network, ask your ISP to enable IPv4 (NAT64/DS-Lite is not enough) or switch to a different network.".to_string()
+            } else if lc.contains("timed out") || lc.contains("timeout") {
                 "Driver initialization timed out.\n\nPlease restart your computer and try again.".to_string()
             } else if lc.contains("administrator")
                 || lc.contains("access denied")
