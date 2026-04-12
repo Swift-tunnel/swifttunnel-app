@@ -15,11 +15,12 @@
 
 use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
 use crate::process_names::process_name_matches_any_tunnel_app;
+use ahash::{AHashMap, AHashSet};
 use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
@@ -375,21 +376,26 @@ fn lookup_connection_pid(
 #[derive(Clone)]
 pub struct ProcessSnapshot {
     /// Connection cache: (local_ip, local_port, protocol) → PID
-    pub connections: HashMap<ConnectionKey, u32>,
+    /// Uses ahash for faster lookups on the packet hot path (~2-5x vs SipHash)
+    pub connections: AHashMap<ConnectionKey, u32>,
     /// PID → process name (lowercase)
-    pub pid_names: HashMap<u32, String>,
+    pub pid_names: AHashMap<u32, String>,
     /// Apps that should be tunneled (lowercase)
-    pub tunnel_apps: HashSet<String>,
+    pub tunnel_apps: AHashSet<String>,
     /// PIDs that belong to a tunnel app (precomputed from `pid_names` + `tunnel_apps`)
-    pub tunnel_pids: HashSet<u32>,
+    pub tunnel_pids: AHashSet<u32>,
     /// UDP local ports explicitly marked as tunnel-owned.
-    pub explicit_tunnel_udp_ports: HashSet<u16>,
+    pub explicit_tunnel_udp_ports: AHashSet<u16>,
     /// TCP local ports explicitly marked as tunnel-owned (for API tunneling).
     ///
     /// When API tunneling is enabled, TCP ports belonging to Roblox processes
     /// are registered here so they persist across snapshot refreshes and
     /// don't rely on stale connection-table lookups.
-    pub explicit_tunnel_tcp_ports: HashSet<u16>,
+    pub explicit_tunnel_tcp_ports: AHashSet<u16>,
+    /// UDP source ports owned by tunnel processes, including explicitly pinned ports.
+    pub tunnel_udp_ports: AHashSet<u16>,
+    /// TCP source ports currently owned by tunnel processes.
+    pub tunnel_tcp_ports: AHashSet<u16>,
     /// Snapshot version (monotonically increasing)
     pub version: u64,
     /// Timestamp when snapshot was created
@@ -398,10 +404,10 @@ pub struct ProcessSnapshot {
 
 impl ProcessSnapshot {
     fn compute_tunnel_pids(
-        pid_names: &HashMap<u32, String>,
-        tunnel_apps: &HashSet<String>,
-    ) -> HashSet<u32> {
-        let mut tunnel_pids = HashSet::new();
+        pid_names: &AHashMap<u32, String>,
+        tunnel_apps: &AHashSet<String>,
+    ) -> AHashSet<u32> {
+        let mut tunnel_pids = AHashSet::new();
 
         for (&pid, name) in pid_names {
             // Exact match - O(1) HashSet lookup
@@ -418,15 +424,43 @@ impl ProcessSnapshot {
         tunnel_pids
     }
 
+    fn compute_tunnel_ports(
+        connections: &AHashMap<ConnectionKey, u32>,
+        tunnel_pids: &AHashSet<u32>,
+        explicit_tunnel_udp_ports: &AHashSet<u16>,
+    ) -> (AHashSet<u16>, AHashSet<u16>) {
+        let mut tunnel_udp_ports = explicit_tunnel_udp_ports.clone();
+        let mut tunnel_tcp_ports = AHashSet::new();
+
+        for (key, pid) in connections {
+            if !tunnel_pids.contains(pid) {
+                continue;
+            }
+
+            match key.protocol {
+                Protocol::Udp => {
+                    tunnel_udp_ports.insert(key.local_port);
+                }
+                Protocol::Tcp => {
+                    tunnel_tcp_ports.insert(key.local_port);
+                }
+            }
+        }
+
+        (tunnel_udp_ports, tunnel_tcp_ports)
+    }
+
     /// Create empty snapshot
-    pub fn empty(tunnel_apps: HashSet<String>) -> Self {
+    pub fn empty(tunnel_apps: AHashSet<String>) -> Self {
         Self {
-            connections: HashMap::new(),
-            pid_names: HashMap::new(),
+            connections: AHashMap::new(),
+            pid_names: AHashMap::new(),
             tunnel_apps,
-            tunnel_pids: HashSet::new(),
-            explicit_tunnel_udp_ports: HashSet::new(),
-            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_pids: AHashSet::new(),
+            explicit_tunnel_udp_ports: AHashSet::new(),
+            explicit_tunnel_tcp_ports: AHashSet::new(),
+            tunnel_udp_ports: AHashSet::new(),
+            tunnel_tcp_ports: AHashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         }
@@ -459,29 +493,10 @@ impl ProcessSnapshot {
         protocol: Protocol,
         api_tunneling: bool,
     ) -> bool {
-        if protocol == Protocol::Udp && self.explicit_tunnel_udp_ports.contains(&local_port) {
-            return true;
+        match protocol {
+            Protocol::Udp => self.tunnel_udp_ports.contains(&local_port),
+            Protocol::Tcp => api_tunneling && self.tunnel_tcp_ports.contains(&local_port),
         }
-        let protocol_ok = protocol == Protocol::Udp || (protocol == Protocol::Tcp && api_tunneling);
-        if !protocol_ok {
-            return false;
-        }
-
-        // For TCP ports in the explicit set, still verify PID ownership to avoid
-        // misrouting traffic from unrelated processes that reuse the same port.
-        if protocol == Protocol::Tcp && self.explicit_tunnel_tcp_ports.contains(&local_port) {
-            return self.connections.iter().any(|(key, pid)| {
-                key.protocol == Protocol::Tcp
-                    && key.local_port == local_port
-                    && self.tunnel_pids.contains(pid)
-            });
-        }
-
-        self.connections.iter().any(|(key, pid)| {
-            key.protocol == protocol
-                && key.local_port == local_port
-                && self.tunnel_pids.contains(pid)
-        })
     }
 
     /// Check if connection should be tunneled with destination info
@@ -630,25 +645,65 @@ pub struct LockFreeProcessCache {
     /// Snapshot version counter
     version: AtomicU64,
     /// Apps to tunnel
-    tunnel_apps: HashSet<String>,
+    tunnel_apps: AHashSet<String>,
     /// UDP ports explicitly registered as tunnel-owned.
-    explicit_tunnel_udp_ports: Mutex<HashSet<u16>>,
+    explicit_tunnel_udp_ports: Mutex<AHashSet<u16>>,
     /// TCP ports explicitly registered as tunnel-owned (API tunneling).
-    explicit_tunnel_tcp_ports: Mutex<HashSet<u16>>,
+    explicit_tunnel_tcp_ports: Mutex<AHashSet<u16>>,
 }
 
 impl LockFreeProcessCache {
+    fn clone_explicit_ports(&self) -> (AHashSet<u16>, AHashSet<u16>) {
+        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
+        let explicit_tunnel_tcp_ports = self.explicit_tunnel_tcp_ports.lock().clone();
+        (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports)
+    }
+
+    fn snapshot_from_parts(
+        &self,
+        connections: AHashMap<ConnectionKey, u32>,
+        pid_names: AHashMap<u32, String>,
+        version: u64,
+        explicit_tunnel_udp_ports: AHashSet<u16>,
+        explicit_tunnel_tcp_ports: AHashSet<u16>,
+    ) -> Arc<ProcessSnapshot> {
+        let pid_names_lower: AHashMap<u32, String> = pid_names
+            .into_iter()
+            .map(|(k, v)| (k, v.to_lowercase()))
+            .collect();
+
+        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names_lower, &self.tunnel_apps);
+        let (tunnel_udp_ports, tunnel_tcp_ports) = ProcessSnapshot::compute_tunnel_ports(
+            &connections,
+            &tunnel_pids,
+            &explicit_tunnel_udp_ports,
+        );
+
+        Arc::new(ProcessSnapshot {
+            connections,
+            pid_names: pid_names_lower,
+            tunnel_apps: self.tunnel_apps.clone(),
+            tunnel_pids,
+            explicit_tunnel_udp_ports,
+            explicit_tunnel_tcp_ports,
+            tunnel_udp_ports,
+            tunnel_tcp_ports,
+            version,
+            created_at: std::time::Instant::now(),
+        })
+    }
+
     /// Create new lock-free cache
     pub fn new(tunnel_apps: Vec<String>) -> Self {
-        let apps: HashSet<String> = tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect();
+        let apps: AHashSet<String> = tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect();
         let initial = Arc::new(ProcessSnapshot::empty(apps.clone()));
 
         Self {
             current: ArcSwap::from(initial),
             version: AtomicU64::new(0),
             tunnel_apps: apps,
-            explicit_tunnel_udp_ports: Mutex::new(HashSet::new()),
-            explicit_tunnel_tcp_ports: Mutex::new(HashSet::new()),
+            explicit_tunnel_udp_ports: Mutex::new(AHashSet::new()),
+            explicit_tunnel_tcp_ports: Mutex::new(AHashSet::new()),
         }
     }
 
@@ -678,41 +733,18 @@ impl LockFreeProcessCache {
     /// Memory is only freed when refcount reaches zero (all readers done).
     pub fn update(
         &self,
-        connections: HashMap<ConnectionKey, u32>,
-        pid_names: HashMap<u32, String>,
+        connections: AHashMap<ConnectionKey, u32>,
+        pid_names: AHashMap<u32, String>,
     ) {
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
-
-        // Pre-lowercase all names at insertion time (not in hot path!)
-        let pid_names_lower: HashMap<u32, String> = pid_names
-            .into_iter()
-            .map(|(k, v)| (k, v.to_lowercase()))
-            .collect();
-
-        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names_lower, &self.tunnel_apps);
-
-        let explicit_tunnel_udp_ports = self
-            .explicit_tunnel_udp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
-
-        let explicit_tunnel_tcp_ports = self
-            .explicit_tunnel_tcp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
-
-        let new_snapshot = Arc::new(ProcessSnapshot {
+        let (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports) = self.clone_explicit_ports();
+        let new_snapshot = self.snapshot_from_parts(
             connections,
-            pid_names: pid_names_lower,
-            tunnel_apps: self.tunnel_apps.clone(),
-            tunnel_pids,
+            pid_names,
+            version,
             explicit_tunnel_udp_ports,
             explicit_tunnel_tcp_ports,
-            version,
-            created_at: std::time::Instant::now(),
-        });
+        );
 
         // Atomically swap in new snapshot - arc-swap handles cleanup safely
         self.current.store(new_snapshot);
@@ -723,7 +755,11 @@ impl LockFreeProcessCache {
     /// CRITICAL: This must create a new snapshot immediately, otherwise workers
     /// will continue using the old snapshot with empty tunnel_apps!
     pub fn set_tunnel_apps(&mut self, apps: Vec<String>) {
-        self.tunnel_apps = apps.into_iter().map(|s| s.to_lowercase()).collect();
+        let new_apps: AHashSet<String> = apps.into_iter().map(|s| s.to_lowercase()).collect();
+        if self.tunnel_apps == new_apps {
+            return;
+        }
+        self.tunnel_apps = new_apps;
 
         // Force immediate snapshot update so workers see the new tunnel_apps
         // Clone the current connections and pid_names from existing snapshot
@@ -731,31 +767,14 @@ impl LockFreeProcessCache {
 
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
-        let tunnel_pids =
-            ProcessSnapshot::compute_tunnel_pids(&old_snap.pid_names, &self.tunnel_apps);
-
-        let explicit_tunnel_udp_ports = self
-            .explicit_tunnel_udp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
-
-        let explicit_tunnel_tcp_ports = self
-            .explicit_tunnel_tcp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
-
-        let new_snapshot = Arc::new(ProcessSnapshot {
-            connections: old_snap.connections.clone(),
-            pid_names: old_snap.pid_names.clone(),
-            tunnel_apps: self.tunnel_apps.clone(), // Use NEW tunnel_apps
-            tunnel_pids,
+        let (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports) = self.clone_explicit_ports();
+        let new_snapshot = self.snapshot_from_parts(
+            old_snap.connections.clone(),
+            old_snap.pid_names.clone(),
+            version,
             explicit_tunnel_udp_ports,
             explicit_tunnel_tcp_ports,
-            version,
-            created_at: std::time::Instant::now(),
-        });
+        );
 
         // Atomically swap in new snapshot - arc-swap handles cleanup safely
         self.current.store(new_snapshot);
@@ -768,7 +787,7 @@ impl LockFreeProcessCache {
     }
 
     /// Get tunnel apps
-    pub fn tunnel_apps(&self) -> &HashSet<String> {
+    pub fn tunnel_apps(&self) -> &AHashSet<String> {
         &self.tunnel_apps
     }
 
@@ -791,36 +810,27 @@ impl LockFreeProcessCache {
     /// 3. When first packet arrives, is_tunnel_pid() returns true
     pub fn register_process_immediate(&self, pid: u32, name: String) {
         let old_snap = self.get_snapshot();
+        let name_lower = name.to_lowercase();
+        if old_snap
+            .pid_names
+            .get(&pid)
+            .is_some_and(|existing| existing == &name_lower)
+        {
+            return;
+        }
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Clone existing data and add the new process
         let mut pid_names = old_snap.pid_names.clone();
-        pid_names.insert(pid, name.to_lowercase());
-
-        let tunnel_pids = ProcessSnapshot::compute_tunnel_pids(&pid_names, &self.tunnel_apps);
-
-        let explicit_tunnel_udp_ports = self
-            .explicit_tunnel_udp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
-
-        let explicit_tunnel_tcp_ports = self
-            .explicit_tunnel_tcp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
-
-        let new_snapshot = Arc::new(ProcessSnapshot {
-            connections: old_snap.connections.clone(),
+        pid_names.insert(pid, name_lower);
+        let (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports) = self.clone_explicit_ports();
+        let new_snapshot = self.snapshot_from_parts(
+            old_snap.connections.clone(),
             pid_names,
-            tunnel_apps: self.tunnel_apps.clone(),
-            tunnel_pids,
+            version,
             explicit_tunnel_udp_ports,
             explicit_tunnel_tcp_ports,
-            version,
-            created_at: std::time::Instant::now(),
-        });
+        );
 
         self.current.store(new_snapshot);
 
@@ -836,38 +846,26 @@ impl LockFreeProcessCache {
     /// This is used by the Windows testbench helper so packet routing does not depend
     /// on connection-table timing races for short-lived probe processes.
     pub fn register_udp_port_immediate(&self, local_port: u16) {
-        let explicit_tunnel_udp_ports = self
-            .explicit_tunnel_udp_ports
-            .lock()
-            .map(|mut ports| {
-                ports.insert(local_port);
-                ports.clone()
-            })
-            .unwrap_or_else(|_| {
-                let mut ports = HashSet::new();
-                ports.insert(local_port);
-                ports
-            });
+        let explicit_tunnel_udp_ports = {
+            let mut ports = self.explicit_tunnel_udp_ports.lock();
+            if !ports.insert(local_port) {
+                return;
+            }
+            ports.clone()
+        };
 
         let old_snap = self.get_snapshot();
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
-        let explicit_tunnel_tcp_ports = self
-            .explicit_tunnel_tcp_ports
-            .lock()
-            .map(|ports| ports.clone())
-            .unwrap_or_default();
+        let explicit_tunnel_tcp_ports = self.explicit_tunnel_tcp_ports.lock().clone();
 
-        let new_snapshot = Arc::new(ProcessSnapshot {
-            connections: old_snap.connections.clone(),
-            pid_names: old_snap.pid_names.clone(),
-            tunnel_apps: self.tunnel_apps.clone(),
-            tunnel_pids: old_snap.tunnel_pids.clone(),
+        let new_snapshot = self.snapshot_from_parts(
+            old_snap.connections.clone(),
+            old_snap.pid_names.clone(),
+            version,
             explicit_tunnel_udp_ports,
             explicit_tunnel_tcp_ports,
-            version,
-            created_at: std::time::Instant::now(),
-        });
+        );
 
         self.current.store(new_snapshot);
 
@@ -883,15 +881,14 @@ impl LockFreeProcessCache {
     /// Persists TCP ports across snapshot refreshes so they don't rely on
     /// stale connection-table lookups.
     pub fn register_tcp_ports(&self, ports: &[u16]) {
-        if let Ok(mut guard) = self.explicit_tunnel_tcp_ports.lock() {
-            let new_set: HashSet<u16> = ports.iter().copied().collect();
-            if *guard != new_set {
-                log::info!(
-                    "Updated TCP ports for API tunneling: {} port(s)",
-                    new_set.len()
-                );
-                *guard = new_set;
-            }
+        let mut guard = self.explicit_tunnel_tcp_ports.lock();
+        let new_set: AHashSet<u16> = ports.iter().copied().collect();
+        if *guard != new_set {
+            log::info!(
+                "Updated TCP ports for API tunneling: {} port(s)",
+                new_set.len()
+            );
+            *guard = new_set;
         }
     }
 }
@@ -902,6 +899,9 @@ impl LockFreeProcessCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Tests use AHashMap/AHashSet to match the production ProcessSnapshot types
+    use ahash::AHashMap as HashMap;
+    use ahash::AHashSet as HashSet;
 
     #[test]
     fn test_lock_free_snapshot() {
@@ -1328,6 +1328,33 @@ mod tests {
         assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Tcp, false));
         // UDP port fallback is unchanged regardless of api_tunneling
         assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Udp, false));
+    }
+
+    #[test]
+    fn test_register_process_immediate_skips_duplicate_snapshot_rebuild() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        cache.register_process_immediate(7001, "RobloxPlayerBeta.exe".to_string());
+        let first_version = cache.get_snapshot().version;
+
+        cache.register_process_immediate(7001, "robloxplayerbeta.exe".to_string());
+
+        assert_eq!(cache.get_snapshot().version, first_version);
+    }
+
+    #[test]
+    fn test_register_udp_port_immediate_skips_duplicate_snapshot_rebuild() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        cache.register_udp_port_immediate(55000);
+        let first_snapshot = cache.get_snapshot();
+        let first_version = first_snapshot.version;
+        assert!(first_snapshot.should_tunnel_by_port_fallback(55000, Protocol::Udp, false));
+        drop(first_snapshot);
+
+        cache.register_udp_port_immediate(55000);
+
+        assert_eq!(cache.get_snapshot().version, first_version);
     }
 
     #[test]

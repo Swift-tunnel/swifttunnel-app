@@ -319,7 +319,7 @@ impl ProcessTracker {
             if !self.pid_names.contains_key(&pid) {
                 if let Some(process) = self.system.process(sysinfo::Pid::from_u32(pid)) {
                     self.pid_names
-                        .insert(pid, process.name().to_string_lossy().to_string());
+                        .insert(pid, process.name().to_string_lossy().into_owned());
                 }
             }
         }
@@ -329,7 +329,7 @@ impl ProcessTracker {
             let name = process.name().to_string_lossy().to_lowercase();
             if process_name_matches_any_tunnel_app(&name, &self.tunnel_apps) {
                 self.pid_names
-                    .insert(_pid.as_u32(), process.name().to_string_lossy().to_string());
+                    .insert(_pid.as_u32(), process.name().to_string_lossy().into_owned());
             }
         }
 
