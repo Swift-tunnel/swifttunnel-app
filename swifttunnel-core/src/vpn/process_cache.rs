@@ -17,10 +17,10 @@ use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
 use crate::process_names::process_name_matches_any_tunnel_app;
 use ahash::{AHashMap, AHashSet};
 use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================

@@ -4498,7 +4498,8 @@ fn run_cache_refresher(
             }
         }
 
-        let mut connections: ahash::AHashMap<ConnectionKey, u32> = ahash::AHashMap::with_capacity(2048);
+        let mut connections: ahash::AHashMap<ConnectionKey, u32> =
+            ahash::AHashMap::with_capacity(2048);
         let mut pid_names: ahash::AHashMap<u32, String> = ahash::AHashMap::with_capacity(512);
 
         // Get TCP table
