@@ -215,6 +215,43 @@ fn persist_session_settings(
     swifttunnel_core::settings::save_settings(&snapshot)
 }
 
+/// Tear down the live VPN session and drop all in-memory state that points at
+/// it. Always clears the published split-tunnel handle, sets Discord idle, and
+/// persists the disconnected session — even when the driver-level disconnect
+/// returns an error, because at that point the driver state is undefined and
+/// we'd rather report `None` to the UI (and refuse to auto-resume on next
+/// launch) than leave a stale handle or a stale `resume_vpn_on_startup` flag.
+///
+/// Shared between `vpn_disconnect` (explicit user action) and the in-app
+/// uninstall path in `commands::system`, which needs the same teardown
+/// ordering before it queues the NSIS uninstaller.
+pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), String> {
+    let mut vpn = state.vpn_connection.lock().await;
+    let result = vpn
+        .disconnect()
+        .await
+        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+    // Clear the published handle whether disconnect succeeded or not — on
+    // failure the driver state is undefined and we'd rather report None to
+    // the UI than hand it a stale pointer.
+    *state.split_tunnel_handle.write() = None;
+    drop(vpn);
+
+    {
+        let mut discord = state.discord_manager.lock();
+        discord.set_idle();
+    }
+
+    // Always persist the disconnected session. If disconnect failed the
+    // driver is in an unknown state, so clearing `resume_vpn_on_startup` is
+    // safer than letting the app auto-resume into it on next launch.
+    if let Err(e) = persist_session_settings(state, None) {
+        log::warn!("Failed to persist disconnected session settings: {}", e);
+    }
+
+    result
+}
+
 async fn emit_vpn_state(app: &AppHandle, state: &AppState) {
     let conn_state = state.vpn_state_handle.lock().await.clone();
 
@@ -388,28 +425,7 @@ pub async fn vpn_connect(
 
 #[tauri::command]
 pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let mut vpn = state.vpn_connection.lock().await;
-    let result = vpn
-        .disconnect()
-        .await
-        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
-    // Clear the published handle whether disconnect succeeded or not — on
-    // failure the driver state is undefined and we'd rather report None to
-    // the UI than hand it a stale pointer.
-    *state.split_tunnel_handle.write() = None;
-    drop(vpn);
-
-    {
-        let mut discord = state.discord_manager.lock();
-        discord.set_idle();
-    }
-
-    if result.is_ok() {
-        if let Err(e) = persist_session_settings(&state, None) {
-            log::warn!("Failed to persist disconnected session settings: {}", e);
-        }
-    }
-
+    let result = disconnect_and_persist(&state).await;
     emit_vpn_state(&app, &state).await;
     result
 }
