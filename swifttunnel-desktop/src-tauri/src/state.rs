@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use swifttunnel_core::auth::AuthManager;
 use swifttunnel_core::discord_rpc::DiscordManager;
 use swifttunnel_core::network_booster::NetworkBooster;
@@ -9,16 +9,25 @@ use swifttunnel_core::performance_monitor::PerformanceMonitor;
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
 use swifttunnel_core::settings::AppSettings;
 use swifttunnel_core::system_optimizer::SystemOptimizer;
-use swifttunnel_core::vpn::connection::VpnConnection;
+use swifttunnel_core::vpn::SplitTunnelDriver;
+use swifttunnel_core::vpn::connection::{ConnectionState, VpnConnection};
 use swifttunnel_core::vpn::servers::DynamicServerList;
 
 /// Shared application state managed by Tauri
 ///
 /// Uses `tokio::sync::Mutex` for managers with async methods (auth, vpn)
 /// and `parking_lot::Mutex` for synchronous-only managers.
+///
+/// `vpn_state_handle` and `split_tunnel_handle` are clones of the inner
+/// state pointers held by `VpnConnection`. Read-only command handlers
+/// (`vpn_get_state`, `vpn_get_throughput`, etc.) hit these directly so
+/// they don't have to acquire the heavy `vpn_connection` mutex while a
+/// connect or disconnect is in flight — that's what used to freeze the UI.
 pub struct AppState {
     pub auth_manager: Arc<tokio::sync::Mutex<AuthManager>>,
     pub vpn_connection: Arc<tokio::sync::Mutex<VpnConnection>>,
+    pub vpn_state_handle: Arc<tokio::sync::Mutex<ConnectionState>>,
+    pub split_tunnel_handle: Arc<RwLock<Option<Arc<tokio::sync::Mutex<SplitTunnelDriver>>>>>,
     pub server_list: Arc<Mutex<DynamicServerList>>,
     /// Map of region_id -> (server_name, latency_ms)
     pub region_latencies: Arc<Mutex<HashMap<String, (String, u32)>>>,
@@ -55,9 +64,14 @@ impl AppState {
 
         let enable_discord_rpc = settings.enable_discord_rpc;
 
+        let vpn_connection = VpnConnection::new();
+        let vpn_state_handle = vpn_connection.state_handle();
+
         Ok(Self {
             auth_manager: Arc::new(tokio::sync::Mutex::new(auth_manager)),
-            vpn_connection: Arc::new(tokio::sync::Mutex::new(VpnConnection::new())),
+            vpn_connection: Arc::new(tokio::sync::Mutex::new(vpn_connection)),
+            vpn_state_handle,
+            split_tunnel_handle: Arc::new(RwLock::new(None)),
             server_list: Arc::new(Mutex::new(DynamicServerList::new_empty())),
             region_latencies: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(Mutex::new(settings)),

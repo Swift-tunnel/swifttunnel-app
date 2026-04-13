@@ -4,9 +4,20 @@ use ring::signature::{ED25519, UnparsedPublicKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::AppHandle;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 use url::Url;
+
+const UPDATER_PROGRESS_EVENT: &str = "updater://progress";
+const UPDATER_DONE_EVENT: &str = "updater://done";
+
+#[derive(Debug, Clone, Serialize)]
+struct UpdaterProgressPayload {
+    downloaded: u64,
+    total: Option<u64>,
+}
 
 use swifttunnel_core::updater::UpdateChannel;
 
@@ -388,22 +399,79 @@ async fn check_update_for_manifest(
     match check_update_for_manifest_with_pubkey(app, manifest, None).await {
         Ok(update) => Ok(update),
         Err(primary_error) => {
-            let Some(legacy_pubkey) = legacy_tauri_updater_public_key() else {
-                return Err(primary_error);
-            };
-
-            if !should_try_legacy_tauri_pubkey(&primary_error) {
-                return Err(primary_error);
+            // Only try the legacy pubkey when the primary failure is
+            // specifically a signature mismatch — not on transient network
+            // errors, parse errors, or anything else. The previous heuristic
+            // was too broad and risked silent fallbacks for unrelated bugs.
+            if !is_signature_mismatch(&primary_error) {
+                return Err(primary_error.into_string());
             }
+            let Some(legacy_pubkey) = legacy_tauri_updater_public_key() else {
+                return Err(primary_error.into_string());
+            };
 
             check_update_for_manifest_with_pubkey(app, manifest, Some(&legacy_pubkey))
                 .await
                 .map_err(|legacy_error| {
                     format!(
-                        "Updater check failed with the configured key ({primary_error}) and the legacy key fallback also failed ({legacy_error})"
+                        "Updater check failed with the configured key ({primary}) and the legacy key fallback also failed ({legacy})",
+                        primary = primary_error.into_string(),
+                        legacy = legacy_error.into_string(),
                     )
                 })
         }
+    }
+}
+
+/// Internal updater error wrapper that preserves enough provenance for the
+/// signature-mismatch fallback decision while still flattening to a String for
+/// the public command surface.
+enum UpdaterCheckError {
+    /// Signature verification rejected the manifest. Caller may want to retry
+    /// with the legacy public key.
+    Signature(String),
+    /// Anything else (network, parse, IO, configuration). NOT eligible for the
+    /// legacy-pubkey fallback.
+    Other(String),
+}
+
+impl UpdaterCheckError {
+    fn into_string(self) -> String {
+        match self {
+            UpdaterCheckError::Signature(msg) | UpdaterCheckError::Other(msg) => msg,
+        }
+    }
+}
+
+fn is_signature_mismatch(error: &UpdaterCheckError) -> bool {
+    matches!(error, UpdaterCheckError::Signature(_))
+}
+
+/// Classify a `tauri_plugin_updater::Error` Display string. The plugin
+/// currently exposes errors as strings, so we match on the exact upstream
+/// prefixes — anything outside this allow-list is treated as a non-signature
+/// failure.
+fn classify_updater_error(message: String) -> UpdaterCheckError {
+    // Phrases drawn from tauri_plugin_updater's signature/key error variants.
+    // Exact prefixes only — substring matches like "signature" alone caught
+    // unrelated errors and triggered spurious legacy-pubkey retries.
+    const SIGNATURE_PHRASES: &[&str] = &[
+        "Signature error",
+        "signature does not match",
+        "signature verification",
+        "different key than the one provided",
+        "Failed to parse public key",
+        "PublicKeyDecode",
+        "InvalidSignature",
+    ];
+    if SIGNATURE_PHRASES.iter().any(|p| {
+        message
+            .to_ascii_lowercase()
+            .contains(&p.to_ascii_lowercase())
+    }) {
+        UpdaterCheckError::Signature(message)
+    } else {
+        UpdaterCheckError::Other(message)
     }
 }
 
@@ -411,14 +479,17 @@ async fn check_update_for_manifest_with_pubkey(
     app: &AppHandle,
     manifest: &SignedUpdateManifest,
     pubkey: Option<&str>,
-) -> Result<Option<tauri_plugin_updater::Update>, String> {
-    let endpoint = Url::parse(&manifest.latest_json_url)
-        .map_err(|e| format!("Invalid latest.json endpoint URL: {}", e))?;
+) -> Result<Option<tauri_plugin_updater::Update>, UpdaterCheckError> {
+    let endpoint = Url::parse(&manifest.latest_json_url).map_err(|e| {
+        UpdaterCheckError::Other(format!("Invalid latest.json endpoint URL: {}", e))
+    })?;
 
     let mut builder = app
         .updater_builder()
         .endpoints(vec![endpoint])
-        .map_err(|e| format!("Failed to configure updater endpoint: {}", e))?;
+        .map_err(|e| {
+            UpdaterCheckError::Other(format!("Failed to configure updater endpoint: {}", e))
+        })?;
 
     if let Some(pubkey) = pubkey {
         builder = builder.pubkey(pubkey.to_string());
@@ -426,20 +497,12 @@ async fn check_update_for_manifest_with_pubkey(
 
     let updater = builder
         .build()
-        .map_err(|e| format!("Failed to initialize updater: {}", e))?;
+        .map_err(|e| UpdaterCheckError::Other(format!("Failed to initialize updater: {}", e)))?;
 
     updater
         .check()
         .await
-        .map_err(|e| format!("Updater check failed: {}", e))
-}
-
-fn should_try_legacy_tauri_pubkey(error: &str) -> bool {
-    let normalized = error.to_ascii_lowercase();
-    normalized.contains("signature")
-        || normalized.contains("pubkey")
-        || normalized.contains("verify")
-        || normalized.contains("cryptographic")
+        .map_err(|e| classify_updater_error(format!("Updater check failed: {}", e)))
 }
 
 #[tauri::command]
@@ -522,10 +585,32 @@ pub async fn updater_install_channel(
         ));
     }
 
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let app_for_progress = app.clone();
+    let downloaded_for_progress = Arc::clone(&downloaded);
+
     update
-        .download_and_install(|_, _| {}, || {})
+        .download_and_install(
+            move |chunk_len, total| {
+                let so_far = downloaded_for_progress.fetch_add(chunk_len as u64, Ordering::Relaxed)
+                    + chunk_len as u64;
+                let _ = app_for_progress.emit(
+                    UPDATER_PROGRESS_EVENT,
+                    UpdaterProgressPayload {
+                        downloaded: so_far,
+                        total,
+                    },
+                );
+            },
+            || {},
+        )
         .await
         .map_err(|e| format!("Failed to download/install update: {}", e))?;
+
+    // Emit `done` only after signature verification + install actually
+    // succeeded — the `on_download_finish` callback fires before the await
+    // resolves, so listeners would otherwise see "done" for failed installs.
+    let _ = app.emit(UPDATER_DONE_EVENT, ());
 
     Ok(UpdaterInstallResponse {
         installed_version: update.version,
@@ -683,16 +768,22 @@ mod tests {
     }
 
     #[test]
-    fn should_try_legacy_tauri_pubkey_only_for_signature_like_failures() {
-        assert!(should_try_legacy_tauri_pubkey(
-            "Updater check failed: failed to verify signature"
-        ));
-        assert!(should_try_legacy_tauri_pubkey(
-            "cryptographic verification error"
-        ));
-        assert!(!should_try_legacy_tauri_pubkey(
-            "Updater check failed: network timeout"
-        ));
+    fn classify_updater_error_only_matches_signature_failures() {
+        assert!(is_signature_mismatch(&classify_updater_error(
+            "Updater check failed: Signature error".to_string()
+        )));
+        assert!(is_signature_mismatch(&classify_updater_error(
+            "signature does not match".to_string()
+        )));
+        assert!(is_signature_mismatch(&classify_updater_error(
+            "PublicKeyDecode: bad key".to_string()
+        )));
+        assert!(is_signature_mismatch(&classify_updater_error(
+            "Updater check failed: The signature was created with a different key than the one provided".to_string()
+        )));
+        assert!(!is_signature_mismatch(&classify_updater_error(
+            "Updater check failed: network timeout".to_string()
+        )));
     }
 
     #[test]

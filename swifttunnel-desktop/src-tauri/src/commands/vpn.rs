@@ -216,9 +216,7 @@ fn persist_session_settings(
 }
 
 async fn emit_vpn_state(app: &AppHandle, state: &AppState) {
-    let vpn = state.vpn_connection.lock().await;
-    let conn_state = vpn.state().await;
-    drop(vpn);
+    let conn_state = state.vpn_state_handle.lock().await.clone();
 
     let response = map_vpn_state(conn_state);
     let payload = VpnStateEvent {
@@ -233,8 +231,9 @@ async fn emit_vpn_state(app: &AppHandle, state: &AppState) {
 
 #[tauri::command]
 pub async fn vpn_get_state(state: State<'_, AppState>) -> Result<VpnStateResponse, String> {
-    let vpn = state.vpn_connection.lock().await;
-    let conn_state = vpn.state().await;
+    // Read the inner state Arc directly so we don't have to wait on the
+    // outer vpn_connection mutex while a connect or disconnect is mid-flight.
+    let conn_state = state.vpn_state_handle.lock().await.clone();
     Ok(map_vpn_state(conn_state))
 }
 
@@ -276,16 +275,7 @@ pub async fn vpn_connect(
     }
 
     // Gather needed data from settings and server list before locking vpn
-    let (
-        custom_relay,
-        auto_routing,
-        relay_qos_enabled,
-        whitelisted_regions,
-        forced_servers,
-        binding_preference,
-        game_process_performance,
-        enable_api_tunneling,
-    ) = {
+    let (settings_snapshot, binding_preference, overrides_changed) = {
         let mut settings = state.settings.lock();
         let previous_overrides = settings.network_binding_overrides.clone();
         let preflight = build_binding_preflight(&mut settings)?;
@@ -293,29 +283,41 @@ pub async fn vpn_connect(
             return Err(preflight.reason);
         }
         let binding_preference = current_binding_preference(&mut settings)?;
-        let settings_snapshot = settings.clone();
+        let snapshot = settings.clone();
         let overrides_changed = previous_overrides != settings.network_binding_overrides;
-        drop(settings);
-
-        if overrides_changed {
-            swifttunnel_core::settings::save_settings(&settings_snapshot)?;
-        }
-
-        (
-            if settings_snapshot.custom_relay_server.is_empty() {
-                None
-            } else {
-                Some(settings_snapshot.custom_relay_server.clone())
-            },
-            settings_snapshot.auto_routing_enabled,
-            settings_snapshot.config.network_settings.gaming_qos,
-            settings_snapshot.whitelisted_regions.clone(),
-            settings_snapshot.forced_servers.clone(),
-            binding_preference,
-            settings_snapshot.game_process_performance,
-            settings_snapshot.enable_api_tunneling,
-        )
+        (snapshot, binding_preference, overrides_changed)
     };
+
+    if overrides_changed {
+        let snapshot_for_save = settings_snapshot.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            swifttunnel_core::settings::save_settings(&snapshot_for_save)
+        })
+        .await
+        .map_err(|e| format!("save_settings task failed: {}", e))??;
+    }
+
+    let (
+        custom_relay,
+        auto_routing,
+        relay_qos_enabled,
+        whitelisted_regions,
+        forced_servers,
+        game_process_performance,
+        enable_api_tunneling,
+    ) = (
+        if settings_snapshot.custom_relay_server.is_empty() {
+            None
+        } else {
+            Some(settings_snapshot.custom_relay_server.clone())
+        },
+        settings_snapshot.auto_routing_enabled,
+        settings_snapshot.config.network_settings.gaming_qos,
+        settings_snapshot.whitelisted_regions.clone(),
+        settings_snapshot.forced_servers.clone(),
+        settings_snapshot.game_process_performance,
+        settings_snapshot.enable_api_tunneling,
+    );
 
     let preset_set = parse_game_presets(&game_presets);
     let tunnel_apps = swifttunnel_core::vpn::get_apps_for_preset_set(&preset_set);
@@ -323,14 +325,7 @@ pub async fn vpn_connect(
     // Build available_servers list from the dynamic server list
     let available_servers: Vec<(String, SocketAddr, Option<u32>)> = {
         let sl = state.server_list.lock();
-        sl.servers()
-            .iter()
-            .filter_map(|s| {
-                let addr: SocketAddr = format!("{}:{}", s.ip, 51821).parse().ok()?;
-                let latency = sl.get_latency(&s.region);
-                Some((s.region.clone(), addr, latency))
-            })
-            .collect()
+        build_available_servers(&sl)
     };
 
     // Get access token
@@ -357,11 +352,16 @@ pub async fn vpn_connect(
         )
         .await
         .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+    if result.is_ok() {
+        // Publish the inner split-tunnel driver handle so polling commands
+        // can read throughput/diagnostics/ping without queuing behind the
+        // outer vpn_connection mutex.
+        *state.split_tunnel_handle.write() = vpn.split_tunnel_handle();
+    }
     drop(vpn);
 
     let discord_region = if result.is_ok() {
-        let vpn = state.vpn_connection.lock().await;
-        let conn_state = vpn.state().await;
+        let conn_state = state.vpn_state_handle.lock().await.clone();
         Some(resolve_discord_region(&conn_state, &region))
     } else {
         None
@@ -393,6 +393,10 @@ pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Resul
         .disconnect()
         .await
         .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+    // Clear the published handle whether disconnect succeeded or not — on
+    // failure the driver state is undefined and we'd rather report None to
+    // the UI than hand it a stale pointer.
+    *state.split_tunnel_handle.write() = None;
     drop(vpn);
 
     {
@@ -412,19 +416,31 @@ pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Resul
 
 #[tauri::command]
 pub async fn vpn_get_ping(state: State<'_, AppState>) -> Result<Option<u32>, String> {
-    let (relay_ping, relay_addr) = {
-        let vpn = state.vpn_connection.lock().await;
-        let relay_ping = vpn.get_relay_ping_snapshot().and_then(|snapshot| {
-            if !snapshot.enabled {
-                return None;
+    // Read both the relay ping snapshot and the current relay address from
+    // the split-tunnel driver handle directly so we don't have to wait on
+    // the outer vpn_connection mutex while connect/disconnect is in flight.
+    let driver = state.split_tunnel_handle.read().clone();
+    let (relay_ping, relay_addr) = match driver {
+        Some(handle) => match handle.try_lock() {
+            Ok(driver) => {
+                let snapshot = driver
+                    .get_relay_context()
+                    .map(|relay| relay.ping_snapshot());
+                let relay_ping = snapshot.and_then(|snapshot| {
+                    if !snapshot.enabled {
+                        return None;
+                    }
+                    // p99 here would mislead the UI: it's the worst-case tail,
+                    // not the current ping. Stick to last_rtt and fall back to
+                    // median only.
+                    snapshot.last_rtt_ms.or(snapshot.p50_rtt_ms)
+                });
+                let relay_addr = driver.current_relay_addr();
+                (relay_ping, relay_addr)
             }
-            snapshot
-                .last_rtt_ms
-                .or(snapshot.p50_rtt_ms)
-                .or(snapshot.p99_rtt_ms)
-        });
-        let relay_addr = vpn.current_relay_addr();
-        (relay_ping, relay_addr)
+            Err(_) => (None, None),
+        },
+        None => (None, None),
     };
 
     // Preferred source: in-tunnel relay RTT telemetry from control-plane ping/pong.
@@ -460,8 +476,17 @@ pub struct ThroughputResponse {
 pub async fn vpn_get_throughput(
     state: State<'_, AppState>,
 ) -> Result<Option<ThroughputResponse>, String> {
-    let vpn = state.vpn_connection.lock().await;
-    Ok(vpn.get_throughput_stats().map(|stats| ThroughputResponse {
+    // Bypass the outer vpn_connection mutex by hitting the split-tunnel
+    // driver handle directly. Returns None until connect() finishes wiring it.
+    let driver = state.split_tunnel_handle.read().clone();
+    let stats = match driver {
+        Some(handle) => handle
+            .try_lock()
+            .ok()
+            .and_then(|driver| driver.get_throughput_stats()),
+        None => None,
+    };
+    Ok(stats.map(|stats| ThroughputResponse {
         bytes_up: stats.get_bytes_tx(),
         bytes_down: stats.get_bytes_rx(),
         packets_tunneled: 0,
@@ -492,26 +517,31 @@ pub struct DiagnosticsResponse {
 pub async fn vpn_get_diagnostics(
     state: State<'_, AppState>,
 ) -> Result<Option<DiagnosticsResponse>, String> {
-    let vpn = state.vpn_connection.lock().await;
-    Ok(vpn
-        .get_split_tunnel_diagnostics()
-        .map(|diag| DiagnosticsResponse {
-            adapter_name: diag.adapter_name,
-            adapter_guid: diag.adapter_guid,
-            selected_if_index: diag.selected_if_index,
-            resolved_if_index: diag.resolved_if_index,
-            has_default_route: diag.has_default_route,
-            route_resolution_source: Some(diag.route_resolution_source),
-            route_resolution_target_ip: diag.route_resolution_target_ip,
-            manual_binding_active: diag.manual_binding_active,
-            binding_reason: diag.binding_reason,
-            binding_stage: diag.binding_stage,
-            cached_override_used: diag.cached_override_used,
-            network_signature: diag.network_signature,
-            last_validation_result: diag.last_validation_result,
-            packets_tunneled: diag.packets_tunneled,
-            packets_bypassed: diag.packets_bypassed,
-        }))
+    let driver = state.split_tunnel_handle.read().clone();
+    let diag = match driver {
+        Some(handle) => handle
+            .try_lock()
+            .ok()
+            .and_then(|driver| driver.get_diagnostics()),
+        None => None,
+    };
+    Ok(diag.map(|diag| DiagnosticsResponse {
+        adapter_name: diag.adapter_name,
+        adapter_guid: diag.adapter_guid,
+        selected_if_index: diag.selected_if_index,
+        resolved_if_index: diag.resolved_if_index,
+        has_default_route: diag.has_default_route,
+        route_resolution_source: Some(diag.route_resolution_source),
+        route_resolution_target_ip: diag.route_resolution_target_ip,
+        manual_binding_active: diag.manual_binding_active,
+        binding_reason: diag.binding_reason,
+        binding_stage: diag.binding_stage,
+        cached_override_used: diag.cached_override_used,
+        network_signature: diag.network_signature,
+        last_validation_result: diag.last_validation_result,
+        packets_tunneled: diag.packets_tunneled,
+        packets_bypassed: diag.packets_bypassed,
+    }))
 }
 
 #[tauri::command]
@@ -599,6 +629,22 @@ fn build_latency_probe_targets(
         .collect()
 }
 
+/// Build the (region, socket_addr, latency) tuples passed into `VpnConnection::connect`
+/// from the dynamic server list. Honors each server's per-relay UDP port instead of
+/// hardcoding 51821 — relays migrating to alternate ports must remain reachable.
+pub(crate) fn build_available_servers(
+    sl: &swifttunnel_core::vpn::servers::DynamicServerList,
+) -> Vec<(String, SocketAddr, Option<u32>)> {
+    sl.servers()
+        .iter()
+        .filter_map(|s| {
+            let addr: SocketAddr = format!("{}:{}", s.ip, s.port).parse().ok()?;
+            let latency = sl.get_latency(&s.region);
+            Some((s.region.clone(), addr, latency))
+        })
+        .collect()
+}
+
 fn apply_latency_measurements(
     sl: &mut swifttunnel_core::vpn::servers::DynamicServerList,
     measurements: &[(String, Option<u32>)],
@@ -651,10 +697,8 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
             }
         }
         tasks.spawn(async move {
-            let endpoint = format!("{ip}:{port}");
-            let latency = swifttunnel_core::vpn::servers::measure_latency(&endpoint)
-                .await
-                .or_else(|| swifttunnel_core::vpn::servers::measure_latency_icmp(&ip));
+            let _ = port; // V3 relays don't echo unauthenticated probes — ICMP is the only signal we have.
+            let latency = swifttunnel_core::vpn::servers::measure_latency_icmp(&ip);
             (server_id, latency)
         });
     }
@@ -678,12 +722,16 @@ mod tests {
     };
 
     fn make_server(region: &str, ip: &str) -> DynamicServerInfo {
+        make_server_with_port(region, ip, 51821)
+    }
+
+    fn make_server_with_port(region: &str, ip: &str, port: u16) -> DynamicServerInfo {
         DynamicServerInfo {
             region: region.to_string(),
             name: region.to_string(),
             country_code: "XX".to_string(),
             ip: ip.to_string(),
-            port: 51821,
+            port,
             phantun_available: false,
             phantun_port: None,
         }
@@ -836,6 +884,43 @@ mod tests {
 
         let selected = select_best_server_in_region(&list, "singapore");
         assert_eq!(selected.as_deref(), Some("singapore"));
+    }
+
+    #[test]
+    fn build_available_servers_uses_dynamic_port() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server_with_port("singapore", "1.1.1.1", 51821),
+                make_server_with_port("alt", "2.2.2.2", 51822),
+                make_server_with_port("phantun", "3.3.3.3", 60001),
+            ],
+            vec![
+                make_region("singapore", &["singapore"]),
+                make_region("alt", &["alt"]),
+                make_region("phantun", &["phantun"]),
+            ],
+            ServerListSource::Api,
+        );
+
+        let built = build_available_servers(&list);
+        let by_region: std::collections::HashMap<_, _> = built
+            .iter()
+            .map(|(region, addr, _)| (region.clone(), *addr))
+            .collect();
+
+        assert_eq!(
+            by_region.get("singapore"),
+            Some(&"1.1.1.1:51821".parse().unwrap())
+        );
+        assert_eq!(
+            by_region.get("alt"),
+            Some(&"2.2.2.2:51822".parse().unwrap())
+        );
+        assert_eq!(
+            by_region.get("phantun"),
+            Some(&"3.3.3.3:60001".parse().unwrap())
+        );
     }
 }
 

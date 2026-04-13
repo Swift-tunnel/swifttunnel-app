@@ -10,9 +10,8 @@
 //!
 //! ## Architecture
 //!
-//! - config.rs: VPN configuration types and API fetching
 //! - routes.rs: Internet interface IP detection
-//! - process_tracker.rs: Maps network connections to PIDs via IP Helper APIs
+//! - process_tracker.rs: Connection-tracking key/stat types shared by process_cache
 //! - process_cache.rs: Lock-free RCU-style process cache for <0.1ms lookups
 //! - parallel_interceptor.rs: Per-CPU parallel packet processing
 //! - split_tunnel.rs: Per-process routing coordination
@@ -20,7 +19,6 @@
 //! - servers.rs: Server list and latency measurement
 
 pub mod auto_routing;
-pub mod config;
 pub mod connection;
 pub mod error_messages;
 pub mod ipv6_recovery;
@@ -38,7 +36,6 @@ pub mod wfp_block;
 pub mod winpkfilter;
 
 pub use auto_routing::{AutoRouter, AutoRoutingAction, AutoRoutingEvent};
-pub use config::{VpnConfigRequest, fetch_vpn_config, update_latency};
 pub use connection::{ConnectionState, VpnConnection};
 pub use error_messages::{short_error, user_friendly_error};
 pub use ipv6_recovery::recover_ipv6_on_startup;

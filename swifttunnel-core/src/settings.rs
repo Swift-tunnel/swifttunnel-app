@@ -330,6 +330,9 @@ pub fn load_settings() -> AppSettings {
             }
             Err(e) => {
                 error!("Failed to parse settings file: {}", e);
+                if let Some(backup) = backup_corrupt_settings(&path) {
+                    error!("Backed up corrupt settings to {:?}", backup);
+                }
                 sanitize_settings(AppSettings::default())
             }
         },
@@ -338,6 +341,23 @@ pub fn load_settings() -> AppSettings {
             sanitize_settings(AppSettings::default())
         }
     }
+}
+
+/// Rename a corrupt settings file to `settings.json.corrupt-{unix_ms}` so the
+/// user can recover their original config and so we don't silently overwrite
+/// it on the next save.
+fn backup_corrupt_settings(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let backup = path.with_file_name(format!(
+        "{}.corrupt-{}",
+        path.file_name()?.to_string_lossy(),
+        stamp
+    ));
+    fs::rename(path, &backup).ok()?;
+    Some(backup)
 }
 
 /// Save settings to disk
@@ -585,5 +605,32 @@ mod tests {
         assert_eq!(settings.window_state.height, MIN_WINDOW_HEIGHT);
         assert_eq!(settings.window_state.x, None);
         assert_eq!(settings.window_state.y, None);
+    }
+
+    #[test]
+    fn test_corrupt_settings_file_is_renamed_with_timestamp() {
+        let dir = std::env::temp_dir().join(format!(
+            "swifttunnel-settings-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, "{ this is not valid json").unwrap();
+
+        let backup = backup_corrupt_settings(&path).expect("backup should be created");
+
+        assert!(!path.exists(), "original file should be renamed");
+        assert!(backup.exists(), "backup file should exist");
+        let backup_name = backup.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            backup_name.starts_with("settings.json.corrupt-"),
+            "unexpected backup name: {}",
+            backup_name
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

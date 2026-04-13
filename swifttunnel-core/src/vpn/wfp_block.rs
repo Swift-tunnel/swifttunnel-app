@@ -169,12 +169,13 @@ fn nt_to_dos_path(nt_path: &str) -> Option<String> {
                             return Some(format!("{}:\\{}", drive_letter, path));
                         }
                     }
-                    // Ultimate fallback: assume C: (shouldn't reach here often)
+                    // Don't guess C:\ — games on D:\ would silently get a
+                    // mismatched WFP block filter. The caller already handles
+                    // None by falling back to speculative tunneling.
                     log::warn!(
-                        "nt_to_dos_path: Could not map volume {} to drive letter, falling back to C:",
+                        "nt_to_dos_path: Could not map volume {} to drive letter, returning None",
                         vol_num
                     );
-                    return Some(format!("C:\\{}", path));
                 }
             }
         }

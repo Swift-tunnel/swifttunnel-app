@@ -85,7 +85,13 @@ impl AutoRouter {
             current_game_region: RwLock::new(None),
             current_relay_addr: RwLock::new(None),
             current_st_region: RwLock::new(initial_region.to_string()),
-            last_switch_time: RwLock::new(Instant::now() - MIN_SWITCH_INTERVAL),
+            // checked_sub avoids a debug-build panic when the process has
+            // been alive for less than MIN_SWITCH_INTERVAL.
+            last_switch_time: RwLock::new(
+                Instant::now()
+                    .checked_sub(MIN_SWITCH_INTERVAL)
+                    .unwrap_or_else(Instant::now),
+            ),
             switches_this_minute: RwLock::new((0, Instant::now())),
             seen_game_servers: RwLock::new(HashSet::new()),
             available_servers: RwLock::new(Vec::new()),
@@ -217,6 +223,12 @@ impl AutoRouter {
         // Fast path: bail if we've already seen this IP.
         // Use try_read() to avoid blocking the hot path. If contended, retry on a
         // later packet (RakNet is chatty, we'll see it again quickly).
+        //
+        // The read-then-write here is a deliberate TOCTOU: two workers can both
+        // pass the read check, but only one of them sees `insert(...) == true`
+        // on the write path below — the loser bails on `if !is_new_ip` without
+        // double-firing the lookup. Cheap by design; do not "fix" with a single
+        // upgradeable lock unless you've measured a contention regression.
         match self.seen_game_servers.try_read() {
             Some(seen) => {
                 if seen.contains(&game_server_ip) {
@@ -923,5 +935,20 @@ mod tests {
             legacy_candidates.is_empty(),
             "No servers should match the legacy 'america' region name"
         );
+    }
+
+    #[test]
+    fn test_pending_lookup_stays_held_until_cleared() {
+        let router = AutoRouter::new(true, "singapore");
+        let ip = Ipv4Addr::new(128, 116, 1, 1);
+
+        router.pending_lookups.write().insert(ip);
+        router.pending_any.store(true, Ordering::Release);
+        assert!(router.is_lookup_pending(ip));
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(router.is_lookup_pending(ip));
+
+        router.clear_pending_lookup(ip);
+        assert!(!router.is_lookup_pending(ip));
     }
 }

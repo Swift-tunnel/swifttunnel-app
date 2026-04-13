@@ -34,7 +34,7 @@ export function ConnectTab() {
   const connectedAt = useVpnStore((s) => s.connectedAt);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
   const fetchPing = useVpnStore((s) => s.fetchPing);
-  const fetchVpnState = useVpnStore((s) => s.fetchState);
+  const fetchState = useVpnStore((s) => s.fetchState);
 
   const settings = useSettingsStore((s) => s.settings);
   const update = useSettingsStore((s) => s.update);
@@ -54,6 +54,31 @@ export function ConnectTab() {
 
   const prevStateRef = useRef(vpnState);
   const [showSuccess, setShowSuccess] = useState(false);
+
+  // Debounce settings persistence so a burst of clicks (region picker, preset
+  // toggles, whitelist edits) collapses into a single disk write 500ms after
+  // the last change instead of one write per click. The local store update
+  // happens immediately so the UI still feels instant.
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function saveDebounced() {
+    if (saveTimeoutRef.current !== null) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+    saveTimeoutRef.current = setTimeout(() => {
+      saveTimeoutRef.current = null;
+      void save();
+    }, 500);
+  }
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current !== null) {
+        clearTimeout(saveTimeoutRef.current);
+        // Flush a pending write on unmount so the user doesn't lose changes
+        // they made right before navigating away.
+        void save();
+      }
+    };
+  }, [save]);
 
   useEffect(() => {
     if (prevStateRef.current !== "connected" && vpnState === "connected") {
@@ -83,11 +108,17 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [isConnected, fetchPing]);
 
+  // Connect/disconnect transitions arrive instantly via the VPN_STATE_CHANGED
+  // event subscription in lib/events.ts. We still poll at low frequency because
+  // background tasks in the core (auto-routing relay switches in
+  // connection.rs::commit_switch, the relay health monitor) mutate
+  // ConnectionState without going through a Tauri command, so the UI would
+  // otherwise miss those changes until the next manual refresh.
   useEffect(() => {
-    if (!isConnected) return;
-    const id = setInterval(fetchVpnState, 2000);
+    if (!isConnected && !isTransitioning) return;
+    const id = setInterval(() => void fetchState(), 2000);
     return () => clearInterval(id);
-  }, [isConnected, fetchVpnState]);
+  }, [isConnected, isTransitioning, fetchState]);
 
   useEffect(() => {
     void fetchLatencies();
@@ -95,9 +126,22 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [fetchLatencies]);
 
-  function handleConnect() {
-    if (isConnected) disconnect();
-    else if (isIdle) connect(settings.selected_region, settings.selected_game_presets);
+  async function handleConnect() {
+    if (isConnected) {
+      disconnect();
+      return;
+    }
+    if (!isIdle) return;
+    // Flush any pending debounced settings save BEFORE connecting — vpn_connect
+    // reads connect-time options (auto_routing, whitelist, forced servers, QoS)
+    // from the backend AppState.settings, so a stale snapshot in the 500 ms
+    // debounce window would silently override the user's last click.
+    if (saveTimeoutRef.current !== null) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+      await save();
+    }
+    connect(settings.selected_region, settings.selected_game_presets);
   }
 
   function togglePreset(presetId: string) {
@@ -106,17 +150,17 @@ export function ConnectTab() {
       ? current.filter((p) => p !== presetId)
       : [...current, presetId];
     update({ selected_game_presets: next });
-    save();
+    saveDebounced();
   }
 
   function selectRegion(regionId: string) {
     update({ selected_region: regionId, auto_routing_enabled: false });
-    save();
+    saveDebounced();
   }
 
   function selectAutoRoute() {
     update({ auto_routing_enabled: true });
-    save();
+    saveDebounced();
   }
 
   function forceServer(regionId: string, server: string | null) {
@@ -124,7 +168,7 @@ export function ConnectTab() {
     if (server) current[regionId] = server;
     else delete current[regionId];
     update({ forced_servers: current });
-    save();
+    saveDebounced();
   }
 
   const ringColor = isConnected
@@ -155,7 +199,7 @@ export function ConnectTab() {
           isConnected={isConnected}
           isTransitioning={isTransitioning}
           showSuccess={showSuccess}
-          onClick={handleConnect}
+          onClick={() => void handleConnect()}
         />
 
         {/* Region badge + status */}
@@ -341,7 +385,7 @@ export function ConnectTab() {
                 regions={regions}
                 whitelisted={settings.whitelisted_regions}
                 disabled={isConnected}
-                onChange={(next) => { update({ whitelisted_regions: next }); save(); }}
+                onChange={(next) => { update({ whitelisted_regions: next }); saveDebounced(); }}
               />
             )}
           </>

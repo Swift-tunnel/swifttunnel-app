@@ -223,6 +223,11 @@ pub struct SplitTunnelDiagnostics {
     pub cached_override_used: bool,
     pub network_signature: Option<String>,
     pub last_validation_result: String,
+    /// Process-lifetime count of worker threads we had to detach via
+    /// `mem::forget` because they did not stop within the join timeout.
+    /// Non-zero means a previous interceptor session leaked threads — fail
+    /// the harness build, investigate before shipping.
+    pub leaked_worker_threads: u64,
 }
 
 fn pwstr_to_string(ptr: windows::core::PWSTR) -> String {
@@ -517,6 +522,17 @@ impl ThroughputStats {
 /// Timeout for thread join operations during stop()
 const THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Process-lifetime counter of threads that we forgot rather than joining.
+/// `start()` warns when this is non-zero so the testbench harness can fail
+/// builds that are leaking interceptor workers.
+static LEAKED_THREADS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of worker threads we had to detach via `mem::forget` because they
+/// did not stop within `THREAD_JOIN_TIMEOUT`.
+pub fn leaked_thread_count() -> u64 {
+    LEAKED_THREADS.load(Ordering::Relaxed)
+}
+
 /// Join a thread with a timeout using a polling approach
 ///
 /// Since Rust's JoinHandle doesn't have a native timeout, we use a polling strategy:
@@ -548,10 +564,12 @@ fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
     }
 
     // Timeout reached - thread is stuck
+    let leaked = LEAKED_THREADS.fetch_add(1, Ordering::Relaxed) + 1;
     log::error!(
-        "STABILITY: {} thread did not stop within {:?} - detaching thread to prevent hang",
+        "STABILITY: {} thread did not stop within {:?} - detaching thread to prevent hang (total leaked: {})",
         name,
-        THREAD_JOIN_TIMEOUT
+        THREAD_JOIN_TIMEOUT,
+        leaked
     );
 
     // CRITICAL: Forget the handle to detach the thread instead of blocking on drop
@@ -834,6 +852,7 @@ impl ParallelInterceptor {
             cached_override_used: self.cached_override_used,
             network_signature: self.active_network_signature.clone(),
             last_validation_result: self.last_validation_result.clone(),
+            leaked_worker_threads: leaked_thread_count(),
         }
     }
 
@@ -3145,6 +3164,20 @@ impl ParallelInterceptor {
             }
         };
 
+        // IPv4-only ISP guard: SwiftTunnel needs an IPv4 default route to work.
+        // If there isn't one, disabling IPv6 would leave the user with no
+        // network at all. Bail out early with a typed error so the UI surfaces
+        // the right message instead of "tunneling failed somewhere".
+        if Self::get_default_route_info_for_targets(&[]).is_none() {
+            log::error!(
+                "No IPv4 default route found — refusing to disable IPv6 (likely IPv6-only network)"
+            );
+            return Err(VpnError::SplitTunnelSetupFailed(
+                "IPv6-only network: SwiftTunnel needs IPv4 connectivity to tunnel game traffic."
+                    .to_string(),
+            ));
+        }
+
         log::info!(
             "Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)",
             friendly_name
@@ -3278,6 +3311,14 @@ impl ParallelInterceptor {
         let physical_idx = self
             .physical_adapter_idx
             .ok_or_else(|| VpnError::SplitTunnel("Physical adapter not configured".to_string()))?;
+
+        let leaked = LEAKED_THREADS.load(Ordering::Relaxed);
+        if leaked > 0 {
+            log::warn!(
+                "Starting parallel interceptor with {} leaked worker thread(s) from a previous session — investigate before shipping",
+                leaked
+            );
+        }
 
         log::info!(
             "Starting parallel interceptor with {} workers",
@@ -4242,30 +4283,6 @@ fn run_packet_worker(
                     }
                 }
 
-                // === CHECKSUM OFFLOAD FIX ===
-                // Modern NICs use hardware checksum offload — we intercept packets BEFORE
-                // the NIC computes checksums, so they have placeholder values (0x0000).
-                // Use thread-local buffer to avoid per-packet heap allocation.
-                let (packet_to_send_ptr, packet_to_send_len): (*const u8, usize) =
-                    if ip_packet.len() >= 20 {
-                        PACKET_BUFFER.with(|buf| {
-                            let mut fix_buf = buf.borrow_mut();
-                            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
-                            fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
-
-                            fix_packet_checksums(&mut fix_buf[..pkt_len]);
-
-                            (fix_buf.as_ptr(), pkt_len)
-                        })
-                    } else {
-                        (ip_packet.as_ptr(), ip_packet.len())
-                    };
-
-                // SAFETY: The pointer is either from ip_packet (still in scope) or
-                // from PACKET_BUFFER (thread-local, valid for duration of this function)
-                let packet_to_send =
-                    unsafe { std::slice::from_raw_parts(packet_to_send_ptr, packet_to_send_len) };
-
                 // === PACKET HOLD: Drop packets while auto-routing lookup is pending ===
                 // When a new game server IP is detected, we hold (drop) packets to it
                 // until the ipinfo.io lookup completes and the relay switches. This
@@ -4287,8 +4304,10 @@ fn run_packet_worker(
                 }
 
                 // === V3: UDP RELAY (NO ENCRYPTION) ===
-                // Forward packets directly to relay server without encryption
-                // This provides lowest latency and CPU usage
+                // Forward packets directly to relay server without encryption.
+                // The checksum fix-up uses a thread-local buffer; we keep the
+                // borrow alive for the entire `forward_outbound` call rather
+                // than letting a raw pointer escape the `with()` closure.
                 if let Some(ref relay) = relay_ctx {
                     // Log relay destination for first few packets (auto-routing debug)
                     if relay_success + relay_fail < 10 {
@@ -4307,7 +4326,20 @@ fn run_packet_worker(
                             }
                         );
                     }
-                    match relay.forward_outbound(packet_to_send) {
+
+                    let forward_result = if ip_packet.len() >= 20 {
+                        PACKET_BUFFER.with(|buf| {
+                            let mut fix_buf = buf.borrow_mut();
+                            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
+                            fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
+                            fix_packet_checksums(&mut fix_buf[..pkt_len]);
+                            relay.forward_outbound(&fix_buf[..pkt_len])
+                        })
+                    } else {
+                        relay.forward_outbound(ip_packet)
+                    };
+
+                    match forward_result {
                         Ok(sent) => {
                             relay_success += 1;
                             if relay_success <= 5 && sent > 0 {
