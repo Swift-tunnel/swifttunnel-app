@@ -389,6 +389,20 @@ impl AuthManager {
         *state = AuthState::LoggedOut;
     }
 
+    /// Cancel only the OAuth callback wait without touching an already
+    /// authenticated session.
+    pub fn cancel_oauth(&self) {
+        info!("Cancelling OAuth flow");
+        let was_awaiting_oauth = matches!(*self.state.lock(), AuthState::AwaitingOAuthCallback(_));
+        if was_awaiting_oauth {
+            self.stop_oauth_server();
+            let mut state = self.state.lock();
+            if matches!(*state, AuthState::AwaitingOAuthCallback(_)) {
+                *state = AuthState::LoggedOut;
+            }
+        }
+    }
+
     /// Clear error state
     pub fn clear_error(&self) {
         let mut state = self.state.lock();

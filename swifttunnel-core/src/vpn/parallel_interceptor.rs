@@ -4288,10 +4288,6 @@ fn run_packet_worker(
                 // until the ipinfo.io lookup completes and the relay switches. This
                 // prevents the game server from seeing traffic from the old relay IP,
                 // which causes Roblox Error 2/277. RakNet will retransmit the held packets.
-                //
-                // Cap the hold at 500ms — better to leak one packet on the old relay
-                // than drop voice chat for several seconds while a slow ipinfo.io
-                // lookup completes.
                 if ip_packet.len() >= 20 {
                     let dst_ip =
                         Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
@@ -4299,9 +4295,7 @@ fn run_packet_worker(
                     // Avoid taking the pending-lookups lock for non-Roblox traffic.
                     if is_roblox_game_server_ip(dst_ip) {
                         if let Some(ref auto_router) = auto_router {
-                            if auto_router
-                                .is_lookup_pending_within(dst_ip, Duration::from_millis(500))
-                            {
+                            if auto_router.is_lookup_pending(dst_ip) {
                                 // Skip this packet — RakNet will retransmit after relay switch
                                 continue;
                             }

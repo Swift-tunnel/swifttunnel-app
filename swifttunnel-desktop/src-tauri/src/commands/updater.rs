@@ -459,6 +459,7 @@ fn classify_updater_error(message: String) -> UpdaterCheckError {
         "Signature error",
         "signature does not match",
         "signature verification",
+        "different key than the one provided",
         "Failed to parse public key",
         "PublicKeyDecode",
         "InvalidSignature",
@@ -774,6 +775,9 @@ mod tests {
         )));
         assert!(is_signature_mismatch(&classify_updater_error(
             "PublicKeyDecode: bad key".to_string()
+        )));
+        assert!(is_signature_mismatch(&classify_updater_error(
+            "Updater check failed: The signature was created with a different key than the one provided".to_string()
         )));
         assert!(!is_signature_mismatch(&classify_updater_error(
             "Updater check failed: network timeout".to_string()
