@@ -215,6 +215,34 @@ fn persist_session_settings(
     swifttunnel_core::settings::save_settings(&snapshot)
 }
 
+/// Shared teardown used by `vpn_disconnect` and `system_uninstall`.
+///
+/// Always clears `split_tunnel_handle`, sets the Discord presence to idle, and
+/// persists the disconnected session settings — even when the underlying VPN
+/// disconnect call fails. A failed teardown leaves the driver in an undefined
+/// state, so we'd rather publish a `None` handle and a clean persisted session
+/// than hand the UI or a subsequent startup a stale "connected" view.
+pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), String> {
+    let mut vpn = state.vpn_connection.lock().await;
+    let result = vpn
+        .disconnect()
+        .await
+        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+    *state.split_tunnel_handle.write() = None;
+    drop(vpn);
+
+    {
+        let mut discord = state.discord_manager.lock();
+        discord.set_idle();
+    }
+
+    if let Err(e) = persist_session_settings(state, None) {
+        log::warn!("Failed to persist disconnected session settings: {}", e);
+    }
+
+    result
+}
+
 async fn emit_vpn_state(app: &AppHandle, state: &AppState) {
     let conn_state = state.vpn_state_handle.lock().await.clone();
 
@@ -388,28 +416,7 @@ pub async fn vpn_connect(
 
 #[tauri::command]
 pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let mut vpn = state.vpn_connection.lock().await;
-    let result = vpn
-        .disconnect()
-        .await
-        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
-    // Clear the published handle whether disconnect succeeded or not — on
-    // failure the driver state is undefined and we'd rather report None to
-    // the UI than hand it a stale pointer.
-    *state.split_tunnel_handle.write() = None;
-    drop(vpn);
-
-    {
-        let mut discord = state.discord_manager.lock();
-        discord.set_idle();
-    }
-
-    if result.is_ok() {
-        if let Err(e) = persist_session_settings(&state, None) {
-            log::warn!("Failed to persist disconnected session settings: {}", e);
-        }
-    }
-
+    let result = disconnect_and_persist(&state).await;
     emit_vpn_state(&app, &state).await;
     result
 }
