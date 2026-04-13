@@ -166,6 +166,31 @@ impl SecureStorage {
         })
     }
 
+    /// Test-only constructor that points at an isolated, unique data directory
+    /// so refresh-failure / session tests don't stomp on each other under
+    /// `cargo test`'s default thread pool.
+    #[cfg(test)]
+    fn with_isolated_data_dir() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let data_dir = std::env::temp_dir().join(format!(
+            "swifttunnel-storage-test-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create test data dir");
+        Self {
+            keyring_entry: None,
+            data_dir,
+        }
+    }
+
     /// Get the auth session file path
     fn session_file_path(&self) -> PathBuf {
         self.data_dir.join(AUTH_SESSION_FILE)
@@ -668,8 +693,7 @@ mod tests {
 
     #[test]
     fn test_refresh_failures_within_window_increments() {
-        let storage = SecureStorage::new().unwrap();
-        storage.reset_refresh_failures();
+        let storage = SecureStorage::with_isolated_data_dir();
 
         assert_eq!(storage.increment_refresh_failures(), 1);
         assert_eq!(storage.increment_refresh_failures(), 2);
@@ -682,8 +706,7 @@ mod tests {
 
     #[test]
     fn test_refresh_failures_time_bucket_resets_after_window() {
-        let storage = SecureStorage::new().unwrap();
-        storage.reset_refresh_failures();
+        let storage = SecureStorage::with_isolated_data_dir();
 
         // Stamp a record more than 1 hour old; the next increment should
         // observe it as expired and reset the count back to 1.
@@ -697,14 +720,11 @@ mod tests {
         assert_eq!(storage.get_refresh_failures(), 0);
         // ...and the next increment starts fresh.
         assert_eq!(storage.increment_refresh_failures(), 1);
-
-        storage.reset_refresh_failures();
     }
 
     #[test]
     fn test_legacy_refresh_failures_txt_is_deleted() {
-        let storage = SecureStorage::new().unwrap();
-        storage.reset_refresh_failures();
+        let storage = SecureStorage::with_isolated_data_dir();
 
         std::fs::write(storage.legacy_refresh_failures_path(), "42").unwrap();
         assert!(storage.legacy_refresh_failures_path().exists());

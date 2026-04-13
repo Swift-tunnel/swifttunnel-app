@@ -588,7 +588,6 @@ pub async fn updater_install_channel(
     let downloaded = Arc::new(AtomicU64::new(0));
     let app_for_progress = app.clone();
     let downloaded_for_progress = Arc::clone(&downloaded);
-    let app_for_done = app.clone();
 
     update
         .download_and_install(
@@ -603,12 +602,15 @@ pub async fn updater_install_channel(
                     },
                 );
             },
-            move || {
-                let _ = app_for_done.emit(UPDATER_DONE_EVENT, ());
-            },
+            || {},
         )
         .await
         .map_err(|e| format!("Failed to download/install update: {}", e))?;
+
+    // Emit `done` only after signature verification + install actually
+    // succeeded — the `on_download_finish` callback fires before the await
+    // resolves, so listeners would otherwise see "done" for failed installs.
+    let _ = app.emit(UPDATER_DONE_EVENT, ());
 
     Ok(UpdaterInstallResponse {
         installed_version: update.version,
