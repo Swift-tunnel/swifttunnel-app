@@ -288,6 +288,18 @@ fn build_restart_as_admin_script(exe_path: &str, current_pid: u32) -> String {
     )
 }
 
+#[cfg(windows)]
+fn build_launch_uninstaller_after_exit_script(uninstaller_path: &str, current_pid: u32) -> String {
+    let escaped_uninstaller = uninstaller_path.replace('\'', "''");
+
+    format!(
+        "$ErrorActionPreference='Stop'; \
+         $pidToWait={current_pid}; \
+         while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 200 }}; \
+         Start-Process -FilePath '{escaped_uninstaller}'"
+    )
+}
+
 #[derive(Serialize)]
 pub struct AdminCheckResponse {
     pub is_admin: bool,
@@ -644,6 +656,21 @@ mod tests {
         assert!(script.contains("-Verb RunAs"));
         assert!(script.contains("-EncodedCommand"));
     }
+
+    #[test]
+    fn build_launch_uninstaller_after_exit_script_waits_for_pid_and_escapes_path() {
+        let script = build_launch_uninstaller_after_exit_script(
+            "C:\\Program Files\\Swift'Tunnel\\uninstall.exe",
+            4242,
+        );
+        assert!(script.contains("$pidToWait=4242"));
+        assert!(script.contains("Get-Process -Id $pidToWait"));
+        assert!(
+            script.contains(
+                "Start-Process -FilePath 'C:\\Program Files\\Swift''Tunnel\\uninstall.exe'"
+            )
+        );
+    }
 }
 
 #[tauri::command]
@@ -656,17 +683,38 @@ pub async fn system_cleanup() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
-    // Run cleanup first to revert all system modifications (blocking work offloaded)
-    tauri::async_runtime::spawn_blocking(|| {
-        swifttunnel_core::network_booster::cleanup_all_system_state()
-            .map_err(|e| format!("Cleanup failed before uninstall: {}", e))
-    })
-    .await
-    .map_err(|e| format!("Cleanup task failed: {}", e))??;
-
+pub async fn system_uninstall(
+    state: tauri::State<'_, crate::state::AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
+        let conn_state = state.vpn_state_handle.lock().await.clone();
+        if !matches!(
+            conn_state,
+            swifttunnel_core::vpn::ConnectionState::Disconnected
+        ) {
+            let mut vpn = state.vpn_connection.lock().await;
+            vpn.disconnect()
+                .await
+                .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))?;
+            *state.split_tunnel_handle.write() = None;
+            drop(vpn);
+
+            {
+                let mut discord = state.discord_manager.lock();
+                discord.set_idle();
+            }
+
+            let mut settings = state.settings.lock();
+            settings.resume_vpn_on_startup = false;
+            let snapshot = settings.clone();
+            drop(settings);
+            if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
+                log::warn!("Failed to persist disconnected session settings: {}", e);
+            }
+        }
+
         // Find and launch the NSIS uninstaller
         let exe_path =
             std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {e}"))?;
@@ -682,9 +730,15 @@ pub async fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
             );
         }
 
-        std::process::Command::new(&uninstaller)
+        let uninstaller_script = build_launch_uninstaller_after_exit_script(
+            &uninstaller.to_string_lossy(),
+            std::process::id(),
+        );
+
+        swifttunnel_core::hidden_command("powershell")
+            .args(["-NoProfile", "-Command", &uninstaller_script])
             .spawn()
-            .map_err(|e| format!("Failed to launch uninstaller: {e}"))?;
+            .map_err(|e| format!("Failed to queue uninstaller launch: {e}"))?;
 
         app.exit(0);
         Ok(())
@@ -692,6 +746,7 @@ pub async fn system_uninstall(app: tauri::AppHandle) -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
+        let _ = state;
         let _ = app;
         Err("Uninstall is only supported on Windows".to_string())
     }
