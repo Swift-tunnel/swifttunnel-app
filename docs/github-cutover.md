@@ -3,7 +3,7 @@
 ## Goals
 
 - GitHub is the canonical release source.
-- GitLab remains a read-only mirror for branches and tags.
+- GitHub is the only supported release publishing path.
 - Current installs that already trust the current Tauri updater key keep updating.
 - Legacy GitHub installs that still trust the older Tauri updater key move to the current key through a staged bridge.
 
@@ -42,18 +42,6 @@ Before enabling GitHub as the canonical release path:
 
 If you skip that swap, GitHub will keep producing legacy-key releases and current GitLab installs will reject them.
 
-### GitLab mirror workflow
-
-- `GITLAB_MIRROR_PUSH_URL`
-
-Recommended format:
-
-```text
-https://<username>:<token>@gitlab.com/swifttunnel-group/swifttunnel-app.git
-```
-
-Use a GitLab token that can push to the mirror project.
-
 ## Important Constraint
 
 The shipped updater code selects the highest semver release in the GitHub releases API before it asks Tauri to verify the release signature. Because of that, a legacy-key population and a current-key population cannot both auto-update from the same GitHub stable feed if the highest stable version is signed by only one of those keys.
@@ -66,7 +54,7 @@ Bridge tags are controlled by the checked-in [`release-signing.toml`](../release
 
 1. Move the existing GitHub secrets into the `*_LEGACY_*` slots and load the GitLab-era keypair into the primary slots.
 2. Push `main` to GitHub and enable the GitHub release workflow.
-3. Keep GitLab as a mirror only.
+3. Keep release publishing on GitHub only.
 4. Add the chosen bridge tag to `release-signing.toml` before cutting that tag.
 5. Publish one legacy bridge release on GitHub.
 6. The GitHub release workflow signs that bridge tag with the legacy private key, while still embedding the current updater public key into the app.
@@ -88,9 +76,9 @@ GitHub CI now checks this on every push and pull request with `node scripts/chec
 
 ## Release Reconciliation
 
-GitHub Actions also runs a scheduled reconciliation workflow. If the newest semver tag exists on GitLab but is missing on GitHub, the workflow fetches that tag from GitLab, verifies that the tagged commit is already on `origin/main`, pushes the missing tag to GitHub, and lets the normal `Release` workflow publish the assets. If the newest GitHub tag already exists but the release entry is missing, the same reconciler dispatches the `Release` workflow manually for that tag.
+GitHub Actions also runs a scheduled reconciliation workflow. If the newest semver tag on GitHub already exists but the release entry is missing, the reconciler dispatches the `Release` workflow manually for that tag.
 
-The reconciler only considers the newest semver tag across GitHub and GitLab, so it repairs the current release without trying to rebuild ancient historical tags.
+The reconciler only considers the newest semver tag on GitHub, so it repairs the current release without trying to rebuild ancient historical tags.
 
 ## Testbench Runner
 

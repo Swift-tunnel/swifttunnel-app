@@ -167,13 +167,12 @@ Notes:
 - `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
 - Windows CI and release packaging run on the self-hosted `testbench` GitHub runner so GitHub uses the same Windows environment we already trust for real builds.
-- GitLab is maintained as a mirror only. If you want automatic mirroring from GitHub, configure `GITLAB_MIRROR_PUSH_URL` in GitHub Actions.
-- A scheduled GitHub reconciliation workflow backfills a missing GitHub semver tag or release if GitLab somehow gets tagged first, then dispatches the normal GitHub `Release` workflow for that tag.
+- A scheduled GitHub reconciliation workflow dispatches the normal GitHub `Release` workflow if the newest GitHub semver tag is missing its release entry.
 
 ### GitHub Cutover Notes
 
 - GitHub is the canonical source for releases and updater assets.
-- GitLab should mirror `main` and release tags only.
+- GitHub is the only supported release publishing path.
 - The existing GitHub updater secret currently matches the legacy GitHub trust root used by `v1.20.18` (`A943D352BDA748D5`), while GitLab `1.21.16` uses key id `436B4C95C608A09A`.
 - Before enabling GitHub releases, move the current GitHub Tauri secrets into the `*_LEGACY_*` slots and replace the primary slots with the GitLab-era current keypair.
 - If older installed builds still trust a legacy GitHub-era Tauri key, add the bridge tag to `release-signing.toml` before cutting it so the GitHub release workflow signs that one tag with the legacy private key while still embedding the current updater public key in the app.

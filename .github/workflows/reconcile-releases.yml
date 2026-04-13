@@ -28,32 +28,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Backfill missing GitHub tag or release
+      - name: Dispatch Release for newest GitHub tag without a release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GITLAB_REPO_URL: https://gitlab.com/swifttunnel-group/swifttunnel-app.git
         run: |
           set -euo pipefail
 
           git fetch origin main --tags --force
-          if git remote get-url gitlab-mirror >/dev/null 2>&1; then
-            git remote set-url gitlab-mirror "${GITLAB_REPO_URL}"
-          else
-            git remote add gitlab-mirror "${GITLAB_REPO_URL}"
-          fi
-
-          mapfile -t gitlab_tags < <(
-            git ls-remote --tags --refs "${GITLAB_REPO_URL}" "v*" |
-              awk '{print $2}' |
-              sed 's#refs/tags/##'
-          )
-
-          latest_gitlab_tag="$(
-            printf '%s\n' "${gitlab_tags[@]}" |
-              python3 scripts/select_latest_semver_tag.py
-          )"
 
           mapfile -t github_tags < <(
             git for-each-ref \
@@ -62,40 +45,13 @@ jobs:
               refs/tags/v*
           )
 
-          latest_github_tag="$(
+          target_tag="$(
             printf '%s\n' "${github_tags[@]}" |
               python3 scripts/select_latest_semver_tag.py
           )"
 
-          target_tag="$(
-            printf '%s\n' "${latest_gitlab_tag}" "${latest_github_tag}" |
-              awk 'NF > 0' |
-              python3 scripts/select_latest_semver_tag.py
-          )"
-
           if [[ -z "${target_tag}" ]]; then
-            echo "No release tags found on GitHub or GitLab."
-            exit 0
-          fi
-
-          missing_github_tag=""
-          if [[ "${target_tag}" == "${latest_gitlab_tag}" ]] && ! git show-ref --verify --quiet "refs/tags/${target_tag}"; then
-            missing_github_tag="${target_tag}"
-          fi
-
-          if [[ -n "${missing_github_tag}" ]]; then
-            echo "Backfilling missing GitHub tag ${missing_github_tag} from GitLab"
-            git fetch gitlab-mirror "refs/tags/${missing_github_tag}:refs/tags/${missing_github_tag}" --force
-            release_commit="$(git rev-list -n 1 "${missing_github_tag}")"
-
-            if ! git merge-base --is-ancestor "${release_commit}" "origin/main"; then
-              echo "::error::Refusing to push ${missing_github_tag} because ${release_commit} is not on origin/main"
-              exit 1
-            fi
-
-            git push origin "refs/tags/${missing_github_tag}"
-            echo "Dispatching Release workflow for backfilled GitHub tag ${missing_github_tag}"
-            gh workflow run Release --repo "${GITHUB_REPOSITORY}" -f tag="${missing_github_tag}"
+            echo "No GitHub release tags found."
             exit 0
           fi
 
