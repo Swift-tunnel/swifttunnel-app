@@ -6,8 +6,9 @@ use super::storage::SecureStorage;
 use super::types::{AuthError, AuthSession, AuthState, OAuthPendingState, UserInfo};
 use chrono::{Duration, Utc};
 use log::{debug, error, info, warn};
+use parking_lot::Mutex;
 use rand::Rng;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use url::form_urlencoded;
 
@@ -88,7 +89,7 @@ impl AuthManager {
 
     /// Get the current auth state
     pub fn get_state(&self) -> AuthState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().clone()
     }
 
     /// Check if user is logged in
@@ -110,7 +111,7 @@ impl AuthManager {
 
         // Set state to logging in
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             *state = AuthState::LoggingIn;
         }
 
@@ -146,7 +147,7 @@ impl AuthManager {
 
                 // Update state
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock();
                     *state = AuthState::LoggedIn(session);
                 }
 
@@ -157,7 +158,7 @@ impl AuthManager {
                 error!("Sign in failed: {}", e);
                 // Reset state to logged out with error
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock();
                     *state = AuthState::Error(e.to_string());
                 }
                 Err(e)
@@ -204,7 +205,7 @@ impl AuthManager {
                     self.storage.reset_refresh_failures();
 
                     {
-                        let mut state = self.state.lock().unwrap();
+                        let mut state = self.state.lock();
                         *state = AuthState::LoggedIn(new_session);
                     }
 
@@ -329,7 +330,7 @@ impl AuthManager {
             let _ = self.storage.store_session(&updated_session);
 
             {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 *state = AuthState::LoggedIn(updated_session);
             }
         }
@@ -354,7 +355,7 @@ impl AuthManager {
         self.storage.clear_session()?;
 
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             *state = AuthState::LoggedOut;
         }
 
@@ -369,7 +370,7 @@ impl AuthManager {
             warn!("Failed to clear session during force logout: {}", e);
         }
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             *state = AuthState::LoggedOut;
         }
         Ok(())
@@ -380,20 +381,17 @@ impl AuthManager {
     /// the localhost port.
     pub fn cancel_login(&self) {
         info!("Cancelling login");
-        let was_awaiting_oauth = matches!(
-            *self.state.lock().unwrap(),
-            AuthState::AwaitingOAuthCallback(_)
-        );
+        let was_awaiting_oauth = matches!(*self.state.lock(), AuthState::AwaitingOAuthCallback(_));
         if was_awaiting_oauth {
             self.stop_oauth_server();
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         *state = AuthState::LoggedOut;
     }
 
     /// Clear error state
     pub fn clear_error(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if matches!(*state, AuthState::Error(_)) {
             *state = AuthState::LoggedOut;
         }
@@ -412,7 +410,7 @@ impl AuthManager {
 
         // Stop any existing OAuth server
         {
-            let mut server_guard = self.oauth_server.lock().unwrap();
+            let mut server_guard = self.oauth_server.lock();
             if let Some(mut server) = server_guard.take() {
                 info!("Stopping previous OAuth server");
                 server.stop();
@@ -457,7 +455,7 @@ impl AuthManager {
 
         // Store the OAuth server
         {
-            let mut server_guard = self.oauth_server.lock().unwrap();
+            let mut server_guard = self.oauth_server.lock();
             *server_guard = Some(oauth_server);
         }
 
@@ -469,7 +467,7 @@ impl AuthManager {
 
         // Set state to awaiting OAuth callback
         {
-            let mut auth_state = self.state.lock().unwrap();
+            let mut auth_state = self.state.lock();
             *auth_state = AuthState::AwaitingOAuthCallback(pending);
         }
 
@@ -485,7 +483,7 @@ impl AuthManager {
     /// Call this periodically to check if the OAuth callback has been received.
     /// Returns Some(callback_data) if callback received, None otherwise.
     pub fn poll_oauth_callback(&self) -> Option<super::oauth_server::OAuthCallbackData> {
-        let server_guard = self.oauth_server.lock().unwrap();
+        let server_guard = self.oauth_server.lock();
         if let Some(ref server) = *server_guard {
             server.try_recv_callback()
         } else {
@@ -495,7 +493,7 @@ impl AuthManager {
 
     /// Get the OAuth server port (if active)
     pub fn get_oauth_port(&self) -> Option<u16> {
-        let server_guard = self.oauth_server.lock().unwrap();
+        let server_guard = self.oauth_server.lock();
         server_guard.as_ref().map(|s| s.port())
     }
 
@@ -516,7 +514,7 @@ impl AuthManager {
 
         // Get expected state from memory
         let expected_state = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock();
             match &*state {
                 AuthState::AwaitingOAuthCallback(pending) => {
                     // Check if the OAuth flow has expired (10 minutes)
@@ -549,7 +547,7 @@ impl AuthManager {
             );
             // Reset state
             {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 *state = AuthState::Error(
                     "Security error: state mismatch. Please try again.".to_string(),
                 );
@@ -566,7 +564,7 @@ impl AuthManager {
 
         // Set state to logging in
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             *state = AuthState::LoggingIn;
         }
 
@@ -580,7 +578,7 @@ impl AuthManager {
             Err(e) => {
                 error!("Failed to exchange OAuth token: {}", e);
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock();
                     *state = AuthState::Error(e.to_string());
                 }
                 return Err(e);
@@ -607,7 +605,7 @@ impl AuthManager {
             Err(e) => {
                 error!("Failed to verify magic link: {}", e);
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock();
                     *state = AuthState::Error(e.to_string());
                 }
                 return Err(e);
@@ -653,7 +651,7 @@ impl AuthManager {
 
         // Update state
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             *state = AuthState::LoggedIn(session);
         }
 
@@ -663,7 +661,7 @@ impl AuthManager {
 
     /// Stop the OAuth server if it's running
     fn stop_oauth_server(&self) {
-        let mut server_guard = self.oauth_server.lock().unwrap();
+        let mut server_guard = self.oauth_server.lock();
         if let Some(mut server) = server_guard.take() {
             info!("Stopping OAuth server");
             server.stop();

@@ -8,3 +8,8 @@ lto = true
 codegen-units = 1
 strip = "debuginfo"
 panic = "unwind"
+
+# Faster builds for proc-macro/build-script crates without penalizing runtime
+[profile.release.build-override]
+opt-level = 0
+codegen-units = 16

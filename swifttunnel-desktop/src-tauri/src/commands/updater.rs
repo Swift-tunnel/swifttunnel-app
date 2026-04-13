@@ -464,10 +464,9 @@ fn classify_updater_error(message: String) -> UpdaterCheckError {
         "InvalidSignature",
     ];
     if SIGNATURE_PHRASES.iter().any(|p| {
-        message.contains(p)
-            || message
-                .to_ascii_lowercase()
-                .contains(&p.to_ascii_lowercase())
+        message
+            .to_ascii_lowercase()
+            .contains(&p.to_ascii_lowercase())
     }) {
         UpdaterCheckError::Signature(message)
     } else {
@@ -766,16 +765,19 @@ mod tests {
     }
 
     #[test]
-    fn should_try_legacy_tauri_pubkey_only_for_signature_like_failures() {
-        assert!(should_try_legacy_tauri_pubkey(
-            "Updater check failed: failed to verify signature"
-        ));
-        assert!(should_try_legacy_tauri_pubkey(
-            "cryptographic verification error"
-        ));
-        assert!(!should_try_legacy_tauri_pubkey(
-            "Updater check failed: network timeout"
-        ));
+    fn classify_updater_error_only_matches_signature_failures() {
+        assert!(is_signature_mismatch(&classify_updater_error(
+            "Updater check failed: Signature error".to_string()
+        )));
+        assert!(is_signature_mismatch(&classify_updater_error(
+            "signature does not match".to_string()
+        )));
+        assert!(is_signature_mismatch(&classify_updater_error(
+            "PublicKeyDecode: bad key".to_string()
+        )));
+        assert!(!is_signature_mismatch(&classify_updater_error(
+            "Updater check failed: network timeout".to_string()
+        )));
     }
 
     #[test]

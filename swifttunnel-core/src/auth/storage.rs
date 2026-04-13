@@ -383,6 +383,11 @@ impl SecureStorage {
         if let Some(session) = self.load_from_keyring()? {
             info!("Loaded session from keyring (migrating to file storage)");
             let _ = self.store_to_file(&session);
+            // Re-encrypt the keyring entry too — load_from_keyring may have
+            // returned a legacy plaintext-JSON entry, and we want to overwrite
+            // it with the DPAPI blob so a future file deletion can't fall back
+            // to plaintext again.
+            let _ = self.store_to_keyring(&session);
             return Ok(Some(session));
         }
 
@@ -408,8 +413,12 @@ impl SecureStorage {
         Ok(())
     }
 
-    /// Check if a session exists. Cheap path: file existence only — keyring
-    /// reads on Windows are synchronous RPCs and don't belong on a hot path.
+    /// Cheap check: is there a session *file* on disk? May return `true` for
+    /// files that won't actually decrypt — e.g. a file DPAPI-encrypted under a
+    /// different Windows user, or a partial write from a crash mid-migration.
+    /// Callers MUST follow up with `load_session` before assuming the user is
+    /// logged in. We accept the false-positive because keyring reads on Windows
+    /// are synchronous RPCs that don't belong on a hot path.
     pub fn has_session(&self) -> bool {
         self.session_file_path().exists()
     }

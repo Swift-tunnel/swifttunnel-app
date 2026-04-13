@@ -111,6 +111,9 @@ num_cpus = "1.16"
 # Stack-allocated buffers for zero-alloc packet processing
 arrayvec = "0.7"
 
+# Faster hashing for internal (non-DoS-sensitive) HashMaps on packet hot paths
+ahash = "0.8"
+
 # Discord Rich Presence for activity status
 discord-rich-presence = "0.2"
 

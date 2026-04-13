@@ -34,6 +34,7 @@ export function ConnectTab() {
   const connectedAt = useVpnStore((s) => s.connectedAt);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
   const fetchPing = useVpnStore((s) => s.fetchPing);
+  const fetchState = useVpnStore((s) => s.fetchState);
 
   const settings = useSettingsStore((s) => s.settings);
   const update = useSettingsStore((s) => s.update);
@@ -107,9 +108,17 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [isConnected, fetchPing]);
 
-  // VPN state is now pushed via the VPN_STATE_CHANGED Tauri event subscription
-  // wired up in lib/events.ts. No polling needed — the previous 2s setInterval
-  // was redundant and added delay to UI updates after a connect/disconnect.
+  // Connect/disconnect transitions arrive instantly via the VPN_STATE_CHANGED
+  // event subscription in lib/events.ts. We still poll at low frequency because
+  // background tasks in the core (auto-routing relay switches in
+  // connection.rs::commit_switch, the relay health monitor) mutate
+  // ConnectionState without going through a Tauri command, so the UI would
+  // otherwise miss those changes until the next manual refresh.
+  useEffect(() => {
+    if (!isConnected && !isTransitioning) return;
+    const id = setInterval(() => void fetchState(), 2000);
+    return () => clearInterval(id);
+  }, [isConnected, isTransitioning, fetchState]);
 
   useEffect(() => {
     void fetchLatencies();
@@ -117,9 +126,22 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [fetchLatencies]);
 
-  function handleConnect() {
-    if (isConnected) disconnect();
-    else if (isIdle) connect(settings.selected_region, settings.selected_game_presets);
+  async function handleConnect() {
+    if (isConnected) {
+      disconnect();
+      return;
+    }
+    if (!isIdle) return;
+    // Flush any pending debounced settings save BEFORE connecting — vpn_connect
+    // reads connect-time options (auto_routing, whitelist, forced servers, QoS)
+    // from the backend AppState.settings, so a stale snapshot in the 500 ms
+    // debounce window would silently override the user's last click.
+    if (saveTimeoutRef.current !== null) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+      await save();
+    }
+    connect(settings.selected_region, settings.selected_game_presets);
   }
 
   function togglePreset(presetId: string) {
@@ -177,7 +199,7 @@ export function ConnectTab() {
           isConnected={isConnected}
           isTransitioning={isTransitioning}
           showSuccess={showSuccess}
-          onClick={handleConnect}
+          onClick={() => void handleConnect()}
         />
 
         {/* Region badge + status */}

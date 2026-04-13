@@ -6,10 +6,11 @@
 //! 128.116.0.0/17 range (they often return Roblox's HQ city "San Mateo"
 //! instead of the actual server location).
 
+use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 /// Shared HTTP client with 5s timeout for geolocation lookups
@@ -56,12 +57,11 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
     // Check cache first
     {
         let cache = get_cache();
-        if let Ok(cache) = cache.lock() {
-            if let Some(location) = cache.get(&ip) {
-                log::debug!("Cache hit for IP {}: {}", ip, location);
-                return Some(location.clone());
-            }
-        };
+        let cache = cache.lock();
+        if let Some(location) = cache.get(&ip) {
+            log::debug!("Cache hit for IP {}: {}", ip, location);
+            return Some(location.clone());
+        }
     }
 
     // Acquire semaphore to limit concurrent requests
@@ -88,10 +88,9 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
     // Cache the result
     {
         let cache = get_cache();
-        if let Ok(mut cache) = cache.lock() {
-            cache.insert(ip, location.clone());
-            log::info!("Cached location for {}: {}", ip, location);
-        };
+        let mut cache = cache.lock();
+        cache.insert(ip, location.clone());
+        log::info!("Cached location for {}: {}", ip, location);
     }
 
     Some(location)
@@ -486,7 +485,7 @@ async fn fetch_ipinfo(ip: Ipv4Addr) -> Option<IpInfoResponse> {
     // Check cache for a previously fetched location string
     let cached_location = {
         let cache = get_cache();
-        cache.lock().ok().and_then(|c| c.get(&ip).cloned())
+        cache.lock().get(&ip).cloned()
     };
 
     if let Some(loc) = cached_location {
@@ -518,9 +517,7 @@ async fn fetch_ipinfo(ip: Ipv4Addr) -> Option<IpInfoResponse> {
 
     // Cache the formatted location string
     if let Some(location) = format_location(&info) {
-        if let Ok(mut cache) = get_cache().lock() {
-            cache.insert(ip, location);
-        }
+        get_cache().lock().insert(ip, location);
     }
 
     Some(info)

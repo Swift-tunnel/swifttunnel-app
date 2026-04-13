@@ -436,9 +436,9 @@ unsafe fn parse_process_start_event(record: &EVENT_RECORD) -> Option<ProcessStar
         }
     }
 
-    // Try to get the full image path from the OS (more reliable than event data)
-    // This returns an NT path like \Device\HarddiskVolume3\...\RobloxPlayerBeta.exe
-    let image_path = get_process_name_by_pid(event_pid).unwrap_or_default();
+    // Try to get the full image path from the OS (more reliable than event data).
+    // This must remain a full NT path because the WFP blocker converts it to a DOS path.
+    let image_path = get_process_image_path_by_pid(event_pid).unwrap_or_default();
 
     // If we couldn't get the name from event data, extract from full path
     if name.is_empty() {
@@ -460,8 +460,8 @@ unsafe fn parse_process_start_event(record: &EVENT_RECORD) -> Option<ProcessStar
     })
 }
 
-/// Get process name by PID using Windows API
-fn get_process_name_by_pid(pid: u32) -> Option<String> {
+/// Get the full NT image path for a PID using Windows API.
+fn get_process_image_path_by_pid(pid: u32) -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::ProcessStatus::GetProcessImageFileNameW;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
@@ -472,17 +472,25 @@ fn get_process_name_by_pid(pid: u32) -> Option<String> {
             return None;
         }
 
-        let mut buffer = [0u16; 260];
-        let len = GetProcessImageFileNameW(handle, &mut buffer);
-        CloseHandle(handle).ok();
+        let mut capacity = 260usize;
+        let path = loop {
+            let mut buffer = vec![0u16; capacity];
+            let len = GetProcessImageFileNameW(handle, &mut buffer) as usize;
+            if len == 0 {
+                let _ = CloseHandle(handle);
+                return None;
+            }
+            if len < buffer.len() || capacity >= 32 * 1024 {
+                break String::from_utf16_lossy(&buffer[..len]);
+            }
+            capacity = (capacity * 2).min(32 * 1024);
+        };
 
-        if len == 0 {
-            return None;
+        if CloseHandle(handle).is_err() {
+            log::debug!("Failed to close process handle for PID {}", pid);
         }
 
-        let path = String::from_utf16_lossy(&buffer[..len as usize]);
-        let name = path.rsplit('\\').next().unwrap_or(&path);
-        Some(name.to_string())
+        Some(path)
     }
 }
 

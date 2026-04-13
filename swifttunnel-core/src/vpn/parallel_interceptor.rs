@@ -3348,14 +3348,12 @@ impl ParallelInterceptor {
         let refresher_cache = Arc::clone(&self.process_cache);
         let refresh_now = Arc::clone(&self.refresh_now_flag);
         let refresh_condvar = Arc::clone(&self.refresh_condvar);
-        let refresher_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
         self.refresher_handle = Some(thread::spawn(move || {
             run_cache_refresher(
                 refresher_cache,
                 refresher_stop,
                 refresh_now,
                 refresh_condvar,
-                refresher_api_tunneling,
             );
         }));
 
@@ -3889,7 +3887,7 @@ fn run_packet_reader(
     // Routing decisions are made here (reader thread) so bypass traffic never hits workers.
     let mut snapshot = process_cache.get_snapshot();
     let mut snapshot_version = snapshot.version;
-    let mut inline_cache: InlineCache = std::collections::HashMap::with_capacity(1024);
+    let mut inline_cache: InlineCache = ahash::AHashMap::with_capacity(1024);
 
     let driver = ndisapi::Ndisapi::new("NDISRD")
         .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
@@ -4474,7 +4472,6 @@ fn run_cache_refresher(
     stop_flag: Arc<AtomicBool>,
     refresh_now: Arc<AtomicBool>,
     refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-    api_tunneling_enabled: Arc<AtomicBool>,
 ) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
@@ -4496,10 +4493,6 @@ fn run_cache_refresher(
     let mut system = System::new();
     let mut refresh_count = 0u64;
     let mut first_run = true;
-
-    // OPTIMIZATION: Reuse HashMaps instead of recreating every iteration
-    let mut connections: HashMap<ConnectionKey, u32> = HashMap::with_capacity(2048);
-    let mut pid_names: HashMap<u32, String> = HashMap::with_capacity(512);
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
@@ -4543,9 +4536,9 @@ fn run_cache_refresher(
             }
         }
 
-        // OPTIMIZATION: Clear and reuse instead of reallocating
-        connections.clear();
-        pid_names.clear();
+        let mut connections: ahash::AHashMap<ConnectionKey, u32> =
+            ahash::AHashMap::with_capacity(2048);
+        let mut pid_names: ahash::AHashMap<u32, String> = ahash::AHashMap::with_capacity(512);
 
         // Get TCP table
         unsafe {
@@ -4663,26 +4656,28 @@ fn run_cache_refresher(
             for pid in connections.values() {
                 if !pid_names.contains_key(pid) {
                     if let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) {
-                        pid_names.insert(*pid, process.name().to_string_lossy().to_string());
+                        pid_names.insert(*pid, process.name().to_string_lossy().into_owned());
                     }
                 }
             }
 
             // Scan for tunnel apps
             for (_pid, process) in system.processes() {
-                let name = process.name().to_string_lossy().to_lowercase();
-                if process_name_matches_any_tunnel_app(&name, tunnel_apps) {
+                let name = process.name().to_string_lossy();
+                let name_lower = name.to_lowercase();
+                if process_name_matches_any_tunnel_app(&name_lower, tunnel_apps) {
                     let pid_u32 = _pid.as_u32();
-                    pid_names.insert(pid_u32, process.name().to_string_lossy().to_string());
-                    tunnel_pids_found.push((pid_u32, process.name().to_string_lossy().to_string()));
+                    let name_string = name.into_owned();
+                    tunnel_pids_found.push((pid_u32, name_string.clone()));
 
                     if refresh_count < 10 {
                         log::info!(
                             "Cache refresher: Found tunnel app '{}' with PID {} (sysinfo)",
-                            process.name().to_string_lossy(),
+                            name_string,
                             pid_u32
                         );
                     }
+                    pid_names.insert(pid_u32, name_string);
                 }
             }
         } else {
@@ -4692,7 +4687,7 @@ fn run_cache_refresher(
                 if !pid_names.contains_key(pid) {
                     // Try to get from existing system cache (no syscall if already cached)
                     if let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) {
-                        pid_names.insert(*pid, process.name().to_string_lossy().to_string());
+                        pid_names.insert(*pid, process.name().to_string_lossy().into_owned());
                     }
                 }
             }
@@ -4715,25 +4710,9 @@ fn run_cache_refresher(
             }
         }
 
-        // Update cache atomically
-        cache.update(connections.clone(), pid_names.clone());
-
-        // Register TCP ports from tunnel processes for API tunneling.
-        // This ensures that TCP connections from Roblox are recognized even when
-        // the process snapshot is stale, by persisting their source ports.
-        if api_tunneling_enabled.load(Ordering::Relaxed) {
-            let snap = cache.get_snapshot();
-            let tcp_ports: Vec<u16> = connections
-                .iter()
-                .filter(|(key, pid)| {
-                    key.protocol == Protocol::Tcp && snap.tunnel_pids.contains(pid)
-                })
-                .map(|(key, _)| key.local_port)
-                .collect();
-            if !tcp_ports.is_empty() {
-                cache.register_tcp_ports(&tcp_ports);
-            }
-        }
+        // Update cache atomically. The snapshot precomputes tunnel-owned source ports
+        // so readers don't need to linearly scan the connection map on a miss.
+        cache.update(connections, pid_names);
 
         // Log tunnel app detection periodically
         refresh_count += 1;
@@ -4741,9 +4720,10 @@ fn run_cache_refresher(
             let snap = cache.get_snapshot();
 
             // Count connections for tunnel PIDs
-            let tunnel_connections: Vec<_> = connections
+            let tunnel_connections: Vec<_> = snap
+                .connections
                 .iter()
-                .filter(|(_, pid)| tunnel_pids_found.iter().any(|(tp, _)| tp == *pid))
+                .filter(|(_, pid)| snap.tunnel_pids.contains(pid))
                 .collect();
 
             if !tunnel_pids_found.is_empty() || tunnel_connections.len() > 0 {
@@ -5070,7 +5050,7 @@ fn queue_overflow_action(mode: QueueOverflowMode, data: &[u8]) -> QueueFullActio
 /// Per-worker inline cache for connection lookups
 /// This amortizes the expensive GetExtendedTcpTable syscall across multiple packets
 /// from the same connection. First packet: ~500μs, subsequent packets: <1μs
-type InlineCache = std::collections::HashMap<(Ipv4Addr, u16, Protocol), bool>;
+type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), bool>;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
 /// Debug counters for inline cache diagnostics
@@ -6388,6 +6368,9 @@ fn run_v3_inbound_receiver(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Tests use AHashMap/AHashSet to match the production ProcessSnapshot types
+    use ahash::AHashMap as HashMap;
+    use ahash::AHashSet as HashSet;
 
     fn build_ipv4_frame(
         protocol: u8,
@@ -7483,15 +7466,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7522,15 +7507,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7558,15 +7545,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7594,15 +7583,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7630,15 +7621,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7666,15 +7659,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7702,15 +7697,17 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7746,15 +7743,17 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -7914,14 +7913,16 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8028,15 +8029,17 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(cached_ip, src_port, Protocol::Udp), pid);
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: [src_port].into_iter().collect(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8068,10 +8071,12 @@ mod tests {
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
-            tunnel_pids: std::collections::HashSet::new(),
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8133,15 +8138,17 @@ mod tests {
         let pid = std::process::id();
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8210,15 +8217,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8245,10 +8254,12 @@ mod tests {
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
-            tunnel_pids: std::collections::HashSet::new(),
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8275,10 +8286,12 @@ mod tests {
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
-            tunnel_pids: std::collections::HashSet::new(),
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8308,10 +8321,12 @@ mod tests {
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
-            tunnel_pids: std::collections::HashSet::new(),
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8520,15 +8535,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8566,10 +8583,12 @@ mod tests {
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
-            tunnel_pids: std::collections::HashSet::new(),
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8609,15 +8628,17 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(cached_ip, src_port, Protocol::Tcp), pid);
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: [src_port].into_iter().collect(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
@@ -8654,15 +8675,17 @@ mod tests {
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
 
-        let tunnel_pids: std::collections::HashSet<u32> = [pid].into_iter().collect();
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
         let snapshot = ProcessSnapshot {
             connections,
             pid_names: HashMap::new(),
-            tunnel_apps: std::collections::HashSet::new(),
+            tunnel_apps: HashSet::new(),
             tunnel_pids,
-            explicit_tunnel_udp_ports: std::collections::HashSet::new(),
-            explicit_tunnel_tcp_ports: std::collections::HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
             version: 0,
             created_at: std::time::Instant::now(),
         };
