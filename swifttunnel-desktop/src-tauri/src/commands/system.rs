@@ -694,25 +694,12 @@ pub async fn system_uninstall(
             conn_state,
             swifttunnel_core::vpn::ConnectionState::Disconnected
         ) {
-            let mut vpn = state.vpn_connection.lock().await;
-            vpn.disconnect()
-                .await
-                .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))?;
-            *state.split_tunnel_handle.write() = None;
-            drop(vpn);
-
-            {
-                let mut discord = state.discord_manager.lock();
-                discord.set_idle();
-            }
-
-            let mut settings = state.settings.lock();
-            settings.resume_vpn_on_startup = false;
-            let snapshot = settings.clone();
-            drop(settings);
-            if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
-                log::warn!("Failed to persist disconnected session settings: {}", e);
-            }
+            // Tear down the live session before touching the uninstaller.
+            // The shared helper always clears the split-tunnel handle, sets
+            // Discord idle, and persists `resume_vpn_on_startup = false` even
+            // if the driver-level disconnect errors — which is what we want
+            // here since the app is about to exit and hand off to NSIS.
+            crate::commands::vpn::disconnect_and_persist(&state).await?;
         }
 
         // Find and launch the NSIS uninstaller

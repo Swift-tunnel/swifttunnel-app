@@ -652,8 +652,10 @@ mod tests {
 
     #[test]
     fn test_storage_roundtrip_via_file() {
-        let storage = SecureStorage::new().unwrap();
-        let _ = storage.clear_session();
+        // Use an isolated data directory so this test doesn't race with
+        // `test_legacy_file_migrated_on_load` over the real user data dir
+        // when cargo's default thread pool runs them in parallel.
+        let storage = SecureStorage::with_isolated_data_dir();
 
         let session = make_session("file");
         storage.store_session(&session).unwrap();
@@ -667,8 +669,8 @@ mod tests {
 
     #[test]
     fn test_legacy_file_migrated_on_load() {
-        let storage = SecureStorage::new().unwrap();
-        let _ = storage.clear_session();
+        // Isolated data dir — see `test_storage_roundtrip_via_file` for why.
+        let storage = SecureStorage::with_isolated_data_dir();
 
         let session = make_session("migrate");
         let json = serde_json::to_string(&session).unwrap();
