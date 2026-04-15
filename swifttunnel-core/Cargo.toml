@@ -15,8 +15,6 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Performance",
     "Win32_Security",
-    # DPAPI (CryptProtectData/CryptUnprotectData) for auth session encryption
-    "Win32_Security_Cryptography",
     "Win32_System_Memory",
     # VPN/Network features
     "Win32_System_IO",
@@ -83,10 +81,15 @@ regex-lite = "0.1"
 # Secure credential storage (DPAPI on Windows)
 keyring = "3"
 
-# Cryptography for PKCE
+# Cryptography for PKCE and auth session sealing
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
+# AES-256-GCM for auth session at-rest encryption. ring is already in the
+# dependency graph transitively via rustls, so this is free binary-size-wise.
+# Direct use avoids importing Win32 CryptProtectData/CryptUnprotectData, which
+# Defender ML heuristics score very heavily against unsigned binaries.
+ring = "0.17"
 
 # URL handling
 url = "2"

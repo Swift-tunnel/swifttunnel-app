@@ -309,12 +309,54 @@ jobs:
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::WriteAllText($confPath, ($config | ConvertTo-Json -Depth 32), $utf8NoBom)
 
+      # Optional: patch tauri.conf.json with a Windows Authenticode signCommand
+      # if the SWIFTTUNNEL_SIGN_COMMAND secret is set. When absent, the build
+      # proceeds unsigned — same as every release before this one.
+      #
+      # To enable signing, add SWIFTTUNNEL_SIGN_COMMAND as a repo secret with
+      # the full command your signer expects, using %1 as the file placeholder.
+      # Examples:
+      #   DigiCert KeyLocker: smctl sign --keypair-alias %SMCTL_KEYPAIR_ALIAS% --input %1
+      #   SSL.com eSigner:    CodeSignTool.bat sign -input_file_path=%1 -username=%ESIGNER_USER% -password=%ESIGNER_PASS% -credential_id=%ESIGNER_CRED%
+      #   Local PFX:          signtool sign /f %PFX_PATH% /p %PFX_PASSWORD% /tr http://timestamp.digicert.com /td sha256 /fd sha256 %1
+      # Then populate the secondary secrets (SMCTL_*, ESIGNER_*, PFX_*) on the
+      # Build step's env block below so tauri-action can see them at sign time.
+      - name: Inject code signing command (optional)
+        shell: powershell
+        env:
+          SWIFTTUNNEL_SIGN_COMMAND: ${{ secrets.SWIFTTUNNEL_SIGN_COMMAND }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SWIFTTUNNEL_SIGN_COMMAND)) {
+            Write-Host "::notice::SWIFTTUNNEL_SIGN_COMMAND secret not set - building unsigned (Defender may flag the installer until the binary accrues SmartScreen reputation)"
+            exit 0
+          }
+          $confPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
+          $config = Get-Content $confPath -Raw | ConvertFrom-Json
+          $config.bundle.windows | Add-Member -NotePropertyName signCommand -NotePropertyValue $env:SWIFTTUNNEL_SIGN_COMMAND -Force
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($confPath, ($config | ConvertTo-Json -Depth 32), $utf8NoBom)
+          Write-Host "::notice::Authenticode signCommand injected - Tauri will sign SwiftTunnel.exe and the NSIS installer"
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_UPDATER_LEGACY_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_LEGACY_PUBLIC_KEY }}
           SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
+          # Code signing passthrough - all optional. Populate whichever secrets
+          # your signing provider needs so the signCommand injected above can
+          # reference them as %VAR% (cmd.exe) or $env:VAR (PowerShell).
+          SMCTL_KEYPAIR_ALIAS: ${{ secrets.SMCTL_KEYPAIR_ALIAS }}
+          SMCTL_API_KEY: ${{ secrets.SMCTL_API_KEY }}
+          SMCTL_HOST: ${{ secrets.SMCTL_HOST }}
+          SMCTL_CLIENT_CERT_FILE: ${{ secrets.SMCTL_CLIENT_CERT_FILE }}
+          SMCTL_CLIENT_CERT_PASSWORD: ${{ secrets.SMCTL_CLIENT_CERT_PASSWORD }}
+          ESIGNER_USER: ${{ secrets.ESIGNER_USER }}
+          ESIGNER_PASS: ${{ secrets.ESIGNER_PASS }}
+          ESIGNER_CRED: ${{ secrets.ESIGNER_CRED }}
+          ESIGNER_TOTP: ${{ secrets.ESIGNER_TOTP }}
+          PFX_PATH: ${{ secrets.PFX_PATH }}
+          PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
         with:
           projectPath: swifttunnel-desktop
           tagName: ${{ steps.meta.outputs.tag }}
