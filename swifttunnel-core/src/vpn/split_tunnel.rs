@@ -776,10 +776,16 @@ impl SplitTunnelDriver {
     }
 
     pub fn remove_driver_for_uninstall() -> Result<(), String> {
-        Self::disable_winpkfilter_bindings_for_uninstall()?;
-
         let mut issues = Vec::new();
         let mut any_msi_found = false;
+
+        // Best-effort: if binding removal fails we still try the MSI uninstall
+        // below. Returning early used to skip the MSI step entirely, which
+        // left both the bindings and the driver package installed when the
+        // binding call hiccupped — strictly worse than attempting the MSI.
+        if let Err(e) = Self::disable_winpkfilter_bindings_for_uninstall() {
+            issues.push(format!("binding removal failed: {}", e));
+        }
 
         // Try to uninstall all known MSI variants (handles machines that may
         // have had either or both architectures installed at some point).
