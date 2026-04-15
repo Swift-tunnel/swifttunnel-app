@@ -822,7 +822,6 @@ impl NetworkBooster {
 /// uninstaller) and the `system_cleanup` Tauri command.
 pub fn cleanup_all_system_state() -> Result<()> {
     info!("Running full stateless system cleanup");
-    let mut critical_errors: Vec<String> = Vec::new();
 
     // 1. Remove hosts file entries
     if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
@@ -932,9 +931,14 @@ pub fn cleanup_all_system_state() -> Result<()> {
     crate::vpn::recover_ipv6_on_startup();
 
     // 11. Remove the WinpkFilter driver package and NDISRD service during
-    // uninstall/explicit cleanup so the app does not leave kernel artifacts behind.
+    // uninstall/explicit cleanup so the app does not leave kernel artifacts
+    // behind. Best-effort: if this fails we log it and continue rather than
+    // aborting the uninstall. Blocking uninstall entirely leaves the user
+    // permanently stuck (often the reason they are uninstalling in the first
+    // place), which is worse than a stale driver that a subsequent install
+    // will replace.
     if let Err(e) = crate::vpn::split_tunnel::SplitTunnelDriver::remove_driver_for_uninstall() {
-        critical_errors.push(format!("driver cleanup failed: {}", e));
+        warn!("Cleanup: driver removal failed (non-fatal): {}", e);
     }
 
     // 12. Remove Roblox FFlag entries from ClientAppSettings.json
@@ -951,17 +955,8 @@ pub fn cleanup_all_system_state() -> Result<()> {
         ])
         .output();
 
-    if critical_errors.is_empty() {
-        info!("Full system cleanup completed");
-        Ok(())
-    } else {
-        let message = critical_errors.join("; ");
-        warn!(
-            "Full system cleanup completed with critical errors: {}",
-            message
-        );
-        Err(anyhow::anyhow!(message))
-    }
+    info!("Full system cleanup completed");
+    Ok(())
 }
 
 /// Reset MTU to 1500 on all active network adapters.
