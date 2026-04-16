@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!-- Detect existing NSIS installation via its registry uninstall entry. -->
+    <Property Id="NSIS_UNINSTALL_PATH">
+      <RegistrySearch Id="NsisUninstSearch" Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SwiftTunnel"
+                      Name="UninstallString" Type="raw" />
+    </Property>
+
+    <Property Id="CLEANUP_EXE" Secure="yes" />
+
+    <!-- Run the old NSIS uninstaller silently during first MSI install. -->
+    <CustomAction Id="SilentNsisUninstall"
+                  Property="NSIS_UNINSTALL_PATH"
+                  ExeCommand="/S"
+                  Return="ignore" />
+
+    <!-- Resolve the cleanup executable path for uninstall. -->
+    <CustomAction Id="SetCleanupExePath"
+                  Property="CLEANUP_EXE"
+                  Value="[INSTALLDIR]SwiftTunnel.exe" />
+
+    <!-- Run SwiftTunnel.exe with the cleanup flag to remove system state. -->
+    <CustomAction Id="RunCleanupOnUninstall"
+                  Property="CLEANUP_EXE"
+                  ExeCommand="--cleanup"
+                  Return="ignore" />
+
+    <!-- Write a marker and remove the NSIS uninstall registry entry. -->
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="CleanupNsisRegistryEntry" Guid="B7E3F1A2-9C4D-4E8F-A6B1-D2C3E4F5A6B7">
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\SwiftTunnel\Migration"
+                       Name="NsisMigrated"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+        <RemoveRegistryKey Id="NsisUninstallRegKey" Root="HKLM"
+                           Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SwiftTunnel"
+                           Action="removeOnInstall" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="NsisMigration">
+      <ComponentRef Id="CleanupNsisRegistryEntry" />
+    </ComponentGroup>
+
+    <InstallExecuteSequence>
+      <Custom Action="SilentNsisUninstall" After="InstallInitialize">
+        NSIS_UNINSTALL_PATH AND NOT Installed
+      </Custom>
+      <Custom Action="SetCleanupExePath" Before="RunCleanupOnUninstall">
+        Installed AND REMOVE="ALL"
+      </Custom>
+      <Custom Action="RunCleanupOnUninstall" Before="RemoveFiles">
+        Installed AND REMOVE="ALL"
+      </Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

@@ -119,9 +119,8 @@ fn derive_session_key(user_bind: &[u8]) -> [u8; 32] {
 /// `[0x03][12-byte nonce][ciphertext || 16-byte tag]`.
 fn seal_blob(plaintext: &[u8], user_bind: &[u8]) -> Result<Vec<u8>, AuthError> {
     let key_bytes = derive_session_key(user_bind);
-    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| {
-        AuthError::StorageError("Failed to build AES-256-GCM key".to_string())
-    })?;
+    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
+        .map_err(|_| AuthError::StorageError("Failed to build AES-256-GCM key".to_string()))?;
     let key = LessSafeKey::new(unbound);
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -158,9 +157,8 @@ fn open_blob(blob: &[u8], user_bind: &[u8]) -> Result<Vec<u8>, AuthError> {
     }
 
     let key_bytes = derive_session_key(user_bind);
-    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| {
-        AuthError::StorageError("Failed to build AES-256-GCM key".to_string())
-    })?;
+    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
+        .map_err(|_| AuthError::StorageError("Failed to build AES-256-GCM key".to_string()))?;
     let key = LessSafeKey::new(unbound);
 
     let mut nonce_arr = [0u8; NONCE_LEN];
@@ -286,7 +284,11 @@ impl SecureStorage {
     /// using it as the bind means users on the same machine can't read each
     /// other's sessions.
     fn user_bind(&self) -> Vec<u8> {
-        self.data_dir.as_os_str().to_string_lossy().as_bytes().to_vec()
+        self.data_dir
+            .as_os_str()
+            .to_string_lossy()
+            .as_bytes()
+            .to_vec()
     }
 
     /// Get the auth session file path
@@ -773,7 +775,10 @@ mod tests {
         assert_eq!(blob[0], SESSION_VERSION_TAG);
 
         match storage.decode_blob(&blob) {
-            DecodedBlob::Session { session: s, rewrite } => {
+            DecodedBlob::Session {
+                session: s,
+                rewrite,
+            } => {
                 assert!(!rewrite, "current-format blob should not request rewrite");
                 assert_eq!(s.access_token, session.access_token);
                 assert_eq!(s.refresh_token, session.refresh_token);
@@ -801,7 +806,10 @@ mod tests {
         assert_ne!(legacy_blob[0], LEGACY_DPAPI_VERSION_TAG);
 
         match storage.decode_blob(&legacy_blob) {
-            DecodedBlob::Session { session: s, rewrite } => {
+            DecodedBlob::Session {
+                session: s,
+                rewrite,
+            } => {
                 assert!(rewrite, "legacy blob should request rewrite");
                 assert_eq!(s.access_token, session.access_token);
                 assert_eq!(s.user.email, session.user.email);
@@ -841,10 +849,7 @@ mod tests {
         ));
 
         // Empty.
-        assert!(matches!(
-            storage.decode_blob(&[]),
-            DecodedBlob::Corrupt
-        ));
+        assert!(matches!(storage.decode_blob(&[]), DecodedBlob::Corrupt));
     }
 
     #[test]

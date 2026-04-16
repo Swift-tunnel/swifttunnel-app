@@ -24,12 +24,23 @@ impl FirewallFixer {
     }
 
     fn remove_swifttunnel_rules_by_prefix() {
-        let _ = hidden_command("powershell")
-            .args([
-                "-Command",
-                "Get-NetFirewallRule -DisplayName 'SwiftTunnel - Roblox*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue",
-            ])
-            .output();
+        // Delete all known rule names individually via netsh instead of
+        // PowerShell Get-NetFirewallRule piping, which triggers AV heuristics.
+        for exe_name in &ROBLOX_EXECUTABLES {
+            for (suffix, dir) in [("Out", "out"), ("In", "in")] {
+                let rule_name = format!("{} {} {}", FIREWALL_RULE_PREFIX, exe_name, suffix);
+                let _ = hidden_command("netsh")
+                    .args([
+                        "advfirewall",
+                        "firewall",
+                        "delete",
+                        "rule",
+                        &format!("name={}", rule_name),
+                        &format!("dir={}", dir),
+                    ])
+                    .output();
+            }
+        }
     }
 
     /// Apply firewall fixes: add allow rules for Roblox, flush DNS, reset Winsock, clear ARP.

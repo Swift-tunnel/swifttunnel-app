@@ -30,7 +30,7 @@ fn main() {
     }
 
     // --cleanup: stateless removal of all SwiftTunnel system modifications.
-    // Used by the NSIS uninstaller to clean up before removing files.
+    // Used by the MSI/NSIS uninstaller to clean up before removing files.
     // Runs after elevation to ensure registry/hosts/firewall access.
     if is_cleanup {
         match swifttunnel_core::network_booster::cleanup_all_system_state() {

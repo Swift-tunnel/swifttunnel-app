@@ -16,6 +16,11 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 ///
 /// This is essential for GUI apps to prevent scary command prompts
 /// from flashing when running shell commands in the background.
+///
+/// For PowerShell commands, `-NoProfile -NonInteractive` is injected
+/// automatically so that every callsite benefits from reduced AV
+/// heuristic scoring (profile-loading and interactive-mode are traits
+/// that malware scanners weight heavily).
 pub fn hidden_command(program: &str) -> Command {
     #[cfg(windows)]
     let mut cmd = Command::new(resolve_windows_command_path(program));
@@ -25,6 +30,11 @@ pub fn hidden_command(program: &str) -> Command {
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
+
+    #[cfg(windows)]
+    if is_powershell_program(program) {
+        cmd.args(["-NoProfile", "-NonInteractive"]);
+    }
 
     cmd
 }

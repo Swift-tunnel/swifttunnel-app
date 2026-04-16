@@ -25,17 +25,20 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost https://*.swifttunnel.net; connect-src 'self' https://*.swifttunnel.net https://*.supabase.co"
     }
   },
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
     "useLocalToolsDir": true,
-    "targets": ["nsis"],
+    "publisher": "SwiftTunnel",
+    "copyright": "Copyright SwiftTunnel. All rights reserved.",
+    "targets": ["msi"],
     "windows": {
-      "nsis": {
-        "installerHooks": "nsis/uninstall-hook.nsh"
+      "wix": {
+        "fragmentPaths": ["wix/nsis-migration.wxs"],
+        "componentGroupRefs": ["NsisMigration"]
       }
     },
     "resources": ["resources/drivers"],

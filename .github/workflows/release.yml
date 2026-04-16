@@ -25,15 +25,6 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - name: Disable Windows Defender
-        shell: powershell
-        continue-on-error: true
-        run: |
-          Set-MpPreference -DisableRealtimeMonitoring $true
-          Set-MpPreference -DisableArchiveScanning $true
-          Set-MpPreference -DisableBehaviorMonitoring $true
-          Set-MpPreference -DisableScriptScanning $true
-
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -335,7 +326,7 @@ jobs:
           $config.bundle.windows | Add-Member -NotePropertyName signCommand -NotePropertyValue $env:SWIFTTUNNEL_SIGN_COMMAND -Force
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::WriteAllText($confPath, ($config | ConvertTo-Json -Depth 32), $utf8NoBom)
-          Write-Host "::notice::Authenticode signCommand injected - Tauri will sign SwiftTunnel.exe and the NSIS installer"
+          Write-Host "::notice::Authenticode signCommand injected - Tauri will sign SwiftTunnel.exe and the MSI installer"
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
@@ -366,7 +357,7 @@ jobs:
           prerelease: ${{ steps.meta.outputs.prerelease }}
           generateReleaseNotes: true
           includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+          updaterJsonPreferNsis: false
 
       - name: Generate and upload signed release manifest
         shell: powershell

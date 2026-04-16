@@ -283,8 +283,7 @@ fn build_restart_as_admin_script(exe_path: &str, current_pid: u32) -> String {
     format!(
         "$ErrorActionPreference='Stop'; \
          $inner='{escaped_inner}'; \
-         $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner)); \
-         Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-EncodedCommand',$enc) | Out-Null"
+         Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-Command',$inner) | Out-Null"
     )
 }
 
@@ -297,6 +296,18 @@ fn build_launch_uninstaller_after_exit_script(uninstaller_path: &str, current_pi
          $pidToWait={current_pid}; \
          while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 200 }}; \
          Start-Process -FilePath '{escaped_uninstaller}'"
+    )
+}
+
+#[cfg(windows)]
+fn build_launch_msi_uninstall_after_exit_script(current_pid: u32) -> String {
+    format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+         $pidToWait={current_pid}; \
+         while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 200 }}; \
+         $entry = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' | \
+           Where-Object {{ $_.DisplayName -eq 'SwiftTunnel' }} | Select-Object -First 1; \
+         if ($entry) {{ Start-Process msiexec.exe -ArgumentList '/x',$entry.PSChildName,'/passive' -Wait }}"
     )
 }
 
@@ -654,7 +665,7 @@ mod tests {
         assert!(script.contains("$inner='"));
         assert!(script.contains("Start-Process -FilePath 'powershell.exe'"));
         assert!(script.contains("-Verb RunAs"));
-        assert!(script.contains("-EncodedCommand"));
+        assert!(script.contains("-Command"));
     }
 
     #[test]
@@ -670,6 +681,16 @@ mod tests {
                 "Start-Process -FilePath 'C:\\Program Files\\Swift''Tunnel\\uninstall.exe'"
             )
         );
+    }
+
+    #[test]
+    fn build_launch_msi_uninstall_after_exit_script_waits_for_pid_and_uses_msiexec() {
+        let script = build_launch_msi_uninstall_after_exit_script(5678);
+        assert!(script.contains("$pidToWait=5678"));
+        assert!(script.contains("Get-Process -Id $pidToWait"));
+        assert!(script.contains("DisplayName -eq 'SwiftTunnel'"));
+        assert!(script.contains("msiexec.exe"));
+        assert!(script.contains("/passive"));
     }
 }
 
@@ -705,28 +726,27 @@ pub async fn system_uninstall(
             }
         }
 
-        // Find and launch the NSIS uninstaller
+        // Find and launch the appropriate uninstaller (NSIS legacy or MSI).
         let exe_path =
             std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {e}"))?;
         let install_dir = exe_path
             .parent()
             .ok_or("Failed to resolve install directory")?;
-        let uninstaller = install_dir.join("uninstall.exe");
+        let nsis_uninstaller = install_dir.join("uninstall.exe");
 
-        if !uninstaller.exists() {
-            return Err(
-                "Uninstaller not found. The app may not have been installed via the installer."
-                    .to_string(),
-            );
-        }
-
-        let uninstaller_script = build_launch_uninstaller_after_exit_script(
-            &uninstaller.to_string_lossy(),
-            std::process::id(),
-        );
+        let uninstall_script = if nsis_uninstaller.exists() {
+            // Legacy NSIS install — launch uninstall.exe after app exits
+            build_launch_uninstaller_after_exit_script(
+                &nsis_uninstaller.to_string_lossy(),
+                std::process::id(),
+            )
+        } else {
+            // MSI install — find product code from registry and run msiexec
+            build_launch_msi_uninstall_after_exit_script(std::process::id())
+        };
 
         swifttunnel_core::hidden_command("powershell")
-            .args(["-NoProfile", "-Command", &uninstaller_script])
+            .args(["-Command", &uninstall_script])
             .spawn()
             .map_err(|e| format!("Failed to queue uninstaller launch: {e}"))?;
 
