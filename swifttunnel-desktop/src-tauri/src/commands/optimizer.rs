@@ -201,8 +201,9 @@ pub async fn boost_update_config(
                 if let Err(e) = ro.restore_settings() {
                     warn_list.push(format!("Roblox optimizer restore: {}", e));
                 }
-                if let Err(e) = ro.apply_optimizations(&config.roblox_settings) {
-                    warn_list.push(format!("Roblox optimizer: {}", e));
+                match ro.apply_optimizations(&config.roblox_settings) {
+                    Ok(opt_warnings) => warn_list.extend(opt_warnings),
+                    Err(e) => warn_list.push(format!("Roblox optimizer: {}", e)),
                 }
             }
 

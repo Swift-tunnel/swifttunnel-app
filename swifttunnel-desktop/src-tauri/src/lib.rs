@@ -328,17 +328,12 @@ pub fn run() {
                     ..
                 } => {
                     if label == "main" {
-                        // When the main window is destroyed (not hidden) and the user
-                        // has minimize_to_tray disabled, exit the app. Without this the
-                        // tray icon keeps the process alive and the user cannot reopen
-                        // the window because it was destroyed rather than hidden.
-                        let should_exit = _app
-                            .try_state::<crate::state::AppState>()
-                            .map(|state| !state.settings.lock().minimize_to_tray)
-                            .unwrap_or(true);
-                        if should_exit {
-                            _app.exit(0);
-                        }
+                        // The main window was destroyed (not hidden). Exit the app
+                        // so the tray icon doesn't leave a zombie process. The
+                        // minimize-to-tray path uses hide(), not close(), so
+                        // Destroyed only fires when the user actually wants to quit
+                        // or an unexpected close occurred.
+                        _app.exit(0);
                     }
                 }
                 tauri::RunEvent::Exit => {

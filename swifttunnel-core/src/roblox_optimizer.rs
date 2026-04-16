@@ -350,60 +350,46 @@ impl RobloxOptimizer {
         }
     }
 
-    /// Apply Roblox-specific optimizations
-    pub fn apply_optimizations(&self, config: &RobloxSettingsConfig) -> Result<()> {
+    /// Apply Roblox-specific optimizations.
+    /// Returns a list of non-fatal warnings (e.g. FFlag failures) on success.
+    /// Only returns `Err` when the XML settings step fails hard.
+    pub fn apply_optimizations(&self, config: &RobloxSettingsConfig) -> Result<Vec<String>> {
         info!("Applying Roblox optimizations via GlobalBasicSettings");
         let settings_path = self.resolve_settings_path();
-
-        // Track XML-level errors separately so FFlags are always attempted.
-        let mut xml_error: Option<String> = None;
+        let mut warnings: Vec<String> = Vec::new();
 
         if !settings_path.exists() {
-            xml_error = Some(
-                "Roblox settings file not found. Please ensure Roblox is installed and has been run at least once.".to_string(),
-            );
-        } else {
-            // Remove read-only if it was set (so we can write)
-            if Self::is_readonly_path(&settings_path) {
-                info!("Settings file is read-only, removing attribute to apply changes...");
-                if let Err(e) = Self::remove_readonly_path(&settings_path) {
-                    error!("Failed to remove read-only attribute: {}", e);
-                    xml_error = Some(format!(
-                        "Cannot modify settings: file is read-only and we couldn't remove the attribute. Error: {}",
-                        e
-                    ));
-                }
-            }
+            return Err(anyhow::anyhow!(
+                "Roblox settings file not found. Please ensure Roblox is installed and has been run at least once."
+            ));
+        }
 
-            if xml_error.is_none() {
-                match self.apply_xml_settings(&settings_path, config) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        xml_error = Some(format!("Failed to apply XML settings: {}", e));
-                    }
-                }
+        // Remove read-only if it was set (so we can write)
+        if Self::is_readonly_path(&settings_path) {
+            info!("Settings file is read-only, removing attribute to apply changes...");
+            if let Err(e) = Self::remove_readonly_path(&settings_path) {
+                error!("Failed to remove read-only attribute: {}", e);
+                return Err(anyhow::anyhow!(
+                    "Cannot modify settings: file is read-only and we couldn't remove the attribute. Error: {}",
+                    e
+                ));
             }
         }
+
+        self.apply_xml_settings(&settings_path, config)?;
 
         // Apply FFlag optimizations (ultraboost) — always attempted regardless
         // of whether the XML settings step succeeded. FFlags live in a separate
         // file (ClientAppSettings.json) inside the Roblox version folder and are
         // independent of GlobalBasicSettings.
         if let Err(e) = self.apply_client_fflags(config) {
-            let fflag_msg = format!("Could not apply FFlag optimizations: {}", e);
-            warn!("{}", fflag_msg);
-            if let Some(xml_msg) = xml_error {
-                return Err(anyhow::anyhow!("{}. Additionally: {}", xml_msg, fflag_msg));
-            }
-            return Err(anyhow::anyhow!(fflag_msg));
-        }
-
-        if let Some(xml_msg) = xml_error {
-            return Err(anyhow::anyhow!(xml_msg));
+            let msg = format!("Could not apply FFlag optimizations: {}", e);
+            warn!("{}", msg);
+            warnings.push(msg);
         }
 
         info!("Roblox optimizations applied successfully");
-        Ok(())
+        Ok(warnings)
     }
 
     /// Apply XML-level settings (FPS cap, graphics quality, window size).
