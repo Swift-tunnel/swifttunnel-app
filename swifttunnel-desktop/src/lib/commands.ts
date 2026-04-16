@@ -19,6 +19,7 @@ import type {
   BufferbloatResultResponse,
   AdminCheckResponse,
   DriverCheckResponse,
+  BoostUpdateResult,
   NetworkDiagnosticsBundleResponse,
   UpdaterCheckResponse,
   UpdaterInstallResponse,
@@ -97,7 +98,7 @@ export const boostGetSystemMemory = () =>
   invoke<SystemMemorySnapshot>("boost_get_system_memory");
 
 export const boostUpdateConfig = (configJson: string) =>
-  invoke<void>("boost_update_config", { configJson });
+  invoke<BoostUpdateResult>("boost_update_config", { configJson });
 
 export const boostCleanRam = () =>
   invoke<RamCleanResultResponse>("boost_clean_ram");

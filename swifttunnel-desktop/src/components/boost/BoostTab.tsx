@@ -114,7 +114,11 @@ export function BoostTab() {
     if (hasConfigChanges) {
       await boost.updateConfig(JSON.stringify(draft));
     }
-    addToast({ type: "success", message: "Boost settings applied" });
+    if (boost.error) {
+      addToast({ type: "warning", message: "Boost applied with warnings" });
+    } else {
+      addToast({ type: "success", message: "Boost settings applied" });
+    }
   }, [
     draft,
     draftGameProcessPerformance,

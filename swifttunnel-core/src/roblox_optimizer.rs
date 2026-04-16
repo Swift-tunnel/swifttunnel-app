@@ -355,29 +355,69 @@ impl RobloxOptimizer {
         info!("Applying Roblox optimizations via GlobalBasicSettings");
         let settings_path = self.resolve_settings_path();
 
-        if !settings_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Roblox settings file not found. Please ensure Roblox is installed and has been run at least once."
-            ));
-        }
+        // Track XML-level errors separately so FFlags are always attempted.
+        let mut xml_error: Option<String> = None;
 
-        // Remove read-only if it was set (so we can write)
-        if Self::is_readonly_path(&settings_path) {
-            info!("Settings file is read-only, removing attribute to apply changes...");
-            if let Err(e) = Self::remove_readonly_path(&settings_path) {
-                error!("Failed to remove read-only attribute: {}", e);
-                return Err(anyhow::anyhow!(
-                    "Cannot modify settings: file is read-only and we couldn't remove the attribute. Error: {}",
-                    e
-                ));
+        if !settings_path.exists() {
+            xml_error = Some(
+                "Roblox settings file not found. Please ensure Roblox is installed and has been run at least once.".to_string(),
+            );
+        } else {
+            // Remove read-only if it was set (so we can write)
+            if Self::is_readonly_path(&settings_path) {
+                info!("Settings file is read-only, removing attribute to apply changes...");
+                if let Err(e) = Self::remove_readonly_path(&settings_path) {
+                    error!("Failed to remove read-only attribute: {}", e);
+                    xml_error = Some(format!(
+                        "Cannot modify settings: file is read-only and we couldn't remove the attribute. Error: {}",
+                        e
+                    ));
+                }
+            }
+
+            if xml_error.is_none() {
+                match self.apply_xml_settings(&settings_path, config) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        xml_error = Some(format!("Failed to apply XML settings: {}", e));
+                    }
+                }
             }
         }
 
+        // Apply FFlag optimizations (ultraboost) — always attempted regardless
+        // of whether the XML settings step succeeded. FFlags live in a separate
+        // file (ClientAppSettings.json) inside the Roblox version folder and are
+        // independent of GlobalBasicSettings.
+        if let Err(e) = self.apply_client_fflags(config) {
+            let fflag_msg = format!("Could not apply FFlag optimizations: {}", e);
+            warn!("{}", fflag_msg);
+            if let Some(xml_msg) = xml_error {
+                return Err(anyhow::anyhow!("{}. Additionally: {}", xml_msg, fflag_msg));
+            }
+            return Err(anyhow::anyhow!(fflag_msg));
+        }
+
+        if let Some(xml_msg) = xml_error {
+            return Err(anyhow::anyhow!(xml_msg));
+        }
+
+        info!("Roblox optimizations applied successfully");
+        Ok(())
+    }
+
+    /// Apply XML-level settings (FPS cap, graphics quality, window size).
+    /// Separated from apply_optimizations so FFlags can run independently.
+    fn apply_xml_settings(
+        &self,
+        settings_path: &PathBuf,
+        config: &RobloxSettingsConfig,
+    ) -> Result<()> {
         // Backup current settings first
-        self.backup_settings_for(&settings_path)?;
+        self.backup_settings_for(settings_path)?;
 
         // Read current content
-        let mut content = fs::read_to_string(&settings_path)?;
+        let mut content = fs::read_to_string(settings_path)?;
 
         // Apply FPS cap
         if config.unlock_fps {
@@ -407,7 +447,7 @@ impl RobloxOptimizer {
         );
 
         // Write updated content back
-        fs::write(&settings_path, &content)?;
+        fs::write(settings_path, &content)?;
 
         // Note: We no longer set the file to read-only. Setting it read-only
         // caused Roblox to fail with "Failed to apply critical settings" because
@@ -415,12 +455,6 @@ impl RobloxOptimizer {
         // The FPS settings may be reset by Roblox, but the background monitor
         // will re-detect and re-apply them when needed.
 
-        // Apply FFlag optimizations (ultraboost)
-        if let Err(e) = self.apply_client_fflags(config) {
-            warn!("Could not apply FFlag optimizations: {}", e);
-        }
-
-        info!("Roblox optimizations applied successfully");
         Ok(())
     }
 

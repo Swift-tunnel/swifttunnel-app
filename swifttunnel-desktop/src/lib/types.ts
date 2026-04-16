@@ -188,6 +188,10 @@ export interface RamCleanResultResponse {
   warnings: string[];
 }
 
+export interface BoostUpdateResult {
+  warnings: string[];
+}
+
 export type OptimizationProfile = "LowEnd" | "Balanced" | "HighEnd" | "Custom";
 export type PowerPlan = "Balanced" | "HighPerformance" | "Ultimate";
 export type GraphicsQuality =

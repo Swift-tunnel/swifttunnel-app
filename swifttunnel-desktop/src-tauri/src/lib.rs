@@ -321,22 +321,44 @@ pub fn run() {
         .build(ctx)
         .expect("error while building tauri application")
         .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Clean up any stale hosts-file entries from old proxy versions
-                swifttunnel_core::roblox_proxy::hosts::recover_stale();
-                // Restore network booster modifications (registry, MTU, firewall, QoS)
-                if let Some(state) = _app.try_state::<crate::state::AppState>() {
-                    let roblox_pid = {
-                        let mut monitor = state.performance_monitor.lock();
-                        monitor.get_roblox_pid().unwrap_or(0)
-                    };
-                    if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
-                        log::warn!("Failed to restore system settings on exit: {e}");
-                    }
-                    if let Err(e) = state.network_booster.lock().restore() {
-                        log::warn!("Failed to restore network settings on exit: {e}");
+            match event {
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } => {
+                    if label == "main" {
+                        // When the main window is destroyed (not hidden) and the user
+                        // has minimize_to_tray disabled, exit the app. Without this the
+                        // tray icon keeps the process alive and the user cannot reopen
+                        // the window because it was destroyed rather than hidden.
+                        let should_exit = _app
+                            .try_state::<crate::state::AppState>()
+                            .map(|state| !state.settings.lock().minimize_to_tray)
+                            .unwrap_or(true);
+                        if should_exit {
+                            _app.exit(0);
+                        }
                     }
                 }
+                tauri::RunEvent::Exit => {
+                    // Clean up any stale hosts-file entries from old proxy versions
+                    swifttunnel_core::roblox_proxy::hosts::recover_stale();
+                    // Restore network booster modifications (registry, MTU, firewall, QoS)
+                    if let Some(state) = _app.try_state::<crate::state::AppState>() {
+                        let roblox_pid = {
+                            let mut monitor = state.performance_monitor.lock();
+                            monitor.get_roblox_pid().unwrap_or(0)
+                        };
+                        if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
+                            log::warn!("Failed to restore system settings on exit: {e}");
+                        }
+                        if let Err(e) = state.network_booster.lock().restore() {
+                            log::warn!("Failed to restore network settings on exit: {e}");
+                        }
+                    }
+                }
+                _ => {}
             }
         });
 }

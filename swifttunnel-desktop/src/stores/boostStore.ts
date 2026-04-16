@@ -124,7 +124,15 @@ export const useBoostStore = create<BoostStore>((set) => ({
   updateConfig: async (configJson) => {
     try {
       set({ error: null });
-      await boostUpdateConfig(configJson);
+      const result = await boostUpdateConfig(configJson);
+      if (result.warnings.length > 0) {
+        const message = result.warnings.join("; ");
+        set({ error: message });
+        await notify(
+          "Boost applied with warnings",
+          "Some optimizations could not be applied.",
+        );
+      }
     } catch (e) {
       const message = String(e);
       set({ error: message });
