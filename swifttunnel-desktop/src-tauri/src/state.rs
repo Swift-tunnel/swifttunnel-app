@@ -12,6 +12,7 @@ use swifttunnel_core::system_optimizer::SystemOptimizer;
 use swifttunnel_core::vpn::SplitTunnelDriver;
 use swifttunnel_core::vpn::connection::{ConnectionState, VpnConnection};
 use swifttunnel_core::vpn::servers::DynamicServerList;
+use tokio::sync::watch;
 
 /// Shared application state managed by Tauri
 ///
@@ -23,10 +24,17 @@ use swifttunnel_core::vpn::servers::DynamicServerList;
 /// (`vpn_get_state`, `vpn_get_throughput`, etc.) hit these directly so
 /// they don't have to acquire the heavy `vpn_connection` mutex while a
 /// connect or disconnect is in flight — that's what used to freeze the UI.
+///
+/// `vpn_state_handle` is a `watch::Receiver` so every state transition
+/// published by `VpnConnection` (including in-place mutations from the
+/// background monitor and auto-routing's `switch_server`) is observable.
+/// A startup bridge task subscribes once and forwards every change to the
+/// `VPN_STATE_CHANGED` Tauri event, so the UI can't get stuck displaying
+/// a state the backend has silently left behind.
 pub struct AppState {
     pub auth_manager: Arc<tokio::sync::Mutex<AuthManager>>,
     pub vpn_connection: Arc<tokio::sync::Mutex<VpnConnection>>,
-    pub vpn_state_handle: Arc<tokio::sync::Mutex<ConnectionState>>,
+    pub vpn_state_handle: watch::Receiver<ConnectionState>,
     pub split_tunnel_handle: Arc<RwLock<Option<Arc<tokio::sync::Mutex<SplitTunnelDriver>>>>>,
     pub server_list: Arc<Mutex<DynamicServerList>>,
     /// Map of region_id -> (server_name, latency_ms)

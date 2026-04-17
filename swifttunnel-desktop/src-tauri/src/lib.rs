@@ -263,7 +263,16 @@ pub fn run() {
             swifttunnel_core::vpn::recover_ipv6_on_startup();
 
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
+            let vpn_state_rx = app_state.vpn_state_handle.clone();
             app.manage(app_state);
+
+            // Bridge every `VpnConnection` state transition — explicit
+            // transitions AND the silent in-place mutations from the relay
+            // health / auto-routing / process monitor tasks — to the UI's
+            // `VPN_STATE_CHANGED` event. Without this, the UI can render a
+            // state the backend has already moved past (e.g. showing a live
+            // session timer after the relay reported "dead").
+            commands::vpn::spawn_vpn_state_bridge(app.handle().clone(), vpn_state_rx);
 
             if let Err(e) = autostart::sync_run_on_startup(app.handle(), run_on_startup_enabled) {
                 log::warn!("Failed to sync startup registration: {}", e);

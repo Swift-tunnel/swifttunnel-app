@@ -1079,7 +1079,7 @@ pub async fn system_uninstall(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let conn_state = state.vpn_state_handle.lock().await.clone();
+        let conn_state = state.vpn_state_handle.borrow().clone();
         if !matches!(
             conn_state,
             swifttunnel_core::vpn::ConnectionState::Disconnected

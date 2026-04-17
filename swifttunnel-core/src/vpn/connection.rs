@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 /// Refresh interval for process exclusion scanning (ms)
 /// Lower = faster detection of new processes, slightly higher CPU
@@ -609,7 +609,13 @@ impl Default for ConnectionState {
 
 /// VPN Connection manager
 pub struct VpnConnection {
-    state: Arc<Mutex<ConnectionState>>,
+    /// State is published through a `tokio::sync::watch` channel so every
+    /// transition — including in-place mutations made from background tasks
+    /// (relay health, auto-routing, process monitor) — automatically fans out
+    /// to all subscribers. The desktop app subscribes once at startup and
+    /// bridges these updates to the `VPN_STATE_CHANGED` Tauri event, so the
+    /// UI can never render a state the backend has silently left behind.
+    state: Arc<watch::Sender<ConnectionState>>,
     split_tunnel: Option<Arc<Mutex<SplitTunnelDriver>>>,
     config: Option<VpnConfig>,
     process_monitor_stop: Arc<AtomicBool>,
@@ -623,8 +629,9 @@ pub struct VpnConnection {
 
 impl VpnConnection {
     pub fn new() -> Self {
+        let (state_tx, _) = watch::channel(ConnectionState::Disconnected);
         Self {
-            state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
+            state: Arc::new(state_tx),
             split_tunnel: None,
             config: None,
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
@@ -635,11 +642,14 @@ impl VpnConnection {
     }
 
     pub async fn state(&self) -> ConnectionState {
-        self.state.lock().await.clone()
+        self.state.borrow().clone()
     }
 
-    pub fn state_handle(&self) -> Arc<Mutex<ConnectionState>> {
-        Arc::clone(&self.state)
+    /// Subscribe to state transitions. Each returned `Receiver` observes every
+    /// change published through `set_state` or the in-place mutations in the
+    /// background monitor and `switch_server`.
+    pub fn state_handle(&self) -> watch::Receiver<ConnectionState> {
+        self.state.subscribe()
     }
 
     /// Clone the inner split-tunnel driver handle so that command callers
@@ -720,7 +730,11 @@ impl VpnConnection {
 
     async fn set_state(&self, state: ConnectionState) {
         log::info!("Connection state: {:?}", state);
-        *self.state.lock().await = state;
+        // `send_replace` always notifies subscribers, even if the new value
+        // equals the old. That's the behavior we want — the UI re-reads the
+        // full state on every event, and suppressing a notification here could
+        // drop an Error-after-Error or a Disconnected-during-shutdown signal.
+        let _ = self.state.send_replace(state);
     }
 
     /// Connect to VPN server using UDP relay (V3 mode)
@@ -748,7 +762,7 @@ impl VpnConnection {
         enable_api_tunneling: bool,
     ) -> VpnResult<()> {
         {
-            let state = self.state.lock().await;
+            let state = self.state.borrow();
             if state.is_connected() {
                 return Err(VpnError::Connection("Already connected".to_string()));
             }
@@ -1718,18 +1732,20 @@ impl VpnConnection {
                                     }
 
                                     // Update UI state promptly when games start/stop
-                                    let mut state = state_handle.lock().await;
-                                    if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
-                                        if *tunneled_processes != running_names {
-                                            if !running_names.is_empty() && tunneled_processes.is_empty() {
-                                                log::info!("V3: Game detected, relaying: {:?}", running_names);
-                                            } else if running_names.is_empty() && !tunneled_processes.is_empty() {
-                                                log::info!("V3: All games exited");
+                                    state_handle.send_if_modified(|state| {
+                                        if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
+                                            if *tunneled_processes != running_names {
+                                                if !running_names.is_empty() && tunneled_processes.is_empty() {
+                                                    log::info!("V3: Game detected, relaying: {:?}", running_names);
+                                                } else if running_names.is_empty() && !tunneled_processes.is_empty() {
+                                                    log::info!("V3: All games exited");
+                                                }
+                                                *tunneled_processes = running_names;
+                                                return true;
                                             }
-                                            *tunneled_processes = running_names;
                                         }
-                                    }
-                                    drop(state);
+                                        false
+                                    });
 
                                     // STEP 3: Remove WFP block filters - packets now flow through VPN relay
                                     for path in blocked_paths {
@@ -1766,17 +1782,20 @@ impl VpnConnection {
                                     guard.sync_targets(&running_processes);
                                 }
 
-                                let mut state = state_handle.lock().await;
-                                if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
-                                    if *tunneled_processes != running_names {
-                                        if !running_names.is_empty() && tunneled_processes.is_empty() {
-                                            log::info!("V3: Game detected, relaying: {:?}", running_names);
-                                        } else if running_names.is_empty() && !tunneled_processes.is_empty() {
-                                            log::info!("V3: All games exited");
+                                state_handle.send_if_modified(|state| {
+                                    if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
+                                        if *tunneled_processes != running_names {
+                                            if !running_names.is_empty() && tunneled_processes.is_empty() {
+                                                log::info!("V3: Game detected, relaying: {:?}", running_names);
+                                            } else if running_names.is_empty() && !tunneled_processes.is_empty() {
+                                                log::info!("V3: All games exited");
+                                            }
+                                            *tunneled_processes = running_names;
+                                            return true;
                                         }
-                                        *tunneled_processes = running_names;
                                     }
-                                }
+                                    false
+                                });
                             }
                             Err(e) => {
                                 log::warn!("V3: Exclusion refresh error: {}", e);
@@ -1786,16 +1805,19 @@ impl VpnConnection {
                         // Sync auto-routing state to connection state
                         if let Some(ref auto_router) = auto_router_for_monitor {
                             let current_auto_region = auto_router.current_region();
-                            let mut state = state_handle.lock().await;
-                            if let ConnectionState::Connected { ref mut server_region, .. } = *state {
-                                if *server_region != current_auto_region && !current_auto_region.is_empty() {
-                                    log::info!(
-                                        "Auto-routing: Syncing UI state to region '{}'",
-                                        current_auto_region
-                                    );
-                                    *server_region = current_auto_region;
+                            state_handle.send_if_modified(|state| {
+                                if let ConnectionState::Connected { ref mut server_region, .. } = *state {
+                                    if *server_region != current_auto_region && !current_auto_region.is_empty() {
+                                        log::info!(
+                                            "Auto-routing: Syncing UI state to region '{}'",
+                                            current_auto_region
+                                        );
+                                        *server_region = current_auto_region;
+                                        return true;
+                                    }
                                 }
-                            }
+                                false
+                            });
                         }
 
                         // Check relay health and update connection state for UI visibility
@@ -1821,23 +1843,26 @@ impl VpnConnection {
                                     RelayHealthState::Dead => Some("dead".to_string()),
                                 }
                             };
-                            let mut state = state_handle.lock().await;
-                            if let ConnectionState::Connected { ref mut relay_status, .. } = *state {
-                                if *relay_status != new_status {
-                                    match &new_status {
-                                        Some(status) => log::warn!(
-                                            "V3: Relay health degraded to '{}' - updating UI state",
-                                            status
-                                        ),
-                                        None => {
-                                            if relay_status.is_some() {
-                                                log::info!("V3: Relay health recovered to healthy");
+                            state_handle.send_if_modified(|state| {
+                                if let ConnectionState::Connected { ref mut relay_status, .. } = *state {
+                                    if *relay_status != new_status {
+                                        match &new_status {
+                                            Some(status) => log::warn!(
+                                                "V3: Relay health degraded to '{}' - updating UI state",
+                                                status
+                                            ),
+                                            None => {
+                                                if relay_status.is_some() {
+                                                    log::info!("V3: Relay health recovered to healthy");
+                                                }
                                             }
                                         }
+                                        *relay_status = new_status;
+                                        return true;
                                     }
-                                    *relay_status = new_status;
                                 }
-                            }
+                                false
+                            });
                         }
                     }
 
@@ -1919,13 +1944,10 @@ impl VpnConnection {
         new_region: &str,
     ) -> VpnResult<()> {
         // Must be connected
-        {
-            let state = self.state.lock().await;
-            if !state.is_connected() {
-                return Err(VpnError::Connection(
-                    "Not connected - cannot switch server".to_string(),
-                ));
-            }
+        if !self.state.borrow().is_connected() {
+            return Err(VpnError::Connection(
+                "Not connected - cannot switch server".to_string(),
+            ));
         }
 
         // Switch the relay via the split tunnel driver
@@ -1949,8 +1971,7 @@ impl VpnConnection {
         }
 
         // Update connection state with new server info
-        {
-            let mut state = self.state.lock().await;
+        self.state.send_if_modified(|state| {
             if let ConnectionState::Connected {
                 ref mut server_region,
                 ref mut server_endpoint,
@@ -1959,8 +1980,11 @@ impl VpnConnection {
             {
                 *server_region = new_region.to_string();
                 *server_endpoint = new_relay_addr.to_string();
+                true
+            } else {
+                false
             }
-        }
+        });
 
         log::info!(
             "Auto-routing: Switched relay to {} ({})",
@@ -2214,19 +2238,15 @@ mod tests {
     #[test]
     fn test_vpn_connection_new_starts_disconnected() {
         let conn = VpnConnection::new();
-        // VpnConnection::new() creates Disconnected state
-        // We can verify via state_handle by trying to lock it
-        let state = conn.state_handle();
-        let guard = state.try_lock().unwrap();
-        assert_eq!(*guard, ConnectionState::Disconnected);
+        let rx = conn.state_handle();
+        assert_eq!(*rx.borrow(), ConnectionState::Disconnected);
     }
 
     #[test]
     fn test_vpn_connection_default_is_new() {
         let conn = VpnConnection::default();
-        let state = conn.state_handle();
-        let guard = state.try_lock().unwrap();
-        assert_eq!(*guard, ConnectionState::Disconnected);
+        let rx = conn.state_handle();
+        assert_eq!(*rx.borrow(), ConnectionState::Disconnected);
     }
 
     #[test]

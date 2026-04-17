@@ -252,25 +252,52 @@ pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), Strin
     result
 }
 
-async fn emit_vpn_state(app: &AppHandle, state: &AppState) {
-    let conn_state = state.vpn_state_handle.lock().await.clone();
-
+fn vpn_state_event(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnStateEvent {
     let response = map_vpn_state(conn_state);
-    let payload = VpnStateEvent {
+    VpnStateEvent {
         state: response.state,
         region: response.region,
         server_endpoint: response.server_endpoint,
         assigned_ip: response.assigned_ip,
         error: response.error,
-    };
-    let _ = app.emit(VPN_STATE_CHANGED, payload);
+    }
+}
+
+/// Subscribe to VPN state transitions and bridge each one to the
+/// `VPN_STATE_CHANGED` Tauri event.
+///
+/// `VpnConnection` publishes every state change (explicit `set_state`, the
+/// relay-health / auto-routing / process-monitor in-place updates, and
+/// `switch_server`) through a single `tokio::sync::watch` channel. This
+/// bridge is the ONLY place that forwards those updates to the UI, which
+/// is why individual command handlers no longer need to emit manually —
+/// any code path that reaches `self.state` is already covered.
+pub(crate) fn spawn_vpn_state_bridge(
+    app: AppHandle,
+    mut rx: tokio::sync::watch::Receiver<swifttunnel_core::vpn::ConnectionState>,
+) {
+    tauri::async_runtime::spawn(async move {
+        // The initial value is marked unseen on `subscribe()`, so the first
+        // `changed()` returns immediately and the UI gets a definitive
+        // snapshot right after startup. Subsequent iterations wake only on
+        // actual transitions.
+        loop {
+            let conn_state = rx.borrow_and_update().clone();
+            let _ = app.emit(VPN_STATE_CHANGED, vpn_state_event(conn_state));
+            if rx.changed().await.is_err() {
+                // Sender dropped — the VpnConnection is gone, which only
+                // happens during app teardown. Stop the bridge cleanly.
+                break;
+            }
+        }
+    });
 }
 
 #[tauri::command]
 pub async fn vpn_get_state(state: State<'_, AppState>) -> Result<VpnStateResponse, String> {
     // Read the inner state Arc directly so we don't have to wait on the
     // outer vpn_connection mutex while a connect or disconnect is mid-flight.
-    let conn_state = state.vpn_state_handle.lock().await.clone();
+    let conn_state = state.vpn_state_handle.borrow().clone();
     Ok(map_vpn_state(conn_state))
 }
 
@@ -302,7 +329,6 @@ pub async fn vpn_preflight_binding(
 #[tauri::command]
 pub async fn vpn_connect(
     state: State<'_, AppState>,
-    app: AppHandle,
     region: String,
     game_presets: Vec<String>,
 ) -> Result<(), String> {
@@ -398,7 +424,7 @@ pub async fn vpn_connect(
     drop(vpn);
 
     let discord_region = if result.is_ok() {
-        let conn_state = state.vpn_state_handle.lock().await.clone();
+        let conn_state = state.vpn_state_handle.borrow().clone();
         Some(resolve_discord_region(&conn_state, &region))
     } else {
         None
@@ -419,15 +445,14 @@ pub async fn vpn_connect(
         }
     }
 
-    emit_vpn_state(&app, &state).await;
+    // No manual emit here — `spawn_vpn_state_bridge` forwards every
+    // state transition published by `VpnConnection` to the UI.
     result
 }
 
 #[tauri::command]
-pub async fn vpn_disconnect(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let result = disconnect_and_persist(&state).await;
-    emit_vpn_state(&app, &state).await;
-    result
+pub async fn vpn_disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    disconnect_and_persist(&state).await
 }
 
 #[tauri::command]
