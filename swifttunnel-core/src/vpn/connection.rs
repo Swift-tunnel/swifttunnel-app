@@ -1349,8 +1349,7 @@ impl VpnConnection {
                                         new_addr
                                     );
                                     relay_for_lookup.switch_relay(new_addr);
-                                    {
-                                        let mut state = state_for_lookup.lock().await;
+                                    state_for_lookup.send_if_modified(|state| {
                                         if let ConnectionState::Connected {
                                             ref mut server_region,
                                             ref mut server_endpoint,
@@ -1359,8 +1358,11 @@ impl VpnConnection {
                                         {
                                             *server_region = new_region.clone();
                                             *server_endpoint = new_addr.to_string();
+                                            true
+                                        } else {
+                                            false
                                         }
-                                    }
+                                    });
                                     if let Err(e) =
                                         relay_for_lookup.send_keepalive_burst_async().await
                                     {
@@ -1440,9 +1442,7 @@ impl VpnConnection {
                                                         latency_improvement_ms.unwrap_or(0)
                                                     );
                                                     relay_for_lookup.switch_relay(new_addr);
-                                                    {
-                                                        let mut state =
-                                                            state_for_lookup.lock().await;
+                                                    state_for_lookup.send_if_modified(|state| {
                                                         if let ConnectionState::Connected {
                                                             ref mut server_region,
                                                             ref mut server_endpoint,
@@ -1451,8 +1451,11 @@ impl VpnConnection {
                                                         {
                                                             *server_region = new_region.clone();
                                                             *server_endpoint = new_addr.to_string();
+                                                            true
+                                                        } else {
+                                                            false
                                                         }
-                                                    }
+                                                    });
                                                     if let Err(e) = relay_for_lookup
                                                         .send_keepalive_burst_async()
                                                         .await
