@@ -4813,11 +4813,30 @@ fn run_cache_refresher(
                 }
             }
         } else {
-            // Fast path: Only look up PIDs from connection table (no full scan)
-            // Uses cached process info from last full scan
+            // Fast path: only look up PIDs from the connection table. Refresh
+            // sysinfo for exactly those PIDs so a reused PID from a decomissioned
+            // tunnel app can't keep its stale name in sysinfo's cache (C7). The
+            // full scan runs every 10th cycle anyway; this narrow refresh costs
+            // one OpenProcess per connection PID rather than a full process
+            // enumeration.
+            let pids_to_refresh: Vec<sysinfo::Pid> = {
+                let mut seen: ahash::AHashSet<u32> =
+                    ahash::AHashSet::with_capacity(connections.len());
+                connections
+                    .values()
+                    .filter(|pid| seen.insert(**pid))
+                    .map(|pid| sysinfo::Pid::from_u32(*pid))
+                    .collect()
+            };
+            if !pids_to_refresh.is_empty() {
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&pids_to_refresh),
+                    true, // remove_dead_processes — drops stale PIDs from sysinfo's cache
+                    ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet),
+                );
+            }
             for pid in connections.values() {
                 if !pid_names.contains_key(pid) {
-                    // Try to get from existing system cache (no syscall if already cached)
                     if let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) {
                         pid_names.insert(*pid, process.name().to_string_lossy().into_owned());
                     }
