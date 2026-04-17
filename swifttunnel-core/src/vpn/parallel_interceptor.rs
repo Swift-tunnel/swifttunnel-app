@@ -78,6 +78,19 @@ const MAX_PACKET_SIZE: usize = 1600;
 /// session (existing IPs still re-register harmlessly).
 const MAX_DETECTED_GAME_SERVERS: usize = 10_000;
 
+/// How long a 5-tuple stays pinned to the bypass path after a worker-queue
+/// overflow event. The game server sees a different source IP on tunneled vs
+/// bypassed packets; flipping back to the tunnel mid-flow makes the server
+/// treat it as a new/lost connection. Holding the flow on bypass for a short
+/// window lets NAT state settle and the game app recover naturally.
+const BYPASS_PIN_DURATION: Duration = Duration::from_secs(5);
+/// Hard cap on pinned entries. Exceeding this (e.g. during a sustained DoS or
+/// a pathological game that opens thousands of sockets) triggers a full clear
+/// rather than unbounded memory growth.
+const BYPASS_PIN_MAX_ENTRIES: usize = 4096;
+/// Opportunistic sweep cadence — amortize eviction across many insertions.
+const BYPASS_PIN_SWEEP_EVERY_N: usize = 256;
+
 /// Thread-local pre-allocated buffer to eliminate per-packet heap allocations
 /// Used for checksum fixup on tunneled packets
 thread_local! {
@@ -3950,6 +3963,10 @@ fn run_packet_reader(
     let mut snapshot = process_cache.get_snapshot();
     let mut snapshot_version = snapshot.version;
     let mut inline_cache: InlineCache = ahash::AHashMap::with_capacity(1024);
+    // Pins 5-tuples to the bypass path for BYPASS_PIN_DURATION after a
+    // worker-queue overflow so the game server doesn't see the source IP
+    // flip between tunnel and bypass mid-flow.
+    let mut bypass_pins = BypassPinCache::new();
 
     let driver = ndisapi::Ndisapi::new("NDISRD")
         .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
@@ -4079,12 +4096,26 @@ fn run_packet_reader(
                     let packet_len = data.len() as u64;
 
                     // Decide routing here to keep bypass traffic out of the workers.
-                    let should_tunnel = should_route_to_vpn_with_inline_cache(
+                    let mut should_tunnel = should_route_to_vpn_with_inline_cache(
                         data,
                         &snapshot,
                         &mut inline_cache,
                         api_tunneling,
                     );
+
+                    // H2: if a prior packet on this 5-tuple was bypassed after a
+                    // worker-queue overflow, keep the flow on the bypass path so
+                    // the game server sees a consistent source IP. Otherwise the
+                    // flip between tunnel (relay source IP) and bypass (client
+                    // source IP) looks like a connection reset to the server.
+                    let five_tuple = parse_five_tuple(data);
+                    if should_tunnel {
+                        if let Some(ref ft) = five_tuple {
+                            if bypass_pins.is_pinned(ft, Instant::now()) {
+                                should_tunnel = false;
+                            }
+                        }
+                    }
 
                     // Auto-routing whitelist bypass: if bypass is active, tunnel-eligible packets
                     // should be passed through to the physical adapter instead.
@@ -4137,6 +4168,12 @@ fn run_packet_reader(
                             QueueOverflowMode::from_u8(queue_overflow_mode.load(Ordering::Relaxed));
                         match queue_overflow_action(mode, data) {
                             QueueFullAction::Bypass => {
+                                // Pin the flow to bypass for a short window so
+                                // follow-up packets don't flip back to the relay
+                                // and confuse the game server's session state.
+                                if let Some(ft) = five_tuple {
+                                    bypass_pins.pin(ft, Instant::now());
+                                }
                                 let _ = passthrough_to_adapter.push(&packets[i]);
                                 if let Some(stats) = worker_stats.get(worker_id) {
                                     stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
@@ -5139,6 +5176,103 @@ fn queue_overflow_action(mode: QueueOverflowMode, data: &[u8]) -> QueueFullActio
                 QueueFullAction::Bypass
             }
         }
+    }
+}
+
+/// IPv4 5-tuple identifying a single UDP/TCP flow.
+type FiveTuple = (Ipv4Addr, u16, Ipv4Addr, u16, u8);
+
+#[inline(always)]
+fn parse_five_tuple(data: &[u8]) -> Option<FiveTuple> {
+    let ip_start = parse_ipv4_header_offset(data)?;
+    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
+    if ihl < 20 {
+        return None;
+    }
+    let protocol = data[ip_start + 9];
+    if protocol != 6 && protocol != 17 {
+        return None;
+    }
+    let transport_start = ip_start + ihl;
+    if data.len() < transport_start + 4 {
+        return None;
+    }
+    let src_ip = Ipv4Addr::new(
+        data[ip_start + 12],
+        data[ip_start + 13],
+        data[ip_start + 14],
+        data[ip_start + 15],
+    );
+    let dst_ip = Ipv4Addr::new(
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    );
+    let src_port = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
+    let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
+    Some((src_ip, src_port, dst_ip, dst_port, protocol))
+}
+
+/// Per-reader cache pinning recently-bypassed 5-tuples to the bypass path.
+///
+/// When a worker queue overflows in Bypass mode the reader reinjects the
+/// outbound packet to the physical NIC. The game server's reply would then
+/// come back via that same path, but any subsequent packet that successfully
+/// enqueues to a worker would egress via the relay with a *different* source
+/// IP — the game server treats the flipped 5-tuple as a new/lost connection.
+///
+/// Pinning the 5-tuple to bypass for [`BYPASS_PIN_DURATION`] after an overflow
+/// event keeps the outbound source IP stable until the pin expires or the flow
+/// stops sending.
+struct BypassPinCache {
+    pins: ahash::AHashMap<FiveTuple, Instant>,
+    insertions: usize,
+}
+
+impl BypassPinCache {
+    fn new() -> Self {
+        Self {
+            pins: ahash::AHashMap::with_capacity(256),
+            insertions: 0,
+        }
+    }
+
+    /// Returns true if the flow is currently pinned-bypass. Refreshes the pin
+    /// on a hit so active flows stay bypassed for the duration of their burst.
+    fn is_pinned(&mut self, ft: &FiveTuple, now: Instant) -> bool {
+        match self.pins.get(ft) {
+            Some(&at) if now.duration_since(at) < BYPASS_PIN_DURATION => {
+                self.pins.insert(*ft, now);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Mark a 5-tuple as pinned to bypass as of `now`, evicting expired
+    /// entries periodically and clearing wholesale if we blow the hard cap.
+    fn pin(&mut self, ft: FiveTuple, now: Instant) {
+        self.pins.insert(ft, now);
+        self.insertions = self.insertions.wrapping_add(1);
+        if self.insertions % BYPASS_PIN_SWEEP_EVERY_N == 0
+            || self.pins.len() > BYPASS_PIN_MAX_ENTRIES
+        {
+            self.sweep(now);
+        }
+    }
+
+    fn sweep(&mut self, now: Instant) {
+        self.pins
+            .retain(|_, ts| now.duration_since(*ts) < BYPASS_PIN_DURATION);
+        if self.pins.len() > BYPASS_PIN_MAX_ENTRIES {
+            self.pins.clear();
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.pins.len()
     }
 }
 
@@ -8799,5 +8933,115 @@ mod tests {
             "UDP routing must be identical regardless of api_tunneling"
         );
         assert!(result_a, "UDP from tunnel app should always be tunneled");
+    }
+
+    // ---- parse_five_tuple ----
+
+    #[test]
+    fn test_parse_five_tuple_extracts_all_fields() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let dst_ip = Ipv4Addr::new(1, 2, 3, 4);
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, 40000, 50000);
+
+        let tuple = parse_five_tuple(&frame).expect("must parse IPv4/UDP");
+        assert_eq!(tuple, (src_ip, 40000, dst_ip, 50000, 17));
+    }
+
+    #[test]
+    fn test_parse_five_tuple_rejects_non_tcp_udp() {
+        let frame = build_ipv4_frame(
+            1, // ICMP
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(1, 2, 3, 4),
+            0,
+            0,
+        );
+        assert!(parse_five_tuple(&frame).is_none());
+    }
+
+    // ---- BypassPinCache ----
+
+    #[test]
+    fn test_bypass_pin_cache_miss_when_empty() {
+        let mut cache = BypassPinCache::new();
+        let ft = (Ipv4Addr::new(10, 0, 0, 1), 1000, Ipv4Addr::new(1, 1, 1, 1), 80, 17);
+        assert!(!cache.is_pinned(&ft, Instant::now()));
+    }
+
+    #[test]
+    fn test_bypass_pin_cache_hit_within_window() {
+        let mut cache = BypassPinCache::new();
+        let ft = (Ipv4Addr::new(10, 0, 0, 1), 1000, Ipv4Addr::new(1, 1, 1, 1), 80, 17);
+        let t0 = Instant::now();
+        cache.pin(ft, t0);
+        assert!(cache.is_pinned(&ft, t0));
+        // Still pinned slightly later.
+        assert!(cache.is_pinned(&ft, t0 + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_bypass_pin_cache_expires_after_duration() {
+        let mut cache = BypassPinCache::new();
+        let ft = (Ipv4Addr::new(10, 0, 0, 1), 1000, Ipv4Addr::new(1, 1, 1, 1), 80, 17);
+        let t0 = Instant::now();
+        cache.pin(ft, t0);
+        assert!(!cache.is_pinned(&ft, t0 + BYPASS_PIN_DURATION + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn test_bypass_pin_cache_refreshes_on_hit() {
+        let mut cache = BypassPinCache::new();
+        let ft = (Ipv4Addr::new(10, 0, 0, 1), 1000, Ipv4Addr::new(1, 1, 1, 1), 80, 17);
+        let t0 = Instant::now();
+        cache.pin(ft, t0);
+
+        // Just inside the pin window — triggers a refresh to t1.
+        let t1 = t0 + BYPASS_PIN_DURATION - Duration::from_millis(100);
+        assert!(cache.is_pinned(&ft, t1));
+
+        // Past the original expiry but within refreshed window -> still pinned.
+        let t2 = t0 + BYPASS_PIN_DURATION + Duration::from_millis(100);
+        assert!(cache.is_pinned(&ft, t2));
+    }
+
+    #[test]
+    fn test_bypass_pin_cache_sweep_drops_expired_entries() {
+        let mut cache = BypassPinCache::new();
+        let t0 = Instant::now();
+        let t_fresh = t0 + BYPASS_PIN_DURATION + Duration::from_secs(1);
+
+        // Seed one stale entry.
+        cache.pin(
+            (Ipv4Addr::new(10, 0, 0, 1), 1000, Ipv4Addr::new(1, 1, 1, 1), 80, 17),
+            t0,
+        );
+        assert_eq!(cache.len(), 1);
+
+        // Force sweep by inserting fresh entries until we cross the threshold.
+        for i in 0..BYPASS_PIN_SWEEP_EVERY_N {
+            let port = 20_000 + (i as u16);
+            cache.pin(
+                (Ipv4Addr::new(10, 0, 0, 2), port, Ipv4Addr::new(1, 1, 1, 1), 80, 17),
+                t_fresh,
+            );
+        }
+
+        // Stale entry should be gone; fresh entries remain.
+        assert!(cache.len() <= BYPASS_PIN_SWEEP_EVERY_N);
+        assert!(!cache.is_pinned(
+            &(Ipv4Addr::new(10, 0, 0, 1), 1000, Ipv4Addr::new(1, 1, 1, 1), 80, 17),
+            t_fresh,
+        ));
+    }
+
+    #[test]
+    fn test_bypass_pin_cache_different_tuples_isolated() {
+        let mut cache = BypassPinCache::new();
+        let ft_a = (Ipv4Addr::new(10, 0, 0, 1), 1000, Ipv4Addr::new(1, 1, 1, 1), 80, 17);
+        let ft_b = (Ipv4Addr::new(10, 0, 0, 1), 1001, Ipv4Addr::new(1, 1, 1, 1), 80, 17);
+        let now = Instant::now();
+        cache.pin(ft_a, now);
+        assert!(cache.is_pinned(&ft_a, now));
+        assert!(!cache.is_pinned(&ft_b, now));
     }
 }
