@@ -6,36 +6,58 @@
 
 .connect-data {
   font-family: 'Azeret Mono', monospace;
+  font-feature-settings: "zero";
+  letter-spacing: -0.01em;
 }
 
-/* ── Ring animations ── */
-
-@keyframes orbit-cw {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes orbit-ccw {
-  to { transform: rotate(-360deg); }
-}
+/* ── Hero animations ── */
 
 @keyframes broadcast-pulse {
   0% {
     transform: scale(1);
-    opacity: 0.4;
+    opacity: 0.45;
   }
   100% {
-    transform: scale(1.7);
+    transform: scale(1.75);
     opacity: 0;
   }
 }
 
 @keyframes glow-breathe {
-  0%, 100% { opacity: 0.12; }
-  50% { opacity: 0.4; }
+  0%, 100% { opacity: 0.18; }
+  50% { opacity: 0.5; }
 }
 
 @keyframes connect-success-glow {
   0% { box-shadow: 0 0 35px rgba(40,210,150,0.18), inset 0 1px 0 rgba(255,255,255,0.1); }
-  50% { box-shadow: 0 0 50px rgba(40,210,150,0.35), inset 0 1px 0 rgba(255,255,255,0.15); }
+  50% { box-shadow: 0 0 60px rgba(40,210,150,0.45), inset 0 1px 0 rgba(255,255,255,0.16); }
   100% { box-shadow: 0 0 35px rgba(40,210,150,0.18), inset 0 1px 0 rgba(255,255,255,0.1); }
+}
+
+@keyframes orbit-cw {
+  to { transform: rotate(360deg); }
+}
+
+/* Live indicator dot (for graph header) */
+.live-dot-sm {
+  position: relative;
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #28d296;
+  box-shadow: 0 0 6px rgba(40, 210, 150, 0.8);
+}
+.live-dot-sm::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  background: #28d296;
+  opacity: 0.4;
+  animation: live-dot-pulse 2s ease-out infinite;
+}
+@keyframes live-dot-pulse {
+  0% { transform: scale(0.8); opacity: 0.5; }
+  100% { transform: scale(2.6); opacity: 0; }
 }

@@ -1,7 +1,9 @@
-export const GAMES = [
-  { id: "roblox", name: "Roblox", icon: "\u{1F3AE}" },
-  { id: "valorant", name: "Valorant", icon: "\u{1F3AF}" },
-  { id: "fortnite", name: "Fortnite", icon: "\u{1F3D7}\uFE0F" },
+export type GameId = "roblox" | "valorant" | "fortnite";
+
+export const GAMES: { id: GameId; name: string; brandColor: string }[] = [
+  { id: "roblox", name: "Roblox", brandColor: "#e2231a" },
+  { id: "valorant", name: "Valorant", brandColor: "#ff4655" },
+  { id: "fortnite", name: "Fortnite", brandColor: "#8b5cf6" },
 ];
 
 export function stateLabel(state: string): string {

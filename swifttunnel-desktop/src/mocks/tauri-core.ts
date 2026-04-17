@@ -198,7 +198,13 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       { id: "amsterdam", name: "Amsterdam", description: "Western Europe", country_code: "NL", servers: ["nl-1"] },
       { id: "brazil", name: "Brazil", description: "South America", country_code: "BR", servers: ["br-1"] },
     ],
-    servers: [],
+    servers: [
+      { region: "singapore", name: "sg-3", country_code: "SG", ip: "54.255.205.216", port: 51821 },
+      { region: "singapore", name: "sg-1", country_code: "SG", ip: "54.255.205.210", port: 51821 },
+      { region: "singapore", name: "sg-2", country_code: "SG", ip: "54.255.205.212", port: 51821 },
+      { region: "mumbai", name: "in-1", country_code: "IN", ip: "13.232.1.1", port: 51821 },
+      { region: "tokyo", name: "jp-1", country_code: "JP", ip: "13.230.1.1", port: 51821 },
+    ],
     source: "mock",
   }),
 

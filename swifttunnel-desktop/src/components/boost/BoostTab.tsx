@@ -5,8 +5,17 @@ import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
 import { systemRestartAsAdmin } from "../../lib/commands";
 import { notify } from "../../lib/notifications";
-import { Toggle } from "../common/Toggle";
-import { Tooltip, InfoIcon } from "../common/Tooltip";
+import {
+  Toggle,
+  SectionHeader,
+  Tooltip,
+  InfoIcon,
+  Button,
+  Row,
+  Chip,
+  Spinner,
+  Slider,
+} from "../ui";
 import {
   PROFILES,
   configsEqual,
@@ -46,11 +55,8 @@ export function BoostTab() {
   const [restartAdminState, setRestartAdminState] = useState<
     "idle" | "restarting" | "error"
   >("idle");
-  const [restartAdminError, setRestartAdminError] = useState<string | null>(
-    null,
-  );
+  const [restartAdminError, setRestartAdminError] = useState<string | null>(null);
 
-  // Draft config — local buffer until user hits Apply
   const savedConfig = settings.config;
   const [draft, setDraft] = useState<Config>(savedConfig);
 
@@ -58,19 +64,16 @@ export function BoostTab() {
     setDraft(savedConfig);
   }, [savedConfig]);
 
-  const savedGameProcessPerformance = settings.game_process_performance;
-  const [draftGameProcessPerformance, setDraftGameProcessPerformance] =
-    useState<GameProcessPerformanceSettings>(savedGameProcessPerformance);
+  const savedGPP = settings.game_process_performance;
+  const [draftGPP, setDraftGPP] = useState<GameProcessPerformanceSettings>(savedGPP);
 
   useEffect(() => {
-    setDraftGameProcessPerformance(savedGameProcessPerformance);
-  }, [savedGameProcessPerformance]);
+    setDraftGPP(savedGPP);
+  }, [savedGPP]);
 
   const hasConfigChanges = !configsEqual(draft, savedConfig);
-  const hasGameProcessPerformanceChanges =
-    JSON.stringify(draftGameProcessPerformance) !==
-    JSON.stringify(savedGameProcessPerformance);
-  const hasChanges = hasConfigChanges || hasGameProcessPerformanceChanges;
+  const hasGPPChanges = JSON.stringify(draftGPP) !== JSON.stringify(savedGPP);
+  const hasChanges = hasConfigChanges || hasGPPChanges;
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
   const windowWidthError = validateWindowDimension(
@@ -108,7 +111,7 @@ export function BoostTab() {
     if (windowValidationError) return;
     updateSettings({
       config: draft,
-      game_process_performance: draftGameProcessPerformance,
+      game_process_performance: draftGPP,
     });
     saveSettings();
     if (hasConfigChanges) {
@@ -122,7 +125,7 @@ export function BoostTab() {
     }
   }, [
     draft,
-    draftGameProcessPerformance,
+    draftGPP,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -137,9 +140,8 @@ export function BoostTab() {
       setRestartAdminError(null);
       await systemRestartAsAdmin();
     } catch (e) {
-      const message = String(e);
       setRestartAdminState("error");
-      setRestartAdminError(message);
+      setRestartAdminError(String(e));
       await notify("Restart canceled", "Could not restart as Administrator.");
     }
   }, []);
@@ -150,7 +152,7 @@ export function BoostTab() {
     try {
       updateSettings({
         config: draft,
-        game_process_performance: draftGameProcessPerformance,
+        game_process_performance: draftGPP,
       });
       saveSettings();
       if (hasConfigChanges) {
@@ -162,7 +164,7 @@ export function BoostTab() {
     }
   }, [
     draft,
-    draftGameProcessPerformance,
+    draftGPP,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -172,59 +174,78 @@ export function BoostTab() {
 
   const discardChanges = useCallback(() => {
     setDraft(savedConfig);
-    setDraftGameProcessPerformance(savedGameProcessPerformance);
-  }, [savedConfig, savedGameProcessPerformance]);
+    setDraftGPP(savedGPP);
+  }, [savedConfig, savedGPP]);
 
   function selectProfile(id: OptimizationProfile) {
     setDraft(getPresetConfig(id, draft));
   }
 
-  function updateSysOpt(partial: Partial<SystemOptimizationConfig>) {
+  function updateSysOpt(p: Partial<SystemOptimizationConfig>) {
     setDraft((prev) => ({
       ...prev,
       profile: "Custom",
-      system_optimization: { ...prev.system_optimization, ...partial },
+      system_optimization: { ...prev.system_optimization, ...p },
     }));
   }
 
-  function updateNetOpt(partial: Partial<NetworkConfig>) {
+  function updateNetOpt(p: Partial<NetworkConfig>) {
     setDraft((prev) => ({
       ...prev,
       profile: "Custom",
-      network_settings: { ...prev.network_settings, ...partial },
+      network_settings: { ...prev.network_settings, ...p },
     }));
   }
 
-  function updateRblxOpt(partial: Partial<RobloxSettingsConfig>) {
+  function updateRblxOpt(p: Partial<RobloxSettingsConfig>) {
     setDraft((prev) => ({
       ...prev,
       profile: "Custom",
-      roblox_settings: { ...prev.roblox_settings, ...partial },
+      roblox_settings: { ...prev.roblox_settings, ...p },
     }));
   }
 
-  function updateGameProcessPerformance(
-    partial: Partial<GameProcessPerformanceSettings>,
-  ) {
-    setDraftGameProcessPerformance((prev) => ({ ...prev, ...partial }));
+  function updateGPP(p: Partial<GameProcessPerformanceSettings>) {
+    setDraftGPP((prev) => ({ ...prev, ...p }));
   }
+
+  const sysCount = [
+    draft.system_optimization.set_high_priority,
+    draft.system_optimization.timer_resolution_1ms,
+    draft.system_optimization.mmcss_gaming_profile,
+    draft.system_optimization.game_mode_enabled,
+  ].filter(Boolean).length;
+  const netCount = [
+    draft.network_settings.disable_nagle,
+    draft.network_settings.disable_network_throttling,
+    draft.network_settings.gaming_qos,
+  ].filter(Boolean).length;
+  const rblxCount = [
+    draft.roblox_settings.unlock_fps,
+    draft.roblox_settings.ultraboost,
+    draft.roblox_settings.window_fullscreen,
+  ].filter(Boolean).length;
+  const schedCount = [
+    draftGPP.high_performance_gpu_binding,
+    draftGPP.prefer_performance_cores,
+    draftGPP.unbind_cpu0,
+  ].filter(Boolean).length;
 
   return (
-    <div className="mx-auto flex max-w-[660px] flex-col gap-4 pb-16">
+    <div className="flex w-full flex-col gap-5 pb-24">
       {boost.error && (
         <div
-          className="rounded-lg px-4 py-2 text-xs"
+          className="rounded-[var(--radius-card)] px-3.5 py-2.5 text-[12px]"
           style={{
             backgroundColor: "var(--color-status-error-soft-10)",
-            color: "var(--color-status-error)",
             border: "1px solid var(--color-status-error-soft-20)",
+            color: "var(--color-status-error)",
           }}
         >
           {boost.error}
         </div>
       )}
 
-      {/* ── RAM Cleaner ── */}
       <RamCleanerCard
         systemMem={boost.systemMem}
         isCleaning={boost.isCleaningRam}
@@ -240,80 +261,87 @@ export function BoostTab() {
       />
 
       {/* ── Profile Selector ── */}
-      <div>
-        <SectionHeader title="Profile" />
-        <div className="flex gap-1 rounded-[var(--radius-card)] border border-border-subtle bg-bg-card p-1">
+      <section>
+        <SectionHeader
+          label="Profile"
+          description="Choose a preset or customize individual settings below"
+          tag={draft.profile === "Custom" ? "Custom" : undefined}
+        />
+        <div
+          className="grid gap-1 rounded-[var(--radius-card)] p-1"
+          style={{
+            gridTemplateColumns: `repeat(${PROFILES.length}, minmax(0, 1fr))`,
+            backgroundColor: "var(--color-bg-card)",
+            border: "1px solid var(--color-border-subtle)",
+          }}
+        >
           {PROFILES.map((p) => {
             const sel = draft.profile === p.id;
             return (
               <button
                 key={p.id}
                 onClick={() => selectProfile(p.id)}
-                className="flex-1 rounded-lg px-3 py-2.5 text-center text-[13px] font-medium transition-colors"
+                className="rounded-[5px] px-3 py-2 text-left transition-colors"
                 style={{
                   backgroundColor: sel
                     ? "var(--color-accent-primary)"
                     : "transparent",
-                  color: sel ? "#fff" : "var(--color-text-muted)",
+                  color: sel ? "#fff" : "var(--color-text-secondary)",
                 }}
               >
-                {p.name}
+                <div className="text-[12.5px] font-semibold">{p.name}</div>
+                <div
+                  className="mt-0.5 text-[10.5px]"
+                  style={{
+                    color: sel ? "rgba(255,255,255,0.78)" : "var(--color-text-muted)",
+                  }}
+                >
+                  {p.desc}
+                </div>
               </button>
             );
           })}
         </div>
-        {draft.profile === "Custom" && (
-          <p className="mt-2 text-[11px] text-text-dimmed">
-            Custom — individual settings below
-          </p>
-        )}
-      </div>
+      </section>
 
       {/* ── Roblox ── */}
-      <Section title="Roblox">
+      <Section
+        title="Roblox"
+        tag={`${rblxCount} / 3 on`}
+      >
         <SettingRow
           title="Unlock FPS"
           desc="Remove 60 FPS cap"
           enabled={draft.roblox_settings.unlock_fps}
           onChange={(v) => updateRblxOpt({ unlock_fps: v })}
         />
-
         {draft.roblox_settings.unlock_fps && (
           <FpsSlider
             value={draft.roblox_settings.target_fps}
             onChange={(v) => updateRblxOpt({ target_fps: v })}
           />
         )}
-
         <SettingRow
           title="Ultraboost"
-          desc="All allowlisted performance FFlags for max FPS (+20-40%)"
+          desc="All allowlisted performance FFlags (+20-40% FPS)"
           enabled={draft.roblox_settings.ultraboost}
           onChange={(v) => updateRblxOpt({ ultraboost: v })}
         />
-
         <ResolutionRow
           width={draft.roblox_settings.window_width}
           height={draft.roblox_settings.window_height}
           onWidthChange={(w) =>
             updateRblxOpt({
-              window_width: parseWindowDimensionInput(
-                String(w),
-                MIN_WINDOW_WIDTH,
-              ),
+              window_width: parseWindowDimensionInput(String(w), MIN_WINDOW_WIDTH),
             })
           }
           onHeightChange={(h) =>
             updateRblxOpt({
-              window_height: parseWindowDimensionInput(
-                String(h),
-                MIN_WINDOW_HEIGHT,
-              ),
+              window_height: parseWindowDimensionInput(String(h), MIN_WINDOW_HEIGHT),
             })
           }
           error={windowValidationError}
         />
-
         <SettingRow
           title="Launch Fullscreen"
           desc="Set Roblox fullscreen default"
@@ -322,84 +350,81 @@ export function BoostTab() {
         />
       </Section>
 
-      {/* ── System ── */}
-      <Section title="System">
-        <SettingRow
-          title="High Priority Mode"
-          desc="Boost game process priority for +5-15 FPS"
-          enabled={draft.system_optimization.set_high_priority}
-          onChange={(v) => updateSysOpt({ set_high_priority: v })}
-        />
-        <SettingRow
-          title="0.5ms Timer Resolution"
-          desc="Max precision frame pacing for smoother frames"
-          tooltip="Reduces the Windows timer interrupt interval to 0.5ms for more precise frame pacing and input polling. Slightly increases CPU usage."
-          enabled={draft.system_optimization.timer_resolution_1ms}
-          onChange={(v) => updateSysOpt({ timer_resolution_1ms: v })}
-        />
-        <SettingRow
-          title="MMCSS Gaming Profile"
-          desc="Better thread scheduling for stable frame times"
-          tooltip="Multimedia Class Scheduler Service — tells Windows to give game threads higher priority for CPU time, reducing stutters from background tasks."
-          enabled={draft.system_optimization.mmcss_gaming_profile}
-          onChange={(v) => updateSysOpt({ mmcss_gaming_profile: v })}
-        />
-        <SettingRow
-          title="Windows Game Mode"
-          desc="System resource prioritization for consistent perf"
-          enabled={draft.system_optimization.game_mode_enabled}
-          onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
-        />
-      </Section>
+      {/* ── System + Network side-by-side ── */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Section title="System" tag={`${sysCount} / 4 on`}>
+          <SettingRow
+            title="High Priority Mode"
+            desc="Boost game process priority (+5-15 FPS)"
+            enabled={draft.system_optimization.set_high_priority}
+            onChange={(v) => updateSysOpt({ set_high_priority: v })}
+          />
+          <SettingRow
+            title="0.5ms Timer Resolution"
+            desc="Max precision frame pacing"
+            tooltip="Reduces the Windows timer interrupt interval to 0.5ms for more precise frame pacing. Slightly increases CPU usage."
+            enabled={draft.system_optimization.timer_resolution_1ms}
+            onChange={(v) => updateSysOpt({ timer_resolution_1ms: v })}
+          />
+          <SettingRow
+            title="MMCSS Gaming Profile"
+            desc="Better thread scheduling, stable frame times"
+            tooltip="Multimedia Class Scheduler Service — prioritizes game threads for CPU time."
+            enabled={draft.system_optimization.mmcss_gaming_profile}
+            onChange={(v) => updateSysOpt({ mmcss_gaming_profile: v })}
+          />
+          <SettingRow
+            title="Windows Game Mode"
+            desc="System resource prioritization"
+            enabled={draft.system_optimization.game_mode_enabled}
+            onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
+          />
+        </Section>
+
+        <Section title="Network" tag={`${netCount} / 3 on`}>
+          <SettingRow
+            title="Disable Nagle's Algorithm"
+            desc="Faster packet delivery (-5-15ms)"
+            tooltip="Nagle batches small packets to reduce overhead. Disabling sends immediately — better for real-time games."
+            enabled={draft.network_settings.disable_nagle}
+            onChange={(v) => updateNetOpt({ disable_nagle: v })}
+          />
+          <SettingRow
+            title="Disable Network Throttling"
+            desc="Full bandwidth while gaming"
+            tooltip="Windows throttles network I/O when multimedia is playing. Disabling prevents sudden bandwidth drops."
+            enabled={draft.network_settings.disable_network_throttling}
+            onChange={(v) => updateNetOpt({ disable_network_throttling: v })}
+          />
+          <SettingRow
+            title="Gaming QoS"
+            desc="Prioritize game UDP (-5-20ms)"
+            tooltip="QoS marks game UDP packets as high priority so routers handle them before downloads / streaming."
+            enabled={draft.network_settings.gaming_qos}
+            onChange={(v) => updateNetOpt({ gaming_qos: v })}
+          />
+        </Section>
+      </div>
 
       {/* ── Process Scheduling ── */}
-      <Section title="Process Scheduling">
+      <Section title="Process Scheduling" tag={`${schedCount} / 3 on`}>
         <SettingRow
           title="High-Performance GPU Binding"
-          desc="Bind target game executables to high-performance GPU while connected"
-          enabled={draftGameProcessPerformance.high_performance_gpu_binding}
-          onChange={(v) =>
-            updateGameProcessPerformance({ high_performance_gpu_binding: v })
-          }
+          desc="Bind target games to the high-performance GPU while connected"
+          enabled={draftGPP.high_performance_gpu_binding}
+          onChange={(v) => updateGPP({ high_performance_gpu_binding: v })}
         />
         <SettingRow
           title="Prefer Performance Cores"
-          desc="Use CPU Sets to steer target games to P-cores on hybrid CPUs"
-          enabled={draftGameProcessPerformance.prefer_performance_cores}
-          onChange={(v) =>
-            updateGameProcessPerformance({ prefer_performance_cores: v })
-          }
+          desc="Steer target games to P-cores on hybrid CPUs"
+          enabled={draftGPP.prefer_performance_cores}
+          onChange={(v) => updateGPP({ prefer_performance_cores: v })}
         />
         <SettingRow
           title="Unbind CPU0"
-          desc="Exclude logical CPU 0 for target games when enough cores are available"
-          enabled={draftGameProcessPerformance.unbind_cpu0}
-          onChange={(v) => updateGameProcessPerformance({ unbind_cpu0: v })}
-        />
-      </Section>
-
-      {/* ── Network ── */}
-      <Section title="Network">
-        <SettingRow
-          title="Disable Nagle's Algorithm"
-          desc="Faster packet delivery (-5-15ms)"
-          tooltip="Nagle's algorithm batches small packets together to reduce overhead. Disabling it sends packets immediately, reducing latency for real-time games."
-          enabled={draft.network_settings.disable_nagle}
-          onChange={(v) => updateNetOpt({ disable_nagle: v })}
-        />
-        <SettingRow
-          title="Disable Network Throttling"
-          desc="Full bandwidth for games, less lag spikes"
-          tooltip="Windows throttles network I/O when multimedia is playing. Disabling this prevents sudden bandwidth drops during gaming."
-          enabled={draft.network_settings.disable_network_throttling}
-          onChange={(v) => updateNetOpt({ disable_network_throttling: v })}
-        />
-        <SettingRow
-          title="Gaming QoS"
-          desc="Prioritize Roblox + tunnel UDP (-5-20ms)"
-          tooltip="Quality of Service — marks game UDP packets as high priority so routers and Windows handle them before other traffic like downloads or streaming."
-          enabled={draft.network_settings.gaming_qos}
-          onChange={(v) => updateNetOpt({ gaming_qos: v })}
+          desc="Exclude logical CPU 0 when enough cores are available"
+          enabled={draftGPP.unbind_cpu0}
+          onChange={(v) => updateGPP({ unbind_cpu0: v })}
         />
       </Section>
 
@@ -407,14 +432,25 @@ export function BoostTab() {
       <AnimatePresence>
         {hasChanges && (
           <motion.div
-            initial={{ opacity: 0, y: 32 }}
+            initial={{ opacity: 0, y: 28 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 32 }}
-            transition={{ type: "spring", damping: 22, stiffness: 300 }}
-            className="fixed bottom-0 left-[var(--spacing-sidebar)] right-0 z-40 px-6 pb-4"
+            exit={{ opacity: 0, y: 28 }}
+            transition={{ type: "spring", damping: 24, stiffness: 280 }}
+            className="fixed z-40"
+            style={{
+              left: `calc(var(--spacing-sidebar) + var(--spacing-content))`,
+              right: "var(--spacing-content)",
+              bottom: `calc(var(--spacing-connect-bar) + 12px)`,
+            }}
           >
-            <div className="mx-auto flex max-w-[660px] items-center justify-between rounded-[var(--radius-card)] border border-border-subtle bg-bg-card px-5 py-3 shadow-lg backdrop-blur-xl">
-              <span className="text-xs font-medium text-text-secondary">
+            <div
+              className="flex w-full items-center justify-between rounded-[var(--radius-card)] px-4 py-2.5 shadow-2xl backdrop-blur-xl"
+              style={{
+                backgroundColor: "var(--color-bg-card)",
+                border: "1px solid var(--color-border-default)",
+              }}
+            >
+              <span className="text-[12px] font-medium text-text-secondary">
                 {windowValidationError
                   ? windowValidationError
                   : hasRobloxChanges && boost.robloxRunning
@@ -422,35 +458,33 @@ export function BoostTab() {
                     : "Unsaved changes"}
               </span>
               <div className="flex items-center gap-2">
-                <button
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={discardChanges}
                   disabled={isRestarting}
-                  className="rounded-[var(--radius-button)] border border-border-subtle px-4 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-bg-hover disabled:opacity-50"
                 >
                   Discard
-                </button>
+                </Button>
                 {hasRobloxChanges && boost.robloxRunning ? (
-                  <button
+                  <Button
+                    variant="primary"
+                    size="sm"
                     onClick={() => void restartAndApply()}
                     disabled={isRestarting || Boolean(windowValidationError)}
-                    className="rounded-[var(--radius-button)] px-5 py-2 text-xs font-semibold text-white transition-opacity disabled:opacity-50"
-                    style={{
-                      backgroundColor: "var(--color-accent-primary)",
-                    }}
+                    loading={isRestarting}
                   >
-                    {isRestarting ? "Restarting\u2026" : "Restart & Apply"}
-                  </button>
+                    Restart & Apply
+                  </Button>
                 ) : (
-                  <button
+                  <Button
+                    variant="primary"
+                    size="sm"
                     onClick={applyChanges}
                     disabled={isRestarting || Boolean(windowValidationError)}
-                    className="rounded-[var(--radius-button)] px-5 py-2 text-xs font-semibold text-white transition-opacity disabled:opacity-50"
-                    style={{
-                      backgroundColor: "var(--color-accent-primary)",
-                    }}
                   >
                     Apply
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>
@@ -463,20 +497,26 @@ export function BoostTab() {
 
 // ── Sub-components ──
 
-function SectionHeader({ title }: { title: string }) {
-  return (
-    <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-dimmed">
-      {title}
-    </div>
-  );
-}
-
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  tag,
+  children,
+}: {
+  title: string;
+  tag?: string;
+  children: ReactNode;
+}) {
   return (
     <section>
-      <SectionHeader title={title} />
-      <div className="overflow-hidden rounded-[var(--radius-card)] border border-border-subtle bg-bg-card">
-        <div className="divide-y divide-border-subtle">{children}</div>
+      <SectionHeader label={title} tag={tag} />
+      <div
+        className="overflow-hidden rounded-[var(--radius-card)]"
+        style={{
+          backgroundColor: "var(--color-bg-card)",
+          border: "1px solid var(--color-border-subtle)",
+        }}
+      >
+        {children}
       </div>
     </section>
   );
@@ -496,19 +536,209 @@ function SettingRow({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <div className="flex items-center justify-between px-4 py-3">
-      <div className="flex min-w-0 flex-col gap-0.5 pr-4">
-        <span className="flex items-center gap-1.5 text-sm font-medium text-text-primary">
-          {title}
-          {tooltip && (
-            <Tooltip content={tooltip}>
+    <Row
+      label={title}
+      desc={desc}
+      tooltip={
+        tooltip && (
+          <Tooltip content={tooltip}>
+            <span className="inline-flex">
               <InfoIcon />
-            </Tooltip>
-          )}
-        </span>
-        <span className="text-xs text-text-muted">{desc}</span>
-      </div>
+            </span>
+          </Tooltip>
+        )
+      }
+    >
       <Toggle enabled={enabled} onChange={onChange} />
+    </Row>
+  );
+}
+
+function FpsSlider({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  // Slider range: 30–1010. The last notch (1010) is the "uncapped" position.
+  const UNCAP_POS = 1010;
+  const isUncapped = value >= 9999;
+  const sliderValue = isUncapped
+    ? UNCAP_POS
+    : Math.max(30, Math.min(value, 1000));
+  const [inputText, setInputText] = useState(isUncapped ? "" : String(value));
+  const [inputFocused, setInputFocused] = useState(false);
+
+  useEffect(() => {
+    if (!inputFocused) {
+      setInputText(isUncapped ? "" : String(value));
+    }
+  }, [value, isUncapped, inputFocused]);
+
+  function commitInput(raw: string) {
+    const v = Number.parseInt(raw, 10);
+    if (!Number.isFinite(v) || v < 30) {
+      setInputText(isUncapped ? "" : String(value));
+      return;
+    }
+    onChange(Math.min(v, 99999));
+  }
+
+  function handleSlider(v: number) {
+    if (v >= UNCAP_POS) onChange(99999);
+    else onChange(Math.min(v, 1000));
+  }
+
+  return (
+    <div className="px-4 py-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-baseline gap-2">
+          <span className="text-[11px] text-text-muted">Target FPS</span>
+          {isUncapped && (
+            <span
+              className="rounded-[3px] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.1em]"
+              style={{
+                backgroundColor: "var(--color-accent-primary-soft-15)",
+                color: "var(--color-accent-secondary)",
+              }}
+            >
+              Uncapped
+            </span>
+          )}
+        </div>
+        <input
+          type="number"
+          min={30}
+          max={99999}
+          value={inputText}
+          placeholder="MAX"
+          onFocus={() => setInputFocused(true)}
+          onChange={(e) => {
+            setInputText(e.target.value);
+            const v = Number.parseInt(e.target.value, 10);
+            if (Number.isFinite(v) && v >= 30 && v <= 99999) onChange(v);
+          }}
+          onBlur={(e) => {
+            setInputFocused(false);
+            commitInput(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+          className="boost-input w-[78px] rounded-[4px] px-2 py-1 text-right font-mono text-[12px] font-semibold outline-none transition-colors"
+          style={{
+            backgroundColor: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-border-default)",
+            color: isUncapped
+              ? "var(--color-accent-secondary)"
+              : "var(--color-text-primary)",
+          }}
+        />
+      </div>
+      <Slider
+        ariaLabel="Target FPS slider"
+        min={30}
+        max={UNCAP_POS}
+        step={10}
+        value={sliderValue}
+        onChange={handleSlider}
+      />
+      <div className="mt-1.5 flex justify-between font-mono text-[9.5px] text-text-dimmed">
+        <span>30</span>
+        <span>120</span>
+        <span>240</span>
+        <span>360</span>
+        <span
+          style={{
+            color:
+              !isUncapped && value >= 1000
+                ? "var(--color-text-primary)"
+                : undefined,
+          }}
+        >
+          1000
+        </span>
+        <span
+          style={{
+            color: isUncapped ? "var(--color-accent-secondary)" : undefined,
+            fontWeight: isUncapped ? 700 : undefined,
+          }}
+        >
+          MAX
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ResolutionRow({
+  width,
+  height,
+  onWidthChange,
+  onHeightChange,
+  error,
+}: {
+  width: number;
+  height: number;
+  onWidthChange: (v: number) => void;
+  onHeightChange: (v: number) => void;
+  error: string | null;
+}) {
+  return (
+    <div className="px-4 py-3">
+      <div className="mb-0.5 text-[13px] font-medium text-text-primary">
+        Window resolution
+      </div>
+      <div className="mb-2.5 text-[11px] text-text-muted">
+        Sets Roblox launch window size in pixels.
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="flex flex-1 flex-col gap-1">
+          <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
+            Width
+          </span>
+          <input
+            type="number"
+            min={MIN_WINDOW_WIDTH}
+            max={MAX_WINDOW_WIDTH}
+            step={2}
+            value={width}
+            onChange={(e) =>
+              onWidthChange(parseWindowDimensionInput(e.target.value, MIN_WINDOW_WIDTH))
+            }
+            className="boost-input rounded-[4px] px-3 py-1.5 font-mono text-[13px] outline-none transition-colors"
+            style={{
+              backgroundColor: "var(--color-bg-elevated)",
+              border: "1px solid var(--color-border-default)",
+              color: "var(--color-text-primary)",
+            }}
+          />
+        </label>
+        <span className="mt-4 text-[11px] text-text-dimmed">×</span>
+        <label className="flex flex-1 flex-col gap-1">
+          <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
+            Height
+          </span>
+          <input
+            type="number"
+            min={MIN_WINDOW_HEIGHT}
+            max={MAX_WINDOW_HEIGHT}
+            step={2}
+            value={height}
+            onChange={(e) =>
+              onHeightChange(parseWindowDimensionInput(e.target.value, MIN_WINDOW_HEIGHT))
+            }
+            className="boost-input rounded-[4px] px-3 py-1.5 font-mono text-[13px] outline-none transition-colors"
+            style={{
+              backgroundColor: "var(--color-bg-elevated)",
+              border: "1px solid var(--color-border-default)",
+              color: "var(--color-text-primary)",
+            }}
+          />
+        </label>
+      </div>
+      {error && <p className="mt-2 text-[11px] text-status-error">{error}</p>}
     </div>
   );
 }
@@ -547,160 +777,133 @@ function RamCleanerCard({
   const showBottom = isCleaning || !isAdmin || result;
 
   return (
-    <div className="overflow-hidden rounded-[var(--radius-card)] border border-border-subtle bg-bg-card">
-      <div className="flex items-center justify-between px-5 pt-5 pb-4">
+    <div
+      className="overflow-hidden rounded-[var(--radius-card)]"
+      style={{
+        backgroundColor: "var(--color-bg-card)",
+        border: "1px solid var(--color-border-subtle)",
+      }}
+    >
+      <div className="flex items-center justify-between px-4 pt-4 pb-3">
         <div>
-          <div className="text-sm font-semibold text-text-primary">
+          <div className="text-[13px] font-semibold text-text-primary">
             RAM Cleaner
           </div>
-          <div className="mt-0.5 text-xs text-text-muted">
+          <div className="mt-0.5 text-[11px] text-text-muted">
             Frees memory by trimming background apps
           </div>
         </div>
-        <button
+        <Button
+          variant="primary"
+          size="md"
           onClick={onClean}
           disabled={isCleaning}
-          className="shrink-0 rounded-[var(--radius-button)] px-5 py-2 text-xs font-semibold text-white transition-opacity disabled:opacity-60"
-          style={{ backgroundColor: "var(--color-accent-primary)" }}
+          loading={isCleaning}
         >
-          {isCleaning ? "Cleaning\u2026" : "Clean RAM"}
-        </button>
+          {isCleaning ? "Cleaning" : "Clean RAM"}
+        </Button>
       </div>
 
       {/* Memory bar */}
-      <div className="mx-5 mb-2 h-2 overflow-hidden rounded-full bg-[rgba(255,255,255,0.06)]">
+      <div
+        className="mx-4 mb-2 h-1.5 overflow-hidden rounded-full"
+        style={{ backgroundColor: "rgba(255,255,255,0.05)" }}
+      >
         <div
           className="h-full rounded-full transition-all duration-500"
           style={{ width: `${percent}%`, backgroundColor: color }}
         />
       </div>
 
-      {/* Stats */}
-      <div className="flex gap-6 px-5 pb-4 text-xs">
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
-            Used
-          </span>
-          <span className="font-mono text-text-primary">
-            {formatGbFromMb(usedMb)} GB
-          </span>
-        </div>
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
-            Total
-          </span>
-          <span className="font-mono text-text-primary">
-            {formatGbFromMb(totalMb)} GB
-          </span>
-        </div>
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
-            Available
-          </span>
-          <span className="font-mono font-semibold" style={{ color }}>
-            {formatGbFromMb(availableMb)} GB
-          </span>
-        </div>
+      <div className="flex gap-5 px-4 pb-4 text-[11px]">
+        <MemStat label="Used" value={`${formatGbFromMb(usedMb)} GB`} />
+        <MemStat label="Total" value={`${formatGbFromMb(totalMb)} GB`} />
+        <MemStat
+          label="Available"
+          value={`${formatGbFromMb(availableMb)} GB`}
+          valueColor={color}
+          bold
+        />
         {systemMem?.standby_mb != null && (
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
-              Standby
-            </span>
-            <span className="font-mono text-text-primary">
-              {formatGbFromMb(systemMem.standby_mb)} GB
-            </span>
-          </div>
+          <MemStat
+            label="Standby"
+            value={`${formatGbFromMb(systemMem.standby_mb)} GB`}
+          />
         )}
       </div>
 
-      {/* Bottom: progress / admin / result */}
       {showBottom && (
-        <div className="space-y-2 border-t border-border-subtle px-5 py-3">
+        <div
+          className="space-y-2 border-t px-4 py-3"
+          style={{ borderColor: "var(--color-border-subtle)" }}
+        >
           {isCleaning && (
-            <div className="flex items-center gap-2 text-xs text-text-muted">
-              <div
-                className="h-1.5 w-1.5 animate-pulse rounded-full"
-                style={{ backgroundColor: "var(--color-accent-primary)" }}
-              />
+            <div className="flex items-center gap-2 text-[11.5px] text-text-muted">
+              <Spinner size={10} color="var(--color-accent-primary)" />
               <span>
                 {stage === "flushing_modified"
-                  ? "Flushing modified pages\u2026"
+                  ? "Flushing modified pages…"
                   : stage === "standby_purge"
-                    ? "Purging standby list\u2026"
+                    ? "Purging standby list…"
                     : stage
-                      ? `${stage}`
-                      : "Cleaning\u2026"}
-                {trimmedCount > 0 ? ` \u00B7 Trimmed: ${trimmedCount}` : ""}
-                {currentProcess ? ` \u00B7 ${currentProcess}` : ""}
+                      ? stage
+                      : "Cleaning…"}
+                {trimmedCount > 0 ? ` · Trimmed: ${trimmedCount}` : ""}
+                {currentProcess ? ` · ${currentProcess}` : ""}
               </span>
             </div>
           )}
-
           {!isAdmin && (
-            <div className="text-xs text-text-muted">
+            <div className="text-[11.5px] text-text-muted">
               Deep clean requires Administrator.{" "}
               <button
                 type="button"
                 onClick={onRestartAsAdmin}
                 disabled={restartState === "restarting"}
-                className="rounded px-1.5 py-0.5 font-semibold text-accent-secondary hover:underline disabled:opacity-60"
+                className="font-semibold text-accent-secondary hover:underline disabled:opacity-60"
               >
                 {restartState === "restarting"
-                  ? "Restarting\u2026"
+                  ? "Restarting…"
                   : "Restart as Admin"}
               </button>
               {restartState === "error" && restartError && (
-                <div className="mt-1 text-xs text-status-error">
+                <div className="mt-1 text-[11px] text-status-error">
                   {restartError}
                 </div>
               )}
             </div>
           )}
-
           {result && (
             <div
-              className="rounded-lg px-3 py-2.5 text-xs text-text-muted"
+              className="rounded-[5px] px-3 py-2 text-[11px] text-text-muted"
               style={{ backgroundColor: "var(--color-bg-elevated)" }}
             >
               <div className="flex flex-wrap gap-x-5 gap-y-1">
-                <span>
-                  Freed{" "}
-                  <span className="font-mono font-medium text-text-primary">
-                    {formatDeltaMb(result.freed_mb)}
-                  </span>
-                </span>
+                <ResultPill label="Freed" value={formatDeltaMb(result.freed_mb)} />
                 {result.standby_freed_mb != null && (
-                  <span>
-                    Standby{" "}
-                    <span className="font-mono font-medium text-text-primary">
-                      {formatDeltaMb(result.standby_freed_mb)}
-                    </span>
-                  </span>
+                  <ResultPill
+                    label="Standby"
+                    value={formatDeltaMb(result.standby_freed_mb)}
+                  />
                 )}
                 {result.modified_freed_mb != null && (
-                  <span>
-                    Modified{" "}
-                    <span className="font-mono font-medium text-text-primary">
-                      {formatDeltaMb(result.modified_freed_mb)}
-                    </span>
-                  </span>
+                  <ResultPill
+                    label="Modified"
+                    value={formatDeltaMb(result.modified_freed_mb)}
+                  />
                 )}
-                <span>
-                  Trimmed{" "}
-                  <span className="font-mono font-medium text-text-primary">
-                    {result.trimmed_count}
-                  </span>
-                </span>
-                <span>
-                  Deep clean{" "}
-                  <span className="font-mono font-medium text-text-primary">
-                    {deepCleanLabel(result.standby_purge)}
-                  </span>
-                </span>
+                <ResultPill label="Trimmed" value={String(result.trimmed_count)} />
+                <ResultPill
+                  label="Deep clean"
+                  value={deepCleanLabel(result.standby_purge)}
+                />
               </div>
               {result.warnings.length > 0 && (
-                <div className="mt-1.5 text-[11px] text-status-warning">
-                  Warnings: {result.warnings.length}
+                <div className="mt-1.5 text-[10.5px] text-status-warning">
+                  <Chip tone="warning" size="xs">
+                    {result.warnings.length} warning
+                    {result.warnings.length !== 1 ? "s" : ""}
+                  </Chip>
                 </div>
               )}
             </div>
@@ -711,158 +914,37 @@ function RamCleanerCard({
   );
 }
 
-function FpsSlider({
+function MemStat({
+  label,
   value,
-  onChange,
+  valueColor,
+  bold,
 }: {
-  value: number;
-  onChange: (v: number) => void;
+  label: string;
+  value: string;
+  valueColor?: string;
+  bold?: boolean;
 }) {
-  const isUncapped = value >= 99999;
-  const sliderValue = isUncapped ? 1000 : Math.min(value, 1000);
-  const sliderPercent = ((sliderValue - 30) / (1000 - 30)) * 100;
-
-  const [inputText, setInputText] = useState(isUncapped ? "" : String(value));
-
-  useEffect(() => {
-    setInputText(isUncapped ? "" : String(value));
-  }, [value, isUncapped]);
-
-  function commitInput(raw: string) {
-    const v = Number.parseInt(raw, 10);
-    if (Number.isFinite(v) && v >= 30) {
-      onChange(Math.min(v, 9999));
-    }
-  }
-
   return (
-    <div className="px-4 py-3">
-      <div className="mb-2.5 flex items-center justify-between">
-        <span className="text-xs text-text-muted">Target FPS</span>
-        <div className="flex items-center gap-1.5">
-          <input
-            type="number"
-            min={30}
-            max={9999}
-            value={inputText}
-            placeholder="MAX"
-            disabled={isUncapped}
-            onChange={(e) => {
-              setInputText(e.target.value);
-              const v = Number.parseInt(e.target.value, 10);
-              if (Number.isFinite(v) && v >= 30 && v <= 9999) {
-                onChange(v);
-              }
-            }}
-            onBlur={(e) => commitInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commitInput(e.currentTarget.value);
-            }}
-            className="boost-input w-[72px] rounded-md border border-border-subtle bg-bg-elevated px-2 py-1 text-right font-mono text-sm font-semibold text-text-primary outline-none transition-colors focus:border-accent-primary disabled:opacity-40"
-          />
-          <button
-            type="button"
-            onClick={() => onChange(isUncapped ? 240 : 99999)}
-            className="rounded-md px-2 py-1 text-[10px] font-bold tracking-wide transition-all"
-            style={{
-              backgroundColor: isUncapped
-                ? "var(--color-accent-primary)"
-                : "var(--color-bg-elevated)",
-              color: isUncapped ? "#fff" : "var(--color-text-muted)",
-            }}
-          >
-            MAX
-          </button>
-        </div>
-      </div>
-      <input
-        type="range"
-        aria-label="Target FPS slider"
-        min={30}
-        max={1000}
-        step={10}
-        value={sliderValue}
-        disabled={isUncapped}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="boost-slider w-full disabled:opacity-30"
-        style={{
-          background: isUncapped
-            ? "rgba(255,255,255,0.06)"
-            : `linear-gradient(to right, var(--color-accent-primary) 0%, var(--color-accent-primary) ${sliderPercent}%, rgba(255,255,255,0.06) ${sliderPercent}%, rgba(255,255,255,0.06) 100%)`,
-        }}
-      />
-      <div className="mt-1.5 flex justify-between text-[10px] text-text-dimmed">
-        <span>30</span>
-        <span>120</span>
-        <span>240</span>
-        <span>360</span>
-        <span>1000</span>
-      </div>
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
+        {label}
+      </span>
+      <span
+        className={`font-mono text-[12px] ${bold ? "font-semibold" : ""}`}
+        style={{ color: valueColor || "var(--color-text-primary)" }}
+      >
+        {value}
+      </span>
     </div>
   );
 }
 
-function ResolutionRow({
-  width,
-  height,
-  onWidthChange,
-  onHeightChange,
-  error,
-}: {
-  width: number;
-  height: number;
-  onWidthChange: (v: number) => void;
-  onHeightChange: (v: number) => void;
-  error: string | null;
-}) {
+function ResultPill({ label, value }: { label: string; value: string }) {
   return (
-    <div className="px-4 py-3">
-      <div className="mb-1 text-sm font-medium text-text-primary">
-        Window Resolution
-      </div>
-      <p className="mb-3 text-xs text-text-muted">
-        Sets Roblox launch window size in pixels.
-      </p>
-      <div className="flex items-center gap-2">
-        <label className="flex flex-1 flex-col gap-1">
-          <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
-            Width
-          </span>
-          <input
-            type="number"
-            min={MIN_WINDOW_WIDTH}
-            max={MAX_WINDOW_WIDTH}
-            step={2}
-            value={width}
-            onChange={(e) =>
-              onWidthChange(
-                parseWindowDimensionInput(e.target.value, MIN_WINDOW_WIDTH),
-              )
-            }
-            className="boost-input rounded-lg border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
-          />
-        </label>
-        <span className="mt-4 text-xs text-text-dimmed">{"\u00D7"}</span>
-        <label className="flex flex-1 flex-col gap-1">
-          <span className="text-[10px] uppercase tracking-wide text-text-dimmed">
-            Height
-          </span>
-          <input
-            type="number"
-            min={MIN_WINDOW_HEIGHT}
-            max={MAX_WINDOW_HEIGHT}
-            step={2}
-            value={height}
-            onChange={(e) =>
-              onHeightChange(
-                parseWindowDimensionInput(e.target.value, MIN_WINDOW_HEIGHT),
-              )
-            }
-            className="boost-input rounded-lg border border-border-subtle bg-bg-elevated px-3 py-2 text-sm text-text-primary outline-none transition-colors focus:border-accent-primary"
-          />
-        </label>
-      </div>
-      {error && <p className="mt-2 text-xs text-status-error">{error}</p>}
-    </div>
+    <span>
+      {label}{" "}
+      <span className="font-mono font-medium text-text-primary">{value}</span>
+    </span>
   );
 }
