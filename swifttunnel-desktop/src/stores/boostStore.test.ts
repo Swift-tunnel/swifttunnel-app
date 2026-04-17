@@ -39,7 +39,7 @@ describe("stores/boostStore", () => {
   });
 
   it("updates config without notifications on success", async () => {
-    boostUpdateConfig.mockResolvedValue(undefined);
+    boostUpdateConfig.mockResolvedValue({ warnings: [] });
 
     const useBoostStore = await loadStore();
     await useBoostStore.getState().updateConfig("{\"profile\":\"Balanced\"}");
@@ -256,7 +256,7 @@ describe("stores/boostStore", () => {
         new Promise((resolve) =>
           setTimeout(() => {
             callOrder.push("updateConfig:resolved");
-            resolve(undefined);
+            resolve({ warnings: [] });
           }, 50),
         ),
     );

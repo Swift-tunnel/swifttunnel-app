@@ -146,11 +146,16 @@ pub async fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, S
     }
 }
 
+#[derive(Clone, Serialize)]
+pub struct BoostUpdateResult {
+    pub warnings: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn boost_update_config(
     state: State<'_, AppState>,
     config_json: String,
-) -> Result<(), String> {
+) -> Result<BoostUpdateResult, String> {
     let config: swifttunnel_core::structs::Config =
         serde_json::from_str(&config_json).map_err(|e| format!("Invalid config: {}", e))?;
 
@@ -196,8 +201,9 @@ pub async fn boost_update_config(
                 if let Err(e) = ro.restore_settings() {
                     warn_list.push(format!("Roblox optimizer restore: {}", e));
                 }
-                if let Err(e) = ro.apply_optimizations(&config.roblox_settings) {
-                    warn_list.push(format!("Roblox optimizer: {}", e));
+                match ro.apply_optimizations(&config.roblox_settings) {
+                    Ok(opt_warnings) => warn_list.extend(opt_warnings),
+                    Err(e) => warn_list.push(format!("Roblox optimizer: {}", e)),
                 }
             }
 
@@ -211,7 +217,7 @@ pub async fn boost_update_config(
             );
         }
 
-        Ok(())
+        Ok(BoostUpdateResult { warnings })
     })
     .await
     .map_err(|e| format!("Boost config task failed: {}", e))?

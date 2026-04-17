@@ -321,22 +321,39 @@ pub fn run() {
         .build(ctx)
         .expect("error while building tauri application")
         .run(|_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Clean up any stale hosts-file entries from old proxy versions
-                swifttunnel_core::roblox_proxy::hosts::recover_stale();
-                // Restore network booster modifications (registry, MTU, firewall, QoS)
-                if let Some(state) = _app.try_state::<crate::state::AppState>() {
-                    let roblox_pid = {
-                        let mut monitor = state.performance_monitor.lock();
-                        monitor.get_roblox_pid().unwrap_or(0)
-                    };
-                    if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
-                        log::warn!("Failed to restore system settings on exit: {e}");
-                    }
-                    if let Err(e) = state.network_booster.lock().restore() {
-                        log::warn!("Failed to restore network settings on exit: {e}");
+            match event {
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } => {
+                    if label == "main" {
+                        // The main window was destroyed (not hidden). Exit the app
+                        // so the tray icon doesn't leave a zombie process. The
+                        // minimize-to-tray path uses hide(), not close(), so
+                        // Destroyed only fires when the user actually wants to quit
+                        // or an unexpected close occurred.
+                        _app.exit(0);
                     }
                 }
+                tauri::RunEvent::Exit => {
+                    // Clean up any stale hosts-file entries from old proxy versions
+                    swifttunnel_core::roblox_proxy::hosts::recover_stale();
+                    // Restore network booster modifications (registry, MTU, firewall, QoS)
+                    if let Some(state) = _app.try_state::<crate::state::AppState>() {
+                        let roblox_pid = {
+                            let mut monitor = state.performance_monitor.lock();
+                            monitor.get_roblox_pid().unwrap_or(0)
+                        };
+                        if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
+                            log::warn!("Failed to restore system settings on exit: {e}");
+                        }
+                        if let Err(e) = state.network_booster.lock().restore() {
+                            log::warn!("Failed to restore network settings on exit: {e}");
+                        }
+                    }
+                }
+                _ => {}
             }
         });
 }
