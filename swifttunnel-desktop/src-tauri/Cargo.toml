@@ -32,3 +32,4 @@ winreg = "0.52"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+embed-manifest = "1"
