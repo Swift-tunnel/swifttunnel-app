@@ -4778,11 +4778,15 @@ fn run_cache_refresher(
         let mut tunnel_pids_found: Vec<(u32, String)> = Vec::new();
 
         if do_full_process_scan {
-            // Full process scan - expensive but only ~every 20 seconds
+            // Full process scan - expensive but only ~every 20 seconds.
+            // `UpdateKind::Always` so sysinfo overwrites the cached exe name
+            // when a PID has been reused by a different process since the last
+            // refresh (C7); `OnlyIfNotSet` would leave the stale tunnel-app
+            // name in place and let that app's traffic route incorrectly.
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet),
+                ProcessRefreshKind::new().with_exe(UpdateKind::Always),
             );
 
             for pid in connections.values() {
@@ -4829,10 +4833,15 @@ fn run_cache_refresher(
                     .collect()
             };
             if !pids_to_refresh.is_empty() {
+                // `UpdateKind::Always` is load-bearing here: `remove_dead_processes`
+                // only drops PIDs that went dead, but a reused PID stays live
+                // under a new process. Without Always, sysinfo would keep the
+                // old (tunnel-app) exe name for the new (non-tunnel) owner and
+                // the hot path would tunnel that process's traffic.
                 system.refresh_processes_specifics(
                     ProcessesToUpdate::Some(&pids_to_refresh),
-                    true, // remove_dead_processes — drops stale PIDs from sysinfo's cache
-                    ProcessRefreshKind::new().with_exe(UpdateKind::OnlyIfNotSet),
+                    true,
+                    ProcessRefreshKind::new().with_exe(UpdateKind::Always),
                 );
             }
             for pid in connections.values() {
@@ -5284,8 +5293,16 @@ impl BypassPinCache {
     fn sweep(&mut self, now: Instant) {
         self.pins
             .retain(|_, ts| now.duration_since(*ts) < BYPASS_PIN_DURATION);
+        // If we're still over the hard cap after expiring, evict the oldest
+        // entries down to half the cap. Full-clear would make every active
+        // pinned flow simultaneously flip back to the tunnel path, defeating
+        // the whole point of the cache in a sustained-overflow / DoS scenario.
         if self.pins.len() > BYPASS_PIN_MAX_ENTRIES {
-            self.pins.clear();
+            let keep = BYPASS_PIN_MAX_ENTRIES / 2;
+            let mut entries: Vec<(FiveTuple, Instant)> = self.pins.drain().collect();
+            entries.sort_unstable_by_key(|&(_, ts)| ts);
+            let drop_count = entries.len().saturating_sub(keep);
+            self.pins.extend(entries.into_iter().skip(drop_count));
         }
     }
 
@@ -8761,5 +8778,49 @@ mod tests {
         cache.pin(ft_a, now);
         assert!(cache.is_pinned(&ft_a, now));
         assert!(!cache.is_pinned(&ft_b, now));
+    }
+
+    #[test]
+    fn test_bypass_pin_cache_over_cap_keeps_newest_entries() {
+        let mut cache = BypassPinCache::new();
+        let base = Instant::now();
+        // Fill well past the hard cap with entries whose timestamps are strictly
+        // monotonic, so the oldest entries are clearly identifiable after sort.
+        let total = BYPASS_PIN_MAX_ENTRIES + (BYPASS_PIN_MAX_ENTRIES / 2) + 5;
+        for i in 0..total {
+            // All timestamps within BYPASS_PIN_DURATION so `retain` keeps them
+            // all; LRU eviction must then trim down to the cap.
+            let ts = base + Duration::from_micros(i as u64);
+            let ft = (
+                Ipv4Addr::new(10, 0, 0, 1),
+                (i % u16::MAX as usize) as u16,
+                Ipv4Addr::new(1, 1, 1, 1),
+                (i % 65535 + 1) as u16,
+                17,
+            );
+            cache.pin(ft, ts);
+        }
+        // After cap-triggered sweep the map must be at or below the cap and
+        // must not be wholesale cleared (full-clear would yield len == 0 or
+        // only the last few post-sweep inserts).
+        assert!(cache.len() <= BYPASS_PIN_MAX_ENTRIES);
+        assert!(
+            cache.len() >= BYPASS_PIN_MAX_ENTRIES / 2,
+            "sweep must retain at least half the cap worth of entries, got {}",
+            cache.len()
+        );
+        // Newest tuple (last inserted) must still be pinned.
+        let newest_ft = (
+            Ipv4Addr::new(10, 0, 0, 1),
+            ((total - 1) % u16::MAX as usize) as u16,
+            Ipv4Addr::new(1, 1, 1, 1),
+            ((total - 1) % 65535 + 1) as u16,
+            17,
+        );
+        let query_ts = base + Duration::from_micros((total - 1) as u64);
+        assert!(
+            cache.is_pinned(&newest_ft, query_ts),
+            "newest entry must survive cap-triggered LRU eviction"
+        );
     }
 }
