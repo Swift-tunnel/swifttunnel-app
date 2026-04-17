@@ -21,6 +21,13 @@ const MIN_SWITCH_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_SWITCHES_PER_MINUTE: u32 = 3;
 const SAME_REGION_UPGRADE_THRESHOLD_MS: u32 = 10;
 
+/// Cap on outstanding geolocation lookups. If the lookup backend stalls (API
+/// outage, network down) this keeps the pending set from growing without bound.
+const MAX_PENDING_LOOKUPS: usize = 100;
+
+/// Cap on retained auto-routing events shown in the UI log.
+const MAX_EVENT_LOG_ENTRIES: usize = 20;
+
 /// Auto-routing state
 pub struct AutoRouter {
     /// Whether auto-routing is enabled
@@ -266,6 +273,22 @@ impl AutoRouter {
             // Blocking write lock is OK here: this runs only once per new game server,
             // and the correctness requirement (holding packets) outweighs the tiny cost.
             let mut pending = self.pending_lookups.write();
+            // Cap pending lookups so a stuck geolocation task (network down, API
+            // outage) can't grow this set without bound. If full, roll back the
+            // seen_game_servers insert above so a future packet can retry once
+            // the pending set drains — otherwise the fast-path `seen.contains()`
+            // check would permanently exclude this IP from auto-routing for the
+            // remainder of the session.
+            if pending.len() >= MAX_PENDING_LOOKUPS && !pending.contains(&game_server_ip) {
+                drop(pending);
+                self.seen_game_servers.write().remove(&game_server_ip);
+                log::warn!(
+                    "Auto-routing: pending_lookups at cap ({}), skipping hold for {}",
+                    MAX_PENDING_LOOKUPS,
+                    game_server_ip
+                );
+                return AutoRoutingAction::NoAction;
+            }
             pending.insert(game_server_ip);
             self.pending_any.store(true, Ordering::Release);
         }
@@ -347,7 +370,7 @@ impl AutoRouter {
                     game_region.display_name()
                 ),
             });
-            if log.len() > 20 {
+            if log.len() > MAX_EVENT_LOG_ENTRIES {
                 log.pop_front();
             }
 
@@ -503,7 +526,7 @@ impl AutoRouter {
 
         let mut log = self.event_log.write();
         log.push_back(event);
-        if log.len() > 20 {
+        if log.len() > MAX_EVENT_LOG_ENTRIES {
             log.pop_front();
         }
 

@@ -231,6 +231,15 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Returns a handle to the interceptor's `workers_panicked` flag so
+    /// long-lived async monitors can observe reader/inbound-receiver failures
+    /// without holding a reference to the driver.
+    pub fn workers_panicked_arc(&self) -> Option<Arc<AtomicBool>> {
+        self.parallel_interceptor
+            .as_ref()
+            .map(|i| i.workers_panicked_arc())
+    }
+
     pub fn set_queue_overflow_mode(&mut self, mode: QueueOverflowMode) {
         if let Some(ref mut interceptor) = self.parallel_interceptor {
             interceptor.set_queue_overflow_mode(mode);

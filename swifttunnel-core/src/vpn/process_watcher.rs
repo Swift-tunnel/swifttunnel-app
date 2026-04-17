@@ -103,8 +103,55 @@ impl ProcessWatcher {
         let thread_handle = std::thread::Builder::new()
             .name("etw-process-watcher".to_string())
             .spawn(move || {
-                if let Err(e) = run_etw_session(sender, stop_flag_clone, watch_list_clone) {
-                    log::error!("ETW process watcher failed: {}", e);
+                // Supervisor loop: restart the ETW session on error with
+                // capped exponential backoff. Without this, a one-time ETW
+                // failure leaves the process cache permanently stale — new
+                // game launches never get tunneled and the user has no
+                // indication why.
+                const INITIAL_BACKOFF_MS: u64 = 1_000;
+                const MAX_BACKOFF_MS: u64 = 30_000;
+                const LONG_RUN_RESET_SECS: u64 = 60;
+                let mut backoff_ms = INITIAL_BACKOFF_MS;
+
+                while !stop_flag_clone.load(Ordering::Acquire) {
+                    let started_at = std::time::Instant::now();
+                    match run_etw_session(
+                        sender.clone(),
+                        stop_flag_clone.clone(),
+                        watch_list_clone.clone(),
+                    ) {
+                        Ok(()) => {
+                            // Normal exit (stop was requested inside the session).
+                            log::info!("ETW process watcher exited normally");
+                            break;
+                        }
+                        Err(e) => {
+                            // If it ran long enough before failing, treat as a
+                            // fresh failure and reset backoff; otherwise escalate.
+                            if started_at.elapsed()
+                                >= std::time::Duration::from_secs(LONG_RUN_RESET_SECS)
+                            {
+                                backoff_ms = INITIAL_BACKOFF_MS;
+                            }
+                            log::error!(
+                                "ETW process watcher failed: {}; restarting in {}ms",
+                                e,
+                                backoff_ms
+                            );
+
+                            // Interruptible sleep so shutdown isn't delayed.
+                            let sleep_until = std::time::Instant::now()
+                                + std::time::Duration::from_millis(backoff_ms);
+                            while std::time::Instant::now() < sleep_until {
+                                if stop_flag_clone.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+
+                            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        }
+                    }
                 }
             })
             .map_err(|e| format!("Failed to spawn ETW thread: {}", e))?;

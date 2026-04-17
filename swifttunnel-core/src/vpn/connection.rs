@@ -1538,6 +1538,10 @@ impl VpnConnection {
             log::info!("V3: Currently tunneling: {:?}", running);
         }
 
+        // Capture the interceptor's panic flag before the driver moves into an
+        // Arc<Mutex<_>> — the monitor task needs lock-free access to poll it
+        // alongside relay_health and sender_panicked.
+        let workers_panicked_for_monitor = driver.workers_panicked_arc();
         let driver = Arc::new(Mutex::new(driver));
         self.split_tunnel = Some(Arc::clone(&driver));
 
@@ -1597,6 +1601,7 @@ impl VpnConnection {
         let auto_router_for_monitor = self.auto_router.clone();
         let process_performance_for_monitor = self.process_performance_manager.clone();
         let relay_health_monitor = relay_for_health;
+        let workers_panicked_monitor = workers_panicked_for_monitor;
 
         tokio::spawn(async move {
             log::info!("V3: Process monitor started");
@@ -1797,11 +1802,24 @@ impl VpnConnection {
                         {
                             use super::udp_relay::RelayHealthState;
                             let health = relay_health_monitor.relay_health();
-                            let new_status = match health {
-                                RelayHealthState::Healthy => None,
-                                RelayHealthState::NoTrafficYet => None,
-                                RelayHealthState::Stale => Some("stale".to_string()),
-                                RelayHealthState::Dead => Some("dead".to_string()),
+                            // A panicked sender, inbound receiver, or reader
+                            // thread ranks above every other health state:
+                            // without them, no bytes flow, even if the last
+                            // relay heartbeat was recent.
+                            let tunnel_threads_panicked = relay_health_monitor.sender_panicked()
+                                || workers_panicked_monitor
+                                    .as_ref()
+                                    .map(|f| f.load(Ordering::Acquire))
+                                    .unwrap_or(false);
+                            let new_status = if tunnel_threads_panicked {
+                                Some("panicked".to_string())
+                            } else {
+                                match health {
+                                    RelayHealthState::Healthy => None,
+                                    RelayHealthState::NoTrafficYet => None,
+                                    RelayHealthState::Stale => Some("stale".to_string()),
+                                    RelayHealthState::Dead => Some("dead".to_string()),
+                                }
                             };
                             let mut state = state_handle.lock().await;
                             if let ConnectionState::Connected { ref mut relay_status, .. } = *state {

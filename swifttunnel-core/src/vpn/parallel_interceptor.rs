@@ -72,6 +72,11 @@ use crate::geolocation::is_roblox_game_server_ip;
 
 /// Maximum Ethernet frame size (MTU 1500 + headers)
 const MAX_PACKET_SIZE: usize = 1600;
+/// Soft cap on unique detected game server IPs per session. Sessions that
+/// teleport across many Roblox instances would otherwise grow this set
+/// unbounded; at this cap we stop recording new IPs for the remainder of the
+/// session (existing IPs still re-register harmlessly).
+const MAX_DETECTED_GAME_SERVERS: usize = 10_000;
 
 /// Thread-local pre-allocated buffer to eliminate per-packet heap allocations
 /// Used for checksum fixup on tunneled packets
@@ -689,6 +694,10 @@ pub struct ParallelInterceptor {
     relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
     /// Inbound receiver thread handle (reads from UdpRelay)
     inbound_receiver_handle: Option<JoinHandle<()>>,
+    /// Set to true if any internal thread (inbound receiver, reader, workers)
+    /// panics. The connection state machine polls this so a worker panic surfaces
+    /// as a real error instead of a silently frozen tunnel.
+    workers_panicked: Arc<AtomicBool>,
     /// Detected game server IPs (for notification purposes)
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
     /// Flag to trigger immediate cache refresh (set by ETW when game process detected)
@@ -762,6 +771,7 @@ impl ParallelInterceptor {
             throughput_stats: ThroughputStats::default(),
             relay_ctx: None,
             inbound_receiver_handle: None,
+            workers_panicked: Arc::new(AtomicBool::new(false)),
             detected_game_servers: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashSet::new(),
             )),
@@ -797,14 +807,6 @@ impl ParallelInterceptor {
     /// Clear detected game servers (call on disconnect)
     pub fn clear_detected_game_servers(&self) {
         self.detected_game_servers.write().clear();
-    }
-
-    /// Add a detected game server IP (called from worker threads)
-    fn record_game_server(&self, ip: std::net::Ipv4Addr) {
-        let mut servers = self.detected_game_servers.write();
-        if servers.insert(ip) {
-            log::info!("New game server detected: {}", ip);
-        }
     }
 
     /// Get throughput stats (cloneable, for GUI access)
@@ -3402,21 +3404,46 @@ impl ParallelInterceptor {
                 VpnError::SplitTunnel("Physical adapter name not set".to_string())
             })?);
 
+        let reader_panicked_flag = Arc::clone(&self.workers_panicked);
         self.reader_handle = Some(thread::spawn(move || {
-            if let Err(e) = run_packet_reader(
-                physical_idx,
-                physical_name,
-                senders,
-                reader_cache,
-                reader_worker_stats,
-                reader_auto_router,
-                reader_queue_overflow_mode,
-                reader_api_tunneling,
-                reader_queue_full_events,
-                reader_stop,
-                num_workers,
-            ) {
-                log::error!("Packet reader error: {}", e);
+            // Wrap in catch_unwind so we can distinguish graceful shutdown
+            // (stop_flag set by disconnect or a sibling thread) from a reader
+            // failure. The reader's L3 error branch already sets stop_flag to
+            // propagate shutdown to other threads, so we also set
+            // workers_panicked here so the connection monitor can surface the
+            // failure instead of treating it as a clean disconnect.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_packet_reader(
+                    physical_idx,
+                    physical_name,
+                    senders,
+                    reader_cache,
+                    reader_worker_stats,
+                    reader_auto_router,
+                    reader_queue_overflow_mode,
+                    reader_api_tunneling,
+                    reader_queue_full_events,
+                    reader_stop,
+                    num_workers,
+                )
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    log::error!("Packet reader error: {}", e);
+                    reader_panicked_flag.store(true, Ordering::Release);
+                }
+                Err(panic_payload) => {
+                    reader_panicked_flag.store(true, Ordering::Release);
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<non-string panic payload>".to_string()
+                    };
+                    log::error!("Packet reader panicked: {}", msg);
+                }
             }
         }));
 
@@ -3428,9 +3455,29 @@ impl ParallelInterceptor {
                 let relay = Arc::clone(relay_ctx);
                 let inbound_stop = Arc::clone(&self.stop_flag);
                 let throughput = self.throughput_stats.clone();
+                let panicked_flag = Arc::clone(&self.workers_panicked);
 
                 self.inbound_receiver_handle = Some(thread::spawn(move || {
-                    run_v3_inbound_receiver(relay, config, inbound_stop, throughput);
+                    // Wrap in catch_unwind so a panic surfaces via workers_panicked
+                    // instead of silently halting the injection path — otherwise the
+                    // tunnel appears "connected" with zero throughput.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_v3_inbound_receiver(relay, config, inbound_stop, throughput);
+                    }));
+                    if let Err(panic_payload) = result {
+                        panicked_flag.store(true, Ordering::Release);
+                        let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                            (*s).to_string()
+                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "<non-string panic payload>".to_string()
+                        };
+                        log::error!(
+                            "V3 inbound receiver panicked — injection halted: {}",
+                            msg
+                        );
+                    }
                 }));
                 log::info!("V3 inbound receiver thread started (UDP relay)");
             } else {
@@ -3679,6 +3726,21 @@ impl ParallelInterceptor {
     /// Check if active
     pub fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// Returns true if any internal thread (inbound receiver or reader) has
+    /// panicked or returned a fatal error. The connection state machine polls
+    /// this so a worker failure surfaces as a user-visible error instead of a
+    /// silent stall.
+    pub fn workers_panicked(&self) -> bool {
+        self.workers_panicked.load(Ordering::Acquire)
+    }
+
+    /// Returns a clone of the internal `workers_panicked` flag so async tasks
+    /// (e.g. the connection monitor in `connection.rs`) can observe it without
+    /// holding a reference to this interceptor.
+    pub fn workers_panicked_arc(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.workers_panicked)
     }
 
     /// Get snapshot for external use
@@ -3960,7 +4022,26 @@ fn run_packet_reader(
         // Read batch of packets
         let mut to_read = EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
 
-        let packets_read = driver.read_packets::<BATCH_SIZE>(&mut to_read).unwrap_or(0);
+        let packets_read = match driver.read_packets::<BATCH_SIZE>(&mut to_read) {
+            Ok(n) => n,
+            Err(e) => {
+                // An error here usually means the NDIS adapter handle is gone
+                // (driver reset, device removal, sleep/resume glitch). Signal
+                // shutdown to sibling threads via stop_flag and propagate the
+                // error out so the thread wrapper can set workers_panicked —
+                // that's how the connection monitor distinguishes this from a
+                // user-initiated disconnect.
+                log::error!(
+                    "Reader: driver.read_packets failed ({}); stopping reader loop",
+                    e
+                );
+                stop_flag.store(true, Ordering::Relaxed);
+                return Err(VpnError::SplitTunnel(format!(
+                    "driver.read_packets failed: {}",
+                    e
+                )));
+            }
+        };
 
         if packets_read == 0 {
             unsafe {
@@ -4266,11 +4347,17 @@ fn run_packet_worker(
                     if is_roblox_game_server_ip(dst_ip) {
                         // Non-blocking write - skip if lock contended (prevents freeze)
                         if let Some(mut servers) = detected_game_servers.try_write() {
-                            if servers.insert(dst_ip) {
-                                log::info!(
-                                    "Game server detected: {} (tunneled by SwiftTunnel)",
-                                    dst_ip
-                                );
+                            // Cap the set so long sessions teleporting across many
+                            // game instances don't grow memory without bound.
+                            if servers.len() < MAX_DETECTED_GAME_SERVERS
+                                || servers.contains(&dst_ip)
+                            {
+                                if servers.insert(dst_ip) {
+                                    log::info!(
+                                        "Game server detected: {} (tunneled by SwiftTunnel)",
+                                        dst_ip
+                                    );
+                                }
                             }
                         }
 
@@ -4308,7 +4395,19 @@ fn run_packet_worker(
                 // The checksum fix-up uses a thread-local buffer; we keep the
                 // borrow alive for the entire `forward_outbound` call rather
                 // than letting a raw pointer escape the `with()` closure.
-                if let Some(ref relay) = relay_ctx {
+                //
+                // If relay health is Dead, skip the relay path entirely: the
+                // sender would silently drop every frame and the game would
+                // stall. Fall through to the physical-adapter bypass so
+                // traffic at least reaches the internet while the connection
+                // state machine tears the tunnel down.
+                let relay_for_forward = relay_ctx.as_ref().filter(|r| {
+                    !matches!(
+                        r.relay_health(),
+                        super::udp_relay::RelayHealthState::Dead
+                    )
+                });
+                if let Some(relay) = relay_for_forward {
                     // Log relay destination for first few packets (auto-routing debug)
                     if relay_success + relay_fail < 10 {
                         log::info!(
@@ -4376,7 +4475,9 @@ fn run_packet_worker(
                         }
                     }
                 } else {
-                    // No relay context — forward to adapter (bypass)
+                    // Either no relay context, or the relay is marked Dead —
+                    // forward to the physical adapter (bypass) so the game
+                    // isn't silently drop-forwarded to nowhere.
                     send_bypass_packet(&driver, &adapters, &work);
                 }
             } else {

@@ -384,6 +384,9 @@ pub struct UdpRelay {
     unanswered_keepalives: AtomicU32,
     /// Last time an inbound data packet was received (not control frames).
     last_receive_time: parking_lot::Mutex<Option<Instant>>,
+    /// Set to true if the sender thread panics. Connection manager polls this so the
+    /// state machine can transition to Error instead of silently halting tunneling.
+    sender_panicked: Arc<AtomicBool>,
 }
 
 impl UdpRelay {
@@ -491,101 +494,126 @@ impl UdpRelay {
         let sender_ping = Arc::clone(&ping);
         let sender_send_errors = Arc::clone(&send_errors);
         let sender_session_id = session_id;
+        let sender_panicked = Arc::new(AtomicBool::new(false));
+        let sender_panicked_for_thread = Arc::clone(&sender_panicked);
         let sender_handle = std::thread::Builder::new()
             .name("udp-relay-sender".to_string())
             .spawn(move || {
-                let mut last_relay_addr: Option<SocketAddr> = None;
-                let mut last_data_at: Option<Instant> = None;
-                let mut ping_seq: u32 = 0;
-                let mut next_ping_at = Instant::now() + PING_INTERVAL;
+                // Wrap the entire body in catch_unwind so a panic here doesn't
+                // silently halt tunneling — instead we surface it via the
+                // sender_panicked flag that the connection manager polls.
+                // AssertUnwindSafe: captured state is either Arcs or owned values
+                // we're willing to abandon on panic; they're dropped either way.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut last_relay_addr: Option<SocketAddr> = None;
+                    let mut last_data_at: Option<Instant> = None;
+                    let mut ping_seq: u32 = 0;
+                    let mut next_ping_at = Instant::now() + PING_INTERVAL;
 
-                loop {
-                    if sender_stop.load(Ordering::Acquire) {
-                        break;
-                    }
+                    loop {
+                        if sender_stop.load(Ordering::Acquire) {
+                            break;
+                        }
 
-                    // Wait for outbound work, but wake periodically to service ping timing.
-                    let now = Instant::now();
-                    let timeout = next_ping_at
-                        .saturating_duration_since(now)
-                        .min(Duration::from_millis(50));
+                        // Wait for outbound work, but wake periodically to service ping timing.
+                        let now = Instant::now();
+                        let timeout = next_ping_at
+                            .saturating_duration_since(now)
+                            .min(Duration::from_millis(50));
 
-                    match outbound_rx.recv_timeout(timeout) {
-                        Ok(job) => {
-                            last_relay_addr = Some(job.addr);
-                            last_data_at = Some(Instant::now());
+                        match outbound_rx.recv_timeout(timeout) {
+                            Ok(job) => {
+                                last_relay_addr = Some(job.addr);
+                                last_data_at = Some(Instant::now());
 
-                            // Send and release buffer slot.
-                            let bytes = unsafe { sender_pool.buffer(job.buf_idx) };
-                            if let Err(e) = sender_socket.send_to(&bytes[..job.len], job.addr) {
-                                let count = sender_send_errors.fetch_add(1, Ordering::Relaxed) + 1;
-                                if count <= 5 || count.is_power_of_two() {
-                                    log::warn!(
-                                        "UDP Relay: Sender thread send_to error #{} to {}: {}",
-                                        count,
-                                        job.addr,
-                                        e
-                                    );
+                                // Send and release buffer slot.
+                                let bytes = unsafe { sender_pool.buffer(job.buf_idx) };
+                                if let Err(e) = sender_socket.send_to(&bytes[..job.len], job.addr) {
+                                    let count =
+                                        sender_send_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                                    if count <= 5 || count.is_power_of_two() {
+                                        log::warn!(
+                                            "UDP Relay: Sender thread send_to error #{} to {}: {}",
+                                            count,
+                                            job.addr,
+                                            e
+                                        );
+                                    }
                                 }
+                                sender_pool.release(job.buf_idx);
                             }
-                            sender_pool.release(job.buf_idx);
+                            Err(channel::RecvTimeoutError::Timeout) => {}
+                            Err(channel::RecvTimeoutError::Disconnected) => break,
                         }
-                        Err(channel::RecvTimeoutError::Timeout) => {}
-                        Err(channel::RecvTimeoutError::Disconnected) => break,
-                    }
 
-                    let now = Instant::now();
-                    if !sender_ping.enabled.load(Ordering::Acquire) {
-                        continue;
-                    }
-
-                    let Some(relay_addr) = last_relay_addr else {
-                        continue;
-                    };
-
-                    let Some(last_data_at) = last_data_at else {
-                        continue;
-                    };
-
-                    // Back off pings when idle to avoid noisy telemetry at rest.
-                    if now.duration_since(last_data_at) >= PING_IDLE_THRESHOLD {
-                        next_ping_at = now + PING_IDLE_INTERVAL;
-                        continue;
-                    }
-
-                    if now < next_ping_at {
-                        continue;
-                    }
-
-                    ping_seq = ping_seq.wrapping_add(1);
-                    let client_ts_mono_ms = now_mono_ms();
-
-                    let mut frame = [0u8; PING_FRAME_LEN];
-                    frame[..SESSION_ID_LEN].copy_from_slice(&sender_session_id);
-                    frame[SESSION_ID_LEN] = PING_FRAME_TYPE;
-                    frame[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5]
-                        .copy_from_slice(&ping_seq.to_be_bytes());
-                    frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
-                        .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
-
-                    if let Err(e) = sender_socket.send_to(&frame, relay_addr) {
-                        let count = sender_send_errors.fetch_add(1, Ordering::Relaxed) + 1;
-                        if count <= 5 || count.is_power_of_two() {
-                            log::warn!(
-                                "UDP Relay: Sender thread ping send_to error #{} to {}: {}",
-                                count,
-                                relay_addr,
-                                e
-                            );
+                        let now = Instant::now();
+                        if !sender_ping.enabled.load(Ordering::Acquire) {
+                            continue;
                         }
-                    }
-                    sender_ping.sent.fetch_add(1, Ordering::Relaxed);
-                    next_ping_at = now + PING_INTERVAL;
-                }
 
-                // Drain any queued jobs to return buffer slots to the free list.
-                while let Ok(job) = outbound_rx.try_recv() {
-                    sender_pool.release(job.buf_idx);
+                        let Some(relay_addr) = last_relay_addr else {
+                            continue;
+                        };
+
+                        let Some(last_data_at) = last_data_at else {
+                            continue;
+                        };
+
+                        // Back off pings when idle to avoid noisy telemetry at rest.
+                        if now.duration_since(last_data_at) >= PING_IDLE_THRESHOLD {
+                            next_ping_at = now + PING_IDLE_INTERVAL;
+                            continue;
+                        }
+
+                        if now < next_ping_at {
+                            continue;
+                        }
+
+                        ping_seq = ping_seq.wrapping_add(1);
+                        let client_ts_mono_ms = now_mono_ms();
+
+                        let mut frame = [0u8; PING_FRAME_LEN];
+                        frame[..SESSION_ID_LEN].copy_from_slice(&sender_session_id);
+                        frame[SESSION_ID_LEN] = PING_FRAME_TYPE;
+                        frame[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5]
+                            .copy_from_slice(&ping_seq.to_be_bytes());
+                        frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
+                            .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
+
+                        if let Err(e) = sender_socket.send_to(&frame, relay_addr) {
+                            let count = sender_send_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                            if count <= 5 || count.is_power_of_two() {
+                                log::warn!(
+                                    "UDP Relay: Sender thread ping send_to error #{} to {}: {}",
+                                    count,
+                                    relay_addr,
+                                    e
+                                );
+                            }
+                        }
+                        sender_ping.sent.fetch_add(1, Ordering::Relaxed);
+                        next_ping_at = now + PING_INTERVAL;
+                    }
+
+                    // Drain any queued jobs to return buffer slots to the free list.
+                    while let Ok(job) = outbound_rx.try_recv() {
+                        sender_pool.release(job.buf_idx);
+                    }
+                }));
+
+                if let Err(panic_payload) = result {
+                    sender_panicked_for_thread.store(true, Ordering::Release);
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<non-string panic payload>".to_string()
+                    };
+                    log::error!(
+                        "UDP Relay: Sender thread panicked — tunneling halted: {}",
+                        msg
+                    );
                 }
             })
             .context("Failed to spawn udp-relay-sender thread")?;
@@ -660,7 +688,15 @@ impl UdpRelay {
             relay_health: Arc::new(AtomicU8::new(RelayHealthState::NoTrafficYet as u8)),
             unanswered_keepalives: AtomicU32::new(0),
             last_receive_time: parking_lot::Mutex::new(None),
+            sender_panicked,
         })
+    }
+
+    /// Returns true if the sender thread panicked. The connection manager should
+    /// transition to Error if this becomes true so the user sees a real failure
+    /// instead of a frozen-but-"connected" tunnel.
+    pub fn sender_panicked(&self) -> bool {
+        self.sender_panicked.load(Ordering::Acquire)
     }
 
     /// Get the session ID as a u64 for logging
