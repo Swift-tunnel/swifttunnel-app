@@ -1198,3 +1198,57 @@ pub async fn system_restart_as_admin(app: tauri::AppHandle) -> Result<(), String
         Err("Administrator restart is only supported on Windows".to_string())
     }
 }
+
+#[derive(Serialize)]
+pub struct CopyLogFileResponse {
+    pub file_path: String,
+}
+
+/// Copy the SwiftTunnel log FILE to the clipboard (not its contents).
+///
+/// Pasting in Discord, Outlook, or File Explorer attaches the actual file
+/// rather than the raw text — makes it easy for users to hand a log over
+/// to support staff.
+#[tauri::command]
+pub async fn system_copy_log_to_clipboard() -> Result<CopyLogFileResponse, String> {
+    let path = crate::logging::log_file_path();
+    let path_str = path.to_string_lossy().to_string();
+
+    if !path.exists() {
+        return Err(format!(
+            "Log file not found at {}. Try connecting once so the app can write logs, then retry.",
+            path_str
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        let escaped = path_str.replace('\'', "''");
+        let script = format!("Set-Clipboard -LiteralPath '{}'", escaped);
+
+        let output = tauri::async_runtime::spawn_blocking(move || {
+            swifttunnel_core::hidden_command("powershell")
+                .args(["-NoProfile", "-Command", &script])
+                .output()
+                .map_err(|e| format!("Failed to run Set-Clipboard: {}", e))
+        })
+        .await
+        .map_err(|e| format!("Clipboard task failed: {}", e))??;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                "Set-Clipboard returned a non-zero exit status.".to_string()
+            } else {
+                format!("Set-Clipboard failed: {}", stderr)
+            });
+        }
+
+        Ok(CopyLogFileResponse { file_path: path_str })
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err("Copying the log file to the clipboard is only supported on Windows".to_string())
+    }
+}

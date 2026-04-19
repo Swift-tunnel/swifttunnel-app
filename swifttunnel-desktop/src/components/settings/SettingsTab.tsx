@@ -8,6 +8,7 @@ import { Toggle } from "../common/Toggle";
 import { Tooltip, InfoIcon } from "../common/Tooltip";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
+  systemCopyLogToClipboard,
   systemOpenUrl,
   systemUninstall,
   vpnListNetworkAdapters,
@@ -42,6 +43,9 @@ export function SettingsTab() {
   const [isGeneratingDiagnostics, setIsGeneratingDiagnostics] = useState(false);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [isCopyingLog, setIsCopyingLog] = useState(false);
+  const [copyLogPath, setCopyLogPath] = useState<string | null>(null);
+  const [copyLogError, setCopyLogError] = useState<string | null>(null);
   const [networkAdapters, setNetworkAdapters] = useState<
     NetworkAdapterInfo[] | null
   >(null);
@@ -133,6 +137,24 @@ export function SettingsTab() {
       setDiagnosticsError(String(e));
     } finally {
       setIsGeneratingDiagnostics(false);
+    }
+  }
+
+  async function copyLogToClipboard() {
+    setIsCopyingLog(true);
+    setCopyLogError(null);
+
+    try {
+      const response = await systemCopyLogToClipboard();
+      setCopyLogPath(response.file_path);
+      addToast({
+        type: "success",
+        message: "Log file copied — paste it into Discord or email to share with support.",
+      });
+    } catch (e) {
+      setCopyLogError(String(e));
+    } finally {
+      setIsCopyingLog(false);
     }
   }
 
@@ -606,6 +628,31 @@ export function SettingsTab() {
         {diagnosticsError && (
           <div className="px-4 pb-3 text-xs text-status-error">
             {diagnosticsError}
+          </div>
+        )}
+        <Row
+          label="Copy Log File"
+          desc="Puts the SwiftTunnel log file on your clipboard — paste into Discord/email to share with support"
+        >
+          <button
+            onClick={() => void copyLogToClipboard()}
+            disabled={isCopyingLog}
+            className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
+          >
+            {isCopyingLog ? "Copying..." : "Copy"}
+          </button>
+        </Row>
+        {copyLogPath && (
+          <div className="px-4 pb-3 text-xs text-text-muted">
+            Copied:{" "}
+            <span className="break-all font-mono text-[11px] text-text-secondary">
+              {copyLogPath}
+            </span>
+          </div>
+        )}
+        {copyLogError && (
+          <div className="px-4 pb-3 text-xs text-status-error">
+            {copyLogError}
           </div>
         )}
       </Section>

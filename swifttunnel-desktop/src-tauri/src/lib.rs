@@ -2,6 +2,7 @@ mod autostart;
 mod commands;
 mod events;
 mod harness;
+mod logging;
 mod state;
 mod tray;
 mod window_restore;
@@ -170,7 +171,7 @@ fn sync_runtime_assets(app: &tauri::App) {
 fn sync_runtime_assets(_app: &tauri::App) {}
 
 pub fn run() {
-    env_logger::init();
+    logging::init();
     let launched_from_startup = autostart::launched_from_startup_flag();
 
     let mut ctx = tauri::generate_context!();
@@ -237,6 +238,7 @@ pub fn run() {
             commands::system::system_launched_from_startup,
             commands::system::system_cleanup,
             commands::system::system_uninstall,
+            commands::system::system_copy_log_to_clipboard,
         ])
         .setup(move |app| {
             info!("SwiftTunnel desktop app starting up");

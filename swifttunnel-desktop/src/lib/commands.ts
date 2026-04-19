@@ -171,3 +171,10 @@ export const systemRestartAsAdmin = () =>
 
 export const systemUninstall = () =>
   invoke<void>("system_uninstall");
+
+export interface CopyLogFileResponse {
+  file_path: string;
+}
+
+export const systemCopyLogToClipboard = () =>
+  invoke<CopyLogFileResponse>("system_copy_log_to_clipboard");
