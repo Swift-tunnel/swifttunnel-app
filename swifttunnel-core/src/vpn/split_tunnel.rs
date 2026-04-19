@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const DRIVER_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const DRIVER_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const DRIVER_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const DRIVER_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const SERVICE_NAME: &str = "NDISRD";
 const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
