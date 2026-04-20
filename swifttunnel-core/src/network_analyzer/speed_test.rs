@@ -1,57 +1,80 @@
 //! Speed Test using Cloudflare
 //!
-//! Uses Cloudflare's speed test endpoints for download/upload measurement.
-//! These are publicly available and don't require licensing like Ookla's Speedtest.
+//! Uses Cloudflare's public speed test endpoints (speed.cloudflare.com).
+//!
+//! Design: runs N parallel TCP streams, waits through a short warm-up
+//! window (discarded — lets TCP slow-start ramp up), then measures
+//! throughput over a fixed steady-state window. Counter-based so a
+//! request that spans the window boundary still contributes every byte
+//! that crossed the wire inside the window.
+//!
+//! Forces HTTP/1.1 so `STREAM_COUNT` actually yields that many TCP
+//! connections instead of h2 multiplexing them over a single socket.
 
 use super::types::{SpeedTestProgress, SpeedTestResults};
+use futures_util::StreamExt;
 use log::{debug, error, info};
 use reqwest::Client;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-/// Cloudflare speed test download endpoint
-/// __down?bytes=N returns N random bytes
 const DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down";
-
-/// Cloudflare speed test upload endpoint
 const UPLOAD_URL: &str = "https://speed.cloudflare.com/__up";
 
-/// Download test size in bytes (10 MB for accurate measurement)
-const DOWNLOAD_SIZE: u64 = 10_000_000;
+/// Parallel TCP streams. Ookla uses 16, Cloudflare's own uses 8.
+const STREAM_COUNT: usize = 8;
 
-/// Upload test size in bytes (5 MB - upload is typically slower)
-const UPLOAD_SIZE: usize = 5_000_000;
+/// Warm-up window before measurement begins (TCP slow-start ramp).
+const WARMUP_SECS: f32 = 2.0;
 
-/// HTTP client timeout
+/// Steady-state measurement window.
+const MEASURE_SECS: f32 = 8.0;
+
+/// Bytes per `__down` request. Oversized so a single request outlasts the
+/// full test window on ~gigabit links. Workers re-GET on connection reuse
+/// if they somehow drain it (cheap — connection is kept alive).
+const DOWNLOAD_PER_REQUEST_BYTES: u64 = 1_000_000_000;
+
+/// Chunk size for the streaming upload body.
+const UPLOAD_CHUNK_BYTES: usize = 65_536;
+
+/// Chunks per upload POST. ~50 MB — big enough to amortize request
+/// overhead, small enough to re-POST a few times during the window on
+/// fast uplinks.
+const UPLOAD_CHUNKS_PER_POST: usize = 800;
+
+/// HTTP timeout per request.
 const REQUEST_TIMEOUT_SECS: u64 = 60;
 
-/// Chunk size for streaming (64 KB)
-const CHUNK_SIZE: usize = 65536;
+/// Progress update cadence during measurement.
+const PROGRESS_INTERVAL_MS: u64 = 100;
 
-/// Run a complete speed test (download + upload)
-///
-/// # Arguments
-/// * `progress_tx` - Channel to send progress updates
-///
-/// # Returns
-/// Result with SpeedTestResults on success
+/// Run a complete speed test (download + upload).
 pub async fn run_speed_test(
     progress_tx: Sender<SpeedTestProgress>,
 ) -> Result<SpeedTestResults, String> {
-    info!("Starting speed test");
+    info!(
+        "Starting speed test: {} parallel streams, {:.1}s warm-up + {:.1}s measure per phase",
+        STREAM_COUNT, WARMUP_SECS, MEASURE_SECS
+    );
 
     let client = Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        // Force HTTP/1.1 so STREAM_COUNT yields real TCP parallelism rather
+        // than h2 streams multiplexed over a single connection.
+        .http1_only()
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    // === DOWNLOAD TEST ===
+    // === DOWNLOAD ===
     let _ = progress_tx.send(SpeedTestProgress::DownloadStarted);
     let download_mbps = match run_download_test(&client, &progress_tx).await {
-        Ok(speed) => {
-            info!("Download test complete: {:.2} Mbps", speed);
-            let _ = progress_tx.send(SpeedTestProgress::DownloadComplete(speed));
-            speed
+        Ok(mbps) => {
+            info!("Download test complete: {:.2} Mbps", mbps);
+            let _ = progress_tx.send(SpeedTestProgress::DownloadComplete(mbps));
+            mbps
         }
         Err(e) => {
             error!("Download test failed: {}", e);
@@ -60,16 +83,16 @@ pub async fn run_speed_test(
         }
     };
 
-    // Brief pause between tests
+    // Brief pause between phases.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // === UPLOAD TEST ===
+    // === UPLOAD ===
     let _ = progress_tx.send(SpeedTestProgress::UploadStarted);
     let upload_mbps = match run_upload_test(&client, &progress_tx).await {
-        Ok(speed) => {
-            info!("Upload test complete: {:.2} Mbps", speed);
-            let _ = progress_tx.send(SpeedTestProgress::UploadComplete(speed));
-            speed
+        Ok(mbps) => {
+            info!("Upload test complete: {:.2} Mbps", mbps);
+            let _ = progress_tx.send(SpeedTestProgress::UploadComplete(mbps));
+            mbps
         }
         Err(e) => {
             error!("Upload test failed: {}", e);
@@ -78,7 +101,6 @@ pub async fn run_speed_test(
         }
     };
 
-    // Build results
     let results = SpeedTestResults {
         download_mbps,
         upload_mbps,
@@ -87,115 +109,195 @@ pub async fn run_speed_test(
     };
 
     let _ = progress_tx.send(SpeedTestProgress::Completed(results.clone()));
-
     info!(
         "Speed test complete: Download={:.2} Mbps, Upload={:.2} Mbps",
         download_mbps, upload_mbps
     );
-
     Ok(results)
 }
 
-/// Run download speed test
 async fn run_download_test(
     client: &Client,
     progress_tx: &Sender<SpeedTestProgress>,
 ) -> Result<f32, String> {
-    let url = format!("{}?bytes={}", DOWNLOAD_URL, DOWNLOAD_SIZE);
-    debug!("Starting download from: {}", url);
+    let url = format!("{}?bytes={}", DOWNLOAD_URL, DOWNLOAD_PER_REQUEST_BYTES);
+    debug!("Download: spawning {} parallel streams", STREAM_COUNT);
 
-    let start = Instant::now();
-    let mut bytes_received: u64 = 0;
-    let mut last_progress_update = Instant::now();
+    let counter = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
 
-    // Stream the download to track progress
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Download request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "Download failed with status: {}",
-            response.status()
-        ));
+    let mut handles = Vec::with_capacity(STREAM_COUNT);
+    for _ in 0..STREAM_COUNT {
+        let client = client.clone();
+        let url = url.clone();
+        let counter = counter.clone();
+        let stop = stop.clone();
+        handles.push(tokio::spawn(async move {
+            download_worker(client, url, counter, stop).await;
+        }));
     }
 
-    let mut stream = response.bytes_stream();
-    use futures_util::StreamExt;
-
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Download stream error: {}", e))?;
-        bytes_received += chunk.len() as u64;
-
-        // Send progress updates at most every 100ms
-        if last_progress_update.elapsed() >= Duration::from_millis(100) {
-            let progress = bytes_received as f32 / DOWNLOAD_SIZE as f32;
-            let elapsed = start.elapsed().as_secs_f32();
-            let current_speed = if elapsed > 0.0 {
-                (bytes_received as f32 * 8.0) / (elapsed * 1_000_000.0) // Mbps
-            } else {
-                0.0
-            };
-            let _ = progress_tx.send(SpeedTestProgress::DownloadProgress(current_speed, progress));
-            last_progress_update = Instant::now();
-        }
+    // Warm-up: discarded. Keep the UI animating so it doesn't look frozen.
+    let warmup_deadline = Instant::now() + Duration::from_secs_f32(WARMUP_SECS);
+    while Instant::now() < warmup_deadline {
+        tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
+        let _ = progress_tx.send(SpeedTestProgress::DownloadProgress(0.0, 0.0));
     }
 
-    let elapsed = start.elapsed().as_secs_f32();
-    if elapsed == 0.0 {
-        return Err("Download completed too fast to measure".to_string());
+    // Measurement.
+    let start_bytes = counter.load(Ordering::Relaxed);
+    let measure_start = Instant::now();
+    let measure_deadline = measure_start + Duration::from_secs_f32(MEASURE_SECS);
+
+    while Instant::now() < measure_deadline {
+        tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
+        let bytes = counter.load(Ordering::Relaxed).saturating_sub(start_bytes);
+        let elapsed = measure_start.elapsed().as_secs_f32();
+        let mbps = if elapsed > 0.0 {
+            (bytes as f32 * 8.0) / (elapsed * 1_000_000.0)
+        } else {
+            0.0
+        };
+        let progress = (elapsed / MEASURE_SECS).min(1.0);
+        let _ = progress_tx.send(SpeedTestProgress::DownloadProgress(mbps, progress));
     }
 
-    // Calculate speed in Mbps (megabits per second)
-    let bits_downloaded = bytes_received as f32 * 8.0;
-    let mbps = bits_downloaded / (elapsed * 1_000_000.0);
+    let total_bytes = counter.load(Ordering::Relaxed).saturating_sub(start_bytes);
+    let elapsed = measure_start.elapsed().as_secs_f32().max(0.001);
+    let mbps = (total_bytes as f32 * 8.0) / (elapsed * 1_000_000.0);
+
+    // Shut the workers down.
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        let _ = h.await;
+    }
+
+    if total_bytes == 0 {
+        return Err("No data received during measurement window".to_string());
+    }
 
     Ok(mbps)
 }
 
-/// Run upload speed test
+async fn download_worker(
+    client: Client,
+    url: String,
+    counter: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        let resp = match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(_) => return,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match chunk {
+                Ok(bytes) => {
+                    counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 async fn run_upload_test(
     client: &Client,
     progress_tx: &Sender<SpeedTestProgress>,
 ) -> Result<f32, String> {
-    debug!("Starting upload to: {}", UPLOAD_URL);
+    debug!("Upload: spawning {} parallel streams", STREAM_COUNT);
 
-    // Generate random data to upload
-    let upload_data: Vec<u8> = (0..UPLOAD_SIZE).map(|i| (i % 256) as u8).collect();
+    let counter = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
 
-    let start = Instant::now();
-
-    // For upload, we send the data in chunks and track progress
-    // Cloudflare's __up endpoint accepts POST with body
-    let response = client
-        .post(UPLOAD_URL)
-        .header("Content-Type", "application/octet-stream")
-        .header("Content-Length", UPLOAD_SIZE.to_string())
-        .body(upload_data)
-        .send()
-        .await
-        .map_err(|e| format!("Upload request failed: {}", e))?;
-
-    let elapsed = start.elapsed().as_secs_f32();
-
-    if !response.status().is_success() {
-        return Err(format!("Upload failed with status: {}", response.status()));
+    let mut handles = Vec::with_capacity(STREAM_COUNT);
+    for _ in 0..STREAM_COUNT {
+        let client = client.clone();
+        let counter = counter.clone();
+        let stop = stop.clone();
+        handles.push(tokio::spawn(async move {
+            upload_worker(client, counter, stop).await;
+        }));
     }
 
-    if elapsed == 0.0 {
-        return Err("Upload completed too fast to measure".to_string());
+    // Warm-up.
+    let warmup_deadline = Instant::now() + Duration::from_secs_f32(WARMUP_SECS);
+    while Instant::now() < warmup_deadline {
+        tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
+        let _ = progress_tx.send(SpeedTestProgress::UploadProgress(0.0, 0.0));
     }
 
-    // Send final progress
-    let _ = progress_tx.send(SpeedTestProgress::UploadProgress(0.0, 1.0));
+    // Measurement.
+    let start_bytes = counter.load(Ordering::Relaxed);
+    let measure_start = Instant::now();
+    let measure_deadline = measure_start + Duration::from_secs_f32(MEASURE_SECS);
 
-    // Calculate speed in Mbps
-    let bits_uploaded = UPLOAD_SIZE as f32 * 8.0;
-    let mbps = bits_uploaded / (elapsed * 1_000_000.0);
+    while Instant::now() < measure_deadline {
+        tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
+        let bytes = counter.load(Ordering::Relaxed).saturating_sub(start_bytes);
+        let elapsed = measure_start.elapsed().as_secs_f32();
+        let mbps = if elapsed > 0.0 {
+            (bytes as f32 * 8.0) / (elapsed * 1_000_000.0)
+        } else {
+            0.0
+        };
+        let progress = (elapsed / MEASURE_SECS).min(1.0);
+        let _ = progress_tx.send(SpeedTestProgress::UploadProgress(mbps, progress));
+    }
+
+    let total_bytes = counter.load(Ordering::Relaxed).saturating_sub(start_bytes);
+    let elapsed = measure_start.elapsed().as_secs_f32().max(0.001);
+    let mbps = (total_bytes as f32 * 8.0) / (elapsed * 1_000_000.0);
+
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        let _ = h.await;
+    }
+
+    if total_bytes == 0 {
+        return Err("No data sent during measurement window".to_string());
+    }
 
     Ok(mbps)
+}
+
+async fn upload_worker(client: Client, counter: Arc<AtomicU64>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        let counter_for_stream = counter.clone();
+        let stop_for_stream = stop.clone();
+        // Streamed body: hyper pulls chunks at socket-write rate, so the
+        // counter increments close to wire-time (small buffering ≪ 1 MB).
+        let body_stream = futures_util::stream::iter(0..UPLOAD_CHUNKS_PER_POST).map(move |_| {
+            if stop_for_stream.load(Ordering::Relaxed) {
+                return Err(std::io::Error::other("stopped"));
+            }
+            let chunk = vec![0u8; UPLOAD_CHUNK_BYTES];
+            counter_for_stream.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            Ok::<Vec<u8>, std::io::Error>(chunk)
+        });
+        let body = reqwest::Body::wrap_stream(body_stream);
+
+        match client
+            .post(UPLOAD_URL)
+            .header("Content-Type", "application/octet-stream")
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(_) => {}
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
 }
 
 /// Format speed for display (e.g., "125.5 Mbps" or "1.2 Gbps")
