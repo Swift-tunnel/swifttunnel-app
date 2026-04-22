@@ -58,7 +58,8 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    delete_ipv6_marker, query_ipv6_binding_enabled, restore_ipv6_from_marker, write_ipv6_marker,
+    delete_ipv6_marker, has_ipv6_binding_native, query_ipv6_binding_enabled,
+    restore_ipv6_from_marker, write_ipv6_marker,
 };
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
@@ -77,6 +78,109 @@ const MAX_PACKET_SIZE: usize = 1600;
 /// unbounded; at this cap we stop recording new IPs for the remainder of the
 /// session (existing IPs still re-register harmlessly).
 const MAX_DETECTED_GAME_SERVERS: usize = 10_000;
+
+/// Packet reader rebind budget. Transient NDIS glitches (sleep/resume, WLAN
+/// roam, driver reset, ndisrd.sys handle staleness) can make `read_packets`
+/// return `0x80070057 ERROR_INVALID_PARAMETER`. Instead of tearing down the
+/// tunnel on the first failure (which showed a fake "Connected" UI on ferdi's
+/// Realtek RTL8821CE), we rebind fresh handles up to this many times before
+/// escalating to `workers_panicked`. Any successful read resets the counter.
+const READER_MAX_REBINDS: u32 = 3;
+
+/// Backoff between rebind attempts. Short at first (transient blip) then
+/// grows to give NDIS a moment to resettle after a driver reset.
+const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
+    Duration::from_millis(100),
+    Duration::from_millis(500),
+    Duration::from_secs(2),
+];
+
+/// Decision returned by the rebind state machine for each read outcome.
+///
+/// Extracted from the reader loop so the branching (increment / reset /
+/// budget check / stop-flag shortcut) can be exercised by unit tests without
+/// spinning up ndisapi or an adapter. The reader is a Windows-only path that
+/// can't run in CI, so these tests are the only place the logic is verified
+/// automatically.
+#[derive(Debug, PartialEq, Eq)]
+enum RebindDecision {
+    /// Stop was already requested; exit the loop cleanly without counting the
+    /// error against the budget.
+    Stop,
+    /// Budget exhausted; the reader should surface a fatal error.
+    Fatal,
+    /// Transient error; sleep for this long, drop the bindings, and retry.
+    Backoff(Duration),
+}
+
+/// Pure state machine for reader rebind budget accounting.
+///
+/// Kept deliberately tiny: only the fields that affect the decision. The
+/// reader owns this alongside its other state (bindings Option, event handles,
+/// etc.) — nothing here touches ndisapi or threading.
+struct RebindState {
+    attempts: u32,
+    max_attempts: u32,
+    backoffs: &'static [Duration],
+}
+
+impl RebindState {
+    fn new(max_attempts: u32, backoffs: &'static [Duration]) -> Self {
+        debug_assert_eq!(
+            backoffs.len(),
+            max_attempts as usize,
+            "backoffs length must equal max_attempts"
+        );
+        Self {
+            attempts: 0,
+            max_attempts,
+            backoffs,
+        }
+    }
+
+    fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    /// Call on a successful read. Returns the prior attempt count (caller
+    /// logs recovery when this is nonzero). Idempotent when already zero.
+    fn record_success(&mut self) -> u32 {
+        let prior = self.attempts;
+        self.attempts = 0;
+        prior
+    }
+
+    /// Call on a read error. `stop_requested` is the current value of the
+    /// stop flag; when true the reader exits cleanly without consuming budget.
+    fn record_error(&mut self, stop_requested: bool) -> RebindDecision {
+        if stop_requested {
+            return RebindDecision::Stop;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        if self.attempts > self.max_attempts {
+            return RebindDecision::Fatal;
+        }
+        // `attempts` is in `1..=max_attempts` here, so `attempts - 1` is a
+        // valid index into `backoffs` (length == max_attempts).
+        let idx = (self.attempts - 1) as usize;
+        RebindDecision::Backoff(self.backoffs[idx])
+    }
+}
+
+/// Sleep for `total`, waking at most every 50ms to check `stop_flag`. Returns
+/// `true` if the caller should exit because `stop_flag` is set. Used during
+/// the reader rebind backoff so disconnect stays responsive.
+fn interruptible_sleep(total: Duration, stop_flag: &AtomicBool) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < total {
+        if stop_flag.load(Ordering::Acquire) {
+            return true;
+        }
+        let remaining = total.saturating_sub(start.elapsed());
+        std::thread::sleep(std::cmp::min(Duration::from_millis(50), remaining));
+    }
+    stop_flag.load(Ordering::Acquire)
+}
 
 /// Thread-local pre-allocated buffer to eliminate per-packet heap allocations
 /// Used for checksum fixup on tunneled packets
@@ -640,6 +744,14 @@ pub struct ParallelInterceptor {
     reader_handle: Option<JoinHandle<()>>,
     /// Cache refresher thread handle
     refresher_handle: Option<JoinHandle<()>>,
+    /// Background TSO-disable thread handle. The disable runs off the main
+    /// path because `Set-NetAdapterAdvancedProperty` can block for 30-60s on a
+    /// hung WMI provider (observed on Realtek RTL8821CE). We join it (with a
+    /// short timeout) before the matching enable runs on disconnect so the two
+    /// PowerShell calls don't race and leave the adapter in a half-configured
+    /// state — otherwise restore-on-disconnect can flip values back before the
+    /// disable even lands.
+    tso_disable_handle: Option<JoinHandle<()>>,
     /// Physical adapter index
     physical_adapter_idx: Option<usize>,
     /// Physical adapter internal name (GUID) for cross-thread lookup
@@ -742,6 +854,7 @@ impl ParallelInterceptor {
             stop_flag: Arc::new(AtomicBool::new(false)),
             worker_handles: Vec::new(),
             reader_handle: None,
+            tso_disable_handle: None,
             refresher_handle: None,
             physical_adapter_idx: None,
             physical_adapter_name: None,
@@ -918,8 +1031,52 @@ impl ParallelInterceptor {
     /// Check if driver is available
     pub fn check_driver_available() -> bool {
         match ndisapi::Ndisapi::new("NDISRD") {
-            Ok(_) => {
-                log::info!("Windows Packet Filter driver available");
+            Ok(driver) => {
+                // Log the installed driver version so that "tunnel works fine"
+                // vs. "read_packets fails with 0x80070057 on Realtek" can be
+                // correlated with driver version in support logs. Minimum
+                // tested-compatible version is 3.6.2 (what we ship). If
+                // someone's machine has an older ndisrd.sys from a previous
+                // product, we still return true (the driver opens fine), but
+                // the warning makes the mismatch visible.
+                match driver.get_version() {
+                    Ok(version) => {
+                        // Minimum shipped-and-tested version. Tuple comparison
+                        // catches 3.6.0 and 3.6.1 too, not just <3.6.0 — the
+                        // Realtek ERROR_INVALID_PARAMETER regression was
+                        // specifically fixed in 3.6.2 upstream.
+                        const MIN: (u32, u32, u32) = (3, 6, 2);
+                        let installed = (version.major, version.minor, version.revision);
+                        if installed < MIN {
+                            log::warn!(
+                                "Windows Packet Filter driver is older than expected: installed {}.{}.{}, SwiftTunnel ships with {}.{}.{}. \
+                                 Reader may return ERROR_INVALID_PARAMETER on some adapters — consider reinstalling.",
+                                version.major,
+                                version.minor,
+                                version.revision,
+                                MIN.0,
+                                MIN.1,
+                                MIN.2
+                            );
+                        } else {
+                            log::info!(
+                                "Windows Packet Filter driver available (version {}.{}.{})",
+                                version.major,
+                                version.minor,
+                                version.revision
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // get_version failing is itself a signal that the
+                        // driver is healthy enough to open but has a broken
+                        // IOCTL path — log and continue.
+                        log::warn!(
+                            "Windows Packet Filter driver available but version query failed: {}",
+                            e
+                        );
+                    }
+                }
                 true
             }
             Err(e) => {
@@ -3046,20 +3203,63 @@ impl ParallelInterceptor {
             friendly_name.replace("'", "''") // Escape single quotes
         );
 
-        // Capture original adapter state before changing anything so disconnect/crash
-        // recovery can restore the exact prior values.
-        write_tso_marker(&friendly_name);
+        // Mark as "disabled from our side" eagerly so `enable_adapter_offload`
+        // still runs its restore path on disconnect even if the background
+        // capture+disable thread hasn't finished yet. `tso_recovery` keeps the
+        // marker-file semantics correct because capture runs before disable
+        // within the thread (see ordering below).
         self.tso_was_disabled = true;
 
-        // 5 second timeout to prevent indefinite hangs
-        if Self::run_powershell_with_timeout(&script, 5) {
-            log::info!("TSO/LSO disabled successfully on {}", friendly_name);
-        } else {
-            log::warn!(
-                "Failed to disable TSO (non-fatal) - adapter may not support these settings"
-            );
-            // Don't fail - some adapters don't support these settings
-        }
+        // Run capture + disable off the connect path. On machines with a slow
+        // or hung WMI provider (Realtek RTL8821CE, 2026-04-19 incident), both
+        // `Get-NetAdapterAdvancedProperty` (the marker capture, 6× per run)
+        // and `Set-NetAdapterAdvancedProperty` can block for 30-60s; doing
+        // them synchronously stalls the connect flow for up to a minute even
+        // though the tunnel is otherwise ready. TSO-on-intercept is a
+        // performance concern, not a correctness one for the first few
+        // packets, so the whole PowerShell dance runs in the background and
+        // `enable_adapter_offload` joins this handle (bounded) on disconnect.
+        //
+        // Ordering inside the thread is load-bearing: `write_tso_marker` must
+        // complete BEFORE any `Set-NetAdapterAdvancedProperty` runs, otherwise
+        // a crash between disable and capture would leave the adapter in our
+        // modified state with no record of the originals — and startup
+        // recovery would skip the adapter (no marker) or restore generic
+        // defaults (legacy marker fallback). Capturing first means any marker
+        // that exists after a crash has the real pre-disable values.
+        let friendly_for_thread = friendly_name.clone();
+        let handle = std::thread::Builder::new()
+            .name("swifttunnel-tso-disable".into())
+            .spawn(move || {
+                // 1. Capture originals (6× PowerShell Get, each now bounded
+                //    by ADAPTER_QUERY_TIMEOUT_SECS inside tso_recovery).
+                write_tso_marker(&friendly_for_thread);
+
+                // 2. Apply the disable. 3s cap; anything longer is WMI hung
+                //    and not worth waiting for.
+                if ParallelInterceptor::run_powershell_with_timeout(&script, 3) {
+                    log::info!(
+                        "TSO/LSO disabled successfully on {} (background)",
+                        friendly_for_thread
+                    );
+                } else {
+                    log::warn!(
+                        "Failed to disable TSO on {} (non-fatal): adapter may not support these \
+                         settings, or WMI is unresponsive. Proceeding with tunnel anyway.",
+                        friendly_for_thread
+                    );
+                }
+            })
+            .map_err(|e| {
+                // Spawning a thread should never fail under normal load;
+                // if it does, fall back to blocking to keep behavior safe.
+                VpnError::SplitTunnel(format!("Failed to spawn TSO disable thread: {}", e))
+            })?;
+
+        // Keep the handle so `enable_adapter_offload` can join (bounded) before
+        // it runs its own PowerShell — avoids a disable-after-enable race where
+        // a slow WMI provider would clobber the restored values.
+        self.tso_disable_handle = Some(handle);
 
         Ok(())
     }
@@ -3070,6 +3270,35 @@ impl ParallelInterceptor {
     pub fn enable_adapter_offload(&mut self) {
         if !self.tso_was_disabled {
             return;
+        }
+
+        // Bound-wait for the background disable thread to finish so the two
+        // PowerShell invocations don't race. If the disable is still stuck in
+        // a hung WMI call, we give up after ~3.5s and proceed — the marker
+        // written eagerly before spawning still captures the original values
+        // for restore, so correctness is preserved.
+        if let Some(handle) = self.tso_disable_handle.take() {
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_millis(3500);
+            let poll = std::time::Duration::from_millis(50);
+            loop {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                    break;
+                }
+                if start.elapsed() >= timeout {
+                    log::warn!(
+                        "TSO disable thread still running after {}ms — detaching and proceeding \
+                         with restore (marker will guide the correct values)",
+                        timeout.as_millis()
+                    );
+                    // Intentionally drop the JoinHandle without joining —
+                    // detaches the OS thread, PowerShell finishes in the
+                    // background without blocking disconnect.
+                    break;
+                }
+                std::thread::sleep(poll);
+            }
         }
 
         let friendly_name = match &self.physical_adapter_friendly_name {
@@ -3184,6 +3413,40 @@ impl ParallelInterceptor {
             "Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)",
             friendly_name
         );
+
+        // Fast path: if the adapter has no IPv6 binding at all, skip the
+        // PowerShell disable entirely. `Disable-NetAdapterBinding` goes
+        // through WMI, which hangs for 20-30s on Realtek / slow-WMI systems
+        // even when there's nothing to disable (see support log from
+        // ferdi@2026-04-19). `has_ipv6_binding_native` uses the IP Helper
+        // API and returns in <1ms.
+        if let Some(if_index) = self.physical_adapter_if_index {
+            match has_ipv6_binding_native(if_index) {
+                Some(false) => {
+                    log::info!(
+                        "IPv6 already not bound on adapter {} (IP Helper fast-path); skipping disable",
+                        friendly_name
+                    );
+                    self.ipv6_was_disabled = false;
+                    delete_ipv6_marker();
+                    return Ok(());
+                }
+                Some(true) => {
+                    // IPv6 is bound — fall through to the slower check +
+                    // disable path. We don't skip the PowerShell
+                    // `query_ipv6_binding_enabled` below because it returns
+                    // the *enabled* state (bound + enabled vs. bound + force-
+                    // disabled) which the marker needs for accurate restore.
+                }
+                None => {
+                    // API error — fall through, let PowerShell handle it.
+                    log::debug!(
+                        "Native IPv6 probe failed for if_index {} — falling back to PowerShell",
+                        if_index
+                    );
+                }
+            }
+        }
 
         if matches!(query_ipv6_binding_enabled(&friendly_name), Some(false)) {
             log::info!(
@@ -3337,7 +3600,16 @@ impl ParallelInterceptor {
         // This prevents Roblox/Windows from preferring IPv6 and bypassing our tunnel
         self.disable_ipv6()?;
 
-        self.stop_flag.store(false, Ordering::SeqCst);
+        self.stop_flag.store(false, Ordering::Release);
+        // Reset the panic flag alongside stop_flag. `workers_panicked` is
+        // written `true` by the reader/inbound-receiver threads on panic or
+        // budget exhaustion, and is never cleared. Without this reset, a
+        // subsequent `stop()`+`start()` on the same `ParallelInterceptor`
+        // (e.g. via `maybe_rebind_on_default_route_change`) would start with
+        // the flag already asserted, and the next monitor tick would
+        // immediately transition the freshly-restarted session
+        // Connected→Error.
+        self.workers_panicked.store(false, Ordering::Release);
         self.active = true;
 
         // Create channels for workers
@@ -3473,10 +3745,7 @@ impl ParallelInterceptor {
                         } else {
                             "<non-string panic payload>".to_string()
                         };
-                        log::error!(
-                            "V3 inbound receiver panicked — injection halted: {}",
-                            msg
-                        );
+                        log::error!("V3 inbound receiver panicked — injection halted: {}", msg);
                     }
                 }));
                 log::info!("V3 inbound receiver thread started (UDP relay)");
@@ -3498,7 +3767,7 @@ impl ParallelInterceptor {
         }
 
         log::info!("Stopping parallel interceptor...");
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.stop_flag.store(true, Ordering::Release);
 
         // Wait for threads with timeout to prevent hanging on stuck threads
         if let Some(handle) = self.reader_handle.take() {
@@ -3951,26 +4220,20 @@ fn run_packet_reader(
     let mut snapshot_version = snapshot.version;
     let mut inline_cache: InlineCache = ahash::AHashMap::with_capacity(1024);
 
-    let driver = ndisapi::Ndisapi::new("NDISRD")
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
-
-    let adapters = driver
-        .get_tcpip_bound_adapters_info()
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to get adapters: {}", e)))?;
-
-    if physical_idx >= adapters.len() {
-        return Err(VpnError::SplitTunnel(
-            "Physical adapter index out of range".to_string(),
-        ));
+    // Bundle the per-run driver/adapter/event so we can rebind atomically.
+    // Each acquire() opens a fresh NDISRD handle and re-enumerates adapters,
+    // which is the only way to recover from a stale adapter handle.
+    struct ReaderBindings {
+        driver: ndisapi::Ndisapi,
+        physical_handle: HANDLE,
+        event: HANDLE,
     }
 
-    let physical_handle = adapters[physical_idx].get_handle();
-
-    // RAII guard for Windows HANDLE to prevent leaks on error
-    struct HandleGuard(HANDLE);
-    impl Drop for HandleGuard {
+    // RAII fallback for the event handle in case set_packet_event / set_adapter_mode
+    // fails partway through acquire().
+    struct EventGuard(HANDLE);
+    impl Drop for EventGuard {
         fn drop(&mut self) {
-            // Check for null (0) and INVALID_HANDLE_VALUE (-1 as isize cast to pointer)
             let raw_handle = self.0.0 as isize;
             if raw_handle != 0 && raw_handle != -1 {
                 unsafe {
@@ -3980,35 +4243,137 @@ fn run_packet_reader(
         }
     }
 
-    // Create event for packet notification
-    let event: HANDLE = unsafe {
-        CreateEventW(None, true, false, None)
-            .map_err(|e| VpnError::SplitTunnel(format!("Failed to create event: {}", e)))?
-    };
+    impl ReaderBindings {
+        fn acquire(physical_name: &str) -> VpnResult<Self> {
+            let driver = ndisapi::Ndisapi::new("NDISRD")
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
 
-    // Wrap in RAII guard - will close handle if we return early due to error
-    let event_guard = HandleGuard(event);
+            let adapters = driver
+                .get_tcpip_bound_adapters_info()
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to get adapters: {}", e)))?;
 
-    driver
-        .set_packet_event(physical_handle, event)
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to set packet event: {}", e)))?;
+            // Match by adapter device name (e.g. "\DEVICE\{GUID}") rather than
+            // index — if a device list change reordered adapters between the
+            // initial enumeration and this acquire(), the index could now point
+            // at a different NIC. The name/GUID is stable for the physical
+            // device.
+            let adapter = adapters
+                .iter()
+                .find(|a| a.get_name() == physical_name)
+                .ok_or_else(|| {
+                    VpnError::SplitTunnel(format!(
+                        "Physical adapter '{}' not found during reader bind (removed/renamed?)",
+                        physical_name
+                    ))
+                })?;
 
-    // Set adapter to tunnel mode
-    driver
-        .set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
+            let physical_handle = adapter.get_handle();
 
-    // Transfer ownership from guard - we'll close manually in cleanup
-    std::mem::forget(event_guard);
+            let event: HANDLE = unsafe {
+                CreateEventW(None, true, false, None)
+                    .map_err(|e| VpnError::SplitTunnel(format!("Failed to create event: {}", e)))?
+            };
+
+            // If the ndisapi calls below fail, the guard closes the event on
+            // the early return path.
+            let event_guard = EventGuard(event);
+
+            driver
+                .set_packet_event(physical_handle, event)
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to set packet event: {}", e)))?;
+
+            driver
+                .set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
+
+            // Transfer event ownership into the bindings — the guard should
+            // NOT close the event now. `Drop for ReaderBindings` takes over.
+            std::mem::forget(event_guard);
+
+            Ok(Self {
+                driver,
+                physical_handle,
+                event,
+            })
+        }
+    }
+
+    // Drop handles teardown for every exit path (normal loop break, Err
+    // return, panic caught by the outer wrapper, `bindings = None` on rebind).
+    // Without this, a budget-exhausted `return Err` or a panic-through-unwind
+    // would leave the physical NIC stuck in `MSTCP_FLAG_SENT_RECEIVE_TUNNEL`
+    // with no reader draining ndisrd's queue, stalling ALL traffic on that
+    // adapter (not just tunneled apps).
+    impl Drop for ReaderBindings {
+        fn drop(&mut self) {
+            let _ = self
+                .driver
+                .set_adapter_mode(self.physical_handle, FilterFlags::default());
+            let raw = self.event.0 as isize;
+            if raw != 0 && raw != -1 {
+                unsafe {
+                    let _ = CloseHandle(self.event);
+                }
+            }
+            // self.driver drops after this, closing its \\.\NDISRD handle.
+        }
+    }
+
+    // `physical_idx` is still logged for operator continuity (see startup
+    // log above), but from here on we look up the adapter by `physical_name`
+    // so the reader can rebind even if device enumeration reorders.
+    //
+    // `bindings: Option<_>` lets a failed `acquire()` during recovery NOT
+    // count against `READER_MAX_REBINDS` — only observed `read_packets`
+    // errors do. Previously a single read error followed by two acquire
+    // flakes could exhaust a "budget of 3" on the second iteration; now the
+    // budget specifically covers 3 real read errors.
+    let mut bindings: Option<ReaderBindings> =
+        Some(ReaderBindings::acquire(physical_name.as_ref())?);
+    let mut rebind = RebindState::new(READER_MAX_REBINDS, &REBIND_BACKOFFS);
 
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
     let mut passthrough_to_adapter: EthMRequest<BATCH_SIZE>;
     let mut passthrough_to_mstcp: EthMRequest<BATCH_SIZE>;
 
     loop {
-        if stop_flag.load(Ordering::Relaxed) {
+        if stop_flag.load(Ordering::Acquire) {
             break;
         }
+
+        // Re-acquire handles if a prior read error dropped them. Acquire
+        // failures here are transient (e.g. the device list hasn't re-settled
+        // after a driver reset) and intentionally don't advance the rebind
+        // budget (see `RebindState` for the accounting).
+        if bindings.is_none() {
+            match ReaderBindings::acquire(physical_name.as_ref()) {
+                Ok(new) => {
+                    log::info!(
+                        "Reader: rebind attempt {}/{} acquired fresh handles, resuming read loop",
+                        rebind.attempts(),
+                        READER_MAX_REBINDS
+                    );
+                    bindings = Some(new);
+                }
+                Err(acquire_err) => {
+                    log::warn!(
+                        "Reader: rebind attempt {}/{} failed to re-acquire handles: {} (will retry)",
+                        rebind.attempts(),
+                        READER_MAX_REBINDS,
+                        acquire_err
+                    );
+                    // Short interruptible delay so we don't tight-loop on a
+                    // persistently-missing adapter. Doesn't consume budget.
+                    if interruptible_sleep(Duration::from_millis(200), &stop_flag) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+        let b = bindings
+            .as_ref()
+            .expect("bindings is Some after acquire above");
 
         // Wait for packet event with reasonable timeout
         // The event is signaled by ndisapi driver when packets are available
@@ -4016,36 +4381,76 @@ fn run_packet_reader(
         // avoiding 1000Hz polling that wastes CPU when idle
         // (When packets arrive, event signals immediately - no added latency)
         unsafe {
-            WaitForSingleObject(event, 100);
+            WaitForSingleObject(b.event, 100);
         }
 
         // Read batch of packets
-        let mut to_read = EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
+        let mut to_read = EthMRequestMut::from_iter(b.physical_handle, packets.iter_mut());
 
-        let packets_read = match driver.read_packets::<BATCH_SIZE>(&mut to_read) {
-            Ok(n) => n,
+        let packets_read = match b.driver.read_packets::<BATCH_SIZE>(&mut to_read) {
+            Ok(n) => {
+                // A successful read_packets IOCTL is itself the signal that
+                // the handle is healthy — `Ok(0)` (WaitForSingleObject timed
+                // out, no queued packets) is the dominant state on idle
+                // adapters, so requiring `n > 0` to reset would let the
+                // counter survive across hours of idle between transient
+                // glitches and ultimately tear down the tunnel on a single
+                // unrelated blip.
+                let prior = rebind.record_success();
+                if prior > 0 {
+                    log::info!(
+                        "Reader: recovered after {} rebind attempt(s) — handle is healthy",
+                        prior
+                    );
+                }
+                n
+            }
             Err(e) => {
-                // An error here usually means the NDIS adapter handle is gone
-                // (driver reset, device removal, sleep/resume glitch). Signal
-                // shutdown to sibling threads via stop_flag and propagate the
-                // error out so the thread wrapper can set workers_panicked —
-                // that's how the connection monitor distinguishes this from a
-                // user-initiated disconnect.
-                log::error!(
-                    "Reader: driver.read_packets failed ({}); stopping reader loop",
-                    e
-                );
-                stop_flag.store(true, Ordering::Relaxed);
-                return Err(VpnError::SplitTunnel(format!(
-                    "driver.read_packets failed: {}",
-                    e
-                )));
+                match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
+                    RebindDecision::Stop => break,
+                    RebindDecision::Fatal => {
+                        log::error!(
+                            "Reader: driver.read_packets failed ({}); rebind budget ({}) exhausted, stopping reader loop",
+                            e,
+                            READER_MAX_REBINDS
+                        );
+                        stop_flag.store(true, Ordering::Release);
+                        // `bindings` drops on return, so Drop resets adapter
+                        // mode and closes the event even on the error path.
+                        return Err(VpnError::SplitTunnel(format!(
+                            "driver.read_packets failed after {} rebinds: {}",
+                            READER_MAX_REBINDS, e
+                        )));
+                    }
+                    RebindDecision::Backoff(backoff) => {
+                        log::warn!(
+                            "Reader: driver.read_packets failed ({}); rebind attempt {}/{} after {}ms backoff",
+                            e,
+                            rebind.attempts(),
+                            READER_MAX_REBINDS,
+                            backoff.as_millis()
+                        );
+
+                        // Drop the dead bindings so Drop resets adapter mode
+                        // on the old handle and closes the event; the next
+                        // iteration re-acquires via the is_none() branch.
+                        bindings = None;
+
+                        // Give NDIS a moment to settle before reopening.
+                        // Interruptible so disconnect during backoff is instant.
+                        if interruptible_sleep(backoff, &stop_flag) {
+                            break;
+                        }
+
+                        continue;
+                    }
+                }
             }
         };
 
         if packets_read == 0 {
             unsafe {
-                let _ = ResetEvent(event);
+                let _ = ResetEvent(b.event);
             }
             continue;
         }
@@ -4063,8 +4468,8 @@ fn run_packet_reader(
         let api_tunneling = api_tunneling_enabled.load(Ordering::Relaxed);
 
         // Prepare passthrough queues
-        passthrough_to_adapter = EthMRequest::new(physical_handle);
-        passthrough_to_mstcp = EthMRequest::new(physical_handle);
+        passthrough_to_adapter = EthMRequest::new(b.physical_handle);
+        passthrough_to_mstcp = EthMRequest::new(b.physical_handle);
 
         // Dispatch packets to workers using source-port hash or fragment metadata hash.
         for i in 0..packets_read {
@@ -4177,23 +4582,24 @@ fn run_packet_reader(
 
         // Send passthrough packets
         if passthrough_to_adapter.get_packet_number() > 0 {
-            let _ = driver.send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
+            let _ = b
+                .driver
+                .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
         }
 
         if passthrough_to_mstcp.get_packet_number() > 0 {
-            let _ = driver.send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp);
+            let _ = b
+                .driver
+                .send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp);
         }
 
         unsafe {
-            let _ = ResetEvent(event);
+            let _ = ResetEvent(b.event);
         }
     }
 
-    // Cleanup
-    let _ = driver.set_adapter_mode(physical_handle, FilterFlags::default());
-    unsafe {
-        let _ = CloseHandle(event);
-    }
+    // Cleanup is handled by `impl Drop for ReaderBindings` when `bindings`
+    // goes out of scope here (or earlier via `bindings = None` on rebind).
 
     log::info!("Packet reader stopped");
     Ok(())
@@ -4251,7 +4657,7 @@ fn run_packet_worker(
     let mut consecutive_timeouts = 0u32;
 
     loop {
-        if stop_flag.load(Ordering::Relaxed) {
+        if stop_flag.load(Ordering::Acquire) {
             break;
         }
 
@@ -4402,10 +4808,7 @@ fn run_packet_worker(
                 // traffic at least reaches the internet while the connection
                 // state machine tears the tunnel down.
                 let relay_for_forward = relay_ctx.as_ref().filter(|r| {
-                    !matches!(
-                        r.relay_health(),
-                        super::udp_relay::RelayHealthState::Dead
-                    )
+                    !matches!(r.relay_health(), super::udp_relay::RelayHealthState::Dead)
                 });
                 if let Some(relay) = relay_for_forward {
                     // Log relay destination for first few packets (auto-routing debug)
@@ -4590,7 +4993,7 @@ fn run_cache_refresher(
     let mut first_run = true;
 
     loop {
-        if stop_flag.load(Ordering::Relaxed) {
+        if stop_flag.load(Ordering::Acquire) {
             break;
         }
 
@@ -4614,7 +5017,7 @@ fn run_cache_refresher(
             if let Ok(mut signaled) = lock.lock() {
                 // Wait until signaled or timeout
                 let result = cvar.wait_timeout_while(signaled, wait_timeout, |s| {
-                    !*s && !stop_flag.load(Ordering::Relaxed)
+                    !*s && !stop_flag.load(Ordering::Acquire)
                 });
                 if let Ok((mut guard, _)) = result {
                     *guard = false; // Reset signal
@@ -4626,7 +5029,7 @@ fn run_cache_refresher(
                 log::info!("Cache refresher: ETW triggered immediate refresh");
             }
 
-            if stop_flag.load(Ordering::Relaxed) {
+            if stop_flag.load(Ordering::Acquire) {
                 return;
             }
         }
@@ -6017,7 +6420,7 @@ fn run_v3_inbound_receiver(
     log::info!("V3 inbound receiver: entering main loop, waiting for relay traffic...");
 
     loop {
-        if stop_flag.load(Ordering::Relaxed) {
+        if stop_flag.load(Ordering::Acquire) {
             log::info!("V3 inbound receiver: stop flag set, exiting loop");
             break;
         }
@@ -8526,5 +8929,232 @@ mod tests {
             "UDP routing must be identical regardless of api_tunneling"
         );
         assert!(result_a, "UDP from tunnel app should always be tunneled");
+    }
+
+    // ------------------------------------------------------------------
+    // Reader rebind / recovery tests
+    //
+    // The reader's actual rebind flow requires ndisapi + a real NDIS driver,
+    // so we can't unit-test `run_packet_reader` itself. These tests cover
+    // the extracted helpers + invariants so a future regression (e.g. someone
+    // shortens REBIND_BACKOFFS to zero, or loses stop_flag responsiveness)
+    // gets caught without needing a Windows integration harness.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_rebind_backoffs_are_monotonically_non_decreasing() {
+        // The expectation is "gentle first, patient later" — any regression
+        // that shortens later backoffs vs. earlier ones would hammer the
+        // driver during the exact window it needs time to resettle.
+        for window in REBIND_BACKOFFS.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "REBIND_BACKOFFS must be non-decreasing: {:?}",
+                REBIND_BACKOFFS
+            );
+        }
+    }
+
+    #[test]
+    fn test_rebind_backoffs_length_matches_budget() {
+        // The reader indexes REBIND_BACKOFFS by (rebind_attempts - 1).
+        // A mismatch would panic the reader thread mid-recovery.
+        assert_eq!(REBIND_BACKOFFS.len(), READER_MAX_REBINDS as usize);
+    }
+
+    #[test]
+    fn test_rebind_budget_is_at_least_one() {
+        // A budget of 0 would mean "retry never" — same as old behavior,
+        // defeats the point of this file's rebind machinery.
+        assert!(
+            READER_MAX_REBINDS >= 1,
+            "Reader must allow at least one rebind attempt"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // RebindState — the pure state machine extracted from the reader loop.
+    // These tests cover the four branches the reader relies on:
+    //   1. increment on error
+    //   2. reset on success (with "was I recovering?" signal)
+    //   3. budget boundary (last-allowed attempt vs. fatal)
+    //   4. stop-flag shortcut (don't consume budget during shutdown)
+    // ------------------------------------------------------------------
+
+    const TEST_BACKOFFS: [Duration; 3] = [
+        Duration::from_millis(10),
+        Duration::from_millis(20),
+        Duration::from_millis(30),
+    ];
+
+    #[test]
+    fn rebind_state_increments_on_error_and_returns_ordered_backoffs() {
+        let mut rs = RebindState::new(3, &TEST_BACKOFFS);
+        assert_eq!(rs.attempts(), 0);
+
+        assert_eq!(
+            rs.record_error(false),
+            RebindDecision::Backoff(Duration::from_millis(10))
+        );
+        assert_eq!(rs.attempts(), 1);
+
+        assert_eq!(
+            rs.record_error(false),
+            RebindDecision::Backoff(Duration::from_millis(20))
+        );
+        assert_eq!(rs.attempts(), 2);
+
+        assert_eq!(
+            rs.record_error(false),
+            RebindDecision::Backoff(Duration::from_millis(30))
+        );
+        assert_eq!(rs.attempts(), 3);
+    }
+
+    #[test]
+    fn rebind_state_reset_on_success_returns_prior_count() {
+        let mut rs = RebindState::new(3, &TEST_BACKOFFS);
+
+        // Burn two attempts.
+        let _ = rs.record_error(false);
+        let _ = rs.record_error(false);
+        assert_eq!(rs.attempts(), 2);
+
+        // The reader uses this return value to log "recovered after N rebinds".
+        assert_eq!(rs.record_success(), 2);
+        assert_eq!(rs.attempts(), 0);
+
+        // A second success with a clean counter should report 0 (idempotent,
+        // no phantom "recovered after 0" log).
+        assert_eq!(rs.record_success(), 0);
+        assert_eq!(rs.attempts(), 0);
+
+        // After a reset, we get the full budget back — NOT a degraded budget.
+        // Regression guard: `rebind_attempts = 0` was the exact fix for C1.
+        assert_eq!(
+            rs.record_error(false),
+            RebindDecision::Backoff(Duration::from_millis(10))
+        );
+    }
+
+    #[test]
+    fn rebind_state_fatal_exactly_at_budget_boundary() {
+        // Budget is 3 → 3 backoffs permitted, the 4th error is Fatal.
+        // This is the invariant that decides whether we keep trying or
+        // surface workers_panicked to the state machine.
+        let mut rs = RebindState::new(3, &TEST_BACKOFFS);
+
+        // 3 allowed attempts.
+        assert!(matches!(rs.record_error(false), RebindDecision::Backoff(_)));
+        assert!(matches!(rs.record_error(false), RebindDecision::Backoff(_)));
+        assert!(matches!(rs.record_error(false), RebindDecision::Backoff(_)));
+        assert_eq!(rs.attempts(), 3);
+
+        // 4th error trips the budget — Fatal, counter still climbs so the
+        // reader's fatal-path log reports the exhausted count.
+        assert_eq!(rs.record_error(false), RebindDecision::Fatal);
+        assert_eq!(rs.attempts(), 4);
+    }
+
+    #[test]
+    fn rebind_state_stop_flag_shortcut_does_not_consume_budget() {
+        // If the user hit Disconnect mid-read, the reader should exit
+        // cleanly, NOT eat a rebind attempt on its way out. Otherwise a
+        // quick connect-disconnect loop could silently erode the budget.
+        let mut rs = RebindState::new(3, &TEST_BACKOFFS);
+
+        assert_eq!(rs.record_error(true), RebindDecision::Stop);
+        assert_eq!(rs.attempts(), 0, "Stop must not consume rebind budget");
+
+        // Should still have the full budget afterward.
+        assert!(matches!(rs.record_error(false), RebindDecision::Backoff(_)));
+        assert_eq!(rs.attempts(), 1);
+    }
+
+    #[test]
+    fn rebind_state_saturates_and_stays_fatal_past_budget() {
+        // Pathological case: something higher up ignored the Fatal verdict
+        // and kept feeding errors. We should keep saying Fatal and not
+        // panic on backoff-array indexing.
+        let mut rs = RebindState::new(3, &TEST_BACKOFFS);
+
+        for _ in 0..10 {
+            let _ = rs.record_error(false);
+        }
+        assert_eq!(rs.record_error(false), RebindDecision::Fatal);
+        // saturating_add prevents u32 wraparound, so `attempts` keeps climbing
+        // without overflow UB.
+        assert!(rs.attempts() >= 4);
+    }
+
+    #[test]
+    fn test_interruptible_sleep_completes_when_stop_flag_not_set() {
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let aborted = interruptible_sleep(Duration::from_millis(120), &stop);
+        let elapsed = start.elapsed();
+        assert!(
+            !aborted,
+            "sleep should complete naturally when stop_flag is false"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "sleep should run for at least the requested duration (got {:?})",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "sleep should not massively overshoot (got {:?})",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_interruptible_sleep_bails_early_when_stop_flag_set() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+
+        // Trigger stop_flag after ~75ms while the reader sleeps 2s (worst-case
+        // rebind backoff). Expect the call to return well before the full 2s
+        // timeout. Upper bound is 1500ms (not 400ms as before) because Windows
+        // CI runners have 15.6ms timer resolution and no timeBeginPeriod(1);
+        // `thread::sleep(50ms)` routinely overshoots to 60-100ms under load,
+        // and the test should not flake on cold/loaded shared runners. Any
+        // value < 2000ms still demonstrates the "bails early" property.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(75));
+            stop_clone.store(true, Ordering::Release);
+        });
+
+        let start = Instant::now();
+        let aborted = interruptible_sleep(Duration::from_secs(2), &stop);
+        let elapsed = start.elapsed();
+
+        assert!(aborted, "sleep should report that it was interrupted");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "sleep should bail well before the 2s deadline (got {:?})",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_interruptible_sleep_zero_duration_returns_stop_state() {
+        // `total = 0` means the inner loop is skipped entirely and the
+        // function returns whatever `stop_flag.load(...)` gives back. Exercise
+        // BOTH polarities — a buggy implementation that hardcoded
+        // `return true;` for the zero-duration path would pass the single-
+        // polarity version of this test.
+        let stop_true = AtomicBool::new(true);
+        assert!(
+            interruptible_sleep(Duration::from_millis(0), &stop_true),
+            "total=0 with stop_flag=true should return true"
+        );
+
+        let stop_false = AtomicBool::new(false);
+        assert!(
+            !interruptible_sleep(Duration::from_millis(0), &stop_false),
+            "total=0 with stop_flag=false should return false"
+        );
     }
 }

@@ -157,8 +157,18 @@ export const systemIsAdmin = () =>
 export const systemCheckDriver = () =>
   invoke<DriverCheckResponse>("system_check_driver");
 
-export const systemInstallDriver = () =>
-  invoke<void>("system_install_driver");
+/**
+ * Install the WinpkFilter driver.
+ *
+ * `force=true` re-runs msiexec even if `is_available()` reports success. A
+ * corrupt install can pass the open-handle check but still fail IOCTLs, so the
+ * force path is available for a future recovery flow (invoked after a mid-
+ * session workers_panicked transition). No production caller currently passes
+ * `true`; the default `force=false` path remains a no-op when the driver is
+ * healthy.
+ */
+export const systemInstallDriver = (force = false) =>
+  invoke<void>("system_install_driver", { force });
 
 export const systemLaunchedFromStartup = () =>
   invoke<boolean>("system_launched_from_startup");

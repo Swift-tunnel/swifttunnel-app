@@ -75,7 +75,19 @@ fn get_marker_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("SwiftTunnel").join(TSO_MARKER_FILE))
 }
 
+/// Per-query timeout for adapter offload probes.
+///
+/// 6 queries × 2s = 12s absolute worst case for a full marker capture. A hung
+/// WMI provider on a flaky NIC (Realtek RTL8821CE in the 2026-04-19 incident)
+/// can otherwise block `.output()` for 30–60s, freezing whichever thread
+/// called us. Every call site now runs this off the connect path, but the
+/// bound is still the right belt-and-braces.
+const ADAPTER_QUERY_TIMEOUT_SECS: u64 = 2;
+
 fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32> {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
     let script = format!(
         r#"
         $adapter = '{}'
@@ -89,20 +101,53 @@ fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32>
         keyword
     );
 
-    let output = crate::hidden_command("powershell")
+    let mut child = crate::hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .ok()?;
 
-    if !output.status.success() {
-        return None;
-    }
+    let start = Instant::now();
+    let timeout = Duration::from_secs(ADAPTER_QUERY_TIMEOUT_SECS);
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .and_then(|line| line.parse::<u32>().ok())
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut stdout = String::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    let _ = pipe.read_to_string(&mut stdout);
+                }
+                return stdout
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .and_then(|line| line.parse::<u32>().ok());
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    log::warn!(
+                        "TSO query for '{}' on '{}' timed out after {}s (WMI hung?), skipping",
+                        keyword,
+                        adapter_name,
+                        ADAPTER_QUERY_TIMEOUT_SECS
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 fn capture_tso_marker(adapter_name: &str) -> TsoMarker {
