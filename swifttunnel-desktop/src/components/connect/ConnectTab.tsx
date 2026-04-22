@@ -25,11 +25,13 @@ export function ConnectTab() {
   const vpnError = useVpnStore((s) => s.error);
   const driverSetupState = useVpnStore((s) => s.driverSetupState);
   const driverSetupError = useVpnStore((s) => s.driverSetupError);
+  const driverResetAttempted = useVpnStore((s) => s.driverResetAttempted);
   const bytesUp = useVpnStore((s) => s.bytesUp);
   const bytesDown = useVpnStore((s) => s.bytesDown);
   const connect = useVpnStore((s) => s.connect);
   const disconnect = useVpnStore((s) => s.disconnect);
   const installDriver = useVpnStore((s) => s.installDriver);
+  const resetDriver = useVpnStore((s) => s.resetDriver);
   const ping = useVpnStore((s) => s.ping);
   const connectedAt = useVpnStore((s) => s.connectedAt);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
@@ -177,7 +179,13 @@ export function ConnectTab() {
   const ringSpeed = isTransitioning ? 3.5 : 55;
   const innerSpeed = isTransitioning ? 2.8 : 38;
 
-  const connectStatus = resolveConnectStatus({ driverSetupState, driverSetupError, vpnError, vpnState });
+  const connectStatus = resolveConnectStatus({
+    driverSetupState,
+    driverSetupError,
+    vpnError,
+    vpnState,
+    driverResetAttempted,
+  });
 
   return (
     <div className="connect-tab mx-auto flex w-full max-w-[660px] flex-col gap-4 pb-4">
@@ -261,6 +269,31 @@ export function ConnectTab() {
                   }}
                 >
                   Windows Packet Filter driver
+                </button>
+              </span>
+            ) : connectStatus.kind === "reboot_required" ? (
+              // No action button: only a reboot actually fixes 1641/3010, and
+              // we must not relaunch installDriver here — that was the 1.25.2
+              // bug where pressing the "install" CTA after a reboot-required
+              // error silently succeeded and then failed on the next connect.
+              <span className="inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
+                <span>{connectStatus.text}</span>
+              </span>
+            ) : connectStatus.kind === "driver_outdated" ? (
+              <span className="inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
+                <span>Older split tunnel driver detected.</span>
+                <button
+                  type="button"
+                  onClick={() => void resetDriver().catch(() => {})}
+                  disabled={isTransitioning}
+                  className="rounded-full px-2 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-60"
+                  style={{
+                    backgroundColor: "rgba(60,130,246,0.18)",
+                    color: "var(--color-accent-secondary)",
+                    border: "1px solid rgba(60,130,246,0.35)",
+                  }}
+                >
+                  Reset driver service
                 </button>
               </span>
             ) : connectStatus.text}

@@ -232,6 +232,7 @@ pub fn run() {
             commands::system::system_is_admin,
             commands::system::system_check_driver,
             commands::system::system_install_driver,
+            commands::system::system_reset_driver,
             commands::system::system_open_url,
             commands::system::system_restart_as_admin,
             commands::system::system_show_notification,
