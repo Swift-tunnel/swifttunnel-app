@@ -61,6 +61,17 @@ describe("connect state helpers", () => {
       ),
     ).toBe(true);
     expect(isDriverVersionTooOld(null)).toBe(false);
+    // Auto-install path in vpnStore.ensureDriverReady writes to
+    // driverSetupError and only mirrors to vpnError via the outer
+    // connect() catch. Checking the second field keeps the match robust
+    // if that mirroring ever changes.
+    expect(
+      isDriverVersionTooOld(
+        null,
+        "Split tunnel driver is older than SwiftTunnel requires (installed 3.5.1, required >= 3.6.2).",
+      ),
+    ).toBe(true);
+    expect(isDriverVersionTooOld(null, null)).toBe(false);
   });
 
   it("prioritizes driver install status over generic VPN state", () => {

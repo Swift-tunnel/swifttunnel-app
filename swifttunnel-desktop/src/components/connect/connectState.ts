@@ -61,14 +61,20 @@ export function isRebootRequired(
  * The self-test surfaces these with a specific phrase so the UI can render
  * a "reset driver service" escalation that avoids a full reinstall when a
  * service restart would clear it.
+ *
+ * Accepts both fields for the same reason `isRebootRequired` does: the
+ * auto-install path in `vpnStore.ensureDriverReady` writes the backend
+ * error to `driverSetupError` but relies on the outer `connect()` catch
+ * block to mirror it into `vpnError`. Checking both makes the match
+ * robust to future store refactors that move driver errors off
+ * `state.error`.
  */
-export function isDriverVersionTooOld(vpnError: string | null): boolean {
-  return (
-    !!vpnError &&
-    vpnError
-      .toLowerCase()
-      .includes("split tunnel driver is older than swifttunnel requires")
-  );
+export function isDriverVersionTooOld(
+  vpnError: string | null,
+  driverSetupError: string | null = null,
+): boolean {
+  const haystack = `${vpnError ?? ""}\n${driverSetupError ?? ""}`.toLowerCase();
+  return haystack.includes("split tunnel driver is older than swifttunnel requires");
 }
 
 export function resolveConnectStatus(input: {
@@ -119,7 +125,10 @@ export function resolveConnectStatus(input: {
     };
   }
 
-  if (isDriverVersionTooOld(input.vpnError) && !input.driverResetAttempted) {
+  if (
+    isDriverVersionTooOld(input.vpnError, input.driverSetupError) &&
+    !input.driverResetAttempted
+  ) {
     return {
       kind: "driver_outdated",
       text: "Older split tunnel driver detected. Reset driver service",
