@@ -761,7 +761,7 @@ impl VpnConnection {
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
     ) -> VpnResult<()> {
-        {
+        let prior_was_error = {
             let state = self.state.borrow();
             if state.is_connected() {
                 return Err(VpnError::Connection("Already connected".to_string()));
@@ -769,6 +769,16 @@ impl VpnConnection {
             if state.is_connecting() {
                 return Err(VpnError::Connection("Connection in progress".to_string()));
             }
+            matches!(*state, ConnectionState::Error(_))
+        };
+
+        // If the prior state was Error, the monitor task's recovery flow
+        // already closed the driver + ran best-effort Arc-shared cleanup, but
+        // the `&mut self`-only resources (`etw_watcher`, `config`,
+        // `split_tunnel = None`) can still be stale. Reconcile them here so
+        // reconnects from Error always start from a clean slate.
+        if prior_was_error {
+            self.cleanup().await;
         }
 
         log::info!("Starting VPN connection to region: {}", region);
@@ -1848,9 +1858,16 @@ impl VpnConnection {
                                         log::error!(
                                             "V3: Split-tunnel reader could not recover — transitioning Connected → Error"
                                         );
+                                        // Wording MUST match `isDriverMissing()` in
+                                        // swifttunnel-desktop/src/components/connect/connectState.ts
+                                        // so the UI renders the install-driver CTA instead of plain
+                                        // text. That helper substring-matches on
+                                        // "split tunnel driver not available" AND
+                                        // "windows packet filter driver" (case-insensitive).
                                         *state = ConnectionState::Error(
-                                            "Tunnel driver lost its adapter handle and could not recover. \
-                                             Please reconnect. If this keeps happening, reinstall WinpkFilter."
+                                            "Split tunnel driver not available — the Windows Packet Filter driver lost \
+                                             its adapter handle and could not recover. Please reconnect, or reinstall \
+                                             the driver."
                                                 .to_string(),
                                         );
                                         true
@@ -1858,9 +1875,35 @@ impl VpnConnection {
                                         false
                                     }
                                 });
-                                // If we transitioned, stop monitoring — the
-                                // session is dead and cleanup will follow.
+                                // Immediate best-effort cleanup via shared Arcs: closing the
+                                // split_tunnel driver triggers `ParallelInterceptor::stop()`
+                                // which restores TSO/IPv6 and joins reader/worker threads.
+                                // Without this, the adapter would stay in
+                                // `MSTCP_FLAG_SENT_RECEIVE_TUNNEL` with no reader draining the
+                                // ndisrd queue until the user clicks Disconnect — which makes
+                                // all traffic on the physical NIC stall, not just tunnel apps.
+                                // ETW watcher, `self.split_tunnel = None`, and `self.config`
+                                // live on `&mut self` so they're reconciled on the next
+                                // `connect()` / `disconnect()` call; connect() was also patched
+                                // to run `cleanup()` first when the prior state was Error.
                                 if transitioned {
+                                    {
+                                        let mut driver_guard = driver.lock().await;
+                                        if let Err(e) = driver_guard.close() {
+                                            log::warn!(
+                                                "V3: recovery cleanup — driver.close() returned {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                    super::wfp_block::cleanup();
+                                    if let Some(ref auto_router) = auto_router_for_monitor {
+                                        auto_router.reset();
+                                    }
+                                    if let Some(ref manager) = process_performance_for_monitor {
+                                        let mut guard = manager.lock().await;
+                                        guard.cleanup_all("workers_panicked_recovery");
+                                    }
                                     break;
                                 }
                             }

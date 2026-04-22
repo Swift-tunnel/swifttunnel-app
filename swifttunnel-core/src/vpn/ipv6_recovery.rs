@@ -78,15 +78,24 @@ pub fn query_ipv6_binding_enabled(adapter_name: &str) -> Option<bool> {
 }
 
 /// Check via IP Helper API (no PowerShell, no WMI) whether the adapter at
-/// `if_index` currently has IPv6 bound. Used as a fast pre-check before
-/// attempting `Disable-NetAdapterBinding`, which can hang 30+ seconds on
+/// `if_index` currently has an IPv6 address on it. Used as a fast pre-check
+/// before attempting `Disable-NetAdapterBinding`, which can hang 30+ seconds on
 /// Realtek / slow-WMI machines even when there is nothing to disable.
 ///
+/// Strictly speaking, `GetAdaptersAddresses(AF_INET6)` filters by "has at
+/// least one IPv6 address", not by binding state — but in practice the two are
+/// equivalent on up-and-running adapters because the ms_tcpip6 binding auto-
+/// configures a link-local `fe80::/10` address the moment it's enabled, and
+/// tentative-DAD addresses are included in the enumeration. Edge cases (IPv6
+/// stack globally disabled via `DisabledComponents`, adapter down) have no
+/// routable v6 path anyway, so skipping the disable is safe.
+///
 /// Returns:
-/// - `Some(true)` → adapter has IPv6 stack bound (caller should proceed with
+/// - `Some(true)` → adapter has an IPv6 address (caller should proceed with
 ///   the disable call).
-/// - `Some(false)` → adapter has no IPv6 binding (caller can skip entirely —
-///   this is the case that saves ~22s on adapters like Realtek RTL8821CE).
+/// - `Some(false)` → no IPv6 addresses on the system or not on this adapter
+///   (caller can skip entirely — this is the case that saves ~22s on adapters
+///   like Realtek RTL8821CE).
 /// - `None` → API failure; caller should fall through to the PowerShell path
 ///   rather than assume a state.
 #[cfg(target_os = "windows")]
@@ -100,28 +109,55 @@ pub fn has_ipv6_binding_native(if_index: u32) -> Option<bool> {
     // unbounded memory; real-world values are a few KB.
     const MAX_BUFFER_BYTES: u32 = 256 * 1024;
 
+    // Win32 error codes (ERROR_SUCCESS=0, ERROR_BUFFER_OVERFLOW=111,
+    // ERROR_NO_DATA=232). Inlined here to avoid pulling in winerror.
+    const ERROR_SUCCESS: u32 = 0;
+    const ERROR_BUFFER_OVERFLOW: u32 = 111;
+    const ERROR_NO_DATA: u32 = 232;
+
     unsafe {
         let mut size: u32 = 0;
-        // Probe size with AF_INET6 → only adapters that have the IPv6 stack
-        // bound show up in the result set.
-        let _ = GetAdaptersAddresses(
+        // Probe size with AF_INET6. The API guarantees `*SizePointer` is only
+        // updated on `ERROR_BUFFER_OVERFLOW`; on any other return value (including
+        // transient failures) `size` stays 0 — we must NOT mis-interpret that as
+        // "no IPv6 anywhere".
+        let rc = GetAdaptersAddresses(
             AF_INET6.0 as u32,
             GAA_FLAG_INCLUDE_PREFIX,
             None,
             None,
             &mut size,
         );
-        if size == 0 {
-            // No adapter on the system has IPv6 bound at all — definitely not
-            // ours.
-            return Some(false);
+        match rc {
+            ERROR_BUFFER_OVERFLOW => {
+                // Proceed to allocate + second call below.
+            }
+            ERROR_NO_DATA => {
+                // Genuine "no IPv6 adapters on system" — safe to skip disable.
+                return Some(false);
+            }
+            _ => {
+                // Probe failed for a reason we can't distinguish from "adapter
+                // exists but API had a hiccup". Punt to PowerShell.
+                return None;
+            }
         }
-        if size > MAX_BUFFER_BYTES {
+
+        if size == 0 || size > MAX_BUFFER_BYTES {
             return None;
         }
 
-        let mut buffer = vec![0u8; size as usize];
+        // Allocate as `Vec<u64>` so the buffer has 8-byte alignment — required
+        // by `IP_ADAPTER_ADDRESSES_LH` (which contains a `u64` union member).
+        // `Vec<u8>::as_mut_ptr()` only guarantees 1-byte alignment per the
+        // documented contract; casting that to `*mut IP_ADAPTER_ADDRESSES_LH`
+        // and creating a reference through it is UB per the Rust Reference
+        // even though `HeapAlloc` happens to return 16-byte-aligned blocks on
+        // x64 Windows today. Miri flags the `Vec<u8>` form.
+        let u64_elems = (size as usize + 7) / 8;
+        let mut buffer: Vec<u64> = vec![0u64; u64_elems];
         let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+
         let rc = GetAdaptersAddresses(
             AF_INET6.0 as u32,
             GAA_FLAG_INCLUDE_PREFIX,
@@ -129,14 +165,20 @@ pub fn has_ipv6_binding_native(if_index: u32) -> Option<bool> {
             Some(adapter_addresses),
             &mut size,
         );
-        if rc != 0 {
+        if rc != ERROR_SUCCESS {
             return None;
         }
 
         let mut current = adapter_addresses;
         while !current.is_null() {
             let adapter = &*current;
-            if adapter.Anonymous1.Anonymous.IfIndex == if_index {
+            // Both IfIndex (IPv4-ordinal) and Ipv6IfIndex are populated by
+            // GetAdaptersAddresses. On physical NICs they are almost always
+            // equal, but checking both costs nothing and defends against
+            // callers that seeded `if_index` from an IPv6-specific source.
+            if adapter.Anonymous1.Anonymous.IfIndex == if_index
+                || adapter.Ipv6IfIndex == if_index
+            {
                 return Some(true);
             }
             current = adapter.Next;
@@ -328,6 +370,74 @@ mod tests {
             matches!(result, Some(false) | None),
             "Expected Some(false) or None for bogus if_index, got {:?}",
             result
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_has_ipv6_binding_native_positive_path() {
+        // Enumerate adapters ourselves, pick one with an IPv6 address, then
+        // assert `has_ipv6_binding_native(that.IfIndex) == Some(true)`. This
+        // is what protects the adapter-iteration loop from being deleted /
+        // short-circuited to a bare `None` or `Some(false)` — the previous
+        // `matches!(..., Some(false) | None)` assertion passed for every
+        // trivially-broken implementation.
+        //
+        // Skip (not fail) if the host truly has no IPv6-bound adapter so CI
+        // runners without IPv6 don't redden the suite.
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        };
+        use windows::Win32::Networking::WinSock::AF_INET6;
+
+        const ERROR_BUFFER_OVERFLOW: u32 = 111;
+
+        let if_index = unsafe {
+            let mut size: u32 = 0;
+            let rc = GetAdaptersAddresses(
+                AF_INET6.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                None,
+                &mut size,
+            );
+            if rc != ERROR_BUFFER_OVERFLOW || size == 0 {
+                eprintln!(
+                    "skipping positive-path test: no IPv6 adapter on this host (rc={}, size={})",
+                    rc, size
+                );
+                return;
+            }
+
+            let u64_elems = (size as usize + 7) / 8;
+            let mut buffer: Vec<u64> = vec![0u64; u64_elems];
+            let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+            let rc = GetAdaptersAddresses(
+                AF_INET6.0 as u32,
+                GAA_FLAG_INCLUDE_PREFIX,
+                None,
+                Some(adapter_addresses),
+                &mut size,
+            );
+            if rc != 0 {
+                eprintln!("skipping positive-path test: second GAA call failed rc={}", rc);
+                return;
+            }
+
+            let first = &*adapter_addresses;
+            // Prefer Ipv6IfIndex when populated; fall back to IfIndex.
+            if first.Ipv6IfIndex != 0 {
+                first.Ipv6IfIndex
+            } else {
+                first.Anonymous1.Anonymous.IfIndex
+            }
+        };
+
+        assert_eq!(
+            has_ipv6_binding_native(if_index),
+            Some(true),
+            "expected Some(true) for a known-IPv6-bound adapter (if_index={})",
+            if_index
         );
     }
 }

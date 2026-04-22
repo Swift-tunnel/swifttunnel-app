@@ -92,7 +92,14 @@ fn check_bundled_driver_msis() {
 }
 
 fn main() {
-    check_bundled_driver_msis();
+    // Only enforce the MSI payload check when we're actually producing a
+    // Windows build. Build-script `#[cfg(target_os)]` reflects the HOST, not
+    // the target, so use CARGO_CFG_TARGET_OS. This keeps macOS/Linux
+    // `cargo check` / IDE builds green while still failing CI/Windows builds
+    // loudly if the MSIs didn't make it into resources/drivers.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        check_bundled_driver_msis();
+    }
 
     let attrs = tauri_build::Attributes::new().windows_attributes(
         tauri_build::WindowsAttributes::new().app_manifest(APP_MANIFEST),

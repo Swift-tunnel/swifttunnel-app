@@ -160,10 +160,12 @@ export const systemCheckDriver = () =>
 /**
  * Install the WinpkFilter driver.
  *
- * `force=true` is used by the recovery flow (UI shows TunnelFailed/Error after
- * the reader exhausted its rebind budget) to re-run msiexec even if the driver
- * appears installed — a corrupt install can pass the is_available() check but
- * still fail IOCTLs. Default behavior stays no-op when the driver is healthy.
+ * `force=true` re-runs msiexec even if `is_available()` reports success. A
+ * corrupt install can pass the open-handle check but still fail IOCTLs, so the
+ * force path is available for a future recovery flow (invoked after a mid-
+ * session workers_panicked transition). No production caller currently passes
+ * `true`; the default `force=false` path remains a no-op when the driver is
+ * healthy.
  */
 export const systemInstallDriver = (force = false) =>
   invoke<void>("system_install_driver", { force });
