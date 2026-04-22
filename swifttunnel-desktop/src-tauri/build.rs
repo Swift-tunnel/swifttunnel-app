@@ -92,12 +92,13 @@ fn check_bundled_driver_msis() {
 }
 
 fn main() {
-    // Only enforce the MSI payload check when we're actually producing a
-    // Windows build. Build-script `#[cfg(target_os)]` reflects the HOST, not
-    // the target, so use CARGO_CFG_TARGET_OS. This keeps macOS/Linux
-    // `cargo check` / IDE builds green while still failing CI/Windows builds
-    // loudly if the MSIs didn't make it into resources/drivers.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    // Only enforce the MSI payload check for Windows release builds.
+    // CARGO_CFG_TARGET_OS gates out macOS/Linux hosts; PROFILE gates out
+    // debug/check builds so CI's `cargo check -p swifttunnel-desktop` stays
+    // green (the MSIs are only fetched in the release workflow).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("PROFILE").as_deref() == Ok("release")
+    {
         check_bundled_driver_msis();
     }
 
