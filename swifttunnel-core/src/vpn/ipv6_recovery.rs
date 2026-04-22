@@ -77,6 +77,79 @@ pub fn query_ipv6_binding_enabled(adapter_name: &str) -> Option<bool> {
     }
 }
 
+/// Check via IP Helper API (no PowerShell, no WMI) whether the adapter at
+/// `if_index` currently has IPv6 bound. Used as a fast pre-check before
+/// attempting `Disable-NetAdapterBinding`, which can hang 30+ seconds on
+/// Realtek / slow-WMI machines even when there is nothing to disable.
+///
+/// Returns:
+/// - `Some(true)` → adapter has IPv6 stack bound (caller should proceed with
+///   the disable call).
+/// - `Some(false)` → adapter has no IPv6 binding (caller can skip entirely —
+///   this is the case that saves ~22s on adapters like Realtek RTL8821CE).
+/// - `None` → API failure; caller should fall through to the PowerShell path
+///   rather than assume a state.
+#[cfg(target_os = "windows")]
+pub fn has_ipv6_binding_native(if_index: u32) -> Option<bool> {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::Networking::WinSock::AF_INET6;
+
+    // Hard cap on initial buffer so a huge machine doesn't make us allocate
+    // unbounded memory; real-world values are a few KB.
+    const MAX_BUFFER_BYTES: u32 = 256 * 1024;
+
+    unsafe {
+        let mut size: u32 = 0;
+        // Probe size with AF_INET6 → only adapters that have the IPv6 stack
+        // bound show up in the result set.
+        let _ = GetAdaptersAddresses(
+            AF_INET6.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            None,
+            &mut size,
+        );
+        if size == 0 {
+            // No adapter on the system has IPv6 bound at all — definitely not
+            // ours.
+            return Some(false);
+        }
+        if size > MAX_BUFFER_BYTES {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+        let rc = GetAdaptersAddresses(
+            AF_INET6.0 as u32,
+            GAA_FLAG_INCLUDE_PREFIX,
+            None,
+            Some(adapter_addresses),
+            &mut size,
+        );
+        if rc != 0 {
+            return None;
+        }
+
+        let mut current = adapter_addresses;
+        while !current.is_null() {
+            let adapter = &*current;
+            if adapter.Anonymous1.Anonymous.IfIndex == if_index {
+                return Some(true);
+            }
+            current = adapter.Next;
+        }
+        Some(false)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn has_ipv6_binding_native(_if_index: u32) -> Option<bool> {
+    None
+}
+
 /// Write IPv6 disabled marker with adapter name and original binding state.
 pub fn write_ipv6_marker(adapter_name: &str) {
     if let Some(marker_path) = get_marker_path() {
@@ -230,5 +303,31 @@ mod tests {
 
         let after_delete = read_ipv6_marker();
         assert_eq!(after_delete, None);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_has_ipv6_binding_native_returns_none_on_non_windows() {
+        // On non-Windows the stub returns None so callers transparently fall
+        // back to the PowerShell query path. If this regresses, the IPv6
+        // disable fast-path would silently skip-or-not-skip in a
+        // non-deterministic way on dev machines.
+        assert_eq!(has_ipv6_binding_native(0), None);
+        assert_eq!(has_ipv6_binding_native(999), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_has_ipv6_binding_native_handles_nonexistent_index() {
+        // A very large, almost certainly unused if_index should produce
+        // Some(false) — the IP Helper enumerates all IPv6 adapters and
+        // doesn't find this one. If the API itself is broken we get None;
+        // either way we must not panic.
+        let result = has_ipv6_binding_native(0x7FFF_FFFF);
+        assert!(
+            matches!(result, Some(false) | None),
+            "Expected Some(false) or None for bogus if_index, got {:?}",
+            result
+        );
     }
 }

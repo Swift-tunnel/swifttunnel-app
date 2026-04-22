@@ -1827,16 +1827,51 @@ impl VpnConnection {
                         {
                             use super::udp_relay::RelayHealthState;
                             let health = relay_health_monitor.relay_health();
-                            // A panicked sender, inbound receiver, or reader
-                            // thread ranks above every other health state:
-                            // without them, no bytes flow, even if the last
-                            // relay heartbeat was recent.
-                            let tunnel_threads_panicked = relay_health_monitor.sender_panicked()
-                                || workers_panicked_monitor
-                                    .as_ref()
-                                    .map(|f| f.load(Ordering::Acquire))
-                                    .unwrap_or(false);
-                            let new_status = if tunnel_threads_panicked {
+
+                            // `workers_panicked` means the split-tunnel reader
+                            // thread exhausted its rebind budget (see
+                            // `READER_MAX_REBINDS` in parallel_interceptor.rs)
+                            // or the V3 inbound receiver panicked — in either
+                            // case, zero packets will ever flow again in this
+                            // session. Previously we only dimmed `relay_status`
+                            // and the UI kept showing a green check. Now we
+                            // transition out of Connected so the UI can offer
+                            // reconnect + reinstall-driver CTAs.
+                            let workers_panicked = workers_panicked_monitor
+                                .as_ref()
+                                .map(|f| f.load(Ordering::Acquire))
+                                .unwrap_or(false);
+
+                            if workers_panicked {
+                                let transitioned = state_handle.send_if_modified(|state| {
+                                    if matches!(*state, ConnectionState::Connected { .. }) {
+                                        log::error!(
+                                            "V3: Split-tunnel reader could not recover — transitioning Connected → Error"
+                                        );
+                                        *state = ConnectionState::Error(
+                                            "Tunnel driver lost its adapter handle and could not recover. \
+                                             Please reconnect. If this keeps happening, reinstall WinpkFilter."
+                                                .to_string(),
+                                        );
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                });
+                                // If we transitioned, stop monitoring — the
+                                // session is dead and cleanup will follow.
+                                if transitioned {
+                                    break;
+                                }
+                            }
+
+                            // Transient relay sender hiccups (UDP send errors,
+                            // stale heartbeat) stay as a Connected sub-status.
+                            // They're often self-healing; the UI shows a
+                            // yellow banner rather than tearing down the
+                            // whole connection.
+                            let sender_panicked = relay_health_monitor.sender_panicked();
+                            let new_status = if sender_panicked {
                                 Some("panicked".to_string())
                             } else {
                                 match health {

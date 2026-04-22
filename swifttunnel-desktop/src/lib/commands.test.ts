@@ -53,10 +53,17 @@ describe("lib/commands", () => {
     });
   });
 
-  it("systemInstallDriver invokes backend with expected args", async () => {
+  it("systemInstallDriver invokes backend with force=false by default", async () => {
     invoke.mockResolvedValue(undefined);
     await expect(systemInstallDriver()).resolves.toBeUndefined();
-    expect(invoke).toHaveBeenCalledWith("system_install_driver");
+    expect(invoke).toHaveBeenCalledWith("system_install_driver", { force: false });
+  });
+
+  it("systemInstallDriver passes force=true when recovery flow invokes repair", async () => {
+    invoke.mockReset();
+    invoke.mockResolvedValue(undefined);
+    await expect(systemInstallDriver(true)).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("system_install_driver", { force: true });
   });
 
   it("systemRestartAsAdmin invokes backend with expected args", async () => {

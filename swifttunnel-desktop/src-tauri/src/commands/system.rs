@@ -559,10 +559,18 @@ pub async fn system_check_driver() -> Result<DriverCheckResponse, String> {
 }
 
 #[tauri::command]
-pub async fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn system_install_driver(
+    app: tauri::AppHandle,
+    force: Option<bool>,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
-        if swifttunnel_core::vpn::SplitTunnelDriver::is_available() {
+        // `force = true` comes from the recovery UI ("Reinstall driver" after
+        // TunnelFailed) — we want to re-run msiexec even if `is_available()`
+        // still reports success, because a stale/corrupt driver can pass the
+        // open-handle check but fail on IOCTLs.
+        let force = force.unwrap_or(false);
+        if !force && swifttunnel_core::vpn::SplitTunnelDriver::is_available() {
             return Ok(());
         }
 
@@ -739,6 +747,7 @@ pub async fn system_install_driver(app: tauri::AppHandle) -> Result<(), String> 
 
     #[cfg(not(windows))]
     {
+        let _ = (app, force);
         Err("Driver installation is only supported on Windows".to_string())
     }
 }

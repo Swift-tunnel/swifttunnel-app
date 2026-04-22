@@ -58,7 +58,8 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    delete_ipv6_marker, query_ipv6_binding_enabled, restore_ipv6_from_marker, write_ipv6_marker,
+    delete_ipv6_marker, has_ipv6_binding_native, query_ipv6_binding_enabled,
+    restore_ipv6_from_marker, write_ipv6_marker,
 };
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
@@ -77,6 +78,37 @@ const MAX_PACKET_SIZE: usize = 1600;
 /// unbounded; at this cap we stop recording new IPs for the remainder of the
 /// session (existing IPs still re-register harmlessly).
 const MAX_DETECTED_GAME_SERVERS: usize = 10_000;
+
+/// Packet reader rebind budget. Transient NDIS glitches (sleep/resume, WLAN
+/// roam, driver reset, ndisrd.sys handle staleness) can make `read_packets`
+/// return `0x80070057 ERROR_INVALID_PARAMETER`. Instead of tearing down the
+/// tunnel on the first failure (which showed a fake "Connected" UI on ferdi's
+/// Realtek RTL8821CE), we rebind fresh handles up to this many times before
+/// escalating to `workers_panicked`. Any successful read resets the counter.
+const READER_MAX_REBINDS: u32 = 3;
+
+/// Backoff between rebind attempts. Short at first (transient blip) then
+/// grows to give NDIS a moment to resettle after a driver reset.
+const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
+    Duration::from_millis(100),
+    Duration::from_millis(500),
+    Duration::from_secs(2),
+];
+
+/// Sleep for `total`, waking at most every 50ms to check `stop_flag`. Returns
+/// `true` if the caller should exit because `stop_flag` is set. Used during
+/// the reader rebind backoff so disconnect stays responsive.
+fn interruptible_sleep(total: Duration, stop_flag: &AtomicBool) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < total {
+        if stop_flag.load(Ordering::Relaxed) {
+            return true;
+        }
+        let remaining = total.saturating_sub(start.elapsed());
+        std::thread::sleep(std::cmp::min(Duration::from_millis(50), remaining));
+    }
+    stop_flag.load(Ordering::Relaxed)
+}
 
 /// Thread-local pre-allocated buffer to eliminate per-packet heap allocations
 /// Used for checksum fixup on tunneled packets
@@ -918,8 +950,43 @@ impl ParallelInterceptor {
     /// Check if driver is available
     pub fn check_driver_available() -> bool {
         match ndisapi::Ndisapi::new("NDISRD") {
-            Ok(_) => {
-                log::info!("Windows Packet Filter driver available");
+            Ok(driver) => {
+                // Log the installed driver version so that "tunnel works fine"
+                // vs. "read_packets fails with 0x80070057 on Realtek" can be
+                // correlated with driver version in support logs. Minimum
+                // tested-compatible version is 3.6.2 (what we ship). If
+                // someone's machine has an older ndisrd.sys from a previous
+                // product, we still return true (the driver opens fine), but
+                // the warning makes the mismatch visible.
+                match driver.get_version() {
+                    Ok(version) => {
+                        const MIN_MAJOR: u32 = 3;
+                        const MIN_MINOR: u32 = 6;
+                        if version.major < MIN_MAJOR
+                            || (version.major == MIN_MAJOR && version.minor < MIN_MINOR)
+                        {
+                            log::warn!(
+                                "Windows Packet Filter driver is older than expected: installed {}.{}.{}, SwiftTunnel ships with 3.6.2. \
+                                 Reader may return ERROR_INVALID_PARAMETER on some adapters — consider reinstalling.",
+                                version.major, version.minor, version.revision
+                            );
+                        } else {
+                            log::info!(
+                                "Windows Packet Filter driver available (version {}.{}.{})",
+                                version.major, version.minor, version.revision
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // get_version failing is itself a signal that the
+                        // driver is healthy enough to open but has a broken
+                        // IOCTL path — log and continue.
+                        log::warn!(
+                            "Windows Packet Filter driver available but version query failed: {}",
+                            e
+                        );
+                    }
+                }
                 true
             }
             Err(e) => {
@@ -3051,15 +3118,38 @@ impl ParallelInterceptor {
         write_tso_marker(&friendly_name);
         self.tso_was_disabled = true;
 
-        // 5 second timeout to prevent indefinite hangs
-        if Self::run_powershell_with_timeout(&script, 5) {
-            log::info!("TSO/LSO disabled successfully on {}", friendly_name);
-        } else {
-            log::warn!(
-                "Failed to disable TSO (non-fatal) - adapter may not support these settings"
-            );
-            // Don't fail - some adapters don't support these settings
-        }
+        // Run the PowerShell disable in a background thread. On machines with
+        // a slow or hung WMI provider (e.g. Realtek RTL8821CE on ferdi's
+        // 2026-04-19 log), `Set-NetAdapterAdvancedProperty` can block for
+        // 30-60s, which stalls the connect flow even though the tunnel would
+        // otherwise be ready. TSO-on-intercept is a performance concern, not
+        // a correctness one for the first few packets, so we proceed with
+        // reader startup immediately and let the offload toggle complete
+        // asynchronously. The marker is written eagerly above so
+        // restore-on-disconnect still does the right thing.
+        let friendly_for_thread = friendly_name.clone();
+        std::thread::Builder::new()
+            .name("swifttunnel-tso-disable".into())
+            .spawn(move || {
+                // 3s cap; anything longer is WMI hung and not worth waiting for.
+                if ParallelInterceptor::run_powershell_with_timeout(&script, 3) {
+                    log::info!(
+                        "TSO/LSO disabled successfully on {} (background)",
+                        friendly_for_thread
+                    );
+                } else {
+                    log::warn!(
+                        "Failed to disable TSO on {} (non-fatal): adapter may not support these \
+                         settings, or WMI is unresponsive. Proceeding with tunnel anyway.",
+                        friendly_for_thread
+                    );
+                }
+            })
+            .map_err(|e| {
+                // Spawning a thread should never fail under normal load;
+                // if it does, fall back to blocking to keep behavior safe.
+                VpnError::SplitTunnel(format!("Failed to spawn TSO disable thread: {}", e))
+            })?;
 
         Ok(())
     }
@@ -3184,6 +3274,40 @@ impl ParallelInterceptor {
             "Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)",
             friendly_name
         );
+
+        // Fast path: if the adapter has no IPv6 binding at all, skip the
+        // PowerShell disable entirely. `Disable-NetAdapterBinding` goes
+        // through WMI, which hangs for 20-30s on Realtek / slow-WMI systems
+        // even when there's nothing to disable (see support log from
+        // ferdi@2026-04-19). `has_ipv6_binding_native` uses the IP Helper
+        // API and returns in <1ms.
+        if let Some(if_index) = self.physical_adapter_if_index {
+            match has_ipv6_binding_native(if_index) {
+                Some(false) => {
+                    log::info!(
+                        "IPv6 already not bound on adapter {} (IP Helper fast-path); skipping disable",
+                        friendly_name
+                    );
+                    self.ipv6_was_disabled = false;
+                    delete_ipv6_marker();
+                    return Ok(());
+                }
+                Some(true) => {
+                    // IPv6 is bound — fall through to the slower check +
+                    // disable path. We don't skip the PowerShell
+                    // `query_ipv6_binding_enabled` below because it returns
+                    // the *enabled* state (bound + enabled vs. bound + force-
+                    // disabled) which the marker needs for accurate restore.
+                }
+                None => {
+                    // API error — fall through, let PowerShell handle it.
+                    log::debug!(
+                        "Native IPv6 probe failed for if_index {} — falling back to PowerShell",
+                        if_index
+                    );
+                }
+            }
+        }
 
         if matches!(query_ipv6_binding_enabled(&friendly_name), Some(false)) {
             log::info!(
@@ -3951,26 +4075,20 @@ fn run_packet_reader(
     let mut snapshot_version = snapshot.version;
     let mut inline_cache: InlineCache = ahash::AHashMap::with_capacity(1024);
 
-    let driver = ndisapi::Ndisapi::new("NDISRD")
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
-
-    let adapters = driver
-        .get_tcpip_bound_adapters_info()
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to get adapters: {}", e)))?;
-
-    if physical_idx >= adapters.len() {
-        return Err(VpnError::SplitTunnel(
-            "Physical adapter index out of range".to_string(),
-        ));
+    // Bundle the per-run driver/adapter/event so we can rebind atomically.
+    // Each acquire() opens a fresh NDISRD handle and re-enumerates adapters,
+    // which is the only way to recover from a stale adapter handle.
+    struct ReaderBindings {
+        driver: ndisapi::Ndisapi,
+        physical_handle: HANDLE,
+        event: HANDLE,
     }
 
-    let physical_handle = adapters[physical_idx].get_handle();
-
-    // RAII guard for Windows HANDLE to prevent leaks on error
-    struct HandleGuard(HANDLE);
-    impl Drop for HandleGuard {
+    // RAII fallback for the event handle in case set_packet_event / set_adapter_mode
+    // fails partway through acquire().
+    struct EventGuard(HANDLE);
+    impl Drop for EventGuard {
         fn drop(&mut self) {
-            // Check for null (0) and INVALID_HANDLE_VALUE (-1 as isize cast to pointer)
             let raw_handle = self.0.0 as isize;
             if raw_handle != 0 && raw_handle != -1 {
                 unsafe {
@@ -3980,26 +4098,79 @@ fn run_packet_reader(
         }
     }
 
-    // Create event for packet notification
-    let event: HANDLE = unsafe {
-        CreateEventW(None, true, false, None)
-            .map_err(|e| VpnError::SplitTunnel(format!("Failed to create event: {}", e)))?
-    };
+    impl ReaderBindings {
+        fn acquire(physical_name: &str) -> VpnResult<Self> {
+            let driver = ndisapi::Ndisapi::new("NDISRD")
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to open driver: {}", e)))?;
 
-    // Wrap in RAII guard - will close handle if we return early due to error
-    let event_guard = HandleGuard(event);
+            let adapters = driver
+                .get_tcpip_bound_adapters_info()
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to get adapters: {}", e)))?;
 
-    driver
-        .set_packet_event(physical_handle, event)
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to set packet event: {}", e)))?;
+            // Match by adapter device name (e.g. "\DEVICE\{GUID}") rather than
+            // index — if a device list change reordered adapters between the
+            // initial enumeration and this acquire(), the index could now point
+            // at a different NIC. The name/GUID is stable for the physical
+            // device.
+            let adapter = adapters
+                .iter()
+                .find(|a| a.get_name() == physical_name)
+                .ok_or_else(|| {
+                    VpnError::SplitTunnel(format!(
+                        "Physical adapter '{}' not found during reader bind (removed/renamed?)",
+                        physical_name
+                    ))
+                })?;
 
-    // Set adapter to tunnel mode
-    driver
-        .set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
-        .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
+            let physical_handle = adapter.get_handle();
 
-    // Transfer ownership from guard - we'll close manually in cleanup
-    std::mem::forget(event_guard);
+            let event: HANDLE = unsafe {
+                CreateEventW(None, true, false, None)
+                    .map_err(|e| VpnError::SplitTunnel(format!("Failed to create event: {}", e)))?
+            };
+
+            // If the ndisapi calls below fail, the guard closes the event on
+            // the early return path.
+            let event_guard = EventGuard(event);
+
+            driver.set_packet_event(physical_handle, event).map_err(|e| {
+                VpnError::SplitTunnel(format!("Failed to set packet event: {}", e))
+            })?;
+
+            driver
+                .set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to set adapter mode: {}", e)))?;
+
+            // Transfer event ownership into the bindings — the guard should
+            // NOT close the event now.
+            std::mem::forget(event_guard);
+
+            Ok(Self {
+                driver,
+                physical_handle,
+                event,
+            })
+        }
+
+        fn release(self) {
+            // Best-effort cleanup: reset adapter mode so WinpkFilter stops
+            // routing packets through the queue, then close the event. Errors
+            // are ignored because we're tearing down either way.
+            let _ = self
+                .driver
+                .set_adapter_mode(self.physical_handle, FilterFlags::default());
+            unsafe {
+                let _ = CloseHandle(self.event);
+            }
+            // self.driver drops here, closing its \\.\NDISRD handle.
+        }
+    }
+
+    // `physical_idx` is still logged for operator continuity (see startup
+    // log above), but from here on we look up the adapter by `physical_name`
+    // so the reader can rebind even if device enumeration reorders.
+    let mut bindings = ReaderBindings::acquire(physical_name.as_ref())?;
+    let mut rebind_attempts: u32 = 0;
 
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
     let mut passthrough_to_adapter: EthMRequest<BATCH_SIZE>;
@@ -4016,36 +4187,92 @@ fn run_packet_reader(
         // avoiding 1000Hz polling that wastes CPU when idle
         // (When packets arrive, event signals immediately - no added latency)
         unsafe {
-            WaitForSingleObject(event, 100);
+            WaitForSingleObject(bindings.event, 100);
         }
 
         // Read batch of packets
-        let mut to_read = EthMRequestMut::from_iter(physical_handle, packets.iter_mut());
+        let mut to_read =
+            EthMRequestMut::from_iter(bindings.physical_handle, packets.iter_mut());
 
-        let packets_read = match driver.read_packets::<BATCH_SIZE>(&mut to_read) {
-            Ok(n) => n,
+        let packets_read = match bindings.driver.read_packets::<BATCH_SIZE>(&mut to_read) {
+            Ok(n) => {
+                // A successful read with >0 packets means the adapter handle is
+                // healthy again — forgive any rebind budget we'd accumulated
+                // during the transient glitch.
+                if rebind_attempts > 0 && n > 0 {
+                    log::info!(
+                        "Reader: recovered after {} rebind attempt(s) — handle is healthy",
+                        rebind_attempts
+                    );
+                    rebind_attempts = 0;
+                }
+                n
+            }
             Err(e) => {
-                // An error here usually means the NDIS adapter handle is gone
-                // (driver reset, device removal, sleep/resume glitch). Signal
-                // shutdown to sibling threads via stop_flag and propagate the
-                // error out so the thread wrapper can set workers_panicked —
-                // that's how the connection monitor distinguishes this from a
-                // user-initiated disconnect.
-                log::error!(
-                    "Reader: driver.read_packets failed ({}); stopping reader loop",
-                    e
+                // If we're already shutting down, don't rebind — exit cleanly.
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                rebind_attempts += 1;
+                if rebind_attempts > READER_MAX_REBINDS {
+                    log::error!(
+                        "Reader: driver.read_packets failed ({}); rebind budget ({}) exhausted, stopping reader loop",
+                        e,
+                        READER_MAX_REBINDS
+                    );
+                    stop_flag.store(true, Ordering::Relaxed);
+                    return Err(VpnError::SplitTunnel(format!(
+                        "driver.read_packets failed after {} rebinds: {}",
+                        READER_MAX_REBINDS, e
+                    )));
+                }
+
+                let backoff = REBIND_BACKOFFS[(rebind_attempts - 1) as usize];
+                log::warn!(
+                    "Reader: driver.read_packets failed ({}); rebind attempt {}/{} after {}ms backoff",
+                    e,
+                    rebind_attempts,
+                    READER_MAX_REBINDS,
+                    backoff.as_millis()
                 );
-                stop_flag.store(true, Ordering::Relaxed);
-                return Err(VpnError::SplitTunnel(format!(
-                    "driver.read_packets failed: {}",
-                    e
-                )));
+
+                // Give NDIS a moment to settle before reopening. Interruptible
+                // so disconnect during backoff works instantly.
+                if interruptible_sleep(backoff, &stop_flag) {
+                    break;
+                }
+
+                match ReaderBindings::acquire(physical_name.as_ref()) {
+                    Ok(new_bindings) => {
+                        let old = std::mem::replace(&mut bindings, new_bindings);
+                        old.release();
+                        log::info!(
+                            "Reader: rebind attempt {}/{} acquired fresh handles, resuming read loop",
+                            rebind_attempts,
+                            READER_MAX_REBINDS
+                        );
+                    }
+                    Err(acquire_err) => {
+                        // Don't count this as a fatal failure — the adapter
+                        // might transiently not be in the list during driver
+                        // reset. Fall through to retry on the next iteration.
+                        log::warn!(
+                            "Reader: rebind attempt {}/{} failed to re-acquire handles: {} (will retry)",
+                            rebind_attempts,
+                            READER_MAX_REBINDS,
+                            acquire_err
+                        );
+                    }
+                }
+
+                continue;
             }
         };
 
         if packets_read == 0 {
             unsafe {
-                let _ = ResetEvent(event);
+                let _ = ResetEvent(bindings.event);
             }
             continue;
         }
@@ -4063,8 +4290,8 @@ fn run_packet_reader(
         let api_tunneling = api_tunneling_enabled.load(Ordering::Relaxed);
 
         // Prepare passthrough queues
-        passthrough_to_adapter = EthMRequest::new(physical_handle);
-        passthrough_to_mstcp = EthMRequest::new(physical_handle);
+        passthrough_to_adapter = EthMRequest::new(bindings.physical_handle);
+        passthrough_to_mstcp = EthMRequest::new(bindings.physical_handle);
 
         // Dispatch packets to workers using source-port hash or fragment metadata hash.
         for i in 0..packets_read {
@@ -4177,23 +4404,24 @@ fn run_packet_reader(
 
         // Send passthrough packets
         if passthrough_to_adapter.get_packet_number() > 0 {
-            let _ = driver.send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
+            let _ = bindings
+                .driver
+                .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
         }
 
         if passthrough_to_mstcp.get_packet_number() > 0 {
-            let _ = driver.send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp);
+            let _ = bindings
+                .driver
+                .send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp);
         }
 
         unsafe {
-            let _ = ResetEvent(event);
+            let _ = ResetEvent(bindings.event);
         }
     }
 
-    // Cleanup
-    let _ = driver.set_adapter_mode(physical_handle, FilterFlags::default());
-    unsafe {
-        let _ = CloseHandle(event);
-    }
+    // Cleanup: release adapter mode + event + driver handle.
+    bindings.release();
 
     log::info!("Packet reader stopped");
     Ok(())
@@ -8526,5 +8754,98 @@ mod tests {
             "UDP routing must be identical regardless of api_tunneling"
         );
         assert!(result_a, "UDP from tunnel app should always be tunneled");
+    }
+
+    // ------------------------------------------------------------------
+    // Reader rebind / recovery tests
+    //
+    // The reader's actual rebind flow requires ndisapi + a real NDIS driver,
+    // so we can't unit-test `run_packet_reader` itself. These tests cover
+    // the extracted helpers + invariants so a future regression (e.g. someone
+    // shortens REBIND_BACKOFFS to zero, or loses stop_flag responsiveness)
+    // gets caught without needing a Windows integration harness.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_rebind_backoffs_are_monotonically_non_decreasing() {
+        // The expectation is "gentle first, patient later" — any regression
+        // that shortens later backoffs vs. earlier ones would hammer the
+        // driver during the exact window it needs time to resettle.
+        for window in REBIND_BACKOFFS.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "REBIND_BACKOFFS must be non-decreasing: {:?}",
+                REBIND_BACKOFFS
+            );
+        }
+    }
+
+    #[test]
+    fn test_rebind_backoffs_length_matches_budget() {
+        // The reader indexes REBIND_BACKOFFS by (rebind_attempts - 1).
+        // A mismatch would panic the reader thread mid-recovery.
+        assert_eq!(REBIND_BACKOFFS.len(), READER_MAX_REBINDS as usize);
+    }
+
+    #[test]
+    fn test_rebind_budget_is_at_least_one() {
+        // A budget of 0 would mean "retry never" — same as old behavior,
+        // defeats the point of this file's rebind machinery.
+        assert!(
+            READER_MAX_REBINDS >= 1,
+            "Reader must allow at least one rebind attempt"
+        );
+    }
+
+    #[test]
+    fn test_interruptible_sleep_completes_when_stop_flag_not_set() {
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let aborted = interruptible_sleep(Duration::from_millis(120), &stop);
+        let elapsed = start.elapsed();
+        assert!(!aborted, "sleep should complete naturally when stop_flag is false");
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "sleep should run for at least the requested duration (got {:?})",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "sleep should not massively overshoot (got {:?})",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_interruptible_sleep_bails_early_when_stop_flag_set() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+
+        // Trigger stop_flag after ~75ms while the reader sleeps 2s (worst-case
+        // rebind backoff). Expect the call to return promptly.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(75));
+            stop_clone.store(true, Ordering::Relaxed);
+        });
+
+        let start = Instant::now();
+        let aborted = interruptible_sleep(Duration::from_secs(2), &stop);
+        let elapsed = start.elapsed();
+
+        assert!(aborted, "sleep should report that it was interrupted");
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "sleep should bail within one polling tick of the flag flipping (got {:?})",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_interruptible_sleep_zero_duration_returns_stop_state() {
+        let stop = AtomicBool::new(true);
+        // total = 0 means we never enter the loop body; result should
+        // reflect the current flag state rather than panic.
+        let aborted = interruptible_sleep(Duration::from_millis(0), &stop);
+        assert!(aborted);
     }
 }

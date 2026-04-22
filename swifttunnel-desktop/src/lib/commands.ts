@@ -157,8 +157,16 @@ export const systemIsAdmin = () =>
 export const systemCheckDriver = () =>
   invoke<DriverCheckResponse>("system_check_driver");
 
-export const systemInstallDriver = () =>
-  invoke<void>("system_install_driver");
+/**
+ * Install the WinpkFilter driver.
+ *
+ * `force=true` is used by the recovery flow (UI shows TunnelFailed/Error after
+ * the reader exhausted its rebind budget) to re-run msiexec even if the driver
+ * appears installed — a corrupt install can pass the is_available() check but
+ * still fail IOCTLs. Default behavior stays no-op when the driver is healthy.
+ */
+export const systemInstallDriver = (force = false) =>
+  invoke<void>("system_install_driver", { force });
 
 export const systemLaunchedFromStartup = () =>
   invoke<boolean>("system_launched_from_startup");
