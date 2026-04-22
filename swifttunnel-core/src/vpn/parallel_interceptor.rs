@@ -1041,22 +1041,23 @@ impl ParallelInterceptor {
                 // the warning makes the mismatch visible.
                 match driver.get_version() {
                     Ok(version) => {
-                        // Minimum shipped-and-tested version. Tuple comparison
-                        // catches 3.6.0 and 3.6.1 too, not just <3.6.0 — the
-                        // Realtek ERROR_INVALID_PARAMETER regression was
-                        // specifically fixed in 3.6.2 upstream.
-                        const MIN: (u32, u32, u32) = (3, 6, 2);
+                        // Minimum shipped-and-tested version. Single source
+                        // of truth lives in `winpkfilter::MIN_DRIVER_VERSION`
+                        // — keep them in sync via that constant so bumps
+                        // only need one edit, and so the self-test /
+                        // auto-install paths all agree on the floor.
+                        let min = super::winpkfilter::MIN_DRIVER_VERSION;
                         let installed = (version.major, version.minor, version.revision);
-                        if installed < MIN {
+                        if installed < min {
                             log::warn!(
                                 "Windows Packet Filter driver is older than expected: installed {}.{}.{}, SwiftTunnel ships with {}.{}.{}. \
                                  Reader may return ERROR_INVALID_PARAMETER on some adapters — consider reinstalling.",
                                 version.major,
                                 version.minor,
                                 version.revision,
-                                MIN.0,
-                                MIN.1,
-                                MIN.2
+                                min.0,
+                                min.1,
+                                min.2
                             );
                         } else {
                             log::info!(

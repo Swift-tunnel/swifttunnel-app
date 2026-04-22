@@ -315,11 +315,115 @@ impl SplitTunnelDriver {
         false
     }
 
+    /// End-to-end self-test for a freshly installed (or repaired) driver.
+    ///
+    /// `check_driver_available` only verifies that `\\.\NDISRD` opens — a weak
+    /// proxy for "the driver works". Machines can pass that check with a
+    /// pre-3.6.2 WinpkFilter install left over from another product
+    /// (ExpressVPN, NordLynx, Wiresock's stand-alone tools) and then fail the
+    /// reader bind at runtime with `ERROR_INVALID_PARAMETER`. This runs the
+    /// next-most-expensive IOCTL (`get_tcpip_bound_adapters_info`) and the
+    /// version check, so the install flow can catch both failure modes up
+    /// front rather than having the user see a "driver not available" error
+    /// on their first Connect.
+    ///
+    /// Returns:
+    /// - `Ok(())` — driver opened, enumerated adapters, and version is new
+    ///   enough (>= 3.6.2).
+    /// - `Err("reboot required…")` / `Err("driver version too old…")` / etc.
+    ///   The error string is shaped so the UI's `isRebootRequired` and
+    ///   `isDriverMissing` helpers can substring-match without parsing.
+    pub fn self_test() -> Result<(), String> {
+        use super::winpkfilter::{MIN_DRIVER_VERSION, format_version};
+
+        let driver = ndisapi::Ndisapi::new("NDISRD").map_err(|e| {
+            format!(
+                "Split tunnel driver not available (Windows Packet Filter driver): failed to open \\\\.\\NDISRD: {}",
+                e
+            )
+        })?;
+
+        // Enumerate adapters. This is the next IOCTL the reader thread will
+        // run during `ReaderBindings::acquire`. An install that passes the
+        // open check but fails here is the "install succeeded, connect
+        // fails" state that costs users an install+reboot cycle to diagnose
+        // by hand.
+        let adapters = driver.get_tcpip_bound_adapters_info().map_err(|e| {
+            format!(
+                "Split tunnel driver not available (Windows Packet Filter driver): installed but IOCTL failed (get_tcpip_bound_adapters_info: {}). Please reboot and try again.",
+                e
+            )
+        })?;
+        if adapters.is_empty() {
+            // Not strictly an install failure, but worth surfacing — on
+            // most machines at least one adapter is NDISRD-bound.
+            log::warn!(
+                "Driver self-test: opened NDISRD and IOCTLs work, but no TCP/IP-bound adapters were enumerated. Tunnel will fail until at least one network interface is bound."
+            );
+        } else {
+            log::info!(
+                "Driver self-test: NDISRD enumerated {} TCP/IP-bound adapter(s)",
+                adapters.len()
+            );
+        }
+
+        match driver.get_version() {
+            Ok(version) => {
+                let installed = (version.major, version.minor, version.revision);
+                if installed < MIN_DRIVER_VERSION {
+                    return Err(format!(
+                        "Split tunnel driver is older than SwiftTunnel requires \
+                         (installed {}, required >= {}). An older Windows Packet \
+                         Filter driver (usually left over from another VPN) is \
+                         preventing SwiftTunnel's bundled 3.6.2 from taking \
+                         effect. Uninstall the other tool's driver, then reinstall \
+                         SwiftTunnel's driver.",
+                        format_version(installed),
+                        format_version(MIN_DRIVER_VERSION)
+                    ));
+                }
+                log::info!(
+                    "Driver self-test: version {} passes minimum {}",
+                    format_version(installed),
+                    format_version(MIN_DRIVER_VERSION)
+                );
+            }
+            Err(e) => {
+                // get_version is usually infallible on a healthy install,
+                // but don't hard-fail the self-test on it — the adapter
+                // enumeration above is a stronger signal. Log and pass.
+                log::warn!(
+                    "Driver self-test: version query failed ({}); continuing because adapters enumerated OK",
+                    e
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Try to install the driver from the bundled MSI.
+    ///
+    /// Validates the MSI's pinned SHA-256 before handing it to msiexec — a
+    /// corrupted bundle (partial copy, disk bit-rot, tampered installer)
+    /// would otherwise surface as an opaque msiexec 1603 with no hint that
+    /// the file itself is wrong. Keeping the check at the bundled path (not
+    /// just the runtime download fallback in the Tauri `system_install_driver`
+    /// command) closes the hole for auto-install during first connect, which
+    /// is the overwhelmingly common path.
     fn install_driver_from_msi() -> Result<(), String> {
         let msi_path = Self::find_driver_msi().ok_or_else(Self::driver_msi_not_found_message)?;
+        let pkg = super::winpkfilter::native_msi_package();
 
-        log::info!("Installing WinpkFilter from: {}", msi_path.display());
+        super::winpkfilter::validate_msi_file(&msi_path, pkg).map_err(|e| {
+            log::error!("Bundled WinpkFilter MSI failed integrity check: {}", e);
+            e
+        })?;
+
+        log::info!(
+            "Installing WinpkFilter from: {} (sha256 verified)",
+            msi_path.display()
+        );
 
         let output = std::process::Command::new("msiexec")
             .args(["/i", &msi_path.to_string_lossy(), "/qn", "/norestart"])

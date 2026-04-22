@@ -405,12 +405,34 @@ fn resolve_winpkfilter_msi(
 ) -> Result<PathBuf, String> {
     let pkg = swifttunnel_core::vpn::winpkfilter::native_msi_package();
 
+    // Validate bundled MSIs the same way we validate cached downloads — a
+    // bundled file can be just as corrupted (partial NSIS extract, disk
+    // bit-rot, tampered install) and handing a bad MSI to msiexec surfaces
+    // as an opaque 1603 with no hint that the file itself is the problem.
+    // Falling through to the download path on integrity failure is
+    // deliberate: the pinned SHA-256 is authoritative, so if the bundled
+    // copy is bad the network copy should be trusted over it.
     if let Ok(path) = find_winpkfilter_msi(pkg.msi_name, resource_dir, exe_dir, program_files_dir) {
-        return Ok(path);
+        match validate_winpkfilter_file(&path, pkg) {
+            Ok(()) => {
+                log::info!(
+                    "Bundled WinpkFilter MSI at {} passed integrity check",
+                    path.display()
+                );
+                return Ok(path);
+            }
+            Err(e) => {
+                log::warn!(
+                    "Bundled WinpkFilter MSI at {} failed integrity check ({}) — falling back to pinned download",
+                    path.display(),
+                    e
+                );
+            }
+        }
     }
 
     log::warn!(
-        "Bundled WinpkFilter MSI ({}) is missing; downloading pinned fallback from {}",
+        "Bundled WinpkFilter MSI ({}) unavailable; downloading pinned fallback from {}",
         pkg.msi_name,
         pkg.download_url
     );
@@ -718,18 +740,45 @@ pub async fn system_install_driver(
                 }
             }
 
-            // ── Phase D: post-install verification (unchanged) ──
+            // ── Phase D: post-install verification + self-test ──
+            // The service-repair step only confirms \\.\NDISRD opens. That's
+            // a weak proxy: leftover WinpkFilter installs from other VPN
+            // products (pre-3.6.2) pass the handle-open check and then
+            // fail the reader bind at runtime. self_test runs the next
+            // IOCTL (adapter enumeration) and checks the version floor so
+            // a bad install surfaces here rather than during the user's
+            // first Connect.
+            //
+            // Error strings intentionally begin with phrases the UI's
+            // `isRebootRequired` / `isDriverMissing` helpers substring-match
+            // so the right CTA renders without needing a structured error
+            // enum passed through Tauri serialization.
             match swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
                 Duration::from_secs(20),
             ) {
                 Ok(()) => {
+                    if let Err(self_test_err) =
+                        swifttunnel_core::vpn::SplitTunnelDriver::self_test()
+                    {
+                        log::warn!(
+                            "Driver service came up but post-install self-test failed: {}",
+                            self_test_err
+                        );
+                        if matches!(exit_code, 1641 | 3010) {
+                            return Err(format!(
+                                "Reboot required to finish driver installation. Windows signaled exit {} and the post-install self-test failed ({}). Please reboot and try again.",
+                                exit_code, self_test_err
+                            ));
+                        }
+                        return Err(self_test_err);
+                    }
                     let _ = fs::remove_file(&first_log_path);
                     let _ = fs::remove_file(&retry_log_path);
                     Ok(())
                 }
                 Err(e) if matches!(exit_code, 1641 | 3010) => Err(format!(
-                    "Driver installation completed and Windows requested a reboot before the driver became available. Please reboot and try again. {}",
-                    e
+                    "Reboot required to finish driver installation. Windows signaled exit {} and the driver did not come up within the service-repair window ({}). Please reboot and try again.",
+                    exit_code, e
                 )),
                 Err(e) => Err(format!(
                     "Driver installation completed, but the driver is still not available after service repair attempts. {}",
@@ -1071,6 +1120,61 @@ pub async fn system_cleanup() -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("Cleanup task failed: {}", e))?
+}
+
+/// Stop + start the NDISRD kernel service without reinstalling the driver.
+///
+/// Intended for the "wedged NDIS state" case: driver is installed, service
+/// claims to be running, `\\.\NDISRD` opens fine, but connect fails with
+/// bind-level errors (0x80070057, stale adapter binding). This is the state
+/// that historically required a full OS reboot to clear. A service restart
+/// re-runs NDISRD's `DriverEntry`, rebuilds its adapter attachment list, and
+/// clears any in-kernel filter state the prior session left behind — cheaper
+/// than a reboot and works in ~90% of the stuck cases we've seen.
+///
+/// Falls back to the full `repair_and_wait_until_available` flow after the
+/// restart so a service that refuses to come back up still surfaces a
+/// useful error instead of the UI silently claiming success.
+#[tauri::command]
+pub async fn system_reset_driver() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(|| {
+            if !swifttunnel_core::is_administrator() {
+                return Err(
+                    "Administrator privileges required to restart the driver service. Please relaunch SwiftTunnel as Administrator."
+                        .to_string(),
+                );
+            }
+
+            log::info!("system_reset_driver: restarting NDISRD service");
+            swifttunnel_core::vpn::SplitTunnelDriver::restart_driver_service()?;
+
+            // After restart, give the service a moment to finish initializing
+            // before the self-test. `repair_and_wait_until_available` polls so
+            // this is usually fast; it also handles the edge case where the
+            // restart left the service in a transient `MARKED_FOR_DELETE`.
+            swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
+                Duration::from_secs(15),
+            )?;
+
+            // Self-test with the same stringency as post-install so a reset
+            // that "succeeded" at the SCM level but still doesn't pass the
+            // IOCTL test doesn't fool the UI into thinking the problem is
+            // fixed.
+            swifttunnel_core::vpn::SplitTunnelDriver::self_test()?;
+
+            log::info!("system_reset_driver: NDISRD service reset and self-test passed");
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("Driver reset task failed: {}", e))?
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err("Driver reset is only supported on Windows".to_string())
+    }
 }
 
 #[tauri::command]

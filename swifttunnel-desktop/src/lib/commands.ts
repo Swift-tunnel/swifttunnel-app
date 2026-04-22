@@ -170,6 +170,18 @@ export const systemCheckDriver = () =>
 export const systemInstallDriver = (force = false) =>
   invoke<void>("system_install_driver", { force });
 
+/**
+ * Restart the NDISRD kernel service without reinstalling the driver.
+ *
+ * Intended as an escalation for the "wedged NDIS state" case — driver files
+ * are in place, service reports running, but bind IOCTLs fail. Cheaper than
+ * reinstall, and much cheaper than a full OS reboot. Runs a self-test after
+ * restart so a failed reset still surfaces a useful error instead of the UI
+ * claiming success.
+ */
+export const systemResetDriver = () =>
+  invoke<void>("system_reset_driver");
+
 export const systemLaunchedFromStartup = () =>
   invoke<boolean>("system_launched_from_startup");
 

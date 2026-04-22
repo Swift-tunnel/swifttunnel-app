@@ -16,6 +16,7 @@ import {
   vpnGetDiagnostics,
   systemCheckDriver,
   systemInstallDriver,
+  systemResetDriver,
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
@@ -55,6 +56,15 @@ interface VpnStore {
   error: string | null;
   driverSetupState: DriverSetupState;
   driverSetupError: string | null;
+  /**
+   * Set to true once the user has clicked "Reset driver service" at least
+   * once during the current error lifecycle. Prevents the UI from
+   * offering the same button forever when the actual problem can't be
+   * fixed by a service restart (e.g. another VPN product's older
+   * WinpkFilter is installed). Cleared on a successful connect or
+   * disconnect so the next incident gets a fresh reset attempt.
+   */
+  driverResetAttempted: boolean;
 
   // Throughput
   bytesUp: number;
@@ -77,6 +87,7 @@ interface VpnStore {
   fetchState: () => Promise<void>;
   ensureDriverReady: () => Promise<void>;
   installDriver: () => Promise<void>;
+  resetDriver: () => Promise<void>;
   connect: (region: string, gamePresets: string[]) => Promise<void>;
   resumeConnectWithAdapter: (guid: string) => Promise<void>;
   dismissBindingChooser: () => void;
@@ -98,6 +109,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   error: null,
   driverSetupState: "idle",
   driverSetupError: null,
+  driverResetAttempted: false,
   bytesUp: 0,
   bytesDown: 0,
   packetsTunneled: 0,
@@ -166,7 +178,18 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverSetupError: null,
       });
     } catch (e) {
-      const message = formatDriverSetupError(e);
+      // Forward the backend error verbatim — the UI substring-matches on
+      // "Reboot required to finish driver installation" and "Split tunnel
+      // driver is older than..." to pick a CTA. Wrapping with
+      // `formatDriverSetupError` would prefix "Split tunnel driver not
+      // available..." which collides with `isDriverMissing` and sends the
+      // user back into an install loop instead of the reboot/reset path.
+      const raw = getErrorMessage(e);
+      const lower = raw.toLowerCase();
+      const preservesRecoveryIntent =
+        lower.includes("reboot required to finish driver installation") ||
+        lower.includes("split tunnel driver is older than swifttunnel requires");
+      const message = preservesRecoveryIntent ? raw : formatDriverSetupError(e);
       set({
         state: "error",
         error: message,
@@ -174,6 +197,42 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverSetupError: message,
       });
       throw new Error(message);
+    }
+  },
+
+  resetDriver: async () => {
+    // Invoked from the UI when resolveConnectStatus returns
+    // `kind: "driver_outdated"` — clears the "wedged NDIS state" that a full
+    // reinstall won't fix (prior-generation WinpkFilter from another VPN
+    // product being earlier in the service path, in-kernel filter state
+    // left behind by a previous session, etc.). Much cheaper than asking
+    // the user to reboot, which was the only workaround in 1.25.2.
+    //
+    // `driverResetAttempted` is flipped to true in the failure branch so
+    // the UI can stop offering the same button after a reset that didn't
+    // work — it's the UX guardrail against the exact 1.25.2 loop (user
+    // clicks "fix it" → backend says ok → user tries again → same error)
+    // that this PR is trying to close. Cleared on successful connect or
+    // disconnect to give the next incident a fresh attempt.
+    try {
+      set({ driverSetupState: "installing", driverSetupError: null });
+      await systemResetDriver();
+      set({
+        error: null,
+        driverSetupState: "installed",
+        driverSetupError: null,
+        driverResetAttempted: false,
+      });
+    } catch (e) {
+      const raw = getErrorMessage(e);
+      set({
+        state: "error",
+        error: raw,
+        driverSetupState: "error",
+        driverSetupError: raw,
+        driverResetAttempted: true,
+      });
+      throw new Error(raw);
     }
   },
 
@@ -219,7 +278,13 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         set({ connectedAt: Date.now() });
         await notify("SwiftTunnel", `Connected to ${get().region ?? region}`);
       }
-      set({ driverSetupState: "idle", driverSetupError: null });
+      // Successful connect clears the reset-attempted one-shot so a future
+      // unrelated incident gets a fresh "Reset driver service" offer.
+      set({
+        driverSetupState: "idle",
+        driverSetupError: null,
+        driverResetAttempted: false,
+      });
     } catch (e) {
       const message = getErrorMessage(e);
       set((current) => ({
@@ -289,6 +354,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         pendingConnectIntent: null,
         driverSetupState: "idle",
         driverSetupError: null,
+        driverResetAttempted: false,
       });
       await notify("SwiftTunnel", "VPN disconnected.");
     } catch (e) {

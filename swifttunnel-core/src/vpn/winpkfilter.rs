@@ -60,6 +60,65 @@ pub const MSI_PACKAGE_ARM64: WinpkFilterMsiPackage = WinpkFilterMsiPackage {
 /// All known MSI packages. Used during uninstall to clean up any variant.
 pub const ALL_MSI_PACKAGES: &[&WinpkFilterMsiPackage] = &[&MSI_PACKAGE_X64, &MSI_PACKAGE_ARM64];
 
+/// Minimum Windows Packet Filter driver version SwiftTunnel requires at runtime.
+///
+/// 3.6.2 fixes the `ERROR_INVALID_PARAMETER` regression that made the reader
+/// return 0x80070057 on certain Realtek NICs. Older installs (3.5.x, 3.6.0,
+/// 3.6.1) still open the `\\.\NDISRD` handle, so without an explicit floor
+/// the install path would accept them as "healthy" and the user would hit
+/// the same reader-bind failure we thought we'd fixed. Keep this in lockstep
+/// with the MSI we ship.
+pub const MIN_DRIVER_VERSION: (u32, u32, u32) = (3, 6, 2);
+
+/// Format a `(major, minor, revision)` version triple for log messages.
+pub fn format_version((major, minor, revision): (u32, u32, u32)) -> String {
+    format!("{}.{}.{}", major, minor, revision)
+}
+
+/// Compute the lowercase hex SHA-256 of `data`.
+pub fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Validate an MSI payload (bytes in memory) against the pinned size+hash
+/// from `WinpkFilterMsiPackage`.
+///
+/// Why this lives in core and not in the desktop crate: both the auto-install
+/// path in `SplitTunnelDriver::install_driver_from_msi` and the explicit
+/// `system_install_driver` Tauri command need to refuse corrupted MSIs before
+/// handing them to `msiexec /i`. A bad MSI bundled into the NSIS installer
+/// (e.g. a partial copy from a flaky disk) would otherwise surface as an
+/// opaque msiexec 1603 with no hint that the file itself is the problem.
+pub fn validate_msi_payload(data: &[u8], pkg: &WinpkFilterMsiPackage) -> Result<(), String> {
+    if data.len() < pkg.min_size_bytes {
+        return Err(format!(
+            "WinpkFilter MSI too small ({} bytes, expected at least {} bytes). The bundled file is likely truncated — reinstall SwiftTunnel.",
+            data.len(),
+            pkg.min_size_bytes
+        ));
+    }
+
+    let digest = sha256_hex(data);
+    if digest != pkg.sha256 {
+        return Err(format!(
+            "WinpkFilter MSI failed integrity check (sha256 mismatch: expected {}, got {}). The bundled file is corrupted — reinstall SwiftTunnel.",
+            pkg.sha256, digest
+        ));
+    }
+
+    Ok(())
+}
+
+/// Read `path` and validate it against the pinned size+hash from `pkg`.
+pub fn validate_msi_file(path: &Path, pkg: &WinpkFilterMsiPackage) -> Result<(), String> {
+    let data =
+        std::fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    validate_msi_payload(&data, pkg)
+}
+
 /// Detect the native machine architecture using `IsWow64Process2`, with an
 /// environment-variable fallback (`PROCESSOR_ARCHITECTURE`).
 #[cfg(windows)]
