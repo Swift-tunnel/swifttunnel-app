@@ -4328,8 +4328,64 @@ fn run_packet_reader(
     // errors do. Previously a single read error followed by two acquire
     // flakes could exhaust a "budget of 3" on the second iteration; now the
     // budget specifically covers 3 real read errors.
-    let mut bindings: Option<ReaderBindings> =
-        Some(ReaderBindings::acquire(physical_name.as_ref())?);
+    //
+    // Initial acquire is retried with a bounded budget: returning `Err` here
+    // flips `workers_panicked` via the catch_unwind wrapper in `start()`,
+    // which the monitor turns into a Connected→Error transition and the UI
+    // renders as "Split tunnel driver not available. Install" — misleading
+    // when the real issue is that the adapter hasn't finished settling
+    // after `ensure_winpkfilter_binding` toggled the NDISRD binding. On
+    // binding-sensitive stacks `set_packet_event` / `set_adapter_mode`
+    // inside `acquire()` can fail transiently in the first 1–3s post-
+    // enable, which caused users to click Connect 2–3 times before it
+    // "took" and to get a no-op "install driver" prompt on the failure.
+    //
+    // Bound kept small (~3s worst case) so a truly-missing adapter still
+    // surfaces within a few seconds instead of the reader spinning
+    // forever with the UI stuck at Connected + 0 traffic.
+    const INITIAL_ACQUIRE_MAX_ATTEMPTS: u32 = 15;
+    const INITIAL_ACQUIRE_BACKOFF: Duration = Duration::from_millis(200);
+    let mut bindings: Option<ReaderBindings> = {
+        let mut attempts: u32 = 0;
+        loop {
+            if stop_flag.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            match ReaderBindings::acquire(physical_name.as_ref()) {
+                Ok(b) => {
+                    if attempts > 0 {
+                        log::info!(
+                            "Reader: initial bind succeeded on attempt {}/{}",
+                            attempts + 1,
+                            INITIAL_ACQUIRE_MAX_ATTEMPTS,
+                        );
+                    }
+                    break Some(b);
+                }
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= INITIAL_ACQUIRE_MAX_ATTEMPTS {
+                        log::error!(
+                            "Reader: initial bind failed after {} attempts: {}",
+                            INITIAL_ACQUIRE_MAX_ATTEMPTS,
+                            e,
+                        );
+                        return Err(e);
+                    }
+                    log::warn!(
+                        "Reader: initial bind attempt {}/{} failed: {} (retrying after {}ms)",
+                        attempts,
+                        INITIAL_ACQUIRE_MAX_ATTEMPTS,
+                        e,
+                        INITIAL_ACQUIRE_BACKOFF.as_millis(),
+                    );
+                    if interruptible_sleep(INITIAL_ACQUIRE_BACKOFF, &stop_flag) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    };
     let mut rebind = RebindState::new(READER_MAX_REBINDS, &REBIND_BACKOFFS);
 
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
