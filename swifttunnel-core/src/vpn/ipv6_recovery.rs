@@ -176,9 +176,7 @@ pub fn has_ipv6_binding_native(if_index: u32) -> Option<bool> {
             // GetAdaptersAddresses. On physical NICs they are almost always
             // equal, but checking both costs nothing and defends against
             // callers that seeded `if_index` from an IPv6-specific source.
-            if adapter.Anonymous1.Anonymous.IfIndex == if_index
-                || adapter.Ipv6IfIndex == if_index
-            {
+            if adapter.Anonymous1.Anonymous.IfIndex == if_index || adapter.Ipv6IfIndex == if_index {
                 return Some(true);
             }
             current = adapter.Next;
@@ -420,7 +418,10 @@ mod tests {
                 &mut size,
             );
             if rc != 0 {
-                eprintln!("skipping positive-path test: second GAA call failed rc={}", rc);
+                eprintln!(
+                    "skipping positive-path test: second GAA call failed rc={}",
+                    rc
+                );
                 return;
             }
 

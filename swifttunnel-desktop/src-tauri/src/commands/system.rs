@@ -25,7 +25,8 @@ fn driver_install_failure_message(code: i32) -> String {
         1223 | 1602 => "Driver installation was canceled at the UAC/installer prompt.".to_string(),
         1603 => "Windows Installer reported a fatal error (1603). This usually means antivirus \
                  interference, a pending reboot, or a corrupted prior install. Check the \
-                 installer log for details.".to_string(),
+                 installer log for details."
+            .to_string(),
         1618 => "Another installer is already running. Close it and retry.".to_string(),
         1625 => "Windows blocked this installer by policy. Contact support.".to_string(),
         1639 => {
@@ -68,8 +69,8 @@ fn unique_extract_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let program_data = std::env::var("ProgramData")
-        .unwrap_or_else(|_| "C:\\ProgramData".to_string());
+    let program_data =
+        std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
     PathBuf::from(program_data)
         .join("SwiftTunnel")
         .join("driver-extract")
@@ -83,11 +84,7 @@ fn unique_extract_dir() -> PathBuf {
 /// be custom-action-free (the AdminExecuteSequence can carry actions), so the
 /// caller must validate the extracted payload before using it.
 #[cfg(windows)]
-fn extract_msi_to_dir(
-    msi_path: &Path,
-    extract_dir: &Path,
-    log_path: &Path,
-) -> Result<(), String> {
+fn extract_msi_to_dir(msi_path: &Path, extract_dir: &Path, log_path: &Path) -> Result<(), String> {
     fs::create_dir_all(extract_dir).map_err(|e| {
         format!(
             "Failed to create MSI extract dir {}: {}",
@@ -198,9 +195,7 @@ fn find_inf_in_extract_dir(extract_dir: &Path) -> Result<PathBuf, String> {
 #[cfg(windows)]
 fn detect_broken_install() -> Option<String> {
     match swifttunnel_core::vpn::winpkfilter::find_installed_driver_published_name() {
-        Ok(Some(name)) if !swifttunnel_core::vpn::SplitTunnelDriver::is_available() => {
-            Some(name)
-        }
+        Ok(Some(name)) if !swifttunnel_core::vpn::SplitTunnelDriver::is_available() => Some(name),
         _ => None,
     }
 }
@@ -218,11 +213,7 @@ fn detect_broken_install() -> Option<String> {
 /// Caller owns `extract_dir` lifecycle — on `Ok`, caller may delete it;
 /// on `Err`, caller should preserve it for support triage.
 #[cfg(windows)]
-fn try_inf_fallback(
-    msi_path: &Path,
-    extract_dir: &Path,
-    extract_log: &Path,
-) -> Result<(), String> {
+fn try_inf_fallback(msi_path: &Path, extract_dir: &Path, extract_log: &Path) -> Result<(), String> {
     // Step 1: mandatory pre-pnputil cleanup so pnputil doesn't short-circuit
     // on a stale store entry.
     if let Err(e) = swifttunnel_core::vpn::winpkfilter::remove_installed_driver_package() {
@@ -239,8 +230,13 @@ fn try_inf_fallback(
     let inf_parent = find_inf_in_extract_dir(extract_dir)?;
 
     // Step 4: install via pnputil (validates the package internally).
-    swifttunnel_core::vpn::winpkfilter::install_driver_from_package_dir(&inf_parent)
-        .map_err(|e| format!("pnputil install from {} failed: {}", inf_parent.display(), e))
+    swifttunnel_core::vpn::winpkfilter::install_driver_from_package_dir(&inf_parent).map_err(|e| {
+        format!(
+            "pnputil install from {} failed: {}",
+            inf_parent.display(),
+            e
+        )
+    })
 }
 
 #[cfg(windows)]
@@ -809,8 +805,8 @@ mod tests {
 
         // Everything else must not fall back.
         for code in [
-            1, 1223, 1602, 1612, 1618, 1619, 1620, 1622, 1625, 1632, 1633,
-            1639, 1640, 1643, 1644, 1645, 1654,
+            1, 1223, 1602, 1612, 1618, 1619, 1620, 1622, 1625, 1632, 1633, 1639, 1640, 1643, 1644,
+            1645, 1654,
         ] {
             assert!(
                 !should_try_inf_fallback(code, ""),
@@ -838,8 +834,7 @@ mod tests {
         let dir = unique_extract_dir();
         let s = dir.to_string_lossy();
         assert!(
-            s.contains("SwiftTunnel")
-                && s.contains("driver-extract"),
+            s.contains("SwiftTunnel") && s.contains("driver-extract"),
             "unexpected extract dir: {}",
             s
         );
@@ -872,8 +867,7 @@ mod tests {
     fn find_inf_in_extract_dir_case_insensitive() {
         let base = unique_temp_dir("extract_case");
         touch(&base.join("NDISRD_LWF.INF"));
-        let result =
-            find_inf_in_extract_dir(&base).expect("should find case-insensitive inf");
+        let result = find_inf_in_extract_dir(&base).expect("should find case-insensitive inf");
         assert_eq!(result, base);
         let _ = fs::remove_dir_all(&base);
     }
@@ -882,8 +876,7 @@ mod tests {
     fn find_inf_in_extract_dir_errors_when_missing() {
         let base = unique_temp_dir("extract_missing");
         touch(&base.join("some_other.inf"));
-        let err =
-            find_inf_in_extract_dir(&base).expect_err("should not find ndisrd_lwf.inf");
+        let err = find_inf_in_extract_dir(&base).expect_err("should not find ndisrd_lwf.inf");
         assert!(err.contains("ndisrd_lwf.inf"));
         assert!(err.contains(&base.display().to_string()));
         let _ = fs::remove_dir_all(&base);
@@ -899,8 +892,7 @@ mod tests {
         }
         fs::create_dir_all(&deep).expect("create deep dirs");
         touch(&deep.join("ndisrd_lwf.inf"));
-        let err = find_inf_in_extract_dir(&base)
-            .expect_err("should not descend past depth cap");
+        let err = find_inf_in_extract_dir(&base).expect_err("should not descend past depth cap");
         assert!(err.contains("ndisrd_lwf.inf"));
         let _ = fs::remove_dir_all(&base);
     }
@@ -1253,7 +1245,9 @@ pub async fn system_copy_log_to_clipboard() -> Result<CopyLogFileResponse, Strin
             });
         }
 
-        Ok(CopyLogFileResponse { file_path: path_str })
+        Ok(CopyLogFileResponse {
+            file_path: path_str,
+        })
     }
 
     #[cfg(not(windows))]

@@ -1051,13 +1051,19 @@ impl ParallelInterceptor {
                             log::warn!(
                                 "Windows Packet Filter driver is older than expected: installed {}.{}.{}, SwiftTunnel ships with {}.{}.{}. \
                                  Reader may return ERROR_INVALID_PARAMETER on some adapters — consider reinstalling.",
-                                version.major, version.minor, version.revision,
-                                MIN.0, MIN.1, MIN.2
+                                version.major,
+                                version.minor,
+                                version.revision,
+                                MIN.0,
+                                MIN.1,
+                                MIN.2
                             );
                         } else {
                             log::info!(
                                 "Windows Packet Filter driver available (version {}.{}.{})",
-                                version.major, version.minor, version.revision
+                                version.major,
+                                version.minor,
+                                version.revision
                             );
                         }
                     }
@@ -3739,10 +3745,7 @@ impl ParallelInterceptor {
                         } else {
                             "<non-string panic payload>".to_string()
                         };
-                        log::error!(
-                            "V3 inbound receiver panicked — injection halted: {}",
-                            msg
-                        );
+                        log::error!("V3 inbound receiver panicked — injection halted: {}", msg);
                     }
                 }));
                 log::info!("V3 inbound receiver thread started (UDP relay)");
@@ -4275,9 +4278,9 @@ fn run_packet_reader(
             // the early return path.
             let event_guard = EventGuard(event);
 
-            driver.set_packet_event(physical_handle, event).map_err(|e| {
-                VpnError::SplitTunnel(format!("Failed to set packet event: {}", e))
-            })?;
+            driver
+                .set_packet_event(physical_handle, event)
+                .map_err(|e| VpnError::SplitTunnel(format!("Failed to set packet event: {}", e)))?;
 
             driver
                 .set_adapter_mode(physical_handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
@@ -4347,14 +4350,17 @@ fn run_packet_reader(
                 Ok(new) => {
                     log::info!(
                         "Reader: rebind attempt {}/{} acquired fresh handles, resuming read loop",
-                        rebind.attempts(), READER_MAX_REBINDS
+                        rebind.attempts(),
+                        READER_MAX_REBINDS
                     );
                     bindings = Some(new);
                 }
                 Err(acquire_err) => {
                     log::warn!(
                         "Reader: rebind attempt {}/{} failed to re-acquire handles: {} (will retry)",
-                        rebind.attempts(), READER_MAX_REBINDS, acquire_err
+                        rebind.attempts(),
+                        READER_MAX_REBINDS,
+                        acquire_err
                     );
                     // Short interruptible delay so we don't tight-loop on a
                     // persistently-missing adapter. Doesn't consume budget.
@@ -4365,7 +4371,9 @@ fn run_packet_reader(
                 }
             }
         }
-        let b = bindings.as_ref().expect("bindings is Some after acquire above");
+        let b = bindings
+            .as_ref()
+            .expect("bindings is Some after acquire above");
 
         // Wait for packet event with reasonable timeout
         // The event is signaled by ndisapi driver when packets are available
@@ -4377,8 +4385,7 @@ fn run_packet_reader(
         }
 
         // Read batch of packets
-        let mut to_read =
-            EthMRequestMut::from_iter(b.physical_handle, packets.iter_mut());
+        let mut to_read = EthMRequestMut::from_iter(b.physical_handle, packets.iter_mut());
 
         let packets_read = match b.driver.read_packets::<BATCH_SIZE>(&mut to_read) {
             Ok(n) => {
@@ -4801,10 +4808,7 @@ fn run_packet_worker(
                 // traffic at least reaches the internet while the connection
                 // state machine tears the tunnel down.
                 let relay_for_forward = relay_ctx.as_ref().filter(|r| {
-                    !matches!(
-                        r.relay_health(),
-                        super::udp_relay::RelayHealthState::Dead
-                    )
+                    !matches!(r.relay_health(), super::udp_relay::RelayHealthState::Dead)
                 });
                 if let Some(relay) = relay_for_forward {
                     // Log relay destination for first few packets (auto-routing debug)
@@ -9041,18 +9045,9 @@ mod tests {
         let mut rs = RebindState::new(3, &TEST_BACKOFFS);
 
         // 3 allowed attempts.
-        assert!(matches!(
-            rs.record_error(false),
-            RebindDecision::Backoff(_)
-        ));
-        assert!(matches!(
-            rs.record_error(false),
-            RebindDecision::Backoff(_)
-        ));
-        assert!(matches!(
-            rs.record_error(false),
-            RebindDecision::Backoff(_)
-        ));
+        assert!(matches!(rs.record_error(false), RebindDecision::Backoff(_)));
+        assert!(matches!(rs.record_error(false), RebindDecision::Backoff(_)));
+        assert!(matches!(rs.record_error(false), RebindDecision::Backoff(_)));
         assert_eq!(rs.attempts(), 3);
 
         // 4th error trips the budget — Fatal, counter still climbs so the
@@ -9072,10 +9067,7 @@ mod tests {
         assert_eq!(rs.attempts(), 0, "Stop must not consume rebind budget");
 
         // Should still have the full budget afterward.
-        assert!(matches!(
-            rs.record_error(false),
-            RebindDecision::Backoff(_)
-        ));
+        assert!(matches!(rs.record_error(false), RebindDecision::Backoff(_)));
         assert_eq!(rs.attempts(), 1);
     }
 
@@ -9101,7 +9093,10 @@ mod tests {
         let start = Instant::now();
         let aborted = interruptible_sleep(Duration::from_millis(120), &stop);
         let elapsed = start.elapsed();
-        assert!(!aborted, "sleep should complete naturally when stop_flag is false");
+        assert!(
+            !aborted,
+            "sleep should complete naturally when stop_flag is false"
+        );
         assert!(
             elapsed >= Duration::from_millis(100),
             "sleep should run for at least the requested duration (got {:?})",

@@ -101,8 +101,7 @@ fn main() {
         check_bundled_driver_msis();
     }
 
-    let attrs = tauri_build::Attributes::new().windows_attributes(
-        tauri_build::WindowsAttributes::new().app_manifest(APP_MANIFEST),
-    );
+    let attrs = tauri_build::Attributes::new()
+        .windows_attributes(tauri_build::WindowsAttributes::new().app_manifest(APP_MANIFEST));
     tauri_build::try_build(attrs).expect("Failed to run tauri-build");
 }
