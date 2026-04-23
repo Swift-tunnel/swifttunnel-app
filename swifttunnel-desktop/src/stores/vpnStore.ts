@@ -46,6 +46,14 @@ function formatDriverSetupError(error: unknown): string {
   ].join("\n");
 }
 
+function isRebootRequiredMessage(
+  vpnError: string | null,
+  driverSetupError: string | null,
+): boolean {
+  const haystack = `${vpnError ?? ""}\n${driverSetupError ?? ""}`.toLowerCase();
+  return haystack.includes("reboot required to finish driver installation");
+}
+
 interface VpnStore {
   state: VpnState;
   region: string | null;
@@ -225,12 +233,23 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       });
     } catch (e) {
       const raw = getErrorMessage(e);
-      set({
-        state: "error",
-        error: raw,
-        driverSetupState: "error",
-        driverSetupError: raw,
-        driverResetAttempted: true,
+      set((current) => {
+        const priorRebootRequired = isRebootRequiredMessage(
+          current.error,
+          current.driverSetupError,
+        );
+        const priorMessage = current.driverSetupError || current.error;
+        const message =
+          priorRebootRequired && priorMessage
+            ? `${priorMessage}\n\nReset driver service failed: ${raw}`
+            : raw;
+        return {
+          state: "error",
+          error: message,
+          driverSetupState: "error",
+          driverSetupError: message,
+          driverResetAttempted: true,
+        };
       });
       throw new Error(raw);
     }

@@ -11,7 +11,7 @@ import {
 } from "../../lib/utils";
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import { GAMES, resolveConnectStatus } from "./connectState";
+import { GAMES, isConnectActionBusy, resolveConnectStatus } from "./connectState";
 import { Tooltip, InfoIcon } from "../common/Tooltip";
 import type { ServerRegion } from "../../lib/types";
 import "./connect.css";
@@ -53,6 +53,7 @@ export function ConnectTab() {
   const isConnected = vpnState === "connected";
   const isIdle = vpnState === "disconnected" || vpnState === "error";
   const isTransitioning = !isConnected && !isIdle;
+  const isConnectBusy = isConnectActionBusy({ vpnState, driverSetupState });
 
   const prevStateRef = useRef(vpnState);
   const [showSuccess, setShowSuccess] = useState(false);
@@ -133,7 +134,7 @@ export function ConnectTab() {
       disconnect();
       return;
     }
-    if (!isIdle) return;
+    if (!isIdle || isConnectBusy) return;
     // Flush any pending debounced settings save BEFORE connecting — vpn_connect
     // reads connect-time options (auto_routing, whitelist, forced servers, QoS)
     // from the backend AppState.settings, so a stale snapshot in the 500 ms
@@ -175,9 +176,9 @@ export function ConnectTab() {
 
   const ringColor = isConnected
     ? "rgba(40, 210, 150, 0.5)"
-    : isTransitioning ? "rgba(60, 130, 246, 0.3)" : "rgba(60, 130, 246, 0.45)";
-  const ringSpeed = isTransitioning ? 3.5 : 55;
-  const innerSpeed = isTransitioning ? 2.8 : 38;
+    : isConnectBusy ? "rgba(60, 130, 246, 0.3)" : "rgba(60, 130, 246, 0.45)";
+  const ringSpeed = isConnectBusy ? 3.5 : 55;
+  const innerSpeed = isConnectBusy ? 2.8 : 38;
 
   const connectStatus = resolveConnectStatus({
     driverSetupState,
@@ -205,7 +206,7 @@ export function ConnectTab() {
           ringSpeed={ringSpeed}
           innerSpeed={innerSpeed}
           isConnected={isConnected}
-          isTransitioning={isTransitioning}
+          isTransitioning={isConnectBusy}
           showSuccess={showSuccess}
           onClick={() => void handleConnect()}
         />
@@ -260,7 +261,7 @@ export function ConnectTab() {
                 <button
                   type="button"
                   onClick={() => void installDriver().catch(() => {})}
-                  disabled={isTransitioning}
+                  disabled={isConnectBusy}
                   className="rounded-full px-2 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-60"
                   style={{
                     backgroundColor: "rgba(60,130,246,0.18)",
@@ -271,21 +272,40 @@ export function ConnectTab() {
                   Windows Packet Filter driver
                 </button>
               </span>
-            ) : connectStatus.kind === "reboot_required" ? (
-              // No action button: only a reboot actually fixes 1641/3010, and
-              // we must not relaunch installDriver here — that was the 1.25.2
-              // bug where pressing the "install" CTA after a reboot-required
-              // error silently succeeded and then failed on the next connect.
+            ) : connectStatus.kind === "reboot_resettable" ? (
+              // Offer "Reset driver service" before a full reboot: the NDISRD
+              // stop+start clears ~90% of the 1641/3010 wedges per
+              // system_reset_driver's doc comment. Must NOT relaunch
+              // installDriver here — that was the 1.25.2 loop (install CTA
+              // silently succeeded, failed on next connect). A failed reset
+              // flips driverResetAttempted, which hides the button while the
+              // fallback reboot-required text (plus reset failure detail)
+              // renders instead.
               <span className="inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
                 <span>{connectStatus.text}</span>
+                <button
+                  type="button"
+                  onClick={() => void resetDriver().catch(() => {})}
+                  disabled={isConnectBusy}
+                  className="rounded-full px-2 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-60"
+                  style={{
+                    backgroundColor: "rgba(60,130,246,0.18)",
+                    color: "var(--color-accent-secondary)",
+                    border: "1px solid rgba(60,130,246,0.35)",
+                  }}
+                >
+                  Reset driver service
+                </button>
               </span>
+            ) : connectStatus.kind === "reboot_required" ? (
+              <span>{connectStatus.text}</span>
             ) : connectStatus.kind === "driver_outdated" ? (
               <span className="inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
                 <span>Older split tunnel driver detected.</span>
                 <button
                   type="button"
                   onClick={() => void resetDriver().catch(() => {})}
-                  disabled={isTransitioning}
+                  disabled={isConnectBusy}
                   className="rounded-full px-2 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-60"
                   style={{
                     backgroundColor: "rgba(60,130,246,0.18)",

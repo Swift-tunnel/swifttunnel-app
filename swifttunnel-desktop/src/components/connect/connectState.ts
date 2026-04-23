@@ -77,6 +77,20 @@ export function isDriverVersionTooOld(
   return haystack.includes("split tunnel driver is older than swifttunnel requires");
 }
 
+export function isConnectActionBusy(input: {
+  vpnState: string;
+  driverSetupState: "idle" | "checking" | "installing" | "installed" | "error";
+}): boolean {
+  const isConnected = input.vpnState === "connected";
+  const isIdle = input.vpnState === "disconnected" || input.vpnState === "error";
+  const isVpnTransitioning = !isConnected && !isIdle;
+  return (
+    isVpnTransitioning ||
+    input.driverSetupState === "checking" ||
+    input.driverSetupState === "installing"
+  );
+}
+
 export function resolveConnectStatus(input: {
   driverSetupState: "idle" | "checking" | "installing" | "installed" | "error";
   driverSetupError: string | null;
@@ -97,6 +111,7 @@ export function resolveConnectStatus(input: {
   | { kind: "text"; text: string }
   | { kind: "driver_missing"; text: string }
   | { kind: "reboot_required"; text: string }
+  | { kind: "reboot_resettable"; text: string }
   | { kind: "driver_outdated"; text: string } {
   if (input.driverSetupState === "checking") {
     return { kind: "text", text: "Checking split tunnel driver…" };
@@ -118,10 +133,31 @@ export function resolveConnectStatus(input: {
   // user into another reinstall loop — that's exactly the state the 1.25.2
   // support reports showed (install -> "no driver" -> install -> "no driver",
   // until the user happened to reboot on their own).
+  //
+  // Before surrendering to a full OS reboot, offer the same
+  // "Reset driver service" escape hatch the driver_outdated path uses:
+  // system_reset_driver's doc comment says the NDISRD stop+start clears
+  // ~90% of the stuck cases that historically only a reboot fixed. Gated
+  // by driverResetAttempted so a failed reset falls through to the
+  // original reboot-required text with no button, preserving the 1.25.2
+  // guardrail against an infinite-loop CTA while still surfacing the backend's
+  // detailed error context.
   if (isRebootRequired(input.vpnError, input.driverSetupError)) {
+    if (input.driverResetAttempted) {
+      return {
+        kind: "reboot_required",
+        text:
+          input.driverSetupError ||
+          input.vpnError ||
+          "Reboot required to finish installing the split tunnel driver.",
+      };
+    }
     return {
-      kind: "reboot_required",
-      text: "Reboot required to finish installing the split tunnel driver.",
+      kind: "reboot_resettable",
+      text:
+        input.driverSetupError ||
+        input.vpnError ||
+        "Reboot required to finish installing the split tunnel driver.",
     };
   }
 

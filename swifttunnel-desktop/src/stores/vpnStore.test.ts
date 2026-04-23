@@ -10,6 +10,7 @@ const {
   vpnGetDiagnostics,
   systemCheckDriver,
   systemInstallDriver,
+  systemResetDriver,
 } = vi.hoisted(() => ({
   vpnGetState: vi.fn(),
   vpnPreflightBinding: vi.fn(),
@@ -20,6 +21,7 @@ const {
   vpnGetDiagnostics: vi.fn(),
   systemCheckDriver: vi.fn(),
   systemInstallDriver: vi.fn(),
+  systemResetDriver: vi.fn(),
 }));
 
 const { notify } = vi.hoisted(() => ({
@@ -36,6 +38,7 @@ vi.mock("../lib/commands", () => ({
   vpnGetDiagnostics,
   systemCheckDriver,
   systemInstallDriver,
+  systemResetDriver,
 }));
 
 vi.mock("../lib/notifications", () => ({
@@ -71,6 +74,7 @@ describe("stores/vpnStore", () => {
     vpnGetDiagnostics.mockReset();
     systemCheckDriver.mockReset();
     systemInstallDriver.mockReset();
+    systemResetDriver.mockReset();
     notify.mockReset();
 
     vpnGetDiagnostics.mockResolvedValue(null);
@@ -138,5 +142,33 @@ describe("stores/vpnStore", () => {
     expect(systemInstallDriver).toHaveBeenCalledTimes(1);
     expect(useVpnStore.getState().driverSetupState).toBe("installed");
     expect(useVpnStore.getState().driverSetupError).toBeNull();
+  });
+
+  it("failed reset preserves reboot-required context and latches the one-shot flag", async () => {
+    systemResetDriver.mockRejectedValue(
+      new Error("Administrator privileges required to restart the driver service."),
+    );
+
+    const useVpnStore = await loadStore();
+    useVpnStore.setState({
+      state: "error",
+      error:
+        "Reboot required to finish driver installation. Windows signaled exit 3010.",
+      driverSetupState: "error",
+      driverSetupError:
+        "Reboot required to finish driver installation. Windows signaled exit 3010.",
+    });
+
+    await expect(useVpnStore.getState().resetDriver()).rejects.toThrow(
+      "Administrator privileges required to restart the driver service.",
+    );
+
+    expect(useVpnStore.getState().driverResetAttempted).toBe(true);
+    expect(useVpnStore.getState().driverSetupError).toContain(
+      "Reboot required to finish driver installation. Windows signaled exit 3010.",
+    );
+    expect(useVpnStore.getState().driverSetupError).toContain(
+      "Reset driver service failed: Administrator privileges required to restart the driver service.",
+    );
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isConnectActionBusy,
   isDriverMissing,
   isDriverVersionTooOld,
   isRebootRequired,
@@ -99,7 +100,43 @@ describe("connect state helpers", () => {
         "Reboot required to finish driver installation. Windows signaled exit 3010.",
       vpnState: "error",
     });
+    expect(result.kind).toBe("reboot_resettable");
+  });
+
+  it("offers a dedicated resettable reboot state before reset has been tried", () => {
+    // The NDISRD stop+start inside system_reset_driver clears ~90% of the
+    // 1641/3010 wedges, so the first-time reboot_required status should
+    // nudge the user toward the reset button instead of a full OS reboot.
+    const result = resolveConnectStatus({
+      driverSetupState: "idle",
+      driverSetupError: null,
+      vpnError:
+        "Reboot required to finish driver installation. Windows signaled exit 3010.",
+      vpnState: "error",
+      driverResetAttempted: false,
+    });
+    expect(result.kind).toBe("reboot_resettable");
+    expect(result.text).toContain("Windows signaled exit 3010");
+  });
+
+  it("falls back to reboot-required text after a reset attempt fails", () => {
+    // If the service-restart escape hatch has already been tried and
+    // didn't stick, the UX guardrail from the driver_outdated path
+    // applies here too: stop offering the same button, surface the
+    // reboot-required backend text so the user isn't stuck re-clicking a
+    // CTA that demonstrably doesn't resolve their machine's state.
+    const result = resolveConnectStatus({
+      driverSetupState: "error",
+      driverSetupError:
+        "Reboot required to finish driver installation. Windows signaled exit 3010.\n\nReset driver service failed: Administrator privileges required.",
+      vpnError:
+        "Reboot required to finish driver installation. Windows signaled exit 3010.\n\nReset driver service failed: Administrator privileges required.",
+      vpnState: "error",
+      driverResetAttempted: true,
+    });
     expect(result.kind).toBe("reboot_required");
+    expect(result.text.toLowerCase()).toContain("reboot required");
+    expect(result.text).toContain("Reset driver service failed");
   });
 
   it("returns driver_outdated for pre-3.6.2 driver errors", () => {
@@ -134,5 +171,20 @@ describe("connect state helpers", () => {
     // user isn't stuck guessing. Checking for the keyword rather than the
     // exact phrasing keeps the test resilient to message tweaks.
     expect(result.text.toLowerCase()).toContain("uninstall");
+  });
+
+  it("treats driver install and reset work as connect-busy even if vpnState is error", () => {
+    expect(
+      isConnectActionBusy({
+        vpnState: "error",
+        driverSetupState: "installing",
+      }),
+    ).toBe(true);
+    expect(
+      isConnectActionBusy({
+        vpnState: "disconnected",
+        driverSetupState: "idle",
+      }),
+    ).toBe(false);
   });
 });
