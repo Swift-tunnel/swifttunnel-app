@@ -257,14 +257,14 @@ jobs:
             }
             $size = (Get-Item $msiPath).Length
             if ($size -lt 500000) {
-              throw "Downloaded WinpkFilter MSI $msiPath is suspiciously small ($size bytes)"
+              throw ("Downloaded WinpkFilter MSI {0} is suspiciously small ({1} bytes)" -f $msiPath, $size)
             }
             $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
             $expectedHash = $expectedHashes[$msiPath]
             if ($actualHash -ne $expectedHash) {
-              throw "WinpkFilter MSI $msiPath failed SHA-256 check: expected $expectedHash, got $actualHash. Either upstream retagged the release or the download is corrupt — do not ship this build."
+              throw ("WinpkFilter MSI {0} failed SHA-256 check: expected {1}, got {2}. Either upstream retagged the release or the download is corrupt -- do not ship this build." -f $msiPath, $expectedHash, $actualHash)
             }
-            Write-Host "Verified $msiPath ($size bytes, sha256=$actualHash)"
+            Write-Host ("Verified {0} ({1} bytes, sha256={2})" -f $msiPath, $size, $actualHash)
           }
 
       - name: Verify updater signing secrets
