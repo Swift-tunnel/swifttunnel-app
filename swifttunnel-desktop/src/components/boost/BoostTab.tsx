@@ -286,14 +286,14 @@ export function BoostTab() {
                   backgroundColor: sel
                     ? "var(--color-accent-primary)"
                     : "transparent",
-                  color: sel ? "#fff" : "var(--color-text-secondary)",
+                  color: sel ? "#000000" : "var(--color-text-secondary)",
                 }}
               >
                 <div className="text-[12.5px] font-semibold">{p.name}</div>
                 <div
                   className="mt-0.5 text-[10.5px]"
                   style={{
-                    color: sel ? "rgba(255,255,255,0.78)" : "var(--color-text-muted)",
+                    color: sel ? "rgba(0,0,0,0.7)" : "var(--color-text-muted)",
                   }}
                 >
                   {p.desc}
@@ -444,9 +444,9 @@ export function BoostTab() {
             }}
           >
             <div
-              className="flex w-full items-center justify-between rounded-[var(--radius-card)] px-4 py-2.5 shadow-2xl backdrop-blur-xl"
+              className="flex w-full items-center justify-between rounded-[var(--radius-card)] px-4 py-2.5"
               style={{
-                backgroundColor: "var(--color-bg-card)",
+                backgroundColor: "var(--color-bg-elevated)",
                 border: "1px solid var(--color-border-default)",
               }}
             >
