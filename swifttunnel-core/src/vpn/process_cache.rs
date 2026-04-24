@@ -264,9 +264,10 @@ impl ProcessSnapshot {
         connections: &AHashMap<ConnectionKey, u32>,
         tunnel_pids: &AHashSet<u32>,
         explicit_tunnel_udp_ports: &AHashSet<u16>,
+        explicit_tunnel_tcp_ports: &AHashSet<u16>,
     ) -> (AHashSet<u16>, AHashSet<u16>) {
         let mut tunnel_udp_ports = explicit_tunnel_udp_ports.clone();
-        let mut tunnel_tcp_ports = AHashSet::new();
+        let mut tunnel_tcp_ports = explicit_tunnel_tcp_ports.clone();
 
         for (key, pid) in connections {
             if !tunnel_pids.contains(pid) {
@@ -513,6 +514,7 @@ impl LockFreeProcessCache {
             &connections,
             &tunnel_pids,
             &explicit_tunnel_udp_ports,
+            &explicit_tunnel_tcp_ports,
         );
 
         Arc::new(ProcessSnapshot {
@@ -717,15 +719,34 @@ impl LockFreeProcessCache {
     /// Persists TCP ports across snapshot refreshes so they don't rely on
     /// stale connection-table lookups.
     pub fn register_tcp_ports(&self, ports: &[u16]) {
-        let mut guard = self.explicit_tunnel_tcp_ports.lock();
-        let new_set: AHashSet<u16> = ports.iter().copied().collect();
-        if *guard != new_set {
+        let explicit_tunnel_tcp_ports = {
+            let mut guard = self.explicit_tunnel_tcp_ports.lock();
+            let new_set: AHashSet<u16> = ports.iter().copied().collect();
+            if *guard == new_set {
+                return;
+            }
+
             log::info!(
                 "Updated TCP ports for API tunneling: {} port(s)",
                 new_set.len()
             );
             *guard = new_set;
-        }
+            guard.clone()
+        };
+
+        // Rebuild snapshot immediately so packet workers can use the new port
+        // ownership map without waiting for the next cache refresh cycle.
+        let old_snap = self.get_snapshot();
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
+        let new_snapshot = self.snapshot_from_parts(
+            old_snap.connections.clone(),
+            old_snap.pid_names.clone(),
+            version,
+            explicit_tunnel_udp_ports,
+            explicit_tunnel_tcp_ports,
+        );
+        self.current.store(new_snapshot);
     }
 }
 
@@ -1206,5 +1227,38 @@ mod tests {
             443,
             true,
         ));
+    }
+
+    #[test]
+    fn test_register_tcp_ports_applies_immediately_and_persists() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        // No connection metadata yet, but API tunnel TCP ports are explicitly known.
+        cache.register_tcp_ports(&[443, 50000]);
+        let first_snapshot = cache.get_snapshot();
+        let first_version = first_snapshot.version;
+
+        assert!(first_snapshot.should_tunnel_by_port_fallback(443, Protocol::Tcp, true));
+        assert!(first_snapshot.should_tunnel_by_port_fallback(50000, Protocol::Tcp, true));
+        assert!(!first_snapshot.should_tunnel_by_port_fallback(443, Protocol::Tcp, false));
+        drop(first_snapshot);
+
+        // Calling with the same set should not force another snapshot rebuild.
+        cache.register_tcp_ports(&[443, 50000]);
+        assert_eq!(cache.get_snapshot().version, first_version);
+
+        // Regular cache updates must preserve explicitly registered TCP ports.
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 20), 55000, Protocol::Udp),
+            9001,
+        );
+        let mut pid_names = HashMap::new();
+        pid_names.insert(9001, "RobloxPlayerBeta.exe".to_string());
+        cache.update(connections, pid_names);
+
+        let updated = cache.get_snapshot();
+        assert!(updated.should_tunnel_by_port_fallback(443, Protocol::Tcp, true));
+        assert!(updated.should_tunnel_by_port_fallback(50000, Protocol::Tcp, true));
     }
 }
