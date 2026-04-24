@@ -24,8 +24,8 @@ interface LiveGraphProps {
 export function LiveGraph({
   samples,
   height = 160,
-  lineColor = "var(--color-status-connected)",
-  fillColor = "#28d296",
+  lineColor = "var(--color-text-primary)",
+  fillColor = "#ffffff",
 }: LiveGraphProps) {
   const W = 480;
   const H = height;
@@ -139,7 +139,7 @@ export function LiveGraph({
           <div className="flex items-center gap-1.5">
             <span
               className="h-1.5 w-1.5 animate-pulse rounded-full"
-              style={{ backgroundColor: "var(--color-status-connected)" }}
+              style={{ backgroundColor: "var(--color-text-primary)" }}
             />
             <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
               Throughput · Live
@@ -179,11 +179,11 @@ export function LiveGraph({
         <div className="flex items-center gap-1.5">
           <span
             className="relative h-1.5 w-1.5 rounded-full"
-            style={{ backgroundColor: "var(--color-status-connected)" }}
+            style={{ backgroundColor: "var(--color-text-primary)" }}
           >
             <span
               className="absolute inset-0 animate-ping rounded-full opacity-60"
-              style={{ backgroundColor: "var(--color-status-connected)" }}
+              style={{ backgroundColor: "var(--color-text-primary)" }}
             />
           </span>
           <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
