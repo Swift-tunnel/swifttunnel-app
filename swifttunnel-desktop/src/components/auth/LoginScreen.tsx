@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useAuthStore } from "../../stores/authStore";
 import { Button, Spinner } from "../ui";
+import swiftLogo from "../../assets/swift.png";
 
 declare const __APP_VERSION__: string;
 
@@ -85,10 +86,7 @@ export function LoginScreen() {
     <div
       data-tauri-drag-region
       className="flex h-screen w-screen items-center justify-center"
-      style={{
-        background:
-          "radial-gradient(ellipse at 50% 20%, rgba(60,130,246,0.08), var(--color-bg-base) 60%)",
-      }}
+      style={{ backgroundColor: "var(--color-bg-base)" }}
     >
       <div className="flex w-full max-w-[360px] flex-col gap-6 px-8">
         {/* Brand */}
@@ -99,26 +97,19 @@ export function LoginScreen() {
           className="flex flex-col items-center gap-3"
         >
           <div
-            className="flex h-14 w-14 items-center justify-center rounded-[12px]"
+            className="flex h-[88px] w-[88px] items-center justify-center rounded-[18px]"
             style={{
-              background:
-                "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-secondary))",
-              boxShadow:
-                "0 8px 28px rgba(60,130,246,0.3), inset 0 1px 0 rgba(255,255,255,0.15)",
+              backgroundColor: "var(--color-bg-card)",
+              border: "1px solid var(--color-border-default)",
             }}
           >
-            <svg
-              width="26"
-              height="26"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="white"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-            </svg>
+            <img
+              src={swiftLogo}
+              alt="SwiftTunnel"
+              width={72}
+              height={72}
+              style={{ objectFit: "contain" }}
+            />
           </div>
           <div className="text-center">
             <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-text-primary">
