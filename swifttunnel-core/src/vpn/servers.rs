@@ -77,6 +77,20 @@ pub struct DynamicServerInfo {
     pub port: u16,
     pub phantun_available: bool,
     pub phantun_port: Option<u16>,
+    #[serde(default = "default_relay_available")]
+    pub relay_available: bool,
+    #[serde(default)]
+    pub relay_port: Option<u16>,
+}
+
+fn default_relay_available() -> bool {
+    true
+}
+
+impl DynamicServerInfo {
+    pub fn effective_relay_port(&self) -> u16 {
+        self.relay_port.unwrap_or(self.port)
+    }
 }
 
 /// Dynamic gaming region with owned strings (for API deserialization)
@@ -434,6 +448,7 @@ impl DynamicServerList {
                 .servers
                 .iter()
                 .filter_map(|server_id| self.get_server(server_id))
+                .filter(|server| server.relay_available)
                 .collect()
         } else {
             vec![]
@@ -446,7 +461,11 @@ impl DynamicServerList {
             region
                 .servers
                 .iter()
-                .filter_map(|server_id| self.get_latency(server_id))
+                .filter_map(|server_id| {
+                    self.get_server(server_id)
+                        .filter(|server| server.relay_available)
+                        .and_then(|_| self.get_latency(server_id))
+                })
                 .min()
         } else {
             None
@@ -467,6 +486,8 @@ mod tests {
             port: 51820,
             phantun_available: false,
             phantun_port: None,
+            relay_available: true,
+            relay_port: Some(51820),
         }
     }
 

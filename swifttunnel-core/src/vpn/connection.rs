@@ -1309,15 +1309,25 @@ impl VpnConnection {
         // Spawn background task for async ipinfo.io region lookups
         if auto_routing_enabled {
             let (lookup_tx, mut lookup_rx) =
-                tokio::sync::mpsc::unbounded_channel::<std::net::Ipv4Addr>();
+                tokio::sync::mpsc::unbounded_channel::<(std::net::Ipv4Addr, u64)>();
             auto_router.set_lookup_channel(lookup_tx);
 
             let router_for_lookup = Arc::clone(&auto_router);
             let state_for_lookup = Arc::clone(&self.state);
             tokio::spawn(async move {
-                while let Some(ip) = lookup_rx.recv().await {
+                while let Some((ip, generation)) = lookup_rx.recv().await {
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
+                            if !router_for_lookup.is_current_lookup_generation(generation) {
+                                log::info!(
+                                    "Auto-routing: Ignoring stale lookup for {} (generation {})",
+                                    ip,
+                                    generation
+                                );
+                                router_for_lookup.clear_pending_lookup(ip);
+                                continue;
+                            }
+
                             log::info!(
                                 "Auto-routing: {} resolved to {} ({})",
                                 ip,

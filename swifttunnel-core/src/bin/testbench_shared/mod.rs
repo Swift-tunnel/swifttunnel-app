@@ -223,8 +223,11 @@ pub async fn load_available_servers() -> Result<Vec<(String, SocketAddr, Option<
 fn to_available_servers(servers: &[DynamicServerInfo]) -> Vec<(String, SocketAddr, Option<u32>)> {
     servers
         .iter()
+        .filter(|server| server.relay_available)
         .filter_map(|server| {
-            let addr = format!("{}:{}", server.ip, 51821).parse().ok()?;
+            let addr = format!("{}:{}", server.ip, server.effective_relay_port())
+                .parse()
+                .ok()?;
             Some((server.region.clone(), addr, None))
         })
         .collect()

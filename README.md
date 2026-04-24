@@ -40,7 +40,7 @@
 Only game traffic is optimized through SwiftTunnel. Discord, Spotify, Chrome — everything else uses your normal internet. No bandwidth wasted.
 
 ### ⚡ Low Latency Gaming Servers
-28 gaming-optimized servers across 10 regions. Each server runs:
+27 gaming-optimized relays across 12 gaming regions. Each relay runs:
 - **BBR** congestion control for faster throughput
 - **fq_codel** queue management to eliminate bufferbloat
 - **V3 UDP relay** protocol for minimal overhead (~0.5-1ms)
@@ -58,7 +58,7 @@ Built-in performance optimizations:
 - All optimizations are reversible
 
 ### 🌍 Auto Region Detection
-Starts on the lowest-latency region from the in-app ping test, then detects which game server you're connecting to and routes through the optimal SwiftTunnel server (ExitLag-style). Manual server pins stay respected, and live ping-test refreshes keep Auto Route's server choices current while connected.
+Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected, drained relays are excluded through `/api/vpn/servers`, stale lookups cannot switch after a newer game-server IP, and live ping-test refreshes keep Auto Route's server choices current while connected.
 
 ---
 

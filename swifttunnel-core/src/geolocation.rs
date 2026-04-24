@@ -1,24 +1,25 @@
 //! IP Geolocation module
 //!
-//! Uses a hardcoded IP table (sourced from BTRoblox) as the primary region
-//! lookup, with ipinfo.io as a fallback for unknown IPs. This two-tier
-//! approach avoids the known inaccuracy of geo-IP services for Roblox's
-//! 128.116.0.0/17 range (they often return Roblox's HQ city "San Mateo"
-//! instead of the actual server location).
+//! Uses the SwiftTunnel web resolver as the primary region lookup. The web
+//! resolver keeps the IPinfo token server-side, caches provider responses, and
+//! applies central overrides. A local Roblox IP table remains as an offline
+//! fallback when the resolver is unreachable or low-confidence.
 
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-/// Shared HTTP client with 5s timeout for geolocation lookups
+const GAME_SERVER_REGION_API_URL: &str = "https://swifttunnel.net/api/vpn/game-server-region";
+
+/// Shared HTTP client with a short timeout for geolocation lookups
 fn geo_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(2))
             .build()
             .expect("Failed to build geolocation HTTP client")
     })
@@ -51,6 +52,28 @@ pub struct IpInfoResponse {
     pub loc: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct GameServerRegionRequest {
+    ip: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct GameServerRegionLocation {
+    city: Option<String>,
+    region: Option<String>,
+    country: Option<String>,
+    loc: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct GameServerRegionResponse {
+    provider: Option<String>,
+    location: Option<GameServerRegionLocation>,
+    roblox_region_id: Option<String>,
+    swifttunnel_region_id: Option<String>,
+    confidence: Option<String>,
+}
+
 /// Get location for an IP address
 /// Returns a formatted string like "Singapore, SG" or "Virginia, VA, US"
 pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
@@ -64,26 +87,18 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
         }
     }
 
-    // Acquire semaphore to limit concurrent requests
-    let _permit = get_semaphore().acquire().await.ok()?;
-
-    // Query ipinfo.io
-    let url = format!("https://ipinfo.io/{}/json", ip);
-    log::info!("Querying location for IP: {}", ip);
-
-    let client = geo_http_client();
-
-    let response = client.get(&url).send().await.ok()?;
-
-    if !response.status().is_success() {
-        log::warn!("ipinfo.io returned status {}", response.status());
-        return None;
-    }
-
-    let info: IpInfoResponse = response.json().await.ok()?;
-
-    // Format location string (like Bloxstrap)
-    let location = format_location(&info)?;
+    let response = resolve_game_server_region_from_api(ip).await?;
+    let location = response
+        .location
+        .as_ref()
+        .and_then(format_api_location)
+        .or_else(|| {
+            response
+                .roblox_region_id
+                .as_deref()
+                .and_then(roblox_region_from_id)
+                .map(|region| region.display_name().to_string())
+        })?;
 
     // Cache the result
     {
@@ -103,6 +118,21 @@ fn format_location(info: &IpInfoResponse) -> Option<String> {
 
     // If city equals region (or no region), use shorter format
     if let Some(region) = &info.region {
+        if city == region {
+            Some(format!("{}, {}", city, country))
+        } else {
+            Some(format!("{}, {}, {}", city, region, country))
+        }
+    } else {
+        Some(format!("{}, {}", city, country))
+    }
+}
+
+fn format_api_location(location: &GameServerRegionLocation) -> Option<String> {
+    let city = location.city.as_ref()?;
+    let country = location.country.as_ref()?;
+
+    if let Some(region) = &location.region {
         if city == region {
             Some(format!("{}, {}", city, country))
         } else {
@@ -418,109 +448,136 @@ fn us_region_from_state(state: &str) -> Option<RobloxRegion> {
     }
 }
 
-/// Look up a game server IP's region.
-///
-/// Uses a two-tier strategy:
-/// 1. **Hardcoded IP table** (from BTRoblox verified data) — instant, no network.
-///    Used as the primary source for 128.116.x.x IPs with known /24 mappings.
-/// 2. **ipinfo.io API** — fallback for unknown IPs or for the display location string.
-///
-/// Returns `(RobloxRegion, location_string)` where location_string is like "Singapore, SG".
-pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
-    // Tier 1: Try hardcoded IP table first (instant, no network needed)
-    let ip_table_region = roblox_ip_to_region(ip);
-
-    if ip_table_region != RobloxRegion::Unknown {
-        // We have a verified region from the IP table. Still fetch ipinfo for the
-        // display location string, but don't block on it for the region decision.
-        let location = match fetch_ipinfo(ip).await {
-            Some(info) => {
-                // Log if ipinfo disagrees with the IP table (helps detect stale entries)
-                let ipinfo_region = ipinfo_to_roblox_region(&info);
-                if ipinfo_region != RobloxRegion::Unknown && ipinfo_region != ip_table_region {
-                    log::warn!(
-                        "Region disagreement for {}: IP table={}, ipinfo={} (city={:?}, country={:?})",
-                        ip,
-                        ip_table_region.display_name(),
-                        ipinfo_region.display_name(),
-                        info.city,
-                        info.country,
-                    );
-                }
-                format_location(&info).unwrap_or_else(|| ip_table_region.display_name().to_string())
-            }
-            None => {
-                // ipinfo unavailable — use region display name as location
-                ip_table_region.display_name().to_string()
-            }
-        };
-
-        log::info!(
-            "Geo lookup: {} -> {} ({}) [IP table]",
-            ip,
-            location,
-            ip_table_region.display_name()
-        );
-        return Some((ip_table_region, location));
+fn roblox_region_from_id(id: &str) -> Option<RobloxRegion> {
+    match id {
+        "singapore" => Some(RobloxRegion::Singapore),
+        "tokyo" => Some(RobloxRegion::Tokyo),
+        "mumbai" => Some(RobloxRegion::Mumbai),
+        "sydney" => Some(RobloxRegion::Sydney),
+        "london" => Some(RobloxRegion::London),
+        "amsterdam" => Some(RobloxRegion::Amsterdam),
+        "paris" => Some(RobloxRegion::Paris),
+        "frankfurt" => Some(RobloxRegion::Frankfurt),
+        "warsaw" => Some(RobloxRegion::Warsaw),
+        "us-east" => Some(RobloxRegion::UsEast),
+        "us-central" => Some(RobloxRegion::UsCentral),
+        "us-west" => Some(RobloxRegion::UsWest),
+        "brazil" => Some(RobloxRegion::Brazil),
+        _ => None,
     }
-
-    // Tier 2: IP not in hardcoded table — fall back to ipinfo.io
-    let info = fetch_ipinfo(ip).await?;
-    let location = format_location(&info)?;
-    let region = ipinfo_to_roblox_region(&info);
-
-    log::info!(
-        "Geo lookup: {} -> {} ({}) [ipinfo fallback]",
-        ip,
-        location,
-        region.display_name()
-    );
-    Some((region, location))
 }
 
-/// Fetch ipinfo.io data for an IP, using the cache and semaphore.
-async fn fetch_ipinfo(ip: Ipv4Addr) -> Option<IpInfoResponse> {
-    let _permit = get_semaphore().acquire().await.ok()?;
-
-    // Check cache for a previously fetched location string
-    let cached_location = {
-        let cache = get_cache();
-        cache.lock().get(&ip).cloned()
-    };
-
-    if let Some(loc) = cached_location {
-        // Parse cached "City, Country" or "City, Region, Country" string back
-        let parts: Vec<&str> = loc.split(", ").collect();
-        let city = parts.first().unwrap_or(&"").to_string();
-        let region = if parts.len() == 3 {
-            Some(parts[1].to_string())
-        } else {
-            None
-        };
-        let country = parts.last().unwrap_or(&"").to_string();
-        return Some(IpInfoResponse {
-            city: Some(city),
-            region,
-            country: Some(country),
-            loc: None, // not available from cache
-        });
+fn roblox_region_from_swifttunnel_region_id(id: &str) -> Option<RobloxRegion> {
+    match id {
+        "germany" => Some(RobloxRegion::Frankfurt),
+        other => roblox_region_from_id(other),
     }
+}
 
-    let url = format!("https://ipinfo.io/{}/json", ip);
+async fn resolve_game_server_region_from_api(ip: Ipv4Addr) -> Option<GameServerRegionResponse> {
+    let _permit = get_semaphore().acquire().await.ok()?;
     let client = geo_http_client();
-    let response = client.get(&url).send().await.ok()?;
+    let response = client
+        .post(GAME_SERVER_REGION_API_URL)
+        .json(&GameServerRegionRequest { ip: ip.to_string() })
+        .send()
+        .await
+        .ok()?;
     if !response.status().is_success() {
-        log::warn!("ipinfo.io returned status {} for {}", response.status(), ip);
+        log::warn!(
+            "SwiftTunnel game-server resolver returned status {} for {}",
+            response.status(),
+            ip
+        );
         return None;
     }
-    let info: IpInfoResponse = response.json().await.ok()?;
+    response.json().await.ok()
+}
 
-    // Cache the formatted location string
-    if let Some(location) = format_location(&info) {
-        get_cache().lock().insert(ip, location);
+fn local_table_lookup(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
+    let region = roblox_ip_to_region(ip);
+    if region == RobloxRegion::Unknown {
+        None
+    } else {
+        Some((region.clone(), region.display_name().to_string()))
     }
+}
 
-    Some(info)
+fn resolve_api_response_or_local(
+    ip: Ipv4Addr,
+    response: Option<GameServerRegionResponse>,
+) -> Option<(RobloxRegion, String)> {
+    match response {
+        Some(response) => {
+            let api_region = response
+                .swifttunnel_region_id
+                .as_deref()
+                .and_then(roblox_region_from_swifttunnel_region_id)
+                .or_else(|| {
+                    response
+                        .roblox_region_id
+                        .as_deref()
+                        .and_then(roblox_region_from_id)
+                });
+            let location = response
+                .location
+                .as_ref()
+                .and_then(format_api_location)
+                .or_else(|| api_region.as_ref().map(|r| r.display_name().to_string()))
+                .unwrap_or_else(|| "Unknown".to_string());
+            let confidence = response.confidence.as_deref().unwrap_or("low");
+
+            if confidence == "low" {
+                if let Some(local) = local_table_lookup(ip) {
+                    log::info!(
+                        "Geo lookup: {} -> {} ({}) [local fallback after low-confidence resolver: provider={:?}, swifttunnel_region={:?}]",
+                        ip,
+                        local.1,
+                        local.0.display_name(),
+                        response.provider,
+                        response.swifttunnel_region_id
+                    );
+                    return Some(local);
+                }
+            }
+
+            if let Some(region) = api_region {
+                log::info!(
+                    "Geo lookup: {} -> {} ({}) [SwiftTunnel resolver: provider={:?}, confidence={}, swifttunnel_region={:?}]",
+                    ip,
+                    location,
+                    region.display_name(),
+                    response.provider,
+                    confidence,
+                    response.swifttunnel_region_id
+                );
+                return Some((region, location));
+            }
+
+            local_table_lookup(ip)
+        }
+        None => {
+            let local = local_table_lookup(ip);
+            if let Some((region, location)) = &local {
+                log::info!(
+                    "Geo lookup: {} -> {} ({}) [local fallback after resolver failure]",
+                    ip,
+                    location,
+                    region.display_name()
+                );
+            }
+            local
+        }
+    }
+}
+
+/// Look up a game server IP's region.
+///
+/// Uses the SwiftTunnel web resolver first. The resolver is IPinfo-primary and
+/// owns the provider token/cache/overrides. If the resolver fails or returns
+/// low-confidence data, fall back to the local Roblox /24 table.
+pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
+    resolve_api_response_or_local(ip, resolve_game_server_region_from_api(ip).await)
 }
 
 /// Map a Roblox game server IP to its geographic region.
@@ -960,6 +1017,83 @@ mod tests {
             ipinfo_to_roblox_region(&info),
             RobloxRegion::UsEast,
             "Default US should be UsEast, not UsWest"
+        );
+    }
+
+    #[test]
+    fn test_resolver_response_beats_local_table_when_confident() {
+        let response = GameServerRegionResponse {
+            provider: Some("ipinfo".to_string()),
+            location: Some(GameServerRegionLocation {
+                city: Some("Tokyo".to_string()),
+                region: Some("Tokyo".to_string()),
+                country: Some("JP".to_string()),
+                loc: None,
+            }),
+            roblox_region_id: Some("tokyo".to_string()),
+            swifttunnel_region_id: Some("tokyo".to_string()),
+            confidence: Some("high".to_string()),
+        };
+
+        // 128.116.50.x is Singapore in the local table, so this proves the
+        // resolver is authoritative when confidence is not low.
+        let resolved =
+            resolve_api_response_or_local(Ipv4Addr::new(128, 116, 50, 10), Some(response));
+        assert_eq!(
+            resolved,
+            Some((RobloxRegion::Tokyo, "Tokyo, JP".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_resolver_swifttunnel_region_id_takes_precedence() {
+        let response = GameServerRegionResponse {
+            provider: Some("manual_override".to_string()),
+            location: Some(GameServerRegionLocation {
+                city: Some("Dallas".to_string()),
+                region: Some("Texas".to_string()),
+                country: Some("US".to_string()),
+                loc: None,
+            }),
+            roblox_region_id: Some("us-east".to_string()),
+            swifttunnel_region_id: Some("us-central".to_string()),
+            confidence: Some("high".to_string()),
+        };
+
+        let resolved =
+            resolve_api_response_or_local(Ipv4Addr::new(128, 116, 102, 10), Some(response));
+        assert_eq!(
+            resolved,
+            Some((RobloxRegion::UsCentral, "Dallas, Texas, US".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_low_confidence_resolver_falls_back_to_local_table() {
+        let response = GameServerRegionResponse {
+            provider: Some("ipinfo".to_string()),
+            location: Some(GameServerRegionLocation {
+                city: None,
+                region: None,
+                country: Some("US".to_string()),
+                loc: None,
+            }),
+            roblox_region_id: Some("us-east".to_string()),
+            swifttunnel_region_id: Some("us-east".to_string()),
+            confidence: Some("low".to_string()),
+        };
+
+        let resolved =
+            resolve_api_response_or_local(Ipv4Addr::new(128, 116, 55, 10), Some(response));
+        assert_eq!(resolved, Some((RobloxRegion::Tokyo, "Tokyo".to_string())));
+    }
+
+    #[test]
+    fn test_resolver_failure_falls_back_to_local_table() {
+        let resolved = resolve_api_response_or_local(Ipv4Addr::new(128, 116, 95, 10), None);
+        assert_eq!(
+            resolved,
+            Some((RobloxRegion::UsCentral, "US Central".to_string()))
         );
     }
 }

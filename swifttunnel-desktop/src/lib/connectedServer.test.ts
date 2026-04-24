@@ -9,6 +9,8 @@ const SERVERS: ServerInfo[] = [
     country_code: "IN",
     ip: "1.2.3.4",
     port: 51821,
+    relay_available: true,
+    relay_port: 51821,
   },
   {
     region: "singapore",
@@ -16,6 +18,8 @@ const SERVERS: ServerInfo[] = [
     country_code: "SG",
     ip: "8.8.8.8",
     port: 51821,
+    relay_available: true,
+    relay_port: 51821,
   },
 ];
 

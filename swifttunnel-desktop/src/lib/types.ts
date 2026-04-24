@@ -123,6 +123,8 @@ export interface ServerInfo {
   country_code: string;
   ip: string;
   port: number;
+  relay_available: boolean;
+  relay_port: number | null;
 }
 
 export interface ServerListResponse {

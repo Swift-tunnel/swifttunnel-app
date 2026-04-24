@@ -357,7 +357,7 @@ pub async fn vpn_connect(
 
     let (
         custom_relay,
-        auto_routing,
+        mut auto_routing,
         relay_qos_enabled,
         whitelisted_regions,
         forced_servers,
@@ -376,6 +376,10 @@ pub async fn vpn_connect(
         settings_snapshot.game_process_performance,
         settings_snapshot.enable_api_tunneling,
     );
+    if custom_relay.is_some() && auto_routing {
+        log::info!("Auto-routing disabled for this session because custom_relay_server is set");
+        auto_routing = false;
+    }
 
     let preset_set = parse_game_presets(&game_presets);
     let tunnel_apps = swifttunnel_core::vpn::get_apps_for_preset_set(&preset_set);
@@ -619,6 +623,8 @@ pub struct ServerInfoResponse {
     pub country_code: String,
     pub ip: String,
     pub port: u16,
+    pub relay_available: bool,
+    pub relay_port: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -654,6 +660,8 @@ pub async fn server_get_list(state: State<'_, AppState>) -> Result<ServerListRes
                     country_code: s.country_code.clone(),
                     ip: s.ip.clone(),
                     port: s.port,
+                    relay_available: s.relay_available,
+                    relay_port: s.relay_port,
                 })
                 .collect(),
             source: sl.source.to_string(),
@@ -676,7 +684,14 @@ fn build_latency_probe_targets(
 ) -> Vec<(String, String, u16)> {
     sl.servers()
         .iter()
-        .map(|server| (server.region.clone(), server.ip.clone(), server.port))
+        .filter(|server| server.relay_available)
+        .map(|server| {
+            (
+                server.region.clone(),
+                server.ip.clone(),
+                server.effective_relay_port(),
+            )
+        })
         .collect()
 }
 
@@ -688,8 +703,11 @@ pub(crate) fn build_available_servers(
 ) -> Vec<(String, SocketAddr, Option<u32>)> {
     sl.servers()
         .iter()
+        .filter(|s| s.relay_available)
         .filter_map(|s| {
-            let addr: SocketAddr = format!("{}:{}", s.ip, s.port).parse().ok()?;
+            let addr: SocketAddr = format!("{}:{}", s.ip, s.effective_relay_port())
+                .parse()
+                .ok()?;
             let latency = sl.get_latency(&s.region);
             Some((s.region.clone(), addr, latency))
         })
@@ -720,14 +738,28 @@ fn select_best_server_in_region(
     let region = sl.get_region(region_id)?;
     let mut best: Option<(String, u32)> = None;
     for server_id in &region.servers {
+        if !sl
+            .get_server(server_id)
+            .is_some_and(|server| server.relay_available)
+        {
+            continue;
+        }
         if let Some(latency) = sl.get_latency(server_id) {
             if best.as_ref().is_none_or(|(_, best_ms)| latency < *best_ms) {
                 best = Some((server_id.clone(), latency));
             }
         }
     }
-    best.map(|(id, _)| id)
-        .or_else(|| region.servers.first().cloned())
+    best.map(|(id, _)| id).or_else(|| {
+        region
+            .servers
+            .iter()
+            .find(|server_id| {
+                sl.get_server(server_id)
+                    .is_some_and(|server| server.relay_available)
+            })
+            .cloned()
+    })
 }
 
 fn select_best_region_by_latency(
@@ -852,6 +884,16 @@ mod tests {
             port,
             phantun_available: false,
             phantun_port: None,
+            relay_available: true,
+            relay_port: Some(port),
+        }
+    }
+
+    fn make_unavailable_server(region: &str, ip: &str) -> DynamicServerInfo {
+        DynamicServerInfo {
+            relay_available: false,
+            relay_port: None,
+            ..make_server_with_port(region, ip, 51821)
         }
     }
 
@@ -956,6 +998,28 @@ mod tests {
         assert!(probes.contains(&("singapore".to_string(), "1.1.1.1".to_string(), 51821)));
         assert!(probes.contains(&("singapore-02".to_string(), "1.1.1.2".to_string(), 51821)));
         assert!(probes.contains(&("tokyo-01".to_string(), "2.2.2.1".to_string(), 51821)));
+    }
+
+    #[test]
+    fn build_latency_probe_targets_excludes_unavailable_relays() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server("singapore", "1.1.1.1"),
+                make_unavailable_server("tokyo-01", "2.2.2.1"),
+            ],
+            vec![
+                make_region("singapore", &["singapore"]),
+                make_region("tokyo", &["tokyo-01"]),
+            ],
+            ServerListSource::Api,
+        );
+
+        let probes = build_latency_probe_targets(&list);
+        assert_eq!(
+            probes,
+            vec![("singapore".to_string(), "1.1.1.1".to_string(), 51821)]
+        );
     }
 
     #[test]
@@ -1103,6 +1167,26 @@ mod tests {
             by_region.get("phantun"),
             Some(&"3.3.3.3:60001".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn build_available_servers_excludes_unavailable_relays() {
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server("singapore", "1.1.1.1"),
+                make_unavailable_server("tokyo-01", "2.2.2.1"),
+            ],
+            vec![
+                make_region("singapore", &["singapore"]),
+                make_region("tokyo", &["tokyo-01"]),
+            ],
+            ServerListSource::Api,
+        );
+
+        let built = build_available_servers(&list);
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].0, "singapore");
     }
 }
 
