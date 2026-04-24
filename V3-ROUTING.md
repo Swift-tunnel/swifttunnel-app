@@ -67,6 +67,7 @@ Inbound (Relay → Client):
 
 ### V3 Connection (~0.5-1 second)
 1. Fetch config from API (for server IP)
+   - When Auto Route is enabled, the initial region is chosen from the in-app ping-test latency cache when available.
 2. Configure split tunnel (ndisapi)
 3. Create UDP relay connection
 4. Connected
@@ -103,6 +104,12 @@ pub struct UdpRelay {
 - `forward_outbound(payload)` - Add session ID and send to relay
 - `receive_inbound(buffer)` - Receive from relay and strip session ID
 - `send_keepalive()` - Maintain NAT binding
+
+### Auto Route Selection
+- Initial Auto Route connects to the region with the best measured in-app ping-test latency when latency data exists; otherwise it falls back to the requested/last selected region.
+- If the requested region has a manual server pin, Auto Route starts there and uses the pinned server. Pinned regions are scored by the pinned server's latency, not by another sibling server.
+- The periodic server ping test updates the live auto-router candidate snapshot, so relay switches use the same fresh latency data shown in the UI.
+- After Roblox game-server region detection, the auto-router still targets the matching SwiftTunnel region and picks the lowest-latency relay inside that region, honoring any forced server override.
 
 ## Server Side
 

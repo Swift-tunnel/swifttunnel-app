@@ -58,7 +58,7 @@ Built-in performance optimizations:
 - All optimizations are reversible
 
 ### 🌍 Auto Region Detection
-Automatically detects which game server you're connecting to and routes through the optimal SwiftTunnel server (ExitLag-style).
+Starts on the lowest-latency region from the in-app ping test, then detects which game server you're connecting to and routes through the optimal SwiftTunnel server (ExitLag-style). Manual server pins stay respected, and live ping-test refreshes keep Auto Route's server choices current while connected.
 
 ---
 

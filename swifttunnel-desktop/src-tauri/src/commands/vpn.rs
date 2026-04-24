@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use tauri::{AppHandle, Emitter, State};
 
@@ -332,11 +332,6 @@ pub async fn vpn_connect(
     region: String,
     game_presets: Vec<String>,
 ) -> Result<(), String> {
-    {
-        let mut discord = state.discord_manager.lock();
-        discord.set_connecting(&region);
-    }
-
     // Gather needed data from settings and server list before locking vpn
     let (settings_snapshot, binding_preference, overrides_changed) = {
         let mut settings = state.settings.lock();
@@ -386,10 +381,25 @@ pub async fn vpn_connect(
     let tunnel_apps = swifttunnel_core::vpn::get_apps_for_preset_set(&preset_set);
 
     // Build available_servers list from the dynamic server list
-    let available_servers: Vec<(String, SocketAddr, Option<u32>)> = {
+    let (connect_region, available_servers): (String, Vec<(String, SocketAddr, Option<u32>)>) = {
         let sl = state.server_list.lock();
-        build_available_servers(&sl)
+        (
+            resolve_initial_connect_region(&sl, &region, auto_routing, &forced_servers),
+            build_available_servers(&sl),
+        )
     };
+    if connect_region != region {
+        log::info!(
+            "Auto-routing: initial connect region resolved from '{}' to '{}' using ping-test latency cache",
+            region,
+            connect_region
+        );
+    }
+
+    {
+        let mut discord = state.discord_manager.lock();
+        discord.set_connecting(&connect_region);
+    }
 
     // Get access token
     let access_token = {
@@ -401,7 +411,7 @@ pub async fn vpn_connect(
     let result = vpn
         .connect(
             &access_token,
-            &region,
+            &connect_region,
             tunnel_apps,
             custom_relay,
             auto_routing,
@@ -425,7 +435,7 @@ pub async fn vpn_connect(
 
     let discord_region = if result.is_ok() {
         let conn_state = state.vpn_state_handle.borrow().clone();
-        Some(resolve_discord_region(&conn_state, &region))
+        Some(resolve_discord_region(&conn_state, &connect_region))
     } else {
         None
     };
@@ -440,7 +450,7 @@ pub async fn vpn_connect(
     }
 
     if result.is_ok() {
-        if let Err(e) = persist_session_settings(&state, Some(&region)) {
+        if let Err(e) = persist_session_settings(&state, Some(&connect_region)) {
             log::warn!("Failed to persist connected session settings: {}", e);
         }
     }
@@ -720,6 +730,51 @@ fn select_best_server_in_region(
         .or_else(|| region.servers.first().cloned())
 }
 
+fn select_best_region_by_latency(
+    sl: &swifttunnel_core::vpn::servers::DynamicServerList,
+    forced_servers: &HashMap<String, String>,
+) -> Option<String> {
+    sl.regions()
+        .iter()
+        .filter_map(|region| {
+            let latency = forced_servers
+                .get(&region.id)
+                .and_then(|server_id| sl.get_latency(server_id))
+                .or_else(|| {
+                    if forced_servers.contains_key(&region.id) {
+                        None
+                    } else {
+                        sl.get_region_best_latency(&region.id)
+                    }
+                });
+            latency.map(|latency| (region.id.clone(), latency))
+        })
+        .min_by(|(region_a, latency_a), (region_b, latency_b)| {
+            latency_a
+                .cmp(latency_b)
+                .then_with(|| region_a.cmp(region_b))
+        })
+        .map(|(region_id, _)| region_id)
+}
+
+fn resolve_initial_connect_region(
+    sl: &swifttunnel_core::vpn::servers::DynamicServerList,
+    requested_region: &str,
+    auto_routing: bool,
+    forced_servers: &HashMap<String, String>,
+) -> String {
+    if !auto_routing {
+        return requested_region.to_string();
+    }
+
+    if forced_servers.contains_key(requested_region) {
+        return requested_region.to_string();
+    }
+
+    select_best_region_by_latency(sl, forced_servers)
+        .unwrap_or_else(|| requested_region.to_string())
+}
+
 #[tauri::command]
 pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<LatencyEntry>, String> {
     let probes = {
@@ -750,8 +805,30 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
         }
     }
 
-    let mut sl = state.server_list.lock();
-    Ok(apply_latency_measurements(&mut sl, &measured))
+    let (entries, available_servers) = {
+        let mut sl = state.server_list.lock();
+        let entries = apply_latency_measurements(&mut sl, &measured);
+        let available_servers = build_available_servers(&sl);
+        (entries, available_servers)
+    };
+
+    sync_auto_router_available_servers(&state, available_servers).await;
+
+    Ok(entries)
+}
+
+async fn sync_auto_router_available_servers(
+    state: &AppState,
+    available_servers: Vec<(String, SocketAddr, Option<u32>)>,
+) {
+    let auto_router = {
+        let vpn = state.vpn_connection.lock().await;
+        vpn.auto_router().cloned()
+    };
+
+    if let Some(router) = auto_router {
+        router.set_available_servers(available_servers);
+    }
 }
 
 #[cfg(test)]
@@ -928,6 +1005,70 @@ mod tests {
     }
 
     #[test]
+    fn select_best_region_by_latency_uses_ping_test_region_best() {
+        let mut list = make_dynamic_server_list();
+        list.set_latency("singapore", Some(28));
+        list.set_latency("singapore-02", Some(12));
+        list.set_latency("tokyo-01", Some(19));
+
+        let selected = select_best_region_by_latency(&list, &HashMap::new());
+        assert_eq!(selected.as_deref(), Some("singapore"));
+    }
+
+    #[test]
+    fn resolve_initial_connect_region_keeps_manual_region() {
+        let mut list = make_dynamic_server_list();
+        list.set_latency("singapore", Some(12));
+        list.set_latency("tokyo-01", Some(5));
+
+        let selected = resolve_initial_connect_region(&list, "singapore", false, &HashMap::new());
+        assert_eq!(selected, "singapore");
+    }
+
+    #[test]
+    fn resolve_initial_connect_region_uses_ping_test_best_for_auto_routing() {
+        let mut list = make_dynamic_server_list();
+        list.set_latency("singapore", Some(22));
+        list.set_latency("singapore-02", Some(16));
+        list.set_latency("tokyo-01", Some(9));
+
+        let selected = resolve_initial_connect_region(&list, "singapore", true, &HashMap::new());
+        assert_eq!(selected, "tokyo");
+    }
+
+    #[test]
+    fn resolve_initial_connect_region_falls_back_without_ping_results() {
+        let list = make_dynamic_server_list();
+
+        let selected = resolve_initial_connect_region(&list, "singapore", true, &HashMap::new());
+        assert_eq!(selected, "singapore");
+    }
+
+    #[test]
+    fn resolve_initial_connect_region_keeps_requested_region_with_forced_server() {
+        let mut list = make_dynamic_server_list();
+        list.set_latency("singapore", Some(22));
+        list.set_latency("singapore-02", Some(16));
+        list.set_latency("tokyo-01", Some(9));
+        let forced_servers = HashMap::from([("singapore".to_string(), "singapore-02".to_string())]);
+
+        let selected = resolve_initial_connect_region(&list, "singapore", true, &forced_servers);
+        assert_eq!(selected, "singapore");
+    }
+
+    #[test]
+    fn select_best_region_by_latency_scores_forced_region_by_forced_server() {
+        let mut list = make_dynamic_server_list();
+        list.set_latency("singapore", Some(5));
+        list.set_latency("singapore-02", Some(50));
+        list.set_latency("tokyo-01", Some(20));
+        let forced_servers = HashMap::from([("singapore".to_string(), "singapore-02".to_string())]);
+
+        let selected = select_best_region_by_latency(&list, &forced_servers);
+        assert_eq!(selected.as_deref(), Some("tokyo"));
+    }
+
+    #[test]
     fn build_available_servers_uses_dynamic_port() {
         let mut list = DynamicServerList::new_empty();
         list.update(
@@ -969,9 +1110,12 @@ mod tests {
 pub async fn server_refresh(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
     let (servers, regions, source) = swifttunnel_core::vpn::servers::load_server_list().await?;
 
-    let mut sl = state.server_list.lock();
-    sl.update(servers, regions, source.clone());
-    drop(sl);
+    let available_servers = {
+        let mut sl = state.server_list.lock();
+        sl.update(servers, regions, source.clone());
+        build_available_servers(&sl)
+    };
+    sync_auto_router_available_servers(&state, available_servers).await;
 
     let _ = app.emit(SERVER_LIST_UPDATED, source.to_string());
 
