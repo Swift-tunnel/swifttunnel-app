@@ -4612,7 +4612,7 @@ fn run_packet_reader(
         }
 
         if wait_result == WAIT_FAILED {
-            let e = windows::core::Error::from_win32();
+            let e = windows::core::Error::from_thread();
             match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
                 RebindDecision::Stop => break,
                 RebindDecision::Fatal => {
