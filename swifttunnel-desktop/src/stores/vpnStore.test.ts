@@ -168,6 +168,83 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().error).toContain("network timeout");
   });
 
+  it("keeps adapter-choice preflight visible instead of returning to silent ready", async () => {
+    systemCheckDriver.mockResolvedValueOnce(driverStatus());
+    vpnPreflightBinding.mockResolvedValueOnce({
+      status: "ambiguous",
+      reason: "SwiftTunnel needs a one-time adapter choice for this network.",
+      network_signature: "sig",
+      route_resolution_source: "internet_fallback",
+      route_resolution_target_ip: "8.8.8.8",
+      resolved_if_index: 7,
+      recommended_guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      cached_override_used: false,
+      binding_stage: "smart_auto",
+      candidates: [
+        {
+          guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          friendly_name: "Ethernet",
+          description: "Intel Ethernet",
+          if_index: 7,
+          is_up: true,
+          is_default_route: true,
+          kind: "ethernet",
+          stage: "smart_auto",
+          reason: "Candidate available for Smart Auto binding",
+          score: 100,
+        },
+      ],
+    });
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("disconnected");
+    expect(useVpnStore.getState().error).toContain("adapter choice");
+    expect(useVpnStore.getState().bindingPreflight?.status).toBe("ambiguous");
+  });
+
+  it("ignores stale disconnected events while a connect attempt is pending", async () => {
+    const useVpnStore = await loadStore();
+    useVpnStore.setState({
+      state: "fetching_config",
+      error: null,
+      connectAttemptInFlight: true,
+    });
+
+    useVpnStore.getState().handleStateEvent({
+      state: "disconnected",
+      region: null,
+      server_endpoint: null,
+      assigned_ip: null,
+      error: null,
+    });
+
+    expect(useVpnStore.getState().state).toBe("fetching_config");
+    expect(useVpnStore.getState().connectAttemptInFlight).toBe(true);
+  });
+
+  it("does not let stale disconnected events clear a visible connect error", async () => {
+    const useVpnStore = await loadStore();
+    useVpnStore.setState({
+      state: "error",
+      error: "Relay preflight enforcement blocked connection.",
+      connectAttemptInFlight: false,
+    });
+
+    useVpnStore.getState().handleStateEvent({
+      state: "disconnected",
+      region: null,
+      server_endpoint: null,
+      assigned_ip: null,
+      error: null,
+    });
+
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain("preflight enforcement");
+  });
+
   it("manual repair action marks driver as installed", async () => {
     systemRepairDriver.mockResolvedValue(driverStatus());
 

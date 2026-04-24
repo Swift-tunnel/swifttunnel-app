@@ -86,6 +86,7 @@ interface VpnStore {
   diagnostics: DiagnosticsResponse | null;
   bindingPreflight: BindingPreflightInfo | null;
   pendingConnectIntent: { region: string; gamePresets: string[] } | null;
+  connectAttemptInFlight: boolean;
 
   // Actions
   fetchState: () => Promise<void>;
@@ -125,6 +126,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   diagnostics: null,
   bindingPreflight: null,
   pendingConnectIntent: null,
+  connectAttemptInFlight: false,
 
   fetchState: async () => {
     try {
@@ -271,6 +273,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverSetupError: null,
         bindingPreflight: null,
         pendingConnectIntent: null,
+        connectAttemptInFlight: true,
       });
       await get().ensureDriverReady();
       set({
@@ -283,9 +286,10 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       if (preflight.status === "ambiguous") {
         set({
           state: "disconnected",
-          error: null,
+          error: preflight.reason,
           bindingPreflight: preflight,
           pendingConnectIntent: { region, gamePresets },
+          connectAttemptInFlight: false,
         });
         return;
       }
@@ -295,6 +299,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           error: preflight.reason,
           bindingPreflight: null,
           pendingConnectIntent: null,
+          connectAttemptInFlight: false,
         });
         return;
       }
@@ -312,12 +317,14 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverSetupError: null,
         driverStatus: null,
         driverResetAttempted: false,
+        connectAttemptInFlight: false,
       });
     } catch (e) {
       const message = getErrorMessage(e);
       set((current) => ({
         state: "error",
         error: message,
+        connectAttemptInFlight: false,
         driverSetupState:
           current.driverSetupState === "error" ? "error" : "idle",
         driverSetupError:
@@ -380,6 +387,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         diagnostics: null,
         bindingPreflight: null,
         pendingConnectIntent: null,
+        connectAttemptInFlight: false,
         driverSetupState: "idle",
         driverSetupError: null,
         driverStatus: null,
@@ -432,12 +440,29 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   handleStateEvent: (event) => {
-    set({
-      state: event.state,
-      region: event.region,
-      serverEndpoint: event.server_endpoint,
-      assignedIp: event.assigned_ip,
-      error: event.error,
+    set((current) => {
+      const staleReadyEvent =
+        event.state === "disconnected" &&
+        event.error === null &&
+        current.state !== "disconnecting" &&
+        (current.connectAttemptInFlight ||
+          (current.state === "error" && current.error !== null));
+
+      if (staleReadyEvent) {
+        return {};
+      }
+
+      return {
+        state: event.state,
+        region: event.region,
+        serverEndpoint: event.server_endpoint,
+        assignedIp: event.assigned_ip,
+        error: event.error,
+        connectAttemptInFlight:
+          event.state === "connected" || event.state === "error"
+            ? false
+            : current.connectAttemptInFlight,
+      };
     });
   },
 
