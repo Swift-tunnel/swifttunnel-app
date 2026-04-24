@@ -74,36 +74,21 @@ export function NetworkTab() {
         <button
           onClick={runAll}
           disabled={anyRunning}
-          className="relative flex h-12 w-full items-center justify-center gap-2 overflow-hidden rounded-[var(--radius-card)] text-[13px] font-semibold tracking-[-0.01em] transition-all disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-button)] text-[13px] font-semibold tracking-[-0.005em] transition-colors disabled:cursor-not-allowed disabled:opacity-60"
           style={
             anyRunning
               ? {
-                  backgroundColor: "var(--color-bg-card)",
-                  border: "1px solid var(--color-border-subtle)",
+                  backgroundColor: "transparent",
+                  border: "1px solid var(--color-border-default)",
                   color: "var(--color-text-muted)",
                 }
               : {
-                  background:
-                    "linear-gradient(180deg, var(--color-accent-primary), #2b6ee0)",
-                  color: "#fff",
-                  border: "1px solid rgba(60,130,246,0.5)",
-                  boxShadow:
-                    "0 2px 10px rgba(60,130,246,0.22), inset 0 1px 0 rgba(255,255,255,0.12)",
+                  backgroundColor: "var(--color-accent-primary)",
+                  color: "#000000",
                 }
           }
         >
-          {!anyRunning && (
-            <span
-              aria-hidden
-              className="pointer-events-none absolute inset-0"
-              style={{
-                background:
-                  "linear-gradient(100deg, transparent 30%, rgba(255,255,255,0.18) 50%, transparent 70%)",
-                animation: "sweep-shine 3.4s ease-in-out infinite",
-              }}
-            />
-          )}
-          <span className="relative flex items-center gap-2">
+          <span className="flex items-center gap-2">
             {anyRunning ? (
               <>
                 <Spinner size={13} />
@@ -150,7 +135,7 @@ export function NetworkTab() {
                 style={{
                   backgroundColor:
                     duration === d ? "var(--color-accent-primary)" : "transparent",
-                  color: duration === d ? "#fff" : "var(--color-text-muted)",
+                  color: duration === d ? "#000000" : "var(--color-text-muted)",
                 }}
               >
                 {d >= 60 ? `${d / 60}m` : `${d}s`}
@@ -252,7 +237,7 @@ export function NetworkTab() {
                   <SpeedCard
                     label="Upload"
                     value={net.speedResult.upload_mbps.toFixed(1)}
-                    color="var(--color-accent-cyan)"
+                    color="var(--color-text-primary)"
                     direction="up"
                   />
                 </div>
