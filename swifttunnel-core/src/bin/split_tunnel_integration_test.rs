@@ -154,7 +154,7 @@ async fn run_connected_checks(
         udp_target,
         udp_count
     );
-    let mut child = Command::new(&test_exe)
+    let child = Command::new(&test_exe)
         .args([
             "--udp-probe",
             "--target",
@@ -244,7 +244,7 @@ async fn run_tcp_api_probe_check(
         DEFAULT_TCP_PROBE_TARGET,
         DEFAULT_TCP_PROBE_COUNT
     );
-    let mut child = Command::new(&test_exe)
+    let child = Command::new(&test_exe)
         .args([
             "--tcp-probe",
             "--target",
