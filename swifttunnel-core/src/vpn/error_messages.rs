@@ -14,7 +14,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
     match error {
         // Split tunnel driver issues
         VpnError::SplitTunnelNotAvailable => {
-            "Split tunnel driver not installed.\n\nPlease reinstall SwiftTunnel or download the driver from:\nhttps://github.com/wiresock/ndisapi/releases".to_string()
+            "Split tunnel driver not available (Windows Packet Filter driver).\n\nOpen SwiftTunnel and use the driver repair button, or reinstall SwiftTunnel if repair keeps failing.".to_string()
         }
 
         VpnError::SplitTunnelSetupFailed(msg) => {
@@ -163,7 +163,8 @@ mod tests {
     fn test_user_friendly_split_tunnel_not_available() {
         let error = VpnError::SplitTunnelNotAvailable;
         let msg = user_friendly_error(&error);
-        assert!(msg.contains("Split tunnel driver not installed"));
+        assert!(msg.contains("Split tunnel driver not available"));
+        assert!(msg.contains("Windows Packet Filter driver"));
     }
 
     #[test]

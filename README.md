@@ -130,7 +130,7 @@ npm run build
 npm run tauri:dev
 ```
 
-### Build NSIS Installer
+### Build MSI Installer
 
 ```bash
 cd swifttunnel-desktop
@@ -138,7 +138,7 @@ npm run tauri:build
 ```
 
 Installer output:
-- `swifttunnel-desktop/src-tauri/target/release/bundle/nsis/*.exe`
+- `swifttunnel-desktop/src-tauri/target/release/bundle/msi/*.msi`
 - Updater artifacts and signatures are generated when signing keys are configured.
 
 ### Release Pipeline
@@ -161,8 +161,9 @@ Notes:
 - `TAURI_UPDATER_PUBLIC_KEY` is the base64-encoded contents of the minisign updater public key file, and it is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
 - If `TAURI_UPDATER_LEGACY_PUBLIC_KEY` is configured, shipped apps can retry updater verification with the legacy Tauri key during a staged migration.
 - `node scripts/check-desktop-version-sync.mjs` verifies `swifttunnel-desktop/src-tauri/Cargo.toml` and `swifttunnel-desktop/src-tauri/tauri.conf.json` stay on the same version, and CI now enforces it on pushes and PRs.
-- `WinpkFilter-x64.msi` is fetched in CI and bundled into NSIS resources.
-- Runtime driver install is bundle-first with pinned fallback download (`Windows.Packet.Filter.3.6.2.1.x64.msi`) plus SHA-256 verification if bundled MSI is missing.
+- x64 and ARM64 WinpkFilter MSIs are fetched in CI, SHA-256 checked, and extracted into signed INF/SYS/CAT driver packages under `swifttunnel-desktop/src-tauri/resources/drivers/winpkfilter/<arch>/win10`.
+- MSI install runs `SwiftTunnel.exe --install-driver` after files land; the helper installs the extracted native driver package with `pnputil`, repairs/starts `NDISRD`, and writes `%ProgramData%\SwiftTunnel\logs\driver-install.log`.
+- Runtime driver repair remains available in-app and uses structured health status to install, reset, reinstall, or request reboot without repeatedly offering the same install action.
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
 - `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
@@ -180,7 +181,7 @@ Notes:
 
 ### Installer Validation Checklist (Clean Windows 10/11)
 
-1. Install using the generated NSIS installer on a clean VM.
+1. Install using the generated MSI installer on a clean VM.
 2. Launch app and confirm login flow works.
 3. Confirm `%APPDATA%\SwiftTunnel\settings.json` is read/written correctly.
 4. Click Connect once on a clean machine and confirm SwiftTunnel auto-installs the Windows Packet Filter driver (UAC prompt expected) before connecting.
@@ -208,7 +209,7 @@ This runs formatter checks, region resolver tests, updater channel/security test
 | GUI | [Tauri v2](https://tauri.app/) + [React 19](https://react.dev/) + TypeScript |
 | Tunnel | V3 UDP Relay (custom, ~0.5-1ms overhead) |
 | Split Tunnel | ndisapi (Windows Packet Filter) |
-| Installer | NSIS (Tauri bundler) |
+| Installer | MSI (Tauri/WiX bundler) |
 
 ---
 

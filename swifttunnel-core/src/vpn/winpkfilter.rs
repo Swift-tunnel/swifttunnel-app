@@ -175,7 +175,9 @@ pub fn native_msi_package() -> &'static WinpkFilterMsiPackage {
 //  DRIVER PACKAGE (INF/SYS/CAT) UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub const DRIVER_PACKAGE_RELATIVE_DIR: &str = "winpkfilter/win10";
+pub const DRIVER_PACKAGE_ROOT_RELATIVE_DIR: &str = "winpkfilter";
+pub const DRIVER_PACKAGE_LEGACY_RELATIVE_DIR: &str = "winpkfilter/win10";
+pub const DRIVER_PACKAGE_WIN10_DIR: &str = "win10";
 pub const DRIVER_INF_NAME: &str = "ndisrd_lwf.inf";
 pub const DRIVER_SYS_NAME: &str = "ndisrd.sys";
 pub const DRIVER_CAT_NAME: &str = "ndisrd.cat";
@@ -189,6 +191,16 @@ pub struct DriverPackage {
     pub inf_path: PathBuf,
     pub sys_path: PathBuf,
     pub cat_path: PathBuf,
+}
+
+pub fn driver_package_relative_dir_for_arch(arch: WinpkFilterMsiArch) -> PathBuf {
+    PathBuf::from(DRIVER_PACKAGE_ROOT_RELATIVE_DIR)
+        .join(arch.to_string())
+        .join(DRIVER_PACKAGE_WIN10_DIR)
+}
+
+pub fn native_driver_package_relative_dir() -> PathBuf {
+    driver_package_relative_dir_for_arch(detect_native_arch())
 }
 
 struct DriverPackageFileSpec {
@@ -232,20 +244,23 @@ pub fn driver_package_candidate_paths(
     program_files_dir: &Path,
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    let native_rel = native_driver_package_relative_dir();
+    let legacy_rel = PathBuf::from(DRIVER_PACKAGE_LEGACY_RELATIVE_DIR);
 
     if let Some(dir) = resource_dir {
-        candidates.push(dir.join("drivers").join(DRIVER_PACKAGE_RELATIVE_DIR));
-        candidates.push(dir.join(DRIVER_PACKAGE_RELATIVE_DIR));
+        candidates.push(dir.join("drivers").join(&native_rel));
+        candidates.push(dir.join(&native_rel));
+        candidates.push(dir.join("drivers").join(&legacy_rel));
+        candidates.push(dir.join(&legacy_rel));
     }
 
     if let Some(dir) = exe_dir {
-        candidates.push(dir.join("drivers").join(DRIVER_PACKAGE_RELATIVE_DIR));
-        candidates.push(
-            dir.join("resources")
-                .join("drivers")
-                .join(DRIVER_PACKAGE_RELATIVE_DIR),
-        );
-        candidates.push(dir.join("resources").join(DRIVER_PACKAGE_RELATIVE_DIR));
+        candidates.push(dir.join("drivers").join(&native_rel));
+        candidates.push(dir.join("resources").join("drivers").join(&native_rel));
+        candidates.push(dir.join("resources").join(&native_rel));
+        candidates.push(dir.join("drivers").join(&legacy_rel));
+        candidates.push(dir.join("resources").join("drivers").join(&legacy_rel));
+        candidates.push(dir.join("resources").join(&legacy_rel));
     }
 
     let install_root = program_files_dir.join("SwiftTunnel");
@@ -253,13 +268,16 @@ pub fn driver_package_candidate_paths(
         install_root
             .join("resources")
             .join("drivers")
-            .join(DRIVER_PACKAGE_RELATIVE_DIR),
+            .join(&native_rel),
     );
+    candidates.push(install_root.join("drivers").join(&native_rel));
     candidates.push(
         install_root
+            .join("resources")
             .join("drivers")
-            .join(DRIVER_PACKAGE_RELATIVE_DIR),
+            .join(&legacy_rel),
     );
+    candidates.push(install_root.join("drivers").join(&legacy_rel));
 
     candidates
 }
@@ -350,7 +368,12 @@ pub fn find_bundled_driver_package(
 
 #[cfg(windows)]
 fn pnputil_success_exit_code(code: i32) -> bool {
-    matches!(code, 0 | 3010)
+    code == 0
+}
+
+#[cfg(windows)]
+fn pnputil_reboot_required_exit_code(code: i32) -> bool {
+    code == 3010
 }
 
 #[cfg(windows)]
@@ -460,6 +483,20 @@ pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String>
             return Ok(());
         }
 
+        if pnputil_reboot_required_exit_code(code) {
+            let detail = pnputil_output_detail(&output);
+            if detail.is_empty() {
+                return Err(
+                    "Reboot required to finish driver installation. pnputil exited with code 3010."
+                        .to_string(),
+                );
+            }
+            return Err(format!(
+                "Reboot required to finish driver installation. pnputil exited with code 3010: {}",
+                detail
+            ));
+        }
+
         let detail = pnputil_output_detail(&output);
         last_error = if detail.is_empty() {
             format!("pnputil failed with code {}", code)
@@ -564,6 +601,20 @@ pub fn remove_installed_driver_package() -> Result<(), String> {
     let code = output.status.code().unwrap_or(-1);
     if pnputil_success_exit_code(code) {
         return Ok(());
+    }
+
+    if pnputil_reboot_required_exit_code(code) {
+        let detail = pnputil_output_detail(&output);
+        if detail.is_empty() {
+            return Err(format!(
+                "Reboot required to finish driver package removal. pnputil /delete-driver {} exited with code 3010.",
+                published_name
+            ));
+        }
+        return Err(format!(
+            "Reboot required to finish driver package removal. pnputil /delete-driver {} exited with code 3010: {}",
+            published_name, detail
+        ));
     }
 
     let detail = pnputil_output_detail(&output);
@@ -674,10 +725,9 @@ mod tests {
         let exe_dir = base.join("exe");
         let program_files_dir = base.join("ProgramFiles");
 
-        let preferred = resource_dir
-            .join("drivers")
-            .join(DRIVER_PACKAGE_RELATIVE_DIR);
-        let fallback = exe_dir.join("drivers").join(DRIVER_PACKAGE_RELATIVE_DIR);
+        let native_rel = native_driver_package_relative_dir();
+        let preferred = resource_dir.join("drivers").join(&native_rel);
+        let fallback = exe_dir.join("drivers").join(&native_rel);
 
         for dir in [&preferred, &fallback] {
             write_valid_driver_package(dir);

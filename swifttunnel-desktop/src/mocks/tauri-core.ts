@@ -355,8 +355,25 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   }),
 
   system_is_admin: () => ({ is_admin: true }),
-  system_check_driver: () => ({ installed: true, version: "3.4.1" }),
+  system_check_driver: () => ({
+    installed: true,
+    version: "3.6.2",
+    ready: true,
+    status: "ready",
+    message: "Windows Packet Filter driver is ready.",
+    reboot_required: false,
+    recommended_action: "none",
+  }),
   system_install_driver: () => {},
+  system_repair_driver: () => ({
+    installed: true,
+    version: "3.6.2",
+    ready: true,
+    status: "ready",
+    message: "Windows Packet Filter driver is ready.",
+    reboot_required: false,
+    recommended_action: "none",
+  }),
   system_open_url: () => {},
   system_restart_as_admin: () => {},
 };

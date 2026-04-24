@@ -9,6 +9,7 @@
     </Property>
 
     <Property Id="CLEANUP_EXE" Secure="yes" />
+    <Property Id="INSTALL_DRIVER_EXE" Secure="yes" />
 
     <!-- Run the old NSIS uninstaller silently during first MSI install. -->
     <CustomAction Id="SilentNsisUninstall"
@@ -25,6 +26,16 @@
     <CustomAction Id="RunCleanupOnUninstall"
                   Property="CLEANUP_EXE"
                   ExeCommand="--cleanup"
+                  Return="ignore" />
+
+    <!-- Install/repair the bundled split-tunnel driver package after files land. -->
+    <CustomAction Id="SetInstallDriverExePath"
+                  Property="INSTALL_DRIVER_EXE"
+                  Value="[INSTALLDIR]SwiftTunnel.exe" />
+
+    <CustomAction Id="RunInstallDriverAfterInstall"
+                  Property="INSTALL_DRIVER_EXE"
+                  ExeCommand="--install-driver"
                   Return="ignore" />
 
     <!-- Write a marker and remove the NSIS uninstall registry entry. -->
@@ -49,6 +60,12 @@
     <InstallExecuteSequence>
       <Custom Action="SilentNsisUninstall" After="InstallInitialize">
         NSIS_UNINSTALL_PATH AND NOT Installed
+      </Custom>
+      <Custom Action="SetInstallDriverExePath" Before="RunInstallDriverAfterInstall">
+        NOT REMOVE
+      </Custom>
+      <Custom Action="RunInstallDriverAfterInstall" After="InstallFiles">
+        NOT REMOVE
       </Custom>
       <Custom Action="SetCleanupExePath" Before="RunCleanupOnUninstall">
         Installed AND REMOVE="ALL"

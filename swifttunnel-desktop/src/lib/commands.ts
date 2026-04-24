@@ -170,6 +170,9 @@ export const systemCheckDriver = () =>
 export const systemInstallDriver = (force = false) =>
   invoke<void>("system_install_driver", { force });
 
+export const systemRepairDriver = () =>
+  invoke<DriverCheckResponse>("system_repair_driver");
+
 /**
  * Restart the NDISRD kernel service without reinstalling the driver.
  *

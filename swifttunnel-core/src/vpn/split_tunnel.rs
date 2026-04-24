@@ -176,6 +176,99 @@ pub enum DriverState {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverHealthStatus {
+    Ready,
+    Missing,
+    ServiceUnavailable,
+    IoctlFailed,
+    VersionTooOld,
+    NoAdapters,
+    RebootRequired,
+}
+
+impl DriverHealthStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DriverHealthStatus::Ready => "ready",
+            DriverHealthStatus::Missing => "missing",
+            DriverHealthStatus::ServiceUnavailable => "service_unavailable",
+            DriverHealthStatus::IoctlFailed => "ioctl_failed",
+            DriverHealthStatus::VersionTooOld => "version_too_old",
+            DriverHealthStatus::NoAdapters => "no_adapters",
+            DriverHealthStatus::RebootRequired => "reboot_required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverRecommendedAction {
+    None,
+    Install,
+    ResetService,
+    Reinstall,
+    Reboot,
+}
+
+impl DriverRecommendedAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DriverRecommendedAction::None => "none",
+            DriverRecommendedAction::Install => "install",
+            DriverRecommendedAction::ResetService => "reset_service",
+            DriverRecommendedAction::Reinstall => "reinstall",
+            DriverRecommendedAction::Reboot => "reboot",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitTunnelDriverHealth {
+    pub installed: bool,
+    pub ready: bool,
+    pub status: DriverHealthStatus,
+    pub message: String,
+    pub version: Option<String>,
+    pub reboot_required: bool,
+    pub recommended_action: DriverRecommendedAction,
+}
+
+impl SplitTunnelDriverHealth {
+    fn ready(version: Option<String>, adapter_count: usize) -> Self {
+        Self {
+            installed: true,
+            ready: true,
+            status: DriverHealthStatus::Ready,
+            message: format!(
+                "Windows Packet Filter driver is ready ({} TCP/IP-bound adapter(s)).",
+                adapter_count
+            ),
+            version,
+            reboot_required: false,
+            recommended_action: DriverRecommendedAction::None,
+        }
+    }
+
+    fn not_ready(
+        installed: bool,
+        status: DriverHealthStatus,
+        message: impl Into<String>,
+        version: Option<String>,
+        reboot_required: bool,
+        recommended_action: DriverRecommendedAction,
+    ) -> Self {
+        Self {
+            installed,
+            ready: false,
+            status,
+            message: message.into(),
+            version,
+            reboot_required,
+            recommended_action,
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  SPLIT TUNNEL DRIVER (ndisapi-based)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -263,12 +356,163 @@ impl SplitTunnelDriver {
         ParallelInterceptor::check_driver_available()
     }
 
+    fn driver_service_exists() -> bool {
+        use windows::Win32::System::Services::*;
+        use windows::core::PCWSTR;
+
+        unsafe {
+            let Ok(scm) = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) else {
+                return false;
+            };
+
+            let service_name_wide: Vec<u16> = SERVICE_NAME
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let service = OpenServiceW(
+                scm,
+                PCWSTR(service_name_wide.as_ptr()),
+                SERVICE_QUERY_STATUS,
+            );
+            let exists = service.is_ok();
+            if let Ok(service) = service {
+                let _ = CloseServiceHandle(service);
+            }
+            let _ = CloseServiceHandle(scm);
+            exists
+        }
+    }
+
+    fn driver_install_evidence() -> bool {
+        if Self::get_driver_path().is_some() || Self::driver_service_exists() {
+            return true;
+        }
+
+        matches!(
+            super::winpkfilter::find_installed_driver_published_name(),
+            Ok(Some(_))
+        )
+    }
+
+    /// Strong health check for the split tunnel driver.
+    ///
+    /// This is intentionally stricter than `ParallelInterceptor::check_driver_available()`:
+    /// opening `\\.\NDISRD` only proves that a device handle exists. A driver is
+    /// considered ready only when it opens, reports a compatible version, accepts
+    /// the adapter-enumeration IOCTL, and enumerates at least one TCP/IP-bound
+    /// adapter.
+    pub fn health_check() -> SplitTunnelDriverHealth {
+        use super::winpkfilter::{MIN_DRIVER_VERSION, format_version};
+
+        let installed_evidence = Self::driver_install_evidence();
+        let driver = match ndisapi::Ndisapi::new("NDISRD") {
+            Ok(driver) => driver,
+            Err(e) => {
+                let installed = installed_evidence;
+                let status = if installed {
+                    DriverHealthStatus::ServiceUnavailable
+                } else {
+                    DriverHealthStatus::Missing
+                };
+                let action = if installed {
+                    DriverRecommendedAction::ResetService
+                } else {
+                    DriverRecommendedAction::Install
+                };
+                return SplitTunnelDriverHealth::not_ready(
+                    installed,
+                    status,
+                    format!(
+                        "Split tunnel driver not available (Windows Packet Filter driver): failed to open \\\\.\\NDISRD: {}",
+                        e
+                    ),
+                    None,
+                    false,
+                    action,
+                );
+            }
+        };
+
+        let version = match driver.get_version() {
+            Ok(version) => {
+                let installed = (version.major, version.minor, version.revision);
+                let version_string = format_version(installed);
+                if installed < MIN_DRIVER_VERSION {
+                    return SplitTunnelDriverHealth::not_ready(
+                        true,
+                        DriverHealthStatus::VersionTooOld,
+                        format!(
+                            "Split tunnel driver is older than SwiftTunnel requires \
+                             (installed {}, required >= {}). An older Windows Packet \
+                             Filter driver is preventing SwiftTunnel's bundled driver \
+                             from taking effect. Reinstall SwiftTunnel's driver.",
+                            version_string,
+                            format_version(MIN_DRIVER_VERSION)
+                        ),
+                        Some(version_string),
+                        false,
+                        DriverRecommendedAction::Reinstall,
+                    );
+                }
+                Some(version_string)
+            }
+            Err(e) => {
+                return SplitTunnelDriverHealth::not_ready(
+                    true,
+                    DriverHealthStatus::IoctlFailed,
+                    format!(
+                        "Split tunnel driver not available (Windows Packet Filter driver): version query failed ({}). Reset the driver service, then try again.",
+                        e
+                    ),
+                    None,
+                    false,
+                    DriverRecommendedAction::ResetService,
+                );
+            }
+        };
+
+        let adapters = match driver.get_tcpip_bound_adapters_info() {
+            Ok(adapters) => adapters,
+            Err(e) => {
+                return SplitTunnelDriverHealth::not_ready(
+                    true,
+                    DriverHealthStatus::IoctlFailed,
+                    format!(
+                        "Split tunnel driver not available (Windows Packet Filter driver): installed but IOCTL failed (get_tcpip_bound_adapters_info: {}). Reset the driver service, then try again.",
+                        e
+                    ),
+                    version,
+                    false,
+                    DriverRecommendedAction::ResetService,
+                );
+            }
+        };
+
+        if adapters.is_empty() {
+            return SplitTunnelDriverHealth::not_ready(
+                true,
+                DriverHealthStatus::NoAdapters,
+                "Split tunnel driver not available (Windows Packet Filter driver): no TCP/IP-bound network adapters were enumerated. Reset the driver service, then try again.",
+                version,
+                false,
+                DriverRecommendedAction::ResetService,
+            );
+        }
+
+        log::info!(
+            "Driver health check passed: version={}, adapters={}",
+            version.as_deref().unwrap_or("unknown"),
+            adapters.len()
+        );
+        SplitTunnelDriverHealth::ready(version, adapters.len())
+    }
+
     /// Check if the split tunnel driver is available
-    /// Will attempt to load the driver if not available
+    /// Will attempt to repair/load the driver if not ready.
     pub fn check_driver_available() -> bool {
-        // Check if WinpkFilter driver is installed
-        if ParallelInterceptor::check_driver_available() {
-            log::info!("Windows Packet Filter driver is available");
+        let initial_health = Self::health_check();
+        if initial_health.ready {
+            log::info!("Windows Packet Filter driver is ready");
             return true;
         }
 
@@ -284,29 +528,57 @@ impl SplitTunnelDriver {
 
         match Self::repair_and_wait_until_available(DRIVER_SERVICE_START_TIMEOUT) {
             Ok(()) => {
-                log::info!("Windows Packet Filter driver available after service repair/start");
-                return true;
+                let health = Self::health_check();
+                if health.ready {
+                    log::info!("Windows Packet Filter driver ready after service repair/start");
+                    return true;
+                }
+                log::warn!(
+                    "Driver service repair completed but health check still failed: {}",
+                    health.message
+                );
             }
             Err(e) => {
                 log::error!("Failed to repair driver service before MSI install: {}", e);
             }
         }
 
-        // Try to install from the bundled MSI.
-        log::info!("Attempting to install WinpkFilter from bundled MSI...");
-        if let Err(e) = Self::install_driver_from_msi() {
-            log::warn!("Failed to install from bundled MSI: {}", e);
-        } else {
-            match Self::repair_and_wait_until_available(DRIVER_READY_TIMEOUT) {
-                Ok(()) => {
-                    log::info!("Windows Packet Filter driver available after MSI install");
-                    return true;
+        if matches!(
+            initial_health.recommended_action,
+            DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall
+        ) {
+            if initial_health.recommended_action == DriverRecommendedAction::Reinstall {
+                if let Err(e) = super::winpkfilter::remove_installed_driver_package() {
+                    log::warn!("Failed to remove stale WinpkFilter driver package: {}", e);
                 }
-                Err(e) => {
-                    log::warn!(
-                        "Driver install succeeded, but readiness repair failed: {}",
-                        e
-                    );
+                if let Err(e) = Self::cleanup_driver_service_for_uninstall() {
+                    log::warn!("Failed to remove stale NDISRD service: {}", e);
+                }
+            }
+
+            // Try to install from the bundled MSI.
+            log::info!("Attempting to install WinpkFilter from bundled MSI...");
+            if let Err(e) = Self::install_driver_from_msi() {
+                log::warn!("Failed to install from bundled MSI: {}", e);
+            } else {
+                match Self::repair_and_wait_until_available(DRIVER_READY_TIMEOUT) {
+                    Ok(()) => {
+                        let health = Self::health_check();
+                        if health.ready {
+                            log::info!("Windows Packet Filter driver ready after MSI install");
+                            return true;
+                        }
+                        log::warn!(
+                            "Driver install succeeded, but health check still failed: {}",
+                            health.message
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Driver install succeeded, but readiness repair failed: {}",
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -334,72 +606,11 @@ impl SplitTunnelDriver {
     ///   The error string is shaped so the UI's `isRebootRequired` and
     ///   `isDriverMissing` helpers can substring-match without parsing.
     pub fn self_test() -> Result<(), String> {
-        use super::winpkfilter::{MIN_DRIVER_VERSION, format_version};
-
-        let driver = ndisapi::Ndisapi::new("NDISRD").map_err(|e| {
-            format!(
-                "Split tunnel driver not available (Windows Packet Filter driver): failed to open \\\\.\\NDISRD: {}",
-                e
-            )
-        })?;
-
-        // Enumerate adapters. This is the next IOCTL the reader thread will
-        // run during `ReaderBindings::acquire`. An install that passes the
-        // open check but fails here is the "install succeeded, connect
-        // fails" state that costs users an install+reboot cycle to diagnose
-        // by hand.
-        let adapters = driver.get_tcpip_bound_adapters_info().map_err(|e| {
-            format!(
-                "Split tunnel driver not available (Windows Packet Filter driver): installed but IOCTL failed (get_tcpip_bound_adapters_info: {}). Please reboot and try again.",
-                e
-            )
-        })?;
-        if adapters.is_empty() {
-            // Not strictly an install failure, but worth surfacing — on
-            // most machines at least one adapter is NDISRD-bound.
-            log::warn!(
-                "Driver self-test: opened NDISRD and IOCTLs work, but no TCP/IP-bound adapters were enumerated. Tunnel will fail until at least one network interface is bound."
-            );
-        } else {
-            log::info!(
-                "Driver self-test: NDISRD enumerated {} TCP/IP-bound adapter(s)",
-                adapters.len()
-            );
+        let health = Self::health_check();
+        if health.ready {
+            return Ok(());
         }
-
-        match driver.get_version() {
-            Ok(version) => {
-                let installed = (version.major, version.minor, version.revision);
-                if installed < MIN_DRIVER_VERSION {
-                    return Err(format!(
-                        "Split tunnel driver is older than SwiftTunnel requires \
-                         (installed {}, required >= {}). An older Windows Packet \
-                         Filter driver (usually left over from another VPN) is \
-                         preventing SwiftTunnel's bundled 3.6.2 from taking \
-                         effect. Uninstall the other tool's driver, then reinstall \
-                         SwiftTunnel's driver.",
-                        format_version(installed),
-                        format_version(MIN_DRIVER_VERSION)
-                    ));
-                }
-                log::info!(
-                    "Driver self-test: version {} passes minimum {}",
-                    format_version(installed),
-                    format_version(MIN_DRIVER_VERSION)
-                );
-            }
-            Err(e) => {
-                // get_version is usually infallible on a healthy install,
-                // but don't hard-fail the self-test on it — the adapter
-                // enumeration above is a stronger signal. Log and pass.
-                log::warn!(
-                    "Driver self-test: version query failed ({}); continuing because adapters enumerated OK",
-                    e
-                );
-            }
-        }
-
-        Ok(())
+        Err(health.message)
     }
 
     /// Try to install the driver from the bundled MSI.
@@ -442,6 +653,47 @@ impl SplitTunnelDriver {
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("msiexec failed with code {}: {}", code, stderr))
+    }
+
+    /// Install the WinpkFilter driver from the bundled INF/SYS/CAT package.
+    ///
+    /// This is the path used by the SwiftTunnel MSI custom action. It avoids
+    /// launching a nested MSI from inside Windows Installer and instead uses
+    /// `pnputil` directly on the extracted driver package.
+    pub fn install_driver_from_bundled_package(
+        resource_dir: Option<&Path>,
+        exe_dir: Option<&Path>,
+        program_files_dir: &Path,
+        force_reinstall: bool,
+    ) -> Result<(), String> {
+        let package = super::winpkfilter::find_bundled_driver_package(
+            resource_dir,
+            exe_dir,
+            program_files_dir,
+        )?;
+
+        if force_reinstall {
+            Self::cleanup_driver_service_for_uninstall().map_err(|e| {
+                format!(
+                    "Failed to remove existing NDISRD service before reinstall: {}",
+                    e
+                )
+            })?;
+            super::winpkfilter::remove_installed_driver_package().map_err(|e| {
+                format!(
+                    "Failed to remove existing WinpkFilter package before reinstall: {}",
+                    e
+                )
+            })?;
+        }
+
+        log::info!(
+            "Installing WinpkFilter from bundled driver package: {}",
+            package.root_dir.display()
+        );
+        super::winpkfilter::install_driver_from_package_dir(&package.root_dir)?;
+        Self::repair_and_wait_until_available(DRIVER_READY_TIMEOUT)?;
+        Self::self_test()
     }
 
     /// Get the path to the driver file
@@ -943,6 +1195,13 @@ impl SplitTunnelDriver {
             log::warn!(
                 "No WinpkFilter MSI found during uninstall; falling back to service cleanup only"
             );
+        }
+
+        // The MSI installer path now installs the extracted INF/SYS/CAT package
+        // with pnputil, so uninstall must remove the Driver Store package
+        // directly even when no WinpkFilter product registration exists.
+        if let Err(e) = super::winpkfilter::remove_installed_driver_package() {
+            issues.push(format!("driver-store package removal failed: {}", e));
         }
 
         if let Err(e) = Self::cleanup_driver_service_for_uninstall() {

@@ -10,6 +10,7 @@ const {
   vpnGetDiagnostics,
   systemCheckDriver,
   systemInstallDriver,
+  systemRepairDriver,
   systemResetDriver,
 } = vi.hoisted(() => ({
   vpnGetState: vi.fn(),
@@ -21,6 +22,7 @@ const {
   vpnGetDiagnostics: vi.fn(),
   systemCheckDriver: vi.fn(),
   systemInstallDriver: vi.fn(),
+  systemRepairDriver: vi.fn(),
   systemResetDriver: vi.fn(),
 }));
 
@@ -38,6 +40,7 @@ vi.mock("../lib/commands", () => ({
   vpnGetDiagnostics,
   systemCheckDriver,
   systemInstallDriver,
+  systemRepairDriver,
   systemResetDriver,
 }));
 
@@ -63,6 +66,19 @@ function connectedState(region: string) {
   };
 }
 
+function driverStatus(overrides = {}) {
+  return {
+    installed: true,
+    version: "3.6.2",
+    ready: true,
+    status: "ready",
+    message: "Windows Packet Filter driver is ready.",
+    reboot_required: false,
+    recommended_action: "none",
+    ...overrides,
+  };
+}
+
 describe("stores/vpnStore", () => {
   beforeEach(() => {
     vpnGetState.mockReset();
@@ -74,6 +90,7 @@ describe("stores/vpnStore", () => {
     vpnGetDiagnostics.mockReset();
     systemCheckDriver.mockReset();
     systemInstallDriver.mockReset();
+    systemRepairDriver.mockReset();
     systemResetDriver.mockReset();
     notify.mockReset();
 
@@ -93,31 +110,54 @@ describe("stores/vpnStore", () => {
     notify.mockResolvedValue(undefined);
   });
 
-  it("auto-installs missing split tunnel driver before connecting", async () => {
-    systemCheckDriver
-      .mockResolvedValueOnce({ installed: false, version: null })
-      .mockResolvedValueOnce({
-        installed: true,
-        version: "Windows Packet Filter",
-      });
-    systemInstallDriver.mockResolvedValue(undefined);
+  it("repairs missing split tunnel driver before connecting", async () => {
+    systemCheckDriver.mockResolvedValueOnce(
+      driverStatus({
+        installed: false,
+        version: null,
+        ready: false,
+        status: "missing",
+        message: "Split tunnel driver not available (Windows Packet Filter driver).",
+        recommended_action: "install",
+      }),
+    );
+    systemRepairDriver.mockResolvedValueOnce(driverStatus());
     vpnConnect.mockResolvedValue(undefined);
     vpnGetState.mockResolvedValue(connectedState("singapore"));
 
     const useVpnStore = await loadStore();
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-    expect(systemCheckDriver).toHaveBeenCalledTimes(2);
-    expect(systemInstallDriver).toHaveBeenCalledTimes(1);
+    expect(systemCheckDriver).toHaveBeenCalledTimes(1);
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(systemInstallDriver).not.toHaveBeenCalled();
     expect(vpnConnect).toHaveBeenCalledWith("singapore", ["roblox"]);
     expect(useVpnStore.getState().state).toBe("connected");
     expect(useVpnStore.getState().driverSetupState).toBe("idle");
     expect(useVpnStore.getState().error).toBeNull();
   });
 
-  it("stops connect and surfaces actionable error when auto-install fails", async () => {
-    systemCheckDriver.mockResolvedValueOnce({ installed: false, version: null });
-    systemInstallDriver.mockRejectedValue(new Error("network timeout"));
+  it("stops connect and surfaces actionable error when repair cannot make driver ready", async () => {
+    systemCheckDriver.mockResolvedValueOnce(
+      driverStatus({
+        installed: false,
+        version: null,
+        ready: false,
+        status: "missing",
+        message: "Split tunnel driver not available (Windows Packet Filter driver).",
+        recommended_action: "install",
+      }),
+    );
+    systemRepairDriver.mockResolvedValueOnce(
+      driverStatus({
+        installed: false,
+        version: null,
+        ready: false,
+        status: "missing",
+        message: "Driver repair failed: network timeout",
+        recommended_action: "install",
+      }),
+    );
 
     const useVpnStore = await loadStore();
     await useVpnStore.getState().connect("singapore", ["roblox"]);
@@ -125,23 +165,60 @@ describe("stores/vpnStore", () => {
     expect(vpnConnect).not.toHaveBeenCalled();
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().driverSetupState).toBe("error");
-    expect(useVpnStore.getState().error).toContain("Automatic installation failed");
     expect(useVpnStore.getState().error).toContain("network timeout");
   });
 
-  it("manual install action marks driver as installed", async () => {
-    systemInstallDriver.mockResolvedValue(undefined);
-    systemCheckDriver.mockResolvedValue({
-      installed: true,
-      version: "Windows Packet Filter",
-    });
+  it("manual repair action marks driver as installed", async () => {
+    systemRepairDriver.mockResolvedValue(driverStatus());
 
     const useVpnStore = await loadStore();
-    await useVpnStore.getState().installDriver();
+    await useVpnStore.getState().repairDriver();
 
-    expect(systemInstallDriver).toHaveBeenCalledTimes(1);
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
     expect(useVpnStore.getState().driverSetupState).toBe("installed");
     expect(useVpnStore.getState().driverSetupError).toBeNull();
+  });
+
+  it("reboot-required repair result latches one-shot flag without reconnecting", async () => {
+    systemRepairDriver.mockResolvedValue(
+      driverStatus({
+        ready: false,
+        status: "reboot_required",
+        message: "Reboot required to finish driver installation.",
+        reboot_required: true,
+        recommended_action: "reboot",
+      }),
+    );
+
+    const useVpnStore = await loadStore();
+    await expect(useVpnStore.getState().repairDriver()).rejects.toThrow(
+      "Reboot required to finish driver installation.",
+    );
+
+    expect(useVpnStore.getState().driverResetAttempted).toBe(true);
+    expect(useVpnStore.getState().driverStatus?.recommended_action).toBe("reboot");
+    expect(useVpnStore.getState().driverSetupError).toContain("Reboot required");
+  });
+
+  it("does not run repair when driver check already requires reboot", async () => {
+    systemCheckDriver.mockResolvedValueOnce(
+      driverStatus({
+        ready: false,
+        status: "reboot_required",
+        message: "Reboot required to finish driver installation.",
+        reboot_required: true,
+        recommended_action: "reboot",
+      }),
+    );
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().driverResetAttempted).toBe(true);
+    expect(useVpnStore.getState().driverSetupError).toContain("Reboot required");
   });
 
   it("failed reset preserves reboot-required context and latches the one-shot flag", async () => {

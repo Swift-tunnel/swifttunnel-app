@@ -385,6 +385,11 @@ export interface AdminCheckResponse {
 export interface DriverCheckResponse {
   installed: boolean;
   version: string | null;
+  ready: boolean;
+  status: string;
+  message: string;
+  reboot_required: boolean;
+  recommended_action: "none" | "install" | "reset_service" | "reinstall" | "reboot" | string;
 }
 
 // ── Events ──

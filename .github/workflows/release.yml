@@ -267,6 +267,76 @@ jobs:
             Write-Host ("Verified {0} ({1} bytes, sha256={2})" -f $msiPath, $size, $actualHash)
           }
 
+          # Extract the signed driver package for MSI-time installation. The
+          # SwiftTunnel MSI must not launch a nested MSI, so the WiX custom
+          # action calls SwiftTunnel.exe --install-driver, which uses pnputil
+          # against these extracted INF/SYS/CAT files.
+          $packageRoot = Join-Path $driversDir "winpkfilter"
+          Remove-Item -Path $packageRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+          function Expand-WinpkFilterPackage {
+            param(
+              [Parameter(Mandatory = $true)][string]$MsiPath,
+              [Parameter(Mandatory = $true)][string]$Arch
+            )
+
+            $extractDir = Join-Path $env:RUNNER_TEMP ("winpkfilter-extract-" + $Arch)
+            $extractLog = Join-Path $env:RUNNER_TEMP ("winpkfilter-extract-" + $Arch + ".log")
+            Remove-Item -Path $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+
+            $targetArg = "TARGETDIR=$extractDir"
+            $process = Start-Process -FilePath "msiexec.exe" -ArgumentList @(
+              "/a",
+              $MsiPath,
+              $targetArg,
+              "/qn",
+              "/norestart",
+              "/L*V",
+              $extractLog
+            ) -Wait -PassThru
+
+            if ($process.ExitCode -ne 0) {
+              throw "Failed to extract $MsiPath with msiexec /a (exit $($process.ExitCode), log: $extractLog)"
+            }
+
+            $inf = Get-ChildItem -Path $extractDir -Recurse -Filter "ndisrd_lwf.inf" -File |
+              Select-Object -First 1
+            if (-not $inf) {
+              throw "Extracted WinpkFilter package for $Arch did not contain ndisrd_lwf.inf (log: $extractLog)"
+            }
+
+            $sourceDir = $inf.Directory.FullName
+            $destDir = Join-Path $packageRoot (Join-Path $Arch "win10")
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+
+            foreach ($fileName in @("ndisrd_lwf.inf", "ndisrd.sys", "ndisrd.cat")) {
+              $sourcePath = Join-Path $sourceDir $fileName
+              if (-not (Test-Path $sourcePath)) {
+                throw "Extracted WinpkFilter package for $Arch is missing $fileName in $sourceDir"
+              }
+              Copy-Item -Path $sourcePath -Destination (Join-Path $destDir $fileName) -Force
+            }
+
+            $minimumSizes = @{
+              "ndisrd_lwf.inf" = 256
+              "ndisrd.sys" = 4096
+              "ndisrd.cat" = 256
+            }
+            foreach ($fileName in $minimumSizes.Keys) {
+              $path = Join-Path $destDir $fileName
+              $size = (Get-Item $path).Length
+              if ($size -lt $minimumSizes[$fileName]) {
+                throw "Extracted WinpkFilter package file $path is suspiciously small ($size bytes)"
+              }
+            }
+
+            Write-Host "Extracted WinpkFilter $Arch driver package to $destDir"
+          }
+
+          Expand-WinpkFilterPackage -MsiPath $x64Path -Arch "x64"
+          Expand-WinpkFilterPackage -MsiPath $arm64Path -Arch "arm64"
+
       - name: Verify updater signing secrets
         shell: powershell
         env:

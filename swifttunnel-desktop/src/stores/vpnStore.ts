@@ -5,6 +5,7 @@ import type {
   ThroughputEvent,
   DiagnosticsResponse,
   BindingPreflightInfo,
+  DriverCheckResponse,
 } from "../lib/types";
 import {
   vpnGetState,
@@ -15,7 +16,7 @@ import {
   vpnGetPing,
   vpnGetDiagnostics,
   systemCheckDriver,
-  systemInstallDriver,
+  systemRepairDriver,
   systemResetDriver,
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
@@ -36,22 +37,16 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function formatDriverSetupError(error: unknown): string {
-  const detail = getErrorMessage(error);
-  return [
-    "Split tunnel driver not available (Windows Packet Filter driver).",
-    "Automatic installation failed.",
-    "",
-    detail,
-  ].join("\n");
-}
-
 function isRebootRequiredMessage(
   vpnError: string | null,
   driverSetupError: string | null,
 ): boolean {
   const haystack = `${vpnError ?? ""}\n${driverSetupError ?? ""}`.toLowerCase();
   return haystack.includes("reboot required to finish driver installation");
+}
+
+function driverStatusMessage(status: DriverCheckResponse): string {
+  return status.message || "Split tunnel driver is not ready.";
 }
 
 interface VpnStore {
@@ -64,6 +59,7 @@ interface VpnStore {
   error: string | null;
   driverSetupState: DriverSetupState;
   driverSetupError: string | null;
+  driverStatus: DriverCheckResponse | null;
   /**
    * Set to true once the user has clicked "Reset driver service" at least
    * once during the current error lifecycle. Prevents the UI from
@@ -94,6 +90,7 @@ interface VpnStore {
   // Actions
   fetchState: () => Promise<void>;
   ensureDriverReady: () => Promise<void>;
+  repairDriver: () => Promise<void>;
   installDriver: () => Promise<void>;
   resetDriver: () => Promise<void>;
   connect: (region: string, gamePresets: string[]) => Promise<void>;
@@ -117,6 +114,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   error: null,
   driverSetupState: "idle",
   driverSetupError: null,
+  driverStatus: null,
   driverResetAttempted: false,
   bytesUp: 0,
   bytesDown: 0,
@@ -149,63 +147,73 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     try {
       set({ driverSetupState: "checking", driverSetupError: null });
       const check = await systemCheckDriver();
-      if (check.installed) {
+      set({ driverStatus: check });
+      if (check.ready) {
         set({ driverSetupState: "idle", driverSetupError: null });
         return;
       }
+      if (check.reboot_required || check.recommended_action === "reboot") {
+        const message = driverStatusMessage(check);
+        set({
+          driverSetupState: "error",
+          driverSetupError: message,
+          driverResetAttempted: true,
+        });
+        throw new Error(message);
+      }
 
       set({ driverSetupState: "installing", driverSetupError: null });
-      await systemInstallDriver();
-      const postInstall = await systemCheckDriver();
-      if (!postInstall.installed) {
-        throw new Error(
-          "Driver installation completed, but Windows Packet Filter driver is still not detected. Please restart your computer and try again.",
-        );
+      const repaired = await systemRepairDriver();
+      set({ driverStatus: repaired });
+      if (!repaired.ready) {
+        set({ driverResetAttempted: true });
+        throw new Error(driverStatusMessage(repaired));
       }
       set({ driverSetupState: "idle", driverSetupError: null });
     } catch (e) {
-      const message = formatDriverSetupError(e);
+      const message = getErrorMessage(e);
       set({ driverSetupState: "error", driverSetupError: message });
       throw new Error(message);
     }
   },
 
-  installDriver: async () => {
+  repairDriver: async () => {
     try {
       set({ driverSetupState: "installing", driverSetupError: null });
-      await systemInstallDriver();
-      const check = await systemCheckDriver();
-      if (!check.installed) {
-        throw new Error(
-          "Driver installation completed, but Windows Packet Filter driver is still not detected. Please restart your computer and try again.",
-        );
+      const repaired = await systemRepairDriver();
+      set({ driverStatus: repaired });
+      if (!repaired.ready) {
+        const message = driverStatusMessage(repaired);
+        set({
+          state: "error",
+          error: message,
+          driverSetupState: "error",
+          driverSetupError: message,
+          driverResetAttempted: true,
+        });
+        throw new Error(message);
       }
       set({
         error: null,
         driverSetupState: "installed",
         driverSetupError: null,
+        driverResetAttempted: false,
       });
     } catch (e) {
-      // Forward the backend error verbatim — the UI substring-matches on
-      // "Reboot required to finish driver installation" and "Split tunnel
-      // driver is older than..." to pick a CTA. Wrapping with
-      // `formatDriverSetupError` would prefix "Split tunnel driver not
-      // available..." which collides with `isDriverMissing` and sends the
-      // user back into an install loop instead of the reboot/reset path.
       const raw = getErrorMessage(e);
-      const lower = raw.toLowerCase();
-      const preservesRecoveryIntent =
-        lower.includes("reboot required to finish driver installation") ||
-        lower.includes("split tunnel driver is older than swifttunnel requires");
-      const message = preservesRecoveryIntent ? raw : formatDriverSetupError(e);
       set({
         state: "error",
-        error: message,
+        error: raw,
         driverSetupState: "error",
-        driverSetupError: message,
+        driverSetupError: raw,
+        driverResetAttempted: true,
       });
-      throw new Error(message);
+      throw new Error(raw);
     }
+  },
+
+  installDriver: async () => {
+    await get().repairDriver();
   },
 
   resetDriver: async () => {
@@ -302,6 +310,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       set({
         driverSetupState: "idle",
         driverSetupError: null,
+        driverStatus: null,
         driverResetAttempted: false,
       });
     } catch (e) {
@@ -373,6 +382,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         pendingConnectIntent: null,
         driverSetupState: "idle",
         driverSetupError: null,
+        driverStatus: null,
         driverResetAttempted: false,
       });
       await notify("SwiftTunnel", "VPN disconnected.");

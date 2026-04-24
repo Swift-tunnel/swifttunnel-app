@@ -150,6 +150,77 @@ describe("connect state helpers", () => {
     expect(result.kind).toBe("driver_outdated");
   });
 
+  it("renders structured driver repair action from backend health", () => {
+    const result = resolveConnectStatus({
+      driverSetupState: "error",
+      driverSetupError: null,
+      driverStatus: {
+        installed: true,
+        version: "3.6.1",
+        ready: false,
+        status: "version_too_old",
+        message: "Split tunnel driver is older than SwiftTunnel requires.",
+        reboot_required: false,
+        recommended_action: "reinstall",
+      },
+      vpnError: null,
+      vpnState: "error",
+    });
+
+    expect(result).toEqual({
+      kind: "driver_repair",
+      text: "Split tunnel driver is older than SwiftTunnel requires.",
+      buttonText: "Repair driver",
+    });
+  });
+
+  it("stops offering install repair after the structured repair attempt fails", () => {
+    const result = resolveConnectStatus({
+      driverSetupState: "error",
+      driverSetupError: "Driver repair failed: bundled package missing.",
+      driverStatus: {
+        installed: false,
+        version: null,
+        ready: false,
+        status: "missing",
+        message: "Driver repair failed: bundled package missing.",
+        reboot_required: false,
+        recommended_action: "install",
+      },
+      vpnError: null,
+      vpnState: "error",
+      driverResetAttempted: true,
+    });
+
+    expect(result).toEqual({
+      kind: "text",
+      text: "Driver repair failed: bundled package missing.",
+    });
+  });
+
+  it("does not offer repair again when structured status requires reboot", () => {
+    const result = resolveConnectStatus({
+      driverSetupState: "error",
+      driverSetupError: null,
+      driverStatus: {
+        installed: true,
+        version: "3.6.2",
+        ready: false,
+        status: "reboot_required",
+        message: "Reboot required to finish driver installation.",
+        reboot_required: true,
+        recommended_action: "reboot",
+      },
+      vpnError: null,
+      vpnState: "error",
+    });
+
+    expect(result).toEqual({
+      kind: "reboot_required",
+      text: "Reboot required to finish driver installation.",
+    });
+  });
+
   it("stops offering the reset button after an attempted reset fails", () => {
     // Guards against the 1.25.2 UX loop: user clicks a "fix it" button,
     // backend says "done", user tries again, same error. The second time

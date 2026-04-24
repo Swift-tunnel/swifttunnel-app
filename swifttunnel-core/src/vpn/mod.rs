@@ -50,8 +50,9 @@ pub use servers::{
     DynamicGamingRegion, DynamicServerInfo, DynamicServerList, ServerListSource, load_server_list,
 };
 pub use split_tunnel::{
-    GamePreset, SplitTunnelConfig, SplitTunnelDriver, get_apps_for_preset_set,
-    get_apps_for_presets, get_tunnel_apps_for_presets,
+    DriverHealthStatus, DriverRecommendedAction, GamePreset, SplitTunnelConfig, SplitTunnelDriver,
+    SplitTunnelDriverHealth, get_apps_for_preset_set, get_apps_for_presets,
+    get_tunnel_apps_for_presets,
 };
 pub use tso_recovery::{emergency_tso_restore, recover_tso_on_startup};
 pub use udp_relay::{RelayAuthAckStatus, RelayContext, RelayPingSnapshot, UdpRelay};

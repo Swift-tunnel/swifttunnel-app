@@ -52,6 +52,11 @@ fn check_bundled_driver_msis() {
     // Real Windows Packet Filter MSIs are ~1-2MB. Anything under 500KB is
     // either a stub, a 404 HTML page, or a corrupt partial download.
     const MIN_MSI_BYTES: u64 = 500_000;
+    const DRIVER_PACKAGE_FILES: &[(&str, u64)] = &[
+        ("ndisrd_lwf.inf", 256),
+        ("ndisrd.sys", 4 * 1024),
+        ("ndisrd.cat", 256),
+    ];
 
     for rel in MSI_FILES {
         println!("cargo:rerun-if-changed={}", rel);
@@ -86,6 +91,56 @@ fn check_bundled_driver_msis() {
                      resources/drivers/.",
                     rel, err
                 );
+            }
+        }
+    }
+
+    for arch in ["x64", "arm64"] {
+        let package_dir = std::path::Path::new("resources")
+            .join("drivers")
+            .join("winpkfilter")
+            .join(arch)
+            .join("win10");
+        println!("cargo:rerun-if-changed={}", package_dir.display());
+
+        if !package_dir.is_dir() {
+            panic!(
+                "Bundled driver package directory `{}` is missing. Extract the WinpkFilter \
+                 MSI payload into resources/drivers/winpkfilter/{}/win10 before building.",
+                package_dir.display(),
+                arch
+            );
+        }
+
+        for (name, min_bytes) in DRIVER_PACKAGE_FILES {
+            let path = package_dir.join(name);
+            println!("cargo:rerun-if-changed={}", path.display());
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_file() && meta.len() >= *min_bytes => {}
+                Ok(meta) if meta.is_file() => {
+                    panic!(
+                        "Bundled driver package file `{}` is suspiciously small ({} bytes, \
+                         expected >= {}). Re-extract the WinpkFilter MSI payload.",
+                        path.display(),
+                        meta.len(),
+                        min_bytes
+                    );
+                }
+                Ok(_) => {
+                    panic!(
+                        "Bundled driver package path `{}` exists but is not a file.",
+                        path.display()
+                    );
+                }
+                Err(err) => {
+                    panic!(
+                        "Bundled driver package file `{}` is missing ({}). Re-extract the \
+                         WinpkFilter MSI payload into resources/drivers/winpkfilter/{}/win10.",
+                        path.display(),
+                        err,
+                        arch
+                    );
+                }
             }
         }
     }

@@ -216,12 +216,10 @@ fn detect_broken_install() -> Option<String> {
 fn try_inf_fallback(msi_path: &Path, extract_dir: &Path, extract_log: &Path) -> Result<(), String> {
     // Step 1: mandatory pre-pnputil cleanup so pnputil doesn't short-circuit
     // on a stale store entry.
-    if let Err(e) = swifttunnel_core::vpn::winpkfilter::remove_installed_driver_package() {
-        log::warn!(
-            "Pre-fallback driver-store cleanup failed (continuing anyway): {}",
-            e
-        );
-    }
+    swifttunnel_core::vpn::SplitTunnelDriver::cleanup_driver_service_for_uninstall()
+        .map_err(|e| format!("Pre-fallback driver-service cleanup failed: {}", e))?;
+    swifttunnel_core::vpn::winpkfilter::remove_installed_driver_package()
+        .map_err(|e| format!("Pre-fallback driver-store cleanup failed: {}", e))?;
 
     // Step 2: extract MSI payload (no /i custom actions).
     extract_msi_to_dir(msi_path, extract_dir, extract_log)?;
@@ -546,6 +544,72 @@ pub fn system_is_admin() -> AdminCheckResponse {
 pub struct DriverCheckResponse {
     pub installed: bool,
     pub version: Option<String>,
+    pub ready: bool,
+    pub status: String,
+    pub message: String,
+    pub reboot_required: bool,
+    pub recommended_action: String,
+}
+
+impl DriverCheckResponse {
+    #[cfg(windows)]
+    fn from_health(health: swifttunnel_core::vpn::SplitTunnelDriverHealth) -> Self {
+        Self {
+            installed: health.installed,
+            version: health.version,
+            ready: health.ready,
+            status: health.status.as_str().to_string(),
+            message: health.message,
+            reboot_required: health.reboot_required,
+            recommended_action: health.recommended_action.as_str().to_string(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn repair_failure(
+        health: swifttunnel_core::vpn::SplitTunnelDriverHealth,
+        error: String,
+    ) -> Self {
+        let lower = error.to_ascii_lowercase();
+        let reboot_required = lower.contains("reboot") || lower.contains("marked for deletion");
+        let status = health.status;
+        let recommended_action = health.recommended_action;
+        let message = health.message;
+        Self {
+            installed: health.installed,
+            version: health.version,
+            ready: false,
+            status: if reboot_required {
+                "reboot_required".to_string()
+            } else {
+                status.as_str().to_string()
+            },
+            message: if message.is_empty() {
+                error
+            } else {
+                format!("{}\n\nRepair failed: {}", message, error)
+            },
+            reboot_required,
+            recommended_action: if reboot_required {
+                "reboot".to_string()
+            } else {
+                recommended_action.as_str().to_string()
+            },
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn unsupported() -> Self {
+        Self {
+            installed: false,
+            version: None,
+            ready: false,
+            status: "unsupported".to_string(),
+            message: "Split tunnel driver is only supported on Windows.".to_string(),
+            reboot_required: false,
+            recommended_action: "none".to_string(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -553,15 +617,9 @@ pub async fn system_check_driver() -> Result<DriverCheckResponse, String> {
     #[cfg(windows)]
     {
         tauri::async_runtime::spawn_blocking(|| {
-            let available = swifttunnel_core::vpn::SplitTunnelDriver::is_available();
-            DriverCheckResponse {
-                installed: available,
-                version: if available {
-                    Some("Windows Packet Filter".to_string())
-                } else {
-                    None
-                },
-            }
+            DriverCheckResponse::from_health(
+                swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
+            )
         })
         .await
         .map_err(|e| format!("Driver check task failed: {}", e))
@@ -569,10 +627,7 @@ pub async fn system_check_driver() -> Result<DriverCheckResponse, String> {
 
     #[cfg(not(windows))]
     {
-        Ok(DriverCheckResponse {
-            installed: false,
-            version: None,
-        })
+        Ok(DriverCheckResponse::unsupported())
     }
 }
 
@@ -583,12 +638,11 @@ pub async fn system_install_driver(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // `force = true` comes from the recovery UI ("Reinstall driver" after
-        // TunnelFailed) — we want to re-run msiexec even if `is_available()`
-        // still reports success, because a stale/corrupt driver can pass the
-        // open-handle check but fail on IOCTLs.
+        // `force = true` comes from recovery flows that need to re-run install
+        // even if the NDISRD handle opens. A stale/corrupt driver can pass the
+        // open-handle check but fail the stronger health check.
         let force = force.unwrap_or(false);
-        if !force && swifttunnel_core::vpn::SplitTunnelDriver::is_available() {
+        if !force && swifttunnel_core::vpn::SplitTunnelDriver::health_check().ready {
             return Ok(());
         }
 
@@ -794,6 +848,123 @@ pub async fn system_install_driver(
     {
         let _ = (app, force);
         Err("Driver installation is only supported on Windows".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckResponse, String> {
+    #[cfg(windows)]
+    {
+        let resource_dir = app.path().resource_dir().ok();
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let program_files_dir = PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
+        );
+
+        tauri::async_runtime::spawn_blocking(move || {
+            use swifttunnel_core::vpn::DriverRecommendedAction;
+
+            let initial = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+            if initial.ready {
+                return Ok(DriverCheckResponse::from_health(initial));
+            }
+
+            if !swifttunnel_core::is_administrator() {
+                return Ok(DriverCheckResponse::repair_failure(
+                    initial,
+                    "Administrator privileges required to repair the split tunnel driver. Please relaunch SwiftTunnel as Administrator.".to_string(),
+                ));
+            }
+
+            let mut current = initial.clone();
+            let mut last_error: Option<String> = None;
+
+            if current.recommended_action == DriverRecommendedAction::ResetService {
+                match swifttunnel_core::vpn::SplitTunnelDriver::restart_driver_service()
+                    .and_then(|_| {
+                        swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
+                            Duration::from_secs(15),
+                        )
+                    })
+                    .and_then(|_| swifttunnel_core::vpn::SplitTunnelDriver::self_test())
+                {
+                    Ok(()) => {
+                        return Ok(DriverCheckResponse::from_health(
+                            swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
+                        ));
+                    }
+                    Err(e) => {
+                        log::warn!("Driver service reset failed during repair: {}", e);
+                        last_error = Some(format!("Driver service reset failed: {}", e));
+                        current = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                    }
+                }
+            }
+
+            if current.reboot_required || current.recommended_action == DriverRecommendedAction::Reboot {
+                let mut response = DriverCheckResponse::from_health(current);
+                if let Some(error) = last_error {
+                    response.message = format!("{}\n\n{}", response.message, error);
+                }
+                response.reboot_required = true;
+                response.recommended_action = "reboot".to_string();
+                response.status = "reboot_required".to_string();
+                return Ok(response);
+            }
+
+            let reset_failed =
+                last_error.is_some() && current.recommended_action == DriverRecommendedAction::ResetService;
+            if matches!(
+                current.recommended_action,
+                DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall
+            ) || matches!(
+                initial.recommended_action,
+                DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall
+            ) || reset_failed
+            {
+                let force_reinstall = matches!(
+                    current.recommended_action,
+                    DriverRecommendedAction::Reinstall
+                ) || matches!(
+                    initial.recommended_action,
+                    DriverRecommendedAction::Reinstall
+                ) || reset_failed;
+
+                match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
+                    resource_dir.as_deref(),
+                    exe_dir.as_deref(),
+                    &program_files_dir,
+                    force_reinstall,
+                ) {
+                    Ok(()) => {
+                        return Ok(DriverCheckResponse::from_health(
+                            swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
+                        ));
+                    }
+                    Err(e) => {
+                        log::warn!("Bundled driver package repair failed: {}", e);
+                        let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                        return Ok(DriverCheckResponse::repair_failure(health, e));
+                    }
+                }
+            }
+
+            let mut response = DriverCheckResponse::from_health(current);
+            if let Some(error) = last_error {
+                response.message = format!("{}\n\n{}", response.message, error);
+            }
+            Ok(response)
+        })
+        .await
+        .map_err(|e| format!("Driver repair task failed: {}", e))?
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Ok(DriverCheckResponse::unsupported())
     }
 }
 

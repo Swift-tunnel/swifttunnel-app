@@ -25,12 +25,13 @@ export function ConnectTab() {
   const vpnError = useVpnStore((s) => s.error);
   const driverSetupState = useVpnStore((s) => s.driverSetupState);
   const driverSetupError = useVpnStore((s) => s.driverSetupError);
+  const driverStatus = useVpnStore((s) => s.driverStatus);
   const driverResetAttempted = useVpnStore((s) => s.driverResetAttempted);
   const bytesUp = useVpnStore((s) => s.bytesUp);
   const bytesDown = useVpnStore((s) => s.bytesDown);
   const connect = useVpnStore((s) => s.connect);
   const disconnect = useVpnStore((s) => s.disconnect);
-  const installDriver = useVpnStore((s) => s.installDriver);
+  const repairDriver = useVpnStore((s) => s.repairDriver);
   const resetDriver = useVpnStore((s) => s.resetDriver);
   const ping = useVpnStore((s) => s.ping);
   const connectedAt = useVpnStore((s) => s.connectedAt);
@@ -129,12 +130,22 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [fetchLatencies]);
 
+  const connectStatus = resolveConnectStatus({
+    driverSetupState,
+    driverSetupError,
+    driverStatus,
+    vpnError,
+    vpnState,
+    driverResetAttempted,
+  });
+  const connectBlockedByReboot = connectStatus.kind === "reboot_required";
+
   async function handleConnect() {
     if (isConnected) {
       disconnect();
       return;
     }
-    if (!isIdle || isConnectBusy) return;
+    if (!isIdle || isConnectBusy || connectBlockedByReboot) return;
     // Flush any pending debounced settings save BEFORE connecting — vpn_connect
     // reads connect-time options (auto_routing, whitelist, forced servers, QoS)
     // from the backend AppState.settings, so a stale snapshot in the 500 ms
@@ -180,14 +191,6 @@ export function ConnectTab() {
   const ringSpeed = isConnectBusy ? 3.5 : 55;
   const innerSpeed = isConnectBusy ? 2.8 : 38;
 
-  const connectStatus = resolveConnectStatus({
-    driverSetupState,
-    driverSetupError,
-    vpnError,
-    vpnState,
-    driverResetAttempted,
-  });
-
   return (
     <div className="connect-tab mx-auto flex w-full max-w-[660px] flex-col gap-4 pb-4">
       {/* ── Hero ── */}
@@ -207,6 +210,7 @@ export function ConnectTab() {
           innerSpeed={innerSpeed}
           isConnected={isConnected}
           isTransitioning={isConnectBusy}
+          isDisabled={connectBlockedByReboot}
           showSuccess={showSuccess}
           onClick={() => void handleConnect()}
         />
@@ -260,7 +264,7 @@ export function ConnectTab() {
                 <span>{connectStatus.text}</span>
                 <button
                   type="button"
-                  onClick={() => void installDriver().catch(() => {})}
+                  onClick={() => void repairDriver().catch(() => {})}
                   disabled={isConnectBusy}
                   className="rounded-full px-2 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-60"
                   style={{
@@ -270,6 +274,23 @@ export function ConnectTab() {
                   }}
                 >
                   Windows Packet Filter driver
+                </button>
+              </span>
+            ) : connectStatus.kind === "driver_repair" ? (
+              <span className="inline-flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1">
+                <span>{connectStatus.text}</span>
+                <button
+                  type="button"
+                  onClick={() => void repairDriver().catch(() => {})}
+                  disabled={isConnectBusy}
+                  className="rounded-full px-2 py-0.5 text-[11px] font-semibold transition-opacity hover:opacity-90 disabled:opacity-60"
+                  style={{
+                    backgroundColor: "rgba(60,130,246,0.18)",
+                    color: "var(--color-accent-secondary)",
+                    border: "1px solid rgba(60,130,246,0.35)",
+                  }}
+                >
+                  {connectStatus.buttonText}
                 </button>
               </span>
             ) : connectStatus.kind === "reboot_resettable" ? (
@@ -508,12 +529,13 @@ function SessionTimer({ connectedAt }: { connectedAt: number | null }) {
 }
 
 function RingAssembly({
-  ringColor, ringSpeed, innerSpeed, isConnected, isTransitioning, showSuccess, onClick,
+  ringColor, ringSpeed, innerSpeed, isConnected, isTransitioning, isDisabled, showSuccess, onClick,
 }: {
   ringColor: string; ringSpeed: number; innerSpeed: number;
-  isConnected: boolean; isTransitioning: boolean; showSuccess: boolean;
+  isConnected: boolean; isTransitioning: boolean; isDisabled: boolean; showSuccess: boolean;
   onClick: () => void;
 }) {
+  const buttonDisabled = isTransitioning || isDisabled;
   return (
     <div className="relative" style={{ width: 156, height: 156, overflow: "visible" }}>
       <svg width="156" height="156" viewBox="0 0 156 156" className="absolute inset-0">
@@ -551,20 +573,20 @@ function RingAssembly({
 
       <motion.button
         onClick={onClick}
-        disabled={isTransitioning}
-        whileHover={!isTransitioning ? { scale: 1.05 } : undefined}
-        whileTap={!isTransitioning ? { scale: 0.95 } : undefined}
+        disabled={buttonDisabled}
+        whileHover={!buttonDisabled ? { scale: 1.05 } : undefined}
+        whileTap={!buttonDisabled ? { scale: 0.95 } : undefined}
         transition={{ type: "spring", stiffness: 400, damping: 22 }}
         className="absolute flex items-center justify-center rounded-full focus:outline-none"
         style={{
           width: 100, height: 100, top: 28, left: 28,
-          cursor: isTransitioning ? "wait" : "pointer",
+          cursor: isTransitioning ? "wait" : isDisabled ? "not-allowed" : "pointer",
           background: isConnected
             ? "linear-gradient(145deg, #28d296, #1fa87a)"
-            : isTransitioning ? "var(--color-bg-elevated)" : "linear-gradient(145deg, #3c82f6, #5a9fff)",
+            : buttonDisabled ? "var(--color-bg-elevated)" : "linear-gradient(145deg, #3c82f6, #5a9fff)",
           boxShadow: isConnected
             ? "0 0 35px rgba(40,210,150,0.18), inset 0 1px 0 rgba(255,255,255,0.1)"
-            : isTransitioning ? "none" : "0 0 30px rgba(60,130,246,0.12), inset 0 1px 0 rgba(255,255,255,0.08)",
+            : buttonDisabled ? "none" : "0 0 30px rgba(60,130,246,0.12), inset 0 1px 0 rgba(255,255,255,0.08)",
           transition: "background 0.5s ease, box-shadow 0.5s ease",
           animation: showSuccess ? "connect-success-glow 0.8s ease-in-out" : "none",
         }}

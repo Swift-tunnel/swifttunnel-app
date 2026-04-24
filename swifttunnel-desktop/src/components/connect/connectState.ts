@@ -1,3 +1,5 @@
+import type { DriverCheckResponse } from "../../lib/types";
+
 export const GAMES = [
   { id: "roblox", name: "Roblox", icon: "\u{1F3AE}" },
   { id: "valorant", name: "Valorant", icon: "\u{1F3AF}" },
@@ -94,6 +96,7 @@ export function isConnectActionBusy(input: {
 export function resolveConnectStatus(input: {
   driverSetupState: "idle" | "checking" | "installing" | "installed" | "error";
   driverSetupError: string | null;
+  driverStatus?: DriverCheckResponse | null;
   vpnError: string | null;
   vpnState: string;
   /**
@@ -110,6 +113,7 @@ export function resolveConnectStatus(input: {
 }):
   | { kind: "text"; text: string }
   | { kind: "driver_missing"; text: string }
+  | { kind: "driver_repair"; text: string; buttonText: string }
   | { kind: "reboot_required"; text: string }
   | { kind: "reboot_resettable"; text: string }
   | { kind: "driver_outdated"; text: string } {
@@ -126,6 +130,54 @@ export function resolveConnectStatus(input: {
 
   if (input.driverSetupState === "installed") {
     return { kind: "text", text: "Driver installed. Click Connect to retry." };
+  }
+
+  if (input.driverStatus && !input.driverStatus.ready) {
+    const status = input.driverStatus;
+    const text =
+      input.driverSetupError ||
+      status.message ||
+      "Split tunnel driver is not ready.";
+
+    if (
+      status.reboot_required ||
+      status.recommended_action === "reboot" ||
+      (status.recommended_action === "reset_service" && input.driverResetAttempted)
+    ) {
+      return { kind: "reboot_required", text };
+    }
+
+    if (status.recommended_action === "reset_service") {
+      return {
+        kind: "driver_repair",
+        text,
+        buttonText: "Reset driver service",
+      };
+    }
+
+    if (
+      input.driverResetAttempted &&
+      (status.recommended_action === "reinstall" ||
+        status.recommended_action === "install")
+    ) {
+      return { kind: "text", text };
+    }
+
+    if (status.recommended_action === "reinstall") {
+      return {
+        kind: "driver_repair",
+        text,
+        buttonText: "Repair driver",
+      };
+    }
+
+    if (status.recommended_action === "install") {
+      return {
+        kind: "driver_repair",
+        text,
+        buttonText: "Install driver",
+      };
+    }
   }
 
   // Reboot-required takes priority over the driver-missing / outdated paths:

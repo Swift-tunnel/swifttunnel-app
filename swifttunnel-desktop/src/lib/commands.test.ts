@@ -14,6 +14,7 @@ import {
   settingsGenerateNetworkDiagnosticsBundle,
   systemRestartAsAdmin,
   systemInstallDriver,
+  systemRepairDriver,
   updaterCheckChannel,
   updaterInstallChannel,
   vpnPreflightBinding,
@@ -64,6 +65,21 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(undefined);
     await expect(systemInstallDriver(true)).resolves.toBeUndefined();
     expect(invoke).toHaveBeenCalledWith("system_install_driver", { force: true });
+  });
+
+  it("systemRepairDriver invokes backend", async () => {
+    const resp = {
+      installed: true,
+      version: "3.6.2",
+      ready: true,
+      status: "ready",
+      message: "ready",
+      reboot_required: false,
+      recommended_action: "none",
+    };
+    invoke.mockResolvedValue(resp);
+    await expect(systemRepairDriver()).resolves.toEqual(resp);
+    expect(invoke).toHaveBeenCalledWith("system_repair_driver");
   });
 
   it("systemRestartAsAdmin invokes backend with expected args", async () => {
