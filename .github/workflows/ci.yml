@@ -120,7 +120,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $params = @{
             EnableApiTunneling = $true
-            CustomRelay = "45.32.115.254:51821"
+            CustomRelay = "45.32.253.124:51821"
           }
           if ($env:SWIFTTUNNEL_TEST_EMAIL) {
             $params.Email = $env:SWIFTTUNNEL_TEST_EMAIL
