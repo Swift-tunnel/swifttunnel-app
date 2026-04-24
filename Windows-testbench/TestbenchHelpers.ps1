@@ -47,10 +47,29 @@ function Ensure-WinpkFilterBinding {
         throw "WinpkFilter binding 'nt_ndisrd' is not installed on adapter '$($adapter.Name)'."
     }
 
+    $service = Get-Service -Name "NDISRD" -ErrorAction SilentlyContinue
+    if (-not $service) {
+        throw "WinpkFilter driver service 'NDISRD' is not installed."
+    }
+
+    if ($service.Status -ne "Running") {
+        Write-Host "Starting WinpkFilter driver service 'NDISRD'..."
+        Start-Service -Name "NDISRD" -ErrorAction Stop
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 250
+            $service = Get-Service -Name "NDISRD" -ErrorAction Stop
+        } while ($service.Status -ne "Running" -and (Get-Date) -lt $deadline)
+
+        if ($service.Status -ne "Running") {
+            throw "WinpkFilter driver service 'NDISRD' did not reach Running state."
+        }
+    }
+
     if (-not $binding.Enabled) {
         Write-Host "Enabling WinpkFilter binding on '$($adapter.Name)'..."
         Enable-NetAdapterBinding -Name $adapter.Name -ComponentID "nt_ndisrd" -Confirm:$false -ErrorAction Stop | Out-Null
-        Start-Sleep -Seconds 1
+        Start-Sleep -Seconds 2
         $binding = Get-NetAdapterBinding -Name $adapter.Name -ComponentID "nt_ndisrd" -ErrorAction Stop |
             Select-Object -First 1
         if (-not $binding.Enabled) {

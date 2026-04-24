@@ -720,6 +720,23 @@ impl UdpRelay {
     }
 
     #[cfg(windows)]
+    pub fn relay_path_mtu_refresh_due(&self) -> bool {
+        let now = now_mono_ms();
+        let refresh_interval_ms = if self.relay_path_mtu_is_fallback.load(Ordering::Acquire) {
+            RELAY_PATH_MTU_FALLBACK_RETRY_INTERVAL_MS
+        } else {
+            RELAY_PATH_MTU_REFRESH_INTERVAL_MS
+        };
+        let last = self.last_mtu_refresh_ms.load(Ordering::Relaxed);
+        now.saturating_sub(last) >= refresh_interval_ms
+    }
+
+    #[cfg(not(windows))]
+    pub fn relay_path_mtu_refresh_due(&self) -> bool {
+        false
+    }
+
+    #[cfg(windows)]
     fn maybe_refresh_relay_path_mtu(&self, relay_addr: SocketAddr) {
         let now = now_mono_ms();
         let refresh_interval_ms = if self.relay_path_mtu_is_fallback.load(Ordering::Acquire) {
@@ -956,6 +973,19 @@ impl UdpRelay {
     pub fn forward_outbound(&self, payload: &[u8]) -> Result<usize> {
         let current_addr = **self.relay_addr.load();
         self.maybe_refresh_relay_path_mtu(current_addr);
+        self.forward_outbound_to_addr(payload, current_addr)
+    }
+
+    /// Forward a packet without doing the periodic MTU refresh check.
+    ///
+    /// Used by the NDIS reader fast path after it has confirmed refresh is not
+    /// currently due; the regular worker path still performs refreshes.
+    pub fn forward_outbound_fast(&self, payload: &[u8]) -> Result<usize> {
+        let current_addr = **self.relay_addr.load();
+        self.forward_outbound_to_addr(payload, current_addr)
+    }
+
+    fn forward_outbound_to_addr(&self, payload: &[u8], current_addr: SocketAddr) -> Result<usize> {
         let max_payload = self.max_inner_packet_len_for_addr(current_addr);
 
         if payload.len() > max_payload {
@@ -1021,18 +1051,20 @@ impl UdpRelay {
         Ok(total_len)
     }
 
-    /// Receive a packet from the relay (inbound: game server -> relay -> game client)
+    /// Receive a packet from the relay directly into the caller-provided frame buffer.
     ///
-    /// Returns the payload with session ID stripped, or None if no packet available.
+    /// Returns the payload slice with the session ID stripped, or None if no packet
+    /// is available. The returned slice borrows `frame_buffer`, avoiding the extra
+    /// relay-frame -> payload copy on the inbound hot path.
     ///
     /// After an auto-routing relay switch, packets from the OLD relay are accepted
     /// during a 2-second grace period. This eliminates the inbound blackout that
     /// occurs while the new relay establishes the game server session mapping.
-    pub fn receive_inbound(&self, buffer: &mut [u8]) -> Result<Option<usize>> {
-        // Temporary buffer to receive with session ID
-        let mut recv_buf = [0u8; 1600];
-
-        match self.socket.recv_from(&mut recv_buf) {
+    pub fn receive_inbound_payload<'a>(
+        &self,
+        frame_buffer: &'a mut [u8],
+    ) -> Result<Option<&'a [u8]>> {
+        match self.socket.recv_from(frame_buffer) {
             Ok((len, from)) => {
                 // Verify it's from our relay server (current or previous during grace period)
                 if !self.is_expected_relay_source(from) {
@@ -1047,35 +1079,31 @@ impl UdpRelay {
                 }
 
                 // Verify session ID matches
-                if recv_buf[..SESSION_ID_LEN] != self.session_id {
+                if frame_buffer[..SESSION_ID_LEN] != self.session_id {
                     log::warn!("UDP Relay: Session ID mismatch, ignoring packet");
                     return Ok(None);
                 }
 
                 // Extract payload (skip session ID)
                 let payload_len = len - SESSION_ID_LEN;
-                if payload_len > buffer.len() {
-                    log::warn!("UDP Relay: Buffer too small for payload");
-                    return Ok(None);
-                }
 
                 // Control frames (auth + ping telemetry) should never reach packet injection.
                 if payload_len >= 1 {
-                    match recv_buf[SESSION_ID_LEN] {
+                    match frame_buffer[SESSION_ID_LEN] {
                         AUTH_HELLO_FRAME_TYPE | AUTH_ACK_FRAME_TYPE | PING_FRAME_TYPE => {
                             return Ok(None);
                         }
                         PONG_FRAME_TYPE => {
                             if len == PONG_FRAME_LEN && self.ping.enabled.load(Ordering::Acquire) {
                                 let client_ts_mono_ms = u64::from_be_bytes([
-                                    recv_buf[SESSION_ID_LEN + 5],
-                                    recv_buf[SESSION_ID_LEN + 6],
-                                    recv_buf[SESSION_ID_LEN + 7],
-                                    recv_buf[SESSION_ID_LEN + 8],
-                                    recv_buf[SESSION_ID_LEN + 9],
-                                    recv_buf[SESSION_ID_LEN + 10],
-                                    recv_buf[SESSION_ID_LEN + 11],
-                                    recv_buf[SESSION_ID_LEN + 12],
+                                    frame_buffer[SESSION_ID_LEN + 5],
+                                    frame_buffer[SESSION_ID_LEN + 6],
+                                    frame_buffer[SESSION_ID_LEN + 7],
+                                    frame_buffer[SESSION_ID_LEN + 8],
+                                    frame_buffer[SESSION_ID_LEN + 9],
+                                    frame_buffer[SESSION_ID_LEN + 10],
+                                    frame_buffer[SESSION_ID_LEN + 11],
+                                    frame_buffer[SESSION_ID_LEN + 12],
                                 ]);
                                 let now_ms = now_mono_ms();
                                 if now_ms >= client_ts_mono_ms {
@@ -1111,7 +1139,6 @@ impl UdpRelay {
                     }
                 }
 
-                buffer[..payload_len].copy_from_slice(&recv_buf[SESSION_ID_LEN..len]);
                 self.packets_received.fetch_add(1, Ordering::Relaxed);
                 let now = Instant::now();
                 self.last_activity_ms
@@ -1125,12 +1152,32 @@ impl UdpRelay {
                     *guard = Some(now);
                 }
 
-                Ok(Some(payload_len))
+                Ok(Some(&frame_buffer[SESSION_ID_LEN..len]))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Receive a packet from the relay (inbound: game server -> relay -> game client).
+    ///
+    /// Returns the payload with session ID stripped, or None if no packet available.
+    pub fn receive_inbound(&self, buffer: &mut [u8]) -> Result<Option<usize>> {
+        // Kept for existing callers/tests. The inbound injector uses
+        // `receive_inbound_payload` to avoid this copy.
+        let mut recv_buf = [0u8; 1600];
+        let Some(payload) = self.receive_inbound_payload(&mut recv_buf)? else {
+            return Ok(None);
+        };
+
+        if payload.len() > buffer.len() {
+            log::warn!("UDP Relay: Buffer too small for payload");
+            return Ok(None);
+        }
+
+        buffer[..payload.len()].copy_from_slice(payload);
+        Ok(Some(payload.len()))
     }
 
     /// Send an immediate keepalive (session_id-only packet) to the current relay.

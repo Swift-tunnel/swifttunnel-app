@@ -635,6 +635,9 @@ const THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// `start()` warns when this is non-zero so the testbench harness can fail
 /// builds that are leaking interceptor workers.
 static LEAKED_THREADS: AtomicU64 = AtomicU64::new(0);
+static READER_DIRECT_RELAY_FORWARDED: AtomicU64 = AtomicU64::new(0);
+static READER_DIRECT_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
+static READER_DIRECT_RELAY_BYPASS: AtomicU64 = AtomicU64::new(0);
 
 /// Number of worker threads we had to detach via `mem::forget` because they
 /// did not stop within `THREAD_JOIN_TIMEOUT`.
@@ -2992,6 +2995,27 @@ impl ParallelInterceptor {
                 throw ('Unsupported WinpkFilter binding selector: ' + $Candidate.Selector)
             }}
 
+            function Start-NDISRDService {{
+                $service = Get-Service -Name 'NDISRD' -ErrorAction SilentlyContinue
+                if (-not $service) {{
+                    throw 'NDISRD service is not installed.'
+                }}
+
+                if ($service.Status -ne 'Running') {{
+                    Write-Output 'Starting NDISRD service before WinpkFilter binding validation'
+                    Start-Service -Name 'NDISRD' -ErrorAction Stop
+                    $deadline = (Get-Date).AddSeconds(10)
+                    do {{
+                        Start-Sleep -Milliseconds 250
+                        $service = Get-Service -Name 'NDISRD' -ErrorAction Stop
+                    }} while ($service.Status -ne 'Running' -and (Get-Date) -lt $deadline)
+
+                    if ($service.Status -ne 'Running') {{
+                        throw 'NDISRD service did not reach Running state.'
+                    }}
+                }}
+            }}
+
             try {{
                 $candidates = Resolve-WinpkFilterCandidates
                 if ($candidates.Count -eq 0) {{
@@ -3016,10 +3040,12 @@ impl ParallelInterceptor {
                 $adapterDescription = if ($binding.InterfaceDescription) {{ [string]$binding.InterfaceDescription }} else {{ '' }}
                 Write-Output ('Using adapter ''' + $adapterName + ''' via ' + $bindingCandidate.Selector + ' (ifIndex=' + $adapterIfIndex + ', description=' + $adapterDescription + ') for WinpkFilter validation')
 
+                Start-NDISRDService
+
                 if (-not $binding.Enabled) {{
                     Write-Output ('Enabling WinpkFilter binding on adapter: ' + $adapterName)
                     Enable-WinpkFilterBinding $bindingCandidate
-                    Start-Sleep -Seconds 1
+                    Start-Sleep -Seconds 2
                     $binding = Get-WinpkFilterBinding $bindingCandidate
 
                     if (-not $binding) {{
@@ -3668,6 +3694,9 @@ impl ParallelInterceptor {
         let num_workers = self.num_workers;
         let reader_cache = Arc::clone(&self.process_cache);
         let reader_worker_stats = self.worker_stats.clone();
+        let reader_relay_ctx = self.relay_ctx.clone();
+        let reader_throughput = self.throughput_stats.clone();
+        let reader_detected_game_servers = Arc::clone(&self.detected_game_servers);
         let reader_auto_router = self.auto_router.clone();
         let reader_queue_overflow_mode = Arc::clone(&self.queue_overflow_mode);
         let reader_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
@@ -3692,6 +3721,9 @@ impl ParallelInterceptor {
                     senders,
                     reader_cache,
                     reader_worker_stats,
+                    reader_relay_ctx,
+                    reader_throughput,
+                    reader_detected_game_servers,
                     reader_auto_router,
                     reader_queue_overflow_mode,
                     reader_api_tunneling,
@@ -4191,6 +4223,114 @@ fn inject_inbound_packet(
     Some(true)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReaderTunnelAction {
+    Consumed,
+    BypassPhysical,
+}
+
+/// Forward an already-classified V3 packet from the reader thread.
+///
+/// This removes the previous reader -> worker channel hop for the common V3
+/// case. The UDP relay still owns the actual Winsock send on its dedicated
+/// sender thread, so the reader only does checksum repair plus a bounded queue
+/// enqueue before returning to drain NDIS.
+fn forward_tunneled_packet_from_reader(
+    data: &[u8],
+    relay: &super::udp_relay::UdpRelay,
+    stats: &WorkerStats,
+    throughput: &ThroughputStats,
+    detected_game_servers: &parking_lot::RwLock<std::collections::HashSet<Ipv4Addr>>,
+    auto_router: Option<&Arc<super::auto_routing::AutoRouter>>,
+) -> ReaderTunnelAction {
+    let packet_len = data.len() as u64;
+    stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
+    stats
+        .bytes_tunneled
+        .fetch_add(packet_len, Ordering::Relaxed);
+    throughput.add_tx(packet_len);
+
+    let ip_start = match parse_ipv4_header_offset(data) {
+        Some(offset) => offset,
+        None => return ReaderTunnelAction::Consumed,
+    };
+    let ip_packet = &data[ip_start..];
+
+    if ip_packet.len() >= 20 {
+        let dst_ip = Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
+        if is_roblox_game_server_ip(dst_ip) {
+            if let Some(mut servers) = detected_game_servers.try_write() {
+                if servers.len() < MAX_DETECTED_GAME_SERVERS || servers.contains(&dst_ip) {
+                    if servers.insert(dst_ip) {
+                        log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+                    }
+                }
+            }
+
+            if let Some(auto_router) = auto_router {
+                auto_router.evaluate_game_server(dst_ip);
+                if auto_router.is_lookup_pending(dst_ip) {
+                    return ReaderTunnelAction::Consumed;
+                }
+            }
+        }
+    }
+
+    if matches!(
+        relay.relay_health(),
+        super::udp_relay::RelayHealthState::Dead
+    ) {
+        let event = READER_DIRECT_RELAY_BYPASS.fetch_add(1, Ordering::Relaxed) + 1;
+        if event <= 5 || event.is_power_of_two() {
+            log::warn!(
+                "Reader direct relay: relay is dead, bypassing tunnel packet to physical adapter (event #{})",
+                event
+            );
+        }
+        return ReaderTunnelAction::BypassPhysical;
+    }
+
+    let forward_result = if ip_packet.len() >= 20 {
+        PACKET_BUFFER.with(|buf| {
+            let mut fix_buf = buf.borrow_mut();
+            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
+            fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
+            fix_packet_checksums(&mut fix_buf[..pkt_len]);
+            relay.forward_outbound_fast(&fix_buf[..pkt_len])
+        })
+    } else {
+        relay.forward_outbound_fast(ip_packet)
+    };
+
+    match forward_result {
+        Ok(sent) => {
+            let forwarded = READER_DIRECT_RELAY_FORWARDED.fetch_add(1, Ordering::Relaxed) + 1;
+            if sent > 0 && forwarded <= 5 {
+                log::info!(
+                    "Reader direct relay: forwarded packet #{} ({} bytes)",
+                    forwarded,
+                    sent
+                );
+            }
+        }
+        Err(e) => {
+            let errors = READER_DIRECT_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed) + 1;
+            if errors <= 10 || errors % 100 == 0 {
+                log::warn!(
+                    "Reader direct relay: forward failed ({} total): {}",
+                    errors,
+                    e
+                );
+            }
+            if errors % 100 == 0 {
+                relay.check_health();
+            }
+        }
+    }
+
+    ReaderTunnelAction::Consumed
+}
+
 /// Packet reader thread - reads from ndisapi and dispatches to workers
 fn run_packet_reader(
     physical_idx: usize,
@@ -4198,6 +4338,9 @@ fn run_packet_reader(
     senders: Vec<crossbeam_channel::Sender<PacketWork>>,
     process_cache: Arc<LockFreeProcessCache>,
     worker_stats: Vec<Arc<WorkerStats>>,
+    relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
+    throughput: ThroughputStats,
+    detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<Ipv4Addr>>>,
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
     api_tunneling_enabled: Arc<AtomicBool>,
@@ -4215,6 +4358,9 @@ fn run_packet_reader(
         physical_name,
         num_workers
     );
+    if relay_ctx.is_some() {
+        log::info!("Packet reader: V3 direct relay fast path enabled");
+    }
 
     // Routing decisions are made here (reader thread) so bypass traffic never hits workers.
     let mut snapshot = process_cache.get_snapshot();
@@ -4577,6 +4723,27 @@ fn run_packet_reader(
                                 .fetch_add(packet_len, Ordering::Relaxed);
                         }
                         continue;
+                    }
+
+                    if let (Some(relay), Some(stats)) =
+                        (relay_ctx.as_ref(), worker_stats.get(worker_id))
+                    {
+                        if !relay.relay_path_mtu_refresh_due() {
+                            match forward_tunneled_packet_from_reader(
+                                data,
+                                relay,
+                                stats,
+                                &throughput,
+                                &detected_game_servers,
+                                auto_router.as_ref(),
+                            ) {
+                                ReaderTunnelAction::Consumed => continue,
+                                ReaderTunnelAction::BypassPhysical => {
+                                    let _ = passthrough_to_adapter.push(&packets[i]);
+                                    continue;
+                                }
+                            }
+                        }
                     }
 
                     // Tunnel packet: dispatch to worker. (Copy only when tunneling.)
@@ -6559,8 +6726,9 @@ fn run_v3_inbound_receiver(
         }
 
         // === RECEIVE PACKET FROM RELAY ===
-        match relay.receive_inbound(&mut recv_buf) {
-            Ok(Some(len)) => {
+        match relay.receive_inbound_payload(&mut recv_buf) {
+            Ok(Some(ip_packet)) => {
+                let len = ip_packet.len();
                 packets_received += 1;
                 last_packet_time = Some(now);
 
@@ -6575,9 +6743,6 @@ fn run_v3_inbound_receiver(
                         len
                     );
                 }
-
-                // The payload is already plain IP packet (relay strips session ID)
-                let ip_packet = &recv_buf[..len];
 
                 // Inject to MSTCP
                 match inject_inbound_packet(

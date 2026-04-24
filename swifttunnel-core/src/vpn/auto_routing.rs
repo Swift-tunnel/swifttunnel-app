@@ -575,7 +575,7 @@ mod tests {
             ),
             (
                 "singapore-02".to_string(),
-                "51.79.128.67:51821".parse().unwrap(),
+                "203.0.113.2:51821".parse().unwrap(),
                 None,
             ),
             (
@@ -694,7 +694,7 @@ mod tests {
         // as manual region connect and switch if we aren't already on it.
         let router = AutoRouter::new(true, "singapore-02");
         router.set_available_servers(make_servers());
-        router.set_current_relay("51.79.128.67:51821".parse().unwrap(), "singapore-02");
+        router.set_current_relay("203.0.113.2:51821".parse().unwrap(), "singapore-02");
 
         // Manual resolution prefers the exact "singapore" server id when it exists.
         let best = router.get_best_server_for_region(&RobloxRegion::Singapore);
@@ -726,7 +726,7 @@ mod tests {
             best,
             Some((
                 "singapore-02".to_string(),
-                "51.79.128.67:51821".parse::<SocketAddr>().unwrap()
+                "203.0.113.2:51821".parse::<SocketAddr>().unwrap()
             ))
         );
     }
@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn test_commit_switch_allows_same_region_upgrade_inside_min_interval() {
         let router = AutoRouter::new(true, "singapore-02");
-        router.set_current_relay("51.79.128.67:51821".parse().unwrap(), "singapore-02");
+        router.set_current_relay("203.0.113.2:51821".parse().unwrap(), "singapore-02");
         *router.last_switch_time.write() = Instant::now();
 
         let result = router.commit_switch(
@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn test_commit_switch_blocks_small_same_region_upgrade_inside_min_interval() {
         let router = AutoRouter::new(true, "singapore-02");
-        router.set_current_relay("51.79.128.67:51821".parse().unwrap(), "singapore-02");
+        router.set_current_relay("203.0.113.2:51821".parse().unwrap(), "singapore-02");
         *router.last_switch_time.write() = Instant::now();
 
         let result = router.commit_switch(
