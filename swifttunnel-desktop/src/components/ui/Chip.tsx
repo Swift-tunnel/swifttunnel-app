@@ -23,7 +23,7 @@ function toneStyle(tone: Tone, color?: string): React.CSSProperties {
       };
     case "connected":
       return {
-        backgroundColor: "rgba(40, 210, 150, 0.15)",
+        backgroundColor: "rgba(34, 197, 94, 0.15)",
         color: "var(--color-status-connected)",
       };
     case "warning":

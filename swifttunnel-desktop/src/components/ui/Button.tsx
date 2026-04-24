@@ -26,11 +26,11 @@ function variantStyle(variant: Variant): React.CSSProperties {
     case "primary":
       return {
         backgroundColor: "var(--color-accent-primary)",
-        color: "#fff",
+        color: "#000000",
       };
     case "secondary":
       return {
-        backgroundColor: "var(--color-bg-elevated)",
+        backgroundColor: "transparent",
         color: "var(--color-text-primary)",
         border: "1px solid var(--color-border-default)",
       };
@@ -41,8 +41,9 @@ function variantStyle(variant: Variant): React.CSSProperties {
       };
     case "destructive":
       return {
-        backgroundColor: "var(--color-status-error)",
-        color: "#fff",
+        backgroundColor: "transparent",
+        color: "var(--color-status-error)",
+        border: "1px solid var(--color-status-error)",
       };
     case "connect":
       return {

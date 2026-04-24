@@ -41,11 +41,11 @@ export function Toggle({
           height: thumb,
           top: pad - 1,
           left: pad - 1,
-          backgroundColor: enabled ? "#fff" : "var(--color-text-muted)",
+          backgroundColor: enabled ? "#000000" : "var(--color-text-muted)",
           transform: enabled
             ? `translateX(${track.w - thumb - pad * 2}px)`
             : "translateX(0)",
-          boxShadow: enabled ? "0 1px 2px rgba(0,0,0,0.25)" : "none",
+          boxShadow: "none",
         }}
       />
     </button>

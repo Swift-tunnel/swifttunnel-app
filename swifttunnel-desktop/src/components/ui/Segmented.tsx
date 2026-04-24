@@ -39,7 +39,7 @@ export function Segmented<T extends string>({
               backgroundColor: active
                 ? "var(--color-accent-primary)"
                 : "transparent",
-              color: active ? "#fff" : "var(--color-text-muted)",
+              color: active ? "#000000" : "var(--color-text-muted)",
             }}
           >
             {item.label}
