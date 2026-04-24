@@ -35,15 +35,15 @@
 
   /* Text */
   --color-text-primary: #fafafa;
-  --color-text-secondary: #a1a1a1;
-  --color-text-muted: #6a6a6a;
-  --color-text-dimmed: #3f3f3f;
+  --color-text-secondary: #b4b4b4;
+  --color-text-muted: #8a8a8a;
+  --color-text-dimmed: #525252;
 
   /* Borders */
-  --color-border-default: #1f1f1f;
-  --color-border-subtle: #141414;
+  --color-border-default: #2a2a2a;
+  --color-border-subtle: #1f1f1f;
   --color-border-focus: #ffffff;
-  --color-border-hover: #2a2a2a;
+  --color-border-hover: #3a3a3a;
 
   /* Latency (preserved, one notch less saturated) */
   --color-latency-excellent: #22c55e;
@@ -53,11 +53,10 @@
   --color-latency-bad: #ef4444;
 
   /* Spacing */
-  --spacing-sidebar: 48px;
+  --spacing-sidebar: 188px;
   --spacing-sidebar-expanded: 200px;
   --spacing-content: 20px;
   --spacing-card-gap: 12px;
-  --spacing-connect-bar: 0px;
 
   /* Radius */
   --radius-card: 8px;

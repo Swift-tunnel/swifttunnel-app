@@ -440,7 +440,7 @@ export function BoostTab() {
             style={{
               left: `calc(var(--spacing-sidebar) + var(--spacing-content))`,
               right: "var(--spacing-content)",
-              bottom: `calc(var(--spacing-connect-bar) + 12px)`,
+              bottom: "12px",
             }}
           >
             <div

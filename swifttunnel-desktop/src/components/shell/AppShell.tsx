@@ -2,7 +2,6 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { Sidebar } from "./Sidebar";
-import { ConnectBar } from "./ConnectBar";
 import { BindingChooserDialog } from "./BindingChooserDialog";
 import { ToastContainer } from "../common/Toast";
 
@@ -42,7 +41,6 @@ export function AppShell({ children }: AppShellProps) {
               {children(activeTab)}
             </motion.div>
           </div>
-          <ConnectBar />
         </div>
       </div>
       <ToastContainer />
