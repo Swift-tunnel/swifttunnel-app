@@ -3649,14 +3649,27 @@ impl ParallelInterceptor {
         let refresher_cache = Arc::clone(&self.process_cache);
         let refresh_now = Arc::clone(&self.refresh_now_flag);
         let refresh_condvar = Arc::clone(&self.refresh_condvar);
+        let refresher_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
+        let (initial_refresh_tx, initial_refresh_rx) = crossbeam_channel::bounded::<()>(1);
         self.refresher_handle = Some(thread::spawn(move || {
             run_cache_refresher(
                 refresher_cache,
                 refresher_stop,
                 refresh_now,
                 refresh_condvar,
+                refresher_api_tunneling,
+                Some(initial_refresh_tx),
             );
         }));
+
+        if initial_refresh_rx
+            .recv_timeout(Duration::from_millis(750))
+            .is_err()
+        {
+            log::warn!(
+                "Cache refresher initial warmup did not complete before packet reader start"
+            );
+        }
 
         // Reset throughput stats on start
         self.throughput_stats.reset();
@@ -5183,6 +5196,48 @@ fn send_bypass_packet(
     }
 }
 
+/// Collect TCP source ports owned by tunnel processes for API tunneling.
+fn collect_tunnel_tcp_ports_for_api_tunneling(
+    connections: &ahash::AHashMap<ConnectionKey, u32>,
+    pid_names: &ahash::AHashMap<u32, String>,
+    tunnel_apps: &ahash::AHashSet<String>,
+) -> Vec<u16> {
+    if tunnel_apps.is_empty() {
+        return Vec::new();
+    }
+
+    let tunnel_pids: ahash::AHashSet<u32> = pid_names
+        .iter()
+        .filter_map(|(pid, name)| {
+            let name_lower = name.to_lowercase();
+            if tunnel_apps.contains(&name_lower)
+                || process_name_matches_any_tunnel_app(&name_lower, tunnel_apps)
+            {
+                Some(*pid)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if tunnel_pids.is_empty() {
+        return Vec::new();
+    }
+
+    let ports: ahash::AHashSet<u16> = connections
+        .iter()
+        .filter_map(|(key, pid)| {
+            if key.protocol == Protocol::Tcp && tunnel_pids.contains(pid) {
+                Some(key.local_port)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    ports.into_iter().collect()
+}
+
 /// Cache refresher thread - single writer
 ///
 /// OPTIMIZATION: Event-driven refresh instead of polling
@@ -5194,6 +5249,8 @@ fn run_cache_refresher(
     stop_flag: Arc<AtomicBool>,
     refresh_now: Arc<AtomicBool>,
     refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    api_tunneling_enabled: Arc<AtomicBool>,
+    mut initial_refresh_done: Option<crossbeam_channel::Sender<()>>,
 ) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
@@ -5462,7 +5519,17 @@ fn run_cache_refresher(
 
         // Update cache atomically. The snapshot precomputes tunnel-owned source ports
         // so readers don't need to linearly scan the connection map on a miss.
-        cache.update(connections, pid_names);
+        if api_tunneling_enabled.load(Ordering::Relaxed) {
+            let explicit_tcp_ports =
+                collect_tunnel_tcp_ports_for_api_tunneling(&connections, &pid_names, tunnel_apps);
+            cache.update_with_tcp_ports(connections, pid_names, &explicit_tcp_ports);
+        } else {
+            cache.update_with_tcp_ports(connections, pid_names, &[]);
+        }
+
+        if let Some(done) = initial_refresh_done.take() {
+            let _ = done.send(());
+        }
 
         // Log tunnel app detection periodically
         refresh_count += 1;
@@ -9108,6 +9175,60 @@ mod tests {
             true,
         ));
         assert!(cache_with_api.contains_key(&(packet_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_api_tunneling_collects_and_publishes_roblox_tcp_ports() {
+        let roblox_pid = 1111;
+        let chrome_pid = 2222;
+        let roblox_port = 53001;
+        let chrome_port = 53002;
+        let roblox_udp_port = 53003;
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 10), roblox_port, Protocol::Tcp),
+            roblox_pid,
+        );
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 11), chrome_port, Protocol::Tcp),
+            chrome_pid,
+        );
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 10), roblox_udp_port, Protocol::Udp),
+            roblox_pid,
+        );
+
+        let mut pid_names = HashMap::new();
+        pid_names.insert(roblox_pid, "RobloxApp.exe".to_string());
+        pid_names.insert(chrome_pid, "chrome.exe".to_string());
+
+        let tunnel_apps: HashSet<String> =
+            ["robloxplayerbeta.exe".to_string()].into_iter().collect();
+        let mut ports =
+            collect_tunnel_tcp_ports_for_api_tunneling(&connections, &pid_names, &tunnel_apps);
+        ports.sort_unstable();
+        assert_eq!(ports, vec![roblox_port]);
+
+        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()]);
+        cache.update_with_tcp_ports(connections, pid_names, &ports);
+
+        let snapshot = cache.get_snapshot();
+        let frame = build_ipv4_frame(
+            6,
+            Ipv4Addr::new(10, 0, 0, 99),
+            Ipv4Addr::new(128, 116, 50, 100),
+            roblox_port,
+            443,
+        );
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
     }
 
     #[test]

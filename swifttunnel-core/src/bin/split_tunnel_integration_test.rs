@@ -5,11 +5,12 @@ use std::process::Command;
 use std::time::Duration;
 
 use swifttunnel_core::settings::load_settings;
-use swifttunnel_core::vpn::VpnConnection;
+use swifttunnel_core::vpn::{SplitTunnelDiagnostics, VpnConnection};
 use testbench_shared::{
-    DEFAULT_UDP_PROBE_COUNT, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS, DEFAULT_UDP_PROBE_TARGET,
-    connect_vpn, get_public_ip, init_logging, parse_common_cli_options, print_diagnostics,
-    print_preflight_summary, resolve_binding_preference, resolve_region, resolve_test_exe,
+    DEFAULT_TCP_PROBE_COUNT, DEFAULT_TCP_PROBE_TARGET, DEFAULT_UDP_PROBE_COUNT,
+    DEFAULT_UDP_PROBE_STARTUP_DELAY_MS, DEFAULT_UDP_PROBE_TARGET, connect_vpn, get_public_ip,
+    init_logging, parse_common_cli_options, print_diagnostics, print_preflight_summary,
+    resolve_binding_preference, resolve_enable_api_tunneling, resolve_region, resolve_test_exe,
 };
 
 fn print_usage() {
@@ -81,13 +82,15 @@ async fn main() {
     println!("Baseline IP: {}", baseline_ip);
 
     let settings = load_settings();
+    let api_tunneling_enabled = resolve_enable_api_tunneling(&options, &settings);
     let mut vpn = VpnConnection::new();
     if let Err(err) = connect_vpn(&mut vpn, &options, &settings, binding_preference).await {
         eprintln!("FAIL: vpn connect failed: {}", err);
         std::process::exit(1);
     }
 
-    let result = run_connected_checks(&mut vpn, &options, &baseline_ip).await;
+    let result =
+        run_connected_checks(&mut vpn, &options, &baseline_ip, api_tunneling_enabled).await;
 
     if let Err(err) = vpn.disconnect().await {
         eprintln!("WARN: vpn disconnect failed: {}", err);
@@ -105,6 +108,7 @@ async fn run_connected_checks(
     vpn: &mut VpnConnection,
     options: &testbench_shared::CommonCliOptions,
     baseline_ip: &str,
+    api_tunneling_enabled: bool,
 ) -> Result<(), String> {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -203,6 +207,93 @@ async fn run_connected_checks(
     if after.packets_tunneled <= before.packets_tunneled {
         return Err(format!(
             "expected tunneled packet counter to increase (before={}, after={})",
+            before.packets_tunneled, after.packets_tunneled
+        ));
+    }
+
+    if api_tunneling_enabled {
+        run_tcp_api_probe_check(vpn, options, &after).await?;
+    } else {
+        println!("Skipping TCP/API probe because API tunneling is disabled");
+    }
+
+    Ok(())
+}
+
+async fn run_tcp_api_probe_check(
+    vpn: &mut VpnConnection,
+    options: &testbench_shared::CommonCliOptions,
+    before: &SplitTunnelDiagnostics,
+) -> Result<(), String> {
+    let test_exe = resolve_test_exe(options)?;
+    let startup_delay_ms = DEFAULT_UDP_PROBE_STARTUP_DELAY_MS.to_string();
+    let port_file = std::env::temp_dir().join(format!(
+        "swifttunnel-probe-tcp-port-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default()
+    ));
+    let port_file_arg = port_file.display().to_string();
+    let _ = std::fs::remove_file(&port_file);
+
+    println!(
+        "Running tunneled TCP/API probe via {} to {} ({} writes)",
+        test_exe.display(),
+        DEFAULT_TCP_PROBE_TARGET,
+        DEFAULT_TCP_PROBE_COUNT
+    );
+    let mut child = Command::new(&test_exe)
+        .args([
+            "--tcp-probe",
+            "--target",
+            DEFAULT_TCP_PROBE_TARGET,
+            "--count",
+            &DEFAULT_TCP_PROBE_COUNT.to_string(),
+            "--startup-delay-ms",
+            &startup_delay_ms,
+            "--port-file",
+            &port_file_arg,
+        ])
+        .spawn()
+        .map_err(|e| format!("failed to spawn TCP probe executable: {}", e))?;
+
+    let child_pid = child.id();
+    println!("TCP probe helper PID: {}", child_pid);
+    vpn.register_tunnel_process(child_pid, "ip_checker.exe")
+        .await
+        .map_err(|e| format!("failed to register TCP probe process for tunneling: {}", e))?;
+
+    let local_port = wait_for_probe_port(&port_file)?;
+    println!("TCP probe helper local port: {}", local_port);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for TCP probe executable: {}", e))?;
+    let _ = std::fs::remove_file(&port_file);
+
+    if !output.status.success() {
+        return Err(format!(
+            "TCP probe executable failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    if !output.stdout.is_empty() {
+        println!("{}", String::from_utf8_lossy(&output.stdout).trim());
+    }
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let after = vpn
+        .get_split_tunnel_diagnostics()
+        .ok_or_else(|| "missing split tunnel diagnostics after TCP probe".to_string())?;
+    print_diagnostics(&after);
+
+    if after.packets_tunneled <= before.packets_tunneled {
+        return Err(format!(
+            "expected TCP/API probe to increase tunneled packet counter (before={}, after={})",
             before.packets_tunneled, after.packets_tunneled
         ));
     }

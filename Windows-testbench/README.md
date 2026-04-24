@@ -40,6 +40,16 @@ cd <repo-root>
   -Password $env:SWIFTTUNNEL_TEST_PASSWORD
 ```
 
+To validate Roblox TCP/API tunneling as well as the UDP split-tunnel path:
+
+```powershell
+.\\Windows-testbench\\run_split_tunnel_integration_test.ps1 `
+  -EnableApiTunneling `
+  -CustomRelay "45.32.115.254:51821" `
+  -Email $env:SWIFTTUNNEL_TEST_EMAIL `
+  -Password $env:SWIFTTUNNEL_TEST_PASSWORD
+```
+
 To include a full connect / disconnect pass in the desktop harness:
 
 ```powershell
@@ -92,6 +102,8 @@ credentials.
 - optional `--custom-relay` / `SWIFTTUNNEL_TEST_CUSTOM_RELAY` targets a specific relay
 - the test process stays on the original public IP after connect
 - a selected helper process (`ip_checker.exe`) generates tunneled UDP packets
+- when API tunneling is enabled, the same helper generates a long-lived TCP
+  probe so the refresher must publish tunnel-owned TCP source ports
 - split tunnel diagnostics show tunneled packet counters increasing
 
 This matches the current V3 architecture more closely than the retired
