@@ -75,13 +75,13 @@ export function Sidebar() {
       {/* Brand */}
       <div
         data-tauri-drag-region
-        className="flex items-center gap-2.5 px-2.5 pt-3.5 pb-4"
+        className="flex items-center gap-2.5 px-1.5 pt-3 pb-3"
       >
         <img
           src={swiftLogo}
           alt="SwiftTunnel"
-          width={28}
-          height={28}
+          width={40}
+          height={40}
           className="shrink-0"
           style={{ objectFit: "contain" }}
         />

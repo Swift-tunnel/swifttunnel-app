@@ -96,21 +96,13 @@ export function LoginScreen() {
           transition={{ duration: 0.3 }}
           className="flex flex-col items-center gap-3"
         >
-          <div
-            className="flex h-[88px] w-[88px] items-center justify-center rounded-[18px]"
-            style={{
-              backgroundColor: "var(--color-bg-card)",
-              border: "1px solid var(--color-border-default)",
-            }}
-          >
-            <img
-              src={swiftLogo}
-              alt="SwiftTunnel"
-              width={72}
-              height={72}
-              style={{ objectFit: "contain" }}
-            />
-          </div>
+          <img
+            src={swiftLogo}
+            alt="SwiftTunnel"
+            width={120}
+            height={120}
+            style={{ objectFit: "contain" }}
+          />
           <div className="text-center">
             <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-text-primary">
               SwiftTunnel
