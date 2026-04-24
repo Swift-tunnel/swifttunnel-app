@@ -282,7 +282,11 @@ export function SettingsTab() {
               { value: "manual" as const, label: "Manual" },
             ]}
             value={adapterBindingMode}
-            onChange={(mode) => set({ adapter_binding_mode: mode })}
+            onChange={(mode) =>
+              set({
+                adapter_binding_mode: mode as "smart_auto" | "manual",
+              })
+            }
           />
         </Row>
 
