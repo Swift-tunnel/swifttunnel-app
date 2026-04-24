@@ -194,10 +194,9 @@ export function SettingsTab() {
             <div
               className="flex h-9 w-9 items-center justify-center rounded-full text-[12px] font-semibold"
               style={{
-                background:
-                  "linear-gradient(135deg, var(--color-accent-primary-soft-20), rgba(90,159,255,0.1))",
-                color: "var(--color-accent-secondary)",
-                border: "1px solid var(--color-border-subtle)",
+                backgroundColor: "var(--color-bg-hover)",
+                color: "var(--color-text-primary)",
+                border: "1px solid var(--color-border-default)",
               }}
             >
               {email?.[0]?.toUpperCase() || "?"}
