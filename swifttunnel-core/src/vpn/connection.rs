@@ -1435,6 +1435,15 @@ impl VpnConnection {
                                     )
                                     .await;
 
+                                    if !router_for_lookup.is_current_lookup_generation(generation) {
+                                        log::info!(
+                                            "Auto-routing: Ignoring stale probe refinement for {} (generation {})",
+                                            ip,
+                                            generation
+                                        );
+                                        continue;
+                                    }
+
                                     if let Some(best_candidate) = ranked_candidates.first() {
                                         if let Some(current_relay) =
                                             router_for_lookup.current_relay()
