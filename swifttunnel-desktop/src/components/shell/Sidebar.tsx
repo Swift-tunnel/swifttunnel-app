@@ -147,25 +147,17 @@ export function Sidebar() {
                 <path d={tab.icon} />
               </svg>
               {expanded && (
-                <>
-                  <span
-                    className="flex-1 text-[13px] font-medium"
-                    style={{
-                      color: isActive
-                        ? "var(--color-text-primary)"
-                        : "var(--color-text-secondary)",
-                      letterSpacing: "-0.005em",
-                    }}
-                  >
-                    {tab.label}
-                  </span>
-                  <span
-                    className="font-mono text-[10px]"
-                    style={{ color: "var(--color-text-dimmed)" }}
-                  >
-                    ⌃{tab.shortcut}
-                  </span>
-                </>
+                <span
+                  className="flex-1 text-[13px] font-medium"
+                  style={{
+                    color: isActive
+                      ? "var(--color-text-primary)"
+                      : "var(--color-text-secondary)",
+                    letterSpacing: "-0.005em",
+                  }}
+                >
+                  {tab.label}
+                </span>
               )}
             </button>
           );

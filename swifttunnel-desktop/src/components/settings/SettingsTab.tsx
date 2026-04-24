@@ -208,7 +208,7 @@ export function SettingsTab() {
               </div>
               {isTester && (
                 <div className="mt-0.5">
-                  <Chip tone="custom" color="#9664ff" uppercase size="xs">
+                  <Chip tone="neutral" uppercase size="xs">
                     Tester
                   </Chip>
                 </div>

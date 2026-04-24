@@ -34,7 +34,6 @@ export function ConnectTab() {
   const vpnState = useVpnStore((s) => s.state);
   const vpnRegion = useVpnStore((s) => s.region);
   const serverEndpoint = useVpnStore((s) => s.serverEndpoint);
-  const splitActive = useVpnStore((s) => s.splitTunnelActive);
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
   const bytesUp = useVpnStore((s) => s.bytesUp);
   const bytesDown = useVpnStore((s) => s.bytesDown);
@@ -351,12 +350,13 @@ export function ConnectTab() {
             <MetricCell label="Download" value={formatBytes(bytesDown)} mono />
             <MetricCell label="Session" value={formatElapsed(elapsed)} mono />
             <MetricCell
-              label="Tunneled"
-              value={`${tunneled.length}`}
-              hint={tunneled.length === 1 ? "process" : "processes"}
+              label="Ping"
+              value={ping !== null ? `${ping}` : "—"}
+              hint={ping !== null ? "ms" : undefined}
+              mono
               valueColor={
-                splitActive
-                  ? "var(--color-text-primary)"
+                ping !== null
+                  ? getLatencyColor(ping)
                   : "var(--color-text-muted)"
               }
             />
