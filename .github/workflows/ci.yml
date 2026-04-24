@@ -100,3 +100,32 @@ jobs:
 
       - name: Test desktop backend
         run: cargo test -p swifttunnel-desktop -- --nocapture
+
+  split-tunnel-testbench:
+    name: Split Tunnel Testbench (Windows)
+    runs-on: [self-hosted, Windows, X64, testbench]
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run split tunnel API tunneling testbench
+        shell: powershell
+        env:
+          SWIFTTUNNEL_TEST_EMAIL: ${{ secrets.SWIFTTUNNEL_TEST_EMAIL }}
+          SWIFTTUNNEL_TEST_PASSWORD: ${{ secrets.SWIFTTUNNEL_TEST_PASSWORD }}
+          SWIFTTUNNEL_TEST_ACCESS_TOKEN: ${{ secrets.SWIFTTUNNEL_TEST_ACCESS_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $params = @{
+            EnableApiTunneling = $true
+            CustomRelay = "45.32.115.254:51821"
+          }
+          if ($env:SWIFTTUNNEL_TEST_EMAIL) {
+            $params.Email = $env:SWIFTTUNNEL_TEST_EMAIL
+          }
+          if ($env:SWIFTTUNNEL_TEST_PASSWORD) {
+            $params.Password = $env:SWIFTTUNNEL_TEST_PASSWORD
+          }
+          .\Windows-testbench\run_split_tunnel_integration_test.ps1 @params

@@ -14,6 +14,8 @@ pub const DEFAULT_REGION: &str = "singapore";
 pub const DEFAULT_UDP_PROBE_TARGET: &str = "128.116.1.1:49152";
 pub const DEFAULT_UDP_PROBE_COUNT: usize = 32;
 pub const DEFAULT_UDP_PROBE_STARTUP_DELAY_MS: u64 = 1500;
+pub const DEFAULT_TCP_PROBE_TARGET: &str = "www.roblox.com:80";
+pub const DEFAULT_TCP_PROBE_COUNT: usize = 5;
 
 #[derive(Debug, Clone, Default)]
 pub struct CommonCliOptions {
@@ -334,6 +336,72 @@ pub fn run_udp_probe(
             .send_to(payload.as_bytes(), addr)
             .map_err(|e| format!("UDP send failed: {}", e))?;
         std::thread::sleep(Duration::from_millis(30));
+    }
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    Ok(())
+}
+
+pub fn run_tcp_probe(
+    target: &str,
+    count: usize,
+    startup_delay_ms: u64,
+    port_file: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let addr = target
+        .to_socket_addrs()
+        .map_err(|e| format!("TCP target resolution failed for '{}': {}", target, e))?
+        .next()
+        .ok_or_else(|| format!("TCP target '{}' did not resolve to any address", target))?;
+
+    // Give the parent process time to register the helper PID before any TCP
+    // SYN is emitted.
+    std::thread::sleep(Duration::from_millis(startup_delay_ms));
+
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|e| format!("TCP connect to '{}' failed: {}", target, e))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(750)))
+        .map_err(|e| format!("Failed to set TCP write timeout: {}", e))?;
+
+    let local_port = stream
+        .local_addr()
+        .map_err(|e| format!("Failed to query TCP local address: {}", e))?
+        .port();
+
+    if let Some(path) = port_file {
+        std::fs::write(path, local_port.to_string())
+            .map_err(|e| format!("Failed to write TCP port file '{}': {}", path.display(), e))?;
+    }
+
+    // Keep the connection established long enough for the cache refresher to
+    // observe and publish the TCP source port, then emit payload packets.
+    std::thread::sleep(Duration::from_millis(startup_delay_ms));
+
+    let host = target
+        .rsplit_once(':')
+        .map(|(host, _)| host.trim_matches(['[', ']']))
+        .unwrap_or(target);
+    let http_chunks = [
+        "GET / HTTP/1.1\r\n".to_string(),
+        format!("Host: {}\r\n", host),
+        "User-Agent: SwiftTunnel-Testbench/1.0\r\n".to_string(),
+        "Connection: close\r\n".to_string(),
+        "\r\n".to_string(),
+    ];
+
+    for idx in 0..count {
+        let payload: std::borrow::Cow<'_, str> = if addr.port() == 80 && idx < http_chunks.len() {
+            std::borrow::Cow::Borrowed(http_chunks[idx].as_str())
+        } else {
+            std::borrow::Cow::Owned(format!("SwiftTunnel TCP probe {}\r\n", idx))
+        };
+        if let Err(err) = stream.write_all(payload.as_bytes()) {
+            log::warn!("TCP probe write stopped after {} packet(s): {}", idx, err);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     std::thread::sleep(Duration::from_millis(500));

@@ -189,7 +189,7 @@ thread_local! {
     static PACKET_BUFFER: RefCell<[u8; MAX_PACKET_SIZE]> = RefCell::new([0u8; MAX_PACKET_SIZE]);
 }
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersInfo, IP_ADAPTER_INFO};
 use windows::Win32::System::Threading::{
     CreateEventW, ResetEvent, SetThreadAffinityMask, WaitForSingleObject,
@@ -3649,14 +3649,27 @@ impl ParallelInterceptor {
         let refresher_cache = Arc::clone(&self.process_cache);
         let refresh_now = Arc::clone(&self.refresh_now_flag);
         let refresh_condvar = Arc::clone(&self.refresh_condvar);
+        let refresher_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
+        let (initial_refresh_tx, initial_refresh_rx) = crossbeam_channel::bounded::<()>(1);
         self.refresher_handle = Some(thread::spawn(move || {
             run_cache_refresher(
                 refresher_cache,
                 refresher_stop,
                 refresh_now,
                 refresh_condvar,
+                refresher_api_tunneling,
+                Some(initial_refresh_tx),
             );
         }));
+
+        if initial_refresh_rx
+            .recv_timeout(Duration::from_millis(750))
+            .is_err()
+        {
+            log::warn!(
+                "Cache refresher initial warmup did not complete before packet reader start"
+            );
+        }
 
         // Reset throughput stats on start
         self.throughput_stats.reset();
@@ -4583,8 +4596,60 @@ fn run_packet_reader(
         // Using 100ms timeout allows responsive stop_flag checking while
         // avoiding 1000Hz polling that wastes CPU when idle
         // (When packets arrive, event signals immediately - no added latency)
-        unsafe {
-            WaitForSingleObject(b.event, 100);
+        let wait_result = unsafe { WaitForSingleObject(b.event, 100) };
+        if wait_result == WAIT_TIMEOUT {
+            // A timeout is the normal idle path. Do not call read_packets()
+            // with an empty queue: WinpkFilter can report ERROR_INVALID_PARAMETER
+            // for that case, which is not a stale driver handle.
+            let prior = rebind.record_success();
+            if prior > 0 {
+                log::info!(
+                    "Reader: recovered after {} rebind attempt(s) - packet event wait is healthy",
+                    prior
+                );
+            }
+            continue;
+        }
+
+        if wait_result == WAIT_FAILED {
+            let e = windows::core::Error::from_thread();
+            match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
+                RebindDecision::Stop => break,
+                RebindDecision::Fatal => {
+                    log::error!(
+                        "Reader: packet event wait failed ({}); rebind budget ({}) exhausted, stopping reader loop",
+                        e,
+                        READER_MAX_REBINDS
+                    );
+                    stop_flag.store(true, Ordering::Release);
+                    return Err(VpnError::SplitTunnel(format!(
+                        "packet event wait failed after {} rebinds: {}",
+                        READER_MAX_REBINDS, e
+                    )));
+                }
+                RebindDecision::Backoff(backoff) => {
+                    log::warn!(
+                        "Reader: packet event wait failed ({}); rebind attempt {}/{} after {}ms backoff",
+                        e,
+                        rebind.attempts(),
+                        READER_MAX_REBINDS,
+                        backoff.as_millis()
+                    );
+                    bindings = None;
+                    if interruptible_sleep(backoff, &stop_flag) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if wait_result != WAIT_OBJECT_0 {
+            log::warn!(
+                "Reader: unexpected packet event wait result: {:?}",
+                wait_result
+            );
+            continue;
         }
 
         // Read batch of packets
@@ -4593,12 +4658,9 @@ fn run_packet_reader(
         let packets_read = match b.driver.read_packets::<BATCH_SIZE>(&mut to_read) {
             Ok(n) => {
                 // A successful read_packets IOCTL is itself the signal that
-                // the handle is healthy — `Ok(0)` (WaitForSingleObject timed
-                // out, no queued packets) is the dominant state on idle
-                // adapters, so requiring `n > 0` to reset would let the
-                // counter survive across hours of idle between transient
-                // glitches and ultimately tear down the tunnel on a single
-                // unrelated blip.
+                // the handle is healthy. `Ok(0)` is also benign here: the
+                // event can race with another reader/drain boundary, but the
+                // IOCTL still succeeded.
                 let prior = rebind.record_success();
                 if prior > 0 {
                     log::info!(
@@ -5183,6 +5245,48 @@ fn send_bypass_packet(
     }
 }
 
+/// Collect TCP source ports owned by tunnel processes for API tunneling.
+fn collect_tunnel_tcp_ports_for_api_tunneling(
+    connections: &ahash::AHashMap<ConnectionKey, u32>,
+    pid_names: &ahash::AHashMap<u32, String>,
+    tunnel_apps: &ahash::AHashSet<String>,
+) -> Vec<u16> {
+    if tunnel_apps.is_empty() {
+        return Vec::new();
+    }
+
+    let tunnel_pids: ahash::AHashSet<u32> = pid_names
+        .iter()
+        .filter_map(|(pid, name)| {
+            let name_lower = name.to_lowercase();
+            if tunnel_apps.contains(&name_lower)
+                || process_name_matches_any_tunnel_app(&name_lower, tunnel_apps)
+            {
+                Some(*pid)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if tunnel_pids.is_empty() {
+        return Vec::new();
+    }
+
+    let ports: ahash::AHashSet<u16> = connections
+        .iter()
+        .filter_map(|(key, pid)| {
+            if key.protocol == Protocol::Tcp && tunnel_pids.contains(pid) {
+                Some(key.local_port)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    ports.into_iter().collect()
+}
+
 /// Cache refresher thread - single writer
 ///
 /// OPTIMIZATION: Event-driven refresh instead of polling
@@ -5194,6 +5298,8 @@ fn run_cache_refresher(
     stop_flag: Arc<AtomicBool>,
     refresh_now: Arc<AtomicBool>,
     refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    api_tunneling_enabled: Arc<AtomicBool>,
+    mut initial_refresh_done: Option<crossbeam_channel::Sender<()>>,
 ) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
@@ -5462,7 +5568,17 @@ fn run_cache_refresher(
 
         // Update cache atomically. The snapshot precomputes tunnel-owned source ports
         // so readers don't need to linearly scan the connection map on a miss.
-        cache.update(connections, pid_names);
+        if api_tunneling_enabled.load(Ordering::Relaxed) {
+            let explicit_tcp_ports =
+                collect_tunnel_tcp_ports_for_api_tunneling(&connections, &pid_names, tunnel_apps);
+            cache.update_with_tcp_ports(connections, pid_names, &explicit_tcp_ports);
+        } else {
+            cache.update_with_tcp_ports(connections, pid_names, &[]);
+        }
+
+        if let Some(done) = initial_refresh_done.take() {
+            let _ = done.send(());
+        }
 
         // Log tunnel app detection periodically
         refresh_count += 1;
@@ -9108,6 +9224,60 @@ mod tests {
             true,
         ));
         assert!(cache_with_api.contains_key(&(packet_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_api_tunneling_collects_and_publishes_roblox_tcp_ports() {
+        let roblox_pid = 1111;
+        let chrome_pid = 2222;
+        let roblox_port = 53001;
+        let chrome_port = 53002;
+        let roblox_udp_port = 53003;
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 10), roblox_port, Protocol::Tcp),
+            roblox_pid,
+        );
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 11), chrome_port, Protocol::Tcp),
+            chrome_pid,
+        );
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 10), roblox_udp_port, Protocol::Udp),
+            roblox_pid,
+        );
+
+        let mut pid_names = HashMap::new();
+        pid_names.insert(roblox_pid, "RobloxApp.exe".to_string());
+        pid_names.insert(chrome_pid, "chrome.exe".to_string());
+
+        let tunnel_apps: HashSet<String> =
+            ["robloxplayerbeta.exe".to_string()].into_iter().collect();
+        let mut ports =
+            collect_tunnel_tcp_ports_for_api_tunneling(&connections, &pid_names, &tunnel_apps);
+        ports.sort_unstable();
+        assert_eq!(ports, vec![roblox_port]);
+
+        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()]);
+        cache.update_with_tcp_ports(connections, pid_names, &ports);
+
+        let snapshot = cache.get_snapshot();
+        let frame = build_ipv4_frame(
+            6,
+            Ipv4Addr::new(10, 0, 0, 99),
+            Ipv4Addr::new(128, 116, 50, 100),
+            roblox_port,
+            443,
+        );
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
     }
 
     #[test]
