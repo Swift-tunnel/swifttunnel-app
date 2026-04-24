@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import commandsTs from "./commands.ts?raw";
 import backendLibRs from "../../src-tauri/src/lib.rs?raw";
+import systemCommandsRs from "../../src-tauri/src/commands/system.rs?raw";
 
 function extractInvokedCommands(source: string): string[] {
   const out = new Set<string>();
@@ -29,5 +30,10 @@ describe("Tauri command wiring", () => {
 
     const missing = invoked.filter((cmd) => !registered.has(cmd));
     expect(missing, `Missing backend Tauri commands: ${missing.join(", ")}`).toEqual([]);
+  });
+
+  it("copies logs as a Windows file-drop clipboard payload", () => {
+    expect(systemCommandsRs).toContain("SetFileDropList");
+    expect(systemCommandsRs).not.toContain("Set-Clipboard -LiteralPath");
   });
 });

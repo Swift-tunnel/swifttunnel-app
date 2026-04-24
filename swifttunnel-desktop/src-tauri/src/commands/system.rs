@@ -1500,13 +1500,33 @@ pub async fn system_copy_log_to_clipboard() -> Result<CopyLogFileResponse, Strin
     #[cfg(windows)]
     {
         let escaped = path_str.replace('\'', "''");
-        let script = format!("Set-Clipboard -LiteralPath '{}'", escaped);
+        let script = format!(
+            r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$files = New-Object System.Collections.Specialized.StringCollection
+[void]$files.Add('{}')
+
+for ($i = 0; $i -lt 5; $i++) {{
+    try {{
+        [System.Windows.Forms.Clipboard]::SetFileDropList($files)
+        exit 0
+    }} catch {{
+        if ($i -eq 4) {{
+            throw
+        }}
+        Start-Sleep -Milliseconds 100
+    }}
+}}
+"#,
+            escaped
+        );
 
         let output = tauri::async_runtime::spawn_blocking(move || {
             swifttunnel_core::hidden_command("powershell")
-                .args(["-NoProfile", "-Command", &script])
+                .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", &script])
                 .output()
-                .map_err(|e| format!("Failed to run Set-Clipboard: {}", e))
+                .map_err(|e| format!("Failed to run clipboard helper: {}", e))
         })
         .await
         .map_err(|e| format!("Clipboard task failed: {}", e))??;
@@ -1514,9 +1534,9 @@ pub async fn system_copy_log_to_clipboard() -> Result<CopyLogFileResponse, Strin
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(if stderr.is_empty() {
-                "Set-Clipboard returned a non-zero exit status.".to_string()
+                "Clipboard helper returned a non-zero exit status.".to_string()
             } else {
-                format!("Set-Clipboard failed: {}", stderr)
+                format!("Clipboard helper failed: {}", stderr)
             });
         }
 
