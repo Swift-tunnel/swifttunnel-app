@@ -5,6 +5,7 @@ import { useVpnStore } from "../../stores/vpnStore";
 import type { TabId, VpnState } from "../../lib/types";
 import { StatusChip } from "./StatusChip";
 import { Tooltip } from "../ui/Tooltip";
+import swiftLogo from "../../assets/swift.png";
 
 declare const __APP_VERSION__: string;
 
@@ -104,28 +105,14 @@ export function Sidebar() {
         data-tauri-drag-region
         className={`flex items-center ${collapsed ? "justify-center px-2" : "gap-2.5 px-3"} pt-4 pb-3`}
       >
-        <div
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px]"
-          style={{
-            background:
-              "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-secondary))",
-            boxShadow:
-              "0 1px 2px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.1)",
-          }}
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="#fff"
-            strokeWidth="2.4"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-          </svg>
-        </div>
+        <img
+          src={swiftLogo}
+          alt="SwiftTunnel"
+          width={28}
+          height={28}
+          className="shrink-0"
+          style={{ objectFit: "contain" }}
+        />
         {!collapsed && (
           <div className="min-w-0 flex-1">
             <div className="text-[12.5px] font-semibold leading-none tracking-[-0.01em] text-text-primary">

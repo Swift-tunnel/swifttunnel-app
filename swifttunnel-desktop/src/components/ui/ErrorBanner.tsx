@@ -19,13 +19,13 @@ export function ErrorBanner({
     },
     warning: {
       bg: "var(--color-status-warning-soft-10)",
-      border: "rgba(245, 180, 40, 0.2)",
+      border: "rgba(234, 179, 8, 0.2)",
       fg: "var(--color-status-warning)",
     },
     info: {
       bg: "var(--color-accent-primary-soft-10)",
       border: "var(--color-accent-primary-soft-20)",
-      fg: "var(--color-accent-secondary)",
+      fg: "var(--color-text-primary)",
     },
   };
   const c = tones[tone];

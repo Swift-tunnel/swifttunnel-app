@@ -86,7 +86,7 @@ export function Tooltip({
         createPortal(
           <div
             role="tooltip"
-            className="pointer-events-none fixed z-[9999] max-w-[220px] rounded-[5px] px-2 py-1.5 text-[11px] leading-tight shadow-lg"
+            className="pointer-events-none fixed z-[9999] max-w-[220px] rounded-[5px] px-2 py-1.5 text-[11px] leading-tight"
             style={{
               left: pos.x,
               top: pos.y,

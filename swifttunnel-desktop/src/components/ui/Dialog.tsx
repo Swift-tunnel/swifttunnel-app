@@ -32,7 +32,7 @@ export function Dialog({
   return createPortal(
     <div
       className="fixed inset-0 z-[200] flex items-center justify-center p-6"
-      style={{ backgroundColor: "rgba(6, 8, 12, 0.72)", backdropFilter: "blur(6px)" }}
+      style={{ backgroundColor: "rgba(0, 0, 0, 0.6)", backdropFilter: "blur(4px)" }}
       onClick={onClose}
     >
       <div
@@ -40,10 +40,10 @@ export function Dialog({
         aria-modal
         aria-label={title}
         onClick={(e) => e.stopPropagation()}
-        className="w-full rounded-[var(--radius-card)] shadow-2xl"
+        className="w-full rounded-[var(--radius-card)]"
         style={{
           maxWidth,
-          backgroundColor: "var(--color-bg-card)",
+          backgroundColor: "var(--color-bg-elevated)",
           border: "1px solid var(--color-border-default)",
         }}
       >
