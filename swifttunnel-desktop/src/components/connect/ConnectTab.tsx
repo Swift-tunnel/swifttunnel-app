@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -7,21 +7,28 @@ import {
   countryFlag,
   formatBytes,
   getLatencyColor,
-  getLatencyLabel,
 } from "../../lib/utils";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import { GAMES, type GameId } from "./connectState";
-import { LiveGraph, type DataSample } from "./LiveGraph";
 import {
-  SectionHeader,
-  EmptyState,
-  Chip,
-  Tooltip,
-  InfoIcon,
-} from "../ui";
+  GAMES,
+  resolveConnectStatus,
+  stateLabel,
+  type GameId,
+} from "./connectState";
+import { LiveGraph, type DataSample } from "./LiveGraph";
+import { Button, EmptyState, Tooltip, InfoIcon } from "../ui";
 import type { ServerRegion } from "../../lib/types";
 
 const DATA_BUFFER_SIZE = 60;
+
+function formatElapsed(s: number): string {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+    : `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
 
 export function ConnectTab() {
   const vpnState = useVpnStore((s) => s.state);
@@ -31,7 +38,14 @@ export function ConnectTab() {
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
   const bytesUp = useVpnStore((s) => s.bytesUp);
   const bytesDown = useVpnStore((s) => s.bytesDown);
+  const ping = useVpnStore((s) => s.ping);
+  const connectedAt = useVpnStore((s) => s.connectedAt);
+  const driverSetupState = useVpnStore((s) => s.driverSetupState);
+  const driverSetupError = useVpnStore((s) => s.driverSetupError);
   const vpnError = useVpnStore((s) => s.error);
+  const connect = useVpnStore((s) => s.connect);
+  const disconnect = useVpnStore((s) => s.disconnect);
+  const installDriver = useVpnStore((s) => s.installDriver);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
   const fetchState = useVpnStore((s) => s.fetchState);
 
@@ -57,15 +71,26 @@ export function ConnectTab() {
   })();
 
   const isConnected = vpnState === "connected";
-  const isTransitioning =
-    !isConnected && vpnState !== "disconnected" && vpnState !== "error";
+  const isIdle = vpnState === "disconnected" || vpnState === "error";
+  const isTransitioning = !isConnected && !isIdle;
+
+  const connectStatus = resolveConnectStatus({
+    driverSetupState,
+    driverSetupError,
+    vpnError,
+    vpnState,
+  });
+
+  const selectedRegion = regions.find((r) => r.id === settings.selected_region);
+  const cachedLatency = getLatency(settings.selected_region);
 
   const [dataHistory, setDataHistory] = useState<DataSample[]>([]);
+  const [elapsed, setElapsed] = useState(0);
   const prevBytesRef = useRef<{ up: number; down: number; t: number } | null>(
     null,
   );
-
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   function saveDebounced() {
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
@@ -73,6 +98,7 @@ export function ConnectTab() {
       void save();
     }, 500);
   }
+
   useEffect(() => {
     return () => {
       if (saveTimeoutRef.current) {
@@ -126,6 +152,19 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [fetchLatencies]);
 
+  useEffect(() => {
+    if (connectedAt === null) {
+      setElapsed(0);
+      return;
+    }
+    setElapsed(Math.floor((Date.now() - connectedAt) / 1000));
+    const id = setInterval(
+      () => setElapsed(Math.floor((Date.now() - connectedAt) / 1000)),
+      1000,
+    );
+    return () => clearInterval(id);
+  }, [connectedAt]);
+
   function togglePreset(id: GameId) {
     const cur = settings.selected_game_presets;
     const next = cur.includes(id) ? cur.filter((p) => p !== id) : [...cur, id];
@@ -151,27 +190,149 @@ export function ConnectTab() {
     saveDebounced();
   }
 
+  const canConnect =
+    isIdle &&
+    (settings.auto_routing_enabled || Boolean(settings.selected_region));
+
+  const primaryDisabled =
+    isTransitioning ||
+    (isIdle && !canConnect && connectStatus.kind !== "driver_missing");
+
+  async function handlePrimary() {
+    if (connectStatus.kind === "driver_missing") {
+      void installDriver().catch(() => {});
+      return;
+    }
+    if (isConnected) {
+      disconnect();
+      return;
+    }
+    if (!isIdle || !canConnect) return;
+    await save();
+    connect(settings.selected_region, settings.selected_game_presets);
+  }
+
+  const heroLabel = isConnected
+    ? "Tunneled to"
+    : isTransitioning
+      ? "Establishing"
+      : vpnState === "error"
+        ? "Connection failed"
+        : "Ready to tunnel";
+
+  const heroRegion = isConnected
+    ? connectedRegion
+    : !settings.auto_routing_enabled
+      ? selectedRegion
+      : null;
+
+  const heroRegionName = isConnected
+    ? connectedRegion?.name || vpnRegion || "Unknown"
+    : isTransitioning
+      ? stateLabel(vpnState)
+      : settings.auto_routing_enabled
+        ? "Auto Route"
+        : selectedRegion?.name || "Select a region";
+
+  const heroLatency = isConnected && ping !== null ? ping : cachedLatency;
+
+  const buttonLabel = (() => {
+    if (connectStatus.kind === "driver_missing") return "Install driver";
+    if (isConnected) return "Disconnect";
+    if (isTransitioning) return "Connecting…";
+    return "Connect";
+  })();
+
+  const buttonVariant: "primary" | "destructive" | "secondary" =
+    isConnected ? "destructive" : isTransitioning ? "secondary" : "primary";
+
   const hasRegions = regions.length > 0;
-  const showError =
-    vpnState === "error" && vpnError && !vpnError.toLowerCase().includes("driver");
 
   return (
-    <div className="flex w-full flex-col gap-5 pb-4">
-      {showError && (
-        <div
-          className="rounded-[var(--radius-card)] px-4 py-3 text-[12px]"
-          style={{
-            backgroundColor: "var(--color-status-error-soft-10)",
-            border: "1px solid var(--color-status-error-soft-20)",
-            color: "var(--color-status-error)",
-          }}
-        >
-          <div className="font-medium">Connection failed</div>
-          <div className="mt-0.5 text-[11px] opacity-90">{vpnError}</div>
+    <div className="flex w-full flex-col gap-7 pb-6">
+      {/* ── Hero ── */}
+      <section className="flex items-start justify-between gap-6 pt-1">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+            {heroLabel}
+          </div>
+          <div className="mt-2.5 flex items-center gap-2.5">
+            {heroRegion && (
+              <span className="text-[22px] leading-none">
+                {countryFlag(heroRegion.country_code)}
+              </span>
+            )}
+            <span
+              className="text-[24px] font-semibold leading-none tracking-[-0.015em]"
+              style={{ color: "var(--color-text-primary)" }}
+            >
+              {heroRegionName}
+            </span>
+            {isConnected && connectedServerName && (
+              <span className="font-mono text-[13px] text-text-muted">
+                {connectedServerName}
+              </span>
+            )}
+          </div>
+          <div className="mt-3 flex items-baseline gap-4">
+            {heroLatency !== null ? (
+              <div className="flex items-baseline gap-1.5">
+                <span
+                  className="font-mono text-[34px] font-medium leading-none tabular-nums"
+                  style={{ color: "var(--color-text-primary)" }}
+                >
+                  {heroLatency}
+                </span>
+                <span className="text-[13px] text-text-muted">ms</span>
+              </div>
+            ) : (
+              <span className="text-[13px] text-text-muted">—</span>
+            )}
+            {isConnected && (
+              <div className="flex items-center gap-1.5">
+                <span
+                  className="relative h-1.5 w-1.5 rounded-full"
+                  style={{ backgroundColor: "var(--color-status-connected)" }}
+                >
+                  <span
+                    className="absolute inset-0 animate-ping rounded-full opacity-60"
+                    style={{ backgroundColor: "var(--color-status-connected)" }}
+                  />
+                </span>
+                <span
+                  className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
+                  style={{ color: "var(--color-status-connected)" }}
+                >
+                  Live
+                </span>
+              </div>
+            )}
+          </div>
+          {vpnState === "error" && vpnError && (
+            <div
+              className="mt-3 rounded-[var(--radius-card)] px-3 py-2 text-[11.5px]"
+              style={{
+                backgroundColor: "var(--color-status-error-soft-10)",
+                border: "1px solid var(--color-status-error-soft-20)",
+                color: "var(--color-status-error)",
+              }}
+            >
+              {vpnError}
+            </div>
+          )}
         </div>
-      )}
+        <Button
+          variant={buttonVariant}
+          size="lg"
+          onClick={handlePrimary}
+          disabled={primaryDisabled}
+          loading={isTransitioning}
+        >
+          {buttonLabel}
+        </Button>
+      </section>
 
-      {/* ── Live monitor (connected) ── */}
+      {/* ── Throughput (connected) ── */}
       {isConnected && (
         <motion.section
           initial={{ opacity: 0, y: 4 }}
@@ -179,103 +340,26 @@ export function ConnectTab() {
           transition={{ duration: 0.2 }}
           className="flex flex-col gap-2.5"
         >
-          <SectionHeader label="Live" tag="Connected" />
+          <LiveGraph samples={dataHistory} />
 
-          {/* Active route strip: target region + relay server */}
+          {/* Metrics row */}
           <div
-            className="flex items-center gap-3 rounded-[var(--radius-card)] px-3.5 py-2.5"
-            style={{
-              backgroundColor: "var(--color-bg-card)",
-              border: "1px solid var(--color-border-subtle)",
-            }}
+            className="mt-2 grid grid-cols-4 overflow-hidden rounded-[var(--radius-card)]"
+            style={{ border: "1px solid var(--color-border-subtle)" }}
           >
-            <span className="text-[9.5px] font-semibold uppercase tracking-[0.12em] text-text-dimmed">
-              Tunneled to
-            </span>
-            <span className="flex items-center gap-1.5">
-              {connectedRegion && (
-                <span className="text-[14px] leading-none">
-                  {countryFlag(connectedRegion.country_code)}
-                </span>
-              )}
-              <span
-                className="text-[13px] font-semibold"
-                style={{
-                  color: "var(--color-status-connected)",
-                  letterSpacing: "-0.01em",
-                }}
-              >
-                {connectedRegion?.name || vpnRegion || "Unknown"}
-              </span>
-            </span>
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="var(--color-text-dimmed)"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden
-            >
-              <path d="M5 12h14M13 5l7 7-7 7" />
-            </svg>
-            <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-text-secondary">
-              {connectedServerName || "—"}
-            </span>
-            <span className="flex items-center gap-1.5 shrink-0">
-              <span
-                className="relative h-1.5 w-1.5 rounded-full"
-                style={{ backgroundColor: "var(--color-status-connected)" }}
-              >
-                <span
-                  className="absolute inset-0 animate-ping rounded-full opacity-60"
-                  style={{ backgroundColor: "var(--color-status-connected)" }}
-                />
-              </span>
-              <span
-                className="text-[10px] font-semibold uppercase tracking-[0.1em]"
-                style={{ color: "var(--color-status-connected)" }}
-              >
-                Live
-              </span>
-            </span>
-          </div>
-
-          <div className="grid gap-3 lg:grid-cols-[1fr_260px]">
-            <LiveGraph samples={dataHistory} />
-            <div
-              className="flex flex-col gap-2 rounded-[var(--radius-card)] p-4"
-              style={{
-                backgroundColor: "var(--color-bg-card)",
-                border: "1px solid var(--color-border-subtle)",
-              }}
-            >
-              <LiveStat
-                label="Split tunnel"
-                value={splitActive ? "Active" : "Inactive"}
-                valueColor={
-                  splitActive
-                    ? "var(--color-status-connected)"
-                    : "var(--color-text-muted)"
-                }
-              />
-              <LiveStat
-                label="Total upload"
-                value={formatBytes(bytesUp)}
-                mono
-              />
-              <LiveStat
-                label="Total download"
-                value={formatBytes(bytesDown)}
-                mono
-              />
-              <LiveStat
-                label="Tunneled"
-                value={`${tunneled.length} ${tunneled.length === 1 ? "process" : "processes"}`}
-              />
-            </div>
+            <MetricCell label="Upload" value={formatBytes(bytesUp)} mono />
+            <MetricCell label="Download" value={formatBytes(bytesDown)} mono />
+            <MetricCell label="Session" value={formatElapsed(elapsed)} mono />
+            <MetricCell
+              label="Tunneled"
+              value={`${tunneled.length}`}
+              hint={tunneled.length === 1 ? "process" : "processes"}
+              valueColor={
+                splitActive
+                  ? "var(--color-text-primary)"
+                  : "var(--color-text-muted)"
+              }
+            />
           </div>
 
           {tunneled.length > 0 && (
@@ -292,7 +376,9 @@ export function ConnectTab() {
                 >
                   <span
                     className="h-1.5 w-1.5 rounded-full"
-                    style={{ backgroundColor: "var(--color-status-connected)" }}
+                    style={{
+                      backgroundColor: "var(--color-status-connected)",
+                    }}
                   />
                   {p}
                 </span>
@@ -304,11 +390,19 @@ export function ConnectTab() {
 
       {/* ── Targets ── */}
       <section>
-        <SectionHeader
-          label="Targets"
-          description="Games that route through the tunnel"
-          tag={`${settings.selected_game_presets.length} / ${GAMES.length}`}
-        />
+        <div className="mb-3 flex items-baseline justify-between">
+          <div className="flex items-baseline gap-2">
+            <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
+              Targets
+            </h3>
+            <span className="font-mono text-[10.5px] text-text-dimmed">
+              {settings.selected_game_presets.length}/{GAMES.length}
+            </span>
+          </div>
+          <span className="text-[10.5px] text-text-muted">
+            Games that route through the tunnel
+          </span>
+        </div>
         <div className="flex flex-wrap gap-2">
           {GAMES.map((game) => {
             const sel = settings.selected_game_presets.includes(game.id);
@@ -316,34 +410,44 @@ export function ConnectTab() {
               <button
                 key={game.id}
                 onClick={() => togglePreset(game.id)}
-                className="group flex items-center gap-2 rounded-[var(--radius-button)] px-3 py-2 transition-all"
+                className="group flex items-center gap-2 rounded-[999px] px-3 py-1.5 transition-colors"
                 style={{
                   backgroundColor: sel
-                    ? "var(--color-accent-primary-soft-8)"
-                    : "var(--color-bg-card)",
-                  border: `1px solid ${sel ? "var(--color-accent-primary)" : "var(--color-border-subtle)"}`,
+                    ? "var(--color-accent-primary-soft-12)"
+                    : "transparent",
+                  border: `1px solid ${sel ? "#ffffff" : "var(--color-border-default)"}`,
+                }}
+                onMouseEnter={(e) => {
+                  if (!sel)
+                    e.currentTarget.style.borderColor =
+                      "var(--color-border-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  if (!sel)
+                    e.currentTarget.style.borderColor =
+                      "var(--color-border-default)";
                 }}
               >
-                <GameLogo id={game.id} brandColor={game.brandColor} active={sel} />
+                <GameLogo id={game.id} active={sel} />
                 <span
                   className="text-[12.5px] font-medium"
                   style={{
                     color: sel
                       ? "var(--color-text-primary)"
                       : "var(--color-text-secondary)",
-                    letterSpacing: "-0.01em",
+                    letterSpacing: "-0.005em",
                   }}
                 >
                   {game.name}
                 </span>
                 {sel && (
                   <svg
-                    width="12"
-                    height="12"
+                    width="11"
+                    height="11"
                     viewBox="0 0 24 24"
                     fill="none"
-                    stroke="var(--color-accent-secondary)"
-                    strokeWidth="2.5"
+                    stroke="#ffffff"
+                    strokeWidth="2.8"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   >
@@ -358,34 +462,39 @@ export function ConnectTab() {
 
       {/* ── Regions ── */}
       <section>
-        <SectionHeader
-          label="Regions"
-          tag={hasRegions ? `${regions.length} available` : undefined}
-          action={
-            hasRegions &&
-            !isConnected && (
-              <button
-                onClick={() => void refreshServers()}
-                className="inline-flex items-center gap-1 text-[10.5px] font-medium text-text-muted transition-colors hover:text-text-secondary"
+        <div className="mb-3 flex items-baseline justify-between">
+          <div className="flex items-baseline gap-2">
+            <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
+              Regions
+            </h3>
+            {hasRegions && (
+              <span className="font-mono text-[10.5px] text-text-dimmed">
+                {regions.length} available
+              </span>
+            )}
+          </div>
+          {hasRegions && !isConnected && (
+            <button
+              onClick={() => void refreshServers()}
+              className="inline-flex items-center gap-1 text-[10.5px] font-medium text-text-muted transition-colors hover:text-text-primary"
+            >
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
               >
-                <svg
-                  width="10"
-                  height="10"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.4"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M23 4v6h-6M1 20v-6h6" />
-                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                </svg>
-                Refresh
-              </button>
-            )
-          }
-        />
+                <path d="M23 4v6h-6M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+              Refresh
+            </button>
+          )}
+        </div>
 
         {!hasRegions ? (
           <EmptyState
@@ -411,43 +520,45 @@ export function ConnectTab() {
             }
           />
         ) : (
-          <div className="flex flex-col gap-2">
+          <div
+            className="flex flex-col overflow-hidden rounded-[var(--radius-card)]"
+            style={{ border: "1px solid var(--color-border-subtle)" }}
+          >
             <AutoRouteRow
               active={settings.auto_routing_enabled}
               disabled={isConnected || isTransitioning}
               onClick={selectAutoRoute}
             />
-            <div className="grid grid-cols-2 gap-2 lg:grid-cols-3 2xl:grid-cols-4">
-              {regions.map((r) => (
-                <RegionCard
-                  key={r.id}
-                  region={r}
-                  selected={
-                    !settings.auto_routing_enabled &&
-                    settings.selected_region === r.id
-                  }
-                  lastUsed={settings.last_connected_region === r.id}
-                  latency={getLatency(r.id)}
-                  disabled={isConnected || isTransitioning}
-                  onSelect={() => selectRegion(r.id)}
-                  forcedServer={settings.forced_servers[r.id]}
-                  onForceServer={forceServer}
-                />
-              ))}
-            </div>
-
-            {settings.auto_routing_enabled && (
-              <WhitelistPanel
-                regions={regions}
-                whitelisted={settings.whitelisted_regions}
+            {regions.map((r, idx) => (
+              <RegionRow
+                key={r.id}
+                region={r}
+                selected={
+                  !settings.auto_routing_enabled &&
+                  settings.selected_region === r.id
+                }
+                lastUsed={settings.last_connected_region === r.id}
+                latency={getLatency(r.id)}
                 disabled={isConnected || isTransitioning}
-                onChange={(next) => {
-                  update({ whitelisted_regions: next });
-                  saveDebounced();
-                }}
+                onSelect={() => selectRegion(r.id)}
+                forcedServer={settings.forced_servers[r.id]}
+                onForceServer={forceServer}
+                isLast={idx === regions.length - 1}
               />
-            )}
+            ))}
           </div>
+        )}
+
+        {hasRegions && settings.auto_routing_enabled && (
+          <WhitelistPanel
+            regions={regions}
+            whitelisted={settings.whitelisted_regions}
+            disabled={isConnected || isTransitioning}
+            onChange={(next) => {
+              update({ whitelisted_regions: next });
+              saveDebounced();
+            }}
+          />
         )}
       </section>
     </div>
@@ -456,49 +567,50 @@ export function ConnectTab() {
 
 // ── Sub-components ──
 
-function LiveStat({
+function MetricCell({
   label,
   value,
-  valueColor,
+  hint,
   mono,
+  valueColor,
 }: {
   label: string;
   value: string;
-  valueColor?: string;
+  hint?: string;
   mono?: boolean;
+  valueColor?: string;
 }) {
   return (
-    <div className="flex items-center justify-between">
-      <span className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
+    <div
+      className="flex flex-col gap-1 px-3.5 py-2.5"
+      style={{
+        backgroundColor: "var(--color-bg-card)",
+        borderRight: "1px solid var(--color-border-subtle)",
+      }}
+    >
+      <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-muted">
         {label}
       </span>
-      <span
-        className={`text-[12.5px] font-semibold ${mono ? "font-mono" : ""}`}
-        style={{ color: valueColor || "var(--color-text-primary)" }}
-      >
-        {value}
-      </span>
+      <div className="flex items-baseline gap-1">
+        <span
+          className={`text-[14px] font-medium ${mono ? "font-mono tabular-nums" : ""}`}
+          style={{ color: valueColor || "var(--color-text-primary)" }}
+        >
+          {value}
+        </span>
+        {hint && (
+          <span className="text-[10px] text-text-muted">{hint}</span>
+        )}
+      </div>
     </div>
   );
 }
 
-function GameLogo({
-  id,
-  brandColor,
-  active,
-}: {
-  id: GameId;
-  brandColor: string;
-  active: boolean;
-}) {
-  const color = active ? brandColor : "var(--color-text-muted)";
-  const bg = active ? `${brandColor}22` : "var(--color-bg-elevated)";
+function GameLogo({ id, active }: { id: GameId; active: boolean }) {
+  const color = active ? "var(--color-text-primary)" : "var(--color-text-muted)";
 
   return (
-    <span
-      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-[3px]"
-      style={{ backgroundColor: bg }}
-    >
+    <span className="flex h-4 w-4 shrink-0 items-center justify-center">
       {id === "roblox" && (
         <svg width="12" height="12" viewBox="0 0 24 24" fill={color}>
           <path d="M4.6 3.5 L20.5 7.7 L16.3 23.6 L0.4 19.4 Z M10.8 11.5 L9.7 15.7 L13.8 16.8 L14.9 12.7 Z" />
@@ -532,49 +644,44 @@ function AutoRouteRow({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="flex w-full items-center gap-3 rounded-[var(--radius-card)] px-3.5 py-3 text-left transition-all disabled:cursor-not-allowed disabled:opacity-50"
+      className="group relative flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50"
       style={{
         backgroundColor: active
           ? "var(--color-accent-primary-soft-8)"
-          : "var(--color-bg-card)",
-        border: `1px solid ${active ? "var(--color-accent-primary)" : "var(--color-border-subtle)"}`,
+          : "transparent",
+        borderBottom: "1px solid var(--color-border-subtle)",
+        boxShadow: active ? "inset 2px 0 0 #ffffff" : "none",
+      }}
+      onMouseEnter={(e) => {
+        if (!active && !disabled)
+          e.currentTarget.style.backgroundColor = "var(--color-bg-hover)";
+      }}
+      onMouseLeave={(e) => {
+        if (!active) e.currentTarget.style.backgroundColor = "transparent";
       }}
     >
-      <span
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[5px]"
-        style={{
-          backgroundColor: active
-            ? "var(--color-accent-primary-soft-15)"
-            : "var(--color-bg-elevated)",
-        }}
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={active ? "var(--color-text-primary)" : "var(--color-text-muted)"}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       >
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={
-            active
-              ? "var(--color-accent-secondary)"
-              : "var(--color-text-muted)"
-          }
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <polyline points="16 3 21 3 21 8" />
-          <line x1="4" y1="20" x2="21" y2="3" />
-          <polyline points="21 16 21 21 16 21" />
-          <line x1="15" y1="15" x2="21" y2="21" />
-        </svg>
-      </span>
-      <div className="flex min-w-0 flex-1 flex-col">
+        <polyline points="16 3 21 3 21 8" />
+        <line x1="4" y1="20" x2="21" y2="3" />
+        <polyline points="21 16 21 21 16 21" />
+        <line x1="15" y1="15" x2="21" y2="21" />
+      </svg>
+      <div className="flex min-w-0 flex-1 flex-col leading-tight">
         <div className="flex items-center gap-2">
           <span
-            className="text-[13px] font-semibold"
+            className="text-[13px] font-medium"
             style={{
               color: active
-                ? "var(--color-accent-secondary)"
+                ? "var(--color-text-primary)"
                 : "var(--color-text-primary)",
             }}
           >
@@ -585,21 +692,24 @@ function AutoRouteRow({
               <InfoIcon />
             </span>
           </Tooltip>
-          {active && (
-            <Chip tone="accent" uppercase size="xs">
-              Active
-            </Chip>
-          )}
         </div>
-        <span className="mt-0.5 text-[11px] text-text-muted">
+        <span className="text-[11px] text-text-muted">
           Picks the fastest relay for every match
         </span>
       </div>
+      {active && (
+        <span
+          className="text-[10px] font-semibold uppercase tracking-[0.1em]"
+          style={{ color: "var(--color-text-primary)" }}
+        >
+          Active
+        </span>
+      )}
     </button>
   );
 }
 
-function RegionCard({
+function RegionRow({
   region,
   selected,
   lastUsed,
@@ -608,6 +718,7 @@ function RegionCard({
   onSelect,
   forcedServer,
   onForceServer,
+  isLast,
 }: {
   region: ServerRegion;
   selected: boolean;
@@ -617,6 +728,7 @@ function RegionCard({
   onSelect: () => void;
   forcedServer: string | undefined;
   onForceServer: (regionId: string, server: string | null) => void;
+  isLast: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [hover, setHover] = useState(false);
@@ -640,90 +752,75 @@ function RegionCard({
       disabled={disabled}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      className="group relative flex h-10 items-center gap-2.5 rounded-[var(--radius-card)] pr-2.5 text-left transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-50"
+      className="group relative flex h-10 items-center gap-3 px-3.5 text-left transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-50"
       style={{
         backgroundColor: selected
           ? "var(--color-accent-primary-soft-8)"
-          : hover
+          : hover && !disabled
             ? "var(--color-bg-hover)"
-            : "var(--color-bg-card)",
-        border: `1px solid ${selected ? "var(--color-accent-primary)" : "var(--color-border-subtle)"}`,
-        paddingLeft: selected ? 9 : 10,
+            : "transparent",
+        borderBottom: isLast
+          ? "none"
+          : "1px solid var(--color-border-subtle)",
+        boxShadow: selected ? "inset 2px 0 0 #ffffff" : "none",
       }}
     >
-      {/* Selected accent rail */}
-      {selected && (
-        <span
-          aria-hidden
-          className="absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-r"
-          style={{ backgroundColor: "var(--color-accent-primary)" }}
-        />
-      )}
-
-      {/* Flag */}
       <span className="text-[14px] leading-none">
         {countryFlag(region.country_code)}
       </span>
 
-      {/* Name + secondary info */}
-      <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-        <span
-          className="truncate text-[12.5px] font-semibold"
-          style={{
-            color: selected
-              ? "var(--color-accent-secondary)"
-              : "var(--color-text-primary)",
-            letterSpacing: "-0.01em",
-          }}
-        >
-          {region.name}
-        </span>
-        {forcedServer ? (
-          <span
-            className="truncate font-mono text-[9.5px]"
-            style={{ color: "var(--color-accent-secondary)" }}
-            title={`Forced server: ${forcedServer}`}
-          >
-            {forcedServer}
-          </span>
-        ) : (
-          <span className="shrink-0 font-mono text-[9.5px] text-text-dimmed">
-            {region.servers.length}
-          </span>
-        )}
-        {lastUsed && !selected && (
-          <span
-            className="shrink-0 text-[8.5px] font-bold uppercase tracking-[0.12em]"
-            style={{ color: "var(--color-accent-secondary)" }}
-          >
-            Last
-          </span>
-        )}
-      </div>
+      <span
+        className="truncate text-[12.5px] font-medium"
+        style={{
+          color: selected
+            ? "var(--color-text-primary)"
+            : "var(--color-text-primary)",
+          letterSpacing: "-0.005em",
+        }}
+      >
+        {region.name}
+      </span>
 
-      {/* Right: latency with color dot */}
+      {forcedServer ? (
+        <span
+          className="font-mono text-[10px] text-text-primary"
+          title={`Forced server: ${forcedServer}`}
+        >
+          {forcedServer}
+        </span>
+      ) : (
+        <span className="font-mono text-[10px] text-text-dimmed">
+          {region.servers.length}
+        </span>
+      )}
+
+      {lastUsed && !selected && (
+        <span
+          className="text-[9px] font-semibold uppercase tracking-[0.12em]"
+          style={{ color: "var(--color-text-muted)" }}
+        >
+          Last
+        </span>
+      )}
+
+      <span className="flex-1" />
+
       {latency !== null && latColor && (
         <span className="flex shrink-0 items-center gap-1.5">
           <span
             className="h-1.5 w-1.5 rounded-full"
-            style={{
-              backgroundColor: latColor,
-              boxShadow: latency < 50 ? `0 0 4px ${latColor}` : "none",
-            }}
+            style={{ backgroundColor: latColor }}
           />
           <span
-            className="font-mono text-[11.5px] font-semibold tabular-nums"
-            style={{ color: latColor }}
+            className="font-mono text-[11.5px] font-medium tabular-nums"
+            style={{ color: "var(--color-text-primary)" }}
           >
             {latency}
-            <span className="ml-px text-[9.5px] font-medium text-text-dimmed">
-              ms
-            </span>
           </span>
+          <span className="text-[10px] text-text-muted">ms</span>
         </span>
       )}
 
-      {/* Server override gear — hover / forced only */}
       {region.servers.length > 1 && (hover || menuOpen || forcedServer) && (
         <ServerMenu
           menuRef={menuRef}
@@ -775,7 +872,7 @@ function ServerMenu({
         className="flex h-5 w-5 items-center justify-center rounded transition-colors"
         style={{
           color: forcedServer
-            ? "var(--color-accent-secondary)"
+            ? "var(--color-text-primary)"
             : "var(--color-text-muted)",
           backgroundColor: open ? "var(--color-bg-hover)" : "transparent",
         }}
@@ -790,15 +887,16 @@ function ServerMenu({
           strokeLinecap="round"
           strokeLinejoin="round"
         >
-          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-          <circle cx="12" cy="12" r="3" />
+          <circle cx="12" cy="12" r="1" />
+          <circle cx="19" cy="12" r="1" />
+          <circle cx="5" cy="12" r="1" />
         </svg>
       </span>
 
       {open && (
         <div
           onClick={(e) => e.stopPropagation()}
-          className="absolute right-0 top-7 z-50 min-w-[130px] overflow-hidden rounded-[5px] shadow-xl"
+          className="absolute right-0 top-7 z-50 min-w-[130px] overflow-hidden rounded-[5px]"
           style={{
             backgroundColor: "var(--color-bg-elevated)",
             border: "1px solid var(--color-border-default)",
@@ -851,7 +949,7 @@ function ServerMenuItem({
       className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition-colors hover:bg-bg-hover ${mono ? "font-mono" : ""}`}
       style={{
         color: active
-          ? "var(--color-accent-secondary)"
+          ? "var(--color-text-primary)"
           : "var(--color-text-secondary)",
       }}
     >
@@ -889,14 +987,13 @@ function WhitelistPanel({
 }) {
   return (
     <div
-      className="mt-2 rounded-[var(--radius-card)] p-3.5"
+      className="mt-3 rounded-[var(--radius-card)] p-3.5"
       style={{
-        backgroundColor: "var(--color-bg-card)",
         border: "1px solid var(--color-border-subtle)",
       }}
     >
       <div className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-secondary">
-        Select which regions to not tunnel
+        Regions to skip
       </div>
       <div className="mt-2.5 flex flex-wrap gap-1.5">
         {regions.map((r) => {
@@ -916,10 +1013,11 @@ function WhitelistPanel({
               className="flex items-center gap-1.5 rounded-[4px] px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-60"
               style={{
                 backgroundColor: active
-                  ? "var(--color-accent-primary-soft-15)"
-                  : "var(--color-bg-elevated)",
+                  ? "var(--color-accent-primary-soft-12)"
+                  : "transparent",
+                border: `1px solid ${active ? "#ffffff" : "var(--color-border-default)"}`,
                 color: active
-                  ? "var(--color-accent-secondary)"
+                  ? "var(--color-text-primary)"
                   : "var(--color-text-muted)",
               }}
             >
