@@ -12,6 +12,7 @@ import {
   settingsLoad,
   settingsSave,
   settingsGenerateNetworkDiagnosticsBundle,
+  systemCopyLogToClipboard,
   systemRestartAsAdmin,
   systemInstallDriver,
   systemRepairDriver,
@@ -86,6 +87,16 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(undefined);
     await expect(systemRestartAsAdmin()).resolves.toBeUndefined();
     expect(invoke).toHaveBeenCalledWith("system_restart_as_admin");
+  });
+
+  it("systemCopyLogToClipboard invokes backend", async () => {
+    const resp = {
+      file_path: "C:\\Users\\test\\AppData\\Roaming\\SwiftTunnel\\logs\\swifttunnel.log",
+    };
+    invoke.mockResolvedValue(resp);
+
+    await expect(systemCopyLogToClipboard()).resolves.toEqual(resp);
+    expect(invoke).toHaveBeenCalledWith("system_copy_log_to_clipboard");
   });
 
   it("vpnGetPing invokes backend with expected args", async () => {
