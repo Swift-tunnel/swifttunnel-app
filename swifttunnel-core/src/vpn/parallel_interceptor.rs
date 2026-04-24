@@ -189,7 +189,7 @@ thread_local! {
     static PACKET_BUFFER: RefCell<[u8; MAX_PACKET_SIZE]> = RefCell::new([0u8; MAX_PACKET_SIZE]);
 }
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::NetworkManagement::IpHelper::{GetAdaptersInfo, IP_ADAPTER_INFO};
 use windows::Win32::System::Threading::{
     CreateEventW, ResetEvent, SetThreadAffinityMask, WaitForSingleObject,
@@ -4596,8 +4596,60 @@ fn run_packet_reader(
         // Using 100ms timeout allows responsive stop_flag checking while
         // avoiding 1000Hz polling that wastes CPU when idle
         // (When packets arrive, event signals immediately - no added latency)
-        unsafe {
-            WaitForSingleObject(b.event, 100);
+        let wait_result = unsafe { WaitForSingleObject(b.event, 100) };
+        if wait_result == WAIT_TIMEOUT {
+            // A timeout is the normal idle path. Do not call read_packets()
+            // with an empty queue: WinpkFilter can report ERROR_INVALID_PARAMETER
+            // for that case, which is not a stale driver handle.
+            let prior = rebind.record_success();
+            if prior > 0 {
+                log::info!(
+                    "Reader: recovered after {} rebind attempt(s) - packet event wait is healthy",
+                    prior
+                );
+            }
+            continue;
+        }
+
+        if wait_result == WAIT_FAILED {
+            let e = windows::core::Error::from_win32();
+            match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
+                RebindDecision::Stop => break,
+                RebindDecision::Fatal => {
+                    log::error!(
+                        "Reader: packet event wait failed ({}); rebind budget ({}) exhausted, stopping reader loop",
+                        e,
+                        READER_MAX_REBINDS
+                    );
+                    stop_flag.store(true, Ordering::Release);
+                    return Err(VpnError::SplitTunnel(format!(
+                        "packet event wait failed after {} rebinds: {}",
+                        READER_MAX_REBINDS, e
+                    )));
+                }
+                RebindDecision::Backoff(backoff) => {
+                    log::warn!(
+                        "Reader: packet event wait failed ({}); rebind attempt {}/{} after {}ms backoff",
+                        e,
+                        rebind.attempts(),
+                        READER_MAX_REBINDS,
+                        backoff.as_millis()
+                    );
+                    bindings = None;
+                    if interruptible_sleep(backoff, &stop_flag) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if wait_result != WAIT_OBJECT_0 {
+            log::warn!(
+                "Reader: unexpected packet event wait result: {:?}",
+                wait_result
+            );
+            continue;
         }
 
         // Read batch of packets
@@ -4606,12 +4658,9 @@ fn run_packet_reader(
         let packets_read = match b.driver.read_packets::<BATCH_SIZE>(&mut to_read) {
             Ok(n) => {
                 // A successful read_packets IOCTL is itself the signal that
-                // the handle is healthy — `Ok(0)` (WaitForSingleObject timed
-                // out, no queued packets) is the dominant state on idle
-                // adapters, so requiring `n > 0` to reset would let the
-                // counter survive across hours of idle between transient
-                // glitches and ultimately tear down the tunnel on a single
-                // unrelated blip.
+                // the handle is healthy. `Ok(0)` is also benign here: the
+                // event can race with another reader/drain boundary, but the
+                // IOCTL still succeeded.
                 let prior = rebind.record_success();
                 if prior > 0 {
                     log::info!(
