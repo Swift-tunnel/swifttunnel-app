@@ -104,11 +104,20 @@ export function LoginScreen() {
             style={{ objectFit: "contain" }}
           />
           <div className="text-center">
+            <div className="mb-2 flex items-center justify-center gap-2">
+              <span
+                className="h-1 w-1 rounded-full"
+                style={{ backgroundColor: "var(--color-status-connected)" }}
+              />
+              <span className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+                Gaming · Relay · 28 Servers
+              </span>
+            </div>
             <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-text-primary">
               SwiftTunnel
             </h1>
             <p className="mt-1 text-[12px] text-text-muted">
-              Gaming VPN · Split tunneling · Low-latency relay
+              Sign in to deploy the tunnel
             </p>
           </div>
         </motion.div>

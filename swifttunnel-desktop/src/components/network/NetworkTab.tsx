@@ -8,8 +8,6 @@ import {
   Chip,
   MetricGrid,
   MetricCell,
-  SectionHeader,
-  Spinner,
 } from "../ui";
 
 const DURATIONS = [5, 10, 30, 300] as const;
@@ -48,6 +46,24 @@ function gradeColor(grade: string): string {
   }
 }
 
+function gradeName(grade: string): string {
+  switch (grade) {
+    case "A+":
+    case "A":
+      return "Excellent";
+    case "B":
+      return "Good";
+    case "C":
+      return "Fair";
+    case "D":
+      return "Poor";
+    case "F":
+      return "Bad";
+    default:
+      return "Tested";
+  }
+}
+
 export function NetworkTab() {
   const net = useNetworkStore();
   const [duration, setDuration] = useState<number>(10);
@@ -57,6 +73,11 @@ export function NetworkTab() {
     net.speedStatus === "running" ||
     net.bufferbloatStatus === "running";
 
+  const completedCount =
+    Number(net.stabilityStatus === "complete") +
+    Number(net.speedStatus === "complete") +
+    Number(net.bufferbloatStatus === "complete");
+
   function runAll() {
     if (anyRunning) return;
     void net.runStabilityTest(duration);
@@ -64,55 +85,96 @@ export function NetworkTab() {
     void net.runBufferbloatTest();
   }
 
+  const grade = net.bufferbloatResult?.grade ?? null;
+  const heroLabel = anyRunning
+    ? "Running diagnostics"
+    : completedCount === 3
+      ? "Diagnostics complete"
+      : completedCount > 0
+        ? "Partial results"
+        : "Diagnostics";
+  const heroState = anyRunning
+    ? "Measuring"
+    : grade
+      ? gradeName(grade)
+      : completedCount > 0
+        ? "Tested"
+        : "Ready";
+  const heroBigValue = grade ?? (completedCount > 0 ? `${completedCount}` : "—");
+  const heroBigColor = grade
+    ? gradeColor(grade)
+    : "var(--color-text-primary)";
+  const heroHint = grade
+    ? null
+    : completedCount > 0
+      ? `/ 3`
+      : null;
+
   return (
     <div className="flex w-full flex-col gap-5 pb-4">
-      <section>
-        <SectionHeader
-          label="Diagnostics"
-          description="Measure connection quality, bandwidth, and latency under load"
-        />
-        <button
+      {/* ── Hero ── */}
+      <section className="flex items-start justify-between gap-6 pt-1">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+            {heroLabel}
+          </div>
+          <div className="mt-2.5 flex items-center gap-2.5">
+            <span
+              className="text-[22px] font-semibold leading-none tracking-[-0.015em]"
+              style={{ color: "var(--color-text-primary)" }}
+            >
+              {heroState}
+            </span>
+            <span className="font-mono text-[13px] text-text-muted">
+              {anyRunning
+                ? `${completedCount}/3 done`
+                : completedCount === 0
+                  ? "no tests run yet"
+                  : `${completedCount}/3 tests`}
+            </span>
+          </div>
+          <div className="mt-3 flex items-baseline gap-4">
+            <div className="flex items-baseline gap-1.5">
+              <span
+                className="font-mono text-[34px] font-medium leading-none tabular-nums"
+                style={{ color: heroBigColor }}
+              >
+                {heroBigValue}
+              </span>
+              {heroHint && (
+                <span className="text-[13px] text-text-muted">{heroHint}</span>
+              )}
+            </div>
+            {anyRunning && (
+              <div className="flex items-center gap-1.5">
+                <span
+                  className="relative h-1.5 w-1.5 rounded-full"
+                  style={{ backgroundColor: "var(--color-accent-primary)" }}
+                >
+                  <span
+                    className="absolute inset-0 animate-ping rounded-full opacity-60"
+                    style={{ backgroundColor: "var(--color-accent-primary)" }}
+                  />
+                </span>
+                <span
+                  className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
+                  style={{ color: "var(--color-accent-primary)" }}
+                >
+                  Live
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+        <Button
+          variant={anyRunning ? "secondary" : "primary"}
+          size="lg"
           onClick={runAll}
           disabled={anyRunning}
-          className="flex h-11 w-full items-center justify-center gap-2 rounded-[var(--radius-button)] text-[13px] font-semibold tracking-[-0.005em] transition-colors disabled:cursor-not-allowed disabled:opacity-60"
-          style={
-            anyRunning
-              ? {
-                  backgroundColor: "transparent",
-                  border: "1px solid var(--color-border-default)",
-                  color: "var(--color-text-muted)",
-                }
-              : {
-                  backgroundColor: "var(--color-accent-primary)",
-                  color: "#000000",
-                }
-          }
+          loading={anyRunning}
         >
-          <span className="flex items-center gap-2">
-            {anyRunning ? (
-              <>
-                <Spinner size={13} />
-                Running diagnostics…
-              </>
-            ) : (
-              <>
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.4"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
-                </svg>
-                Run All Tests
-              </>
-            )}
-          </span>
-        </button>
+          {anyRunning ? "Running…" : "Run All Tests"}
+        </Button>
       </section>
 
       <TestCard

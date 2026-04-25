@@ -185,14 +185,42 @@ export function SettingsTab() {
       (a) => a.guid === settings.preferred_physical_adapter_guid,
     );
 
+  const updateLabel = (() => {
+    switch (updaterStatus) {
+      case "checking":
+        return "Checking…";
+      case "installing":
+        return "Installing";
+      case "update_available":
+        return `v${updaterVersion} ready`;
+      case "up_to_date":
+        return "Up to date";
+      case "error":
+        return "Update error";
+      default:
+        return "Idle";
+    }
+  })();
+  const updateColor =
+    updaterStatus === "error"
+      ? "var(--color-status-error)"
+      : updaterStatus === "update_available"
+        ? "var(--color-accent-primary)"
+        : updaterStatus === "up_to_date"
+          ? "var(--color-status-connected)"
+          : "var(--color-text-muted)";
+
   return (
     <div className="flex w-full flex-col gap-5 pb-4">
-      {/* Account */}
-      <Section title="Account">
-        <div className="flex items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-3">
+      {/* ── Hero ── */}
+      <section className="flex items-start justify-between gap-6 pt-1">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+            Account
+          </div>
+          <div className="mt-2.5 flex items-center gap-2.5">
             <div
-              className="flex h-9 w-9 items-center justify-center rounded-full text-[12px] font-semibold"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold"
               style={{
                 backgroundColor: "var(--color-bg-hover)",
                 color: "var(--color-text-primary)",
@@ -201,32 +229,53 @@ export function SettingsTab() {
             >
               {email?.[0]?.toUpperCase() || "?"}
             </div>
-            <div>
-              <div className="text-[13px] font-medium text-text-primary">
-                {email || "Unknown"}
-              </div>
-              {isTester && (
-                <div className="mt-0.5">
-                  <Chip tone="neutral" uppercase size="xs">
-                    Tester
-                  </Chip>
-                </div>
-              )}
+            <span
+              className="truncate text-[22px] font-semibold leading-none tracking-[-0.015em]"
+              style={{ color: "var(--color-text-primary)" }}
+            >
+              {email || "Unknown"}
+            </span>
+            {isTester && (
+              <Chip tone="neutral" uppercase size="xs">
+                Tester
+              </Chip>
+            )}
+          </div>
+          <div className="mt-3 flex items-baseline gap-4">
+            <div className="flex items-baseline gap-1.5">
+              <span
+                className="font-mono text-[22px] font-medium leading-none tabular-nums"
+                style={{ color: "var(--color-text-primary)" }}
+              >
+                v{__APP_VERSION__}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ backgroundColor: updateColor }}
+              />
+              <span
+                className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
+                style={{ color: updateColor }}
+              >
+                {updateLabel}
+              </span>
             </div>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={logout}
-            style={{
-              color: "var(--color-status-error)",
-              border: "1px solid var(--color-status-error-soft-20)",
-            }}
-          >
-            Log out
-          </Button>
         </div>
-      </Section>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={logout}
+          style={{
+            color: "var(--color-status-error)",
+            border: "1px solid var(--color-status-error-soft-20)",
+          }}
+        >
+          Log out
+        </Button>
+      </section>
 
       {/* General */}
       <Section title="General">

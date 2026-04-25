@@ -776,26 +776,77 @@ function RamCleanerCard({
   const color = memColor(percent);
   const showBottom = isCleaning || !isAdmin || result;
 
+  const stateLabel = isCleaning
+    ? "Cleaning"
+    : percent >= 85
+      ? "High usage"
+      : percent >= 70
+        ? "Elevated"
+        : percent > 0
+          ? "Healthy"
+          : "—";
+  const heroLabel = isCleaning ? "Reclaiming" : "System Memory";
+  const showLive = !isCleaning && percent >= 85;
+
   return (
-    <div
-      className="overflow-hidden rounded-[var(--radius-card)]"
-      style={{
-        backgroundColor: "var(--color-bg-card)",
-        border: "1px solid var(--color-border-subtle)",
-      }}
-    >
-      <div className="flex items-center justify-between px-4 pt-4 pb-3">
-        <div>
-          <div className="text-[13px] font-semibold text-text-primary">
-            RAM Cleaner
+    <section className="flex flex-col gap-4">
+      {/* ── Hero ── */}
+      <div className="flex items-start justify-between gap-6 pt-1">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+            {heroLabel}
           </div>
-          <div className="mt-0.5 text-[11px] text-text-muted">
-            Frees memory by trimming background apps
+          <div className="mt-2.5 flex items-center gap-2.5">
+            <span
+              className="text-[22px] font-semibold leading-none tracking-[-0.015em]"
+              style={{ color: "var(--color-text-primary)" }}
+            >
+              {stateLabel}
+            </span>
+            {totalMb > 0 && (
+              <span className="font-mono text-[13px] text-text-muted">
+                {formatGbFromMb(usedMb)} / {formatGbFromMb(totalMb)} GB
+              </span>
+            )}
+          </div>
+          <div className="mt-3 flex items-baseline gap-4">
+            {totalMb > 0 ? (
+              <div className="flex items-baseline gap-1.5">
+                <span
+                  className="font-mono text-[34px] font-medium leading-none tabular-nums"
+                  style={{ color: "var(--color-text-primary)" }}
+                >
+                  {percent.toFixed(0)}
+                </span>
+                <span className="text-[13px] text-text-muted">%</span>
+              </div>
+            ) : (
+              <span className="text-[13px] text-text-muted">—</span>
+            )}
+            {showLive && (
+              <div className="flex items-center gap-1.5">
+                <span
+                  className="relative h-1.5 w-1.5 rounded-full"
+                  style={{ backgroundColor: color }}
+                >
+                  <span
+                    className="absolute inset-0 animate-ping rounded-full opacity-60"
+                    style={{ backgroundColor: color }}
+                  />
+                </span>
+                <span
+                  className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
+                  style={{ color }}
+                >
+                  Live
+                </span>
+              </div>
+            )}
           </div>
         </div>
         <Button
           variant="primary"
-          size="md"
+          size="lg"
           onClick={onClean}
           disabled={isCleaning}
           loading={isCleaning}
@@ -804,33 +855,40 @@ function RamCleanerCard({
         </Button>
       </div>
 
-      {/* Memory bar */}
+      {/* ── Memory detail card ── */}
       <div
-        className="mx-4 mb-2 h-1.5 overflow-hidden rounded-full"
-        style={{ backgroundColor: "rgba(255,255,255,0.05)" }}
+        className="overflow-hidden rounded-[var(--radius-card)]"
+        style={{
+          backgroundColor: "var(--color-bg-card)",
+          border: "1px solid var(--color-border-subtle)",
+        }}
       >
         <div
-          className="h-full rounded-full transition-all duration-500"
-          style={{ width: `${percent}%`, backgroundColor: color }}
-        />
-      </div>
-
-      <div className="flex gap-5 px-4 pb-4 text-[11px]">
-        <MemStat label="Used" value={`${formatGbFromMb(usedMb)} GB`} />
-        <MemStat label="Total" value={`${formatGbFromMb(totalMb)} GB`} />
-        <MemStat
-          label="Available"
-          value={`${formatGbFromMb(availableMb)} GB`}
-          valueColor={color}
-          bold
-        />
-        {systemMem?.standby_mb != null && (
-          <MemStat
-            label="Standby"
-            value={`${formatGbFromMb(systemMem.standby_mb)} GB`}
+          className="mx-4 mt-4 mb-2 h-1.5 overflow-hidden rounded-full"
+          style={{ backgroundColor: "rgba(255,255,255,0.05)" }}
+        >
+          <div
+            className="h-full rounded-full transition-all duration-500"
+            style={{ width: `${percent}%`, backgroundColor: color }}
           />
-        )}
-      </div>
+        </div>
+
+        <div className="flex gap-5 px-4 pb-4 text-[11px]">
+          <MemStat label="Used" value={`${formatGbFromMb(usedMb)} GB`} />
+          <MemStat label="Total" value={`${formatGbFromMb(totalMb)} GB`} />
+          <MemStat
+            label="Available"
+            value={`${formatGbFromMb(availableMb)} GB`}
+            valueColor={color}
+            bold
+          />
+          {systemMem?.standby_mb != null && (
+            <MemStat
+              label="Standby"
+              value={`${formatGbFromMb(systemMem.standby_mb)} GB`}
+            />
+          )}
+        </div>
 
       {showBottom && (
         <div
@@ -910,7 +968,8 @@ function RamCleanerCard({
           )}
         </div>
       )}
-    </div>
+      </div>
+    </section>
   );
 }
 
