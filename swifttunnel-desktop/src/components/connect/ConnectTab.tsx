@@ -11,7 +11,7 @@ import {
 } from "../../lib/utils";
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import { GAMES, isConnectActionBusy, resolveConnectStatus } from "./connectState";
+import { isConnectActionBusy, resolveConnectStatus } from "./connectState";
 import { Tooltip, InfoIcon } from "../common/Tooltip";
 import type { ServerRegion } from "../../lib/types";
 import "./connect.css";
@@ -155,16 +155,7 @@ export function ConnectTab() {
       saveTimeoutRef.current = null;
       await save();
     }
-    connect(settings.selected_region, settings.selected_game_presets);
-  }
-
-  function togglePreset(presetId: string) {
-    const current = settings.selected_game_presets;
-    const next = current.includes(presetId)
-      ? current.filter((p) => p !== presetId)
-      : [...current, presetId];
-    update({ selected_game_presets: next });
-    saveDebounced();
+    connect(settings.selected_region, ["roblox"]);
   }
 
   function selectRegion(regionId: string) {
@@ -382,32 +373,6 @@ export function ConnectTab() {
           </motion.section>
         )}
       </AnimatePresence>
-
-      {/* ── Games ── */}
-      <section>
-        <SectionHeader>Games</SectionHeader>
-        <div className="flex gap-2">
-          {GAMES.map((game) => {
-            const sel = settings.selected_game_presets.includes(game.id);
-            return (
-              <button
-                key={game.id}
-                onClick={() => togglePreset(game.id)}
-                className="flex items-center gap-2 rounded-[var(--radius-button)] border px-4 py-2.5 text-sm transition-all"
-                style={{
-                  backgroundColor: sel ? "var(--color-accent-primary-soft-10)" : "var(--color-bg-card)",
-                  borderColor: sel ? "var(--color-accent-primary)" : "var(--color-border-subtle)",
-                  color: sel ? "var(--color-accent-secondary)" : "var(--color-text-secondary)",
-                }}
-              >
-                <span>{game.icon}</span>
-                <span className="font-medium">{game.name}</span>
-                {sel && <CheckIcon size={14} />}
-              </button>
-            );
-          })}
-        </div>
-      </section>
 
       {/* ── Regions ── */}
       <section>

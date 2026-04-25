@@ -127,8 +127,6 @@ pub(crate) fn parse_game_presets(
             let normalized = preset.trim().to_ascii_lowercase();
             match normalized.as_str() {
                 "roblox" => Some(swifttunnel_core::vpn::GamePreset::Roblox),
-                "valorant" => Some(swifttunnel_core::vpn::GamePreset::Valorant),
-                "fortnite" => Some(swifttunnel_core::vpn::GamePreset::Fortnite),
                 _ => None,
             }
         })

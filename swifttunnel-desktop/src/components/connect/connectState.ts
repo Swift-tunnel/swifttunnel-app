@@ -1,11 +1,5 @@
 import type { DriverCheckResponse } from "../../lib/types";
 
-export const GAMES = [
-  { id: "roblox", name: "Roblox", icon: "\u{1F3AE}" },
-  { id: "valorant", name: "Valorant", icon: "\u{1F3AF}" },
-  { id: "fortnite", name: "Fortnite", icon: "\u{1F3D7}️" },
-];
-
 export function stateLabel(state: string): string {
   switch (state) {
     case "disconnected":

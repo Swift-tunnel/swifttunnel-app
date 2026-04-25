@@ -33,10 +33,7 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
       loadedSettings,
     )
   ) {
-    void deps.connectVpn(
-      loadedSettings.selected_region,
-      loadedSettings.selected_game_presets,
-    );
+    void deps.connectVpn(loadedSettings.selected_region, ["roblox"]);
   }
 
   if (loadedSettings.update_settings.auto_check) {

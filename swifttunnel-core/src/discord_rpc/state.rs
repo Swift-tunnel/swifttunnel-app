@@ -176,8 +176,6 @@ pub fn region_flag_key(region_id: &str) -> &'static str {
 pub fn game_icon_key(game_name: &str) -> &'static str {
     match game_name.to_lowercase().as_str() {
         "roblox" | "robloxplayerbeta" | "robloxplayerbeta.exe" => "game_roblox",
-        "valorant" | "valorant.exe" => "game_valorant",
-        "fortnite" | "fortnitelauncherbeinstaller" => "game_fortnite",
         _ => "game_generic",
     }
 }
@@ -186,8 +184,6 @@ pub fn game_icon_key(game_name: &str) -> &'static str {
 pub fn game_display_name(game_name: &str) -> &'static str {
     match game_name.to_lowercase().as_str() {
         "roblox" | "robloxplayerbeta" | "robloxplayerbeta.exe" => "Roblox",
-        "valorant" | "valorant.exe" => "VALORANT",
-        "fortnite" | "fortnitelauncherbeinstaller" => "Fortnite",
         _ => "Game",
     }
 }
@@ -231,7 +227,6 @@ mod tests {
     fn test_game_display_name() {
         assert_eq!(game_display_name("roblox"), "Roblox");
         assert_eq!(game_display_name("RobloxPlayerBeta.exe"), "Roblox");
-        assert_eq!(game_display_name("valorant"), "VALORANT");
         assert_eq!(game_display_name("unknown_game"), "Game");
     }
 }

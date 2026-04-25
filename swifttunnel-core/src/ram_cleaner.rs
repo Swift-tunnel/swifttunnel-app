@@ -91,17 +91,6 @@ const DENYLIST_NAMES_LOWER: &[&str] = &[
     "robloxstudio.exe",
     "robloxstudiolauncherbeta.exe",
     "robloxstudiolauncher.exe",
-    // Valorant
-    "valorant-win64-shipping.exe",
-    "valorant.exe",
-    "riotclientservices.exe",
-    "riotclientux.exe",
-    "riotclientuxrender.exe",
-    // Fortnite
-    "fortniteclient-win64-shipping.exe",
-    "fortnitelauncher.exe",
-    "epicgameslauncher.exe",
-    "epicwebhelper.exe",
 ];
 
 fn select_trim_candidates(
@@ -625,8 +614,6 @@ mod tests {
     fn select_candidates_excludes_game_processes() {
         let processes = vec![
             proc(10, "RobloxPlayerBeta.exe", 800, 0.0),
-            proc(11, "valorant-win64-shipping.exe", 900, 0.0),
-            proc(12, "FortniteClient-Win64-Shipping.exe", 700, 0.0),
             proc(13, "Chrome.exe", 600, 0.0),
         ];
         let exclude = HashSet::new();

@@ -41,60 +41,35 @@ const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GamePreset {
     Roblox,
-    Valorant,
-    Fortnite,
 }
 
 impl GamePreset {
     pub fn all() -> &'static [GamePreset] {
-        &[
-            GamePreset::Roblox,
-            GamePreset::Valorant,
-            GamePreset::Fortnite,
-        ]
+        &[GamePreset::Roblox]
     }
 
     /// Process names that should use VPN
     pub fn process_names(&self) -> &'static [&'static str] {
         match self {
             GamePreset::Roblox => ROBLOX_PROCESS_NAMES,
-            GamePreset::Valorant => &[
-                "valorant-win64-shipping.exe",
-                "valorant.exe",
-                "riotclientservices.exe",
-                "riotclientux.exe",
-                "riotclientuxrender.exe",
-            ],
-            GamePreset::Fortnite => &[
-                "fortniteclient-win64-shipping.exe",
-                "fortnitelauncher.exe",
-                "epicgameslauncher.exe",
-                "epicwebhelper.exe",
-            ],
         }
     }
 
     pub fn display_name(&self) -> &'static str {
         match self {
             GamePreset::Roblox => "Roblox",
-            GamePreset::Valorant => "Valorant",
-            GamePreset::Fortnite => "Fortnite",
         }
     }
 
     pub fn icon(&self) -> &'static str {
         match self {
             GamePreset::Roblox => "🎮",
-            GamePreset::Valorant => "🎯",
-            GamePreset::Fortnite => "🏝️",
         }
     }
 
     pub fn description(&self) -> &'static str {
         match self {
             GamePreset::Roblox => "Roblox Player & Studio",
-            GamePreset::Valorant => "Valorant + Riot Client",
-            GamePreset::Fortnite => "Fortnite + Epic Launcher",
         }
     }
 }
@@ -1760,8 +1735,6 @@ mod tests {
     #[test]
     fn test_game_preset_names() {
         assert!(!GamePreset::Roblox.process_names().is_empty());
-        assert!(!GamePreset::Valorant.process_names().is_empty());
-        assert!(!GamePreset::Fortnite.process_names().is_empty());
         assert!(
             GamePreset::Roblox
                 .process_names()

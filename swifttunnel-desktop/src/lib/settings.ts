@@ -76,6 +76,7 @@ export function mergeAppSettings(
   return {
     ...DEFAULT_SETTINGS,
     ...raw,
+    selected_game_presets: DEFAULT_SETTINGS.selected_game_presets,
     config: {
       ...DEFAULT_SETTINGS.config,
       ...raw?.config,

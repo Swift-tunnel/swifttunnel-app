@@ -118,7 +118,7 @@ pub struct AppSettings {
     /// Expanded boost info panel IDs (user preference to show detailed info)
     #[serde(default)]
     pub expanded_boost_info: Vec<String>,
-    /// Selected game presets for split tunneling (stored as strings: "roblox", "valorant", "fortnite")
+    /// Selected game presets for split tunneling (stored as strings: "roblox")
     #[serde(default = "default_game_presets")]
     pub selected_game_presets: Vec<String>,
     /// Cached network test results
@@ -288,6 +288,7 @@ impl AppSettings {
                 normalize_guid_ascii_lowercase(&guid).map(|normalized| (signature, normalized))
             })
             .collect();
+        self.selected_game_presets = default_game_presets();
     }
 }
 

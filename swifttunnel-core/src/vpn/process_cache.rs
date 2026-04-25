@@ -156,7 +156,7 @@ pub fn is_game_server(
     protocol: Protocol,
     api_tunneling: bool,
 ) -> bool {
-    // Currently only Roblox, but can add Valorant, Fortnite, etc.
+    // SwiftTunnel currently supports Roblox process routing only.
     is_roblox_game_server(dst_ip, dst_port, protocol, api_tunneling)
 }
 

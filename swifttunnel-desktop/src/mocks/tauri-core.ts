@@ -49,7 +49,7 @@ const MOCK_SETTINGS: AppSettings = {
   resume_vpn_on_startup: true,
   last_connected_region: "singapore",
   expanded_boost_info: [],
-  selected_game_presets: ["roblox", "valorant"],
+  selected_game_presets: ["roblox"],
   network_test_results: {
     last_stability: null,
     last_speed: null,
@@ -99,7 +99,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
           server_endpoint: "54.255.205.216:51821",
           assigned_ip: null,
           split_tunnel_active: true,
-          tunneled_processes: ["RobloxPlayerBeta.exe", "valorant.exe"],
+          tunneled_processes: ["RobloxPlayerBeta.exe"],
           error: null,
         }
       : {
