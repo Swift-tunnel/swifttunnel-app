@@ -53,6 +53,11 @@ pub struct NetworkBooster {
     firewall_fixer: FirewallFixer,
 }
 
+pub struct NetworkApplyOutcome {
+    pub applied_config: NetworkConfig,
+    pub warnings: Vec<String>,
+}
+
 impl NetworkBooster {
     pub fn new() -> Self {
         Self {
@@ -77,51 +82,96 @@ impl NetworkBooster {
     /// "boost on/off" switch.
     pub fn reconcile_optimizations(&mut self, config: &NetworkConfig) -> Result<()> {
         info!("Reconciling network optimizations");
+        let outcome = self.reconcile_optimizations_checked(config);
+        if !outcome.warnings.is_empty() {
+            warn!(
+                "Network optimizations applied with warnings: {}",
+                outcome.warnings.join("; ")
+            );
+        }
+        Ok(())
+    }
+
+    /// Reconcile network optimizations and report which toggles actually applied.
+    ///
+    /// This is used by the desktop UI so a toggle only persists as "on" after
+    /// the backing registry/QoS operation succeeds.
+    pub fn reconcile_optimizations_checked(
+        &mut self,
+        config: &NetworkConfig,
+    ) -> NetworkApplyOutcome {
+        info!("Reconciling network optimizations");
+
+        let mut applied_config = config.clone();
+        let mut warnings = Vec::new();
 
         if config.prioritize_roblox_traffic {
             if let Err(e) = self.prioritize_game_traffic() {
-                warn!("Could not prioritize game traffic: {}", e);
+                applied_config.prioritize_roblox_traffic = false;
+                warnings.push(format!("Prioritize Roblox traffic: {}", e));
             }
         } else if let Err(e) = self.remove_prioritize_game_traffic() {
-            warn!("Could not remove Roblox priority QoS policy: {}", e);
+            warnings.push(format!("Remove Roblox priority QoS policy: {}", e));
         }
 
         // Tier 1 (Safe) Network Boosts
         if config.disable_nagle {
             if let Err(e) = self.disable_nagle_algorithm() {
-                warn!("Could not disable Nagle's algorithm: {}", e);
+                applied_config.disable_nagle = false;
+                warnings.push(format!("Disable Nagle's algorithm: {}", e));
             }
         } else if let Err(e) = self.restore_nagle_algorithm() {
-            warn!("Could not restore Nagle's algorithm defaults: {}", e);
+            warnings.push(format!("Restore Nagle's algorithm defaults: {}", e));
         }
 
         if config.disable_network_throttling {
             if let Err(e) = self.disable_network_throttling() {
-                warn!("Could not disable network throttling: {}", e);
+                applied_config.disable_network_throttling = false;
+                warnings.push(format!("Disable network throttling: {}", e));
             }
         } else if let Err(e) = self.restore_network_throttling() {
-            warn!("Could not restore network throttling defaults: {}", e);
+            warnings.push(format!("Restore network throttling defaults: {}", e));
         }
 
         if config.gaming_qos {
             if let Err(e) = self.enable_gaming_qos() {
-                warn!("Could not enable gaming QoS: {}", e);
+                applied_config.gaming_qos = false;
+                warnings.push(format!("Enable gaming QoS: {}", e));
             }
         } else if let Err(e) = self.disable_gaming_qos() {
-            warn!("Could not disable gaming QoS: {}", e);
+            warnings.push(format!("Disable gaming QoS: {}", e));
         }
 
         if config.firewall_fix {
             if let Err(e) = self.firewall_fixer.apply() {
-                warn!("Could not apply Roblox firewall fix: {}", e);
+                applied_config.firewall_fix = false;
+                warnings.push(format!("Apply Roblox firewall fix: {}", e));
             }
         } else if let Err(e) = self.firewall_fixer.restore() {
-            warn!("Could not restore Roblox firewall rules: {}", e);
+            warnings.push(format!("Restore Roblox firewall rules: {}", e));
         }
 
         self.persist_snapshot();
 
-        Ok(())
+        let effective_config = self.effective_network_config(&applied_config);
+        if applied_config.disable_nagle && !effective_config.disable_nagle {
+            warnings.push("Disable Nagle's algorithm did not verify after apply".to_string());
+        }
+        if applied_config.disable_network_throttling && !effective_config.disable_network_throttling
+        {
+            warnings.push("Disable network throttling did not verify after apply".to_string());
+        }
+        if applied_config.gaming_qos && !effective_config.gaming_qos {
+            warnings.push("Gaming QoS did not verify after apply".to_string());
+        }
+        if applied_config.prioritize_roblox_traffic && !effective_config.prioritize_roblox_traffic {
+            warnings.push("Roblox priority QoS did not verify after apply".to_string());
+        }
+
+        NetworkApplyOutcome {
+            applied_config: effective_config,
+            warnings,
+        }
     }
 
     fn parse_first_line(output: &[u8], error_message: &str) -> Result<String> {
@@ -224,7 +274,75 @@ impl NetworkBooster {
         None
     }
 
-    fn set_registry_dword(key_path: &str, value_name: &str, value: u32) {
+    fn registry_key_exists(key_path: &str) -> bool {
+        hidden_command("reg")
+            .args(["query", key_path])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    fn qos_policy_exists(policy_name: &str) -> bool {
+        let policy_path = format!(
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+            policy_name
+        );
+        Self::registry_key_exists(&policy_path)
+    }
+
+    pub fn effective_network_config(&self, desired: &NetworkConfig) -> NetworkConfig {
+        let mut effective = desired.clone();
+
+        if desired.disable_nagle {
+            let adapter_guids = self.list_adapter_guids();
+            effective.disable_nagle = !adapter_guids.is_empty()
+                && adapter_guids.iter().all(|guid| {
+                    let key_path = format!(
+                        r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
+                        guid
+                    );
+                    Self::query_registry_dword(&key_path, REG_VALUE_TCP_ACK_FREQUENCY) == Some(1)
+                        && Self::query_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY) == Some(1)
+                });
+        }
+
+        if desired.disable_network_throttling {
+            effective.disable_network_throttling = Self::query_registry_dword(
+                NETWORK_SYSTEM_PROFILE_KEY,
+                REG_VALUE_NETWORK_THROTTLING_INDEX,
+            ) == Some(u32::MAX)
+                && Self::query_registry_dword(
+                    NETWORK_SYSTEM_PROFILE_KEY,
+                    REG_VALUE_SYSTEM_RESPONSIVENESS,
+                ) == Some(0);
+        }
+
+        if desired.gaming_qos {
+            let dscp_enabled = Self::query_registry_dword(
+                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
+                "Do not use NLA",
+            ) == Some(1);
+            let roblox_policies_present = ROBLOX_QOS_EXECUTABLES.iter().all(|exe| {
+                let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
+                Self::qos_policy_exists(&policy_name)
+            });
+            let relay_policies_present = RELAY_QOS_EXECUTABLES.iter().all(|exe| {
+                let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
+                Self::qos_policy_exists(&policy_name)
+            });
+            effective.gaming_qos =
+                dscp_enabled && roblox_policies_present && relay_policies_present;
+        }
+
+        if desired.prioritize_roblox_traffic {
+            effective.prioritize_roblox_traffic =
+                Self::qos_policy_exists(LEGACY_ROBLOX_PRIORITY_POLICY);
+        }
+
+        effective
+    }
+
+    fn set_registry_dword(key_path: &str, value_name: &str, value: u32) -> Result<()> {
         let value_str = value.to_string();
         let output = hidden_command("reg")
             .args([
@@ -243,22 +361,48 @@ impl NetworkBooster {
         match output {
             Ok(result) => {
                 if !result.status.success() {
-                    warn!("Failed to set {}\\{} to {}", key_path, value_name, value);
+                    return Err(anyhow::anyhow!(
+                        "failed to set {}\\{} to {}",
+                        key_path,
+                        value_name,
+                        value
+                    ));
                 }
             }
             Err(e) => {
-                warn!(
-                    "Failed to set {}\\{} to {}: {}",
-                    key_path, value_name, value, e
-                );
+                return Err(anyhow::anyhow!(
+                    "failed to set {}\\{} to {}: {}",
+                    key_path,
+                    value_name,
+                    value,
+                    e
+                ));
             }
+        }
+
+        match Self::query_registry_dword(key_path, value_name) {
+            Some(actual) if actual == value => Ok(()),
+            Some(actual) => Err(anyhow::anyhow!(
+                "{}\\{} was {}, expected {}",
+                key_path,
+                value_name,
+                actual,
+                value
+            )),
+            None => Err(anyhow::anyhow!(
+                "{}\\{} was not readable after write",
+                key_path,
+                value_name
+            )),
         }
     }
 
     fn restore_registry_dword(key_path: &str, value_name: &str, value: Option<u32>) {
         match value {
             Some(saved) => {
-                Self::set_registry_dword(key_path, value_name, saved);
+                if let Err(e) = Self::set_registry_dword(key_path, value_name, saved) {
+                    warn!("Failed to restore {}\\{}: {}", key_path, value_name, e);
+                }
             }
             None => {
                 let _ = hidden_command("reg")
@@ -283,7 +427,9 @@ impl NetworkBooster {
         if output.status.success() {
             info!("QoS policy created for Roblox");
         } else {
-            warn!("Failed to create QoS policy (may already exist or need admin)");
+            return Err(anyhow::anyhow!(
+                "failed to create QoS policy (Administrator may be required)"
+            ));
         }
 
         Ok(())
@@ -301,7 +447,9 @@ impl NetworkBooster {
             .output()?;
 
         if !output.status.success() {
-            warn!("Failed to remove legacy RobloxPriority QoS policy");
+            return Err(anyhow::anyhow!(
+                "failed to remove legacy RobloxPriority QoS policy"
+            ));
         }
         Ok(())
     }
@@ -343,7 +491,12 @@ impl NetworkBooster {
     fn disable_nagle_algorithm(&mut self) -> Result<()> {
         info!("Disabling Nagle's algorithm for all adapters");
 
-        for guid in self.list_adapter_guids() {
+        let adapter_guids = self.list_adapter_guids();
+        if adapter_guids.is_empty() {
+            return Err(anyhow::anyhow!("no network adapters found"));
+        }
+
+        for guid in adapter_guids {
             let key_path = format!(
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
                 guid
@@ -359,10 +512,10 @@ impl NetworkBooster {
                 });
 
             // TcpAckFrequency = 1
-            Self::set_registry_dword(&key_path, REG_VALUE_TCP_ACK_FREQUENCY, 1);
+            Self::set_registry_dword(&key_path, REG_VALUE_TCP_ACK_FREQUENCY, 1)?;
 
             // TCPNoDelay = 1 (disable Nagle)
-            Self::set_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, 1);
+            Self::set_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, 1)?;
         }
         info!("Nagle's algorithm disabled on all adapters");
 
@@ -417,7 +570,7 @@ impl NetworkBooster {
             NETWORK_SYSTEM_PROFILE_KEY,
             REG_VALUE_NETWORK_THROTTLING_INDEX,
             u32::MAX, // 0xFFFFFFFF
-        );
+        )?;
         info!("Network throttling disabled");
 
         // Also set SystemResponsiveness to 0 (0% reserved for background tasks)
@@ -425,7 +578,7 @@ impl NetworkBooster {
             NETWORK_SYSTEM_PROFILE_KEY,
             REG_VALUE_SYSTEM_RESPONSIVENESS,
             0,
-        );
+        )?;
 
         Ok(())
     }
@@ -459,10 +612,18 @@ impl NetworkBooster {
     pub fn enable_gaming_qos(&mut self) -> Result<()> {
         info!("Enabling Gaming QoS with DSCP EF (46) priority");
 
+        let run_reg_add = |args: &[&str], label: &str| -> Result<()> {
+            let output = hidden_command("reg").args(args).output()?;
+            if !output.status.success() {
+                return Err(anyhow::anyhow!("failed to write {}", label));
+            }
+            Ok(())
+        };
+
         // Step 1: Enable DSCP tagging in Windows (required for QoS policies to work)
         // Create QoS key under Tcpip if it doesn't exist, then set "Do not use NLA" = 1
-        let output = hidden_command("reg")
-            .args([
+        run_reg_add(
+            &[
                 "add",
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
                 "/v",
@@ -472,25 +633,14 @@ impl NetworkBooster {
                 "/d",
                 "1",
                 "/f",
-            ])
-            .output();
-
-        match &output {
-            Ok(result) => {
-                if result.status.success() {
-                    info!("DSCP tagging enabled in registry");
-                } else {
-                    warn!("Failed to enable DSCP tagging (may need admin)");
-                }
-            }
-            Err(e) => {
-                warn!("Failed to set DSCP registry key: {}", e);
-            }
-        }
+            ],
+            "DSCP tagging registry key",
+        )?;
+        info!("DSCP tagging enabled in registry");
 
         // Step 2: Also disable the UserTOSSetting override
-        let _ = hidden_command("reg")
-            .args([
+        run_reg_add(
+            &[
                 "add",
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
                 "/v",
@@ -500,172 +650,186 @@ impl NetworkBooster {
                 "/d",
                 "0",
                 "/f",
-            ])
-            .output();
+            ],
+            "UserTOSSetting registry key",
+        )?;
 
         // Step 3: Create QoS policies for Roblox and tunnel relay app traffic.
         // DSCP 46 = 101110 binary = highest priority for low-latency traffic.
-        let write_policy = |policy_name: String, exe: &str, protocol: &str, remote_port: &str| {
-            let policy_path = format!(
-                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
-                policy_name
-            );
+        let write_policy =
+            |policy_name: String, exe: &str, protocol: &str, remote_port: &str| -> Result<()> {
+                let policy_path = format!(
+                    r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+                    policy_name
+                );
 
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Version",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "1.0",
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Application Name",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    exe,
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Protocol",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    protocol,
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "DSCP Value",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "46",
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Throttle Rate",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "-1",
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Local Port",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "*",
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Local IP",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "*",
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Local IP Prefix Length",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "*",
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Remote Port",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    remote_port,
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Remote IP",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "*",
-                    "/f",
-                ])
-                .output();
-            let _ = hidden_command("reg")
-                .args([
-                    "add",
-                    &policy_path,
-                    "/v",
-                    "Remote IP Prefix Length",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    "*",
-                    "/f",
-                ])
-                .output();
-        };
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Version",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        "1.0",
+                        "/f",
+                    ],
+                    "QoS policy Version",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Application Name",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        exe,
+                        "/f",
+                    ],
+                    "QoS policy Application Name",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Protocol",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        protocol,
+                        "/f",
+                    ],
+                    "QoS policy Protocol",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "DSCP Value",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        "46",
+                        "/f",
+                    ],
+                    "QoS policy DSCP Value",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Throttle Rate",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        "-1",
+                        "/f",
+                    ],
+                    "QoS policy Throttle Rate",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Local Port",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        "*",
+                        "/f",
+                    ],
+                    "QoS policy Local Port",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Local IP",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        "*",
+                        "/f",
+                    ],
+                    "QoS policy Local IP",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Local IP Prefix Length",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        "*",
+                        "/f",
+                    ],
+                    "QoS policy Local IP Prefix Length",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Remote Port",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        remote_port,
+                        "/f",
+                    ],
+                    "QoS policy Remote Port",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Remote IP",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        "*",
+                        "/f",
+                    ],
+                    "QoS policy Remote IP",
+                )?;
+                run_reg_add(
+                    &[
+                        "add",
+                        &policy_path,
+                        "/v",
+                        "Remote IP Prefix Length",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        "*",
+                        "/f",
+                    ],
+                    "QoS policy Remote IP Prefix Length",
+                )?;
+                Ok(())
+            };
 
         for exe in ROBLOX_QOS_EXECUTABLES {
             let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
-            write_policy(policy_name, exe, "*", "*");
+            write_policy(policy_name, exe, "*", "*")?;
             info!("Created QoS policy for {}", exe);
         }
 
         // Fallback for tunnel traffic: app process packets to relay port 51821.
         for exe in RELAY_QOS_EXECUTABLES {
             let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
-            write_policy(policy_name, exe, "UDP", "51821");
+            write_policy(policy_name, exe, "UDP", "51821")?;
             info!("Created relay QoS policy for {}", exe);
         }
 

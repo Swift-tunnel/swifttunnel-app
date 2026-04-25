@@ -100,6 +100,9 @@ export const boostGetSystemMemory = () =>
 export const boostUpdateConfig = (configJson: string) =>
   invoke<BoostUpdateResult>("boost_update_config", { configJson });
 
+export const boostSyncEffectiveConfig = () =>
+  invoke<BoostUpdateResult>("boost_sync_effective_config");
+
 export const boostCleanRam = () =>
   invoke<RamCleanResultResponse>("boost_clean_ram");
 

@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
       disable_nagle: false,
       disable_network_throttling: false,
       gaming_qos: false,
+      firewall_fix: false,
     },
     auto_start_with_roblox: false,
     show_overlay: true,

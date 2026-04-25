@@ -33,6 +33,7 @@ const MOCK_SETTINGS: AppSettings = {
       disable_nagle: true,
       disable_network_throttling: true,
       gaming_qos: true,
+      firewall_fix: false,
     },
     auto_start_with_roblox: false,
     show_overlay: true,
@@ -251,7 +252,11 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     };
   },
 
-  boost_update_config: () => {},
+  boost_update_config: () => ({ warnings: [], applied_config: MOCK_SETTINGS.config }),
+  boost_sync_effective_config: () => ({
+    warnings: [],
+    applied_config: MOCK_SETTINGS.config,
+  }),
   boost_clean_ram: async () => {
     const before = handlers.boost_get_system_memory() as {
       total_mb: number;

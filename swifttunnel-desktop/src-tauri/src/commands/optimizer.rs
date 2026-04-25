@@ -149,6 +149,7 @@ pub async fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, S
 #[derive(Clone, Serialize)]
 pub struct BoostUpdateResult {
     pub warnings: Vec<String>,
+    pub applied_config: swifttunnel_core::structs::Config,
 }
 
 #[tauri::command]
@@ -166,11 +167,7 @@ pub async fn boost_update_config(
     let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        {
-            let mut s = settings.lock();
-            s.config = config.clone();
-            swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
-        }
+        let mut applied_config = config.clone();
 
         let warnings = {
             let mut warn_list = Vec::new();
@@ -191,9 +188,14 @@ pub async fn boost_update_config(
 
             {
                 let mut nb = network_booster.lock();
-                if let Err(e) = nb.reconcile_optimizations(&config.network_settings) {
-                    warn_list.push(format!("Network booster: {}", e));
-                }
+                let outcome = nb.reconcile_optimizations_checked(&config.network_settings);
+                applied_config.network_settings = outcome.applied_config;
+                warn_list.extend(
+                    outcome
+                        .warnings
+                        .into_iter()
+                        .map(|warning| format!("Network booster: {}", warning)),
+                );
             }
 
             {
@@ -210,6 +212,12 @@ pub async fn boost_update_config(
             warn_list
         };
 
+        {
+            let mut s = settings.lock();
+            s.config = applied_config.clone();
+            swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
+        }
+
         if !warnings.is_empty() {
             log::warn!(
                 "Boost config applied with warnings: {}",
@@ -217,10 +225,77 @@ pub async fn boost_update_config(
             );
         }
 
-        Ok(BoostUpdateResult { warnings })
+        Ok(BoostUpdateResult {
+            warnings,
+            applied_config,
+        })
     })
     .await
     .map_err(|e| format!("Boost config task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn boost_sync_effective_config(
+    state: State<'_, AppState>,
+) -> Result<BoostUpdateResult, String> {
+    let settings = state.settings.clone();
+    let network_booster = state.network_booster.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let current_config = {
+            let s = settings.lock();
+            s.config.clone()
+        };
+
+        let effective_network_config = {
+            let nb = network_booster.lock();
+            nb.effective_network_config(&current_config.network_settings)
+        };
+
+        let mut applied_config = current_config.clone();
+        applied_config.network_settings = effective_network_config;
+
+        let mut warnings = Vec::new();
+        if current_config.network_settings.disable_nagle
+            && !applied_config.network_settings.disable_nagle
+        {
+            warnings.push(
+                "Network booster: Disable Nagle's algorithm was not active on Windows".to_string(),
+            );
+        }
+        if current_config.network_settings.disable_network_throttling
+            && !applied_config.network_settings.disable_network_throttling
+        {
+            warnings.push(
+                "Network booster: Disable network throttling was not active on Windows".to_string(),
+            );
+        }
+        if current_config.network_settings.gaming_qos && !applied_config.network_settings.gaming_qos
+        {
+            warnings.push("Network booster: Gaming QoS was not active on Windows".to_string());
+        }
+
+        if applied_config.network_settings.disable_nagle
+            != current_config.network_settings.disable_nagle
+            || applied_config.network_settings.disable_network_throttling
+                != current_config.network_settings.disable_network_throttling
+            || applied_config.network_settings.gaming_qos
+                != current_config.network_settings.gaming_qos
+            || applied_config.network_settings.prioritize_roblox_traffic
+                != current_config.network_settings.prioritize_roblox_traffic
+        {
+            let mut s = settings.lock();
+            s.config = applied_config.clone();
+            swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
+        }
+
+        Ok(BoostUpdateResult {
+            warnings,
+            applied_config,
+        })
+    })
+    .await
+    .map_err(|e| format!("Boost config sync task failed: {}", e))?
 }
 
 #[tauri::command]

@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { boostUpdateConfig, boostRestartRoblox, boostGetSystemMemory, boostCleanRam } = vi.hoisted(() => ({
+const { boostUpdateConfig, boostSyncEffectiveConfig, boostRestartRoblox, boostGetSystemMemory, boostCleanRam } = vi.hoisted(() => ({
   boostUpdateConfig: vi.fn(),
+  boostSyncEffectiveConfig: vi.fn(),
   boostRestartRoblox: vi.fn(),
   boostGetSystemMemory: vi.fn(),
   boostCleanRam: vi.fn(),
@@ -13,6 +14,7 @@ vi.mock("../lib/commands", () => ({
   boostGetSystemMemory,
   boostCleanRam,
   boostUpdateConfig,
+  boostSyncEffectiveConfig,
   boostRestartRoblox,
 }));
 
@@ -32,6 +34,7 @@ async function loadStore() {
 describe("stores/boostStore", () => {
   beforeEach(() => {
     boostUpdateConfig.mockReset();
+    boostSyncEffectiveConfig.mockReset();
     boostRestartRoblox.mockReset();
     boostGetSystemMemory.mockReset();
     boostCleanRam.mockReset();
@@ -54,7 +57,9 @@ describe("stores/boostStore", () => {
     boostUpdateConfig.mockRejectedValue(new Error("boom"));
 
     const useBoostStore = await loadStore();
-    await useBoostStore.getState().updateConfig("{\"profile\":\"Balanced\"}");
+    await expect(
+      useBoostStore.getState().updateConfig("{\"profile\":\"Balanced\"}"),
+    ).rejects.toThrow("boom");
 
     expect(useBoostStore.getState().error).toBe("Error: boom");
     expect(notify).toHaveBeenCalledTimes(1);
@@ -62,6 +67,20 @@ describe("stores/boostStore", () => {
       "Boost config failed",
       "Could not save optimization profile.",
     );
+  });
+
+  it("syncs effective config without notifying when persisted toggles were stale", async () => {
+    const applied_config = { profile: "Balanced", network_settings: { disable_nagle: false } };
+    boostSyncEffectiveConfig.mockResolvedValue({
+      warnings: ["Network booster: Disable Nagle's algorithm was not active on Windows"],
+      applied_config,
+    });
+
+    const useBoostStore = await loadStore();
+    await expect(useBoostStore.getState().syncEffectiveConfig()).resolves.toBe(applied_config);
+
+    expect(useBoostStore.getState().error).toContain("Disable Nagle");
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it("cleans RAM and updates state without notifications on success", async () => {

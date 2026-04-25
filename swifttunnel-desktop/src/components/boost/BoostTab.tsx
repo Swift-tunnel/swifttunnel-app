@@ -56,6 +56,7 @@ export function BoostTab() {
     "idle" | "restarting" | "error"
   >("idle");
   const [restartAdminError, setRestartAdminError] = useState<string | null>(null);
+  const [networkApplying, setNetworkApplying] = useState(false);
 
   const savedConfig = settings.config;
   const [draft, setDraft] = useState<Config>(savedConfig);
@@ -70,6 +71,21 @@ export function BoostTab() {
   useEffect(() => {
     setDraftGPP(savedGPP);
   }, [savedGPP]);
+
+  useEffect(() => {
+    let canceled = false;
+    void boost.syncEffectiveConfig().then((appliedConfig) => {
+      if (canceled || !appliedConfig) return;
+      if (!configsEqual(appliedConfig, useSettingsStore.getState().settings.config)) {
+        updateSettings({ config: appliedConfig });
+        void useSettingsStore.getState().save();
+      }
+      setDraft(appliedConfig);
+    });
+    return () => {
+      canceled = true;
+    };
+  }, [boost.syncEffectiveConfig, updateSettings]);
 
   const hasConfigChanges = !configsEqual(draft, savedConfig);
   const hasGPPChanges = JSON.stringify(draftGPP) !== JSON.stringify(savedGPP);
@@ -109,14 +125,16 @@ export function BoostTab() {
 
   const applyChanges = useCallback(async () => {
     if (windowValidationError) return;
+    let appliedConfig = draft;
+    if (hasConfigChanges) {
+      appliedConfig = await boost.updateConfig(JSON.stringify(draft));
+    }
     updateSettings({
-      config: draft,
+      config: appliedConfig,
       game_process_performance: draftGPP,
     });
+    setDraft(appliedConfig);
     saveSettings();
-    if (hasConfigChanges) {
-      await boost.updateConfig(JSON.stringify(draft));
-    }
     const currentError = useBoostStore.getState().error;
     if (currentError) {
       addToast({ type: "warning", message: "Boost applied with warnings" });
@@ -150,14 +168,16 @@ export function BoostTab() {
     if (windowValidationError) return;
     setIsRestarting(true);
     try {
+      let appliedConfig = draft;
+      if (hasConfigChanges) {
+        appliedConfig = await boost.updateConfig(JSON.stringify(draft));
+      }
       updateSettings({
-        config: draft,
+        config: appliedConfig,
         game_process_performance: draftGPP,
       });
+      setDraft(appliedConfig);
       saveSettings();
-      if (hasConfigChanges) {
-        await boost.updateConfig(JSON.stringify(draft));
-      }
       await boost.restartRoblox();
     } finally {
       setIsRestarting(false);
@@ -189,13 +209,35 @@ export function BoostTab() {
     }));
   }
 
-  function updateNetOpt(p: Partial<NetworkConfig>) {
-    setDraft((prev) => ({
-      ...prev,
-      profile: "Custom",
-      network_settings: { ...prev.network_settings, ...p },
-    }));
-  }
+  const applyNetworkOpt = useCallback(
+    async (p: Partial<NetworkConfig>) => {
+      const nextDraft = {
+        ...draft,
+        profile: "Custom" as const,
+        network_settings: { ...draft.network_settings, ...p },
+      };
+      setNetworkApplying(true);
+      try {
+        const appliedConfig = await boost.updateConfig(JSON.stringify(nextDraft));
+        updateSettings({
+          config: appliedConfig,
+          game_process_performance: draftGPP,
+        });
+        setDraft(appliedConfig);
+        saveSettings();
+
+        const currentError = useBoostStore.getState().error;
+        if (currentError) {
+          addToast({ type: "warning", message: "Network boost could not fully apply" });
+        } else {
+          addToast({ type: "success", message: "Network boost updated" });
+        }
+      } finally {
+        setNetworkApplying(false);
+      }
+    },
+    [addToast, boost, draft, draftGPP, saveSettings, updateSettings],
+  );
 
   function updateRblxOpt(p: Partial<RobloxSettingsConfig>) {
     setDraft((prev) => ({
@@ -387,21 +429,24 @@ export function BoostTab() {
             desc="Faster packet delivery (-5-15ms)"
             tooltip="Nagle batches small packets to reduce overhead. Disabling sends immediately — better for real-time games."
             enabled={draft.network_settings.disable_nagle}
-            onChange={(v) => updateNetOpt({ disable_nagle: v })}
+            onChange={(v) => void applyNetworkOpt({ disable_nagle: v })}
+            disabled={networkApplying}
           />
           <SettingRow
             title="Disable Network Throttling"
             desc="Full bandwidth while gaming"
             tooltip="Windows throttles network I/O when multimedia is playing. Disabling prevents sudden bandwidth drops."
             enabled={draft.network_settings.disable_network_throttling}
-            onChange={(v) => updateNetOpt({ disable_network_throttling: v })}
+            onChange={(v) => void applyNetworkOpt({ disable_network_throttling: v })}
+            disabled={networkApplying}
           />
           <SettingRow
             title="Gaming QoS"
             desc="Prioritize game UDP (-5-20ms)"
             tooltip="QoS marks game UDP packets as high priority so routers handle them before downloads / streaming."
             enabled={draft.network_settings.gaming_qos}
-            onChange={(v) => updateNetOpt({ gaming_qos: v })}
+            onChange={(v) => void applyNetworkOpt({ gaming_qos: v })}
+            disabled={networkApplying}
           />
         </Section>
       </div>
@@ -528,12 +573,14 @@ function SettingRow({
   tooltip,
   enabled,
   onChange,
+  disabled,
 }: {
   title: string;
   desc: string;
   tooltip?: string;
   enabled: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <Row
@@ -549,7 +596,7 @@ function SettingRow({
         )
       }
     >
-      <Toggle enabled={enabled} onChange={onChange} />
+      <Toggle enabled={enabled} onChange={onChange} disabled={disabled} />
     </Row>
   );
 }

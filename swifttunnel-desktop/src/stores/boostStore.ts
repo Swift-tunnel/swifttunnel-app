@@ -4,6 +4,7 @@ import type {
   RamCleanProgressEvent,
   RamCleanResultResponse,
   SystemMemorySnapshot,
+  Config,
 } from "../lib/types";
 import {
   boostGetMetrics,
@@ -11,6 +12,7 @@ import {
   boostCleanRam,
   boostGetSystemInfo,
   boostUpdateConfig,
+  boostSyncEffectiveConfig,
   boostRestartRoblox,
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
@@ -47,7 +49,8 @@ interface BoostStore {
   fetchMetrics: () => Promise<void>;
   fetchSystemMemory: () => Promise<void>;
   fetchSystemInfo: () => Promise<void>;
-  updateConfig: (configJson: string) => Promise<void>;
+  updateConfig: (configJson: string) => Promise<Config>;
+  syncEffectiveConfig: () => Promise<Config | null>;
   restartRoblox: () => Promise<void>;
   cleanRam: () => Promise<void>;
   clearError: () => void;
@@ -133,10 +136,28 @@ export const useBoostStore = create<BoostStore>((set) => ({
           "Some optimizations could not be applied.",
         );
       }
+      return result.applied_config ?? JSON.parse(configJson);
     } catch (e) {
       const message = String(e);
       set({ error: message });
       await notify("Boost config failed", "Could not save optimization profile.");
+      throw e;
+    }
+  },
+
+  syncEffectiveConfig: async () => {
+    try {
+      set({ error: null });
+      const result = await boostSyncEffectiveConfig();
+      if (result.warnings.length > 0) {
+        set({ error: result.warnings.join("; ") });
+      }
+      return result.applied_config;
+    } catch (error) {
+      reportError("Failed to sync boost config state", error, {
+        dedupeKey: "boost-sync-effective-config",
+      });
+      return null;
     }
   },
 

@@ -192,6 +192,7 @@ export interface RamCleanResultResponse {
 
 export interface BoostUpdateResult {
   warnings: string[];
+  applied_config: Config;
 }
 
 export type OptimizationProfile = "LowEnd" | "Balanced" | "HighEnd" | "Custom";
@@ -238,6 +239,7 @@ export interface NetworkConfig {
   disable_nagle: boolean;
   disable_network_throttling: boolean;
   gaming_qos: boolean;
+  firewall_fix: boolean;
 }
 
 export interface Config {
