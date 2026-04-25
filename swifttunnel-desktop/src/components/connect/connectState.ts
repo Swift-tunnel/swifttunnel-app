@@ -1,13 +1,5 @@
 import type { DriverCheckResponse } from "../../lib/types";
 
-export type GameId = "roblox" | "valorant" | "fortnite";
-
-export const GAMES: { id: GameId; name: string; brandColor: string }[] = [
-  { id: "roblox", name: "Roblox", brandColor: "#e2231a" },
-  { id: "valorant", name: "Valorant", brandColor: "#ff4655" },
-  { id: "fortnite", name: "Fortnite", brandColor: "#8b5cf6" },
-];
-
 export function stateLabel(state: string): string {
   switch (state) {
     case "disconnected":

@@ -103,7 +103,7 @@ Every affordance currently in the UI. The rebuild must preserve every capability
 - Tunneled processes chips (live list from `tunneledProcesses`).
 
 **Target games**
-- Select game presets from `GAMES` list (currently: Roblox, Valorant, Fortnite — extensible).
+- Connect uses the Roblox preset directly; there is no game selection UX.
 - Multi-select toggles; selection drives which processes get tunneled.
 - Shows count `N / total`.
 

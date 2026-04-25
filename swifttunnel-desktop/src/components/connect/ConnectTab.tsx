@@ -11,11 +11,9 @@ import {
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import {
-  GAMES,
   isConnectActionBusy,
   resolveConnectStatus,
   stateLabel,
-  type GameId,
 } from "./connectState";
 import { LiveGraph, type DataSample } from "./LiveGraph";
 import { Button, EmptyState, Tooltip, InfoIcon } from "../ui";
@@ -181,13 +179,6 @@ export function ConnectTab() {
     return () => clearInterval(id);
   }, [connectedAt]);
 
-  function togglePreset(id: GameId) {
-    const cur = settings.selected_game_presets;
-    const next = cur.includes(id) ? cur.filter((p) => p !== id) : [...cur, id];
-    update({ selected_game_presets: next });
-    saveDebounced();
-  }
-
   function selectRegion(regionId: string) {
     update({ selected_region: regionId, auto_routing_enabled: false });
     saveDebounced();
@@ -253,7 +244,7 @@ export function ConnectTab() {
     }
     if (!isIdle || !canConnect || isConnectBusy) return;
     await flushSettingsSave();
-    void connect(settings.selected_region, settings.selected_game_presets);
+    void connect(settings.selected_region, ["roblox"]);
   }
 
   const heroLabel = isConnected
@@ -441,78 +432,6 @@ export function ConnectTab() {
           )}
         </motion.section>
       )}
-
-      {/* ── Targets ── */}
-      <section>
-        <div className="mb-3 flex items-baseline justify-between">
-          <div className="flex items-baseline gap-2">
-            <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
-              Targets
-            </h3>
-            <span className="font-mono text-[10.5px] text-text-dimmed">
-              {settings.selected_game_presets.length}/{GAMES.length}
-            </span>
-          </div>
-          <span className="text-[10.5px] text-text-muted">
-            Games that route through the tunnel
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {GAMES.map((game) => {
-            const sel = settings.selected_game_presets.includes(game.id);
-            return (
-              <button
-                key={game.id}
-                onClick={() => togglePreset(game.id)}
-                className="group flex items-center gap-2 rounded-[999px] px-3 py-1.5 transition-colors"
-                style={{
-                  backgroundColor: sel
-                    ? "var(--color-accent-primary-soft-12)"
-                    : "transparent",
-                  border: `1px solid ${sel ? "#ffffff" : "var(--color-border-default)"}`,
-                }}
-                onMouseEnter={(e) => {
-                  if (!sel)
-                    e.currentTarget.style.borderColor =
-                      "var(--color-border-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!sel)
-                    e.currentTarget.style.borderColor =
-                      "var(--color-border-default)";
-                }}
-              >
-                <GameLogo id={game.id} active={sel} />
-                <span
-                  className="text-[12.5px] font-medium"
-                  style={{
-                    color: sel
-                      ? "var(--color-text-primary)"
-                      : "var(--color-text-secondary)",
-                    letterSpacing: "-0.005em",
-                  }}
-                >
-                  {game.name}
-                </span>
-                {sel && (
-                  <svg
-                    width="11"
-                    height="11"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="#ffffff"
-                    strokeWidth="2.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </section>
 
       {/* ── Regions ── */}
       <section>
@@ -713,30 +632,6 @@ function ConnectStatusBanner({
         </Button>
       )}
     </div>
-  );
-}
-
-function GameLogo({ id, active }: { id: GameId; active: boolean }) {
-  const color = active ? "var(--color-text-primary)" : "var(--color-text-muted)";
-
-  return (
-    <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-      {id === "roblox" && (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill={color}>
-          <path d="M4.6 3.5 L20.5 7.7 L16.3 23.6 L0.4 19.4 Z M10.8 11.5 L9.7 15.7 L13.8 16.8 L14.9 12.7 Z" />
-        </svg>
-      )}
-      {id === "valorant" && (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill={color}>
-          <path d="M2 3 L7.2 3 L14 18.5 L11.6 21.5 Z M22 3 L16.8 3 L12 13.5 L14 18 Z" />
-        </svg>
-      )}
-      {id === "fortnite" && (
-        <svg width="12" height="12" viewBox="0 0 24 24" fill={color}>
-          <path d="M7 2.5 L18 2.5 L18 6.5 L11 6.5 L11 10 L16.5 10 L16 14 L11 14 L11 21 L8 22 L8 13 L6 13 L6.5 10 L8 10 L8 6.5 L7 6.5 Z" />
-        </svg>
-      )}
-    </span>
   );
 }
 
