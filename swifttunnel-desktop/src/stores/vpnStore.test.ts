@@ -205,6 +205,49 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().bindingPreflight?.status).toBe("ambiguous");
   });
 
+  it("repairs driver bindings once when preflight cannot see WinpkFilter adapters", async () => {
+    systemCheckDriver.mockResolvedValueOnce(driverStatus());
+    vpnPreflightBinding
+      .mockResolvedValueOnce({
+        status: "unrecoverable",
+        reason:
+          "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.",
+        network_signature: "source=internet_fallback;if_index=8;next_hop=1;up=",
+        route_resolution_source: "internet_fallback",
+        route_resolution_target_ip: "128.116.1.1",
+        resolved_if_index: 8,
+        recommended_guid: null,
+        cached_override_used: false,
+        binding_stage: "unrecoverable",
+        candidates: [],
+      })
+      .mockResolvedValueOnce({
+        status: "ok",
+        reason: "Split tunnel adapter binding validated.",
+        network_signature:
+          "source=internet_fallback;if_index=8;next_hop=1;up=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        route_resolution_source: "internet_fallback",
+        route_resolution_target_ip: "128.116.1.1",
+        resolved_if_index: 8,
+        recommended_guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        cached_override_used: false,
+        binding_stage: "exact_route_match",
+        candidates: [],
+      });
+    systemRepairDriver.mockResolvedValueOnce(driverStatus());
+    vpnConnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnPreflightBinding).toHaveBeenCalledTimes(2);
+    expect(vpnConnect).toHaveBeenCalledWith("singapore", ["roblox"]);
+    expect(useVpnStore.getState().bindingPreflight).toBeNull();
+    expect(useVpnStore.getState().state).toBe("connected");
+  });
+
   it("ignores stale disconnected events while a connect attempt is pending", async () => {
     const useVpnStore = await loadStore();
     useVpnStore.setState({

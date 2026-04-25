@@ -253,6 +253,7 @@ enum BindingStage {
     WanFallback,
     BridgeSibling,
     RouteOwnerFallback,
+    SingleCandidateFallback,
     SmartAuto,
     Unrecoverable,
 }
@@ -266,6 +267,7 @@ impl BindingStage {
             Self::WanFallback => "wan_fallback",
             Self::BridgeSibling => "bridge_sibling",
             Self::RouteOwnerFallback => "route_owner_fallback",
+            Self::SingleCandidateFallback => "single_candidate_fallback",
             Self::SmartAuto => "smart_auto",
             Self::Unrecoverable => "unrecoverable",
         }
@@ -2097,6 +2099,24 @@ impl ParallelInterceptor {
         Some(best)
     }
 
+    fn select_single_viable_candidate<'a>(
+        candidates: &'a [PhysicalCandidate],
+    ) -> Option<&'a PhysicalCandidate> {
+        let viable: Vec<&PhysicalCandidate> = candidates
+            .iter()
+            .filter(|candidate| candidate.is_up != Some(false))
+            .filter(|candidate| candidate.kind != "loopback")
+            .filter(|candidate| candidate.kind != "tunnel")
+            .filter(|candidate| !Self::is_wan_like_friendly_name(&candidate.friendly_name))
+            .collect();
+
+        if viable.len() == 1 {
+            return viable.into_iter().next();
+        }
+
+        None
+    }
+
     fn to_binding_candidate_info(
         candidate: &PhysicalCandidate,
         default_route_if_index: Option<u32>,
@@ -2324,6 +2344,7 @@ impl ParallelInterceptor {
 
         let mut vpn_adapter: Option<(usize, String)> = None;
         let mut physical_candidates: Vec<PhysicalCandidate> = Vec::new();
+        let mut unknown_physical_candidates: Vec<PhysicalCandidate> = Vec::new();
 
         for (idx, adapter) in adapters.iter().enumerate() {
             let internal_name = adapter.get_name();
@@ -2500,10 +2521,33 @@ impl ParallelInterceptor {
                         score: 0,
                         is_up,
                     });
+                } else if internal_guid_lc.is_some() {
+                    log::info!(
+                        "    -> Deferred as unknown NDIS candidate (friendly name unavailable)"
+                    );
+                    unknown_physical_candidates.push(PhysicalCandidate {
+                        idx,
+                        guid: internal_guid_lc.unwrap_or_default(),
+                        friendly_name: friendly_name.clone(),
+                        description: resolved_description.clone(),
+                        kind: resolved_kind.clone(),
+                        internal_name: internal_name.to_string(),
+                        if_index: adapter_if_index,
+                        score: -500 + (10 - idx.min(10)) as i32,
+                        is_up,
+                    });
                 } else {
                     log::info!("    -> Skipped (unknown adapter, no friendly name)");
                 }
             }
+        }
+
+        if physical_candidates.is_empty() && !unknown_physical_candidates.is_empty() {
+            log::warn!(
+                "No named WinpkFilter adapter candidates were available; falling back to {} unknown NDIS candidate(s)",
+                unknown_physical_candidates.len()
+            );
+            physical_candidates = unknown_physical_candidates;
         }
 
         let binding_preference = self.binding_preference.clone();
@@ -2561,6 +2605,12 @@ impl ParallelInterceptor {
         } else {
             false
         };
+        let used_single_candidate_fallback = if selected.is_none() && strict_default_route {
+            selected = Self::select_single_viable_candidate(&physical_candidates);
+            selected.is_some()
+        } else {
+            false
+        };
 
         self.manual_binding_active = used_preferred_physical_adapter
             && binding_preference
@@ -2579,6 +2629,8 @@ impl ParallelInterceptor {
             BindingStage::BridgeSibling
         } else if used_route_owner_fallback {
             BindingStage::RouteOwnerFallback
+        } else if used_single_candidate_fallback {
+            BindingStage::SingleCandidateFallback
         } else if used_wan_only_fallback {
             BindingStage::WanFallback
         } else if selected.is_some() {
@@ -2595,6 +2647,19 @@ impl ParallelInterceptor {
                     "'{}' if_index={:?} up={:?} score={}",
                     c.friendly_name, c.if_index, c.is_up, c.score
                 ));
+            }
+
+            if physical_candidates.is_empty() {
+                self.binding_stage = BindingStage::Unrecoverable.as_str().to_string();
+                self.binding_reason =
+                    "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.".to_string();
+                self.last_validation_result = "winpkfilter_binding_missing".to_string();
+                self.binding_candidates.clear();
+                self.recommended_adapter_guid = None;
+
+                return Err(VpnError::SplitTunnel(format!(
+                    "No WinpkFilter-bound NDIS adapters were visible for default-route interface index {def}."
+                )));
             }
 
             self.binding_stage = if route_owner_bridge_like {
@@ -2659,6 +2724,9 @@ impl ParallelInterceptor {
                 BindingStage::RouteOwnerFallback => {
                     "Connected using the adapter whose name matches the Windows default-route owner when the interface index did not map back into NDIS.".to_string()
                 }
+                BindingStage::SingleCandidateFallback => {
+                    "Connected using the only viable WinpkFilter adapter because the Windows default-route interface index did not map back into NDIS.".to_string()
+                }
                 BindingStage::WanFallback => {
                     "Connected using WAN fallback because the active route resolves through WAN pseudo-adapters.".to_string()
                 }
@@ -2678,6 +2746,8 @@ impl ParallelInterceptor {
                         BindingStage::WanFallback
                     } else if route_owner_bridge_like {
                         BindingStage::BridgeSibling
+                    } else if used_single_candidate_fallback {
+                        BindingStage::SingleCandidateFallback
                     } else {
                         BindingStage::SmartAuto
                     };
@@ -2720,6 +2790,12 @@ impl ParallelInterceptor {
                 } else if used_wan_only_fallback {
                     log::warn!(
                         "Selected adapter '{}' via WAN-only fallback (default-route IfIndex {:?} not directly visible in NDIS).",
+                        friendly_name,
+                        default_route_if_index
+                    );
+                } else if used_single_candidate_fallback {
+                    log::warn!(
+                        "Selected adapter '{}' as the only viable WinpkFilter candidate (default-route IfIndex {:?} not directly visible in NDIS).",
                         friendly_name,
                         default_route_if_index
                     );
@@ -7886,6 +7962,71 @@ mod tests {
             selected.is_none(),
             "ambiguous owner-name matches must not auto-select"
         );
+    }
+
+    #[test]
+    fn test_select_single_viable_candidate_selects_only_safe_candidate() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                guid: "wifi-guid".to_string(),
+                friendly_name: "Wi-Fi".to_string(),
+                description: "Intel Wi-Fi".to_string(),
+                kind: "wifi".to_string(),
+                internal_name: "wifi".to_string(),
+                if_index: None,
+                score: 90,
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                guid: "wan-guid".to_string(),
+                friendly_name: "WAN Network Interface (IP)".to_string(),
+                description: "WAN Network Interface (IP)".to_string(),
+                kind: "ppp".to_string(),
+                internal_name: "wan".to_string(),
+                if_index: Some(20),
+                score: -100,
+                is_up: Some(true),
+            },
+        ];
+
+        let selected = ParallelInterceptor::select_single_viable_candidate(&candidates);
+
+        assert_eq!(
+            selected.map(|candidate| candidate.guid.as_str()),
+            Some("wifi-guid")
+        );
+    }
+
+    #[test]
+    fn test_select_single_viable_candidate_rejects_multiple_safe_candidates() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                guid: "wifi-guid".to_string(),
+                friendly_name: "Wi-Fi".to_string(),
+                description: "Intel Wi-Fi".to_string(),
+                kind: "wifi".to_string(),
+                internal_name: "wifi".to_string(),
+                if_index: None,
+                score: 90,
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                guid: "eth-guid".to_string(),
+                friendly_name: "Ethernet".to_string(),
+                description: "Realtek Ethernet".to_string(),
+                kind: "ethernet".to_string(),
+                internal_name: "eth".to_string(),
+                if_index: None,
+                score: 100,
+                is_up: Some(true),
+            },
+        ];
+
+        assert!(ParallelInterceptor::select_single_viable_candidate(&candidates).is_none());
     }
 
     #[test]

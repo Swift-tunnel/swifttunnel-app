@@ -49,6 +49,15 @@ function driverStatusMessage(status: DriverCheckResponse): string {
   return status.message || "Split tunnel driver is not ready.";
 }
 
+function isRepairableBindingPreflight(preflight: BindingPreflightInfo): boolean {
+  const haystack = `${preflight.reason}\n${preflight.binding_stage ?? ""}`.toLowerCase();
+  return (
+    preflight.status === "unrecoverable" &&
+    (haystack.includes("winpkfilter-bound network adapters") ||
+      haystack.includes("repair the split tunnel driver"))
+  );
+}
+
 interface VpnStore {
   state: VpnState;
   region: string | null;
@@ -282,7 +291,17 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverSetupState: "idle",
         driverSetupError: null,
       });
-      const preflight = await vpnPreflightBinding(region, gamePresets);
+      let preflight = await vpnPreflightBinding(region, gamePresets);
+      if (isRepairableBindingPreflight(preflight)) {
+        await get().repairDriver();
+        set({
+          state: "fetching_config",
+          error: null,
+          driverSetupState: "idle",
+          driverSetupError: null,
+        });
+        preflight = await vpnPreflightBinding(region, gamePresets);
+      }
       if (preflight.status === "ambiguous") {
         set({
           state: "disconnected",

@@ -109,6 +109,7 @@ export function NetworkTab() {
     : completedCount > 0
       ? `/ 3`
       : null;
+  const stabilityPingSamples = net.stabilityResult?.ping_samples ?? [];
 
   return (
     <div className="flex w-full flex-col gap-5 pb-4">
@@ -270,8 +271,8 @@ export function NetworkTab() {
                   {net.stabilityResult.packet_loss.toFixed(1)}%
                 </span>
               </div>
-              {net.stabilityResult.ping_samples.length > 0 && (
-                <PingTimeline samples={net.stabilityResult.ping_samples} />
+              {stabilityPingSamples.length > 0 && (
+                <PingTimeline samples={stabilityPingSamples} />
               )}
             </ResultReveal>
           )

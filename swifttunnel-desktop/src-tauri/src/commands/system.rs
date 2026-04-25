@@ -528,6 +528,184 @@ fn build_launch_msi_uninstall_after_exit_script(current_pid: u32) -> String {
     )
 }
 
+#[cfg(windows)]
+fn install_winpkfilter_driver_from_msi(
+    app: &tauri::AppHandle,
+    resource_dir: Option<&Path>,
+    exe_dir: Option<&Path>,
+    program_files_dir: &Path,
+    force: bool,
+) -> Result<(), String> {
+    // `force = true` comes from recovery flows that need to re-run install
+    // even if the NDISRD handle opens. A stale/corrupt driver can pass the
+    // open-handle check but fail the stronger health check.
+    if !force && swifttunnel_core::vpn::SplitTunnelDriver::health_check().ready {
+        return Ok(());
+    }
+
+    let msi_path = resolve_winpkfilter_msi(app, resource_dir, exe_dir, program_files_dir)?;
+    let msi_string = msi_path.to_string_lossy().to_string();
+    let first_log_path = default_driver_install_log_path();
+    let first_log_string = first_log_path.to_string_lossy().to_string();
+    let retry_log_path = first_log_path.with_extension("retry.log");
+    let retry_log_string = retry_log_path.to_string_lossy().to_string();
+
+    // ── Phase A: pre-flight (broken-install detection) ──
+    // If the WinpkFilter driver package is registered in the driver store
+    // but the driver isn't available at runtime, the MSI is very likely
+    // to return 1603 trying to "repair" the stale state. Clean it up
+    // first so the MSI install starts from a known-empty state.
+    if let Some(published) = detect_broken_install() {
+        log::warn!(
+            "Detected broken WinpkFilter install ({}); cleaning up before retry",
+            published
+        );
+        if let Err(e) = swifttunnel_core::vpn::SplitTunnelDriver::remove_driver_for_uninstall() {
+            log::warn!("Pre-install cleanup failed (continuing anyway): {}", e);
+        }
+    }
+
+    let run_install = |passive: bool, log_string: &str| -> Result<(i32, String), String> {
+        if swifttunnel_core::is_administrator() {
+            let ui_flag = if passive { "/passive" } else { "/qn" };
+            let output = swifttunnel_core::hidden_command("msiexec")
+                .args(["/i", &msi_string, ui_flag, "/norestart", "/L*V", log_string])
+                .output()
+                .map_err(|e| format!("Failed to run msiexec: {}", e))?;
+            Ok((
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        } else {
+            let script = build_elevated_msiexec_script(&msi_string, log_string, passive);
+
+            let output = swifttunnel_core::hidden_command("powershell")
+                .args(["-NoProfile", "-Command", &script])
+                .output()
+                .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
+
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok((
+                output.status.code().unwrap_or(-1),
+                if !stderr.is_empty() { stderr } else { stdout },
+            ))
+        }
+    };
+
+    let (mut exit_code, mut output_error) = run_install(true, &first_log_string)?;
+    let mut retry_attempted = false;
+
+    // Some systems return 1639 with /passive. Retry once with /qn.
+    if exit_code == 1639 {
+        retry_attempted = true;
+        log::warn!("WinpkFilter install returned 1639 with /passive; retrying with /qn");
+        let (retry_code, retry_error) = run_install(false, &retry_log_string)?;
+        exit_code = retry_code;
+        output_error = retry_error;
+    }
+
+    // ── Phase C: handle MSI result ──
+    if !driver_install_success_exit_code(exit_code) {
+        if should_try_inf_fallback(exit_code, &output_error) {
+            log::warn!(
+                "MSI install returned recoverable code {}; attempting INF fallback via pnputil",
+                exit_code
+            );
+            let extract_dir = unique_extract_dir();
+            let extract_log = extract_dir.join("extract.log");
+            match try_inf_fallback(&msi_path, &extract_dir, &extract_log) {
+                Ok(()) => {
+                    log::info!("INF fallback succeeded; proceeding to service repair");
+                    // Best-effort cleanup of the extract dir on success.
+                    let _ = fs::remove_dir_all(&extract_dir);
+                    // Fall through to Phase D.
+                }
+                Err(fallback_err) => {
+                    // Preserve extract dir for support triage.
+                    log::error!(
+                        "INF fallback failed; extract dir preserved at {}",
+                        extract_dir.display()
+                    );
+                    let mut message = format!(
+                        "Driver install failed (msiexec code {}). INF fallback also failed: {}. Installer log: {}. Extract dir: {}",
+                        exit_code,
+                        fallback_err,
+                        first_log_string,
+                        extract_dir.display()
+                    );
+                    if retry_attempted {
+                        message.push_str(". Retry log: ");
+                        message.push_str(&retry_log_string);
+                    }
+                    return Err(message);
+                }
+            }
+        } else {
+            let mut message = if is_probable_uac_cancel_message(&output_error) {
+                "Driver installation was canceled at the UAC/installer prompt.".to_string()
+            } else {
+                driver_install_failure_message(exit_code)
+            };
+            if !output_error.is_empty() {
+                message.push_str(": ");
+                message.push_str(&output_error);
+            }
+            message.push_str(". Installer log: ");
+            message.push_str(&first_log_string);
+            if retry_attempted {
+                message.push_str(". Retry log: ");
+                message.push_str(&retry_log_string);
+            }
+            return Err(message);
+        }
+    }
+
+    // ── Phase D: post-install verification + self-test ──
+    // The service-repair step only confirms \\.\NDISRD opens. That's
+    // a weak proxy: leftover WinpkFilter installs from other VPN
+    // products (pre-3.6.2) pass the handle-open check and then
+    // fail the reader bind at runtime. self_test runs the next
+    // IOCTL (adapter enumeration) and checks the version floor so
+    // a bad install surfaces here rather than during the user's
+    // first Connect.
+    //
+    // Error strings intentionally begin with phrases the UI's
+    // `isRebootRequired` / `isDriverMissing` helpers substring-match
+    // so the right CTA renders without needing a structured error
+    // enum passed through Tauri serialization.
+    match swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
+        Duration::from_secs(20),
+    ) {
+        Ok(()) => {
+            if let Err(self_test_err) = swifttunnel_core::vpn::SplitTunnelDriver::self_test() {
+                log::warn!(
+                    "Driver service came up but post-install self-test failed: {}",
+                    self_test_err
+                );
+                if matches!(exit_code, 1641 | 3010) {
+                    return Err(format!(
+                        "Reboot required to finish driver installation. Windows signaled exit {} and the post-install self-test failed ({}). Please reboot and try again.",
+                        exit_code, self_test_err
+                    ));
+                }
+                return Err(self_test_err);
+            }
+            let _ = fs::remove_file(&first_log_path);
+            let _ = fs::remove_file(&retry_log_path);
+            Ok(())
+        }
+        Err(e) if matches!(exit_code, 1641 | 3010) => Err(format!(
+            "Reboot required to finish driver installation. Windows signaled exit {} and the driver did not come up within the service-repair window ({}). Please reboot and try again.",
+            exit_code, e
+        )),
+        Err(e) => Err(format!(
+            "Driver installation completed, but the driver is still not available after service repair attempts. {}",
+            e
+        )),
+    }
+}
+
 #[derive(Serialize)]
 pub struct AdminCheckResponse {
     pub is_admin: bool,
@@ -638,14 +816,7 @@ pub async fn system_install_driver(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        // `force = true` comes from recovery flows that need to re-run install
-        // even if the NDISRD handle opens. A stale/corrupt driver can pass the
-        // open-handle check but fail the stronger health check.
         let force = force.unwrap_or(false);
-        if !force && swifttunnel_core::vpn::SplitTunnelDriver::health_check().ready {
-            return Ok(());
-        }
-
         let resource_dir = app.path().resource_dir().ok();
         let exe_dir = std::env::current_exe()
             .ok()
@@ -654,191 +825,13 @@ pub async fn system_install_driver(
             std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
         );
         tauri::async_runtime::spawn_blocking(move || {
-            let msi_path = resolve_winpkfilter_msi(
+            install_winpkfilter_driver_from_msi(
                 &app,
                 resource_dir.as_deref(),
                 exe_dir.as_deref(),
                 &program_files_dir,
-            )?;
-            let msi_string = msi_path.to_string_lossy().to_string();
-            let first_log_path = default_driver_install_log_path();
-            let first_log_string = first_log_path.to_string_lossy().to_string();
-            let retry_log_path = first_log_path.with_extension("retry.log");
-            let retry_log_string = retry_log_path.to_string_lossy().to_string();
-
-            // ── Phase A: pre-flight (broken-install detection) ──
-            // If the WinpkFilter driver package is registered in the driver store
-            // but the driver isn't available at runtime, the MSI is very likely
-            // to return 1603 trying to "repair" the stale state. Clean it up
-            // first so the MSI install starts from a known-empty state.
-            if let Some(published) = detect_broken_install() {
-                log::warn!(
-                    "Detected broken WinpkFilter install ({}); cleaning up before retry",
-                    published
-                );
-                if let Err(e) =
-                    swifttunnel_core::vpn::SplitTunnelDriver::remove_driver_for_uninstall()
-                {
-                    log::warn!("Pre-install cleanup failed (continuing anyway): {}", e);
-                }
-            }
-
-            let run_install =
-                |passive: bool, log_string: &str| -> Result<(i32, String), String> {
-                    if swifttunnel_core::is_administrator() {
-                        let ui_flag = if passive { "/passive" } else { "/qn" };
-                        let output = swifttunnel_core::hidden_command("msiexec")
-                            .args([
-                                "/i",
-                                &msi_string,
-                                ui_flag,
-                                "/norestart",
-                                "/L*V",
-                                log_string,
-                            ])
-                            .output()
-                            .map_err(|e| format!("Failed to run msiexec: {}", e))?;
-                        Ok((
-                            output.status.code().unwrap_or(-1),
-                            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                        ))
-                    } else {
-                        let script =
-                            build_elevated_msiexec_script(&msi_string, log_string, passive);
-
-                        let output = swifttunnel_core::hidden_command("powershell")
-                            .args(["-NoProfile", "-Command", &script])
-                            .output()
-                            .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
-
-                        let stderr =
-                            String::from_utf8_lossy(&output.stderr).trim().to_string();
-                        let stdout =
-                            String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        Ok((
-                            output.status.code().unwrap_or(-1),
-                            if !stderr.is_empty() { stderr } else { stdout },
-                        ))
-                    }
-                };
-
-            let (mut exit_code, mut output_error) = run_install(true, &first_log_string)?;
-            let mut retry_attempted = false;
-
-            // Some systems return 1639 with /passive. Retry once with /qn.
-            if exit_code == 1639 {
-                retry_attempted = true;
-                log::warn!(
-                    "WinpkFilter install returned 1639 with /passive; retrying with /qn"
-                );
-                let (retry_code, retry_error) = run_install(false, &retry_log_string)?;
-                exit_code = retry_code;
-                output_error = retry_error;
-            }
-
-            // ── Phase C: handle MSI result ──
-            if !driver_install_success_exit_code(exit_code) {
-                if should_try_inf_fallback(exit_code, &output_error) {
-                    log::warn!(
-                        "MSI install returned recoverable code {}; attempting INF fallback via pnputil",
-                        exit_code
-                    );
-                    let extract_dir = unique_extract_dir();
-                    let extract_log = extract_dir.join("extract.log");
-                    match try_inf_fallback(&msi_path, &extract_dir, &extract_log) {
-                        Ok(()) => {
-                            log::info!(
-                                "INF fallback succeeded; proceeding to service repair"
-                            );
-                            // Best-effort cleanup of the extract dir on success.
-                            let _ = fs::remove_dir_all(&extract_dir);
-                            // Fall through to Phase D.
-                        }
-                        Err(fallback_err) => {
-                            // Preserve extract dir for support triage.
-                            log::error!(
-                                "INF fallback failed; extract dir preserved at {}",
-                                extract_dir.display()
-                            );
-                            let mut message = format!(
-                                "Driver install failed (msiexec code {}). INF fallback also failed: {}. Installer log: {}. Extract dir: {}",
-                                exit_code,
-                                fallback_err,
-                                first_log_string,
-                                extract_dir.display()
-                            );
-                            if retry_attempted {
-                                message.push_str(". Retry log: ");
-                                message.push_str(&retry_log_string);
-                            }
-                            return Err(message);
-                        }
-                    }
-                } else {
-                    let mut message = if is_probable_uac_cancel_message(&output_error) {
-                        "Driver installation was canceled at the UAC/installer prompt.".to_string()
-                    } else {
-                        driver_install_failure_message(exit_code)
-                    };
-                    if !output_error.is_empty() {
-                        message.push_str(": ");
-                        message.push_str(&output_error);
-                    }
-                    message.push_str(". Installer log: ");
-                    message.push_str(&first_log_string);
-                    if retry_attempted {
-                        message.push_str(". Retry log: ");
-                        message.push_str(&retry_log_string);
-                    }
-                    return Err(message);
-                }
-            }
-
-            // ── Phase D: post-install verification + self-test ──
-            // The service-repair step only confirms \\.\NDISRD opens. That's
-            // a weak proxy: leftover WinpkFilter installs from other VPN
-            // products (pre-3.6.2) pass the handle-open check and then
-            // fail the reader bind at runtime. self_test runs the next
-            // IOCTL (adapter enumeration) and checks the version floor so
-            // a bad install surfaces here rather than during the user's
-            // first Connect.
-            //
-            // Error strings intentionally begin with phrases the UI's
-            // `isRebootRequired` / `isDriverMissing` helpers substring-match
-            // so the right CTA renders without needing a structured error
-            // enum passed through Tauri serialization.
-            match swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
-                Duration::from_secs(20),
-            ) {
-                Ok(()) => {
-                    if let Err(self_test_err) =
-                        swifttunnel_core::vpn::SplitTunnelDriver::self_test()
-                    {
-                        log::warn!(
-                            "Driver service came up but post-install self-test failed: {}",
-                            self_test_err
-                        );
-                        if matches!(exit_code, 1641 | 3010) {
-                            return Err(format!(
-                                "Reboot required to finish driver installation. Windows signaled exit {} and the post-install self-test failed ({}). Please reboot and try again.",
-                                exit_code, self_test_err
-                            ));
-                        }
-                        return Err(self_test_err);
-                    }
-                    let _ = fs::remove_file(&first_log_path);
-                    let _ = fs::remove_file(&retry_log_path);
-                    Ok(())
-                }
-                Err(e) if matches!(exit_code, 1641 | 3010) => Err(format!(
-                    "Reboot required to finish driver installation. Windows signaled exit {} and the driver did not come up within the service-repair window ({}). Please reboot and try again.",
-                    exit_code, e
-                )),
-                Err(e) => Err(format!(
-                    "Driver installation completed, but the driver is still not available after service repair attempts. {}",
-                    e
-                )),
-            }
+                force,
+            )
         })
         .await
         .map_err(|e| format!("Driver install task failed: {}", e))?
@@ -871,17 +864,11 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 return Ok(DriverCheckResponse::from_health(initial));
             }
 
-            if !swifttunnel_core::is_administrator() {
-                return Ok(DriverCheckResponse::repair_failure(
-                    initial,
-                    "Administrator privileges required to repair the split tunnel driver. Please relaunch SwiftTunnel as Administrator.".to_string(),
-                ));
-            }
-
+            let is_admin = swifttunnel_core::is_administrator();
             let mut current = initial.clone();
             let mut last_error: Option<String> = None;
 
-            if current.recommended_action == DriverRecommendedAction::ResetService {
+            if is_admin && current.recommended_action == DriverRecommendedAction::ResetService {
                 match swifttunnel_core::vpn::SplitTunnelDriver::restart_driver_service()
                     .and_then(|_| {
                         swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
@@ -901,6 +888,10 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                         current = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
                     }
                 }
+            } else if current.recommended_action == DriverRecommendedAction::ResetService {
+                log::info!(
+                    "Skipping in-process driver service reset because SwiftTunnel is not elevated; falling through to elevated MSI repair"
+                );
             }
 
             if current.reboot_required || current.recommended_action == DriverRecommendedAction::Reboot {
@@ -918,25 +909,52 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 last_error.is_some() && current.recommended_action == DriverRecommendedAction::ResetService;
             if matches!(
                 current.recommended_action,
-                DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall
+                DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
             ) || matches!(
                 initial.recommended_action,
-                DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall
+                DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
             ) || reset_failed
             {
                 let force_reinstall = matches!(
                     current.recommended_action,
-                    DriverRecommendedAction::Reinstall
+                    DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
                 ) || matches!(
                     initial.recommended_action,
-                    DriverRecommendedAction::Reinstall
+                    DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
                 ) || reset_failed;
 
-                match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
+                let mut repair_errors = Vec::new();
+
+                if is_admin {
+                    match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
+                        resource_dir.as_deref(),
+                        exe_dir.as_deref(),
+                        &program_files_dir,
+                        force_reinstall,
+                    ) {
+                        Ok(()) => {
+                            return Ok(DriverCheckResponse::from_health(
+                                swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
+                            ));
+                        }
+                        Err(e) => {
+                            log::warn!("Bundled driver package repair failed: {}", e);
+                            repair_errors.push(format!("bundled package repair failed: {}", e));
+                        }
+                    }
+                } else {
+                    repair_errors.push(
+                        "service reset requires elevation; trying elevated installer repair"
+                            .to_string(),
+                    );
+                }
+
+                match install_winpkfilter_driver_from_msi(
+                    &app,
                     resource_dir.as_deref(),
                     exe_dir.as_deref(),
                     &program_files_dir,
-                    force_reinstall,
+                    true,
                 ) {
                     Ok(()) => {
                         return Ok(DriverCheckResponse::from_health(
@@ -944,9 +962,13 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                         ));
                     }
                     Err(e) => {
-                        log::warn!("Bundled driver package repair failed: {}", e);
+                        log::warn!("MSI driver repair failed: {}", e);
+                        repair_errors.push(format!("MSI repair failed: {}", e));
                         let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
-                        return Ok(DriverCheckResponse::repair_failure(health, e));
+                        return Ok(DriverCheckResponse::repair_failure(
+                            health,
+                            repair_errors.join("\n"),
+                        ));
                     }
                 }
             }
