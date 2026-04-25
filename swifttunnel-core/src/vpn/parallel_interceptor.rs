@@ -638,6 +638,7 @@ static LEAKED_THREADS: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_BYPASS: AtomicU64 = AtomicU64::new(0);
+const V3_NO_INBOUND_WARNING_SECS: u64 = 10;
 
 /// Number of worker threads we had to detach via `mem::forget` because they
 /// did not stop within `THREAD_JOIN_TIMEOUT`.
@@ -6210,10 +6211,12 @@ fn should_route_to_vpn_with_inline_cache(
             c.set(n + 1);
             n
         });
-        // Log first 20 high-port UDP packets that were bypassed
+        // Log first 20 high-port UDP packets that were bypassed. Keep this at
+        // debug so relay-socket passthrough does not look like game/API leakage
+        // in normal user logs.
         if log_count < 20 {
-            log::info!(
-                "V2 BYPASS: {}:{}/{:?} -> {}:{} | tunnel_app={}, port_ok=true, ip_in_ranges={}",
+            log::debug!(
+                "Route diagnostic: bypassed non-tunneled high-port UDP {}:{}/{:?} -> {}:{} | tunnel_app={}, port_ok=true, ip_in_ranges={}",
                 src_ip,
                 src_port,
                 protocol,
@@ -6747,10 +6750,11 @@ fn run_v3_inbound_receiver(
     let mut last_packet_time: Option<std::time::Instant> = None;
     let mut last_health_check = std::time::Instant::now();
     let mut no_traffic_warning_logged = false;
+    let mut first_outbound_time: Option<std::time::Instant> = None;
 
     // Health check constants
     const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
-    const NO_TRAFFIC_WARNING_SECS: u64 = 10;
+    const NO_TRAFFIC_WARNING_SECS: u64 = V3_NO_INBOUND_WARNING_SECS;
 
     // Keepalive interval for relay - must match udp_relay::KEEPALIVE_INTERVAL (15s)
     // 20s was too long and could cause NAT timeout on strict networks (Error 277)
@@ -6772,16 +6776,32 @@ fn run_v3_inbound_receiver(
             last_health_check = now;
             let uptime_secs = now.duration_since(start_time).as_secs();
 
-            // Check for "no traffic ever received" condition
-            if packets_received == 0
-                && uptime_secs >= NO_TRAFFIC_WARNING_SECS
-                && !no_traffic_warning_logged
-            {
+            let tx_bytes = throughput.bytes_tx.load(Ordering::Relaxed);
+            if packets_received == 0 && tx_bytes > 0 && first_outbound_time.is_none() {
+                first_outbound_time = Some(now);
+            }
+            let outbound_wait_secs =
+                first_outbound_time.map(|first| now.duration_since(first).as_secs());
+
+            // Check for "outbound relay traffic sent but no inbound response" condition.
+            // Pure idle startup is common while Roblox is not yet sending game packets,
+            // so do not emit the scary relay warning until we have actually tried to
+            // tunnel traffic and waited for return packets.
+            if should_log_no_inbound_warning(
+                packets_received,
+                outbound_wait_secs,
+                no_traffic_warning_logged,
+            ) {
                 no_traffic_warning_logged = true;
                 log::error!("========================================");
                 log::error!("V3 WARNING: NO INBOUND TRAFFIC DETECTED!");
                 log::error!("========================================");
                 log::error!("  Uptime: {}s", uptime_secs);
+                log::error!(
+                    "  Outbound wait: {}s",
+                    outbound_wait_secs.unwrap_or_default()
+                );
+                log::error!("  Outbound bytes: {}", tx_bytes);
                 log::error!("  Packets received: 0");
                 log::error!("");
                 log::error!("This may indicate:");
@@ -6919,13 +6939,34 @@ fn run_v3_inbound_receiver(
         throughput.bytes_rx.load(Ordering::Relaxed)
     );
 
-    if packets_received == 0 && total_uptime > NO_TRAFFIC_WARNING_SECS {
+    let total_tx_bytes = throughput.bytes_tx.load(Ordering::Relaxed);
+    let final_outbound_wait_secs = first_outbound_time.map(|first| first.elapsed().as_secs());
+    if total_tx_bytes > 0
+        && should_log_no_inbound_warning(packets_received, final_outbound_wait_secs, false)
+    {
         log::error!("========================================");
         log::error!("CRITICAL: V3 session ended with ZERO inbound traffic!");
+        log::error!(
+            "Outbound wait: {}s",
+            final_outbound_wait_secs.unwrap_or_default()
+        );
+        log::error!("Outbound bytes sent: {}", total_tx_bytes);
         log::error!("Relay server may not be running.");
         log::error!("========================================");
     }
     log::info!("========================================");
+}
+
+fn should_log_no_inbound_warning(
+    packets_received: u64,
+    outbound_wait_secs: Option<u64>,
+    already_logged: bool,
+) -> bool {
+    packets_received == 0
+        && !already_logged
+        && outbound_wait_secs
+            .map(|secs| secs >= V3_NO_INBOUND_WARNING_SECS)
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -9084,6 +9125,31 @@ mod tests {
         assert!(interceptor.api_tunneling_enabled.load(Ordering::Relaxed));
         interceptor.set_api_tunneling_enabled(false);
         assert!(!interceptor.api_tunneling_enabled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_no_inbound_warning_waits_for_outbound_grace_period() {
+        assert!(!should_log_no_inbound_warning(0, None, false));
+        assert!(!should_log_no_inbound_warning(
+            0,
+            Some(V3_NO_INBOUND_WARNING_SECS - 1),
+            false
+        ));
+        assert!(should_log_no_inbound_warning(
+            0,
+            Some(V3_NO_INBOUND_WARNING_SECS),
+            false
+        ));
+        assert!(!should_log_no_inbound_warning(
+            1,
+            Some(V3_NO_INBOUND_WARNING_SECS),
+            false
+        ));
+        assert!(!should_log_no_inbound_warning(
+            0,
+            Some(V3_NO_INBOUND_WARNING_SECS),
+            true
+        ));
     }
 
     #[test]
