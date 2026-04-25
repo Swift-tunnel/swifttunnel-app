@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 // ============================================================================
 // GAME SERVER IP RANGES (for V2 hybrid routing)
@@ -490,6 +491,8 @@ pub struct LockFreeProcessCache {
     explicit_tunnel_udp_ports: Mutex<AHashSet<u16>>,
     /// TCP ports explicitly registered as tunnel-owned (API tunneling).
     explicit_tunnel_tcp_ports: Mutex<AHashSet<u16>>,
+    /// Last time each API-tunnel TCP port was observed in the owner table.
+    explicit_tunnel_tcp_port_last_seen: Mutex<AHashMap<u16, Instant>>,
 }
 
 impl LockFreeProcessCache {
@@ -546,6 +549,7 @@ impl LockFreeProcessCache {
             snapshot_write_lock: Mutex::new(()),
             explicit_tunnel_udp_ports: Mutex::new(AHashSet::new()),
             explicit_tunnel_tcp_ports: Mutex::new(AHashSet::new()),
+            explicit_tunnel_tcp_port_last_seen: Mutex::new(AHashMap::new()),
         }
     }
 
@@ -606,6 +610,34 @@ impl LockFreeProcessCache {
     ) {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
         let explicit_tunnel_tcp_ports = self.replace_explicit_tcp_ports_locked(tcp_ports);
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
+        let new_snapshot = self.snapshot_from_parts(
+            connections,
+            pid_names,
+            version,
+            explicit_tunnel_udp_ports,
+            explicit_tunnel_tcp_ports,
+        );
+
+        self.current.store(new_snapshot);
+    }
+
+    /// Update snapshot while retaining recently observed API TCP source ports.
+    ///
+    /// Roblox teleport/API TCP connections can be short-lived enough to appear
+    /// in one owner-table sample and disappear in the next. Keeping a small
+    /// grace set prevents one missed sample from breaking the rest of the flow.
+    pub fn update_with_recent_tcp_ports(
+        &self,
+        connections: AHashMap<ConnectionKey, u32>,
+        pid_names: AHashMap<u32, String>,
+        tcp_ports: &[u16],
+        retain_for: Duration,
+    ) {
+        let _snapshot_write_guard = self.snapshot_write_lock.lock();
+        let explicit_tunnel_tcp_ports =
+            self.retain_recent_explicit_tcp_ports_locked(tcp_ports, retain_for);
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
         let new_snapshot = self.snapshot_from_parts(
@@ -754,20 +786,15 @@ impl LockFreeProcessCache {
     /// stale connection-table lookups.
     pub fn register_tcp_ports(&self, ports: &[u16]) {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
-        let explicit_tunnel_tcp_ports = {
-            let mut guard = self.explicit_tunnel_tcp_ports.lock();
-            let new_set: AHashSet<u16> = ports.iter().copied().collect();
-            if *guard == new_set {
-                return;
-            }
-
-            log::info!(
-                "Updated TCP ports for API tunneling: {} port(s)",
-                new_set.len()
-            );
-            *guard = new_set;
-            guard.clone()
+        let new_set: AHashSet<u16> = ports.iter().copied().collect();
+        let unchanged = {
+            let guard = self.explicit_tunnel_tcp_ports.lock();
+            *guard == new_set
         };
+        if unchanged {
+            return;
+        }
+        let explicit_tunnel_tcp_ports = self.replace_explicit_tcp_ports_locked(ports);
 
         // Rebuild snapshot immediately so packet workers can use the new port
         // ownership map without waiting for the next cache refresh cycle.
@@ -785,8 +812,37 @@ impl LockFreeProcessCache {
     }
 
     fn replace_explicit_tcp_ports_locked(&self, ports: &[u16]) -> AHashSet<u16> {
-        let mut guard = self.explicit_tunnel_tcp_ports.lock();
         let new_set: AHashSet<u16> = ports.iter().copied().collect();
+        let now = Instant::now();
+        {
+            let mut last_seen = self.explicit_tunnel_tcp_port_last_seen.lock();
+            last_seen.clear();
+            last_seen.extend(new_set.iter().map(|port| (*port, now)));
+        }
+
+        self.store_explicit_tcp_ports_locked(new_set)
+    }
+
+    fn retain_recent_explicit_tcp_ports_locked(
+        &self,
+        ports: &[u16],
+        retain_for: Duration,
+    ) -> AHashSet<u16> {
+        let now = Instant::now();
+        let new_set = {
+            let mut last_seen = self.explicit_tunnel_tcp_port_last_seen.lock();
+            for port in ports {
+                last_seen.insert(*port, now);
+            }
+            last_seen.retain(|_, seen_at| now.duration_since(*seen_at) <= retain_for);
+            last_seen.keys().copied().collect()
+        };
+
+        self.store_explicit_tcp_ports_locked(new_set)
+    }
+
+    fn store_explicit_tcp_ports_locked(&self, new_set: AHashSet<u16>) -> AHashSet<u16> {
+        let mut guard = self.explicit_tunnel_tcp_ports.lock();
         if *guard != new_set {
             log::info!(
                 "Updated TCP ports for API tunneling: {} port(s)",
@@ -1327,5 +1383,47 @@ mod tests {
         assert!(snap.should_tunnel(Ipv4Addr::new(10, 0, 0, 20), 53000, Protocol::Tcp));
         assert!(snap.should_tunnel_by_port_fallback(443, Protocol::Tcp, true));
         assert!(snap.should_tunnel_by_port_fallback(53000, Protocol::Tcp, true));
+    }
+
+    #[test]
+    fn test_update_with_recent_tcp_ports_retains_then_expires() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+
+        cache.update_with_recent_tcp_ports(
+            HashMap::new(),
+            HashMap::new(),
+            &[53000],
+            Duration::from_secs(30),
+        );
+        assert!(
+            cache
+                .get_snapshot()
+                .should_tunnel_by_port_fallback(53000, Protocol::Tcp, true)
+        );
+
+        cache.update_with_recent_tcp_ports(
+            HashMap::new(),
+            HashMap::new(),
+            &[],
+            Duration::from_secs(30),
+        );
+        assert!(
+            cache
+                .get_snapshot()
+                .should_tunnel_by_port_fallback(53000, Protocol::Tcp, true)
+        );
+
+        std::thread::sleep(Duration::from_millis(2));
+        cache.update_with_recent_tcp_ports(
+            HashMap::new(),
+            HashMap::new(),
+            &[],
+            Duration::from_millis(1),
+        );
+        assert!(
+            !cache
+                .get_snapshot()
+                .should_tunnel_by_port_fallback(53000, Protocol::Tcp, true)
+        );
     }
 }

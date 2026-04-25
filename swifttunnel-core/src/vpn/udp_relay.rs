@@ -719,6 +719,12 @@ impl UdpRelay {
         mtu.saturating_sub(overhead)
     }
 
+    /// Current maximum inner IP packet length that can be encapsulated without
+    /// exceeding the relay path MTU.
+    pub fn max_inner_packet_len(&self) -> usize {
+        self.max_inner_packet_len_for_addr(**self.relay_addr.load())
+    }
+
     #[cfg(windows)]
     pub fn relay_path_mtu_refresh_due(&self) -> bool {
         let now = now_mono_ms();

@@ -95,6 +95,15 @@ const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
     Duration::from_secs(2),
 ];
 
+/// TCP owner-table refresh cadence while API tunneling is active and a tunnel
+/// process is present. Teleport/API HTTPS flows can be brief, so the normal
+/// 2s fallback misses too many source ports.
+const API_TUNNEL_TCP_FAST_REFRESH_MS: u64 = 100;
+
+/// Keep recently observed Roblox-owned TCP source ports briefly so one missed
+/// owner-table sample does not immediately declassify an active API flow.
+const API_TUNNEL_TCP_PORT_RETENTION_SECS: u64 = 10;
+
 /// Decision returned by the rebind state machine for each read outcome.
 ///
 /// Extracted from the reader loop so the branching (increment / reset /
@@ -4309,6 +4318,7 @@ fn forward_tunneled_packet_from_reader(
             let mut fix_buf = buf.borrow_mut();
             let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
+            clamp_tcp_mss_for_relay(&mut fix_buf[..pkt_len], relay.max_inner_packet_len());
             fix_packet_checksums(&mut fix_buf[..pkt_len]);
             relay.forward_outbound_fast(&fix_buf[..pkt_len])
         })
@@ -5121,6 +5131,10 @@ fn run_packet_worker(
                             let mut fix_buf = buf.borrow_mut();
                             let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
                             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
+                            clamp_tcp_mss_for_relay(
+                                &mut fix_buf[..pkt_len],
+                                relay.max_inner_packet_len(),
+                            );
                             fix_packet_checksums(&mut fix_buf[..pkt_len]);
                             relay.forward_outbound(&fix_buf[..pkt_len])
                         })
@@ -5292,8 +5306,9 @@ fn collect_tunnel_tcp_ports_for_api_tunneling(
 ///
 /// OPTIMIZATION: Event-driven refresh instead of polling
 /// - Sleeps for 2 seconds normally (was 20ms = 50x reduction)
+/// - Uses a short cadence while API tunneling is active and a tunnel process is present
 /// - Wakes immediately when ETW detects game process (via refresh_now flag)
-/// - Full process scan only every 10th iteration (was every iteration)
+/// - Full process scan is time-based instead of iteration-based
 fn run_cache_refresher(
     cache: Arc<LockFreeProcessCache>,
     stop_flag: Arc<AtomicBool>,
@@ -5305,7 +5320,10 @@ fn run_cache_refresher(
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     use windows::Win32::NetworkManagement::IpHelper::*;
 
-    log::info!("Cache refresher started (event-driven + 2s fallback, ExitLag-style efficiency)");
+    log::info!(
+        "Cache refresher started (event-driven, 2s fallback, {}ms API TCP fast path)",
+        API_TUNNEL_TCP_FAST_REFRESH_MS
+    );
 
     // Log tunnel apps at startup
     let tunnel_apps = cache.tunnel_apps();
@@ -5322,6 +5340,7 @@ fn run_cache_refresher(
     let mut system = System::new();
     let mut refresh_count = 0u64;
     let mut first_run = true;
+    let mut last_full_process_scan: Option<Instant> = None;
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
@@ -5336,9 +5355,22 @@ fn run_cache_refresher(
             // EVENT-DRIVEN REFRESH: Block on Condvar until ETW signals or 2s timeout
             // Zero CPU when idle, instant wakeup when game launches
             let tunnel_apps = cache.tunnel_apps();
+            let api_tunneling_active = api_tunneling_enabled.load(Ordering::Relaxed);
+            let has_tunnel_process = if api_tunneling_active {
+                !cache.get_snapshot().tunnel_pids.is_empty()
+            } else {
+                false
+            };
             let wait_timeout = if tunnel_apps.is_empty() {
                 // No apps to tunnel - sleep longer (5s) since nothing to track
                 Duration::from_secs(5)
+            } else if api_tunneling_active && has_tunnel_process {
+                Duration::from_millis(API_TUNNEL_TCP_FAST_REFRESH_MS)
+            } else if api_tunneling_active {
+                // API tunneling is enabled but the current snapshot has not
+                // seen a tunnel PID yet. Poll a little faster so pre-existing
+                // Roblox launches are discovered without waiting for ETW.
+                Duration::from_millis(500)
             } else {
                 // Normal: 2 second fallback
                 Duration::from_secs(2)
@@ -5465,17 +5497,28 @@ fn run_cache_refresher(
             }
         }
 
-        // OPTIMIZATION: Only do expensive full process scan every 10th iteration (~20 seconds)
-        // - refresh_count starts at 0, so first iteration gets a full scan (0 % 10 == 0)
-        // - ETW handles instant detection of new game launches
-        // - Full scan is just a fallback for edge cases (process started before VPN connected)
-        let do_full_process_scan = refresh_count % 10 == 0;
+        // OPTIMIZATION: Keep full process scans time-based so the API TCP fast
+        // cadence does not turn them into once-per-second whole-system scans.
+        // ETW handles new game launches; this remains a fallback for processes
+        // started before VPN connected and for PID/name cache repair.
+        let api_tunneling_active = api_tunneling_enabled.load(Ordering::Relaxed);
+        let has_tunnel_process = !cache.get_snapshot().tunnel_pids.is_empty();
+        let full_process_scan_interval = if api_tunneling_active && has_tunnel_process {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(20)
+        };
+        let do_full_process_scan = last_full_process_scan
+            .map(|last_scan| last_scan.elapsed() >= full_process_scan_interval)
+            .unwrap_or(true);
 
         let tunnel_apps = cache.tunnel_apps();
         let mut tunnel_pids_found: Vec<(u32, String)> = Vec::new();
 
         if do_full_process_scan {
-            // Full process scan - expensive but only ~every 20 seconds.
+            last_full_process_scan = Some(Instant::now());
+
+            // Full process scan - expensive, so it runs on a wall-clock interval.
             // `UpdateKind::Always` so sysinfo overwrites the cached exe name
             // when a PID has been reused by a different process since the last
             // refresh (C7); `OnlyIfNotSet` would leave the stale tunnel-app
@@ -5516,10 +5559,9 @@ fn run_cache_refresher(
         } else {
             // Fast path: only look up PIDs from the connection table. Refresh
             // sysinfo for exactly those PIDs so a reused PID from a decomissioned
-            // tunnel app can't keep its stale name in sysinfo's cache (C7). The
-            // full scan runs every 10th cycle anyway; this narrow refresh costs
-            // one OpenProcess per connection PID rather than a full process
-            // enumeration.
+            // tunnel app can't keep its stale name in sysinfo's cache (C7).
+            // This narrow refresh costs one OpenProcess per connection PID
+            // rather than a full process enumeration.
             let pids_to_refresh: Vec<sysinfo::Pid> = {
                 let mut seen: ahash::AHashSet<u32> =
                     ahash::AHashSet::with_capacity(connections.len());
@@ -5572,7 +5614,12 @@ fn run_cache_refresher(
         if api_tunneling_enabled.load(Ordering::Relaxed) {
             let explicit_tcp_ports =
                 collect_tunnel_tcp_ports_for_api_tunneling(&connections, &pid_names, tunnel_apps);
-            cache.update_with_tcp_ports(connections, pid_names, &explicit_tcp_ports);
+            cache.update_with_recent_tcp_ports(
+                connections,
+                pid_names,
+                &explicit_tcp_ports,
+                Duration::from_secs(API_TUNNEL_TCP_PORT_RETENTION_SECS),
+            );
         } else {
             cache.update_with_tcp_ports(connections, pid_names, &[]);
         }
@@ -5948,6 +5995,7 @@ fn should_route_to_vpn_with_inline_cache(
         static SNAPSHOT_MISSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static INLINE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static PORT_FALLBACK_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static TCP_API_SPECULATIVE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static SPECULATIVE_MISSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static FRAGMENT_CACHE_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static FRAGMENT_BYPASS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -6106,36 +6154,61 @@ fn should_route_to_vpn_with_inline_cache(
         // couldn't identify the source process. This catches first packets sent
         // before the UDP table is populated (0.5-2ms race window).
         //
-        // This is intentionally UDP-only. TCP "API tunneling" must remain scoped
-        // to Roblox-owned connections; speculating TCP by destination IP would
-        // route browser / launcher Roblox web traffic through the relay too.
-        let is_game_dst = protocol == Protocol::Udp
+        // TCP speculation is allowed only when API tunneling is enabled and a
+        // tunnel process is already known. This catches first SYNs for Roblox
+        // API/teleport flows before the owner table publishes the source port,
+        // without enabling broad browser-only Roblox traffic tunneling.
+        let can_speculate_tcp_api =
+            protocol == Protocol::Tcp && api_tunneling && !snapshot.tunnel_pids.is_empty();
+        let is_game_dst = (protocol == Protocol::Udp || can_speculate_tcp_api)
             && super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
         if is_game_dst {
             // Log speculative tunneling for debugging (first 20 times only)
             thread_local! {
                 static SPECULATIVE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+                static TCP_API_SPECULATIVE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
             }
-            let spec_count = SPECULATIVE_COUNT.with(|c| {
-                let n = c.get();
-                c.set(n + 1);
-                n
-            });
-            if spec_count < 20 {
-                log::info!(
-                    "SPECULATIVE TUNNEL: {}:{} -> {}:{} (PID unknown, but destination is game server)",
-                    src_ip,
-                    src_port,
-                    dst_ip,
-                    dst_port
-                );
+            if protocol == Protocol::Tcp {
+                TCP_API_SPECULATIVE_HITS.with(|c| c.set(c.get() + 1));
+                let spec_count = TCP_API_SPECULATIVE_COUNT.with(|c| {
+                    let n = c.get();
+                    c.set(n + 1);
+                    n
+                });
+                if spec_count < 20 {
+                    log::info!(
+                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (Roblox process active, source port not sampled yet)",
+                        src_ip,
+                        src_port,
+                        dst_ip,
+                        dst_port
+                    );
+                }
+            } else {
+                let spec_count = SPECULATIVE_COUNT.with(|c| {
+                    let n = c.get();
+                    c.set(n + 1);
+                    n
+                });
+                if spec_count < 20 {
+                    log::info!(
+                        "SPECULATIVE TUNNEL: {}:{} -> {}:{} (PID unknown, but destination is game server)",
+                        src_ip,
+                        src_port,
+                        dst_ip,
+                        dst_port
+                    );
+                }
             }
 
             // Cache speculative hit so subsequent packets from this source port
             // use the fast inline cache path. Critical for V3 mode where
             // inline_connection_lookup is disabled (stability fix v1.0.8).
             // Without this, every V3 packet re-does the speculative IP range check.
-            if inline_cache.len() < 10000 {
+            //
+            // TCP speculative hits are not cached by source port only because a
+            // later unrelated TCP connection could reuse that local port.
+            if protocol == Protocol::Udp && inline_cache.len() < 10000 {
                 inline_cache.insert(cache_key, true);
             }
 
@@ -6168,16 +6241,18 @@ fn should_route_to_vpn_with_inline_cache(
             let snapshot_m = SNAPSHOT_MISSES.with(|c| c.get());
             let inline_h = INLINE_HITS.with(|c| c.get());
             let port_fb = PORT_FALLBACK_HITS.with(|c| c.get());
+            let tcp_api_spec = TCP_API_SPECULATIVE_HITS.with(|c| c.get());
             let spec_miss = SPECULATIVE_MISSES.with(|c| c.get());
             let frag_hits = FRAGMENT_CACHE_HITS.with(|c| c.get());
             let frag_bypass = FRAGMENT_BYPASS.with(|c| c.get());
             log::info!(
-                "Cache stats: total={} snapshot_hits={} snapshot_miss={} inline_hits={} port_fallback={} speculative_miss={} fragment_hits={} fragment_bypass={} | snapshot_apps={} connections={}",
+                "Cache stats: total={} snapshot_hits={} snapshot_miss={} inline_hits={} port_fallback={} tcp_api_speculative={} speculative_miss={} fragment_hits={} fragment_bypass={} | snapshot_apps={} connections={}",
                 total,
                 snapshot_h,
                 snapshot_m,
                 inline_h,
                 port_fb,
+                tcp_api_spec,
                 spec_miss,
                 frag_hits,
                 frag_bypass,
@@ -6609,6 +6684,79 @@ fn ipv4_is_fragment(packet: &[u8]) -> bool {
     }
     let fragment_bits = u16::from_be_bytes([packet[6], packet[7]]);
     (fragment_bits & 0x2000) != 0 || (fragment_bits & 0x1FFF) != 0
+}
+
+/// Clamp outbound TCP SYN MSS so tunneled TCP does not create inner packets
+/// larger than the UDP relay can encapsulate without fragmentation.
+fn clamp_tcp_mss_for_relay(packet: &mut [u8], max_inner_packet_len: usize) -> bool {
+    const TCP_FLAG_SYN: u8 = 0x02;
+    const TCP_OPTION_EOL: u8 = 0;
+    const TCP_OPTION_NOP: u8 = 1;
+    const TCP_OPTION_MSS: u8 = 2;
+    const TCP_OPTION_MSS_LEN: usize = 4;
+    const MAX_IPV4_TCP_HEADER_WITH_OPTIONS: usize = 60;
+
+    if packet.len() < 20 || (packet[0] >> 4) != 4 {
+        return false;
+    }
+
+    let ihl = ((packet[0] & 0x0F) as usize) * 4;
+    let total_len = match ipv4_total_len(packet, ihl) {
+        Some(total_len) => total_len,
+        None => return false,
+    };
+    let packet = &mut packet[..total_len];
+
+    if ipv4_is_fragment(packet) || packet[9] != 6 || packet.len() < ihl + 20 {
+        return false;
+    }
+
+    let tcp_offset = ihl;
+    let tcp_header_len = ((packet[tcp_offset + 12] >> 4) as usize) * 4;
+    if tcp_header_len < 20 || packet.len() < tcp_offset + tcp_header_len {
+        return false;
+    }
+
+    if (packet[tcp_offset + 13] & TCP_FLAG_SYN) == 0 {
+        return false;
+    }
+
+    let max_mss = max_inner_packet_len.saturating_sub(MAX_IPV4_TCP_HEADER_WITH_OPTIONS);
+    if max_mss == 0 || max_mss > u16::MAX as usize {
+        return false;
+    }
+    let max_mss = max_mss as u16;
+
+    let options_end = tcp_offset + tcp_header_len;
+    let mut i = tcp_offset + 20;
+    while i < options_end {
+        match packet[i] {
+            TCP_OPTION_EOL => break,
+            TCP_OPTION_NOP => i += 1,
+            kind => {
+                if i + 1 >= options_end {
+                    break;
+                }
+                let option_len = packet[i + 1] as usize;
+                if option_len < 2 || i + option_len > options_end {
+                    break;
+                }
+
+                if kind == TCP_OPTION_MSS && option_len == TCP_OPTION_MSS_LEN {
+                    let current_mss = u16::from_be_bytes([packet[i + 2], packet[i + 3]]);
+                    if current_mss > max_mss {
+                        packet[i + 2..i + 4].copy_from_slice(&max_mss.to_be_bytes());
+                        return true;
+                    }
+                    return false;
+                }
+
+                i += option_len;
+            }
+        }
+    }
+
+    false
 }
 
 /// Fix checksums in an IP packet (modifies packet in place)
@@ -8409,6 +8557,32 @@ mod tests {
     }
 
     #[test]
+    fn test_clamp_tcp_mss_for_relay_reduces_syn_mss() {
+        let mut packet = vec![0u8; 44];
+        packet[0] = 0x45; // IPv4, 20-byte IP header
+        packet[2..4].copy_from_slice(&(44u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6; // TCP
+        packet[12..16].copy_from_slice(&Ipv4Addr::new(192, 168, 1, 10).octets());
+        packet[16..20].copy_from_slice(&Ipv4Addr::new(128, 116, 50, 100).octets());
+
+        let tcp = 20;
+        packet[tcp..tcp + 2].copy_from_slice(&53000u16.to_be_bytes());
+        packet[tcp + 2..tcp + 4].copy_from_slice(&443u16.to_be_bytes());
+        packet[tcp + 12] = 6u8 << 4; // 24-byte TCP header
+        packet[tcp + 13] = 0x02; // SYN
+        packet[tcp + 20] = 2; // MSS
+        packet[tcp + 21] = 4;
+        packet[tcp + 22..tcp + 24].copy_from_slice(&1460u16.to_be_bytes());
+
+        assert!(clamp_tcp_mss_for_relay(&mut packet, 1464));
+        assert_eq!(
+            u16::from_be_bytes([packet[tcp + 22], packet[tcp + 23]]),
+            1404
+        );
+    }
+
+    #[test]
     fn test_fix_packet_checksums_preserves_non_initial_fragment_payload() {
         let frame = build_ipv4_udp_fragment_frame(
             Ipv4Addr::new(192, 168, 1, 211),
@@ -9203,7 +9377,8 @@ mod tests {
     #[test]
     fn test_tcp_api_tunneling_does_not_speculate_without_process_match() {
         // TCP API tunneling must stay process-scoped. Roblox destination IPs
-        // alone are not enough to route arbitrary TCP through the relay.
+        // alone are not enough to route arbitrary TCP through the relay when
+        // no tunnel process is currently known.
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40001;
@@ -9236,6 +9411,42 @@ mod tests {
         // With api_tunneling: TCP still should NOT be tunneled without a Roblox process match
         inline_cache.clear();
         assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_speculates_when_tunnel_process_is_active() {
+        // First SYNs for Roblox API/teleport TCP flows can arrive before the
+        // Windows owner table publishes their source port. If a tunnel process
+        // is already active, allow destination-guarded TCP speculation.
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 40001;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(6, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
             &mut inline_cache,
