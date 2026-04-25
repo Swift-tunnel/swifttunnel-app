@@ -1094,7 +1094,13 @@ pub fn cleanup_all_system_state() -> Result<()> {
     crate::vpn::recover_tso_on_startup();
     crate::vpn::recover_ipv6_on_startup();
 
-    // 11. Remove the WinpkFilter driver package and NDISRD service during
+    // 11. Remove stale WFP block filters left by older non-dynamic sessions.
+    crate::vpn::wfp_block::cleanup_stale();
+
+    // 12. Reset any adapter left in WinpkFilter tunnel mode.
+    crate::vpn::SplitTunnelDriver::cleanup_stale_state();
+
+    // 13. Remove the WinpkFilter driver package and NDISRD service during
     // uninstall/explicit cleanup so the app does not leave kernel artifacts
     // behind. Best-effort: if this fails we log it and continue rather than
     // aborting the uninstall. Blocking uninstall entirely leaves the user
@@ -1105,10 +1111,10 @@ pub fn cleanup_all_system_state() -> Result<()> {
         warn!("Cleanup: driver removal failed (non-fatal): {}", e);
     }
 
-    // 12. Remove Roblox FFlag entries from ClientAppSettings.json
+    // 14. Remove Roblox FFlag entries from ClientAppSettings.json
     crate::roblox_optimizer::RobloxOptimizer::cleanup_for_uninstall();
 
-    // 13. Delete autostart Run key
+    // 15. Delete autostart Run key
     let _ = hidden_command("reg")
         .args([
             "delete",

@@ -9,7 +9,7 @@ mod window_restore;
 
 use std::sync::Arc;
 
-use log::info;
+use log::{info, warn};
 use state::AppState;
 use tauri::{Emitter, Manager};
 use window_restore::restore_main_window;
@@ -170,6 +170,40 @@ fn sync_runtime_assets(app: &tauri::App) {
 #[cfg(not(windows))]
 fn sync_runtime_assets(_app: &tauri::App) {}
 
+fn recover_stale_network_state() {
+    // Clean up any stale hosts-file entries from old proxy versions.
+    swifttunnel_core::roblox_proxy::hosts::recover_stale();
+    // Remove old WFP process-block filters from builds before dynamic WFP sessions.
+    swifttunnel_core::vpn::wfp_block::cleanup_stale();
+    // Reset any adapter left in WinpkFilter tunnel mode by a prior forced exit.
+    swifttunnel_core::vpn::SplitTunnelDriver::cleanup_stale_state();
+    // Recover adapter settings if the app crashed while connected.
+    swifttunnel_core::vpn::recover_tso_on_startup();
+    swifttunnel_core::vpn::recover_ipv6_on_startup();
+}
+
+fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+
+    let conn_state = state.vpn_state_handle.borrow().clone();
+    let has_split_tunnel_handle = state.split_tunnel_handle.read().is_some();
+    if matches!(
+        conn_state,
+        swifttunnel_core::vpn::ConnectionState::Disconnected
+    ) && !has_split_tunnel_handle
+    {
+        return;
+    }
+
+    info!("Disconnecting active VPN session before app exit");
+    let runtime = state.runtime.clone();
+    if let Err(e) = runtime.block_on(commands::vpn::disconnect_and_persist(&state)) {
+        warn!("Failed to disconnect VPN during app exit: {}", e);
+    }
+}
+
 pub fn run() {
     logging::init();
     let launched_from_startup = autostart::launched_from_startup_flag();
@@ -254,18 +288,13 @@ pub fn run() {
             let runtime =
                 Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
 
-            // Clean up any stale hosts-file entries from old proxy versions
-            swifttunnel_core::roblox_proxy::hosts::recover_stale();
+            recover_stale_network_state();
 
             let app_state = AppState::new(runtime.clone(), launched_from_startup)
                 .expect("Failed to initialize app state");
 
             // Recover network booster state from persisted snapshot (crash recovery)
             app_state.network_booster.lock().recover_from_snapshot();
-
-            // Recover TSO/IPv6 adapter settings if the app crashed while connected
-            swifttunnel_core::vpn::recover_tso_on_startup();
-            swifttunnel_core::vpn::recover_ipv6_on_startup();
 
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
             let vpn_state_rx = app_state.vpn_state_handle.clone();
@@ -351,8 +380,8 @@ pub fn run() {
                     }
                 }
                 tauri::RunEvent::Exit => {
-                    // Clean up any stale hosts-file entries from old proxy versions
-                    swifttunnel_core::roblox_proxy::hosts::recover_stale();
+                    disconnect_vpn_on_exit(_app);
+                    recover_stale_network_state();
                     // Restore network booster modifications (registry, MTU, firewall, QoS)
                     if let Some(state) = _app.try_state::<crate::state::AppState>() {
                         let roblox_pid = {

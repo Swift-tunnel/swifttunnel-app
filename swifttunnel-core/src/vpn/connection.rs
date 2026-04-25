@@ -2204,6 +2204,8 @@ impl Drop for VpnConnection {
                 let _ = guard.close();
             }
         }
+
+        super::wfp_block::cleanup();
     }
 }
 

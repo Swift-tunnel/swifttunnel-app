@@ -24,20 +24,18 @@ export function formatConnectedServerLabel(
   }
 
   const { host, port } = parseEndpoint(endpoint);
-  const target = host || endpoint;
-  const endpointLabel = `${target}${port !== null ? `:${port}` : ""}`;
 
   const exactMatch = servers.find(
     (server) => server.ip === host && (port === null || server.port === port),
   );
   if (exactMatch) {
-    return `${exactMatch.name} (${endpointLabel})`;
+    return exactMatch.name;
   }
 
   const ipMatch = servers.find((server) => server.ip === host);
   if (ipMatch) {
-    return `${ipMatch.name} (${endpointLabel})`;
+    return ipMatch.name;
   }
 
-  return endpointLabel;
+  return fallbackRegion ?? "Private relay";
 }

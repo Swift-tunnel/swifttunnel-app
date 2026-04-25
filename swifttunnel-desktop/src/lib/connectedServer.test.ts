@@ -24,14 +24,14 @@ const SERVERS: ServerInfo[] = [
 ];
 
 describe("formatConnectedServerLabel", () => {
-  it("shows matched server name with exact endpoint", () => {
+  it("shows matched server name without exposing endpoint", () => {
     const label = formatConnectedServerLabel("1.2.3.4:51821", SERVERS, "mumbai");
-    expect(label).toBe("mumbai-02 (1.2.3.4:51821)");
+    expect(label).toBe("mumbai-02");
   });
 
-  it("falls back to raw endpoint when server is unknown", () => {
+  it("falls back to region when server is unknown", () => {
     const label = formatConnectedServerLabel("9.9.9.9:51821", SERVERS, "mumbai");
-    expect(label).toBe("9.9.9.9:51821");
+    expect(label).toBe("mumbai");
   });
 
   it("falls back to region when endpoint is missing", () => {

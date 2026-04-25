@@ -1365,9 +1365,46 @@ impl SplitTunnelDriver {
     /// Cleanup stale state from previous sessions
     pub fn cleanup_stale_state() {
         log::info!("Cleaning up stale split tunnel state...");
-        // With ndisapi, there's no persistent state to clean up
-        // The driver handles cleanup automatically
-        log::info!("Stale state cleanup complete");
+
+        let driver = match ndisapi::Ndisapi::new("NDISRD") {
+            Ok(driver) => driver,
+            Err(e) => {
+                log::debug!(
+                    "Stale split tunnel cleanup skipped; NDISRD is not available: {}",
+                    e
+                );
+                return;
+            }
+        };
+
+        let adapters = match driver.get_tcpip_bound_adapters_info() {
+            Ok(adapters) => adapters,
+            Err(e) => {
+                log::warn!(
+                    "Stale split tunnel cleanup could not enumerate adapters: {}",
+                    e
+                );
+                return;
+            }
+        };
+
+        let mut reset_count = 0usize;
+        for adapter in adapters {
+            let handle = adapter.get_handle();
+            match driver.set_adapter_mode(handle, ndisapi::FilterFlags::default()) {
+                Ok(()) => reset_count += 1,
+                Err(e) => log::warn!(
+                    "Stale split tunnel cleanup could not reset adapter '{}': {}",
+                    adapter.get_name(),
+                    e
+                ),
+            }
+        }
+
+        log::info!(
+            "Stale split tunnel cleanup complete (reset {} adapter mode(s))",
+            reset_count
+        );
     }
 
     /// Stop and delete the NDISRD driver service from SCM for uninstall.
