@@ -3,72 +3,70 @@
 /* SwiftTunnel Design System v8 - Clean Dark Pro */
 
 @theme {
-  /* Backgrounds */
-  --color-bg-base: #0e0e12;
-  --color-bg-sidebar: #121217;
-  --color-bg-card: #18181e;
-  --color-bg-elevated: #202028;
-  --color-bg-hover: #282832;
-  --color-bg-active: #30303a;
-  --color-bg-input: #121216;
-  --color-bg-glass: #14141a;
+  /* Surfaces */
+  --color-bg-base: #000000;
+  --color-bg-sidebar: #050505;
+  --color-bg-card: #0a0a0a;
+  --color-bg-elevated: #141414;
+  --color-bg-hover: #1a1a1a;
+  --color-bg-active: #242424;
+  --color-bg-input: #0a0a0a;
+  --color-bg-glass: #0e0e0e;
 
-  /* Accents */
-  --color-accent-primary: #3c82f6;
-  --color-accent-secondary: #60a5ff;
-  --color-accent-cyan: #3898ff;
-  --color-accent-purple: #9664ff;
-  --color-accent-lime: #82dc3c;
-  --color-accent-primary-glow: #64a5ff;
-  --color-accent-primary-soft-8: rgba(60, 130, 246, 0.08);
-  --color-accent-primary-soft-10: rgba(60, 130, 246, 0.1);
-  --color-accent-primary-soft-12: rgba(60, 130, 246, 0.12);
-  --color-accent-primary-soft-15: rgba(60, 130, 246, 0.15);
-  --color-accent-primary-soft-20: rgba(60, 130, 246, 0.2);
-  --color-accent-lime-soft-10: rgba(130, 220, 60, 0.1);
+  /* Emphasis (replaces blue accent) */
+  --color-accent-primary: #ffffff;
+  --color-accent-secondary: #ffffff;
+  --color-accent-primary-glow: #ffffff;
+  --color-accent-primary-soft-8: rgba(255, 255, 255, 0.08);
+  --color-accent-primary-soft-10: rgba(255, 255, 255, 0.1);
+  --color-accent-primary-soft-12: rgba(255, 255, 255, 0.12);
+  --color-accent-primary-soft-15: rgba(255, 255, 255, 0.15);
+  --color-accent-primary-soft-20: rgba(255, 255, 255, 0.2);
 
-  /* Status */
-  --color-status-connected: #28d296;
-  --color-status-connected-glow: #64f0c8;
-  --color-status-warning: #f5b428;
-  --color-status-error: #f05a5a;
-  --color-status-inactive: #50505f;
-  --color-status-warning-soft-10: rgba(245, 180, 40, 0.1);
-  --color-status-error-soft-10: rgba(240, 90, 90, 0.1);
-  --color-status-error-soft-20: rgba(240, 90, 90, 0.2);
+  /* Status (preserved, one notch less saturated) */
+  --color-status-connected: #22c55e;
+  --color-status-connected-glow: #4ade80;
+  --color-status-warning: #eab308;
+  --color-status-error: #ef4444;
+  --color-status-inactive: #525252;
+  --color-status-warning-soft-10: rgba(234, 179, 8, 0.1);
+  --color-status-error-soft-10: rgba(239, 68, 68, 0.1);
+  --color-status-error-soft-20: rgba(239, 68, 68, 0.2);
 
   /* Text */
-  --color-text-primary: #ebebf0;
-  --color-text-secondary: #9b9baa;
-  --color-text-muted: #696978;
-  --color-text-dimmed: #464655;
+  --color-text-primary: #fafafa;
+  --color-text-secondary: #b4b4b4;
+  --color-text-muted: #8a8a8a;
+  --color-text-dimmed: #525252;
 
   /* Borders */
-  --color-border-default: #262630;
-  --color-border-subtle: #1c1c24;
-  --color-border-focus: #3c82f6;
-  --color-border-hover: #373744;
+  --color-border-default: #2a2a2a;
+  --color-border-subtle: #1f1f1f;
+  --color-border-focus: #ffffff;
+  --color-border-hover: #3a3a3a;
 
-  /* Latency */
-  --color-latency-excellent: #28d296;
-  --color-latency-good: #82dc3c;
-  --color-latency-fair: #f5b428;
-  --color-latency-poor: #f08c32;
-  --color-latency-bad: #f05a5a;
+  /* Latency (preserved, one notch less saturated) */
+  --color-latency-excellent: #22c55e;
+  --color-latency-good: #84cc16;
+  --color-latency-fair: #eab308;
+  --color-latency-poor: #f97316;
+  --color-latency-bad: #ef4444;
 
   /* Spacing */
-  --spacing-sidebar: 76px;
-  --spacing-content: 28px;
-  --spacing-card-gap: 14px;
+  --spacing-sidebar: 52px;
+  --spacing-sidebar-expanded: 200px;
+  --spacing-content: 20px;
+  --spacing-card-gap: 12px;
 
   /* Radius */
-  --radius-card: 10px;
-  --radius-button: 8px;
-  --radius-input: 8px;
-  --radius-sm: 6px;
+  --radius-card: 8px;
+  --radius-button: 6px;
+  --radius-input: 6px;
+  --radius-sm: 4px;
 }
 
-/* Boost slider */
+/* Range sliders */
+.ui-slider,
 .boost-slider {
   -webkit-appearance: none;
   appearance: none;
@@ -77,18 +75,29 @@
   outline: none;
   cursor: pointer;
 }
+.ui-slider::-webkit-slider-thumb,
 .boost-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: #fff;
   cursor: pointer;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
   transition: box-shadow 0.15s ease;
 }
+.ui-slider::-webkit-slider-thumb:hover,
 .boost-slider::-webkit-slider-thumb:hover {
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(60, 130, 246, 0.2);
+  box-shadow:
+    0 1px 4px rgba(0, 0, 0, 0.5),
+    0 0 0 3px rgba(255, 255, 255, 0.18);
+}
+.ui-slider:disabled,
+.boost-slider:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* Hide number input spinners */
@@ -105,8 +114,50 @@ body {
   background-color: var(--color-bg-base);
   color: var(--color-text-primary);
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: "Figtree", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  letter-spacing: -0.008em;
+  font-feature-settings: "ss01", "cv11";
+}
+
+/* Mono numerics everywhere — use `.mono` or a tailwind font-mono class */
+.mono,
+.font-mono {
+  font-family: "Azeret Mono", "Cascadia Code", "Consolas", ui-monospace, monospace;
+  font-feature-settings: "tnum", "ss01";
+  letter-spacing: -0.01em;
+}
+
+/* Utility: faint blueprint-style section divider */
+.hairline-divider {
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--color-border-subtle) 15%,
+    var(--color-border-subtle) 85%,
+    transparent
+  );
+}
+
+@keyframes pulse-opacity {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes sweep-shine {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
 }
 
 /* Scrollbar */

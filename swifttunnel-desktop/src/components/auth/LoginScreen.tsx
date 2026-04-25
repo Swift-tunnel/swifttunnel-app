@@ -1,24 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useAuthStore } from "../../stores/authStore";
+import { Button, Spinner } from "../ui";
+import swiftLogo from "../../assets/swift.png";
+
+declare const __APP_VERSION__: string;
 
 const OAUTH_TIMEOUT_MS = 120_000;
 
 const FEATURES = [
   {
     icon: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
-    title: "Split Tunneling",
-    desc: "Only game traffic is routed",
+    title: "Split tunneling",
+    desc: "Only game traffic routes through the relay",
   },
   {
     icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
-    title: "PC Optimization",
-    desc: "FPS unlock, RAM cleaner, QoS",
+    title: "Boost suite",
+    desc: "FPS unlock, RAM cleaner, gaming QoS",
   },
   {
     icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20",
-    title: "28 Servers, 12 Regions",
-    desc: "Low latency worldwide",
+    title: "Global relay",
+    desc: "28 servers across 12 regions",
   },
 ];
 
@@ -28,6 +32,10 @@ export function LoginScreen() {
   const startedAtRef = useRef<number | null>(null);
   const [elapsedSecs, setElapsedSecs] = useState(0);
   const isAwaiting = state === "awaiting_oauth";
+  const remaining = Math.max(
+    0,
+    Math.ceil(OAUTH_TIMEOUT_MS / 1000 - elapsedSecs),
+  );
 
   useEffect(() => {
     let polling = false;
@@ -76,82 +84,85 @@ export function LoginScreen() {
 
   return (
     <div
-      className="flex h-screen w-screen items-center justify-center bg-bg-base"
-      style={{
-        background:
-          "radial-gradient(ellipse at 50% 30%, rgba(60,130,246,0.06), var(--color-bg-base) 70%)",
-      }}
+      data-tauri-drag-region
+      className="flex h-screen w-screen items-center justify-center"
+      style={{ backgroundColor: "var(--color-bg-base)" }}
     >
-      <div className="flex w-full max-w-sm flex-col items-center gap-8 px-8">
+      <div className="flex w-full max-w-[360px] flex-col gap-6 px-8">
         {/* Brand */}
-        <div className="flex flex-col items-center gap-3">
-          <div
-            className="flex h-16 w-16 items-center justify-center rounded-2xl"
-            style={{
-              background:
-                "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-purple))",
-            }}
-          >
-            <svg
-              width="32"
-              height="32"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="white"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
+        <motion.div
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+          className="flex flex-col items-center gap-3"
+        >
+          <img
+            src={swiftLogo}
+            alt="SwiftTunnel"
+            width={120}
+            height={120}
+            style={{ objectFit: "contain" }}
+          />
+          <div className="text-center">
+            <div className="mb-2 flex items-center justify-center gap-2">
+              <span
+                className="h-1 w-1 rounded-full"
+                style={{ backgroundColor: "var(--color-status-connected)" }}
+              />
+              <span className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.18em] text-text-muted">
+                Gaming · Relay · 28 Servers
+              </span>
+            </div>
+            <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-text-primary">
+              SwiftTunnel
+            </h1>
+            <p className="mt-1 text-[12px] text-text-muted">
+              Sign in to deploy the tunnel
+            </p>
           </div>
-          <h1 className="text-2xl font-bold text-text-primary">SwiftTunnel</h1>
-          <p className="text-sm text-text-secondary text-center">
-            Gaming VPN with split tunneling for low-latency gameplay
-          </p>
-        </div>
+        </motion.div>
 
-        {/* Login Card */}
-        <div
-          className="flex w-full flex-col gap-4 rounded-[var(--radius-card)] border p-6"
+        {/* Login card */}
+        <motion.div
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.05 }}
+          className="rounded-[var(--radius-card)] p-5"
           style={{
             backgroundColor: "var(--color-bg-card)",
-            borderColor: "var(--color-border-subtle)",
+            border: "1px solid var(--color-border-subtle)",
           }}
         >
           {isAwaiting ? (
-            <div className="flex flex-col items-center gap-3 py-4">
-              <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent-primary border-t-transparent" />
-              <p className="text-sm text-text-secondary">
-                Waiting for browser login...
+            <div className="flex flex-col items-center gap-3 py-2">
+              <Spinner size={18} color="var(--color-accent-primary)" />
+              <p className="text-[13px] font-medium text-text-primary">
+                Waiting for browser login
               </p>
-              <p className="text-xs text-text-muted">
+              <p className="text-center text-[11px] text-text-muted">
                 Complete sign-in in your browser to continue
               </p>
-              <p className="text-xs text-text-dimmed">
-                Times out in{" "}
-                {Math.max(0, Math.ceil(OAUTH_TIMEOUT_MS / 1000 - elapsedSecs))}s
+              <p className="font-mono text-[10.5px] text-text-dimmed">
+                Times out in {remaining}s
               </p>
-              <button
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={() => void cancelOAuth()}
-                className="rounded-[var(--radius-button)] border border-border-default px-3 py-1 text-xs text-text-secondary transition-colors hover:bg-bg-hover"
               >
                 Cancel
-              </button>
+              </Button>
             </div>
           ) : (
-            <>
-              <button
-                onClick={startOAuth}
-                className="flex w-full items-center justify-center gap-2 rounded-[var(--radius-button)] px-4 py-3 text-sm font-medium text-white transition-opacity hover:opacity-90"
-                style={{
-                  background:
-                    "linear-gradient(135deg, var(--color-accent-primary), var(--color-accent-secondary))",
-                }}
-              >
+            <Button
+              variant="primary"
+              size="lg"
+              fullWidth
+              onClick={startOAuth}
+              leadingIcon={
                 <svg
-                  width="18"
-                  height="18"
+                  width="15"
+                  height="15"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -163,39 +174,42 @@ export function LoginScreen() {
                   <polyline points="10 17 15 12 10 7" />
                   <line x1="15" y1="12" x2="3" y2="12" />
                 </svg>
-                Sign in with SwiftTunnel
-              </button>
-            </>
+              }
+            >
+              Sign in with SwiftTunnel
+            </Button>
           )}
 
           {error && (
-            <p className="text-xs text-status-error text-center">{error}</p>
+            <p className="mt-3 text-center text-[11px] text-status-error">
+              {error}
+            </p>
           )}
-        </div>
+        </motion.div>
 
-        {/* Feature highlights */}
-        <div className="flex w-full flex-col gap-2.5">
+        {/* Feature list */}
+        <div className="flex flex-col gap-1.5">
           {FEATURES.map((feature, i) => (
             <motion.div
               key={feature.title}
-              initial={{ opacity: 0, y: 10 }}
+              initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.15 + i * 0.1, duration: 0.35 }}
-              className="flex items-center gap-3 rounded-[var(--radius-card)] border border-border-subtle px-4 py-3"
-              style={{ backgroundColor: "var(--color-bg-card)" }}
+              transition={{ delay: 0.15 + i * 0.06, duration: 0.3 }}
+              className="flex items-center gap-3 rounded-[5px] px-3 py-2"
             >
               <div
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[5px]"
                 style={{
                   backgroundColor: "var(--color-accent-primary-soft-10)",
+                  border: "1px solid var(--color-border-subtle)",
                 }}
               >
                 <svg
-                  width="16"
-                  height="16"
+                  width="13"
+                  height="13"
                   viewBox="0 0 24 24"
                   fill="none"
-                  stroke="var(--color-accent-primary)"
+                  stroke="var(--color-accent-secondary)"
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -204,10 +218,10 @@ export function LoginScreen() {
                 </svg>
               </div>
               <div>
-                <div className="text-xs font-medium text-text-primary">
+                <div className="text-[12px] font-medium text-text-primary">
                   {feature.title}
                 </div>
-                <div className="text-[11px] text-text-muted">
+                <div className="text-[10.5px] text-text-muted">
                   {feature.desc}
                 </div>
               </div>
@@ -215,10 +229,10 @@ export function LoginScreen() {
           ))}
         </div>
 
-        <p className="text-xs text-text-dimmed">v{__APP_VERSION__}</p>
+        <p className="text-center font-mono text-[10px] text-text-dimmed">
+          v{__APP_VERSION__}
+        </p>
       </div>
     </div>
   );
 }
-
-declare const __APP_VERSION__: string;

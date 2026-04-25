@@ -4,8 +4,17 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useToastStore } from "../../stores/toastStore";
-import { Toggle } from "../common/Toggle";
-import { Tooltip, InfoIcon } from "../common/Tooltip";
+import {
+  Toggle,
+  Button,
+  Chip,
+  Row,
+  Segmented,
+  Tooltip,
+  InfoIcon,
+  SectionHeader,
+  Slider,
+} from "../ui";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
   systemCopyLogToClipboard,
@@ -37,9 +46,13 @@ export function SettingsTab() {
   const updaterError = useUpdaterStore((s) => s.error);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
+
   const vpnState = useVpnStore((s) => s.state);
   const vpnDiagnostics = useVpnStore((s) => s.diagnostics);
   const fetchVpnDiagnostics = useVpnStore((s) => s.fetchDiagnostics);
+
+  const addToast = useToastStore((s) => s.addToast);
+
   const [isGeneratingDiagnostics, setIsGeneratingDiagnostics] = useState(false);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
@@ -50,10 +63,10 @@ export function SettingsTab() {
     NetworkAdapterInfo[] | null
   >(null);
   const [networkAdaptersLoading, setNetworkAdaptersLoading] = useState(false);
-  const [networkAdaptersError, setNetworkAdaptersError] = useState<
-    string | null
-  >(null);
-  const addToast = useToastStore((s) => s.addToast);
+  const [networkAdaptersError, setNetworkAdaptersError] = useState<string | null>(
+    null,
+  );
+
   const [isUninstalling, setIsUninstalling] = useState(false);
   const [uninstallError, setUninstallError] = useState<string | null>(null);
 
@@ -108,9 +121,7 @@ export function SettingsTab() {
 
   useEffect(() => {
     void fetchVpnDiagnostics();
-    if (vpnState !== "connected") {
-      return;
-    }
+    if (vpnState !== "connected") return;
     const id = setInterval(() => {
       void fetchVpnDiagnostics();
     }, 3000);
@@ -162,14 +173,20 @@ export function SettingsTab() {
     if (a.is_default_route !== b.is_default_route)
       return a.is_default_route ? -1 : 1;
     if (a.is_up !== b.is_up) return a.is_up ? -1 : 1;
-    const kindPriority = (kind: string) => {
-      switch (kind) {
-        case "ethernet": return 0;
-        case "wifi": return 1;
-        case "ppp": return 2;
-        case "tunnel": return 3;
-        case "loopback": return 4;
-        default: return 5;
+    const kindPriority = (k: string) => {
+      switch (k) {
+        case "ethernet":
+          return 0;
+        case "wifi":
+          return 1;
+        case "ppp":
+          return 2;
+        case "tunnel":
+          return 3;
+        case "loopback":
+          return 4;
+        default:
+          return 5;
       }
     };
     const ap = kindPriority(a.kind);
@@ -189,70 +206,122 @@ export function SettingsTab() {
       (a) => a.guid === settings.preferred_physical_adapter_guid,
     );
 
+  const updateLabel = (() => {
+    switch (updaterStatus) {
+      case "checking":
+        return "Checking…";
+      case "installing":
+        return "Installing";
+      case "update_available":
+        return `v${updaterVersion} ready`;
+      case "up_to_date":
+        return "Up to date";
+      case "error":
+        return "Update error";
+      default:
+        return "Idle";
+    }
+  })();
+  const updateColor =
+    updaterStatus === "error"
+      ? "var(--color-status-error)"
+      : updaterStatus === "update_available"
+        ? "var(--color-accent-primary)"
+        : updaterStatus === "up_to_date"
+          ? "var(--color-status-connected)"
+          : "var(--color-text-muted)";
+
   return (
-    <div className="mx-auto flex max-w-[660px] flex-col gap-4">
-      {/* ── Account ── */}
-      <Section title="Account">
-        <div className="flex items-center justify-between px-4 py-3">
-          <div className="flex items-center gap-3">
+    <div className="flex w-full flex-col gap-5 pb-4">
+      {/* ── Hero ── */}
+      <section className="flex items-start justify-between gap-6 pt-1">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
+            Account
+          </div>
+          <div className="mt-2.5 flex items-center gap-2.5">
             <div
-              className="flex h-9 w-9 items-center justify-center rounded-full text-sm font-medium"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold"
               style={{
-                backgroundColor: "var(--color-accent-primary-soft-20)",
-                color: "var(--color-accent-secondary)",
+                backgroundColor: "var(--color-bg-hover)",
+                color: "var(--color-text-primary)",
+                border: "1px solid var(--color-border-default)",
               }}
             >
               {email?.[0]?.toUpperCase() || "?"}
             </div>
-            <div>
-              <div className="text-sm font-medium text-text-primary">
-                {email || "Unknown"}
-              </div>
-              {isTester && (
-                <span
-                  className="text-[10px] font-medium"
-                  style={{ color: "var(--color-accent-purple)" }}
-                >
-                  Tester
-                </span>
-              )}
+            <span
+              className="truncate text-[22px] font-semibold leading-none tracking-[-0.015em]"
+              style={{ color: "var(--color-text-primary)" }}
+            >
+              {email || "Unknown"}
+            </span>
+            {isTester && (
+              <Chip tone="neutral" uppercase size="xs">
+                Tester
+              </Chip>
+            )}
+          </div>
+          <div className="mt-3 flex items-baseline gap-4">
+            <div className="flex items-baseline gap-1.5">
+              <span
+                className="font-mono text-[22px] font-medium leading-none tabular-nums"
+                style={{ color: "var(--color-text-primary)" }}
+              >
+                v{__APP_VERSION__}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ backgroundColor: updateColor }}
+              />
+              <span
+                className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
+                style={{ color: updateColor }}
+              >
+                {updateLabel}
+              </span>
             </div>
           </div>
-          <button
-            onClick={logout}
-            className="rounded-[var(--radius-button)] border px-3 py-1.5 text-xs transition-colors"
-            style={{
-              borderColor: "var(--color-status-error-soft-20)",
-              color: "var(--color-status-error)",
-            }}
-            onMouseEnter={(e) =>
-              (e.currentTarget.style.backgroundColor =
-                "var(--color-status-error-soft-10)")
-            }
-            onMouseLeave={(e) =>
-              (e.currentTarget.style.backgroundColor = "transparent")
-            }
-          >
-            Log Out
-          </button>
         </div>
-      </Section>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={logout}
+          style={{
+            color: "var(--color-status-error)",
+            border: "1px solid var(--color-status-error-soft-20)",
+          }}
+        >
+          Log out
+        </Button>
+      </section>
 
-      {/* ── General ── */}
+      {/* General */}
       <Section title="General">
-        <Row label="Run on Startup" desc="Launch SwiftTunnel when you sign into Windows">
+        <Row
+          label="Run on startup"
+          desc="Launch SwiftTunnel when you sign in to Windows"
+        >
           <Toggle
             enabled={settings.run_on_startup}
             onChange={(v) => set({ run_on_startup: v })}
           />
         </Row>
-        <Row label="Auto Reconnect Tunnel" desc="Reconnect after restart if last session was connected">
+        <Row
+          label="Auto-reconnect tunnel"
+          desc="Reconnect after restart if last session was connected"
+        >
           <Toggle
             enabled={settings.auto_reconnect}
             onChange={(v) => set({ auto_reconnect: v })}
           />
         </Row>
-        <Row label="Discord Rich Presence" desc="Show tunnel status in Discord">
+        <Row
+          label="Discord Rich Presence"
+          desc="Show tunnel status in your Discord profile"
+        >
           <Toggle
             enabled={settings.enable_discord_rpc}
             onChange={(v) => set({ enable_discord_rpc: v })}
@@ -260,24 +329,34 @@ export function SettingsTab() {
         </Row>
       </Section>
 
-      {/* ── Tunnel ── */}
+      {/* Tunnel */}
       <Section title="Tunnel">
         <Row
-          label="Adapter Selection"
+          label="Adapter selection"
           desc={
             manualAdapterBinding
               ? "Manual — locked to a specific adapter"
               : "Smart Auto — follows active route, rebinds on network change"
           }
-          tooltip="Smart Auto detects your active network adapter from the OS routing table and rebinds automatically when you switch networks. Manual lets you pin a specific adapter."
+          tooltip={
+            <Tooltip content="Smart Auto detects your active adapter from the OS routing table and rebinds automatically on network changes. Manual pins a specific adapter.">
+              <span className="inline-flex">
+                <InfoIcon />
+              </span>
+            </Tooltip>
+          }
         >
-          <SegmentedPicker
+          <Segmented
             options={[
               { value: "smart_auto" as const, label: "Smart Auto" },
               { value: "manual" as const, label: "Manual" },
             ]}
             value={adapterBindingMode}
-            onChange={(mode: "smart_auto" | "manual") => set({ adapter_binding_mode: mode })}
+            onChange={(mode) =>
+              set({
+                adapter_binding_mode: mode as "smart_auto" | "manual",
+              })
+            }
           />
         </Row>
 
@@ -291,16 +370,14 @@ export function SettingsTab() {
                 })
               }
               disabled={networkAdaptersLoading}
-              className="w-full rounded-lg border bg-bg-elevated px-3 py-2 text-sm text-text-primary disabled:opacity-50"
-              style={{ borderColor: "var(--color-border-default)" }}
-              onFocus={(e) =>
-                (e.currentTarget.style.borderColor = "var(--color-accent-primary)")
-              }
-              onBlur={(e) =>
-                (e.currentTarget.style.borderColor = "var(--color-border-default)")
-              }
+              className="w-full rounded-[4px] px-3 py-2 text-[12.5px] outline-none transition-colors disabled:opacity-50"
+              style={{
+                backgroundColor: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-border-default)",
+                color: "var(--color-text-primary)",
+              }}
             >
-              <option value="">Auto fallback (Recommended)</option>
+              <option value="">Auto fallback (recommended)</option>
               {sortedAdapters.map((adapter) => {
                 const label =
                   adapter.friendly_name || adapter.description || adapter.guid;
@@ -310,7 +387,7 @@ export function SettingsTab() {
                   adapter.is_default_route ? "default" : null,
                 ]
                   .filter(Boolean)
-                  .join(", ");
+                  .join(" · ");
                 return (
                   <option key={adapter.guid} value={adapter.guid}>
                     {tags ? `${label} (${tags})` : label}
@@ -319,7 +396,7 @@ export function SettingsTab() {
               })}
             </select>
             {adapterMissing && (
-              <p className="mt-2 text-xs text-status-error">
+              <p className="mt-2 text-[11px] text-status-error">
                 Selected adapter not found. Choose Auto or another adapter.
               </p>
             )}
@@ -327,18 +404,18 @@ export function SettingsTab() {
         )}
 
         {!manualAdapterBinding && (
-          <div className="px-4 pb-3 text-xs text-text-muted">
+          <div className="px-4 pb-3 text-[11px] text-text-muted">
             Current:{" "}
-            <span className="text-text-primary">
+            <span className="font-mono text-text-primary">
               {vpnDiagnostics?.adapter_name || "Not resolved"}
             </span>
-            {" \u00B7 "}
+            <span className="text-text-dimmed"> · </span>
             <span className="text-text-primary">{routeSourceLabel}</span>
           </div>
         )}
 
         {networkAdaptersError && (
-          <div className="px-4 pb-3 text-xs text-status-error">
+          <div className="px-4 pb-3 text-[11px] text-status-error">
             Failed to load adapters: {networkAdaptersError}
           </div>
         )}
@@ -346,7 +423,13 @@ export function SettingsTab() {
         <Row
           label="API Tunneling"
           desc="Route game API calls through relay to bypass ISP blocking"
-          tooltip="When enabled, TCP traffic from game processes is also tunneled through the relay server. Helps if your ISP blocks game API endpoints. Requires TCP-capable relay."
+          tooltip={
+            <Tooltip content="TCP traffic from game processes is also tunneled through the relay server. Helps when your ISP blocks game API endpoints.">
+              <span className="inline-flex">
+                <InfoIcon />
+              </span>
+            </Tooltip>
+          }
         >
           <Toggle
             enabled={settings.enable_api_tunneling}
@@ -354,59 +437,106 @@ export function SettingsTab() {
           />
         </Row>
 
-        <details className="mx-4 mb-3 rounded-lg border border-border-subtle bg-bg-elevated">
-          <summary className="cursor-pointer px-3 py-2 text-[11px] font-medium text-text-muted">
-            Adapter Diagnostics
+        <details
+          className="mx-4 mb-3 rounded-[5px]"
+          style={{
+            backgroundColor: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-border-subtle)",
+          }}
+        >
+          <summary className="cursor-pointer px-3 py-2 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+            Adapter diagnostics
           </summary>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 px-3 pb-3 text-[11px]">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 px-3 pb-3 text-[10.5px]">
             <DiagItem label="State" value={vpnState} />
             <DiagItem label="Adapter" value={vpnDiagnostics?.adapter_name} />
-            <DiagItem label="GUID" value={vpnDiagnostics?.adapter_guid} mono />
-            <DiagItem label="Selected ifIndex" value={vpnDiagnostics?.selected_if_index} />
-            <DiagItem label="Resolved ifIndex" value={vpnDiagnostics?.resolved_if_index} />
+            <DiagItem
+              label="GUID"
+              value={vpnDiagnostics?.adapter_guid}
+              mono
+            />
+            <DiagItem
+              label="Selected ifIndex"
+              value={vpnDiagnostics?.selected_if_index}
+              mono
+            />
+            <DiagItem
+              label="Resolved ifIndex"
+              value={vpnDiagnostics?.resolved_if_index}
+              mono
+            />
             <DiagItem label="Route source" value={routeSourceLabel} />
-            <DiagItem label="Route target" value={vpnDiagnostics?.route_resolution_target_ip} />
-            <DiagItem label="Has route" value={vpnDiagnostics?.has_default_route ? "yes" : "no"} />
-            <DiagItem label="Manual binding" value={vpnDiagnostics?.manual_binding_active ? "yes" : "no"} />
-            <DiagItem label="Cached override" value={vpnDiagnostics?.cached_override_used ? "yes" : "no"} />
-            <DiagItem label="Binding stage" value={vpnDiagnostics?.binding_stage} />
-            <DiagItem label="Validation" value={vpnDiagnostics?.last_validation_result} />
+            <DiagItem
+              label="Route target"
+              value={vpnDiagnostics?.route_resolution_target_ip}
+              mono
+            />
+            <DiagItem
+              label="Has route"
+              value={vpnDiagnostics?.has_default_route ? "yes" : "no"}
+            />
+            <DiagItem
+              label="Manual binding"
+              value={vpnDiagnostics?.manual_binding_active ? "yes" : "no"}
+            />
+            <DiagItem
+              label="Cached override"
+              value={vpnDiagnostics?.cached_override_used ? "yes" : "no"}
+            />
+            <DiagItem
+              label="Binding stage"
+              value={vpnDiagnostics?.binding_stage}
+            />
+            <DiagItem
+              label="Validation"
+              value={vpnDiagnostics?.last_validation_result}
+            />
             <div className="col-span-2">
-              <DiagItem label="Binding reason" value={vpnDiagnostics?.binding_reason} />
+              <DiagItem
+                label="Binding reason"
+                value={vpnDiagnostics?.binding_reason}
+              />
             </div>
             <DiagItem
               label="Packets"
+              mono
               value={`${vpnDiagnostics?.packets_tunneled ?? 0} tunneled / ${vpnDiagnostics?.packets_bypassed ?? 0} bypassed`}
             />
           </div>
         </details>
       </Section>
 
-      {/* ── Updates ── */}
+      {/* Updates */}
       <Section title="Updates">
-        <Row label="Update Channel" desc="Stable for vetted releases, Live for pre-release">
-          <SegmentedPicker
+        <Row
+          label="Update channel"
+          desc="Stable for vetted releases, Live for pre-release"
+        >
+          <Segmented
             options={["Stable", "Live"] as UpdateChannel[]}
             value={settings.update_channel}
             onChange={(ch) => set({ update_channel: ch })}
           />
         </Row>
-        <Row label="Auto Update" desc="Automatically check and install updates on startup">
+        <Row
+          label="Auto update"
+          desc="Automatically check and install updates on startup"
+        >
           <Toggle
             enabled={settings.update_settings.auto_check}
             onChange={(v) =>
-              set({ update_settings: { ...settings.update_settings, auto_check: v } })
+              set({
+                update_settings: { ...settings.update_settings, auto_check: v },
+              })
             }
           />
         </Row>
 
-        {/* Version + Status */}
         <div className="px-4 py-3">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              {/* Version badge */}
+            <div className="flex items-center gap-2">
               <span
-                className="rounded-md px-2 py-1 text-xs font-semibold"
+                className="rounded-[3px] px-1.5 py-0.5 font-mono text-[11px] font-semibold"
                 style={{
                   backgroundColor: "var(--color-bg-elevated)",
                   color: "var(--color-text-primary)",
@@ -414,117 +544,79 @@ export function SettingsTab() {
               >
                 v{__APP_VERSION__}
               </span>
-
-              {/* Status indicator */}
-              <div className="flex items-center gap-1.5">
-                {updaterStatus === "checking" && (
-                  <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle cx="12" cy="12" r="10" stroke="var(--color-accent-primary)" strokeWidth="2.5" strokeDasharray="50" strokeLinecap="round" />
-                  </svg>
-                )}
-                {updaterStatus === "up_to_date" && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-connected)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M20 6 9 17l-5-5" />
-                  </svg>
-                )}
-                {updaterStatus === "update_available" && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 19V5M5 12l7-7 7 7" />
-                  </svg>
-                )}
-                {updaterStatus === "installing" && (
-                  <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
-                    <circle cx="12" cy="12" r="10" stroke="var(--color-accent-primary)" strokeWidth="2.5" strokeDasharray="50" strokeLinecap="round" />
-                  </svg>
-                )}
-                {updaterStatus === "error" && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-error)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M18 6 6 18M6 6l12 12" />
-                  </svg>
-                )}
-                <span
-                  className="text-xs font-medium"
-                  style={{
-                    color:
-                      updaterStatus === "checking" || updaterStatus === "installing"
-                        ? "var(--color-accent-primary)"
-                        : updaterStatus === "up_to_date"
-                          ? "var(--color-status-connected)"
-                          : updaterStatus === "update_available"
-                            ? "var(--color-accent-primary)"
-                            : updaterStatus === "error"
-                              ? "var(--color-status-error)"
-                              : "var(--color-text-muted)",
-                  }}
-                >
-                  {updaterStatus === "checking"
-                    ? "Checking for updates..."
-                    : updaterStatus === "up_to_date"
-                      ? "You're up to date"
-                      : updaterStatus === "update_available"
-                        ? `v${updaterVersion} available`
-                        : updaterStatus === "installing"
-                          ? `Installing v${updaterVersion}...`
-                          : updaterStatus === "error"
-                            ? (updaterError || "Update check failed")
-                            : "Not checked yet"}
-                </span>
-              </div>
+              <UpdaterStatusLine
+                status={updaterStatus}
+                version={updaterVersion}
+                error={updaterError}
+              />
             </div>
-
-            {/* Action buttons */}
             <div className="flex items-center gap-2">
               {updaterStatus === "update_available" && (
-                <button
+                <Button
+                  variant="primary"
+                  size="sm"
                   onClick={() => void installUpdate()}
-                  className="rounded-[var(--radius-button)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
-                  style={{ backgroundColor: "var(--color-accent-primary)" }}
                 >
-                  Update Now
-                </button>
+                  Update now
+                </Button>
               )}
               {updaterStatus === "error" ? (
-                <button
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => void checkForUpdates(true)}
-                  className="rounded-[var(--radius-button)] border px-3 py-1.5 text-xs transition-colors hover:bg-bg-hover"
                   style={{
-                    borderColor: "var(--color-status-error-soft-20)",
                     color: "var(--color-status-error)",
+                    border: "1px solid var(--color-status-error-soft-20)",
                   }}
                 >
                   Retry
-                </button>
+                </Button>
               ) : (
-                <button
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => void checkForUpdates(true)}
-                  disabled={updaterStatus === "checking" || updaterStatus === "installing"}
-                  className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
+                  disabled={
+                    updaterStatus === "checking" ||
+                    updaterStatus === "installing"
+                  }
                 >
-                  Check Now
-                </button>
+                  Check now
+                </Button>
               )}
             </div>
           </div>
 
-          {/* Update available: version arrow */}
           {updaterStatus === "update_available" && (
-            <div className="mt-2 flex items-center gap-2 text-xs text-text-muted">
+            <div className="mt-2 flex items-center gap-2 font-mono text-[11px] text-text-muted">
               <span>v{__APP_VERSION__}</span>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="11"
+                height="11"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <path d="M5 12h14M12 5l7 7-7 7" />
               </svg>
-              <span style={{ color: "var(--color-accent-primary)" }} className="font-medium">
+              <span
+                style={{ color: "var(--color-accent-primary)" }}
+                className="font-semibold"
+              >
                 v{updaterVersion}
               </span>
             </div>
           )}
 
-          {/* Progress bar for installing */}
           {updaterStatus === "installing" && (
             <div className="mt-3">
               <div
-                className="h-1.5 w-full overflow-hidden rounded-full"
-                style={{ backgroundColor: "var(--color-bg-hover)" }}
+                className="h-1 w-full overflow-hidden rounded-full"
+                style={{ backgroundColor: "var(--color-bg-elevated)" }}
               >
                 <div
                   className="h-full rounded-full transition-all duration-300 ease-out"
@@ -534,15 +626,17 @@ export function SettingsTab() {
                   }}
                 />
               </div>
-              <div className="mt-1 text-right text-[11px] text-text-dimmed">
+              <div className="mt-1 text-right font-mono text-[10px] text-text-dimmed">
                 {updaterProgress}%
               </div>
             </div>
           )}
         </div>
 
-        {/* Last checked */}
-        <div className="border-t border-border-subtle px-4 py-2.5 text-[11px] text-text-dimmed">
+        <div
+          className="border-t px-4 py-2.5 font-mono text-[10.5px] text-text-dimmed"
+          style={{ borderColor: "var(--color-border-subtle)" }}
+        >
           Last checked:{" "}
           {updaterLastChecked
             ? new Date(updaterLastChecked * 1000).toLocaleString()
@@ -550,10 +644,13 @@ export function SettingsTab() {
         </div>
       </Section>
 
-      {/* ── Experimental (tester-gated) ── */}
+      {/* Experimental */}
       {isTester && (
-        <Section title="Experimental">
-          <Row label="Practice Mode" desc="Add artificial latency for training">
+        <Section title="Experimental" tag="Tester">
+          <Row
+            label="Practice mode"
+            desc="Add artificial latency for training"
+          >
             <Toggle
               enabled={settings.experimental_mode}
               onChange={(v) => set({ experimental_mode: v })}
@@ -561,72 +658,73 @@ export function SettingsTab() {
           </Row>
           {settings.experimental_mode && (
             <div className="flex items-center justify-between px-4 pb-3">
-              <span className="text-xs text-text-muted">
-                Artificial Latency
+              <span className="text-[11.5px] text-text-muted">
+                Artificial latency
               </span>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs text-accent-secondary">
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-[12px] font-semibold text-accent-secondary">
                   +{settings.artificial_latency_ms}ms
                 </span>
-                <input
-                  type="range"
-                  aria-label="Artificial latency"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={settings.artificial_latency_ms}
-                  onChange={(e) =>
-                    set({ artificial_latency_ms: Number(e.target.value) })
-                  }
-                  className="w-28 accent-accent-primary"
-                />
+                <div className="w-32">
+                  <Slider
+                    ariaLabel="Artificial latency"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={settings.artificial_latency_ms}
+                    onChange={(v) => set({ artificial_latency_ms: v })}
+                  />
+                </div>
               </div>
             </div>
           )}
-          <Row label="Custom Relay Server" desc="Override relay endpoint (host:port)">
+          <Row
+            label="Custom relay server"
+            desc="Override relay endpoint (host:port)"
+          >
             <input
               type="text"
               value={settings.custom_relay_server}
               onChange={(e) => set({ custom_relay_server: e.target.value })}
               placeholder="auto"
-              className="w-36 rounded-lg border bg-bg-elevated px-2 py-1.5 text-sm text-text-primary placeholder:text-text-dimmed focus:outline-none"
-              style={{ borderColor: "var(--color-border-default)" }}
-              onFocus={(e) =>
-                (e.currentTarget.style.borderColor = "var(--color-accent-primary)")
-              }
-              onBlur={(e) => {
-                e.currentTarget.style.borderColor = "var(--color-border-default)";
-                save();
+              className="w-40 rounded-[4px] px-2 py-1.5 font-mono text-[12px] outline-none transition-colors"
+              style={{
+                backgroundColor: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-border-default)",
+                color: "var(--color-text-primary)",
               }}
+              onBlur={() => save()}
             />
           </Row>
         </Section>
       )}
 
-      {/* ── Support ── */}
+      {/* Support */}
       <Section title="Support">
         <Row
-          label="Network Diagnostics"
+          label="Network diagnostics"
           desc="Generate a support-ready bundle with ISP, routing, and split tunnel info"
         >
-          <button
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => void generateDiagnosticsBundle()}
             disabled={isGeneratingDiagnostics}
-            className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
+            loading={isGeneratingDiagnostics}
           >
-            {isGeneratingDiagnostics ? "Generating..." : "Generate"}
-          </button>
+            {isGeneratingDiagnostics ? "Generating" : "Generate"}
+          </Button>
         </Row>
         {diagnosticsPath && (
-          <div className="px-4 pb-3 text-xs text-text-muted">
+          <div className="px-4 pb-3 text-[11px] text-text-muted">
             Saved to:{" "}
-            <span className="break-all font-mono text-[11px] text-text-secondary">
+            <span className="break-all font-mono text-[10.5px] text-text-secondary">
               {diagnosticsPath}
             </span>
           </div>
         )}
         {diagnosticsError && (
-          <div className="px-4 pb-3 text-xs text-status-error">
+          <div className="px-4 pb-3 text-[11px] text-status-error">
             {diagnosticsError}
           </div>
         )}
@@ -657,31 +755,38 @@ export function SettingsTab() {
         )}
       </Section>
 
-      {/* ── About ── */}
+      {/* About */}
       <Section title="About">
         <div className="flex items-center justify-between px-4 py-3">
-          <span className="text-sm text-text-secondary">
-            SwiftTunnel Desktop v{__APP_VERSION__}
+          <span className="text-[12.5px] text-text-secondary">
+            SwiftTunnel Desktop{" "}
+            <span className="font-mono text-text-dimmed">
+              v{__APP_VERSION__}
+            </span>
           </span>
           <div className="flex gap-3">
             <LinkButton onClick={() => systemOpenUrl("https://swifttunnel.net")}>
               Website
             </LinkButton>
-            <LinkButton onClick={() => systemOpenUrl("https://discord.gg/swifttunnel")}>
+            <LinkButton
+              onClick={() => systemOpenUrl("https://discord.gg/swifttunnel")}
+            >
               Discord
             </LinkButton>
           </div>
         </div>
         <div className="flex items-center justify-between px-4 py-3">
           <div>
-            <div className="text-sm font-medium text-text-primary">
+            <div className="text-[13px] font-medium text-text-primary">
               Uninstall SwiftTunnel
             </div>
-            <div className="text-xs text-text-muted">
+            <div className="text-[11px] text-text-muted">
               Remove app and revert all system changes
             </div>
           </div>
-          <button
+          <Button
+            variant="destructive"
+            size="sm"
             onClick={async () => {
               setIsUninstalling(true);
               setUninstallError(null);
@@ -693,20 +798,13 @@ export function SettingsTab() {
               }
             }}
             disabled={isUninstalling}
-            className="rounded-[var(--radius-button)] px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-50"
-            style={{ backgroundColor: "var(--color-status-error)" }}
-            onMouseEnter={(e) => {
-              if (!isUninstalling) e.currentTarget.style.opacity = "0.85";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.opacity = "1";
-            }}
+            loading={isUninstalling}
           >
-            {isUninstalling ? "Uninstalling..." : "Uninstall"}
-          </button>
+            {isUninstalling ? "Uninstalling" : "Uninstall"}
+          </Button>
         </div>
         {uninstallError && (
-          <div className="px-4 pb-3 text-xs text-status-error">
+          <div className="px-4 pb-3 text-[11px] text-status-error">
             {uninstallError}
           </div>
         )}
@@ -717,80 +815,28 @@ export function SettingsTab() {
 
 // ── Sub-components ──
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section>
-      <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-dimmed">
-        {title}
-      </div>
-      <div className="overflow-hidden rounded-[var(--radius-card)] border border-border-subtle bg-bg-card">
-        <div className="divide-y divide-border-subtle">{children}</div>
-      </div>
-    </section>
-  );
-}
-
-function Row({
-  label,
-  desc,
-  tooltip,
+function Section({
+  title,
+  tag,
   children,
 }: {
-  label: string;
-  desc: string;
-  tooltip?: string;
+  title: string;
+  tag?: string;
   children: ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between px-4 py-3">
-      <div className="flex min-w-0 flex-col gap-0.5 pr-4">
-        <span className="flex items-center gap-1.5 text-sm font-medium text-text-primary">
-          {label}
-          {tooltip && (
-            <Tooltip content={tooltip}>
-              <InfoIcon />
-            </Tooltip>
-          )}
-        </span>
-        <span className="text-xs text-text-muted">{desc}</span>
+    <section>
+      <SectionHeader label={title} tag={tag} />
+      <div
+        className="overflow-hidden rounded-[var(--radius-card)]"
+        style={{
+          backgroundColor: "var(--color-bg-card)",
+          border: "1px solid var(--color-border-subtle)",
+        }}
+      >
+        {children}
       </div>
-      {children}
-    </div>
-  );
-}
-
-function SegmentedPicker<T extends string>({
-  options,
-  value,
-  onChange,
-}: {
-  options: T[] | { value: T; label: string }[];
-  value: T;
-  onChange: (v: T) => void;
-}) {
-  const items = options.map((o) =>
-    typeof o === "string" ? { value: o, label: o } : o,
-  );
-  return (
-    <div className="flex gap-1">
-      {items.map((item) => (
-        <button
-          key={item.value}
-          onClick={() => onChange(item.value)}
-          className="rounded px-3 py-1 text-xs transition-colors"
-          style={{
-            backgroundColor:
-              value === item.value
-                ? "var(--color-accent-primary)"
-                : "var(--color-bg-hover)",
-            color:
-              value === item.value ? "white" : "var(--color-text-secondary)",
-          }}
-        >
-          {item.label}
-        </button>
-      ))}
-    </div>
+    </section>
   );
 }
 
@@ -804,10 +850,12 @@ function DiagItem({
   mono?: boolean;
 }) {
   return (
-    <div className="flex flex-col">
-      <span className="text-text-dimmed">{label}</span>
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
+        {label}
+      </span>
       <span
-        className={`text-text-primary ${mono ? "font-mono" : ""}`}
+        className={`text-text-primary ${mono ? "font-mono text-[10px]" : "text-[11px]"}`}
       >
         {value ?? "n/a"}
       </span>
@@ -825,9 +873,105 @@ function LinkButton({
   return (
     <button
       onClick={onClick}
-      className="text-xs text-accent-secondary transition-opacity hover:opacity-80"
+      className="text-[11.5px] font-medium text-accent-secondary transition-opacity hover:opacity-80"
     >
       {children}
     </button>
+  );
+}
+
+function UpdaterStatusLine({
+  status,
+  version,
+  error,
+}: {
+  status: string;
+  version: string | null;
+  error: string | null;
+}) {
+  const color =
+    status === "checking" || status === "installing"
+      ? "var(--color-accent-primary)"
+      : status === "up_to_date"
+        ? "var(--color-status-connected)"
+        : status === "update_available"
+          ? "var(--color-accent-primary)"
+          : status === "error"
+            ? "var(--color-status-error)"
+            : "var(--color-text-muted)";
+  const text =
+    status === "checking"
+      ? "Checking for updates…"
+      : status === "up_to_date"
+        ? "You're up to date"
+        : status === "update_available"
+          ? `v${version} available`
+          : status === "installing"
+            ? `Installing v${version}…`
+            : status === "error"
+              ? error || "Update check failed"
+              : "Not checked yet";
+
+  return (
+    <div className="flex items-center gap-1.5">
+      {(status === "checking" || status === "installing") && (
+        <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+          <circle
+            cx="12"
+            cy="12"
+            r="10"
+            stroke={color}
+            strokeWidth="2.5"
+            strokeDasharray="50"
+            strokeLinecap="round"
+          />
+        </svg>
+      )}
+      {status === "up_to_date" && (
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={color}
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      )}
+      {status === "update_available" && (
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={color}
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M12 19V5M5 12l7-7 7 7" />
+        </svg>
+      )}
+      {status === "error" && (
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={color}
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M18 6 6 18M6 6l12 12" />
+        </svg>
+      )}
+      <span className="text-[11.5px] font-medium" style={{ color }}>
+        {text}
+      </span>
+    </div>
   );
 }
