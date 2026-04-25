@@ -1905,12 +1905,6 @@ impl ParallelInterceptor {
             || friendly_lower.starts_with("wan ")
     }
 
-    fn has_wan_or_ppp_name_hint(friendly_name: &str, description: &str) -> bool {
-        Self::is_wan_like_friendly_name(friendly_name)
-            || Self::is_wan_like_friendly_name(description)
-            || description.to_ascii_lowercase().contains("ppp")
-    }
-
     fn adapter_kind_from_if_type(if_type: u32) -> &'static str {
         use windows::Win32::NetworkManagement::IpHelper::{
             IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK,
