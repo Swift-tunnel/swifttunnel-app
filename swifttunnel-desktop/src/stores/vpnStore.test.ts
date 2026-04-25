@@ -248,6 +248,91 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("connected");
   });
 
+  it("keeps repair action visible when binding repair does not fix preflight", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    const failedPreflight = {
+      status: "unrecoverable" as const,
+      reason:
+        "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.",
+      network_signature: "source=internet_fallback;if_index=8;next_hop=1;up=",
+      route_resolution_source: "internet_fallback",
+      route_resolution_target_ip: "128.116.1.1",
+      resolved_if_index: 8,
+      recommended_guid: null,
+      cached_override_used: false,
+      binding_stage: "unrecoverable",
+      candidates: [],
+    };
+    vpnPreflightBinding.mockResolvedValue(failedPreflight);
+    systemRepairDriver.mockResolvedValue(driverStatus());
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().driverSetupState).toBe("error");
+    expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
+      "reset_service",
+    );
+    expect(useVpnStore.getState().driverSetupError).toContain(
+      "Automatic split tunnel driver repair did not restore adapter binding.",
+    );
+  });
+
+  it("does not let a stale auto-repair continuation connect after disconnect", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnPreflightBinding.mockResolvedValue({
+      status: "unrecoverable",
+      reason:
+        "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.",
+      network_signature: "source=internet_fallback;if_index=8;next_hop=1;up=",
+      route_resolution_source: "internet_fallback",
+      route_resolution_target_ip: "128.116.1.1",
+      resolved_if_index: 8,
+      recommended_guid: null,
+      cached_override_used: false,
+      binding_stage: "unrecoverable",
+      candidates: [],
+    });
+    let resolveRepair!: (value: ReturnType<typeof driverStatus>) => void;
+    systemRepairDriver.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRepair = resolve;
+      }),
+    );
+    vpnDisconnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue({
+      state: "disconnected",
+      region: null,
+      server_endpoint: null,
+      assigned_ip: null,
+      relay_auth_mode: "ticket",
+      split_tunnel_active: false,
+      tunneled_processes: [],
+      error: null,
+    });
+
+    const useVpnStore = await loadStore();
+    const connectPromise = useVpnStore
+      .getState()
+      .connect("singapore", ["roblox"]);
+
+    await vi.waitFor(() => {
+      expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    });
+
+    await useVpnStore.getState().disconnect();
+    resolveRepair(driverStatus());
+    await connectPromise;
+
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("disconnected");
+    expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);
+  });
+
   it("ignores stale disconnected events while a connect attempt is pending", async () => {
     const useVpnStore = await loadStore();
     useVpnStore.setState({

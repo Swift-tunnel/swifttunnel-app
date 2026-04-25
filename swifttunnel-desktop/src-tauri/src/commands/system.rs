@@ -6,10 +6,117 @@ use std::fs;
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
+use std::sync::Mutex;
+#[cfg(windows)]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
+use ring::rand::SecureRandom;
+#[cfg(windows)]
 use tauri::Manager;
+
+#[cfg(windows)]
+static DRIVER_OPERATION_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+#[cfg(windows)]
+fn program_data_swifttunnel_dir() -> PathBuf {
+    let program_data =
+        std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+    PathBuf::from(program_data).join("SwiftTunnel")
+}
+
+#[cfg(windows)]
+fn random_hex(bytes_len: usize) -> Result<String, String> {
+    let mut bytes = vec![0u8; bytes_len];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| "Failed to generate secure random bytes".to_string())?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(windows)]
+fn has_reparse_point(path: &Path) -> Result<bool, String> {
+    use std::os::windows::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+    Ok((metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+}
+
+#[cfg(windows)]
+fn reject_reparse_point(path: &Path) -> Result<(), String> {
+    if has_reparse_point(path)? {
+        Err(format!(
+            "Refusing to use reparse-point path {}",
+            path.display()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn harden_driver_work_dir_acl(path: &Path) -> Result<(), String> {
+    let path_string = path.to_string_lossy().to_string();
+    let output = swifttunnel_core::hidden_command("icacls")
+        .args([
+            &path_string,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to harden driver work directory ACLs: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!(
+            "Failed to harden driver work directory ACLs for {}: {}",
+            path.display(),
+            stderr
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn create_secure_driver_work_dir(label: &str) -> Result<PathBuf, String> {
+    let base = program_data_swifttunnel_dir().join("driver-work");
+    fs::create_dir_all(&base).map_err(|e| {
+        format!(
+            "Failed to create driver work root {}: {}",
+            base.display(),
+            e
+        )
+    })?;
+    reject_reparse_point(&base)?;
+
+    for _ in 0..8 {
+        let dir = base.join(format!("{label}-{}", random_hex(16)?));
+        match fs::create_dir(&dir) {
+            Ok(()) => {
+                harden_driver_work_dir_acl(&dir)?;
+                reject_reparse_point(&dir)?;
+                return Ok(dir);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to create driver work directory {}: {}",
+                    dir.display(),
+                    e
+                ));
+            }
+        }
+    }
+
+    Err("Failed to allocate a unique driver work directory".to_string())
+}
 
 #[cfg(windows)]
 fn driver_install_success_exit_code(code: i32) -> bool {
@@ -65,16 +172,15 @@ fn should_try_inf_fallback(exit_code: i32, stderr: &str) -> bool {
 
 #[cfg(windows)]
 fn unique_extract_dir() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let program_data =
-        std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-    PathBuf::from(program_data)
-        .join("SwiftTunnel")
-        .join("driver-extract")
-        .join(format!("{nanos}"))
+    let suffix = random_hex(16).unwrap_or_else(|_| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos().to_string())
+            .unwrap_or_else(|_| "fallback".to_string())
+    });
+    program_data_swifttunnel_dir()
+        .join("driver-work")
+        .join(format!("extract-{suffix}"))
 }
 
 /// Extract an MSI's payload to a directory via `msiexec /a` (administrative
@@ -92,6 +198,7 @@ fn extract_msi_to_dir(msi_path: &Path, extract_dir: &Path, log_path: &Path) -> R
             e
         )
     })?;
+    reject_reparse_point(extract_dir)?;
 
     let target_dir_arg = format!("TARGETDIR={}", extract_dir.display());
     let output = swifttunnel_core::hidden_command("msiexec")
@@ -137,6 +244,13 @@ fn extract_msi_to_dir(msi_path: &Path, extract_dir: &Path, log_path: &Path) -> R
 #[cfg(windows)]
 fn find_inf_in_extract_dir(extract_dir: &Path) -> Result<PathBuf, String> {
     let target = swifttunnel_core::vpn::winpkfilter::DRIVER_INF_NAME;
+    let canonical_extract_dir = fs::canonicalize(extract_dir).map_err(|e| {
+        format!(
+            "Failed to canonicalize extract dir {}: {}",
+            extract_dir.display(),
+            e
+        )
+    })?;
 
     fn walk(dir: &Path, target: &str, depth: u32) -> Option<PathBuf> {
         if depth > 6 {
@@ -173,13 +287,28 @@ fn find_inf_in_extract_dir(extract_dir: &Path) -> Result<PathBuf, String> {
         None
     }
 
-    walk(extract_dir, target, 0).ok_or_else(|| {
+    let found = walk(extract_dir, target, 0).ok_or_else(|| {
         format!(
             "Could not locate {} under {}",
             target,
             extract_dir.display()
         )
-    })
+    })?;
+    reject_reparse_point(&found)?;
+    let canonical_found = fs::canonicalize(&found).map_err(|e| {
+        format!(
+            "Failed to canonicalize extracted driver package {}: {}",
+            found.display(),
+            e
+        )
+    })?;
+    if !canonical_found.starts_with(&canonical_extract_dir) {
+        return Err(format!(
+            "Extracted driver package escaped secure extract dir: {}",
+            canonical_found.display()
+        ));
+    }
+    Ok(canonical_found)
 }
 
 /// Returns `Some(published_name)` if the WinpkFilter driver package is
@@ -461,24 +590,82 @@ fn resolve_winpkfilter_msi(
 }
 
 #[cfg(windows)]
-fn default_driver_install_log_path() -> PathBuf {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("swifttunnel-winpkfilter-install-{now_ms}.log"))
+struct DriverInstallWorkspace {
+    root: PathBuf,
+    msi_path: PathBuf,
+    first_log_path: PathBuf,
+    retry_log_path: PathBuf,
+    extract_dir: PathBuf,
 }
 
 #[cfg(windows)]
-fn build_elevated_msiexec_script(msi_path: &str, log_path: &str, passive: bool) -> String {
+fn stage_winpkfilter_msi(
+    source_path: &Path,
+    pkg: &swifttunnel_core::vpn::winpkfilter::WinpkFilterMsiPackage,
+) -> Result<DriverInstallWorkspace, String> {
+    reject_reparse_point(source_path)?;
+    let data = fs::read(source_path)
+        .map_err(|e| format!("Failed to read {}: {}", source_path.display(), e))?;
+    validate_winpkfilter_payload(&data, pkg)?;
+
+    let root = create_secure_driver_work_dir("install")?;
+    let msi_path = root.join(pkg.msi_name);
+    let mut staged = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&msi_path)
+        .map_err(|e| format!("Failed to create staged MSI {}: {}", msi_path.display(), e))?;
+    use std::io::Write;
+    staged
+        .write_all(&data)
+        .map_err(|e| format!("Failed to write staged MSI {}: {}", msi_path.display(), e))?;
+    staged
+        .sync_all()
+        .map_err(|e| format!("Failed to flush staged MSI {}: {}", msi_path.display(), e))?;
+    drop(staged);
+    reject_reparse_point(&msi_path)?;
+    validate_winpkfilter_file(&msi_path, pkg)?;
+
+    Ok(DriverInstallWorkspace {
+        first_log_path: root.join("install.log"),
+        retry_log_path: root.join("install.retry.log"),
+        extract_dir: root.join("extract"),
+        root,
+        msi_path,
+    })
+}
+
+#[cfg(windows)]
+fn default_driver_install_log_path() -> PathBuf {
+    program_data_swifttunnel_dir()
+        .join("driver-work")
+        .join(format!(
+            "install-{}.log",
+            random_hex(16).unwrap_or_else(|_| "fallback".to_string())
+        ))
+}
+
+#[cfg(windows)]
+fn build_elevated_msiexec_script(
+    msi_path: &str,
+    log_path: &str,
+    passive: bool,
+    reinstall: bool,
+) -> String {
     // PowerShell single-quote escaping.
     let escaped_msi = msi_path.replace('\'', "''");
     let escaped_log = log_path.replace('\'', "''");
     let ui_flag = if passive { "/passive" } else { "/qn" };
 
+    let reinstall_args = if reinstall {
+        ",'REINSTALL=ALL','REINSTALLMODE=vamus'"
+    } else {
+        ""
+    };
+
     format!(
         "$ErrorActionPreference='Stop'; \
-         $args=@('/i','{escaped_msi}','{ui_flag}','/norestart','/L*V','{escaped_log}'); \
+         $args=@('/i','{escaped_msi}','{ui_flag}','/norestart','/L*V','{escaped_log}'{reinstall_args}); \
          $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -ArgumentList $args -Wait -PassThru; \
          exit $p.ExitCode"
     )
@@ -543,11 +730,13 @@ fn install_winpkfilter_driver_from_msi(
         return Ok(());
     }
 
-    let msi_path = resolve_winpkfilter_msi(app, resource_dir, exe_dir, program_files_dir)?;
-    let msi_string = msi_path.to_string_lossy().to_string();
-    let first_log_path = default_driver_install_log_path();
+    let pkg = swifttunnel_core::vpn::winpkfilter::native_msi_package();
+    let resolved_msi_path = resolve_winpkfilter_msi(app, resource_dir, exe_dir, program_files_dir)?;
+    let workspace = stage_winpkfilter_msi(&resolved_msi_path, pkg)?;
+    let msi_string = workspace.msi_path.to_string_lossy().to_string();
+    let first_log_path = workspace.first_log_path.clone();
     let first_log_string = first_log_path.to_string_lossy().to_string();
-    let retry_log_path = first_log_path.with_extension("retry.log");
+    let retry_log_path = workspace.retry_log_path.clone();
     let retry_log_string = retry_log_path.to_string_lossy().to_string();
 
     // ── Phase A: pre-flight (broken-install detection) ──
@@ -555,21 +744,38 @@ fn install_winpkfilter_driver_from_msi(
     // but the driver isn't available at runtime, the MSI is very likely
     // to return 1603 trying to "repair" the stale state. Clean it up
     // first so the MSI install starts from a known-empty state.
+    let mut cleaned_broken_install = false;
     if let Some(published) = detect_broken_install() {
         log::warn!(
             "Detected broken WinpkFilter install ({}); cleaning up before retry",
             published
         );
-        if let Err(e) = swifttunnel_core::vpn::SplitTunnelDriver::remove_driver_for_uninstall() {
-            log::warn!("Pre-install cleanup failed (continuing anyway): {}", e);
+        match swifttunnel_core::vpn::SplitTunnelDriver::remove_driver_for_uninstall() {
+            Ok(()) => {
+                cleaned_broken_install = true;
+            }
+            Err(e) => {
+                log::warn!("Pre-install cleanup failed (continuing anyway): {}", e);
+            }
         }
     }
+    let use_reinstall_mode = force
+        && !cleaned_broken_install
+        && swifttunnel_core::vpn::winpkfilter::find_installed_driver_published_name()
+            .ok()
+            .flatten()
+            .is_some();
 
     let run_install = |passive: bool, log_string: &str| -> Result<(i32, String), String> {
         if swifttunnel_core::is_administrator() {
             let ui_flag = if passive { "/passive" } else { "/qn" };
+            let mut args = vec!["/i", &msi_string, ui_flag, "/norestart", "/L*V", log_string];
+            if use_reinstall_mode {
+                args.push("REINSTALL=ALL");
+                args.push("REINSTALLMODE=vamus");
+            }
             let output = swifttunnel_core::hidden_command("msiexec")
-                .args(["/i", &msi_string, ui_flag, "/norestart", "/L*V", log_string])
+                .args(args)
                 .output()
                 .map_err(|e| format!("Failed to run msiexec: {}", e))?;
             Ok((
@@ -577,7 +783,8 @@ fn install_winpkfilter_driver_from_msi(
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         } else {
-            let script = build_elevated_msiexec_script(&msi_string, log_string, passive);
+            let script =
+                build_elevated_msiexec_script(&msi_string, log_string, passive, use_reinstall_mode);
 
             let output = swifttunnel_core::hidden_command("powershell")
                 .args(["-NoProfile", "-Command", &script])
@@ -612,13 +819,11 @@ fn install_winpkfilter_driver_from_msi(
                 "MSI install returned recoverable code {}; attempting INF fallback via pnputil",
                 exit_code
             );
-            let extract_dir = unique_extract_dir();
+            let extract_dir = workspace.extract_dir.clone();
             let extract_log = extract_dir.join("extract.log");
-            match try_inf_fallback(&msi_path, &extract_dir, &extract_log) {
+            match try_inf_fallback(&workspace.msi_path, &extract_dir, &extract_log) {
                 Ok(()) => {
                     log::info!("INF fallback succeeded; proceeding to service repair");
-                    // Best-effort cleanup of the extract dir on success.
-                    let _ = fs::remove_dir_all(&extract_dir);
                     // Fall through to Phase D.
                 }
                 Err(fallback_err) => {
@@ -684,25 +889,58 @@ fn install_winpkfilter_driver_from_msi(
                     self_test_err
                 );
                 if matches!(exit_code, 1641 | 3010) {
-                    return Err(format!(
+                    let mut message = format!(
                         "Reboot required to finish driver installation. Windows signaled exit {} and the post-install self-test failed ({}). Please reboot and try again.",
                         exit_code, self_test_err
-                    ));
+                    );
+                    message.push_str(". Installer log: ");
+                    message.push_str(&first_log_string);
+                    if retry_attempted {
+                        message.push_str(". Retry log: ");
+                        message.push_str(&retry_log_string);
+                    }
+                    return Err(message);
                 }
-                return Err(self_test_err);
+                let mut message = self_test_err;
+                message.push_str(". Installer log: ");
+                message.push_str(&first_log_string);
+                if retry_attempted {
+                    message.push_str(". Retry log: ");
+                    message.push_str(&retry_log_string);
+                }
+                return Err(message);
             }
             let _ = fs::remove_file(&first_log_path);
             let _ = fs::remove_file(&retry_log_path);
+            let _ = fs::remove_dir_all(&workspace.root);
             Ok(())
         }
-        Err(e) if matches!(exit_code, 1641 | 3010) => Err(format!(
-            "Reboot required to finish driver installation. Windows signaled exit {} and the driver did not come up within the service-repair window ({}). Please reboot and try again.",
-            exit_code, e
-        )),
-        Err(e) => Err(format!(
-            "Driver installation completed, but the driver is still not available after service repair attempts. {}",
-            e
-        )),
+        Err(e) if matches!(exit_code, 1641 | 3010) => {
+            let mut message = format!(
+                "Reboot required to finish driver installation. Windows signaled exit {} and the driver did not come up within the service-repair window ({}). Please reboot and try again.",
+                exit_code, e
+            );
+            message.push_str(". Installer log: ");
+            message.push_str(&first_log_string);
+            if retry_attempted {
+                message.push_str(". Retry log: ");
+                message.push_str(&retry_log_string);
+            }
+            Err(message)
+        }
+        Err(e) => {
+            let mut message = format!(
+                "Driver installation completed, but the driver is still not available after service repair attempts. {}",
+                e
+            );
+            message.push_str(". Installer log: ");
+            message.push_str(&first_log_string);
+            if retry_attempted {
+                message.push_str(". Retry log: ");
+                message.push_str(&retry_log_string);
+            }
+            Err(message)
+        }
     }
 }
 
@@ -825,6 +1063,9 @@ pub async fn system_install_driver(
             std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
         );
         tauri::async_runtime::spawn_blocking(move || {
+            let _guard = DRIVER_OPERATION_LOCK
+                .lock()
+                .map_err(|_| "Driver operation lock is poisoned".to_string())?;
             install_winpkfilter_driver_from_msi(
                 &app,
                 resource_dir.as_deref(),
@@ -859,16 +1100,18 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
         tauri::async_runtime::spawn_blocking(move || {
             use swifttunnel_core::vpn::DriverRecommendedAction;
 
+            let _guard = DRIVER_OPERATION_LOCK
+                .lock()
+                .map_err(|_| "Driver operation lock is poisoned".to_string())?;
             let initial = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
-            if initial.ready {
-                return Ok(DriverCheckResponse::from_health(initial));
-            }
-
             let is_admin = swifttunnel_core::is_administrator();
             let mut current = initial.clone();
             let mut last_error: Option<String> = None;
 
-            if is_admin && current.recommended_action == DriverRecommendedAction::ResetService {
+            if is_admin
+                && (initial.ready
+                    || current.recommended_action == DriverRecommendedAction::ResetService)
+            {
                 match swifttunnel_core::vpn::SplitTunnelDriver::restart_driver_service()
                     .and_then(|_| {
                         swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
@@ -894,6 +1137,10 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 );
             }
 
+            if initial.ready && current.ready && last_error.is_none() {
+                return Ok(DriverCheckResponse::from_health(current));
+            }
+
             if current.reboot_required || current.recommended_action == DriverRecommendedAction::Reboot {
                 let mut response = DriverCheckResponse::from_health(current);
                 if let Some(error) = last_error {
@@ -914,6 +1161,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 initial.recommended_action,
                 DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
             ) || reset_failed
+                || (initial.ready && last_error.is_some())
             {
                 let force_reinstall = matches!(
                     current.recommended_action,
@@ -921,9 +1169,13 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 ) || matches!(
                     initial.recommended_action,
                     DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
-                ) || reset_failed;
+                ) || reset_failed
+                    || initial.ready;
 
                 let mut repair_errors = Vec::new();
+                if let Some(error) = &last_error {
+                    repair_errors.push(error.clone());
+                }
 
                 if is_admin {
                     match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
@@ -1076,7 +1328,7 @@ mod tests {
         let dir = unique_extract_dir();
         let s = dir.to_string_lossy();
         assert!(
-            s.contains("SwiftTunnel") && s.contains("driver-extract"),
+            s.contains("SwiftTunnel") && s.contains("driver-work") && s.contains("extract-"),
             "unexpected extract dir: {}",
             s
         );
@@ -1259,6 +1511,7 @@ mod tests {
             "C:\\path\\ev'elyn\\WinpkFilter-x64.msi",
             "C:\\Temp\\log's\\winpk.log",
             true,
+            true,
         );
         assert!(script.contains("ev''elyn"));
         assert!(script.contains("log''s"));
@@ -1266,6 +1519,8 @@ mod tests {
         assert!(script.contains("msiexec.exe"));
         assert!(script.contains("/passive"));
         assert!(script.contains("/L*V"));
+        assert!(script.contains("REINSTALL=ALL"));
+        assert!(script.contains("REINSTALLMODE=vamus"));
     }
 
     #[test]
@@ -1333,6 +1588,9 @@ pub async fn system_reset_driver() -> Result<(), String> {
     #[cfg(windows)]
     {
         tauri::async_runtime::spawn_blocking(|| {
+            let _guard = DRIVER_OPERATION_LOCK
+                .lock()
+                .map_err(|_| "Driver operation lock is poisoned".to_string())?;
             if !swifttunnel_core::is_administrator() {
                 return Err(
                     "Administrator privileges required to restart the driver service. Please relaunch SwiftTunnel as Administrator."

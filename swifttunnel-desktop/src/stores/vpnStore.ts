@@ -58,6 +58,32 @@ function isRepairableBindingPreflight(preflight: BindingPreflightInfo): boolean 
   );
 }
 
+let connectAttemptSeq = 0;
+const autoRepairedBindingSignatures = new Set<string>();
+
+function nextConnectAttempt(): number {
+  connectAttemptSeq += 1;
+  return connectAttemptSeq;
+}
+
+function isCurrentConnectAttempt(attempt: number): boolean {
+  return attempt === connectAttemptSeq;
+}
+
+function bindingRepairFailedStatus(reason: string): DriverCheckResponse {
+  return {
+    installed: true,
+    version: null,
+    ready: false,
+    status: "binding_repair_failed",
+    message:
+      "Automatic split tunnel driver repair did not restore adapter binding.\n\n" +
+      reason,
+    reboot_required: false,
+    recommended_action: "reset_service",
+  };
+}
+
 interface VpnStore {
   state: VpnState;
   region: string | null;
@@ -275,6 +301,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   connect: async (region, gamePresets) => {
+    const attempt = nextConnectAttempt();
     try {
       set({
         state: "fetching_config",
@@ -285,6 +312,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         connectAttemptInFlight: true,
       });
       await get().ensureDriverReady();
+      if (!isCurrentConnectAttempt(attempt)) return;
       set({
         state: "fetching_config",
         error: null,
@@ -292,8 +320,14 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverSetupError: null,
       });
       let preflight = await vpnPreflightBinding(region, gamePresets);
-      if (isRepairableBindingPreflight(preflight)) {
+      if (!isCurrentConnectAttempt(attempt)) return;
+      if (
+        isRepairableBindingPreflight(preflight) &&
+        !autoRepairedBindingSignatures.has(preflight.network_signature)
+      ) {
+        autoRepairedBindingSignatures.add(preflight.network_signature);
         await get().repairDriver();
+        if (!isCurrentConnectAttempt(attempt)) return;
         set({
           state: "fetching_config",
           error: null,
@@ -301,6 +335,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           driverSetupError: null,
         });
         preflight = await vpnPreflightBinding(region, gamePresets);
+        if (!isCurrentConnectAttempt(attempt)) return;
       }
       if (preflight.status === "ambiguous") {
         set({
@@ -313,6 +348,20 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         return;
       }
       if (preflight.status === "unrecoverable") {
+        if (isRepairableBindingPreflight(preflight)) {
+          const status = bindingRepairFailedStatus(preflight.reason);
+          set({
+            state: "error",
+            error: status.message,
+            driverSetupState: "error",
+            driverSetupError: status.message,
+            driverStatus: status,
+            bindingPreflight: null,
+            pendingConnectIntent: null,
+            connectAttemptInFlight: false,
+          });
+          return;
+        }
         set({
           state: "error",
           error: preflight.reason,
@@ -323,8 +372,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         return;
       }
       await vpnConnect(region, gamePresets);
+      if (!isCurrentConnectAttempt(attempt)) return;
       await get().fetchState();
+      if (!isCurrentConnectAttempt(attempt)) return;
       await get().fetchDiagnostics();
+      if (!isCurrentConnectAttempt(attempt)) return;
       if (get().state === "connected") {
         set({ connectedAt: Date.now() });
         await notify("SwiftTunnel", `Connected to ${get().region ?? region}`);
@@ -338,7 +390,9 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverResetAttempted: false,
         connectAttemptInFlight: false,
       });
+      autoRepairedBindingSignatures.clear();
     } catch (e) {
+      if (!isCurrentConnectAttempt(attempt)) return;
       const message = getErrorMessage(e);
       set((current) => ({
         state: "error",
@@ -387,6 +441,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   disconnect: async () => {
+    nextConnectAttempt();
     try {
       set({ state: "disconnecting" });
       await vpnDisconnect();
@@ -412,6 +467,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverStatus: null,
         driverResetAttempted: false,
       });
+      autoRepairedBindingSignatures.clear();
       await notify("SwiftTunnel", "VPN disconnected.");
     } catch (e) {
       set({ state: "error", error: String(e) });

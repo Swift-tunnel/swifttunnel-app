@@ -1905,6 +1905,12 @@ impl ParallelInterceptor {
             || friendly_lower.starts_with("wan ")
     }
 
+    fn has_wan_or_ppp_name_hint(friendly_name: &str, description: &str) -> bool {
+        Self::is_wan_like_friendly_name(friendly_name)
+            || Self::is_wan_like_friendly_name(description)
+            || description.to_ascii_lowercase().contains("ppp")
+    }
+
     fn adapter_kind_from_if_type(if_type: u32) -> &'static str {
         use windows::Win32::NetworkManagement::IpHelper::{
             IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK,
@@ -2107,7 +2113,13 @@ impl ParallelInterceptor {
             .filter(|candidate| candidate.is_up != Some(false))
             .filter(|candidate| candidate.kind != "loopback")
             .filter(|candidate| candidate.kind != "tunnel")
-            .filter(|candidate| !Self::is_wan_like_friendly_name(&candidate.friendly_name))
+            .filter(|candidate| candidate.kind != "ppp")
+            .filter(|candidate| {
+                !Self::has_wan_or_ppp_name_hint(&candidate.friendly_name, &candidate.description)
+            })
+            .filter(|candidate| {
+                !candidate.friendly_name.trim().is_empty() || candidate.if_index.is_some()
+            })
             .collect();
 
         if viable.len() == 1 {
@@ -2320,17 +2332,21 @@ impl ParallelInterceptor {
             log::warn!("Could not determine default route interface - will use name-based scoring");
         }
 
-        if let Err(err) = Self::ensure_winpkfilter_binding_for_adapter(
-            default_route_if_index,
-            default_route_owner
-                .as_ref()
-                .map(|(friendly_name, _, _, _)| friendly_name.as_str()),
-        ) {
+        let default_route_binding_error = if let Err(err) =
+            Self::ensure_winpkfilter_binding_for_adapter(
+                default_route_if_index,
+                default_route_owner
+                    .as_ref()
+                    .map(|(friendly_name, _, _, _)| friendly_name.as_str()),
+            ) {
             log::warn!(
                 "WinpkFilter binding check on default-route adapter failed before enumeration: {}",
                 err
             );
-        }
+            Some(err)
+        } else {
+            None
+        };
 
         // Find adapters
         let driver = ndisapi::Ndisapi::new("NDISRD")
@@ -2521,9 +2537,9 @@ impl ParallelInterceptor {
                         score: 0,
                         is_up,
                     });
-                } else if internal_guid_lc.is_some() {
+                } else if internal_guid_lc.is_some() && has_default_route_for_scoring {
                     log::info!(
-                        "    -> Deferred as unknown NDIS candidate (friendly name unavailable)"
+                        "    -> Deferred as default-route unknown NDIS candidate (friendly name unavailable)"
                     );
                     unknown_physical_candidates.push(PhysicalCandidate {
                         idx,
@@ -2536,6 +2552,8 @@ impl ParallelInterceptor {
                         score: -500 + (10 - idx.min(10)) as i32,
                         is_up,
                     });
+                } else if internal_guid_lc.is_some() {
+                    log::info!("    -> Skipped unknown NDIS candidate without default-route proof");
                 } else {
                     log::info!("    -> Skipped (unknown adapter, no friendly name)");
                 }
@@ -2589,14 +2607,20 @@ impl ParallelInterceptor {
             }
         }
 
-        let used_bridge_sibling =
-            if selected.is_none() && strict_default_route && route_owner_bridge_like {
-                selected = Self::select_bridge_sibling_candidate(&physical_candidates);
-                selected.is_some()
-            } else {
-                false
-            };
-        let used_route_owner_fallback = if selected.is_none() && strict_default_route {
+        let used_bridge_sibling = if selected.is_none()
+            && strict_default_route
+            && route_owner_bridge_like
+            && default_route_binding_error.is_none()
+        {
+            selected = Self::select_bridge_sibling_candidate(&physical_candidates);
+            selected.is_some()
+        } else {
+            false
+        };
+        let used_route_owner_fallback = if selected.is_none()
+            && strict_default_route
+            && default_route_binding_error.is_none()
+        {
             selected = Self::select_route_owner_named_candidate(
                 &physical_candidates,
                 default_route_owner.as_ref(),
@@ -2605,12 +2629,7 @@ impl ParallelInterceptor {
         } else {
             false
         };
-        let used_single_candidate_fallback = if selected.is_none() && strict_default_route {
-            selected = Self::select_single_viable_candidate(&physical_candidates);
-            selected.is_some()
-        } else {
-            false
-        };
+        let used_single_candidate_fallback = false;
 
         self.manual_binding_active = used_preferred_physical_adapter
             && binding_preference
@@ -2639,6 +2658,22 @@ impl ParallelInterceptor {
             BindingStage::Unrecoverable
         };
 
+        if selected.is_none() && physical_candidates.is_empty() {
+            self.binding_stage = BindingStage::Unrecoverable.as_str().to_string();
+            self.binding_reason =
+                "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.".to_string();
+            self.last_validation_result = "winpkfilter_binding_missing".to_string();
+            self.binding_candidates.clear();
+            self.recommended_adapter_guid = None;
+
+            let suffix = default_route_if_index
+                .map(|def| format!(" for default-route interface index {def}"))
+                .unwrap_or_default();
+            return Err(VpnError::SplitTunnel(format!(
+                "No WinpkFilter-bound NDIS adapters were visible{suffix}."
+            )));
+        }
+
         if strict_default_route && default_route_if_index.is_some() && selected.is_none() {
             let def = default_route_if_index.expect("checked is_some");
             let mut lines = Vec::new();
@@ -2647,19 +2682,6 @@ impl ParallelInterceptor {
                     "'{}' if_index={:?} up={:?} score={}",
                     c.friendly_name, c.if_index, c.is_up, c.score
                 ));
-            }
-
-            if physical_candidates.is_empty() {
-                self.binding_stage = BindingStage::Unrecoverable.as_str().to_string();
-                self.binding_reason =
-                    "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.".to_string();
-                self.last_validation_result = "winpkfilter_binding_missing".to_string();
-                self.binding_candidates.clear();
-                self.recommended_adapter_guid = None;
-
-                return Err(VpnError::SplitTunnel(format!(
-                    "No WinpkFilter-bound NDIS adapters were visible for default-route interface index {def}."
-                )));
             }
 
             self.binding_stage = if route_owner_bridge_like {
@@ -2702,8 +2724,12 @@ impl ParallelInterceptor {
                 .max_by_key(|candidate| candidate.score)
                 .map(|candidate| candidate.guid.clone());
 
+            let binding_error = default_route_binding_error
+                .as_ref()
+                .map(|error| format!(" Default-route binding check failed first: {error}."))
+                .unwrap_or_default();
             return Err(VpnError::SplitTunnel(format!(
-                "No NDIS adapter matched the default-route interface index {def}. Candidates: {}",
+                "No NDIS adapter matched the default-route interface index {def}.{binding_error} Candidates: {}",
                 lines.join(", ")
             )));
         }
@@ -8025,6 +8051,23 @@ mod tests {
                 is_up: Some(true),
             },
         ];
+
+        assert!(ParallelInterceptor::select_single_viable_candidate(&candidates).is_none());
+    }
+
+    #[test]
+    fn test_select_single_viable_candidate_rejects_nameless_ppp_wan_candidate() {
+        let candidates = vec![PhysicalCandidate {
+            idx: 0,
+            guid: "wan-guid".to_string(),
+            friendly_name: "".to_string(),
+            description: "WAN Network Interface (IP)".to_string(),
+            kind: "ppp".to_string(),
+            internal_name: "wan".to_string(),
+            if_index: Some(25),
+            score: -100,
+            is_up: Some(true),
+        }];
 
         assert!(ParallelInterceptor::select_single_viable_candidate(&candidates).is_none());
     }
