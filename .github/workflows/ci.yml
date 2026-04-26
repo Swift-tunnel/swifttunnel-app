@@ -21,6 +21,11 @@ on:
       - "Cargo.toml"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
 
 jobs:
   frontend:
@@ -101,8 +106,48 @@ jobs:
       - name: Test desktop backend
         run: cargo test -p swifttunnel-desktop -- --nocapture
 
+  split-tunnel-testbench-availability:
+    name: Split Tunnel Testbench Availability
+    runs-on: ubuntu-latest
+    outputs:
+      runner_available: ${{ steps.runner.outputs.available }}
+
+    steps:
+      - name: Check for an online testbench runner
+        id: runner
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          set +e
+          matching_runner_count="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runners" \
+              --jq '.runners[] | select(.status == "online") | select(([.labels[].name] | contains(["self-hosted", "Windows", "X64", "testbench"]))) | .id' \
+              | wc -l \
+              | tr -d ' '
+          )"
+          api_status=$?
+          set -e
+
+          if [[ "$api_status" -ne 0 ]]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Could not query self-hosted runners; skipping split tunnel testbench instead of queuing indefinitely."
+            exit 0
+          fi
+
+          if [[ "$matching_runner_count" -gt 0 ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Found $matching_runner_count online split tunnel testbench runner(s)."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No online split tunnel testbench runner found; skipping split tunnel testbench instead of queuing indefinitely."
+          fi
+
   split-tunnel-testbench:
     name: Split Tunnel Testbench (Windows)
+    needs: split-tunnel-testbench-availability
+    if: needs.split-tunnel-testbench-availability.outputs.runner_available == 'true'
     runs-on: [self-hosted, Windows, X64, testbench]
     timeout-minutes: 45
 
