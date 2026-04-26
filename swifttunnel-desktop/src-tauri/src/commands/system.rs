@@ -1121,9 +1121,13 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                     .and_then(|_| swifttunnel_core::vpn::SplitTunnelDriver::self_test())
                 {
                     Ok(()) => {
-                        return Ok(DriverCheckResponse::from_health(
-                            swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
-                        ));
+                        current = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                        if !initial.ready {
+                            return Ok(DriverCheckResponse::from_health(current));
+                        }
+                        log::info!(
+                            "Driver service reset passed; continuing repair to refresh WinpkFilter adapter bindings"
+                        );
                     }
                     Err(e) => {
                         log::warn!("Driver service reset failed during repair: {}", e);
@@ -1137,7 +1141,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 );
             }
 
-            if initial.ready && current.ready && last_error.is_none() {
+            if !initial.ready && current.ready && last_error.is_none() {
                 return Ok(DriverCheckResponse::from_health(current));
             }
 
@@ -1161,7 +1165,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 initial.recommended_action,
                 DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
             ) || reset_failed
-                || (initial.ready && last_error.is_some())
+                || initial.ready
             {
                 let force_reinstall = matches!(
                     current.recommended_action,
@@ -1169,8 +1173,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 ) || matches!(
                     initial.recommended_action,
                     DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
-                ) || reset_failed
-                    || initial.ready;
+                ) || reset_failed;
 
                 let mut repair_errors = Vec::new();
                 if let Some(error) = &last_error {
@@ -1264,6 +1267,12 @@ mod tests {
         fs::write(path, b"").expect("write temp file");
     }
 
+    fn assert_same_canonical_path(actual: &Path, expected: &Path) {
+        let actual = fs::canonicalize(actual).expect("canonicalize actual path");
+        let expected = fs::canonicalize(expected).expect("canonicalize expected path");
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn driver_install_success_exit_code_accepts_expected_codes() {
         for code in [0, 1638, 1641, 3010] {
@@ -1342,7 +1351,7 @@ mod tests {
         let base = unique_temp_dir("extract_top");
         touch(&base.join("ndisrd_lwf.inf"));
         let result = find_inf_in_extract_dir(&base).expect("should find top-level inf");
-        assert_eq!(result, base);
+        assert_same_canonical_path(&result, &base);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1353,7 +1362,7 @@ mod tests {
         fs::create_dir_all(&nested).expect("create nested dir");
         touch(&nested.join("ndisrd_lwf.inf"));
         let result = find_inf_in_extract_dir(&base).expect("should find nested inf");
-        assert_eq!(result, nested);
+        assert_same_canonical_path(&result, &nested);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1362,7 +1371,7 @@ mod tests {
         let base = unique_temp_dir("extract_case");
         touch(&base.join("NDISRD_LWF.INF"));
         let result = find_inf_in_extract_dir(&base).expect("should find case-insensitive inf");
-        assert_eq!(result, base);
+        assert_same_canonical_path(&result, &base);
         let _ = fs::remove_dir_all(&base);
     }
 

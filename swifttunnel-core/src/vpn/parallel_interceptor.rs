@@ -250,6 +250,7 @@ enum BindingStage {
     ExactRouteMatch,
     ManualPreference,
     RememberedOverride,
+    WinpkFilterBindingMissing,
     WanFallback,
     BridgeSibling,
     RouteOwnerFallback,
@@ -264,6 +265,7 @@ impl BindingStage {
             Self::ExactRouteMatch => "exact_route_match",
             Self::ManualPreference => "manual_preference",
             Self::RememberedOverride => "remembered_override",
+            Self::WinpkFilterBindingMissing => "winpkfilter_binding_missing",
             Self::WanFallback => "wan_fallback",
             Self::BridgeSibling => "bridge_sibling",
             Self::RouteOwnerFallback => "route_owner_fallback",
@@ -2652,20 +2654,74 @@ impl ParallelInterceptor {
             BindingStage::Unrecoverable
         };
 
+        let default_route_binding_missing = default_route_binding_error
+            .as_ref()
+            .is_some_and(|err| Self::is_winpkfilter_binding_missing_failure(&err.to_string()));
+
         if selected.is_none() && physical_candidates.is_empty() {
-            self.binding_stage = BindingStage::Unrecoverable.as_str().to_string();
-            self.binding_reason =
-                "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.".to_string();
-            self.last_validation_result = "winpkfilter_binding_missing".to_string();
+            self.binding_stage = if default_route_binding_missing {
+                BindingStage::WinpkFilterBindingMissing.as_str().to_string()
+            } else {
+                BindingStage::Unrecoverable.as_str().to_string()
+            };
+            self.binding_reason = if default_route_binding_missing {
+                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. Repair the split tunnel driver, then try again.".to_string()
+            } else {
+                "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.".to_string()
+            };
+            self.last_validation_result = if default_route_binding_missing {
+                "winpkfilter_binding_missing".to_string()
+            } else {
+                "no_winpkfilter_bound_adapters".to_string()
+            };
             self.binding_candidates.clear();
             self.recommended_adapter_guid = None;
 
             let suffix = default_route_if_index
                 .map(|def| format!(" for default-route interface index {def}"))
                 .unwrap_or_default();
+            if default_route_binding_missing {
+                let adapter_label = default_route_owner
+                    .as_ref()
+                    .map(|(friendly_name, _, _, _)| friendly_name.as_str())
+                    .unwrap_or("active network adapter");
+                return Err(VpnError::SplitTunnel(
+                    Self::winpkfilter_binding_missing_message(adapter_label),
+                ));
+            }
             return Err(VpnError::SplitTunnel(format!(
                 "No WinpkFilter-bound NDIS adapters were visible{suffix}."
             )));
+        }
+
+        if strict_default_route
+            && default_route_if_index.is_some()
+            && selected.is_none()
+            && default_route_binding_missing
+        {
+            let adapter_label = default_route_owner
+                .as_ref()
+                .map(|(friendly_name, _, _, _)| friendly_name.as_str())
+                .unwrap_or("active network adapter");
+            self.binding_stage = BindingStage::WinpkFilterBindingMissing.as_str().to_string();
+            self.binding_reason =
+                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. Repair the split tunnel driver, then try again.".to_string();
+            self.last_validation_result = "winpkfilter_binding_missing".to_string();
+            self.binding_candidates = physical_candidates
+                .iter()
+                .map(|candidate| {
+                    Self::to_binding_candidate_info(
+                        candidate,
+                        default_route_if_index,
+                        BindingStage::SmartAuto,
+                        "Candidate available after WinpkFilter binding repair",
+                    )
+                })
+                .collect();
+            self.recommended_adapter_guid = None;
+            return Err(VpnError::SplitTunnel(
+                Self::winpkfilter_binding_missing_message(adapter_label),
+            ));
         }
 
         if strict_default_route && default_route_if_index.is_some() && selected.is_none() {
@@ -3051,6 +3107,10 @@ impl ParallelInterceptor {
             function Resolve-WinpkFilterCandidates {{
                 $candidates = [System.Collections.Generic.List[object]]::new()
 
+                if ($null -ne $adapterIfIndex) {{
+                    Add-BindingCandidate $candidates 'InterfaceIndex' ([string]$adapterIfIndex) $adapterLabel
+                }}
+
                 if (-not [string]::IsNullOrWhiteSpace($adapterHint)) {{
                     Add-BindingCandidate $candidates 'Name' $adapterHint $adapterHint
                     Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint $adapterHint
@@ -3074,6 +3134,12 @@ impl ParallelInterceptor {
             }}
 
             function Get-WinpkFilterBinding([object]$Candidate) {{
+                if ($Candidate.Selector -eq 'InterfaceIndex') {{
+                    return Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value) -ErrorAction SilentlyContinue |
+                        Get-NetAdapterBinding -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+                }}
+
                 if ($Candidate.Selector -eq 'Name') {{
                     return Get-NetAdapterBinding -Name $Candidate.Value -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
                         Select-Object -First 1
@@ -3088,6 +3154,16 @@ impl ParallelInterceptor {
             }}
 
             function Enable-WinpkFilterBinding([object]$Candidate) {{
+                if ($Candidate.Selector -eq 'InterfaceIndex') {{
+                    $adapter = Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value) -ErrorAction Stop |
+                        Select-Object -First 1
+                    if (-not $adapter) {{
+                        throw ('Could not resolve adapter by interface index: ' + $Candidate.Value)
+                    }}
+                    Enable-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
+                    return
+                }}
+
                 if ($Candidate.Selector -eq 'Name') {{
                     Enable-NetAdapterBinding -Name $Candidate.Value -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
                     return
@@ -3139,7 +3215,7 @@ impl ParallelInterceptor {
                 }}
 
                 if (-not $bindingCandidate) {{
-                    throw ('WinpkFilter binding nt_ndisrd is not installed on adapter: ' + $adapterLabel)
+                    throw ('winpkfilter_binding_missing: nt_ndisrd is not bound to adapter ''' + $adapterLabel + ''' (ifIndex=' + $adapterIfIndex + '). Repair the split tunnel driver, then try again.')
                 }}
 
                 $adapterName = if ($binding.Name) {{ [string]$binding.Name }} elseif ($bindingCandidate.DisplayName) {{ [string]$bindingCandidate.DisplayName }} else {{ $adapterLabel }}
@@ -3175,7 +3251,11 @@ impl ParallelInterceptor {
                     $errorText = 'PowerShell command failed without an exception message.'
                 }}
 
-                Write-Error ('WinpkFilter binding validation failed for adapter ' + $adapterLabel + ': ' + $errorText)
+                if ($errorText -like 'winpkfilter_binding_missing:*') {{
+                    [Console]::Error.WriteLine($errorText)
+                }} else {{
+                    [Console]::Error.WriteLine('winpkfilter_binding_validation_failed: adapter ''' + $adapterLabel + ''': ' + $errorText)
+                }}
                 exit 1
             }}
             "#,
@@ -3193,6 +3273,21 @@ impl ParallelInterceptor {
             || (details.contains("get-netadapter") && details.contains("not recognized"))
             || (details.contains("get-netadapterbinding") && details.contains("not recognized"))
             || (details.contains("enable-netadapterbinding") && details.contains("not recognized"))
+    }
+
+    fn is_winpkfilter_binding_missing_failure(details: &str) -> bool {
+        let details = details.to_ascii_lowercase();
+        details.contains("winpkfilter_binding_missing")
+            || (details.contains("nt_ndisrd")
+                && (details.contains("not installed on adapter")
+                    || details.contains("not bound to adapter")))
+    }
+
+    fn winpkfilter_binding_missing_message(adapter_label: &str) -> String {
+        format!(
+            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter '{}'. Repair the split tunnel driver, then try again.",
+            adapter_label
+        )
     }
 
     /// Ensure the WinpkFilter lightweight filter is enabled on a target adapter.
@@ -3268,11 +3363,17 @@ impl ParallelInterceptor {
                 return Ok(());
             }
 
-            // Only retry on timeouts or transient failures, not on permanent ones
-            // like "binding not installed". Check for permanent failure indicators.
-            if last_details.contains("is not installed on adapter") {
+            // Only retry on timeouts or transient failures, not on permanent
+            // binding faults. The driver repair path can re-install the LWF
+            // component and rebind it to the adapter.
+            if Self::is_winpkfilter_binding_missing_failure(&last_details) {
+                last_details = Self::winpkfilter_binding_missing_message(adapter_label);
                 break;
             }
+        }
+
+        if Self::is_winpkfilter_binding_missing_failure(&last_details) {
+            return Err(VpnError::SplitTunnel(last_details));
         }
 
         Err(VpnError::SplitTunnel(format!(
@@ -9392,7 +9493,7 @@ mod tests {
             script.contains("Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint")
         );
         assert!(script.contains("Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value"));
-        assert!(script.contains("Write-Error ('WinpkFilter binding validation failed for adapter ' + $adapterLabel + ': ' + $errorText)"));
+        assert!(script.contains("winpkfilter_binding_validation_failed"));
     }
 
     #[test]
@@ -9405,6 +9506,31 @@ mod tests {
         assert!(script.contains(
             "Get-CimInstance -ClassName Win32_NetworkAdapter -Filter ('InterfaceIndex = ' + $adapterIfIndex)"
         ));
+        assert!(script.contains(
+            "Add-BindingCandidate $candidates 'InterfaceIndex' ([string]$adapterIfIndex)"
+        ));
+        assert!(script.contains("Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value)"));
+        let interface_index_pos = script
+            .find("Add-BindingCandidate $candidates 'InterfaceIndex'")
+            .expect("interface-index candidate should be present");
+        let name_pos = script
+            .find("Add-BindingCandidate $candidates 'Name' $adapterHint")
+            .expect("name candidate should be present");
+        assert!(interface_index_pos < name_pos);
+    }
+
+    #[test]
+    fn test_winpkfilter_missing_binding_failure_is_structured() {
+        assert!(ParallelInterceptor::is_winpkfilter_binding_missing_failure(
+            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'"
+        ));
+        assert!(ParallelInterceptor::is_winpkfilter_binding_missing_failure(
+            "WinpkFilter binding nt_ndisrd is not installed on adapter: Ethernet"
+        ));
+        assert_eq!(
+            ParallelInterceptor::winpkfilter_binding_missing_message("Ethernet"),
+            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'. Repair the split tunnel driver, then try again."
+        );
     }
 
     #[test]

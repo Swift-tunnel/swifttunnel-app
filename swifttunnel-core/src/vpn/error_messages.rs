@@ -30,6 +30,10 @@ pub fn user_friendly_error(error: &VpnError) -> String {
                 "Administrator privileges required.\n\nPlease run SwiftTunnel as Administrator.".to_string()
             } else if lc.contains("no ndis adapter matched the default-route interface index") {
                 "SwiftTunnel couldn't detect your active network adapter for split tunneling.\n\nGo to Settings -> VPN -> Network Adapter, select your Wi-Fi/Ethernet adapter, then reconnect.\n\nThis can happen if another VPN, network bridge, or virtual adapter owns the default route.".to_string()
+            } else if lc.contains("winpkfilter_binding_missing")
+                || (lc.contains("nt_ndisrd") && lc.contains("not bound to adapter"))
+            {
+                "Split tunnel driver binding is missing on the active network adapter.\n\nSwiftTunnel can repair this automatically. Use Repair driver, then reconnect.".to_string()
             } else if lc.contains("internet interface") || lc.contains("no default gateway") {
                 "No internet connection detected.\n\nPlease check your network connection and try again.".to_string()
             } else {
@@ -189,6 +193,16 @@ mod tests {
         let msg = user_friendly_error(&error);
         assert!(msg.contains("Settings"));
         assert!(msg.contains("Network Adapter"));
+    }
+
+    #[test]
+    fn test_user_friendly_winpkfilter_binding_missing_is_concise() {
+        let error = VpnError::SplitTunnelSetupFailed(
+            "Failed to configure V3 split tunnel: Split tunnel driver error: winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'.".to_string(),
+        );
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("driver binding is missing"));
+        assert!(!msg.contains("Failed to configure V3 split tunnel"));
     }
 
     #[test]

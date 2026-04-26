@@ -248,6 +248,93 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("connected");
   });
 
+  it("repairs missing WinpkFilter binding marker during preflight", async () => {
+    systemCheckDriver.mockResolvedValueOnce(driverStatus());
+    vpnPreflightBinding
+      .mockResolvedValueOnce({
+        status: "unrecoverable",
+        reason:
+          "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Realtek Gaming GbE Family Controller'.",
+        network_signature: "source=internet_fallback;if_index=20;next_hop=1;up=",
+        route_resolution_source: "internet_fallback",
+        route_resolution_target_ip: "8.8.8.8",
+        resolved_if_index: 20,
+        recommended_guid: null,
+        cached_override_used: false,
+        binding_stage: "winpkfilter_binding_missing",
+        candidates: [],
+      })
+      .mockResolvedValueOnce({
+        status: "ok",
+        reason: "Split tunnel adapter binding validated.",
+        network_signature:
+          "source=internet_fallback;if_index=20;next_hop=1;up=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        route_resolution_source: "internet_fallback",
+        route_resolution_target_ip: "8.8.8.8",
+        resolved_if_index: 20,
+        recommended_guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        cached_override_used: false,
+        binding_stage: "exact_route_match",
+        candidates: [],
+      });
+    systemRepairDriver.mockResolvedValueOnce(driverStatus());
+    vpnConnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnPreflightBinding).toHaveBeenCalledTimes(2);
+    expect(vpnConnect).toHaveBeenCalledWith("singapore", ["roblox"]);
+    expect(useVpnStore.getState().state).toBe("connected");
+  });
+
+  it("does not auto-repair unrelated nt_ndisrd validation errors", async () => {
+    systemCheckDriver.mockResolvedValueOnce(driverStatus());
+    vpnPreflightBinding.mockResolvedValueOnce({
+      status: "unrecoverable",
+      reason: "nt_ndisrd adapter validation error: access denied",
+      network_signature: "source=internet_fallback;if_index=20;next_hop=1;up=",
+      route_resolution_source: "internet_fallback",
+      route_resolution_target_ip: "8.8.8.8",
+      resolved_if_index: 20,
+      recommended_guid: null,
+      cached_override_used: false,
+      binding_stage: "unrecoverable",
+      candidates: [],
+    });
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain("access denied");
+  });
+
+  it("repairs and retries once when connect races a missing WinpkFilter binding", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    systemRepairDriver.mockResolvedValueOnce(driverStatus());
+    vpnConnect
+      .mockRejectedValueOnce(
+        new Error(
+          "Split tunnel driver binding is missing on the active network adapter.",
+        ),
+      )
+      .mockResolvedValueOnce(undefined);
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnConnect).toHaveBeenCalledTimes(2);
+    expect(vpnPreflightBinding).toHaveBeenCalledTimes(2);
+    expect(useVpnStore.getState().state).toBe("connected");
+  });
+
   it("keeps repair action visible when binding repair does not fix preflight", async () => {
     systemCheckDriver.mockResolvedValue(driverStatus());
     const failedPreflight = {
@@ -275,10 +362,10 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().driverSetupState).toBe("error");
     expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
-      "reset_service",
+      "reinstall",
     );
     expect(useVpnStore.getState().driverSetupError).toContain(
-      "Automatic split tunnel driver repair did not restore adapter binding.",
+      "Automatic split tunnel driver repair did not restore the WinpkFilter adapter binding.",
     );
   });
 
