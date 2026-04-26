@@ -35,11 +35,13 @@ const AUTO_ROUTING_PING_SAMPLES: usize = 5;
 const CONNECT_FAIL_HANDSHAKE_TIMEOUT: &str = "ST_CONNECT_HANDSHAKE_TIMEOUT";
 const CONNECT_FAIL_CANDIDATE_EXHAUSTED: &str = "ST_CONNECT_CANDIDATE_EXHAUSTED";
 const CONNECT_FAIL_PREFLIGHT_ENFORCED: &str = "ST_CONNECT_PREFLIGHT_ENFORCED";
+const CONNECT_FAIL_AUTH_REQUIRED: &str = "ST_CONNECT_AUTH_REQUIRED";
 const CONNECT_FAIL_REGION_UNAVAILABLE: &str = "ST_CONNECT_REGION_UNAVAILABLE";
 
 static HANDSHAKE_TIMEOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
 static CANDIDATE_EXHAUSTED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static PREFLIGHT_ENFORCED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static AUTH_REQUIRED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static REGION_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -47,6 +49,7 @@ struct RelayCandidateAttempt {
     region: String,
     addr: SocketAddr,
     authenticated: bool,
+    auth_required: bool,
     preflight_mode: RelayPreflightMode,
     queue_full_mode: RelayQueueFullMode,
 }
@@ -70,6 +73,10 @@ fn select_candidate_after_preflight(
     }
 
     let fallback = attempts.first().ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
+
+    if fallback.auth_required {
+        return Err(CONNECT_FAIL_AUTH_REQUIRED);
+    }
 
     if fallback.preflight_mode == RelayPreflightMode::Enforce {
         return Err(CONNECT_FAIL_PREFLIGHT_ENFORCED);
@@ -1072,14 +1079,8 @@ impl VpnConnection {
             }
         };
 
-        let resolved_forced_server =
-            resolved_forced_server(forced_for_region.as_deref(), &relay_candidates);
-        let has_forced_server = resolved_forced_server.is_some();
-
         let mut relay_auth_mode = if custom_relay_server.is_some() {
             "custom_legacy".to_string()
-        } else if has_forced_server {
-            "forced_server_legacy".to_string()
         } else {
             "legacy_fallback".to_string()
         };
@@ -1087,11 +1088,6 @@ impl VpnConnection {
 
         if custom_relay_server.is_some() {
             log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
-        } else if has_forced_server {
-            log::info!(
-                "V3: Forced server '{}' selected, skipping relay ticket bootstrap for direct connection",
-                resolved_forced_server.as_deref().unwrap_or("unknown")
-            );
         } else {
             let auth_client = AuthClient::new();
             let session_id_hex = relay.session_id_hex();
@@ -1124,6 +1120,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: false,
+                            auth_required: false,
                             preflight_mode: RelayPreflightMode::Legacy,
                             queue_full_mode: RelayQueueFullMode::Bypass,
                         });
@@ -1150,6 +1147,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: true,
+                            auth_required: ticket.auth_required,
                             preflight_mode: candidate_preflight_mode,
                             queue_full_mode: candidate_queue_full_mode,
                         });
@@ -1180,6 +1178,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: false,
+                            auth_required: ticket.auth_required,
                             preflight_mode: candidate_preflight_mode,
                             queue_full_mode: candidate_queue_full_mode,
                         });
@@ -1198,6 +1197,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: false,
+                            auth_required: ticket.auth_required,
                             preflight_mode: candidate_preflight_mode,
                             queue_full_mode: candidate_queue_full_mode,
                         });
@@ -1213,6 +1213,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: false,
+                            auth_required: ticket.auth_required,
                             preflight_mode: candidate_preflight_mode,
                             queue_full_mode: candidate_queue_full_mode,
                         });
@@ -1258,6 +1259,21 @@ impl VpnConnection {
                         let _ = driver.close();
                         return Err(VpnError::Connection(
                             "Relay preflight enforcement blocked connection (no healthy authenticated relay candidate)"
+                                .to_string(),
+                        ));
+                    }
+                    Err(CONNECT_FAIL_AUTH_REQUIRED) => {
+                        log_sampled_connect_event(
+                            &AUTH_REQUIRED_EVENTS,
+                            CONNECT_FAIL_AUTH_REQUIRED,
+                            format!(
+                                "Required relay auth rejected legacy fallback for '{}' (session {})",
+                                config.region, session_id_hex
+                            ),
+                        );
+                        let _ = driver.close();
+                        return Err(VpnError::Connection(
+                            "Relay authentication required but no relay candidate authenticated"
                                 .to_string(),
                         ));
                     }
@@ -2833,6 +2849,7 @@ mod tests {
                 region: "germany-01".to_string(),
                 addr: parse_addr("10.0.0.1:51821"),
                 authenticated: false,
+                auth_required: false,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Bypass,
             },
@@ -2840,6 +2857,7 @@ mod tests {
                 region: "germany-02".to_string(),
                 addr: parse_addr("10.0.0.2:51821"),
                 authenticated: true,
+                auth_required: true,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Drop,
             },
@@ -2847,6 +2865,7 @@ mod tests {
                 region: "germany-03".to_string(),
                 addr: parse_addr("10.0.0.3:51821"),
                 authenticated: false,
+                auth_required: true,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Bypass,
             },
@@ -2870,6 +2889,7 @@ mod tests {
                 region: "germany-01".to_string(),
                 addr: parse_addr("10.0.0.1:51821"),
                 authenticated: false,
+                auth_required: false,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Bypass,
             },
@@ -2877,6 +2897,7 @@ mod tests {
                 region: "germany-02".to_string(),
                 addr: parse_addr("10.0.0.2:51821"),
                 authenticated: false,
+                auth_required: false,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Drop,
             },
@@ -2899,6 +2920,7 @@ mod tests {
             region: "germany-01".to_string(),
             addr: parse_addr("10.0.0.1:51821"),
             authenticated: false,
+            auth_required: false,
             preflight_mode: RelayPreflightMode::Enforce,
             queue_full_mode: RelayQueueFullMode::Bypass,
         }];
@@ -2909,12 +2931,29 @@ mod tests {
     }
 
     #[test]
+    fn test_select_candidate_after_preflight_auth_required_rejects_legacy_fallback() {
+        let attempts = vec![RelayCandidateAttempt {
+            region: "germany-01".to_string(),
+            addr: parse_addr("10.0.0.1:51821"),
+            authenticated: false,
+            auth_required: true,
+            preflight_mode: RelayPreflightMode::Legacy,
+            queue_full_mode: RelayQueueFullMode::Bypass,
+        }];
+
+        let error = select_candidate_after_preflight(&attempts)
+            .expect_err("required auth should reject unauthenticated legacy fallback");
+        assert_eq!(error, CONNECT_FAIL_AUTH_REQUIRED);
+    }
+
+    #[test]
     fn test_select_candidate_after_preflight_fallback_uses_selected_policy() {
         let attempts = vec![
             RelayCandidateAttempt {
                 region: "germany-01".to_string(),
                 addr: parse_addr("10.0.0.1:51821"),
                 authenticated: false,
+                auth_required: false,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Bypass,
             },
@@ -2922,6 +2961,7 @@ mod tests {
                 region: "germany-02".to_string(),
                 addr: parse_addr("10.0.0.2:51821"),
                 authenticated: false,
+                auth_required: true,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Drop,
             },

@@ -4969,19 +4969,13 @@ fn run_packet_reader(
                     let auto_routing_bypass =
                         should_tunnel && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
 
-                    if !should_tunnel || auto_routing_bypass {
-                        // When bypassing due to auto-routing whitelist, still run game server
-                        // detection + evaluation so teleports to non-whitelisted regions resume tunneling.
-                        if auto_routing_bypass {
-                            if let Some(dst_ip) = parse_ipv4_dst_ip(data) {
-                                if is_roblox_game_server_ip(dst_ip) {
-                                    if let Some(ref ar) = auto_router {
-                                        ar.evaluate_game_server(dst_ip);
-                                    }
-                                }
-                            }
-                        }
+                    if auto_routing_packet_action(data, auto_router.as_ref(), should_tunnel)
+                        == AutoRoutingPacketAction::Hold
+                    {
+                        continue;
+                    }
 
+                    if !should_tunnel || auto_routing_bypass {
                         // Batch passthrough (much cheaper than per-packet bypass reinjection).
                         let _ = passthrough_to_adapter.push(&packets[i]);
 
@@ -5036,6 +5030,20 @@ fn run_packet_reader(
                             QueueOverflowMode::from_u8(queue_overflow_mode.load(Ordering::Relaxed));
                         match queue_overflow_action(mode, data) {
                             QueueFullAction::Bypass => {
+                                if auto_routing_packet_action(data, auto_router.as_ref(), false)
+                                    == AutoRoutingPacketAction::Hold
+                                {
+                                    let event =
+                                        queue_full_events.fetch_add(1, Ordering::Relaxed) + 1;
+                                    if event <= 5 || event.is_power_of_two() {
+                                        log::warn!(
+                                            "ST_AUTO_ROUTING_HOLD_QUEUE_FULL: worker {} queue full, dropping pending auto-routing packet instead of bypassing to physical adapter (event #{})",
+                                            worker_id,
+                                            event
+                                        );
+                                    }
+                                    continue;
+                                }
                                 let _ = passthrough_to_adapter.push(&packets[i]);
                                 if let Some(stats) = worker_stats.get(worker_id) {
                                     stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
@@ -5211,16 +5219,10 @@ fn run_packet_worker(
             let auto_routing_bypass =
                 should_tunnel && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
 
-            // When bypassing, still run game server detection + auto-routing evaluation
-            // so we can detect teleports to non-whitelisted regions and resume tunneling.
-            if auto_routing_bypass {
-                if let Some(dst_ip) = parse_ipv4_dst_ip(&work.data) {
-                    if is_roblox_game_server_ip(dst_ip) {
-                        if let Some(ref ar) = auto_router {
-                            ar.evaluate_game_server(dst_ip);
-                        }
-                    }
-                }
+            if auto_routing_packet_action(&work.data, auto_router.as_ref(), should_tunnel)
+                == AutoRoutingPacketAction::Hold
+            {
+                continue;
             }
 
             if should_tunnel && !auto_routing_bypass {
@@ -5261,12 +5263,7 @@ fn run_packet_worker(
                             }
                         }
 
-                        // === AUTO ROUTING ===
-                        // Notify auto-router of new game server IPs (triggers async region lookup).
-                        // The actual relay switch happens asynchronously via handle_region_lookup().
-                        if let Some(ref auto_router) = auto_router {
-                            auto_router.evaluate_game_server(dst_ip);
-                        }
+                        // Auto-routing was evaluated before any bypass path could run.
                     }
                 }
 
@@ -6133,6 +6130,12 @@ enum QueueFullAction {
     Drop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoRoutingPacketAction {
+    Pass,
+    Hold,
+}
+
 #[inline(always)]
 fn is_ipv4_fragment(data: &[u8]) -> bool {
     let ip_start = match parse_ipv4_header_offset(data) {
@@ -6156,6 +6159,42 @@ fn queue_overflow_action(mode: QueueOverflowMode, data: &[u8]) -> QueueFullActio
             }
         }
     }
+}
+
+/// Apply the auto-routing hold gate for packets that could otherwise escape.
+///
+/// `evaluate_new_server` should be true only after the packet has been classified as
+/// tunnel-eligible (including whitelist bypass). Pending lookups are honored for every
+/// packet to the destination, which catches fragments and queue-overflow races without
+/// starting lookups for unrelated traffic.
+#[inline(always)]
+fn auto_routing_packet_action(
+    data: &[u8],
+    auto_router: Option<&Arc<super::auto_routing::AutoRouter>>,
+    evaluate_new_server: bool,
+) -> AutoRoutingPacketAction {
+    let Some(auto_router) = auto_router else {
+        return AutoRoutingPacketAction::Pass;
+    };
+    let Some(dst_ip) = parse_ipv4_dst_ip(data) else {
+        return AutoRoutingPacketAction::Pass;
+    };
+    if !is_roblox_game_server_ip(dst_ip) {
+        return AutoRoutingPacketAction::Pass;
+    }
+
+    if auto_router.is_lookup_pending(dst_ip) {
+        return AutoRoutingPacketAction::Hold;
+    }
+
+    if evaluate_new_server {
+        auto_router.evaluate_game_server(dst_ip);
+        if auto_router.is_lookup_pending(dst_ip) {
+            return AutoRoutingPacketAction::Hold;
+        }
+    }
+
+    AutoRoutingPacketAction::Pass
 }
 
 /// Per-worker inline cache for connection lookups
@@ -9073,6 +9112,79 @@ mod tests {
             queue_overflow_action(QueueOverflowMode::Drop, &frame),
             QueueFullAction::Drop
         );
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_holds_new_game_server_packet() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        router.set_lookup_channel(tx);
+
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let frame = build_ipv4_frame(17, Ipv4Addr::new(192, 168, 1, 210), dst_ip, 53020, 54020);
+
+        assert_eq!(
+            auto_routing_packet_action(&frame, Some(&router), true),
+            AutoRoutingPacketAction::Hold
+        );
+        assert!(router.is_lookup_pending(dst_ip));
+        let (queued_ip, generation) = rx.try_recv().expect("lookup should be queued");
+        assert_eq!(queued_ip, dst_ip);
+        assert_eq!(generation, 1);
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_holds_pending_tail_fragment_without_evaluating() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        router.set_lookup_channel(tx);
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 211);
+        let dst_ip = Ipv4Addr::new(128, 116, 51, 100);
+        router.evaluate_game_server(dst_ip);
+        let _ = rx.try_recv().expect("lookup should be queued");
+
+        let tail_fragment =
+            build_ipv4_udp_fragment_frame(src_ip, dst_ip, 53021, 54021, 0x5151, 1, false);
+
+        assert_eq!(
+            auto_routing_packet_action(&tail_fragment, Some(&router), false),
+            AutoRoutingPacketAction::Hold
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "tail fragment must not enqueue another lookup"
+        );
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_does_not_hold_without_lookup_channel() {
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        let dst_ip = Ipv4Addr::new(128, 116, 52, 100);
+        let frame = build_ipv4_frame(17, Ipv4Addr::new(192, 168, 1, 212), dst_ip, 53022, 54022);
+
+        assert_eq!(
+            auto_routing_packet_action(&frame, Some(&router), true),
+            AutoRoutingPacketAction::Pass
+        );
+        assert!(!router.is_lookup_pending(dst_ip));
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_ignores_similar_non_roblox_destination() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        router.set_lookup_channel(tx);
+
+        let dst_ip = Ipv4Addr::new(128, 117, 50, 100);
+        let frame = build_ipv4_frame(17, Ipv4Addr::new(192, 168, 1, 213), dst_ip, 53023, 54023);
+
+        assert_eq!(
+            auto_routing_packet_action(&frame, Some(&router), true),
+            AutoRoutingPacketAction::Pass
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(dst_ip));
     }
 
     #[test]
