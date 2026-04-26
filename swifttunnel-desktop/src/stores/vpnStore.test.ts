@@ -290,6 +290,30 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("connected");
   });
 
+  it("does not auto-repair unrelated nt_ndisrd validation errors", async () => {
+    systemCheckDriver.mockResolvedValueOnce(driverStatus());
+    vpnPreflightBinding.mockResolvedValueOnce({
+      status: "unrecoverable",
+      reason: "nt_ndisrd adapter validation error: access denied",
+      network_signature: "source=internet_fallback;if_index=20;next_hop=1;up=",
+      route_resolution_source: "internet_fallback",
+      route_resolution_target_ip: "8.8.8.8",
+      resolved_if_index: 20,
+      recommended_guid: null,
+      cached_override_used: false,
+      binding_stage: "unrecoverable",
+      candidates: [],
+    });
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain("access denied");
+  });
+
   it("repairs and retries once when connect races a missing WinpkFilter binding", async () => {
     systemCheckDriver.mockResolvedValue(driverStatus());
     systemRepairDriver.mockResolvedValueOnce(driverStatus());

@@ -1267,6 +1267,12 @@ mod tests {
         fs::write(path, b"").expect("write temp file");
     }
 
+    fn assert_same_canonical_path(actual: &Path, expected: &Path) {
+        let actual = fs::canonicalize(actual).expect("canonicalize actual path");
+        let expected = fs::canonicalize(expected).expect("canonicalize expected path");
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn driver_install_success_exit_code_accepts_expected_codes() {
         for code in [0, 1638, 1641, 3010] {
@@ -1345,7 +1351,7 @@ mod tests {
         let base = unique_temp_dir("extract_top");
         touch(&base.join("ndisrd_lwf.inf"));
         let result = find_inf_in_extract_dir(&base).expect("should find top-level inf");
-        assert_eq!(result, base);
+        assert_same_canonical_path(&result, &base);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1356,7 +1362,7 @@ mod tests {
         fs::create_dir_all(&nested).expect("create nested dir");
         touch(&nested.join("ndisrd_lwf.inf"));
         let result = find_inf_in_extract_dir(&base).expect("should find nested inf");
-        assert_eq!(result, nested);
+        assert_same_canonical_path(&result, &nested);
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1365,7 +1371,7 @@ mod tests {
         let base = unique_temp_dir("extract_case");
         touch(&base.join("NDISRD_LWF.INF"));
         let result = find_inf_in_extract_dir(&base).expect("should find case-insensitive inf");
-        assert_eq!(result, base);
+        assert_same_canonical_path(&result, &base);
         let _ = fs::remove_dir_all(&base);
     }
 

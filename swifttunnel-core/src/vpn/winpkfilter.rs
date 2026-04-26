@@ -562,6 +562,33 @@ fn run_pnputil_install(inf_path: &str) -> Result<(), String> {
     Err(last_error)
 }
 
+fn combine_driver_install_results(
+    netcfg_result: Result<(), String>,
+    pnputil_result: Result<(), String>,
+) -> Result<(), String> {
+    let mut issues = Vec::new();
+    let mut netcfg_failed = false;
+
+    if let Err(e) = netcfg_result {
+        netcfg_failed = true;
+        issues.push(format!("netcfg binding install failed: {}", e));
+    }
+
+    if let Err(e) = pnputil_result {
+        issues.push(format!("pnputil driver install failed: {}", e));
+    }
+
+    if netcfg_failed
+        || issues
+            .iter()
+            .any(|issue| issue.to_ascii_lowercase().contains("reboot required"))
+    {
+        Err(issues.join("; "))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(windows)]
 pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String> {
     let package = validate_driver_package_dir(package_dir)?;
@@ -583,28 +610,15 @@ pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String>
         }
     }
 
-    let mut issues = Vec::new();
-
-    if let Err(e) = run_netcfg_install(&inf_path) {
+    let netcfg_result = run_netcfg_install(&inf_path).inspect_err(|e| {
         log::warn!("WinpkFilter netcfg binding install failed: {}", e);
-        issues.push(format!("netcfg binding install failed: {}", e));
-    }
+    });
 
-    if let Err(e) = run_pnputil_install(&inf_path) {
+    let pnputil_result = run_pnputil_install(&inf_path).inspect_err(|e| {
         log::warn!("WinpkFilter pnputil driver install failed: {}", e);
-        issues.push(format!("pnputil driver install failed: {}", e));
-    }
+    });
 
-    if issues
-        .iter()
-        .any(|issue| issue.to_ascii_lowercase().contains("reboot required"))
-    {
-        Err(issues.join("; "))
-    } else if issues.len() >= 2 {
-        Err(issues.join("; "))
-    } else {
-        Ok(())
-    }
+    combine_driver_install_results(netcfg_result, pnputil_result)
 }
 
 #[cfg(not(windows))]
@@ -923,6 +937,30 @@ Provider Name:      NDISAPI
         let (pnputil_program, pnputil_args) = driver_pnputil_install_command(inf_path);
         assert_eq!(pnputil_program, "pnputil");
         assert_eq!(pnputil_args, ["/add-driver", inf_path, "/install"]);
+    }
+
+    #[test]
+    fn driver_install_result_surfaces_netcfg_failure_even_if_pnputil_succeeds() {
+        let err = combine_driver_install_results(Err("access denied".to_string()), Ok(()))
+            .expect_err("netcfg failure must not be masked");
+        assert!(err.contains("netcfg binding install failed"));
+        assert!(err.contains("access denied"));
+    }
+
+    #[test]
+    fn driver_install_result_allows_non_reboot_pnputil_failure_after_netcfg_success() {
+        combine_driver_install_results(Ok(()), Err("pnputil failed with code 2".to_string()))
+            .expect("netcfg success is enough to refresh the LWF binding");
+    }
+
+    #[test]
+    fn driver_install_result_preserves_reboot_required_failures() {
+        let err = combine_driver_install_results(
+            Ok(()),
+            Err("Reboot required to finish driver installation.".to_string()),
+        )
+        .expect_err("reboot-required errors must stay visible");
+        assert!(err.contains("Reboot required"));
     }
 
     #[test]

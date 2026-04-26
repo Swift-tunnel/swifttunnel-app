@@ -56,7 +56,9 @@ function isRepairableBindingPreflight(preflight: BindingPreflightInfo): boolean 
     preflight.status === "unrecoverable" &&
     (haystack.includes("winpkfilter_binding_missing") ||
       haystack.includes("winpkfilter binding is missing") ||
-      haystack.includes("nt_ndisrd") ||
+      haystack.includes("nt_ndisrd is not bound") ||
+      haystack.includes("nt_ndisrd is not installed on adapter") ||
+      haystack.includes("binding nt_ndisrd is not installed") ||
       haystack.includes("winpkfilter-bound network adapters") ||
       haystack.includes("repair the split tunnel driver"))
   );
