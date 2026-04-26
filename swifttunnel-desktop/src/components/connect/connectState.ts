@@ -75,7 +75,13 @@ export function isDriverVersionTooOld(
 
 export function isConnectActionBusy(input: {
   vpnState: string;
-  driverSetupState: "idle" | "checking" | "installing" | "installed" | "error";
+  driverSetupState:
+    | "idle"
+    | "checking"
+    | "installing"
+    | "repairing"
+    | "installed"
+    | "error";
 }): boolean {
   const isConnected = input.vpnState === "connected";
   const isIdle = input.vpnState === "disconnected" || input.vpnState === "error";
@@ -83,12 +89,19 @@ export function isConnectActionBusy(input: {
   return (
     isVpnTransitioning ||
     input.driverSetupState === "checking" ||
-    input.driverSetupState === "installing"
+    input.driverSetupState === "installing" ||
+    input.driverSetupState === "repairing"
   );
 }
 
 export function resolveConnectStatus(input: {
-  driverSetupState: "idle" | "checking" | "installing" | "installed" | "error";
+  driverSetupState:
+    | "idle"
+    | "checking"
+    | "installing"
+    | "repairing"
+    | "installed"
+    | "error";
   driverSetupError: string | null;
   driverStatus?: DriverCheckResponse | null;
   vpnError: string | null;
@@ -119,6 +132,13 @@ export function resolveConnectStatus(input: {
     return {
       kind: "text",
       text: "Installing required split tunnel driver…",
+    };
+  }
+
+  if (input.driverSetupState === "repairing") {
+    return {
+      kind: "text",
+      text: "Repairing split tunnel driver…",
     };
   }
 

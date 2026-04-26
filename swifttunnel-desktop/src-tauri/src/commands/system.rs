@@ -1121,9 +1121,13 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                     .and_then(|_| swifttunnel_core::vpn::SplitTunnelDriver::self_test())
                 {
                     Ok(()) => {
-                        return Ok(DriverCheckResponse::from_health(
-                            swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
-                        ));
+                        current = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                        if !initial.ready {
+                            return Ok(DriverCheckResponse::from_health(current));
+                        }
+                        log::info!(
+                            "Driver service reset passed; continuing repair to refresh WinpkFilter adapter bindings"
+                        );
                     }
                     Err(e) => {
                         log::warn!("Driver service reset failed during repair: {}", e);
@@ -1137,7 +1141,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 );
             }
 
-            if initial.ready && current.ready && last_error.is_none() {
+            if !initial.ready && current.ready && last_error.is_none() {
                 return Ok(DriverCheckResponse::from_health(current));
             }
 
@@ -1161,7 +1165,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 initial.recommended_action,
                 DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
             ) || reset_failed
-                || (initial.ready && last_error.is_some())
+                || initial.ready
             {
                 let force_reinstall = matches!(
                     current.recommended_action,
@@ -1169,8 +1173,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 ) || matches!(
                     initial.recommended_action,
                     DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
-                ) || reset_failed
-                    || initial.ready;
+                ) || reset_failed;
 
                 let mut repair_errors = Vec::new();
                 if let Some(error) = &last_error {

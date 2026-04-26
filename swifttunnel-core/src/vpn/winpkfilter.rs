@@ -181,6 +181,7 @@ pub const DRIVER_PACKAGE_WIN10_DIR: &str = "win10";
 pub const DRIVER_INF_NAME: &str = "ndisrd_lwf.inf";
 pub const DRIVER_SYS_NAME: &str = "ndisrd.sys";
 pub const DRIVER_CAT_NAME: &str = "ndisrd.cat";
+const DRIVER_COMPONENT_ID: &str = "nt_ndisrd";
 const DRIVER_INF_MIN_SIZE_BYTES: u64 = 256;
 const DRIVER_SYS_MIN_SIZE_BYTES: u64 = 4 * 1024;
 const DRIVER_CAT_MIN_SIZE_BYTES: u64 = 256;
@@ -376,6 +377,17 @@ fn pnputil_reboot_required_exit_code(code: i32) -> bool {
     code == 3010
 }
 
+fn driver_netcfg_install_command(inf_path: &str) -> (&'static str, [&str; 6]) {
+    (
+        "netcfg",
+        ["/l", inf_path, "/c", "s", "/i", DRIVER_COMPONENT_ID],
+    )
+}
+
+fn driver_pnputil_install_command(inf_path: &str) -> (&'static str, [&str; 3]) {
+    ("pnputil", ["/add-driver", inf_path, "/install"])
+}
+
 #[cfg(windows)]
 fn pnputil_output_detail(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -401,30 +413,62 @@ fn pnputil_retryable_exit_code(code: i32) -> bool {
     matches!(code, 2 | 5)
 }
 
+#[cfg(windows)]
+fn netcfg_already_installed_detail(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("already installed")
+        || detail.contains("already exists")
+        || detail.contains("0x800700b7")
+}
+
+#[cfg(windows)]
+fn run_netcfg_install(inf_path: &str) -> Result<(), String> {
+    let (program, args) = driver_netcfg_install_command(inf_path);
+    let output = hidden_command(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run netcfg: {}", e))?;
+
+    let code = output.status.code().unwrap_or(-1);
+    if output.status.success() {
+        log::info!("WinpkFilter network component installed/refreshed with netcfg");
+        return Ok(());
+    }
+
+    let detail = pnputil_output_detail(&output);
+    if netcfg_already_installed_detail(&detail) {
+        log::info!(
+            "WinpkFilter network component already installed according to netcfg: {}",
+            detail
+        );
+        return Ok(());
+    }
+
+    if pnputil_reboot_required_exit_code(code) {
+        if detail.is_empty() {
+            return Err(
+                "Reboot required to finish WinpkFilter binding installation. netcfg exited with code 3010."
+                    .to_string(),
+            );
+        }
+        return Err(format!(
+            "Reboot required to finish WinpkFilter binding installation. netcfg exited with code 3010: {}",
+            detail
+        ));
+    }
+
+    if detail.is_empty() {
+        Err(format!("netcfg failed with code {}", code))
+    } else {
+        Err(format!("netcfg failed with code {}: {}", code, detail))
+    }
+}
+
 /// Maximum number of pnputil install attempts before giving up.
 const PNPUTIL_INSTALL_MAX_ATTEMPTS: u32 = 3;
 
 #[cfg(windows)]
-pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String> {
-    let package = validate_driver_package_dir(package_dir)?;
-    let inf_path = package.inf_path.to_string_lossy().to_string();
-
-    // Idempotency: skip install if the driver is already in the store.
-    match find_installed_driver_published_name() {
-        Ok(Some(published)) => {
-            log::info!(
-                "WinpkFilter driver already present in driver store as {}; skipping install",
-                published
-            );
-            return Ok(());
-        }
-        Ok(None) => {} // Not installed yet — proceed.
-        Err(e) => {
-            // Non-fatal: if we can't query the store, proceed with install anyway.
-            log::warn!("Could not query driver store before install: {}", e);
-        }
-    }
-
+fn run_pnputil_install(inf_path: &str) -> Result<(), String> {
     let mut last_error = String::new();
 
     for attempt in 1..=PNPUTIL_INSTALL_MAX_ATTEMPTS {
@@ -439,10 +483,8 @@ pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String>
             std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
         }
 
-        let output = match hidden_command("pnputil")
-            .args(["/add-driver", &inf_path, "/install"])
-            .output()
-        {
+        let (program, args) = driver_pnputil_install_command(inf_path);
+        let output = match hidden_command(program).args(args).output() {
             Ok(output) => output,
             Err(e) => {
                 last_error = format!("Failed to run pnputil: {}", e);
@@ -518,6 +560,51 @@ pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String>
     }
 
     Err(last_error)
+}
+
+#[cfg(windows)]
+pub fn install_driver_from_package_dir(package_dir: &Path) -> Result<(), String> {
+    let package = validate_driver_package_dir(package_dir)?;
+    let inf_path = package.inf_path.to_string_lossy().to_string();
+
+    match find_installed_driver_published_name() {
+        Ok(Some(published)) => {
+            log::info!(
+                "WinpkFilter driver already present in driver store as {}; refreshing network component binding",
+                published
+            );
+        }
+        Ok(None) => {
+            log::info!("WinpkFilter driver package not present in driver store; installing");
+        }
+        Err(e) => {
+            // Non-fatal: if we can't query the store, proceed with install anyway.
+            log::warn!("Could not query driver store before install: {}", e);
+        }
+    }
+
+    let mut issues = Vec::new();
+
+    if let Err(e) = run_netcfg_install(&inf_path) {
+        log::warn!("WinpkFilter netcfg binding install failed: {}", e);
+        issues.push(format!("netcfg binding install failed: {}", e));
+    }
+
+    if let Err(e) = run_pnputil_install(&inf_path) {
+        log::warn!("WinpkFilter pnputil driver install failed: {}", e);
+        issues.push(format!("pnputil driver install failed: {}", e));
+    }
+
+    if issues
+        .iter()
+        .any(|issue| issue.to_ascii_lowercase().contains("reboot required"))
+    {
+        Err(issues.join("; "))
+    } else if issues.len() >= 2 {
+        Err(issues.join("; "))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(windows))]
@@ -823,6 +910,32 @@ Provider Name:      NDISAPI
             assert!(!pnputil_retryable_exit_code(0));
             assert!(!pnputil_retryable_exit_code(1));
             assert!(!pnputil_retryable_exit_code(3010));
+        }
+    }
+
+    #[test]
+    fn driver_rebind_commands_include_netcfg_and_pnputil_install() {
+        let inf_path = r"C:\Program Files\SwiftTunnel\drivers\ndisrd_lwf.inf";
+        let (netcfg_program, netcfg_args) = driver_netcfg_install_command(inf_path);
+        assert_eq!(netcfg_program, "netcfg");
+        assert_eq!(netcfg_args, ["/l", inf_path, "/c", "s", "/i", "nt_ndisrd"]);
+
+        let (pnputil_program, pnputil_args) = driver_pnputil_install_command(inf_path);
+        assert_eq!(pnputil_program, "pnputil");
+        assert_eq!(pnputil_args, ["/add-driver", inf_path, "/install"]);
+    }
+
+    #[test]
+    fn netcfg_already_installed_detection_is_lenient() {
+        #[cfg(windows)]
+        {
+            assert!(netcfg_already_installed_detail(
+                "The requested component is already installed."
+            ));
+            assert!(netcfg_already_installed_detail(
+                "0x800700b7 Cannot create a file when that file already exists"
+            ));
+            assert!(!netcfg_already_installed_detail("Access is denied."));
         }
     }
 

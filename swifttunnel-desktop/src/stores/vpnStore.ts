@@ -27,6 +27,7 @@ type DriverSetupState =
   | "idle"
   | "checking"
   | "installing"
+  | "repairing"
   | "installed"
   | "error";
 
@@ -53,8 +54,23 @@ function isRepairableBindingPreflight(preflight: BindingPreflightInfo): boolean 
   const haystack = `${preflight.reason}\n${preflight.binding_stage ?? ""}`.toLowerCase();
   return (
     preflight.status === "unrecoverable" &&
-    (haystack.includes("winpkfilter-bound network adapters") ||
+    (haystack.includes("winpkfilter_binding_missing") ||
+      haystack.includes("winpkfilter binding is missing") ||
+      haystack.includes("nt_ndisrd") ||
+      haystack.includes("winpkfilter-bound network adapters") ||
       haystack.includes("repair the split tunnel driver"))
+  );
+}
+
+function isBindingMissingMessage(message: string): boolean {
+  const haystack = message.toLowerCase();
+  return (
+    haystack.includes("winpkfilter_binding_missing") ||
+    haystack.includes("split tunnel driver binding is missing") ||
+    (haystack.includes("nt_ndisrd") &&
+      (haystack.includes("not bound") ||
+        haystack.includes("not installed on adapter") ||
+        haystack.includes("binding is missing")))
   );
 }
 
@@ -75,12 +91,12 @@ function bindingRepairFailedStatus(reason: string): DriverCheckResponse {
     installed: true,
     version: null,
     ready: false,
-    status: "binding_repair_failed",
+    status: "binding_missing",
     message:
-      "Automatic split tunnel driver repair did not restore adapter binding.\n\n" +
+      "Automatic split tunnel driver repair did not restore the WinpkFilter adapter binding.\n\n" +
       reason,
     reboot_required: false,
-    recommended_action: "reset_service",
+    recommended_action: "reinstall",
   };
 }
 
@@ -216,7 +232,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
 
   repairDriver: async () => {
     try {
-      set({ driverSetupState: "installing", driverSetupError: null });
+      set({ driverSetupState: "repairing", driverSetupError: null });
       const repaired = await systemRepairDriver();
       set({ driverStatus: repaired });
       if (!repaired.ready) {
@@ -268,7 +284,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     // that this PR is trying to close. Cleared on successful connect or
     // disconnect to give the next incident a fresh attempt.
     try {
-      set({ driverSetupState: "installing", driverSetupError: null });
+      set({ driverSetupState: "repairing", driverSetupError: null });
       await systemResetDriver();
       set({
         error: null,
@@ -371,7 +387,22 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         });
         return;
       }
-      await vpnConnect(region, gamePresets);
+      try {
+        await vpnConnect(region, gamePresets);
+      } catch (e) {
+        const message = getErrorMessage(e);
+        if (
+          isBindingMissingMessage(message) &&
+          !autoRepairedBindingSignatures.has(preflight.network_signature)
+        ) {
+          autoRepairedBindingSignatures.add(preflight.network_signature);
+          await get().repairDriver();
+          if (!isCurrentConnectAttempt(attempt)) return;
+          await get().connect(region, gamePresets);
+          return;
+        }
+        throw e;
+      }
       if (!isCurrentConnectAttempt(attempt)) return;
       await get().fetchState();
       if (!isCurrentConnectAttempt(attempt)) return;

@@ -89,6 +89,20 @@ describe("connect state helpers", () => {
     });
   });
 
+  it("shows repair status while automatic binding repair runs", () => {
+    expect(
+      resolveConnectStatus({
+        driverSetupState: "repairing",
+        driverSetupError: null,
+        vpnError: null,
+        vpnState: "fetching_config",
+      }),
+    ).toEqual({
+      kind: "text",
+      text: "Repairing split tunnel driver…",
+    });
+  });
+
   it("returns reboot_required before falling back to driver_missing", () => {
     // Reboot-required must outrank driver-missing: if the install already
     // told us the system needs a restart, re-prompting for another install
@@ -249,6 +263,12 @@ describe("connect state helpers", () => {
       isConnectActionBusy({
         vpnState: "error",
         driverSetupState: "installing",
+      }),
+    ).toBe(true);
+    expect(
+      isConnectActionBusy({
+        vpnState: "error",
+        driverSetupState: "repairing",
       }),
     ).toBe(true);
     expect(
