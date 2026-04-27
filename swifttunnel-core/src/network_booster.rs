@@ -466,9 +466,17 @@ impl NetworkBooster {
             .output()?;
 
         if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "failed to remove legacy RobloxPriority QoS policy"
-            ));
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                warn!(
+                    "Failed to remove legacy RobloxPriority QoS policy; treating as non-fatal cleanup"
+                );
+            } else {
+                warn!(
+                    "Failed to remove legacy RobloxPriority QoS policy; treating as non-fatal cleanup: {}",
+                    stderr
+                );
+            }
         }
         Ok(())
     }
