@@ -36,12 +36,14 @@ const CONNECT_FAIL_HANDSHAKE_TIMEOUT: &str = "ST_CONNECT_HANDSHAKE_TIMEOUT";
 const CONNECT_FAIL_CANDIDATE_EXHAUSTED: &str = "ST_CONNECT_CANDIDATE_EXHAUSTED";
 const CONNECT_FAIL_PREFLIGHT_ENFORCED: &str = "ST_CONNECT_PREFLIGHT_ENFORCED";
 const CONNECT_FAIL_AUTH_REQUIRED: &str = "ST_CONNECT_AUTH_REQUIRED";
+const CONNECT_FAIL_POLICY_UNAVAILABLE: &str = "ST_CONNECT_POLICY_UNAVAILABLE";
 const CONNECT_FAIL_REGION_UNAVAILABLE: &str = "ST_CONNECT_REGION_UNAVAILABLE";
 
 static HANDSHAKE_TIMEOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
 static CANDIDATE_EXHAUSTED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static PREFLIGHT_ENFORCED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static AUTH_REQUIRED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static POLICY_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 static REGION_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -49,6 +51,7 @@ struct RelayCandidateAttempt {
     region: String,
     addr: SocketAddr,
     authenticated: bool,
+    policy_known: bool,
     auth_required: bool,
     preflight_mode: RelayPreflightMode,
     queue_full_mode: RelayQueueFullMode,
@@ -74,11 +77,18 @@ fn select_candidate_after_preflight(
 
     let fallback = attempts.first().ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
 
-    if fallback.auth_required {
+    if attempts.iter().any(|attempt| !attempt.policy_known) {
+        return Err(CONNECT_FAIL_POLICY_UNAVAILABLE);
+    }
+
+    if attempts.iter().any(|attempt| attempt.auth_required) {
         return Err(CONNECT_FAIL_AUTH_REQUIRED);
     }
 
-    if fallback.preflight_mode == RelayPreflightMode::Enforce {
+    if attempts
+        .iter()
+        .any(|attempt| attempt.preflight_mode == RelayPreflightMode::Enforce)
+    {
         return Err(CONNECT_FAIL_PREFLIGHT_ENFORCED);
     }
 
@@ -630,6 +640,8 @@ pub struct VpnConnection {
     etw_watcher: Option<ProcessWatcher>,
     /// Auto-router for automatic relay switching based on game server region
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
+    /// Background task that performs async auto-routing IP lookups.
+    auto_lookup_handle: Option<tokio::task::JoinHandle<()>>,
     /// Per-process game performance tuning manager (Windows-only behavior).
     process_performance_manager: Option<Arc<Mutex<GameProcessPerformanceManager>>>,
 }
@@ -644,6 +656,7 @@ impl VpnConnection {
             process_monitor_stop: Arc::new(AtomicBool::new(false)),
             etw_watcher: None,
             auto_router: None,
+            auto_lookup_handle: None,
             process_performance_manager: None,
         }
     }
@@ -771,7 +784,10 @@ impl VpnConnection {
         let prior_was_error = {
             let state = self.state.borrow();
             if state.is_connected() {
-                return Err(VpnError::Connection("Already connected".to_string()));
+                log::info!(
+                    "Connect requested while already connected; treating as idempotent success"
+                );
+                return Ok(());
             }
             if state.is_connecting() {
                 return Err(VpnError::Connection("Connection in progress".to_string()));
@@ -1120,6 +1136,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: false,
+                            policy_known: false,
                             auth_required: false,
                             preflight_mode: RelayPreflightMode::Legacy,
                             queue_full_mode: RelayQueueFullMode::Bypass,
@@ -1147,6 +1164,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: true,
+                            policy_known: true,
                             auth_required: ticket.auth_required,
                             preflight_mode: candidate_preflight_mode,
                             queue_full_mode: candidate_queue_full_mode,
@@ -1178,6 +1196,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: false,
+                            policy_known: true,
                             auth_required: ticket.auth_required,
                             preflight_mode: candidate_preflight_mode,
                             queue_full_mode: candidate_queue_full_mode,
@@ -1197,6 +1216,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: false,
+                            policy_known: true,
                             auth_required: ticket.auth_required,
                             preflight_mode: candidate_preflight_mode,
                             queue_full_mode: candidate_queue_full_mode,
@@ -1213,6 +1233,7 @@ impl VpnConnection {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
                             authenticated: false,
+                            policy_known: true,
                             auth_required: ticket.auth_required,
                             preflight_mode: candidate_preflight_mode,
                             queue_full_mode: candidate_queue_full_mode,
@@ -1277,6 +1298,21 @@ impl VpnConnection {
                                 .to_string(),
                         ));
                     }
+                    Err(CONNECT_FAIL_POLICY_UNAVAILABLE) => {
+                        log_sampled_connect_event(
+                            &POLICY_UNAVAILABLE_EVENTS,
+                            CONNECT_FAIL_POLICY_UNAVAILABLE,
+                            format!(
+                                "Relay policy unavailable for '{}' (session {})",
+                                config.region, session_id_hex
+                            ),
+                        );
+                        let _ = driver.close();
+                        return Err(VpnError::Connection(
+                            "Relay policy unavailable; refusing unauthenticated legacy fallback"
+                                .to_string(),
+                        ));
+                    }
                     Err(code) => {
                         log_sampled_connect_event(
                             &CANDIDATE_EXHAUSTED_EVENTS,
@@ -1330,7 +1366,7 @@ impl VpnConnection {
 
             let router_for_lookup = Arc::clone(&auto_router);
             let state_for_lookup = Arc::clone(&self.state);
-            tokio::spawn(async move {
+            let lookup_handle = tokio::spawn(async move {
                 while let Some((ip, generation)) = lookup_rx.recv().await {
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
@@ -1535,6 +1571,7 @@ impl VpnConnection {
                 }
                 log::debug!("Auto-routing: Lookup task exiting (channel closed)");
             });
+            self.auto_lookup_handle = Some(lookup_handle);
             log::info!("V3: Auto-routing lookup task spawned");
         }
 
@@ -2021,6 +2058,11 @@ impl VpnConnection {
             auto_router.reset();
         }
         self.auto_router = None;
+
+        if let Some(handle) = self.auto_lookup_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
 
         if let Some(manager) = self.process_performance_manager.take() {
             let mut guard = manager.lock().await;
@@ -2849,6 +2891,7 @@ mod tests {
                 region: "germany-01".to_string(),
                 addr: parse_addr("10.0.0.1:51821"),
                 authenticated: false,
+                policy_known: true,
                 auth_required: false,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Bypass,
@@ -2857,6 +2900,7 @@ mod tests {
                 region: "germany-02".to_string(),
                 addr: parse_addr("10.0.0.2:51821"),
                 authenticated: true,
+                policy_known: true,
                 auth_required: true,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Drop,
@@ -2865,6 +2909,7 @@ mod tests {
                 region: "germany-03".to_string(),
                 addr: parse_addr("10.0.0.3:51821"),
                 authenticated: false,
+                policy_known: true,
                 auth_required: true,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Bypass,
@@ -2889,6 +2934,7 @@ mod tests {
                 region: "germany-01".to_string(),
                 addr: parse_addr("10.0.0.1:51821"),
                 authenticated: false,
+                policy_known: true,
                 auth_required: false,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Bypass,
@@ -2897,6 +2943,7 @@ mod tests {
                 region: "germany-02".to_string(),
                 addr: parse_addr("10.0.0.2:51821"),
                 authenticated: false,
+                policy_known: true,
                 auth_required: false,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Drop,
@@ -2920,6 +2967,7 @@ mod tests {
             region: "germany-01".to_string(),
             addr: parse_addr("10.0.0.1:51821"),
             authenticated: false,
+            policy_known: true,
             auth_required: false,
             preflight_mode: RelayPreflightMode::Enforce,
             queue_full_mode: RelayQueueFullMode::Bypass,
@@ -2936,6 +2984,7 @@ mod tests {
             region: "germany-01".to_string(),
             addr: parse_addr("10.0.0.1:51821"),
             authenticated: false,
+            policy_known: true,
             auth_required: true,
             preflight_mode: RelayPreflightMode::Legacy,
             queue_full_mode: RelayQueueFullMode::Bypass,
@@ -2947,12 +2996,13 @@ mod tests {
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_fallback_uses_selected_policy() {
+    fn test_select_candidate_after_preflight_strictest_policy_rejects_fallback() {
         let attempts = vec![
             RelayCandidateAttempt {
                 region: "germany-01".to_string(),
                 addr: parse_addr("10.0.0.1:51821"),
                 authenticated: false,
+                policy_known: true,
                 auth_required: false,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Bypass,
@@ -2961,21 +3011,32 @@ mod tests {
                 region: "germany-02".to_string(),
                 addr: parse_addr("10.0.0.2:51821"),
                 authenticated: false,
+                policy_known: true,
                 auth_required: true,
                 preflight_mode: RelayPreflightMode::Legacy,
                 queue_full_mode: RelayQueueFullMode::Drop,
             },
         ];
 
-        let selected = select_candidate_after_preflight(&attempts)
-            .expect("legacy preflight should allow fallback");
-        assert_eq!(
-            selected,
-            (
-                "germany-01".to_string(),
-                parse_addr("10.0.0.1:51821"),
-                RelayQueueFullMode::Bypass
-            )
-        );
+        let error = select_candidate_after_preflight(&attempts)
+            .expect_err("auth-required candidate should reject unauthenticated fallback");
+        assert_eq!(error, CONNECT_FAIL_AUTH_REQUIRED);
+    }
+
+    #[test]
+    fn test_select_candidate_after_preflight_unknown_policy_rejects_fallback() {
+        let attempts = vec![RelayCandidateAttempt {
+            region: "germany-01".to_string(),
+            addr: parse_addr("10.0.0.1:51821"),
+            authenticated: false,
+            policy_known: false,
+            auth_required: false,
+            preflight_mode: RelayPreflightMode::Legacy,
+            queue_full_mode: RelayQueueFullMode::Bypass,
+        }];
+
+        let error = select_candidate_after_preflight(&attempts)
+            .expect_err("unknown relay policy must fail closed");
+        assert_eq!(error, CONNECT_FAIL_POLICY_UNAVAILABLE);
     }
 }

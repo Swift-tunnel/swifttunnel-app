@@ -144,6 +144,22 @@ impl RelayHealthState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelaySendOutcome {
+    Enqueued(usize),
+    Backpressure,
+    Oversize,
+}
+
+impl RelaySendOutcome {
+    pub fn bytes_enqueued(self) -> usize {
+        match self {
+            Self::Enqueued(bytes) => bytes,
+            Self::Backpressure | Self::Oversize => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RelayPathContext {
     pub point_to_point_default_route: bool,
@@ -384,6 +400,8 @@ pub struct UdpRelay {
     unanswered_keepalives: AtomicU32,
     /// Last time an inbound data packet was received (not control frames).
     last_receive_time: parking_lot::Mutex<Option<Instant>>,
+    /// First outbound activity since creation or relay switch.
+    first_outbound_time: parking_lot::Mutex<Option<Instant>>,
     /// Set to true if the sender thread panics. Connection manager polls this so the
     /// state machine can transition to Error instead of silently halting tunneling.
     sender_panicked: Arc<AtomicBool>,
@@ -688,6 +706,7 @@ impl UdpRelay {
             relay_health: Arc::new(AtomicU8::new(RelayHealthState::NoTrafficYet as u8)),
             unanswered_keepalives: AtomicU32::new(0),
             last_receive_time: parking_lot::Mutex::new(None),
+            first_outbound_time: parking_lot::Mutex::new(None),
             sender_panicked,
         })
     }
@@ -697,6 +716,15 @@ impl UdpRelay {
     /// instead of a frozen-but-"connected" tunnel.
     pub fn sender_panicked(&self) -> bool {
         self.sender_panicked.load(Ordering::Acquire)
+    }
+
+    fn record_outbound_activity(&self) {
+        self.last_activity_ms
+            .store(now_mono_ms(), Ordering::Relaxed);
+        let mut first = self.first_outbound_time.lock();
+        if first.is_none() {
+            *first = Some(Instant::now());
+        }
     }
 
     /// Get the session ID as a u64 for logging
@@ -976,7 +1004,7 @@ impl UdpRelay {
     ///
     /// Takes the original UDP payload and prepends session ID before enqueueing to the
     /// dedicated sender thread.
-    pub fn forward_outbound(&self, payload: &[u8]) -> Result<usize> {
+    pub fn forward_outbound(&self, payload: &[u8]) -> Result<RelaySendOutcome> {
         let current_addr = **self.relay_addr.load();
         self.maybe_refresh_relay_path_mtu(current_addr);
         self.forward_outbound_to_addr(payload, current_addr)
@@ -986,12 +1014,16 @@ impl UdpRelay {
     ///
     /// Used by the NDIS reader fast path after it has confirmed refresh is not
     /// currently due; the regular worker path still performs refreshes.
-    pub fn forward_outbound_fast(&self, payload: &[u8]) -> Result<usize> {
+    pub fn forward_outbound_fast(&self, payload: &[u8]) -> Result<RelaySendOutcome> {
         let current_addr = **self.relay_addr.load();
         self.forward_outbound_to_addr(payload, current_addr)
     }
 
-    fn forward_outbound_to_addr(&self, payload: &[u8], current_addr: SocketAddr) -> Result<usize> {
+    fn forward_outbound_to_addr(
+        &self,
+        payload: &[u8],
+        current_addr: SocketAddr,
+    ) -> Result<RelaySendOutcome> {
         let max_payload = self.max_inner_packet_len_for_addr(current_addr);
 
         if payload.len() > max_payload {
@@ -1009,7 +1041,7 @@ impl UdpRelay {
                     current_addr,
                 );
             }
-            return Ok(0);
+            return Ok(RelaySendOutcome::Oversize);
         }
 
         let total_len = SESSION_ID_LEN + payload.len();
@@ -1023,7 +1055,7 @@ impl UdpRelay {
                     payload.len()
                 );
             }
-            return Ok(0);
+            return Ok(RelaySendOutcome::Backpressure);
         };
 
         unsafe {
@@ -1047,14 +1079,13 @@ impl UdpRelay {
                 );
             }
             self.outbound_pool.release(buf_idx);
-            return Ok(0);
+            return Ok(RelaySendOutcome::Backpressure);
         }
 
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
-        self.last_activity_ms
-            .store(now_mono_ms(), Ordering::Relaxed);
+        self.record_outbound_activity();
 
-        Ok(total_len)
+        Ok(RelaySendOutcome::Enqueued(total_len))
     }
 
     /// Receive a packet from the relay directly into the caller-provided frame buffer.
@@ -1193,8 +1224,7 @@ impl UdpRelay {
         self.socket
             .send_to(&self.session_id, current_addr)
             .context("Failed to send immediate keepalive")?;
-        self.last_activity_ms
-            .store(now_mono_ms(), Ordering::Relaxed);
+        self.record_outbound_activity();
         log::info!(
             "UDP Relay: Sent immediate keepalive to {} (session {:016x})",
             current_addr,
@@ -1227,8 +1257,7 @@ impl UdpRelay {
         }
         // Count burst as unanswered keepalive so Dead state is reachable
         self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
-        self.last_activity_ms
-            .store(now_mono_ms(), Ordering::Relaxed);
+        self.record_outbound_activity();
         log::info!(
             "UDP Relay: Sent keepalive burst (3 packets) to {} (session {:016x})",
             current_addr,
@@ -1256,8 +1285,7 @@ impl UdpRelay {
             }
         }
         self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
-        self.last_activity_ms
-            .store(now_mono_ms(), Ordering::Relaxed);
+        self.record_outbound_activity();
         log::info!(
             "UDP Relay: Sent async keepalive burst (3 packets) to {} (session {:016x})",
             current_addr,
@@ -1280,7 +1308,7 @@ impl UdpRelay {
             self.socket
                 .send_to(&self.session_id, current_addr)
                 .context("Failed to send keepalive")?;
-            self.last_activity_ms.store(now_ms, Ordering::Relaxed);
+            self.record_outbound_activity();
             self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
             log::trace!("UDP Relay: Sent keepalive");
         }
@@ -1305,7 +1333,38 @@ impl UdpRelay {
         let has_ever_received = self.last_receive_time.lock().is_some();
 
         if !has_ever_received {
-            // Never received traffic - stay at NoTrafficYet (initial connect phase)
+            let first_outbound = *self.first_outbound_time.lock();
+            let Some(first_outbound) = first_outbound else {
+                // Pure idle startup: no game packet or keepalive has tried to use the relay yet.
+                return;
+            };
+
+            let silence = first_outbound.elapsed();
+            let unanswered = self.unanswered_keepalives.load(Ordering::Relaxed);
+            let current = self.relay_health();
+
+            if unanswered >= RELAY_DEAD_KEEPALIVE_THRESHOLD {
+                if current != RelayHealthState::Dead {
+                    self.relay_health
+                        .store(RelayHealthState::Dead as u8, Ordering::Relaxed);
+                    log::error!(
+                        "UDP Relay: Health -> DEAD (no inbound ever, {} unanswered keepalives, {}s since first outbound, session {:016x})",
+                        unanswered,
+                        silence.as_secs(),
+                        self.session_id_u64()
+                    );
+                }
+            } else if silence >= RELAY_STALE_THRESHOLD && current == RelayHealthState::NoTrafficYet
+            {
+                self.relay_health
+                    .store(RelayHealthState::Stale as u8, Ordering::Relaxed);
+                log::warn!(
+                    "UDP Relay: Health -> STALE (no inbound ever, {}s since first outbound, {} unanswered keepalives, session {:016x})",
+                    silence.as_secs(),
+                    unanswered,
+                    self.session_id_u64()
+                );
+            }
             return;
         }
 
@@ -1399,6 +1458,7 @@ impl UdpRelay {
         self.relay_health
             .store(RelayHealthState::NoTrafficYet as u8, Ordering::Relaxed);
         self.unanswered_keepalives.store(0, Ordering::Relaxed);
+        *self.first_outbound_time.lock() = None;
         log::info!(
             "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
             old_addr,
@@ -1735,8 +1795,8 @@ mod tests {
         relay.set_relay_path_mtu_for_test(1500);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
         let payload = vec![0u8; max_payload + 1];
-        let sent = relay.forward_outbound(&payload).unwrap();
-        assert_eq!(sent, 0);
+        let outcome = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(outcome, RelaySendOutcome::Oversize);
         assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
     }
 
@@ -1746,8 +1806,11 @@ mod tests {
         relay.set_relay_path_mtu_for_test(1500);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
         let payload = vec![0u8; max_payload];
-        let sent = relay.forward_outbound(&payload).unwrap();
-        assert_eq!(sent, SESSION_ID_LEN + max_payload);
+        let outcome = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(
+            outcome,
+            RelaySendOutcome::Enqueued(SESSION_ID_LEN + max_payload)
+        );
     }
 
     #[test]
@@ -1761,8 +1824,8 @@ mod tests {
         );
 
         let payload = vec![0u8; max_payload + 1];
-        let sent = relay.forward_outbound(&payload).unwrap();
-        assert_eq!(sent, 0);
+        let outcome = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(outcome, RelaySendOutcome::Oversize);
         assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
     }
 

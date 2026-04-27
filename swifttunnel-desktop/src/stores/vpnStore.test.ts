@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   vpnGetState,
@@ -81,6 +81,7 @@ function driverStatus(overrides = {}) {
 
 describe("stores/vpnStore", () => {
   beforeEach(() => {
+    vi.useRealTimers();
     vpnGetState.mockReset();
     vpnPreflightBinding.mockReset();
     vpnConnect.mockReset();
@@ -108,6 +109,10 @@ describe("stores/vpnStore", () => {
       candidates: [],
     });
     notify.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("repairs missing split tunnel driver before connecting", async () => {
@@ -335,6 +340,74 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("connected");
   });
 
+  it("treats an exact backend already-connected marker as connect success", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockRejectedValueOnce(new Error("Already connected."));
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(vpnConnect).toHaveBeenCalledTimes(1);
+    expect(vpnGetState).toHaveBeenCalledTimes(1);
+    expect(useVpnStore.getState().state).toBe("connected");
+    expect(useVpnStore.getState().error).toBeNull();
+    expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);
+  });
+
+  it("does not treat similar already-connected failures as idempotent success", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockRejectedValueOnce(
+      new Error("Already connected to a different relay account"),
+    );
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(vpnGetState).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain("different relay account");
+    expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);
+  });
+
+  it("times out a hung backend connect instead of spinning forever", async () => {
+    vi.useFakeTimers();
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockReturnValue(new Promise(() => {}));
+
+    const useVpnStore = await loadStore();
+    const connectPromise = useVpnStore
+      .getState()
+      .connect("singapore", ["roblox"]);
+
+    await vi.waitFor(() => {
+      expect(vpnConnect).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(90_000);
+    await connectPromise;
+
+    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);
+    expect(useVpnStore.getState().error).toContain("VPN connection timed out");
+  });
+
+  it("does not repair a superficially similar nt_ndisrd timeout", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockRejectedValueOnce(
+      new Error("nt_ndisrd adapter validation timed out while reading status"),
+    );
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(vpnConnect).toHaveBeenCalledTimes(1);
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain("timed out");
+  });
+
   it("keeps repair action visible when binding repair does not fix preflight", async () => {
     systemCheckDriver.mockResolvedValue(driverStatus());
     const failedPreflight = {
@@ -458,6 +531,37 @@ describe("stores/vpnStore", () => {
 
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().error).toContain("preflight enforcement");
+  });
+
+  it("does not let late transition events hide a timed-out connect error", async () => {
+    const useVpnStore = await loadStore();
+    useVpnStore.setState({
+      state: "error",
+      error: "VPN connection timed out after 90s.",
+      connectAttemptInFlight: false,
+    });
+
+    useVpnStore.getState().handleStateEvent({
+      state: "configuring_split_tunnel",
+      region: null,
+      server_endpoint: null,
+      assigned_ip: null,
+      error: null,
+    });
+
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain("timed out");
+
+    useVpnStore.getState().handleStateEvent({
+      state: "connected",
+      region: "singapore",
+      server_endpoint: "1.2.3.4:51821",
+      assigned_ip: "10.0.0.2",
+      error: null,
+    });
+
+    expect(useVpnStore.getState().state).toBe("connected");
+    expect(useVpnStore.getState().region).toBe("singapore");
   });
 
   it("manual repair action marks driver as installed", async () => {

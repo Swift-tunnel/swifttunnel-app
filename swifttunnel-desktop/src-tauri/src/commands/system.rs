@@ -1593,9 +1593,23 @@ pub async fn system_cleanup() -> Result<(), String> {
 /// restart so a service that refuses to come back up still surfaces a
 /// useful error instead of the UI silently claiming success.
 #[tauri::command]
-pub async fn system_reset_driver() -> Result<(), String> {
+pub async fn system_reset_driver(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
+        let _vpn_guard = state.vpn_connection.lock().await;
+        let conn_state = state.vpn_state_handle.borrow().clone();
+        if !matches!(
+            conn_state,
+            swifttunnel_core::vpn::ConnectionState::Disconnected
+                | swifttunnel_core::vpn::ConnectionState::Error(_)
+        ) {
+            return Err(
+                "Disconnect SwiftTunnel before resetting the split tunnel driver.".to_string(),
+            );
+        }
+
         tauri::async_runtime::spawn_blocking(|| {
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()

@@ -20,6 +20,10 @@ const REG_VALUE_TCP_ACK_FREQUENCY: &str = "TcpAckFrequency";
 const REG_VALUE_TCP_NO_DELAY: &str = "TCPNoDelay";
 const REG_VALUE_NETWORK_THROTTLING_INDEX: &str = "NetworkThrottlingIndex";
 const REG_VALUE_SYSTEM_RESPONSIVENESS: &str = "SystemResponsiveness";
+const TCPIP_QOS_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS";
+const TCPIP_PARAMETERS_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters";
+const REG_VALUE_DO_NOT_USE_NLA: &str = "Do not use NLA";
+const REG_VALUE_DISABLE_USER_TOS_SETTING: &str = "DisableUserTOSSetting";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct NagleRegistrySnapshot {
@@ -33,11 +37,19 @@ struct NetworkThrottlingSnapshot {
     system_responsiveness: Option<u32>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct QosRegistrySnapshot {
+    do_not_use_nla: Option<u32>,
+    disable_user_tos_setting: Option<u32>,
+}
+
 /// On-disk snapshot of pre-modification values for crash/uninstall recovery.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistentSnapshot {
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
+    #[serde(default)]
+    qos_registry_snapshot: Option<QosRegistrySnapshot>,
 }
 
 const SNAPSHOT_FILE: &str = "network_snapshots.json";
@@ -50,6 +62,7 @@ pub struct NetworkBooster {
     qos_enabled: bool,
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
+    qos_registry_snapshot: Option<QosRegistrySnapshot>,
     firewall_fixer: FirewallFixer,
 }
 
@@ -64,6 +77,7 @@ impl NetworkBooster {
             qos_enabled: false,
             nagle_registry_snapshot: HashMap::new(),
             network_throttling_snapshot: None,
+            qos_registry_snapshot: None,
             firewall_fixer: FirewallFixer::new(),
         }
     }
@@ -397,17 +411,22 @@ impl NetworkBooster {
         }
     }
 
-    fn restore_registry_dword(key_path: &str, value_name: &str, value: Option<u32>) {
+    fn restore_registry_dword(key_path: &str, value_name: &str, value: Option<u32>) -> Result<()> {
         match value {
-            Some(saved) => {
-                if let Err(e) = Self::set_registry_dword(key_path, value_name, saved) {
-                    warn!("Failed to restore {}\\{}: {}", key_path, value_name, e);
-                }
-            }
+            Some(saved) => Self::set_registry_dword(key_path, value_name, saved),
             None => {
                 let _ = hidden_command("reg")
                     .args(["delete", key_path, "/v", value_name, "/f"])
                     .output();
+                if Self::query_registry_dword(key_path, value_name).is_none() {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "failed to restore {}\\{} to absent",
+                        key_path,
+                        value_name
+                    ))
+                }
             }
         }
     }
@@ -530,7 +549,7 @@ impl NetworkBooster {
             return Ok(());
         }
 
-        for (guid, snapshot) in self.nagle_registry_snapshot.drain() {
+        for (guid, snapshot) in self.nagle_registry_snapshot.clone() {
             let key_path = format!(
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
                 guid
@@ -540,10 +559,11 @@ impl NetworkBooster {
                 &key_path,
                 REG_VALUE_TCP_ACK_FREQUENCY,
                 snapshot.tcp_ack_frequency,
-            );
-            Self::restore_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, snapshot.tcp_no_delay);
+            )?;
+            Self::restore_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, snapshot.tcp_no_delay)?;
         }
 
+        self.nagle_registry_snapshot.clear();
         Ok(())
     }
 
@@ -586,7 +606,7 @@ impl NetworkBooster {
     fn restore_network_throttling(&mut self) -> Result<()> {
         info!("Restoring Windows network throttling from snapshot");
 
-        let Some(snapshot) = self.network_throttling_snapshot.take() else {
+        let Some(snapshot) = self.network_throttling_snapshot.clone() else {
             info!("No network throttling snapshot captured in this session; skipping restore");
             return Ok(());
         };
@@ -595,13 +615,14 @@ impl NetworkBooster {
             NETWORK_SYSTEM_PROFILE_KEY,
             REG_VALUE_NETWORK_THROTTLING_INDEX,
             snapshot.network_throttling_index,
-        );
+        )?;
         Self::restore_registry_dword(
             NETWORK_SYSTEM_PROFILE_KEY,
             REG_VALUE_SYSTEM_RESPONSIVENESS,
             snapshot.system_responsiveness,
-        );
+        )?;
 
+        self.network_throttling_snapshot = None;
         Ok(())
     }
 
@@ -620,14 +641,24 @@ impl NetworkBooster {
             Ok(())
         };
 
+        if self.qos_registry_snapshot.is_none() {
+            self.qos_registry_snapshot = Some(QosRegistrySnapshot {
+                do_not_use_nla: Self::query_registry_dword(TCPIP_QOS_KEY, REG_VALUE_DO_NOT_USE_NLA),
+                disable_user_tos_setting: Self::query_registry_dword(
+                    TCPIP_PARAMETERS_KEY,
+                    REG_VALUE_DISABLE_USER_TOS_SETTING,
+                ),
+            });
+        }
+
         // Step 1: Enable DSCP tagging in Windows (required for QoS policies to work)
         // Create QoS key under Tcpip if it doesn't exist, then set "Do not use NLA" = 1
         run_reg_add(
             &[
                 "add",
-                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
+                TCPIP_QOS_KEY,
                 "/v",
-                "Do not use NLA",
+                REG_VALUE_DO_NOT_USE_NLA,
                 "/t",
                 "REG_DWORD",
                 "/d",
@@ -642,9 +673,9 @@ impl NetworkBooster {
         run_reg_add(
             &[
                 "add",
-                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+                TCPIP_PARAMETERS_KEY,
                 "/v",
-                "DisableUserTOSSetting",
+                REG_VALUE_DISABLE_USER_TOS_SETTING,
                 "/t",
                 "REG_DWORD",
                 "/d",
@@ -866,25 +897,23 @@ impl NetworkBooster {
                 .output();
         }
 
-        // Remove DSCP tagging registry keys set by enable_gaming_qos()
-        let _ = hidden_command("reg")
-            .args([
-                "delete",
-                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
-                "/v",
-                "Do not use NLA",
-                "/f",
-            ])
-            .output();
-        let _ = hidden_command("reg")
-            .args([
-                "delete",
-                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
-                "/v",
-                "DisableUserTOSSetting",
-                "/f",
-            ])
-            .output();
+        if let Some(snapshot) = self.qos_registry_snapshot.clone() {
+            Self::restore_registry_dword(
+                TCPIP_QOS_KEY,
+                REG_VALUE_DO_NOT_USE_NLA,
+                snapshot.do_not_use_nla,
+            )?;
+            Self::restore_registry_dword(
+                TCPIP_PARAMETERS_KEY,
+                REG_VALUE_DISABLE_USER_TOS_SETTING,
+                snapshot.disable_user_tos_setting,
+            )?;
+            self.qos_registry_snapshot = None;
+        } else {
+            info!(
+                "No Gaming QoS registry snapshot captured; leaving global DSCP/TOS values unchanged"
+            );
+        }
 
         self.qos_enabled = false;
         info!("Gaming QoS disabled");
@@ -900,16 +929,35 @@ impl NetworkBooster {
     pub fn restore(&mut self) -> Result<()> {
         info!("Restoring original network settings");
 
+        let mut errors = Vec::new();
+
         // Restore low-latency registry overrides.
-        let _ = self.restore_nagle_algorithm();
-        let _ = self.restore_network_throttling();
+        if let Err(e) = self.restore_nagle_algorithm() {
+            errors.push(format!("Nagle registry restore: {}", e));
+        }
+        if let Err(e) = self.restore_network_throttling() {
+            errors.push(format!("network throttling registry restore: {}", e));
+        }
 
         // Remove old QoS policy (legacy)
-        let _ = self.remove_prioritize_game_traffic();
-        let _ = self.disable_gaming_qos();
+        if let Err(e) = self.remove_prioritize_game_traffic() {
+            warn!("Legacy QoS policy removal failed during restore: {}", e);
+        }
+        if let Err(e) = self.disable_gaming_qos() {
+            errors.push(format!("Gaming QoS restore: {}", e));
+        }
 
         // Remove firewall rules
-        let _ = self.firewall_fixer.restore();
+        if let Err(e) = self.firewall_fixer.restore() {
+            errors.push(format!("firewall rule restore: {}", e));
+        }
+
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Network restore incomplete: {}",
+                errors.join("; ")
+            ));
+        }
 
         Self::clear_snapshot();
 
@@ -924,6 +972,7 @@ impl NetworkBooster {
         let snapshot = PersistentSnapshot {
             nagle_registry_snapshot: self.nagle_registry_snapshot.clone(),
             network_throttling_snapshot: self.network_throttling_snapshot.clone(),
+            qos_registry_snapshot: self.qos_registry_snapshot.clone(),
         };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -974,6 +1023,9 @@ impl NetworkBooster {
         if self.network_throttling_snapshot.is_none() {
             self.network_throttling_snapshot = snapshot.network_throttling_snapshot;
         }
+        if self.qos_registry_snapshot.is_none() {
+            self.qos_registry_snapshot = snapshot.qos_registry_snapshot;
+        }
 
         let _ = self.restore();
     }
@@ -986,6 +1038,9 @@ impl NetworkBooster {
 /// uninstaller) and the `system_cleanup` Tauri command.
 pub fn cleanup_all_system_state() -> Result<()> {
     info!("Running full stateless system cleanup");
+
+    let mut booster = NetworkBooster::new();
+    booster.recover_from_snapshot();
 
     // 1. Remove hosts file entries
     if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
@@ -1014,66 +1069,15 @@ pub fn cleanup_all_system_state() -> Result<()> {
             .output();
     }
 
-    // 3. Delete DSCP tagging registry keys
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
-            "/v",
-            "Do not use NLA",
-            "/f",
-        ])
-        .output();
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
-            "/v",
-            "DisableUserTOSSetting",
-            "/f",
-        ])
-        .output();
+    info!(
+        "Cleanup: leaving global TCP/QoS registry values untouched unless a persisted SwiftTunnel snapshot restored them"
+    );
 
-    // 4. Delete TcpAckFrequency/TCPNoDelay on all adapter GUIDs (OS default = absent)
-    let booster = NetworkBooster::new();
-    for guid in booster.list_adapter_guids() {
-        let key_path = format!(
-            r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
-            guid
-        );
-        let _ = hidden_command("reg")
-            .args(["delete", &key_path, "/v", REG_VALUE_TCP_ACK_FREQUENCY, "/f"])
-            .output();
-        let _ = hidden_command("reg")
-            .args(["delete", &key_path, "/v", REG_VALUE_TCP_NO_DELAY, "/f"])
-            .output();
-    }
-
-    // 5. Delete NetworkThrottlingIndex/SystemResponsiveness (OS default = absent)
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            NETWORK_SYSTEM_PROFILE_KEY,
-            "/v",
-            REG_VALUE_NETWORK_THROTTLING_INDEX,
-            "/f",
-        ])
-        .output();
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            NETWORK_SYSTEM_PROFILE_KEY,
-            "/v",
-            REG_VALUE_SYSTEM_RESPONSIVENESS,
-            "/f",
-        ])
-        .output();
-
-    // 6. Remove firewall rules.
+    // 3. Remove firewall rules.
     let mut firewall = FirewallFixer::new();
     let _ = firewall.restore();
 
-    // 7. Delete legacy RobloxPriority QoS policy
+    // 4. Delete legacy RobloxPriority QoS policy
     let _ = hidden_command("powershell")
         .args([
             "-Command",
@@ -1201,6 +1205,19 @@ mod tests {
         );
         assert_eq!(NetworkBooster::parse_registry_dword(""), None);
         assert_eq!(NetworkBooster::parse_registry_dword("invalid"), None);
+    }
+
+    #[test]
+    fn persistent_snapshot_accepts_pre_qos_snapshot_files() {
+        let snapshot: PersistentSnapshot = serde_json::from_str(
+            r#"{
+              "nagle_registry_snapshot": {},
+              "network_throttling_snapshot": null
+            }"#,
+        )
+        .expect("old snapshot without QoS fields should still load");
+
+        assert!(snapshot.qos_registry_snapshot.is_none());
     }
 
     /// Verify apply_optimizations returns Ok even when individual optimizations

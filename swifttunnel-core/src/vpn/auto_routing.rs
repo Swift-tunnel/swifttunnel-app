@@ -120,6 +120,11 @@ impl AutoRouter {
         *self.lookup_sender.write() = Some(sender);
     }
 
+    /// Drop the lookup sender so the background lookup task can exit during teardown.
+    pub fn clear_lookup_channel(&self) {
+        *self.lookup_sender.write() = None;
+    }
+
     /// Enable or disable auto-routing
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
@@ -570,6 +575,7 @@ impl AutoRouter {
         self.latest_lookup_generation.store(0, Ordering::Release);
         self.pending_any.store(false, Ordering::Release);
         self.auto_routing_bypassed.store(false, Ordering::Release);
+        self.clear_lookup_channel();
     }
 }
 

@@ -76,6 +76,41 @@ function isBindingMissingMessage(message: string): boolean {
   );
 }
 
+function isAlreadyConnectedMessage(message: string): boolean {
+  return message.trim().toLowerCase().replace(/\.+$/, "") === "already connected";
+}
+
+const VPN_PREFLIGHT_TIMEOUT_MS = 20_000;
+const VPN_CONNECT_TIMEOUT_MS = 90_000;
+
+function formatTimeout(timeoutMs: number): string {
+  const seconds = timeoutMs / 1000;
+  return Number.isInteger(seconds) ? `${seconds}s` : `${timeoutMs}ms`;
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  label: string,
+  timeoutMs: number,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(
+        new Error(
+          `${label} timed out after ${formatTimeout(timeoutMs)}. SwiftTunnel stopped this connect attempt so you can retry.`,
+        ),
+      );
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+  });
+}
+
 let connectAttemptSeq = 0;
 const autoRepairedBindingSignatures = new Set<string>();
 
@@ -337,7 +372,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverSetupState: "idle",
         driverSetupError: null,
       });
-      let preflight = await vpnPreflightBinding(region, gamePresets);
+      let preflight = await withTimeout(
+        vpnPreflightBinding(region, gamePresets),
+        "Split tunnel preflight",
+        VPN_PREFLIGHT_TIMEOUT_MS,
+      );
       if (!isCurrentConnectAttempt(attempt)) return;
       if (
         isRepairableBindingPreflight(preflight) &&
@@ -352,7 +391,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           driverSetupState: "idle",
           driverSetupError: null,
         });
-        preflight = await vpnPreflightBinding(region, gamePresets);
+        preflight = await withTimeout(
+          vpnPreflightBinding(region, gamePresets),
+          "Split tunnel preflight",
+          VPN_PREFLIGHT_TIMEOUT_MS,
+        );
         if (!isCurrentConnectAttempt(attempt)) return;
       }
       if (preflight.status === "ambiguous") {
@@ -390,7 +433,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         return;
       }
       try {
-        await vpnConnect(region, gamePresets);
+        await withTimeout(
+          vpnConnect(region, gamePresets),
+          "VPN connection",
+          VPN_CONNECT_TIMEOUT_MS,
+        );
       } catch (e) {
         const message = getErrorMessage(e);
         if (
@@ -403,7 +450,9 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           await get().connect(region, gamePresets);
           return;
         }
-        throw e;
+        if (!isAlreadyConnectedMessage(message)) {
+          throw e;
+        }
       }
       if (!isCurrentConnectAttempt(attempt)) return;
       await get().fetchState();
@@ -557,6 +606,19 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           (current.state === "error" && current.error !== null));
 
       if (staleReadyEvent) {
+        return {};
+      }
+
+      const staleTransitionAfterError =
+        current.state === "error" &&
+        current.error !== null &&
+        !current.connectAttemptInFlight &&
+        event.error === null &&
+        event.state !== "connected" &&
+        event.state !== "error" &&
+        event.state !== "disconnected";
+
+      if (staleTransitionAfterError) {
         return {};
       }
 

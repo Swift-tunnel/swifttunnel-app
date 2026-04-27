@@ -3832,7 +3832,10 @@ impl ParallelInterceptor {
 
         // Disable IPv6 on physical adapter - SwiftTunnel is IPv4-only
         // This prevents Roblox/Windows from preferring IPv6 and bypassing our tunnel
-        self.disable_ipv6()?;
+        if let Err(e) = self.disable_ipv6() {
+            self.enable_adapter_offload();
+            return Err(e);
+        }
 
         self.stop_flag.store(false, Ordering::Release);
         // Reset the panic flag alongside stop_flag. `workers_panicked` is
@@ -3889,6 +3892,7 @@ impl ParallelInterceptor {
             let relay_ctx = self.relay_ctx.clone();
             let detected_game_servers = Arc::clone(&self.detected_game_servers);
             let auto_router = self.auto_router.clone();
+            let queue_overflow_mode = Arc::clone(&self.queue_overflow_mode);
 
             let handle = thread::spawn(move || {
                 // Set CPU affinity for this worker
@@ -3903,6 +3907,7 @@ impl ParallelInterceptor {
                     relay_ctx,
                     detected_game_servers,
                     auto_router,
+                    queue_overflow_mode,
                 );
             });
 
@@ -3974,36 +3979,52 @@ impl ParallelInterceptor {
 
         // Start V3 inbound receiver thread (reads from UdpRelay, injects to MSTCP)
         if let Some(ref relay_ctx) = self.relay_ctx {
-            let inbound_config = self.create_inbound_config();
+            match self.create_inbound_config() {
+                Ok(config) => {
+                    let relay = Arc::clone(relay_ctx);
+                    let inbound_stop = Arc::clone(&self.stop_flag);
+                    let throughput = self.throughput_stats.clone();
+                    let panicked_flag = Arc::clone(&self.workers_panicked);
 
-            if let Some(config) = inbound_config {
-                let relay = Arc::clone(relay_ctx);
-                let inbound_stop = Arc::clone(&self.stop_flag);
-                let throughput = self.throughput_stats.clone();
-                let panicked_flag = Arc::clone(&self.workers_panicked);
-
-                self.inbound_receiver_handle = Some(thread::spawn(move || {
-                    // Wrap in catch_unwind so a panic surfaces via workers_panicked
-                    // instead of silently halting the injection path — otherwise the
-                    // tunnel appears "connected" with zero throughput.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_v3_inbound_receiver(relay, config, inbound_stop, throughput);
+                    self.inbound_receiver_handle = Some(thread::spawn(move || {
+                        // Wrap in catch_unwind so a panic surfaces via workers_panicked
+                        // instead of silently halting the injection path — otherwise the
+                        // tunnel appears "connected" with zero throughput.
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run_v3_inbound_receiver(relay, config, inbound_stop, throughput)
+                        }));
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                panicked_flag.store(true, Ordering::Release);
+                                log::error!(
+                                    "V3 inbound receiver exited fatally — injection halted: {}",
+                                    e
+                                );
+                            }
+                            Err(panic_payload) => {
+                                panicked_flag.store(true, Ordering::Release);
+                                let msg =
+                                    if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                                        (*s).to_string()
+                                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                        s.clone()
+                                    } else {
+                                        "<non-string panic payload>".to_string()
+                                    };
+                                log::error!(
+                                    "V3 inbound receiver panicked — injection halted: {}",
+                                    msg
+                                );
+                            }
+                        }
                     }));
-                    if let Err(panic_payload) = result {
-                        panicked_flag.store(true, Ordering::Release);
-                        let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
-                            (*s).to_string()
-                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "<non-string panic payload>".to_string()
-                        };
-                        log::error!("V3 inbound receiver panicked — injection halted: {}", msg);
-                    }
-                }));
-                log::info!("V3 inbound receiver thread started (UDP relay)");
-            } else {
-                log::warn!("V3 inbound receiver NOT started (failed to create config)");
+                    log::info!("V3 inbound receiver thread started (UDP relay)");
+                }
+                Err(err) => {
+                    self.stop();
+                    return Err(err);
+                }
             }
         } else {
             log::info!("Inbound receiver NOT started (no relay_ctx)");
@@ -4024,7 +4045,10 @@ impl ParallelInterceptor {
 
         // Wait for threads with timeout to prevent hanging on stuck threads
         if let Some(handle) = self.reader_handle.take() {
-            join_with_timeout(handle, "Reader");
+            if !join_with_timeout(handle, "Reader") {
+                self.workers_panicked.store(true, Ordering::Release);
+                super::split_tunnel::SplitTunnelDriver::cleanup_stale_state();
+            }
         }
 
         for (i, handle) in self.worker_handles.drain(..).enumerate() {
@@ -4214,7 +4238,10 @@ impl ParallelInterceptor {
             self.recommended_adapter_guid = old_recommended_adapter_guid;
         }
 
-        self.start()?;
+        if let Err(e) = self.start() {
+            self.workers_panicked.store(true, Ordering::Release);
+            return Err(e);
+        }
         if let (Some(old_name), Some(new_name)) = (
             old_adapter_name_for_toast,
             self.physical_adapter_friendly_name.clone(),
@@ -4297,35 +4324,42 @@ impl ParallelInterceptor {
 
     /// Create InboundConfig for the optimized inbound receiver
     ///
-    /// Returns None if physical adapter cannot be found
-    fn create_inbound_config(&self) -> Option<InboundConfig> {
-        let physical_name = self.physical_adapter_name.clone()?;
+    /// Returns an error if the injection adapter cannot be proven before startup succeeds.
+    fn create_inbound_config(&self) -> VpnResult<InboundConfig> {
+        let physical_name = self.physical_adapter_name.clone().ok_or_else(|| {
+            VpnError::SplitTunnel(
+                "create_inbound_config: physical adapter name missing".to_string(),
+            )
+        })?;
 
         // Open driver to get adapter MAC
         let driver = match ndisapi::Ndisapi::new("NDISRD") {
             Ok(d) => d,
             Err(e) => {
-                log::error!("create_inbound_config: failed to open driver: {}", e);
-                return None;
+                return Err(VpnError::SplitTunnel(format!(
+                    "create_inbound_config: failed to open driver: {}",
+                    e
+                )));
             }
         };
 
         let adapters = match driver.get_tcpip_bound_adapters_info() {
             Ok(a) => a,
             Err(e) => {
-                log::error!("create_inbound_config: failed to get adapters: {}", e);
-                return None;
+                return Err(VpnError::SplitTunnel(format!(
+                    "create_inbound_config: failed to get adapters: {}",
+                    e
+                )));
             }
         };
 
         let adapter_mac: [u8; 6] = match adapters.iter().find(|a| a.get_name() == &physical_name) {
             Some(a) => a.get_hw_address()[0..6].try_into().unwrap_or([0; 6]),
             None => {
-                log::error!(
+                return Err(VpnError::SplitTunnel(format!(
                     "create_inbound_config: physical adapter '{}' not found",
                     physical_name
-                );
-                return None;
+                )));
             }
         };
 
@@ -4340,7 +4374,7 @@ impl ParallelInterceptor {
             adapter_mac[5],
         );
 
-        Some(InboundConfig {
+        Ok(InboundConfig {
             physical_adapter_name: physical_name,
             adapter_mac,
         })
@@ -4404,17 +4438,19 @@ fn inject_inbound_packet(
         );
     }
 
-    // Create Ethernet frame (stack-allocated buffer)
-    const MAX_ETHER_FRAME: usize = 1622; // 14 header + 1600 payload + 8 padding
+    let mut buffer = IntermediateBuffer::default();
     let frame_len = 14 + ip_packet.len();
 
-    if frame_len > MAX_ETHER_FRAME {
-        log::warn!("Inbound: packet too large ({} bytes), dropping", frame_len);
+    if frame_len > buffer.buffer.0.len() {
+        log::warn!(
+            "Inbound: packet too large for IntermediateBuffer ({} > {} bytes), dropping",
+            frame_len,
+            buffer.buffer.0.len()
+        );
         return None;
     }
 
-    let mut ethernet_frame_buf = [0u8; MAX_ETHER_FRAME];
-    let ethernet_frame = &mut ethernet_frame_buf[..frame_len];
+    let ethernet_frame = &mut buffer.buffer.0[..frame_len];
     ethernet_frame[0..6].copy_from_slice(&config.adapter_mac); // Destination = physical adapter
     ethernet_frame[6..12].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]); // Locally administered src MAC
     ethernet_frame[12] = 0x08; // EtherType: IPv4
@@ -4422,10 +4458,8 @@ fn inject_inbound_packet(
     ethernet_frame[14..].copy_from_slice(ip_packet);
 
     // Create IntermediateBuffer and inject
-    let mut buffer = IntermediateBuffer::default();
     buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
-    buffer.length = ethernet_frame.len() as u32;
-    buffer.buffer.0[..ethernet_frame.len()].copy_from_slice(ethernet_frame);
+    buffer.length = frame_len as u32;
 
     let mut to_mstcp: EthMRequest<1> = EthMRequest::new(adapter_handle);
     if to_mstcp.push(&buffer).is_err() {
@@ -4462,6 +4496,7 @@ fn forward_tunneled_packet_from_reader(
     throughput: &ThroughputStats,
     detected_game_servers: &parking_lot::RwLock<std::collections::HashSet<Ipv4Addr>>,
     auto_router: Option<&Arc<super::auto_routing::AutoRouter>>,
+    queue_overflow_mode: QueueOverflowMode,
 ) -> ReaderTunnelAction {
     let packet_len = data.len() as u64;
     stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
@@ -4524,13 +4559,34 @@ fn forward_tunneled_packet_from_reader(
     };
 
     match forward_result {
-        Ok(sent) => {
+        Ok(super::udp_relay::RelaySendOutcome::Enqueued(sent)) => {
             let forwarded = READER_DIRECT_RELAY_FORWARDED.fetch_add(1, Ordering::Relaxed) + 1;
             if sent > 0 && forwarded <= 5 {
                 log::info!(
                     "Reader direct relay: forwarded packet #{} ({} bytes)",
                     forwarded,
                     sent
+                );
+            }
+        }
+        Ok(super::udp_relay::RelaySendOutcome::Backpressure) => {
+            let errors = READER_DIRECT_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed) + 1;
+            if errors <= 10 || errors % 100 == 0 {
+                log::warn!(
+                    "Reader direct relay: sender backpressure ({} total)",
+                    errors
+                );
+            }
+            if queue_overflow_action(queue_overflow_mode, data) == QueueFullAction::Bypass {
+                return ReaderTunnelAction::BypassPhysical;
+            }
+        }
+        Ok(super::udp_relay::RelaySendOutcome::Oversize) => {
+            let errors = READER_DIRECT_RELAY_ERRORS.fetch_add(1, Ordering::Relaxed) + 1;
+            if errors <= 10 || errors % 100 == 0 {
+                log::warn!(
+                    "Reader direct relay: oversized tunnel packet dropped ({} total)",
+                    errors
                 );
             }
         }
@@ -5000,6 +5056,9 @@ fn run_packet_reader(
                                 &throughput,
                                 &detected_game_servers,
                                 auto_router.as_ref(),
+                                QueueOverflowMode::from_u8(
+                                    queue_overflow_mode.load(Ordering::Relaxed),
+                                ),
                             ) {
                                 ReaderTunnelAction::Consumed => continue,
                                 ReaderTunnelAction::BypassPhysical => {
@@ -5117,6 +5176,7 @@ fn run_packet_worker(
     relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
+    queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
 ) {
     log::info!("Worker {} started", worker_id);
 
@@ -5337,13 +5397,40 @@ fn run_packet_worker(
                     };
 
                     match forward_result {
-                        Ok(sent) => {
+                        Ok(super::udp_relay::RelaySendOutcome::Enqueued(sent)) => {
                             relay_success += 1;
                             if relay_success <= 5 && sent > 0 {
                                 log::info!(
                                     "Worker {}: V3 relay forward OK - {} bytes",
                                     worker_id,
                                     sent
+                                );
+                            }
+                        }
+                        Ok(super::udp_relay::RelaySendOutcome::Backpressure) => {
+                            relay_fail += 1;
+                            let mode = QueueOverflowMode::from_u8(
+                                queue_overflow_mode.load(Ordering::Relaxed),
+                            );
+                            if queue_overflow_action(mode, work.data.as_slice())
+                                == QueueFullAction::Bypass
+                            {
+                                send_bypass_packet(&driver, &adapters, &work);
+                            } else if relay_fail <= 10 || relay_fail % 100 == 0 {
+                                log::warn!(
+                                    "Worker {}: V3 relay sender backpressure, dropping tunnel packet ({} total)",
+                                    worker_id,
+                                    relay_fail
+                                );
+                            }
+                        }
+                        Ok(super::udp_relay::RelaySendOutcome::Oversize) => {
+                            relay_fail += 1;
+                            if relay_fail <= 10 || relay_fail % 100 == 0 {
+                                log::warn!(
+                                    "Worker {}: V3 relay packet oversized, dropping tunnel packet ({} total)",
+                                    worker_id,
+                                    relay_fail
                                 );
                             }
                         }
@@ -5428,18 +5515,18 @@ fn send_bypass_packet(
 
     let adapter_handle = adapter.get_handle();
 
-    // Safety check: Don't process oversized packets that would overflow IntermediateBuffer
-    const MAX_ETHER_FRAME: usize = 1522;
-    if work.data.len() > MAX_ETHER_FRAME {
+    // Safety check: Don't process oversized packets that would overflow IntermediateBuffer.
+    let mut buffer = IntermediateBuffer::default();
+    if work.data.len() > buffer.buffer.0.len() {
         log::warn!(
-            "send_bypass_packet: packet too large ({} bytes), dropping",
-            work.data.len()
+            "send_bypass_packet: packet too large ({} > {} bytes), dropping",
+            work.data.len(),
+            buffer.buffer.0.len()
         );
         return;
     }
 
     // Create IntermediateBuffer with packet data
-    let mut buffer = IntermediateBuffer::default();
     // CRITICAL: Set direction flag to outbound - required for send_packets_to_adapter
     buffer.device_flags = DirectionFlags::PACKET_FLAG_ON_SEND;
     buffer.length = work.data.len() as u32;
@@ -5494,6 +5581,19 @@ fn collect_tunnel_tcp_ports_for_api_tunneling(
         .collect();
 
     ports.into_iter().collect()
+}
+
+fn bounded_ip_helper_entries(
+    buffer_len: usize,
+    advertised_entries: u32,
+    entry_size: usize,
+) -> usize {
+    const TABLE_ENTRY_OFFSET: usize = std::mem::size_of::<u32>();
+    if buffer_len < TABLE_ENTRY_OFFSET || entry_size == 0 {
+        return 0;
+    }
+    let max_entries = buffer_len.saturating_sub(TABLE_ENTRY_OFFSET) / entry_size;
+    (advertised_entries as usize).min(max_entries)
 }
 
 /// Cache refresher thread - single writer
@@ -5618,21 +5718,18 @@ fn run_cache_refresher(
                     0,
                 ) == 0
                 {
-                    // BOUNDS CHECK: Validate buffer has at least the header size
                     let header_size = std::mem::size_of::<u32>(); // dwNumEntries
                     if buffer.len() >= header_size {
-                        let table = &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
-                        let num_entries = table.dwNumEntries as usize;
-
-                        // BOUNDS CHECK: Validate num_entries doesn't exceed buffer capacity
+                        let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
                         let entry_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-                        let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
-                        let safe_entries = num_entries.min(max_entries);
+                        let safe_entries =
+                            bounded_ip_helper_entries(buffer.len(), num_entries, entry_size);
+                        let entry_base = buffer.as_ptr().add(header_size);
 
-                        let entries =
-                            std::slice::from_raw_parts(table.table.as_ptr(), safe_entries);
-
-                        for entry in entries {
+                        for i in 0..safe_entries {
+                            let entry = std::ptr::read_unaligned(
+                                entry_base.add(i * entry_size) as *const MIB_TCPROW_OWNER_PID
+                            );
                             let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
                             let local_port = u16::from_be(entry.dwLocalPort as u16);
                             let key = ConnectionKey::new(local_ip, local_port, Protocol::Tcp);
@@ -5666,21 +5763,18 @@ fn run_cache_refresher(
                     0,
                 ) == 0
                 {
-                    // BOUNDS CHECK: Validate buffer has at least the header size
                     let header_size = std::mem::size_of::<u32>(); // dwNumEntries
                     if buffer.len() >= header_size {
-                        let table = &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID);
-                        let num_entries = table.dwNumEntries as usize;
-
-                        // BOUNDS CHECK: Validate num_entries doesn't exceed buffer capacity
+                        let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
                         let entry_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
-                        let max_entries = buffer.len().saturating_sub(header_size) / entry_size;
-                        let safe_entries = num_entries.min(max_entries);
+                        let safe_entries =
+                            bounded_ip_helper_entries(buffer.len(), num_entries, entry_size);
+                        let entry_base = buffer.as_ptr().add(header_size);
 
-                        let entries =
-                            std::slice::from_raw_parts(table.table.as_ptr(), safe_entries);
-
-                        for entry in entries {
+                        for i in 0..safe_entries {
+                            let entry = std::ptr::read_unaligned(
+                                entry_base.add(i * entry_size) as *const MIB_UDPROW_OWNER_PID
+                            );
                             let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
                             let local_port = u16::from_be(entry.dwLocalPort as u16);
                             let key = ConnectionKey::new(local_ip, local_port, Protocol::Udp);
@@ -7064,7 +7158,7 @@ fn run_v3_inbound_receiver(
     config: InboundConfig,
     stop_flag: Arc<AtomicBool>,
     throughput: ThroughputStats,
-) {
+) -> VpnResult<()> {
     log::info!("========================================");
     log::info!("V3 INBOUND RECEIVER STARTING");
     log::info!("========================================");
@@ -7083,7 +7177,10 @@ fn run_v3_inbound_receiver(
             log::error!("Failed to open ndisapi driver: {}", e);
             log::error!("Inbound traffic will NOT work!");
             log::error!("========================================");
-            return;
+            return Err(VpnError::SplitTunnel(format!(
+                "V3 inbound receiver failed to open driver: {}",
+                e
+            )));
         }
     };
 
@@ -7095,7 +7192,10 @@ fn run_v3_inbound_receiver(
             log::error!("Failed to get adapters: {}", e);
             log::error!("Inbound traffic will NOT work!");
             log::error!("========================================");
-            return;
+            return Err(VpnError::SplitTunnel(format!(
+                "V3 inbound receiver failed to get adapters: {}",
+                e
+            )));
         }
     };
 
@@ -7117,7 +7217,10 @@ fn run_v3_inbound_receiver(
             }
             log::error!("Inbound traffic will NOT work!");
             log::error!("========================================");
-            return;
+            return Err(VpnError::SplitTunnel(format!(
+                "V3 inbound receiver physical adapter '{}' not found",
+                config.physical_adapter_name
+            )));
         }
     };
 
@@ -7339,6 +7442,7 @@ fn run_v3_inbound_receiver(
         log::error!("========================================");
     }
     log::info!("========================================");
+    Ok(())
 }
 
 fn should_log_no_inbound_warning(
@@ -7443,6 +7547,30 @@ mod tests {
         frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
 
         frame
+    }
+
+    #[test]
+    fn test_bounded_ip_helper_entries_accepts_entries_inside_buffer() {
+        let entry_size = 24;
+        assert_eq!(
+            bounded_ip_helper_entries(4 + entry_size * 3, 3, entry_size),
+            3
+        );
+    }
+
+    #[test]
+    fn test_bounded_ip_helper_entries_caps_overadvertised_table() {
+        let entry_size = 24;
+        assert_eq!(
+            bounded_ip_helper_entries(4 + entry_size * 2, u32::MAX, entry_size),
+            2
+        );
+    }
+
+    #[test]
+    fn test_bounded_ip_helper_entries_rejects_truncated_buffers() {
+        assert_eq!(bounded_ip_helper_entries(3, 1, 24), 0);
+        assert_eq!(bounded_ip_helper_entries(4, 1, 24), 0);
     }
 
     fn build_pppoe_ipv4_frame(

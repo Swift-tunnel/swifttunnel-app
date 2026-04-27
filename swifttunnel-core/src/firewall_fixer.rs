@@ -59,6 +59,9 @@ impl FirewallFixer {
             warn!("No Roblox executables found in %LOCALAPPDATA%\\Roblox\\Versions\\");
         }
 
+        let mut rules_added = 0usize;
+        let mut rule_failures = 0usize;
+
         for (exe_name, full_path) in &executables {
             let path_str = full_path.to_string_lossy();
 
@@ -81,8 +84,10 @@ impl FirewallFixer {
             match output {
                 Ok(result) if result.status.success() => {
                     info!("Added outbound firewall rule for {}", exe_name);
+                    rules_added += 1;
                 }
                 Ok(result) => {
+                    rule_failures += 1;
                     let stderr = String::from_utf8_lossy(&result.stderr);
                     warn!(
                         "Failed to add outbound firewall rule for {}: {}",
@@ -90,6 +95,7 @@ impl FirewallFixer {
                     );
                 }
                 Err(e) => {
+                    rule_failures += 1;
                     warn!(
                         "Failed to add outbound firewall rule for {}: {}",
                         exe_name, e
@@ -116,8 +122,10 @@ impl FirewallFixer {
             match output {
                 Ok(result) if result.status.success() => {
                     info!("Added inbound firewall rule for {}", exe_name);
+                    rules_added += 1;
                 }
                 Ok(result) => {
+                    rule_failures += 1;
                     let stderr = String::from_utf8_lossy(&result.stderr);
                     warn!(
                         "Failed to add inbound firewall rule for {}: {}",
@@ -125,6 +133,7 @@ impl FirewallFixer {
                     );
                 }
                 Err(e) => {
+                    rule_failures += 1;
                     warn!(
                         "Failed to add inbound firewall rule for {}: {}",
                         exe_name, e
@@ -163,8 +172,31 @@ impl FirewallFixer {
             }
         }
 
+        if executables.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Roblox firewall fix could not add rules: no Roblox executables found"
+            ));
+        }
+        if rule_failures > 0 {
+            if rules_added > 0 {
+                Self::remove_swifttunnel_rules_by_prefix();
+            }
+            return Err(anyhow::anyhow!(
+                "Roblox firewall fix failed to add {} firewall rule(s)",
+                rule_failures
+            ));
+        }
+        if rules_added == 0 {
+            return Err(anyhow::anyhow!(
+                "Roblox firewall fix did not add any firewall rules"
+            ));
+        }
+
         self.rules_applied = true;
-        info!("Roblox firewall fix applied successfully");
+        info!(
+            "Roblox firewall fix applied successfully ({} rule(s))",
+            rules_added
+        );
         Ok(())
     }
 

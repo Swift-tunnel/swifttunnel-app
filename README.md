@@ -164,6 +164,7 @@ Notes:
 - x64 and ARM64 WinpkFilter MSIs are fetched in CI, SHA-256 checked, and extracted into signed INF/SYS/CAT driver packages under `swifttunnel-desktop/src-tauri/resources/drivers/winpkfilter/<arch>/win10`.
 - MSI install runs `SwiftTunnel.exe --install-driver` after files land; the helper installs the extracted native driver package with `pnputil`, repairs/starts `NDISRD`, and writes `%ProgramData%\SwiftTunnel\logs\driver-install.log`.
 - Runtime driver repair remains available in-app and uses structured health status to install, reset, reinstall, or request reboot without repeatedly offering the same install action.
+- The desktop connect flow bounds split tunnel preflight and backend VPN connect waits, so a hung connect attempt surfaces a retryable error instead of leaving the UI indefinitely in a connecting state.
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
 - `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
