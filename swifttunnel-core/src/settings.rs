@@ -214,7 +214,7 @@ fn default_auto_routing() -> bool {
 }
 
 fn default_minimize_to_tray() -> bool {
-    false
+    true
 }
 
 fn default_run_on_startup() -> bool {
@@ -249,7 +249,7 @@ impl Default for AppSettings {
             current_tab: "connect".to_string(),
             update_settings: UpdateSettings::default(),
             update_channel: UpdateChannel::Stable,
-            minimize_to_tray: false,
+            minimize_to_tray: default_minimize_to_tray(),
             run_on_startup: default_run_on_startup(),
             auto_reconnect: default_auto_reconnect(),
             resume_vpn_on_startup: false,
@@ -289,6 +289,9 @@ impl AppSettings {
             })
             .collect();
         self.selected_game_presets = default_game_presets();
+        // Older releases serialized false as the default even though the app has
+        // no user-facing toggle. Keep app-close safe for shared/cafe PCs.
+        self.minimize_to_tray = true;
     }
 }
 
@@ -407,8 +410,8 @@ mod tests {
         assert_eq!(settings.selected_server, "singapore");
         assert_eq!(settings.update_channel, UpdateChannel::Stable);
         assert!(
-            !settings.minimize_to_tray,
-            "Default should allow closing via X; tray behavior is opt-in"
+            settings.minimize_to_tray,
+            "Default should hide to tray so X/taskbar close keeps the tunnel alive"
         );
         assert!(!settings.run_on_startup);
         assert!(!settings.auto_reconnect);
@@ -501,10 +504,20 @@ mod tests {
 
     #[test]
     fn test_settings_minimize_to_tray_default() {
-        // Settings without minimize_to_tray should default to false (quit on X).
+        // Settings without minimize_to_tray should default to true (hide to tray).
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(!loaded.minimize_to_tray);
+        assert!(loaded.minimize_to_tray);
+    }
+
+    #[test]
+    fn test_settings_sanitize_migrates_legacy_minimize_to_tray_false() {
+        let mut settings = AppSettings::default();
+        settings.minimize_to_tray = false;
+
+        settings.sanitize_in_place();
+
+        assert!(settings.minimize_to_tray);
     }
 
     #[test]

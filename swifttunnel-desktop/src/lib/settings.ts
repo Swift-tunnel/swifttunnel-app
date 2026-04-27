@@ -42,7 +42,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   current_tab: "connect",
   update_settings: { auto_check: true, last_check: null },
   update_channel: "Stable",
-  minimize_to_tray: false,
+  minimize_to_tray: true,
   run_on_startup: false,
   auto_reconnect: false,
   resume_vpn_on_startup: false,
@@ -74,9 +74,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
 export function mergeAppSettings(
   raw: Partial<AppSettings> | undefined,
 ): AppSettings {
-  return {
+  const settings = {
     ...DEFAULT_SETTINGS,
     ...raw,
+    // Older releases saved false by default even though there is no UI for this
+    // preference. Migrate those installs so taskbar/X close hides to tray.
+    minimize_to_tray: true,
     selected_game_presets: DEFAULT_SETTINGS.selected_game_presets,
     config: {
       ...DEFAULT_SETTINGS.config,
@@ -115,4 +118,6 @@ export function mergeAppSettings(
       ...raw?.game_process_performance,
     },
   };
+
+  return settings;
 }

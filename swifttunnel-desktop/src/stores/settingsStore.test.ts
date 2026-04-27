@@ -62,14 +62,14 @@ describe("stores/settingsStore", () => {
     ).toBe(false);
   });
 
-  it("defaults minimize_to_tray to false when load fails", async () => {
+  it("defaults minimize_to_tray to true when load fails", async () => {
     settingsLoad.mockRejectedValue(new Error("boom"));
 
     const useSettingsStore = await loadStore();
     await useSettingsStore.getState().load();
 
     expect(useSettingsStore.getState().isLoaded).toBe(true);
-    expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(false);
+    expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(true);
     expect(useSettingsStore.getState().settings.run_on_startup).toBe(false);
     expect(useSettingsStore.getState().settings.auto_reconnect).toBe(false);
     expect(useSettingsStore.getState().settings.resume_vpn_on_startup).toBe(false);
@@ -105,6 +105,18 @@ describe("stores/settingsStore", () => {
     expect(
       useSettingsStore.getState().settings.config.roblox_settings.window_fullscreen,
     ).toBe(false);
+  });
+
+  it("migrates legacy saved minimize_to_tray false to true", async () => {
+    settingsLoad.mockResolvedValue({
+      ...DEFAULT_SETTINGS,
+      minimize_to_tray: false,
+    });
+
+    const useSettingsStore = await loadStore();
+    await useSettingsStore.getState().load();
+
+    expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(true);
   });
 
   it("save persists activeTab into current_tab", async () => {

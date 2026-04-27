@@ -44,7 +44,7 @@ const MOCK_SETTINGS: AppSettings = {
   current_tab: "boost",
   update_settings: { auto_check: true, last_check: 1739350000, dismissed_version: null },
   update_channel: "Stable",
-  minimize_to_tray: false,
+  minimize_to_tray: true,
   run_on_startup: true,
   auto_reconnect: true,
   resume_vpn_on_startup: true,
