@@ -58,7 +58,7 @@ Built-in performance optimizations:
 - All optimizations are reversible
 
 ### 🌍 Auto Region Detection
-Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected, drained relays are excluded through `/api/vpn/servers`, stale lookups cannot switch after a newer game-server IP, and live ping-test refreshes keep Auto Route's server choices current while connected.
+Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected and still complete the relay-ticket handshake, drained relays are excluded through `/api/vpn/servers`, stale lookups cannot switch after a newer game-server IP, and live ping-test refreshes keep Auto Route's server choices current while connected.
 
 ---
 
@@ -167,7 +167,7 @@ Notes:
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
 - `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
-- Windows CI and release packaging run on the self-hosted `testbench` GitHub runner so GitHub uses the same Windows environment we already trust for real builds.
+- Windows CI and release packaging run on the self-hosted `testbench` GitHub runner with the `swifttunnel-app` label so GitHub uses the same Windows environment we already trust for real builds.
 - A scheduled GitHub reconciliation workflow dispatches the normal GitHub `Release` workflow if the newest GitHub semver tag is missing its release entry.
 
 ### GitHub Cutover Notes

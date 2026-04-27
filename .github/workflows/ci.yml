@@ -60,7 +60,7 @@ jobs:
 
   rust:
     name: Rust Check (Windows)
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, testbench, swifttunnel-app]
     timeout-minutes: 60
 
     steps:
@@ -123,7 +123,7 @@ jobs:
           set +e
           matching_runner_count="$(
             gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runners" \
-              --jq '.runners[] | select(.status == "online") | select(([.labels[].name] | contains(["self-hosted", "Windows", "X64", "testbench"]))) | .id' \
+              --jq '.runners[] | select(.status == "online") | select(([.labels[].name] | contains(["self-hosted", "Windows", "X64", "testbench", "swifttunnel-app"]))) | .id' \
               | wc -l \
               | tr -d ' '
           )"
@@ -148,7 +148,7 @@ jobs:
     name: Split Tunnel Testbench (Windows)
     needs: split-tunnel-testbench-availability
     if: needs.split-tunnel-testbench-availability.outputs.runner_available == 'true'
-    runs-on: [self-hosted, Windows, X64, testbench]
+    runs-on: [self-hosted, Windows, X64, testbench, swifttunnel-app]
     timeout-minutes: 45
 
     steps:

@@ -21,7 +21,7 @@ concurrency:
 jobs:
   release:
     name: Build & Publish (Tauri)
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64, testbench, swifttunnel-app]
     timeout-minutes: 90
 
     steps:
