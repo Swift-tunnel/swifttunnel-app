@@ -59,8 +59,8 @@ jobs:
         run: npm run build
 
   rust:
-    name: Rust Check (Windows)
-    runs-on: [self-hosted, Windows, X64, testbench, swifttunnel-app]
+    name: Rust Check (GitHub Windows)
+    runs-on: windows-latest
     timeout-minutes: 60
 
     steps:
@@ -76,7 +76,7 @@ jobs:
           ) | Where-Object { Test-Path $_ }
 
           if ($gitBashPaths.Count -eq 0) {
-            throw 'Git Bash was not found on the testbench runner.'
+            throw 'Git Bash was not found on the GitHub-hosted Windows runner.'
           }
 
           foreach ($path in $gitBashPaths) {
