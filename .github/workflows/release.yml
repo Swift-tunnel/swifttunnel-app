@@ -205,6 +205,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          cache-on-failure: true
+          save-if: true
+
       - name: Install frontend dependencies
         working-directory: swifttunnel-desktop
         run: npm ci

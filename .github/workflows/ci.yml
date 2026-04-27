@@ -91,6 +91,14 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
