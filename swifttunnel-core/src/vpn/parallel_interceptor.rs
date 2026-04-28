@@ -4132,22 +4132,36 @@ impl ParallelInterceptor {
             self.detected_game_servers.read().iter().copied().collect();
         let new_default_with_source =
             Self::get_default_route_info_for_targets(&observed_game_targets);
-        let new_default = new_default_with_source.map(|(info, _, _)| info);
+        let (new_default, new_default_source, new_default_target_ip) = match new_default_with_source
+        {
+            Some((info, source, target_ip)) => (Some(info), source, target_ip),
+            None => (None, DefaultRouteSource::Unresolved, None),
+        };
         let new_default_if_index = new_default.map(|d| d.if_index);
         let new_default_next_hop = new_default.map(|d| d.next_hop);
+        let route_probe_resolved = new_default.is_some();
 
-        // Update stored default route info for diagnostics even if we don't rebind.
-        self.default_route_if_index = new_default_if_index;
-        self.default_route_next_hop = new_default_next_hop;
-        self.default_route_source = new_default_with_source
-            .map(|(_, source, _)| source)
-            .unwrap_or(DefaultRouteSource::Unresolved);
-        self.default_route_target_ip = new_default_with_source.and_then(|(_, _, ip)| ip);
-        let new_network_signature = Self::build_network_signature(
-            self.default_route_source,
-            new_default_if_index,
-            new_default_next_hop,
-        );
+        // Route probes can transiently fail while the relay path is still moving traffic.
+        // Treat that as diagnostic-only: preserve the known binding and wait for a
+        // structured route owner before attempting a stop/start rebind.
+        let new_network_signature = if route_probe_resolved {
+            self.default_route_if_index = new_default_if_index;
+            self.default_route_next_hop = new_default_next_hop;
+            self.default_route_source = new_default_source;
+            self.default_route_target_ip = new_default_target_ip;
+            Some(Self::build_network_signature(
+                self.default_route_source,
+                new_default_if_index,
+                new_default_next_hop,
+            ))
+        } else {
+            log::debug!(
+                "Default route probe unresolved during rebind check; preserving current adapter binding (current_if_index={:?}, stored_default_if_index={:?})",
+                current_if_index,
+                prev_default_if_index
+            );
+            None
+        };
 
         let strict_default_route =
             new_default_next_hop.is_some() && new_default_next_hop != Some(0);
@@ -4167,7 +4181,9 @@ impl ParallelInterceptor {
 
         if self.binding_preference.as_ref().is_some_and(|preference| {
             preference.source == BindingPreferenceSource::RememberedAuto
-                && preference.network_signature.as_deref() != Some(new_network_signature.as_str())
+                && new_network_signature.as_deref().is_some_and(|signature| {
+                    preference.network_signature.as_deref() != Some(signature)
+                })
         }) {
             log::info!("Network signature changed; clearing remembered adapter binding preference");
             self.binding_preference = None;
@@ -4180,6 +4196,7 @@ impl ParallelInterceptor {
             .is_some_and(|preference| preference.source == BindingPreferenceSource::Manual);
         let needs_rebind = Self::should_rebind_on_route_change(
             manual_binding,
+            route_probe_resolved,
             adapter_down,
             default_changed,
             default_mismatch,
@@ -4265,11 +4282,16 @@ impl ParallelInterceptor {
 
     fn should_rebind_on_route_change(
         manual_binding: bool,
+        route_probe_resolved: bool,
         adapter_down: bool,
         default_changed: bool,
         default_mismatch: bool,
         binding_stage: &str,
     ) -> bool {
+        if !route_probe_resolved {
+            return false;
+        }
+
         if manual_binding {
             return adapter_down;
         }
@@ -8375,6 +8397,7 @@ mod tests {
     fn test_should_rebind_on_route_change_rebinds_exact_match_mismatch() {
         assert!(ParallelInterceptor::should_rebind_on_route_change(
             false,
+            true,
             false,
             false,
             true,
@@ -8386,6 +8409,7 @@ mod tests {
     fn test_should_rebind_on_route_change_ignores_wan_fallback_mismatch() {
         assert!(!ParallelInterceptor::should_rebind_on_route_change(
             false,
+            true,
             false,
             false,
             true,
@@ -8397,11 +8421,50 @@ mod tests {
     fn test_should_rebind_on_route_change_still_rebinds_when_route_changes() {
         assert!(ParallelInterceptor::should_rebind_on_route_change(
             false,
+            true,
             false,
             true,
             true,
             BindingStage::WanFallback.as_str(),
         ));
+    }
+
+    #[test]
+    fn test_should_rebind_on_route_change_ignores_unresolved_probe_even_if_adapter_down() {
+        assert!(!ParallelInterceptor::should_rebind_on_route_change(
+            false,
+            false,
+            true,
+            false,
+            false,
+            BindingStage::ExactRouteMatch.as_str(),
+        ));
+    }
+
+    #[test]
+    fn test_should_rebind_on_route_change_rebinds_confirmed_adapter_down() {
+        assert!(ParallelInterceptor::should_rebind_on_route_change(
+            false,
+            true,
+            true,
+            false,
+            false,
+            BindingStage::ExactRouteMatch.as_str(),
+        ));
+    }
+
+    #[test]
+    fn test_should_rebind_on_route_change_unresolved_probe_cannot_loop_rebinds() {
+        for _ in 0..10 {
+            assert!(!ParallelInterceptor::should_rebind_on_route_change(
+                false,
+                false,
+                true,
+                false,
+                true,
+                BindingStage::ExactRouteMatch.as_str(),
+            ));
+        }
     }
 
     #[test]
