@@ -119,10 +119,6 @@ fn select_candidate_after_preflight(
 
     let fallback = attempts.first().ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
 
-    if attempts.iter().any(|attempt| !attempt.policy_known) {
-        return Err(CONNECT_FAIL_POLICY_UNAVAILABLE);
-    }
-
     if attempts.iter().any(|attempt| attempt.auth_required) {
         return Err(CONNECT_FAIL_AUTH_REQUIRED);
     }
@@ -1305,6 +1301,23 @@ impl VpnConnection {
 
                 match select_candidate_after_preflight(&attempt_results) {
                     Ok((fallback_region, fallback_addr, fallback_queue_mode)) => {
+                        let policy_known = attempt_results
+                            .iter()
+                            .find(|attempt| {
+                                attempt.region == fallback_region && attempt.addr == fallback_addr
+                            })
+                            .is_none_or(|attempt| attempt.policy_known);
+                        if !policy_known {
+                            relay_auth_mode = "policy_unavailable_legacy_fallback".to_string();
+                            log_sampled_connect_event(
+                                &POLICY_UNAVAILABLE_EVENTS,
+                                CONNECT_FAIL_POLICY_UNAVAILABLE,
+                                format!(
+                                    "Relay policy unavailable for '{}'; attempting marked legacy fallback on '{}' (session {})",
+                                    config.region, fallback_region, session_id_hex
+                                ),
+                            );
+                        }
                         selected_relay_region = fallback_region;
                         relay_addr = fallback_addr;
                         queue_full_mode = fallback_queue_mode;
@@ -3130,7 +3143,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_unknown_policy_rejects_fallback() {
+    fn test_select_candidate_after_preflight_all_unknown_policy_allows_marked_fallback() {
         let attempts = vec![RelayCandidateAttempt {
             region: "germany-01".to_string(),
             addr: parse_addr("10.0.0.1:51821"),
@@ -3141,8 +3154,71 @@ mod tests {
             queue_full_mode: RelayQueueFullMode::Bypass,
         }];
 
+        let selected = select_candidate_after_preflight(&attempts)
+            .expect("unknown policy alone should not block legacy fallback");
+        assert_eq!(
+            selected,
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                RelayQueueFullMode::Bypass
+            )
+        );
+    }
+
+    #[test]
+    fn test_select_candidate_after_preflight_auth_policy_beats_unknown_policy() {
+        let attempts = vec![
+            RelayCandidateAttempt {
+                region: "germany-01".to_string(),
+                addr: parse_addr("10.0.0.1:51821"),
+                authenticated: false,
+                policy_known: false,
+                auth_required: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Bypass,
+            },
+            RelayCandidateAttempt {
+                region: "germany-02".to_string(),
+                addr: parse_addr("10.0.0.2:51821"),
+                authenticated: false,
+                policy_known: true,
+                auth_required: true,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Drop,
+            },
+        ];
+
         let error = select_candidate_after_preflight(&attempts)
-            .expect_err("unknown relay policy must fail closed");
-        assert_eq!(error, CONNECT_FAIL_POLICY_UNAVAILABLE);
+            .expect_err("structured auth-required policy must still reject fallback");
+        assert_eq!(error, CONNECT_FAIL_AUTH_REQUIRED);
+    }
+
+    #[test]
+    fn test_select_candidate_after_preflight_enforced_policy_beats_unknown_policy() {
+        let attempts = vec![
+            RelayCandidateAttempt {
+                region: "germany-01".to_string(),
+                addr: parse_addr("10.0.0.1:51821"),
+                authenticated: false,
+                policy_known: false,
+                auth_required: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Bypass,
+            },
+            RelayCandidateAttempt {
+                region: "germany-02".to_string(),
+                addr: parse_addr("10.0.0.2:51821"),
+                authenticated: false,
+                policy_known: true,
+                auth_required: false,
+                preflight_mode: RelayPreflightMode::Enforce,
+                queue_full_mode: RelayQueueFullMode::Drop,
+            },
+        ];
+
+        let error = select_candidate_after_preflight(&attempts)
+            .expect_err("structured enforced preflight must still reject fallback");
+        assert_eq!(error, CONNECT_FAIL_PREFLIGHT_ENFORCED);
     }
 }

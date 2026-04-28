@@ -80,8 +80,11 @@ function isAlreadyConnectedMessage(message: string): boolean {
   return message.trim().toLowerCase().replace(/\.+$/, "") === "already connected";
 }
 
-const VPN_PREFLIGHT_TIMEOUT_MS = 20_000;
 const VPN_CONNECT_TIMEOUT_MS = 90_000;
+// Adapter preflight can wait on slow Windows networking APIs. Keep its UI
+// timeout aligned with the real connect budget so we do not fail at 20s while
+// the backend is still making progress.
+const VPN_PREFLIGHT_TIMEOUT_MS = VPN_CONNECT_TIMEOUT_MS;
 const VPN_CONNECT_CLEANUP_TIMEOUT_MS = 15_000;
 
 function formatTimeout(timeoutMs: number): string {
