@@ -1,0 +1,83 @@
+name: Announce Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to announce, for example v2.0.8
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  discord:
+    name: Discord announcement
+    runs-on: ubuntu-latest
+    steps:
+      - name: Announce release in Discord
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          DISCORD_RELEASE_ROLE_ID: "1449321655561359472"
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_RELEASE_WEBHOOK_URL}" ]; then
+            echo "::error::DISCORD_RELEASE_WEBHOOK_URL secret is not set"
+            exit 1
+          fi
+
+          release_json="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json name,body,url,tagName,isPrerelease)"
+          release_name="$(jq -r '.name' <<<"${release_json}")"
+          release_url="$(jq -r '.url' <<<"${release_json}")"
+          tag_name="$(jq -r '.tagName' <<<"${release_json}")"
+          is_prerelease="$(jq -r '.isPrerelease' <<<"${release_json}")"
+          description="$(jq -r '.body // ""' <<<"${release_json}")"
+
+          if [ -z "${description}" ]; then
+            description="See the release page for downloads and details."
+          fi
+          if [ "${#description}" -gt 3900 ]; then
+            description="${description:0:3897}..."
+          fi
+
+          if [ "${is_prerelease}" = "true" ]; then
+            channel_label="Live"
+            color=16753920
+          else
+            channel_label="Stable"
+            color=5793266
+          fi
+
+          payload="$(jq -n \
+            --arg role_id "${DISCORD_RELEASE_ROLE_ID}" \
+            --arg release_name "${release_name}" \
+            --arg release_url "${release_url}" \
+            --arg tag_name "${tag_name}" \
+            --arg description "${description}" \
+            --arg channel_label "${channel_label}" \
+            --arg color "${color}" \
+            '{
+              username: "SwiftTunnel Releases",
+              content: ("<@&" + $role_id + "> SwiftTunnel " + $tag_name + " is live."),
+              allowed_mentions: { parse: [], roles: [$role_id] },
+              embeds: [{
+                title: $release_name,
+                url: $release_url,
+                description: $description,
+                color: ($color | tonumber),
+                fields: [
+                  { name: "Version", value: ($tag_name | sub("^v"; "")), inline: true },
+                  { name: "Channel", value: $channel_label, inline: true },
+                  { name: "Release", value: $release_url, inline: false }
+                ]
+              }]
+            }')"
+
+          curl -fsS \
+            -H "Content-Type: application/json" \
+            -d "${payload}" \
+            "${DISCORD_RELEASE_WEBHOOK_URL}"
