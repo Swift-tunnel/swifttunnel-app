@@ -506,3 +506,65 @@ jobs:
           node -e "const fs=require('fs');const crypto=require('crypto');const manifest=fs.readFileSync(process.env.MANIFEST_PATH);const signature=crypto.sign(null,manifest,process.env.SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY).toString('base64');fs.writeFileSync(process.env.SIGNATURE_PATH,signature+'\n');"
 
           gh release upload $env:TAG $manifestPath $signaturePath --repo $env:GITHUB_REPOSITORY --clobber
+
+      - name: Announce release in Discord
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHANNEL_CLASS: ${{ steps.meta.outputs.channel_class }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DISCORD_RELEASE_WEBHOOK_URL)) {
+            Write-Host "::notice::DISCORD_RELEASE_WEBHOOK_URL secret not set - skipping Discord release announcement"
+            exit 0
+          }
+
+          $releaseJson = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json name,body,url,tagName,isPrerelease
+          $release = $releaseJson | ConvertFrom-Json
+
+          $description = ""
+          if ($release.body) {
+            $description = $release.body.Trim()
+          }
+          if ([string]::IsNullOrWhiteSpace($description)) {
+            $description = "See the release page for downloads and details."
+          }
+          if ($description.Length -gt 3900) {
+            $description = $description.Substring(0, 3897) + "..."
+          }
+
+          $channelLabel = if ($env:CHANNEL_CLASS -eq "live") { "Live" } else { "Stable" }
+          $color = if ($env:CHANNEL_CLASS -eq "live") { 16753920 } else { 5793266 }
+
+          $payload = @{
+            username = "SwiftTunnel Releases"
+            content = "SwiftTunnel $($release.tagName) is live."
+            allowed_mentions = @{
+              parse = @()
+            }
+            embeds = @(
+              @{
+                title = $release.name
+                url = $release.url
+                description = $description
+                color = $color
+                fields = @(
+                  @{
+                    name = "Version"
+                    value = $env:VERSION
+                    inline = $true
+                  },
+                  @{
+                    name = "Channel"
+                    value = $channelLabel
+                    inline = $true
+                  }
+                )
+              }
+            )
+          }
+
+          $payloadJson = $payload | ConvertTo-Json -Depth 10
+          Invoke-RestMethod -Method Post -Uri $env:DISCORD_RELEASE_WEBHOOK_URL -ContentType "application/json" -Body $payloadJson
