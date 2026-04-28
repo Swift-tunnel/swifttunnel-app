@@ -64,6 +64,48 @@ fn log_sampled_connect_event(counter: &AtomicU64, code: &str, message: impl AsRe
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayHealthAction {
+    Continue {
+        relay_status: Option<String>,
+    },
+    Fatal {
+        error_message: String,
+        cleanup_reason: &'static str,
+    },
+}
+
+fn classify_relay_health(
+    health: super::udp_relay::RelayHealthState,
+    sender_panicked: bool,
+) -> RelayHealthAction {
+    use super::udp_relay::RelayHealthState;
+
+    if health == RelayHealthState::Dead {
+        return RelayHealthAction::Fatal {
+            error_message: "Relay connection failed - SwiftTunnel stopped the session because the relay stopped returning traffic. Please reconnect or choose another relay."
+                .to_string(),
+            cleanup_reason: "relay_dead_recovery",
+        };
+    }
+
+    if sender_panicked {
+        return RelayHealthAction::Continue {
+            relay_status: Some("panicked".to_string()),
+        };
+    }
+
+    match health {
+        RelayHealthState::Stale => RelayHealthAction::Continue {
+            relay_status: Some("stale".to_string()),
+        },
+        RelayHealthState::Healthy | RelayHealthState::NoTrafficYet => {
+            RelayHealthAction::Continue { relay_status: None }
+        }
+        RelayHealthState::Dead => unreachable!("handled above"),
+    }
+}
+
 fn select_candidate_after_preflight(
     attempts: &[RelayCandidateAttempt],
 ) -> Result<(String, SocketAddr, RelayQueueFullMode), &'static str> {
@@ -1907,7 +1949,6 @@ impl VpnConnection {
 
                         // Check relay health and update connection state for UI visibility
                         {
-                            use super::udp_relay::RelayHealthState;
                             let health = relay_health_monitor.relay_health();
 
                             // `workers_panicked` means the split-tunnel reader
@@ -1980,42 +2021,69 @@ impl VpnConnection {
                                 }
                             }
 
-                            // Transient relay sender hiccups (UDP send errors,
-                            // stale heartbeat) stay as a Connected sub-status.
-                            // They're often self-healing; the UI shows a
-                            // yellow banner rather than tearing down the
-                            // whole connection.
                             let sender_panicked = relay_health_monitor.sender_panicked();
-                            let new_status = if sender_panicked {
-                                Some("panicked".to_string())
-                            } else {
-                                match health {
-                                    RelayHealthState::Healthy => None,
-                                    RelayHealthState::NoTrafficYet => None,
-                                    RelayHealthState::Stale => Some("stale".to_string()),
-                                    RelayHealthState::Dead => Some("dead".to_string()),
-                                }
-                            };
-                            state_handle.send_if_modified(|state| {
-                                if let ConnectionState::Connected { ref mut relay_status, .. } = *state {
-                                    if *relay_status != new_status {
-                                        match &new_status {
-                                            Some(status) => log::warn!(
-                                                "V3: Relay health degraded to '{}' - updating UI state",
-                                                status
-                                            ),
-                                            None => {
-                                                if relay_status.is_some() {
-                                                    log::info!("V3: Relay health recovered to healthy");
-                                                }
+                            match classify_relay_health(health, sender_panicked) {
+                                RelayHealthAction::Fatal {
+                                    error_message,
+                                    cleanup_reason,
+                                } => {
+                                    let transitioned = state_handle.send_if_modified(|state| {
+                                        if matches!(*state, ConnectionState::Connected { .. }) {
+                                            log::error!(
+                                                "V3: Relay health is '{}' - transitioning Connected -> Error",
+                                                health.as_str()
+                                            );
+                                            *state = ConnectionState::Error(error_message.clone());
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    });
+
+                                    if transitioned {
+                                        {
+                                            let mut driver_guard = driver.lock().await;
+                                            if let Err(e) = driver_guard.close() {
+                                                log::warn!(
+                                                    "V3: relay recovery cleanup - driver.close() returned {}",
+                                                    e
+                                                );
                                             }
                                         }
-                                        *relay_status = new_status;
-                                        return true;
+                                        super::wfp_block::cleanup();
+                                        if let Some(ref auto_router) = auto_router_for_monitor {
+                                            auto_router.reset();
+                                        }
+                                        if let Some(ref manager) = process_performance_for_monitor {
+                                            let mut guard = manager.lock().await;
+                                            guard.cleanup_all(cleanup_reason);
+                                        }
+                                        break;
                                     }
                                 }
-                                false
-                            });
+                                RelayHealthAction::Continue { relay_status: new_status } => {
+                                    state_handle.send_if_modified(|state| {
+                                        if let ConnectionState::Connected { ref mut relay_status, .. } = *state {
+                                            if *relay_status != new_status {
+                                                match &new_status {
+                                                    Some(status) => log::warn!(
+                                                        "V3: Relay health degraded to '{}' - updating UI state",
+                                                        status
+                                                    ),
+                                                    None => {
+                                                        if relay_status.is_some() {
+                                                            log::info!("V3: Relay health recovered to healthy");
+                                                        }
+                                                    }
+                                                }
+                                                *relay_status = new_status;
+                                                return true;
+                                            }
+                                        }
+                                        false
+                                    });
+                                }
+                            }
                         }
                     }
 
@@ -2400,6 +2468,44 @@ mod tests {
         let conn = VpnConnection::new();
         let rx = conn.state_handle();
         assert_eq!(*rx.borrow(), ConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn test_dead_relay_health_is_fatal() {
+        let action = classify_relay_health(super::super::udp_relay::RelayHealthState::Dead, false);
+
+        match action {
+            RelayHealthAction::Fatal {
+                error_message,
+                cleanup_reason,
+            } => {
+                assert!(error_message.contains("relay stopped returning traffic"));
+                assert_eq!(cleanup_reason, "relay_dead_recovery");
+            }
+            RelayHealthAction::Continue { .. } => panic!("dead relay must not remain connected"),
+        }
+    }
+
+    #[test]
+    fn test_stale_relay_health_remains_connected_status() {
+        let action = classify_relay_health(super::super::udp_relay::RelayHealthState::Stale, false);
+
+        assert_eq!(
+            action,
+            RelayHealthAction::Continue {
+                relay_status: Some("stale".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_no_traffic_yet_relay_health_does_not_trigger_recovery() {
+        let action = classify_relay_health(
+            super::super::udp_relay::RelayHealthState::NoTrafficYet,
+            false,
+        );
+
+        assert_eq!(action, RelayHealthAction::Continue { relay_status: None });
     }
 
     #[test]

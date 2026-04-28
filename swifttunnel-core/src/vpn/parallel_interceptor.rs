@@ -2360,12 +2360,16 @@ impl ParallelInterceptor {
 
         for (idx, adapter) in adapters.iter().enumerate() {
             let internal_name = adapter.get_name();
-            // Try both GetAdaptersInfo and GetAdaptersAddresses for friendly name
-            let friendly_name = get_adapter_friendly_name(&internal_name)
-                .or_else(|| get_adapter_friendly_name_v2(&internal_name))
+            // Prefer the operational interface alias from GetAdaptersAddresses
+            // (e.g. "Ethernet 2") over the legacy adapter description from
+            // GetAdaptersInfo (e.g. "Realtek PCIe GbE Family Controller #2").
+            // PowerShell's Get-NetAdapterBinding -Name expects the alias.
+            let friendly_name = choose_adapter_operational_name(
+                get_adapter_friendly_name_v2(&internal_name),
+                get_adapter_friendly_name(&internal_name),
                 // ndisapi has extra NDISWAN-aware lookup logic as a final fallback.
-                .or_else(|| ndisapi::Ndisapi::get_friendly_adapter_name(internal_name).ok())
-                .unwrap_or_default();
+                ndisapi::Ndisapi::get_friendly_adapter_name(internal_name).ok(),
+            );
 
             log::info!(
                 "  Adapter {}: '{}' (internal: {})",
@@ -3727,15 +3731,18 @@ impl ParallelInterceptor {
         );
 
         log::warn!(
-            "Continuing without IPv6 disable on adapter '{}'. IPv6 traffic may bypass VPN.{}{}",
+            "Refusing to continue without IPv6 disable on adapter '{}'. IPv6 traffic may bypass VPN.{}{}",
             friendly_name,
             if details.is_empty() { "" } else { " Details: " },
             details
         );
 
-        // Non-fatal by design: this optimization can fail on some systems due to
-        // privileges or adapter-specific behavior, but tunneling can still proceed.
-        Ok(())
+        Err(VpnError::SplitTunnelSetupFailed(format!(
+            "Failed to disable IPv6 on adapter '{}'. SwiftTunnel is IPv4-only; leaving IPv6 enabled could let game traffic bypass the tunnel.{}{}",
+            friendly_name,
+            if details.is_empty() { "" } else { " Details: " },
+            details
+        )))
     }
 
     /// Disable IPv6 on the physical adapter
@@ -6830,6 +6837,19 @@ where
 }
 
 /// Get adapter friendly name
+fn choose_adapter_operational_name(
+    addresses_alias: Option<String>,
+    legacy_description: Option<String>,
+    ndisapi_name: Option<String>,
+) -> String {
+    [addresses_alias, legacy_description, ndisapi_name]
+        .into_iter()
+        .flatten()
+        .map(|name| name.trim().to_string())
+        .find(|name| !name.is_empty())
+        .unwrap_or_default()
+}
+
 fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
     let guid = ParallelInterceptor::extract_guid_ascii_lowercase(internal_name)?;
 
@@ -9941,6 +9961,28 @@ mod tests {
     }
 
     #[test]
+    fn test_choose_adapter_operational_name_prefers_alias_over_description() {
+        let name = choose_adapter_operational_name(
+            Some("Ethernet 2".to_string()),
+            Some("Realtek PCIe GbE Family Controller #2".to_string()),
+            None,
+        );
+
+        assert_eq!(name, "Ethernet 2");
+    }
+
+    #[test]
+    fn test_choose_adapter_operational_name_falls_back_to_legacy_description() {
+        let name = choose_adapter_operational_name(
+            Some("   ".to_string()),
+            Some("Realtek PCIe GbE Family Controller #2".to_string()),
+            None,
+        );
+
+        assert_eq!(name, "Realtek PCIe GbE Family Controller #2");
+    }
+
+    #[test]
     fn test_disable_ipv6_sets_flag_on_success() {
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
@@ -9963,7 +10005,7 @@ mod tests {
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
-        interceptor
+        let error = interceptor
             .disable_ipv6_with_runner(|_, _| PowerShellRunOutput {
                 success: false,
                 timed_out: false,
@@ -9971,7 +10013,9 @@ mod tests {
                 stdout: String::new(),
                 stderr: "Access is denied.".to_string(),
             })
-            .unwrap();
+            .expect_err("IPv6 disable failure must abort connect");
+
+        assert!(error.to_string().contains("Failed to disable IPv6"));
         assert!(interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
     }
