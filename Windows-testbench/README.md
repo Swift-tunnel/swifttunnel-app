@@ -50,6 +50,20 @@ To validate Roblox TCP/API tunneling as well as the UDP split-tunnel path:
   -Password $env:SWIFTTUNNEL_TEST_PASSWORD
 ```
 
+To require end-to-end UDP response traffic through a specific relay, point the
+probe at a UDP echo server and enable response validation:
+
+```powershell
+.\\Windows-testbench\\run_split_tunnel_integration_test.ps1 `
+  -CustomRelay "45.32.253.124:51821" `
+  -UdpTarget "104.64.209.241:22080" `
+  -UdpExpectResponses `
+  -UdpCount 64 `
+  -UdpPayloadBytes 1200 `
+  -TcpTarget "setup.rbxcdn.com:80" `
+  -EnableApiTunneling
+```
+
 To include a full connect / disconnect pass in the desktop harness:
 
 ```powershell

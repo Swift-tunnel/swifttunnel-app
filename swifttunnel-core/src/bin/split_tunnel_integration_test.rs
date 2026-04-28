@@ -7,10 +7,11 @@ use std::time::Duration;
 use swifttunnel_core::settings::load_settings;
 use swifttunnel_core::vpn::{SplitTunnelDiagnostics, VpnConnection};
 use testbench_shared::{
-    DEFAULT_TCP_PROBE_COUNT, DEFAULT_TCP_PROBE_TARGET, DEFAULT_UDP_PROBE_COUNT,
-    DEFAULT_UDP_PROBE_STARTUP_DELAY_MS, DEFAULT_UDP_PROBE_TARGET, connect_vpn, get_public_ip,
-    init_logging, parse_common_cli_options, print_diagnostics, print_preflight_summary,
-    resolve_binding_preference, resolve_enable_api_tunneling, resolve_region, resolve_test_exe,
+    DEFAULT_TCP_PROBE_COUNT, DEFAULT_TCP_PROBE_TARGET, DEFAULT_UDP_ECHO_PAYLOAD_BYTES,
+    DEFAULT_UDP_PROBE_COUNT, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS, DEFAULT_UDP_PROBE_TARGET,
+    connect_vpn, get_public_ip, init_logging, parse_common_cli_options, print_diagnostics,
+    print_preflight_summary, resolve_binding_preference, resolve_enable_api_tunneling,
+    resolve_region, resolve_test_exe,
 };
 
 fn print_usage() {
@@ -23,6 +24,10 @@ fn print_usage() {
         "  split_tunnel_integration_test.exe --test-exe path\\to\\ip_checker.exe --udp-target {} --udp-count {}",
         DEFAULT_UDP_PROBE_TARGET, DEFAULT_UDP_PROBE_COUNT
     );
+    println!(
+        "  split_tunnel_integration_test.exe --custom-relay 45.32.253.124:51821 --udp-target echo.host:22080 --udp-expect-responses --udp-payload-bytes {} --tcp-target setup.rbxcdn.com:80",
+        DEFAULT_UDP_ECHO_PAYLOAD_BYTES
+    );
     println!("  split_tunnel_integration_test.exe --custom-relay 45.32.115.254:51821");
     println!();
     println!("Environment:");
@@ -31,6 +36,7 @@ fn print_usage() {
     println!("  SWIFTTUNNEL_TEST_PASSWORD");
     println!("  SWIFTTUNNEL_TEST_REGION");
     println!("  SWIFTTUNNEL_TEST_ADAPTER_GUID");
+    println!("  SWIFTTUNNEL_TEST_TCP_TARGET");
     println!("  SWIFTTUNNEL_TEST_CUSTOM_RELAY");
     println!("  SWIFTTUNNEL_TEST_ENABLE_API_TUNNELING");
 }
@@ -148,14 +154,37 @@ async fn run_connected_checks(
     let port_file_arg = port_file.display().to_string();
     let _ = std::fs::remove_file(&port_file);
 
+    let udp_payload_bytes = options
+        .udp_payload_bytes
+        .unwrap_or(DEFAULT_UDP_ECHO_PAYLOAD_BYTES);
     println!(
-        "Running tunneled UDP probe via {} to {} ({} packets)",
+        "Running tunneled UDP {}probe via {} to {} ({} packets)",
+        if options.udp_expect_responses {
+            "echo "
+        } else {
+            ""
+        },
         test_exe.display(),
         udp_target,
         udp_count
     );
-    let child = Command::new(&test_exe)
-        .args([
+    let mut command = Command::new(&test_exe);
+    if options.udp_expect_responses {
+        command.args([
+            "--udp-echo-probe",
+            "--target",
+            &udp_target,
+            "--count",
+            &udp_count.to_string(),
+            "--payload-bytes",
+            &udp_payload_bytes.to_string(),
+            "--startup-delay-ms",
+            &startup_delay_ms,
+            "--port-file",
+            &port_file_arg,
+        ]);
+    } else {
+        command.args([
             "--udp-probe",
             "--target",
             &udp_target,
@@ -165,7 +194,9 @@ async fn run_connected_checks(
             &startup_delay_ms,
             "--port-file",
             &port_file_arg,
-        ])
+        ]);
+    }
+    let child = command
         .spawn()
         .map_err(|e| format!("failed to spawn probe executable: {}", e))?;
 
@@ -238,19 +269,25 @@ async fn run_tcp_api_probe_check(
     let port_file_arg = port_file.display().to_string();
     let _ = std::fs::remove_file(&port_file);
 
+    let tcp_target = options
+        .tcp_target
+        .clone()
+        .or_else(|| std::env::var("SWIFTTUNNEL_TEST_TCP_TARGET").ok())
+        .unwrap_or_else(|| DEFAULT_TCP_PROBE_TARGET.to_string());
+    let tcp_count = options.tcp_count.unwrap_or(DEFAULT_TCP_PROBE_COUNT);
     println!(
         "Running tunneled TCP/API probe via {} to {} ({} writes)",
         test_exe.display(),
-        DEFAULT_TCP_PROBE_TARGET,
-        DEFAULT_TCP_PROBE_COUNT
+        tcp_target,
+        tcp_count
     );
     let child = Command::new(&test_exe)
         .args([
             "--tcp-probe",
             "--target",
-            DEFAULT_TCP_PROBE_TARGET,
+            &tcp_target,
             "--count",
-            &DEFAULT_TCP_PROBE_COUNT.to_string(),
+            &tcp_count.to_string(),
             "--startup-delay-ms",
             &startup_delay_ms,
             "--port-file",

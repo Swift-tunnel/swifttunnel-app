@@ -6,8 +6,12 @@ param(
     [string]$AdapterGuid,
     [string]$CustomRelay,
     [switch]$EnableApiTunneling,
+    [switch]$UdpExpectResponses,
     [string]$UdpTarget,
-    [int]$UdpCount
+    [int]$UdpCount,
+    [int]$UdpPayloadBytes,
+    [string]$TcpTarget,
+    [int]$TcpCount
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,8 +30,12 @@ if ($Password) { $argsList += @("--password", $Password) }
 if ($AdapterGuid) { $argsList += @("--adapter-guid", $AdapterGuid) }
 if ($CustomRelay) { $argsList += @("--custom-relay", $CustomRelay) }
 if ($EnableApiTunneling) { $argsList += "--enable-api-tunneling" }
+if ($UdpExpectResponses) { $argsList += "--udp-expect-responses" }
 if ($UdpTarget) { $argsList += @("--udp-target", $UdpTarget) }
 if ($UdpCount) { $argsList += @("--udp-count", $UdpCount) }
+if ($UdpPayloadBytes) { $argsList += @("--udp-payload-bytes", $UdpPayloadBytes) }
+if ($TcpTarget) { $argsList += @("--tcp-target", $TcpTarget) }
+if ($TcpCount) { $argsList += @("--tcp-count", $TcpCount) }
 
 & ".\target\release\split_tunnel_integration_test.exe" @argsList
 exit $LASTEXITCODE

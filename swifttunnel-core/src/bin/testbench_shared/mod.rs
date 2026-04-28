@@ -13,6 +13,7 @@ use swifttunnel_core::vpn::{
 pub const DEFAULT_REGION: &str = "singapore";
 pub const DEFAULT_UDP_PROBE_TARGET: &str = "128.116.1.1:49152";
 pub const DEFAULT_UDP_PROBE_COUNT: usize = 32;
+pub const DEFAULT_UDP_ECHO_PAYLOAD_BYTES: usize = 1200;
 pub const DEFAULT_UDP_PROBE_STARTUP_DELAY_MS: u64 = 1500;
 pub const DEFAULT_TCP_PROBE_TARGET: &str = "www.roblox.com:80";
 pub const DEFAULT_TCP_PROBE_COUNT: usize = 5;
@@ -27,6 +28,10 @@ pub struct CommonCliOptions {
     pub test_exe: Option<PathBuf>,
     pub udp_target: Option<String>,
     pub udp_count: Option<usize>,
+    pub udp_expect_responses: bool,
+    pub udp_payload_bytes: Option<usize>,
+    pub tcp_target: Option<String>,
+    pub tcp_count: Option<usize>,
     pub custom_relay_server: Option<String>,
     pub enable_api_tunneling: bool,
 }
@@ -67,6 +72,22 @@ pub fn parse_common_cli_options(args: &[String]) -> Result<CommonCliOptions, Str
                     .parse::<usize>()
                     .map_err(|_| format!("Invalid integer for {}: {}", flag, raw))?;
                 opts.udp_count = Some(count);
+            }
+            "--udp-expect-responses" => opts.udp_expect_responses = true,
+            "--udp-payload-bytes" => {
+                let raw = next(flag, &mut idx)?;
+                let bytes = raw
+                    .parse::<usize>()
+                    .map_err(|_| format!("Invalid integer for {}: {}", flag, raw))?;
+                opts.udp_payload_bytes = Some(bytes);
+            }
+            "--tcp-target" => opts.tcp_target = Some(next(flag, &mut idx)?),
+            "--tcp-count" => {
+                let raw = next(flag, &mut idx)?;
+                let count = raw
+                    .parse::<usize>()
+                    .map_err(|_| format!("Invalid integer for {}: {}", flag, raw))?;
+                opts.tcp_count = Some(count);
             }
             "--custom-relay" => opts.custom_relay_server = Some(next(flag, &mut idx)?),
             "--enable-api-tunneling" => opts.enable_api_tunneling = true,
@@ -223,11 +244,8 @@ pub async fn load_available_servers() -> Result<Vec<(String, SocketAddr, Option<
 fn to_available_servers(servers: &[DynamicServerInfo]) -> Vec<(String, SocketAddr, Option<u32>)> {
     servers
         .iter()
-        .filter(|server| server.relay_available)
         .filter_map(|server| {
-            let addr = format!("{}:{}", server.ip, server.effective_relay_port())
-                .parse()
-                .ok()?;
+            let addr = format!("{}:{}", server.ip, server.port).parse().ok()?;
             Some((server.region.clone(), addr, None))
         })
         .collect()
@@ -346,9 +364,111 @@ pub fn run_udp_probe(
     Ok(())
 }
 
-pub fn run_tcp_probe(
+pub fn run_udp_echo_probe(
     target: &str,
     count: usize,
+    payload_bytes: usize,
+    startup_delay_ms: u64,
+    port_file: Option<&std::path::Path>,
+) -> Result<(), String> {
+    const MAX_PAYLOAD_BYTES: usize = 1400;
+    let payload_bytes = payload_bytes.clamp(16, MAX_PAYLOAD_BYTES);
+    let addr = target
+        .to_socket_addrs()
+        .map_err(|e| format!("UDP echo target resolution failed for '{}': {}", target, e))?
+        .next()
+        .ok_or_else(|| {
+            format!(
+                "UDP echo target '{}' did not resolve to any address",
+                target
+            )
+        })?;
+    let socket =
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("Failed to set UDP read timeout: {}", e))?;
+    socket
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .map_err(|e| format!("Failed to set UDP write timeout: {}", e))?;
+
+    let local_port = socket
+        .local_addr()
+        .map_err(|e| format!("Failed to query UDP local address: {}", e))?
+        .port();
+
+    if let Some(path) = port_file {
+        std::fs::write(path, local_port.to_string())
+            .map_err(|e| format!("Failed to write UDP port file '{}': {}", path.display(), e))?;
+    }
+
+    std::thread::sleep(Duration::from_millis(startup_delay_ms));
+
+    let mut received = 0usize;
+    let mut total_rtt = Duration::ZERO;
+    let mut min_rtt: Option<Duration> = None;
+    let mut max_rtt = Duration::ZERO;
+    let mut recv_buf = vec![0u8; payload_bytes + 64];
+
+    for idx in 0..count {
+        let mut payload = vec![0u8; payload_bytes];
+        payload[..8].copy_from_slice(&(idx as u64).to_be_bytes());
+        for (offset, byte) in payload[8..].iter_mut().enumerate() {
+            *byte = ((idx + offset) & 0xFF) as u8;
+        }
+
+        let sent_at = std::time::Instant::now();
+        socket
+            .send_to(&payload, addr)
+            .map_err(|e| format!("UDP echo send {} failed: {}", idx, e))?;
+
+        let (len, peer) = socket
+            .recv_from(&mut recv_buf)
+            .map_err(|e| format!("UDP echo response {} timed out/failed: {}", idx, e))?;
+        if peer.ip() != addr.ip() || peer.port() != addr.port() {
+            return Err(format!(
+                "UDP echo response {} came from unexpected peer {} (expected {})",
+                idx, peer, addr
+            ));
+        }
+        if len != payload.len() || recv_buf[..len] != payload[..] {
+            return Err(format!(
+                "UDP echo response {} payload mismatch (expected {} bytes, got {})",
+                idx,
+                payload.len(),
+                len
+            ));
+        }
+
+        let rtt = sent_at.elapsed();
+        received += 1;
+        total_rtt += rtt;
+        min_rtt = Some(min_rtt.map_or(rtt, |current| current.min(rtt)));
+        max_rtt = max_rtt.max(rtt);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let avg_rtt_ms = if received > 0 {
+        total_rtt.as_secs_f64() * 1000.0 / received as f64
+    } else {
+        0.0
+    };
+    println!(
+        "UDP echo probe response summary: sent={} received={} payload_bytes={} min_ms={:.2} avg_ms={:.2} max_ms={:.2}",
+        count,
+        received,
+        payload_bytes,
+        min_rtt.unwrap_or_default().as_secs_f64() * 1000.0,
+        avg_rtt_ms,
+        max_rtt.as_secs_f64() * 1000.0
+    );
+
+    Ok(())
+}
+
+pub fn run_tcp_probe(
+    target: &str,
+    _count: usize,
     startup_delay_ms: u64,
     port_file: Option<&std::path::Path>,
 ) -> Result<(), String> {
@@ -367,6 +487,9 @@ pub fn run_tcp_probe(
     stream
         .set_write_timeout(Some(Duration::from_millis(750)))
         .map_err(|e| format!("Failed to set TCP write timeout: {}", e))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Failed to set TCP read timeout: {}", e))?;
 
     let local_port = stream
         .local_addr()
@@ -386,28 +509,43 @@ pub fn run_tcp_probe(
         .rsplit_once(':')
         .map(|(host, _)| host.trim_matches(['[', ']']))
         .unwrap_or(target);
-    let http_chunks = [
-        "GET / HTTP/1.1\r\n".to_string(),
-        format!("Host: {}\r\n", host),
-        "User-Agent: SwiftTunnel-Testbench/1.0\r\n".to_string(),
-        "Connection: close\r\n".to_string(),
-        "\r\n".to_string(),
-    ];
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nUser-Agent: SwiftTunnel-Testbench/1.0\r\nConnection: close\r\n\r\n",
+        host
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("TCP HTTP request write to '{}' failed: {}", target, e))?;
 
-    for idx in 0..count {
-        let payload: std::borrow::Cow<'_, str> = if addr.port() == 80 && idx < http_chunks.len() {
-            std::borrow::Cow::Borrowed(http_chunks[idx].as_str())
-        } else {
-            std::borrow::Cow::Owned(format!("SwiftTunnel TCP probe {}\r\n", idx))
-        };
-        if let Err(err) = stream.write_all(payload.as_bytes()) {
-            log::warn!("TCP probe write stopped after {} packet(s): {}", idx, err);
-            break;
+    let mut response = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset && !response.is_empty() => {
+                println!(
+                    "TCP probe peer reset after response bytes; accepting completed response: target={} response_bytes={}",
+                    target,
+                    response.len()
+                );
+                break;
+            }
+            Err(e) => return Err(format!("TCP response read from '{}' failed: {}", target, e)),
         }
-        std::thread::sleep(Duration::from_millis(100));
+    }
+    if response.is_empty() {
+        return Err(format!(
+            "TCP probe to '{}' returned an empty response",
+            target
+        ));
     }
 
-    std::thread::sleep(Duration::from_millis(500));
+    println!(
+        "TCP probe response summary: target={} response_bytes={}",
+        target,
+        response.len()
+    );
 
     Ok(())
 }

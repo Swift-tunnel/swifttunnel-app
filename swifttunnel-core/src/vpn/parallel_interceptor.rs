@@ -5596,6 +5596,97 @@ fn bounded_ip_helper_entries(
     (advertised_entries as usize).min(max_entries)
 }
 
+#[cfg(target_os = "windows")]
+fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
+    use windows::Win32::NetworkManagement::IpHelper::*;
+
+    unsafe {
+        let mut size: u32 = 0;
+        let _ = GetExtendedTcpTable(
+            None,
+            &mut size,
+            false,
+            2,
+            TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+            0,
+        );
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        if GetExtendedTcpTable(
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut size,
+            false,
+            2,
+            TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+            0,
+        ) != 0
+        {
+            return None;
+        }
+
+        let header_size = std::mem::size_of::<u32>();
+        if buffer.len() < header_size {
+            return None;
+        }
+
+        let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
+        let entry_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+        let safe_entries = bounded_ip_helper_entries(buffer.len(), num_entries, entry_size);
+        let entry_base = buffer.as_ptr().add(header_size);
+
+        for i in 0..safe_entries {
+            let entry = std::ptr::read_unaligned(
+                entry_base.add(i * entry_size) as *const MIB_TCPROW_OWNER_PID
+            );
+            let entry_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
+            let entry_port = u16::from_be(entry.dwLocalPort as u16);
+            if entry_ip == local_ip && entry_port == local_port {
+                return Some(entry.dwOwningPid);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn lookup_tcp_owner_pid(_local_ip: Ipv4Addr, _local_port: u16) -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn lookup_process_name_by_pid(pid: u32) -> Option<String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        if handle.is_invalid() {
+            return None;
+        }
+
+        let mut buffer = [0u16; 512];
+        let len = K32GetProcessImageFileNameW(handle, &mut buffer);
+        let _ = CloseHandle(handle);
+
+        if len == 0 {
+            return None;
+        }
+
+        let path = String::from_utf16_lossy(&buffer[..len as usize]);
+        path.rsplit('\\').next().map(|name| name.to_string())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn lookup_process_name_by_pid(_pid: u32) -> Option<String> {
+    None
+}
+
 /// Cache refresher thread - single writer
 ///
 /// OPTIMIZATION: Event-driven refresh instead of polling
@@ -6297,6 +6388,34 @@ fn auto_routing_packet_action(
 type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), bool>;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
+fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool {
+    let name_lower = name.to_lowercase();
+    snapshot.tunnel_apps.contains(&name_lower)
+        || process_name_matches_any_tunnel_app(&name_lower, &snapshot.tunnel_apps)
+}
+
+fn tcp_owner_matches_tunnel_scope<P>(
+    pid: u32,
+    snapshot: &ProcessSnapshot,
+    process_name_lookup: &P,
+) -> bool
+where
+    P: Fn(u32) -> Option<String>,
+{
+    if snapshot.is_tunnel_pid_public(pid) {
+        return true;
+    }
+
+    if let Some(name) = snapshot.pid_names.get(&pid) {
+        return process_name_in_tunnel_scope(name, snapshot);
+    }
+
+    process_name_lookup(pid)
+        .as_deref()
+        .map(|name| process_name_in_tunnel_scope(name, snapshot))
+        .unwrap_or(false)
+}
+
 /// Debug counters for inline cache diagnostics
 struct InlineCacheStats {
     snapshot_hits: u64,
@@ -6318,6 +6437,47 @@ fn should_route_to_vpn_with_inline_cache(
     inline_cache: &mut InlineCache,
     api_tunneling: bool,
 ) -> bool {
+    should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+        data,
+        snapshot,
+        inline_cache,
+        api_tunneling,
+        lookup_tcp_owner_pid,
+    )
+}
+
+fn should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup<F>(
+    data: &[u8],
+    snapshot: &ProcessSnapshot,
+    inline_cache: &mut InlineCache,
+    api_tunneling: bool,
+    tcp_owner_lookup: F,
+) -> bool
+where
+    F: Fn(Ipv4Addr, u16) -> Option<u32>,
+{
+    should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+        data,
+        snapshot,
+        inline_cache,
+        api_tunneling,
+        tcp_owner_lookup,
+        lookup_process_name_by_pid,
+    )
+}
+
+fn should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup<F, P>(
+    data: &[u8],
+    snapshot: &ProcessSnapshot,
+    inline_cache: &mut InlineCache,
+    api_tunneling: bool,
+    tcp_owner_lookup: F,
+    process_name_lookup: P,
+) -> bool
+where
+    F: Fn(Ipv4Addr, u16) -> Option<u32>,
+    P: Fn(u32) -> Option<String>,
+{
     // Thread-local counters for debugging
     thread_local! {
         static TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -6408,6 +6568,13 @@ fn should_route_to_vpn_with_inline_cache(
 
     let src_port = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
     let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
+    let tcp_flags = if protocol == Protocol::Tcp && data.len() > transport_start + 13 {
+        Some(data[transport_start + 13])
+    } else {
+        None
+    };
+    let is_tcp_initial_syn =
+        tcp_flags.is_some_and(|flags| (flags & 0x02) != 0 && (flags & 0x10) == 0);
 
     // Phase 1: Check snapshot cache (fast path, O(1))
     //
@@ -6488,11 +6655,26 @@ fn should_route_to_vpn_with_inline_cache(
         // tunnel process is already known. This catches first SYNs for Roblox
         // API/teleport flows before the owner table publishes the source port,
         // without enabling broad browser-only Roblox traffic tunneling.
-        let can_speculate_tcp_api =
-            protocol == Protocol::Tcp && api_tunneling && !snapshot.tunnel_pids.is_empty();
+        let has_tunnel_scope = !snapshot.tunnel_pids.is_empty() || !snapshot.tunnel_apps.is_empty();
+        let can_speculate_tcp_api = protocol == Protocol::Tcp && api_tunneling && has_tunnel_scope;
+        let is_tcp_api_bootstrap_syn =
+            can_speculate_tcp_api && is_tcp_initial_syn && matches!(dst_port, 80 | 443);
+        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn {
+            tcp_owner_lookup(src_ip, src_port)
+        } else {
+            None
+        };
+        let tcp_api_bootstrap_owned_by_tunnel = tcp_api_bootstrap_owner
+            .map(|pid| tcp_owner_matches_tunnel_scope(pid, snapshot, &process_name_lookup))
+            .unwrap_or(false);
+        let tcp_api_bootstrap_known_unrelated = tcp_api_bootstrap_owner
+            .map(|pid| !tcp_owner_matches_tunnel_scope(pid, snapshot, &process_name_lookup))
+            .unwrap_or(false);
+        let tcp_api_bootstrap_allowed =
+            is_tcp_api_bootstrap_syn && !tcp_api_bootstrap_known_unrelated;
         let is_game_dst = (protocol == Protocol::Udp || can_speculate_tcp_api)
             && super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
-        if is_game_dst {
+        if is_game_dst || tcp_api_bootstrap_allowed {
             // Log speculative tunneling for debugging (first 20 times only)
             thread_local! {
                 static SPECULATIVE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -6507,11 +6689,14 @@ fn should_route_to_vpn_with_inline_cache(
                 });
                 if spec_count < 20 {
                     log::info!(
-                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (Roblox process active, source port not sampled yet)",
+                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (Roblox destination or API bootstrap, initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={})",
                         src_ip,
                         src_port,
                         dst_ip,
-                        dst_port
+                        dst_port,
+                        is_tcp_initial_syn,
+                        tcp_api_bootstrap_owner,
+                        tcp_api_bootstrap_owned_by_tunnel
                     );
                 }
             } else {
@@ -6536,9 +6721,12 @@ fn should_route_to_vpn_with_inline_cache(
             // inline_connection_lookup is disabled (stability fix v1.0.8).
             // Without this, every V3 packet re-does the speculative IP range check.
             //
-            // TCP speculative hits are not cached by source port only because a
-            // later unrelated TCP connection could reuse that local port.
-            if protocol == Protocol::Udp && inline_cache.len() < 10000 {
+            // TCP API bootstrap SYNs must seed the inline cache too; otherwise
+            // the SYN is tunneled but the following ACK/request can bypass
+            // before the Windows owner table publishes the source port.
+            if (protocol == Protocol::Udp || protocol == Protocol::Tcp)
+                && inline_cache.len() < 10000
+            {
                 inline_cache.insert(cache_key, true);
             }
 
@@ -7017,7 +7205,7 @@ fn ipv4_is_fragment(packet: &[u8]) -> bool {
 }
 
 /// Clamp outbound TCP SYN MSS so tunneled TCP does not create inner packets
-/// larger than the UDP relay can encapsulate without fragmentation.
+/// larger than the relay TUN path can forward without fragmentation.
 fn clamp_tcp_mss_for_relay(packet: &mut [u8], max_inner_packet_len: usize) -> bool {
     const TCP_FLAG_SYN: u8 = 0x02;
     const TCP_OPTION_EOL: u8 = 0;
@@ -7025,6 +7213,11 @@ fn clamp_tcp_mss_for_relay(packet: &mut [u8], max_inner_packet_len: usize) -> bo
     const TCP_OPTION_MSS: u8 = 2;
     const TCP_OPTION_MSS_LEN: usize = 4;
     const MAX_IPV4_TCP_HEADER_WITH_OPTIONS: usize = 60;
+    // Relay TCP/API forwarding exits through swifttun0, whose MTU is 1400.
+    // Cap the advertised MSS to the TUN MTU minus a worst-case IPv4+TCP header
+    // so large HTTP asset responses do not depend on PMTU discovery or
+    // fragmentation to make it back through the UDP relay.
+    const RELAY_TUN_SAFE_TCP_MSS: usize = 1340;
 
     if packet.len() < 20 || (packet[0] >> 4) != 4 {
         return false;
@@ -7051,7 +7244,9 @@ fn clamp_tcp_mss_for_relay(packet: &mut [u8], max_inner_packet_len: usize) -> bo
         return false;
     }
 
-    let max_mss = max_inner_packet_len.saturating_sub(MAX_IPV4_TCP_HEADER_WITH_OPTIONS);
+    let max_mss = max_inner_packet_len
+        .saturating_sub(MAX_IPV4_TCP_HEADER_WITH_OPTIONS)
+        .min(RELAY_TUN_SAFE_TCP_MSS);
     if max_mss == 0 || max_mss > u16::MAX as usize {
         return false;
     }
@@ -7487,6 +7682,31 @@ mod tests {
         let transport_start = ip_start + 20;
         frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
         frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+
+        frame
+    }
+
+    fn build_ipv4_tcp_frame_with_flags(
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        flags: u8,
+    ) -> Vec<u8> {
+        let mut frame = vec![0u8; 14 + 20 + 20];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+
+        let ip_start = 14;
+        frame[ip_start] = 0x45;
+        frame[ip_start + 9] = 6;
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&src_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+
+        let transport_start = ip_start + 20;
+        frame[transport_start..transport_start + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+        frame[transport_start + 12] = 0x50;
+        frame[transport_start + 13] = flags;
 
         frame
     }
@@ -9024,7 +9244,59 @@ mod tests {
         assert!(clamp_tcp_mss_for_relay(&mut packet, 1464));
         assert_eq!(
             u16::from_be_bytes([packet[tcp + 22], packet[tcp + 23]]),
-            1404
+            1340
+        );
+    }
+
+    #[test]
+    fn test_clamp_tcp_mss_for_relay_keeps_safe_syn_mss() {
+        let mut packet = vec![0u8; 44];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(44u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&Ipv4Addr::new(192, 168, 1, 10).octets());
+        packet[16..20].copy_from_slice(&Ipv4Addr::new(128, 116, 50, 100).octets());
+
+        let tcp = 20;
+        packet[tcp..tcp + 2].copy_from_slice(&53000u16.to_be_bytes());
+        packet[tcp + 2..tcp + 4].copy_from_slice(&443u16.to_be_bytes());
+        packet[tcp + 12] = 6u8 << 4;
+        packet[tcp + 13] = 0x02; // SYN
+        packet[tcp + 20] = 2;
+        packet[tcp + 21] = 4;
+        packet[tcp + 22..tcp + 24].copy_from_slice(&1200u16.to_be_bytes());
+
+        assert!(!clamp_tcp_mss_for_relay(&mut packet, 1464));
+        assert_eq!(
+            u16::from_be_bytes([packet[tcp + 22], packet[tcp + 23]]),
+            1200
+        );
+    }
+
+    #[test]
+    fn test_clamp_tcp_mss_for_relay_ignores_non_syn_tcp() {
+        let mut packet = vec![0u8; 44];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(44u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&Ipv4Addr::new(192, 168, 1, 10).octets());
+        packet[16..20].copy_from_slice(&Ipv4Addr::new(128, 116, 50, 100).octets());
+
+        let tcp = 20;
+        packet[tcp..tcp + 2].copy_from_slice(&53000u16.to_be_bytes());
+        packet[tcp + 2..tcp + 4].copy_from_slice(&443u16.to_be_bytes());
+        packet[tcp + 12] = 6u8 << 4;
+        packet[tcp + 13] = 0x10; // ACK, not SYN
+        packet[tcp + 20] = 2;
+        packet[tcp + 21] = 4;
+        packet[tcp + 22..tcp + 24].copy_from_slice(&1460u16.to_be_bytes());
+
+        assert!(!clamp_tcp_mss_for_relay(&mut packet, 1464));
+        assert_eq!(
+            u16::from_be_bytes([packet[tcp + 22], packet[tcp + 23]]),
+            1460
         );
     }
 
@@ -9256,9 +9528,8 @@ mod tests {
             AutoRoutingPacketAction::Hold
         );
         assert!(router.is_lookup_pending(dst_ip));
-        let (queued_ip, generation) = rx.try_recv().expect("lookup should be queued");
+        let queued_ip = rx.try_recv().expect("lookup should be queued");
         assert_eq!(queued_ip, dst_ip);
-        assert_eq!(generation, 1);
     }
 
     #[test]
@@ -9990,13 +10261,332 @@ mod tests {
         let frame = build_ipv4_frame(6, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
 
-        assert!(should_route_to_vpn_with_inline_cache(
+        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |ip, port| {
+                if ip == src_ip && port == src_port {
+                    Some(tunnel_pid)
+                } else {
+                    None
+                }
+            },
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_bootstrap_asset_syn_for_unrelated_owner() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
+        let src_port = 40005;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+        let unrelated_pid = 5678;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |ip, port| {
+                if ip == src_ip && port == src_port {
+                    Some(unrelated_pid)
+                } else {
+                    None
+                }
+            },
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_tunnel_process_is_active() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
+        let src_port = 40002;
+        let dst_port = 80;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |ip, port| {
+                if ip == src_ip && port == src_port {
+                    Some(tunnel_pid)
+                } else {
+                    None
+                }
+            },
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_owner_not_published_yet() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
+        let src_port = 40006;
+        let dst_port = 80;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |_ip, _port| None,
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_app_scope_exists_without_pid() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
+        let src_port = 40007;
+        let dst_port = 80;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["ip_checker.exe".to_string()].into_iter().collect(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |_ip, _port| None,
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_owner_pid_name_matches_app_scope() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
+        let src_port = 40008;
+        let dst_port = 80;
+        let tunnel_pid = 8580;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["ip_checker.exe".to_string()].into_iter().collect(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(tunnel_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == tunnel_pid {
+                        Some("ip_checker.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_bootstrap_asset_syn_when_owner_pid_name_is_unrelated() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
+        let src_port = 40009;
+        let dst_port = 80;
+        let unrelated_pid = 9001;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["ip_checker.exe".to_string()].into_iter().collect(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(unrelated_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == unrelated_pid {
+                        Some("chrome.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_bootstrap_non_syn_asset_packet() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
+        let src_port = 40003;
+        let dst_port = 80;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x10);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_bootstrap_non_asset_port() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
+        let src_port = 40004;
+        let dst_port = 25;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(inline_cache.is_empty());
     }
 
     #[test]
