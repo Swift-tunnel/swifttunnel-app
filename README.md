@@ -168,7 +168,7 @@ Notes:
 - The desktop connect flow bounds split tunnel preflight and backend VPN connect waits, so a hung connect attempt surfaces a retryable error instead of leaving the UI indefinitely in a connecting state.
 - `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
 - `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
-- The release workflow generates release notes before publishing, uses them as the GitHub Release body, and includes the same changelog plus the release URL in the Discord announcement.
+- The release workflow generates release notes before publishing, uses them as the GitHub Release body, and includes the same changelog plus a separate release URL field in the Discord announcement.
 - If `DISCORD_RELEASE_WEBHOOK_URL` is configured, the release workflow posts a Discord embed and pings the configured release role.
 - The manual `Announce Release` workflow can resend the Discord announcement for an existing tag without rebuilding or republishing the app.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
