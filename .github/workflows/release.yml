@@ -213,21 +213,29 @@ jobs:
             Where-Object { $_ -match '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?(?:\+[0-9A-Za-z\.-]+)?$' -and $_ -ne $env:TAG } |
             Select-Object -First 1
 
-          $payloadPath = Join-Path $env:RUNNER_TEMP "release-notes-payload.json"
-          $payload = [ordered]@{
-            tag_name = $env:TAG
-            target_commitish = (git rev-parse HEAD).Trim()
+          $body = ""
+          $manualNotesPath = Join-Path "release-notes" "$($env:TAG).md"
+          if (Test-Path $manualNotesPath) {
+            $body = (Get-Content -Raw -Path $manualNotesPath).Trim()
           }
-          if (-not [string]::IsNullOrWhiteSpace($previousTag)) {
-            $payload.previous_tag_name = $previousTag
-          }
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::WriteAllText($payloadPath, ($payload | ConvertTo-Json -Depth 8), $utf8NoBom)
 
-          $notesJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" --method POST --input $payloadPath
-          if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($notesJson)) {
-            $notes = $notesJson | ConvertFrom-Json
-            $body = $notes.body.Trim()
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            $payloadPath = Join-Path $env:RUNNER_TEMP "release-notes-payload.json"
+            $payload = [ordered]@{
+              tag_name = $env:TAG
+              target_commitish = (git rev-parse HEAD).Trim()
+            }
+            if (-not [string]::IsNullOrWhiteSpace($previousTag)) {
+              $payload.previous_tag_name = $previousTag
+            }
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($payloadPath, ($payload | ConvertTo-Json -Depth 8), $utf8NoBom)
+
+            $notesJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" --method POST --input $payloadPath
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($notesJson)) {
+              $notes = $notesJson | ConvertFrom-Json
+              $body = $notes.body.Trim()
+            }
           }
 
           if ([string]::IsNullOrWhiteSpace($body)) {
@@ -575,7 +583,7 @@ jobs:
             $description = $release.body.Trim()
           }
           $description = (($description -split "`r?`n") |
-            Where-Object { $_ -notmatch '^\s*(\*\*)?Download(\*\*)?\s*:' }) -join "`n"
+            Where-Object { $_ -notmatch '^\s*(\*\*)?(Download|Release)(\*\*)?\s*:' }) -join "`n"
           $description = $description.Trim()
           if ([string]::IsNullOrWhiteSpace($description)) {
             $description = "See the release page for downloads and details."

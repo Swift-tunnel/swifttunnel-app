@@ -40,7 +40,7 @@ jobs:
           if [ -z "${description}" ]; then
             description="See the release page for downloads and details."
           fi
-          description="$(printf '%s\n' "${description}" | sed -E '/^[[:space:]]*(\\*\\*)?Download(\\*\\*)?[[:space:]]*:/Id' | sed -E ':a; /^[[:space:]]*$/ { $d; N; ba; }')"
+          description="$(printf '%s\n' "${description}" | sed -E '/^[[:space:]]*(\\*\\*)?(Download|Release)(\\*\\*)?[[:space:]]*:/Id' | sed -E ':a; /^[[:space:]]*$/ { $d; N; ba; }')"
           if [ -z "${description}" ]; then
             description="See the release page for details."
           fi

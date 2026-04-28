@@ -265,20 +265,6 @@ pub struct SplitTunnelDriver {
 unsafe impl Send for SplitTunnelDriver {}
 unsafe impl Sync for SplitTunnelDriver {}
 
-impl Drop for SplitTunnelDriver {
-    fn drop(&mut self) {
-        if let Some(mut interceptor) = self.parallel_interceptor.take() {
-            log::warn!(
-                "Split tunnel driver dropped while still open; stopping interceptor to restore adapter state"
-            );
-            interceptor.stop();
-        }
-        self.config = None;
-        self.state = DriverState::NotAvailable;
-        self.stop_flag.store(true, Ordering::SeqCst);
-    }
-}
-
 impl SplitTunnelDriver {
     pub fn new() -> Self {
         log::info!("Split tunnel: Using parallel mode (per-CPU workers, <0.1ms latency)");
