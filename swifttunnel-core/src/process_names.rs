@@ -2,7 +2,6 @@ pub const ROBLOX_PROCESS_NAMES: &[&str] = &[
     "robloxplayerbeta.exe",
     "robloxplayer.exe",
     "robloxapp.exe",
-    "windows10universal.exe",
     "robloxplayerlauncher.exe",
     "robloxstudiobeta.exe",
     "robloxstudio.exe",
@@ -67,12 +66,15 @@ mod tests {
             "RobloxPlayerBeta.exe",
             "robloxplayer.exe",
             "C:\\Program Files\\Roblox\\RobloxApp.exe",
-            "Windows10Universal.exe",
             "robloxstudiolauncherbeta.exe",
         ] {
             assert!(is_roblox_process_name(name), "expected {name} to match");
         }
 
+        // Windows10Universal.exe is the generic UWP app host — Photos, Calculator, every
+        // Microsoft Store app runs under that name. Microsoft Store Roblox actually runs
+        // as RobloxPlayerBeta.exe, so the host name is never the right tunnel signal.
+        assert!(!is_roblox_process_name("Windows10Universal.exe"));
         assert!(!is_roblox_process_name("chrome.exe"));
         assert!(!is_roblox_process_name("robloxhelper.exe"));
     }

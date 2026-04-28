@@ -7614,6 +7614,7 @@ fn run_v3_inbound_receiver(
                 ) {
                     Some(true) => {
                         packets_injected += 1;
+                        relay.record_inject_outcome(true);
                         if packets_injected <= 10 || packets_injected % 1000 == 0 {
                             log::info!(
                                 "V3 inbound: injected packet #{} ({} bytes)",
@@ -7624,10 +7625,16 @@ fn run_v3_inbound_receiver(
                     }
                     Some(false) => {
                         inject_errors += 1;
-                        if inject_errors <= 10 {
+                        relay.record_inject_outcome(false);
+                        let streak = relay.inject_error_streak();
+                        // First 10 errors at error level, then sample every 50th so a long
+                        // failure run stays visible without spamming the log.
+                        if inject_errors <= 10 || inject_errors % 50 == 0 {
                             log::error!(
-                                "V3 inbound: FAILED to inject packet #{}",
-                                packets_received
+                                "V3 inbound: FAILED to inject packet #{} (streak={}, total_errors={})",
+                                packets_received,
+                                streak,
+                                inject_errors
                             );
                         }
                     }

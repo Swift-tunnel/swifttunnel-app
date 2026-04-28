@@ -105,6 +105,14 @@ const RELAY_SWITCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const RELAY_STALE_THRESHOLD: Duration = Duration::from_secs(30);
 /// After this many unanswered keepalives (~60s at 15s interval), declare relay dead.
 const RELAY_DEAD_KEEPALIVE_THRESHOLD: u32 = 4;
+/// Consecutive inbound packets that fail to inject before declaring the relay stale.
+/// Catches relays whose UDP control plane (keepalive ACK / pong) still responds while
+/// every reconstructed data packet is unusable — `last_receive_time` would otherwise
+/// keep getting refreshed by pongs and hide the data-plane failure indefinitely.
+const INJECT_STALE_STREAK: u32 = 8;
+/// Consecutive inject failures that escalate to Dead and force the connection to tear
+/// down so the user can pick a different relay.
+const INJECT_DEAD_STREAK: u32 = 24;
 
 /// Relay health states visible to the connection manager and UI.
 ///
@@ -398,6 +406,9 @@ pub struct UdpRelay {
     relay_health: Arc<AtomicU8>,
     /// Consecutive keepalives sent without receiving any inbound traffic.
     unanswered_keepalives: AtomicU32,
+    /// Consecutive inbound packets that failed to inject into the local stack since the
+    /// last successful inject. Used to detect data-plane failure that pongs would otherwise mask.
+    inject_error_streak: AtomicU32,
     /// Sequence number for explicit keepalive PING frames.
     keepalive_ping_seq: AtomicU32,
     /// Last time the current relay provided liveness evidence.
@@ -707,6 +718,7 @@ impl UdpRelay {
             ping,
             relay_health: Arc::new(AtomicU8::new(RelayHealthState::NoTrafficYet as u8)),
             unanswered_keepalives: AtomicU32::new(0),
+            inject_error_streak: AtomicU32::new(0),
             keepalive_ping_seq: AtomicU32::new(0),
             last_receive_time: parking_lot::Mutex::new(None),
             first_outbound_time: parking_lot::Mutex::new(None),
@@ -762,6 +774,25 @@ impl UdpRelay {
             .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
         self.unanswered_keepalives.store(0, Ordering::Relaxed);
         *self.last_receive_time.lock() = Some(now);
+    }
+
+    /// Record the outcome of an inject attempt by the inbound receiver.
+    ///
+    /// A successful inject resets the streak; a failure increments it. The streak feeds
+    /// into `check_health()` so a relay that responds to pongs but produces unusable data
+    /// packets (e.g. malformed reconstructed IP frames) is detected, instead of looking
+    /// healthy forever because pongs alone refresh `last_receive_time`.
+    pub fn record_inject_outcome(&self, success: bool) {
+        if success {
+            self.inject_error_streak.store(0, Ordering::Relaxed);
+        } else {
+            self.inject_error_streak.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Current consecutive inject-failure streak (for tests + diagnostic logs).
+    pub fn inject_error_streak(&self) -> u32 {
+        self.inject_error_streak.load(Ordering::Relaxed)
     }
 
     fn rollback_unanswered_keepalive(&self) {
@@ -1451,6 +1482,38 @@ impl UdpRelay {
                 );
             }
         }
+
+        // Data-plane failure check: pongs may keep refreshing `last_receive_time`, so the
+        // checks above can stay Healthy even when every reconstructed data packet is being
+        // rejected by the local inject path. The streak is the only signal that catches this.
+        let streak = self.inject_error_streak.load(Ordering::Relaxed);
+        let current_after = self.relay_health();
+        if streak >= INJECT_DEAD_STREAK {
+            if current_after != RelayHealthState::Dead {
+                self.relay_health
+                    .store(RelayHealthState::Dead as u8, Ordering::Relaxed);
+                log::error!(
+                    "UDP Relay: Health -> DEAD (inject failure streak {} >= {}, session {:016x})",
+                    streak,
+                    INJECT_DEAD_STREAK,
+                    self.session_id_u64()
+                );
+            }
+        } else if streak >= INJECT_STALE_STREAK
+            && matches!(
+                current_after,
+                RelayHealthState::Healthy | RelayHealthState::NoTrafficYet
+            )
+        {
+            self.relay_health
+                .store(RelayHealthState::Stale as u8, Ordering::Relaxed);
+            log::warn!(
+                "UDP Relay: Health -> STALE (inject failure streak {} >= {}, session {:016x})",
+                streak,
+                INJECT_STALE_STREAK,
+                self.session_id_u64()
+            );
+        }
     }
 
     /// Get statistics
@@ -1509,6 +1572,7 @@ impl UdpRelay {
         self.relay_health
             .store(RelayHealthState::NoTrafficYet as u8, Ordering::Relaxed);
         self.unanswered_keepalives.store(0, Ordering::Relaxed);
+        self.inject_error_streak.store(0, Ordering::Relaxed);
         *self.last_receive_time.lock() = None;
         *self.first_outbound_time.lock() = None;
         log::info!(
@@ -2007,6 +2071,82 @@ mod tests {
         relay.check_health();
 
         assert_eq!(relay.relay_health(), RelayHealthState::Dead);
+    }
+
+    #[test]
+    fn test_inject_failure_streak_flips_health_to_stale_even_when_pongs_refresh_liveness() {
+        // Reproduces the tokyo-02 scenario: pongs keep `last_receive_time` fresh and
+        // `unanswered_keepalives` at zero, so the keepalive-based health checks would
+        // call this Healthy. The inject streak must override that.
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        relay
+            .relay_health
+            .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
+        *relay.last_receive_time.lock() = Some(Instant::now());
+
+        for _ in 0..INJECT_STALE_STREAK {
+            relay.record_inject_outcome(false);
+        }
+
+        relay.check_health();
+        assert_eq!(relay.relay_health(), RelayHealthState::Stale);
+        assert_eq!(relay.inject_error_streak(), INJECT_STALE_STREAK);
+    }
+
+    #[test]
+    fn test_inject_failure_streak_escalates_to_dead() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        relay
+            .relay_health
+            .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
+        *relay.last_receive_time.lock() = Some(Instant::now());
+
+        for _ in 0..INJECT_DEAD_STREAK {
+            relay.record_inject_outcome(false);
+        }
+
+        relay.check_health();
+        assert_eq!(relay.relay_health(), RelayHealthState::Dead);
+    }
+
+    #[test]
+    fn test_inject_success_resets_streak_and_does_not_flip_health() {
+        // Negative test: a relay producing some bad packets but mostly good ones must NOT
+        // be flagged as Stale. Only sustained, no-recovery failure triggers the override.
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        relay
+            .relay_health
+            .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
+        *relay.last_receive_time.lock() = Some(Instant::now());
+
+        // Get within one of the threshold, then succeed — streak resets.
+        for _ in 0..(INJECT_STALE_STREAK - 1) {
+            relay.record_inject_outcome(false);
+        }
+        relay.record_inject_outcome(true);
+
+        // Even with another batch of failures right after, the streak only restarts here.
+        for _ in 0..(INJECT_STALE_STREAK - 1) {
+            relay.record_inject_outcome(false);
+        }
+
+        relay.check_health();
+        assert_eq!(relay.relay_health(), RelayHealthState::Healthy);
+        assert_eq!(relay.inject_error_streak(), INJECT_STALE_STREAK - 1);
+    }
+
+    #[test]
+    fn test_inject_streak_resets_on_relay_switch() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        for _ in 0..(INJECT_STALE_STREAK + 2) {
+            relay.record_inject_outcome(false);
+        }
+        assert!(relay.inject_error_streak() >= INJECT_STALE_STREAK);
+
+        relay.switch_relay("127.0.0.1:51822".parse().unwrap());
+
+        assert_eq!(relay.inject_error_streak(), 0);
+        assert_eq!(relay.relay_health(), RelayHealthState::NoTrafficYet);
     }
 
     #[test]

@@ -96,6 +96,14 @@ impl ProcessWatcher {
     pub fn start(watch_list: HashSet<String>) -> Result<Self, String> {
         let (sender, receiver) = bounded(100);
         let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Seed the watcher with any matching processes that are ALREADY running before
+        // SwiftTunnel connected. ETW only fires on process *start* events, so a game
+        // launched before the tunnel — the most common "connected but no game traffic
+        // flows" cause — would otherwise never get registered. Run synchronously so the
+        // synthetic events are queued before we return to the caller.
+        enumerate_running_matching_processes(&sender, &watch_list);
+
         let stop_flag_clone = stop_flag.clone();
         let watch_list = Arc::new(RwLock::new(watch_list));
         let watch_list_clone = watch_list.clone();
@@ -505,6 +513,92 @@ unsafe fn parse_process_start_event(record: &EVENT_RECORD) -> Option<ProcessStar
         image_path,
         parent_pid,
     })
+}
+
+/// One-shot scan of currently running processes at watcher startup. Emits synthetic
+/// `ProcessStartEvent`s for any matching the watch list so games already running before
+/// SwiftTunnel connected get registered for tunneling. Without this, a player who alt-tabs
+/// into Roblox first and then opens the app sees "connected" but their packets bypass
+/// the tunnel silently — ETW alone only catches future process starts.
+///
+/// Returns the number of synthetic events emitted (informational, not load-bearing).
+fn enumerate_running_matching_processes(
+    sender: &Sender<ProcessStartEvent>,
+    watch_list: &HashSet<String>,
+) -> usize {
+    use windows::Win32::System::ProcessStatus::EnumProcesses;
+
+    if watch_list.is_empty() {
+        return 0;
+    }
+
+    // Sized for typical Windows sessions; over-provision rather than retry.
+    let mut pids = vec![0u32; 4096];
+    let mut bytes_returned = 0u32;
+    let enum_ok = unsafe {
+        EnumProcesses(
+            pids.as_mut_ptr(),
+            (pids.len() * std::mem::size_of::<u32>()) as u32,
+            &mut bytes_returned,
+        )
+        .is_ok()
+    };
+    if !enum_ok {
+        log::warn!("ETW initial scan: EnumProcesses failed; relying on ETW start events only");
+        return 0;
+    }
+
+    let pid_count = bytes_returned as usize / std::mem::size_of::<u32>();
+    let mut emitted = 0usize;
+
+    for &pid in &pids[..pid_count] {
+        if pid == 0 {
+            continue;
+        }
+        let Some(image_path) = get_process_image_path_by_pid(pid) else {
+            continue;
+        };
+        let short_name = image_path.rsplit('\\').next().unwrap_or("").to_string();
+        if short_name.is_empty() {
+            continue;
+        }
+        let name_lower = short_name.to_ascii_lowercase();
+        if !should_watch_process(&name_lower, watch_list) {
+            continue;
+        }
+
+        let event = ProcessStartEvent {
+            pid,
+            name: short_name.clone(),
+            image_path,
+            // Parent PID is unavailable from EnumProcesses without a Toolhelp32 snapshot,
+            // and downstream tunneling decisions key off the PID itself, not the parent.
+            parent_pid: 0,
+        };
+        log::info!(
+            "ETW initial scan: registered already-running {} (PID {}) for tunneling",
+            short_name,
+            pid
+        );
+        if sender.try_send(event).is_err() {
+            // The bounded(100) channel is the same one ETW uses; if it's already full at
+            // startup something is very wrong upstream. Stop scanning rather than spin.
+            log::warn!(
+                "ETW initial scan: event channel full at {} entries; halting scan",
+                emitted
+            );
+            return emitted;
+        }
+        emitted += 1;
+    }
+
+    if emitted > 0 {
+        log::info!(
+            "ETW initial scan: seeded {} already-running matching process(es)",
+            emitted
+        );
+    }
+    emitted
 }
 
 /// Get the full NT image path for a PID using Windows API.
