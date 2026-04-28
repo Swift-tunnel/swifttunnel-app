@@ -512,6 +512,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          DISCORD_RELEASE_ROLE_ID: "1449321655561359472"
           TAG: ${{ steps.meta.outputs.tag }}
           VERSION: ${{ steps.meta.outputs.version }}
           CHANNEL_CLASS: ${{ steps.meta.outputs.channel_class }}
@@ -537,12 +538,14 @@ jobs:
 
           $channelLabel = if ($env:CHANNEL_CLASS -eq "live") { "Live" } else { "Stable" }
           $color = if ($env:CHANNEL_CLASS -eq "live") { 16753920 } else { 5793266 }
+          $roleMention = "<@&$env:DISCORD_RELEASE_ROLE_ID>"
 
           $payload = @{
             username = "SwiftTunnel Releases"
-            content = "SwiftTunnel $($release.tagName) is live."
+            content = "$roleMention SwiftTunnel $($release.tagName) is live."
             allowed_mentions = @{
               parse = @()
+              roles = @($env:DISCORD_RELEASE_ROLE_ID)
             }
             embeds = @(
               @{
