@@ -398,7 +398,9 @@ pub struct UdpRelay {
     relay_health: Arc<AtomicU8>,
     /// Consecutive keepalives sent without receiving any inbound traffic.
     unanswered_keepalives: AtomicU32,
-    /// Last time an inbound data packet was received (not control frames).
+    /// Sequence number for explicit keepalive PING frames.
+    keepalive_ping_seq: AtomicU32,
+    /// Last time the current relay provided liveness evidence.
     last_receive_time: parking_lot::Mutex<Option<Instant>>,
     /// First outbound activity since creation or relay switch.
     first_outbound_time: parking_lot::Mutex<Option<Instant>>,
@@ -705,6 +707,7 @@ impl UdpRelay {
             ping,
             relay_health: Arc::new(AtomicU8::new(RelayHealthState::NoTrafficYet as u8)),
             unanswered_keepalives: AtomicU32::new(0),
+            keepalive_ping_seq: AtomicU32::new(0),
             last_receive_time: parking_lot::Mutex::new(None),
             first_outbound_time: parking_lot::Mutex::new(None),
             sender_panicked,
@@ -725,6 +728,48 @@ impl UdpRelay {
         if first.is_none() {
             *first = Some(Instant::now());
         }
+    }
+
+    fn build_ping_frame(&self) -> [u8; PING_FRAME_LEN] {
+        let seq = self
+            .keepalive_ping_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let client_ts_mono_ms = now_mono_ms();
+
+        let mut frame = [0u8; PING_FRAME_LEN];
+        frame[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
+        frame[SESSION_ID_LEN] = PING_FRAME_TYPE;
+        frame[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5].copy_from_slice(&seq.to_be_bytes());
+        frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
+            .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
+        frame
+    }
+
+    fn send_ping_to_current_relay(&self, context: &'static str) -> Result<SocketAddr> {
+        let current_addr = **self.relay_addr.load();
+        let frame = self.build_ping_frame();
+        self.socket
+            .send_to(&frame, current_addr)
+            .with_context(|| format!("Failed to send {context}"))?;
+        Ok(current_addr)
+    }
+
+    fn record_current_relay_liveness(&self, now: Instant) {
+        self.last_activity_ms
+            .store(now_mono_ms(), Ordering::Relaxed);
+        self.relay_health
+            .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
+        self.unanswered_keepalives.store(0, Ordering::Relaxed);
+        *self.last_receive_time.lock() = Some(now);
+    }
+
+    fn rollback_unanswered_keepalive(&self) {
+        let _ =
+            self.unanswered_keepalives
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                });
     }
 
     /// Get the session ID as a u64 for logging
@@ -1131,41 +1176,47 @@ impl UdpRelay {
                             return Ok(None);
                         }
                         PONG_FRAME_TYPE => {
-                            if len == PONG_FRAME_LEN && self.ping.enabled.load(Ordering::Acquire) {
-                                let client_ts_mono_ms = u64::from_be_bytes([
-                                    frame_buffer[SESSION_ID_LEN + 5],
-                                    frame_buffer[SESSION_ID_LEN + 6],
-                                    frame_buffer[SESSION_ID_LEN + 7],
-                                    frame_buffer[SESSION_ID_LEN + 8],
-                                    frame_buffer[SESSION_ID_LEN + 9],
-                                    frame_buffer[SESSION_ID_LEN + 10],
-                                    frame_buffer[SESSION_ID_LEN + 11],
-                                    frame_buffer[SESSION_ID_LEN + 12],
-                                ]);
-                                let now_ms = now_mono_ms();
-                                if now_ms >= client_ts_mono_ms {
-                                    let rtt_ms = (now_ms - client_ts_mono_ms) as u32;
-                                    self.ping.record_rtt_ms(rtt_ms);
+                            let current_addr = **self.relay_addr.load();
+                            if len == PONG_FRAME_LEN && from == current_addr {
+                                self.record_current_relay_liveness(Instant::now());
 
-                                    // Report RTT to the relay that sent this pong, routed
-                                    // through the sender thread to avoid blocking the receive path.
-                                    let rtt_us = rtt_ms.saturating_mul(1000);
-                                    const RTT_REPORT_LEN: usize = SESSION_ID_LEN + 1 + 4; // 13 bytes
-                                    if let Some(buf_idx) = self.outbound_pool.try_acquire() {
-                                        unsafe {
-                                            let pkt = self.outbound_pool.buffer_mut(buf_idx);
-                                            pkt[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
-                                            pkt[SESSION_ID_LEN] = RTT_REPORT_FRAME_TYPE;
-                                            pkt[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5]
-                                                .copy_from_slice(&rtt_us.to_be_bytes());
-                                        }
-                                        let job = OutboundJob {
-                                            addr: from,
-                                            buf_idx,
-                                            len: RTT_REPORT_LEN,
-                                        };
-                                        if self.outbound_tx.try_send(job).is_err() {
-                                            self.outbound_pool.release(buf_idx);
+                                if self.ping.enabled.load(Ordering::Acquire) {
+                                    let client_ts_mono_ms = u64::from_be_bytes([
+                                        frame_buffer[SESSION_ID_LEN + 5],
+                                        frame_buffer[SESSION_ID_LEN + 6],
+                                        frame_buffer[SESSION_ID_LEN + 7],
+                                        frame_buffer[SESSION_ID_LEN + 8],
+                                        frame_buffer[SESSION_ID_LEN + 9],
+                                        frame_buffer[SESSION_ID_LEN + 10],
+                                        frame_buffer[SESSION_ID_LEN + 11],
+                                        frame_buffer[SESSION_ID_LEN + 12],
+                                    ]);
+                                    let now_ms = now_mono_ms();
+                                    if now_ms >= client_ts_mono_ms {
+                                        let rtt_ms = (now_ms - client_ts_mono_ms) as u32;
+                                        self.ping.record_rtt_ms(rtt_ms);
+
+                                        // Report RTT to the relay that sent this pong, routed
+                                        // through the sender thread to avoid blocking the receive path.
+                                        let rtt_us = rtt_ms.saturating_mul(1000);
+                                        const RTT_REPORT_LEN: usize = SESSION_ID_LEN + 1 + 4; // 13 bytes
+                                        if let Some(buf_idx) = self.outbound_pool.try_acquire() {
+                                            unsafe {
+                                                let pkt = self.outbound_pool.buffer_mut(buf_idx);
+                                                pkt[..SESSION_ID_LEN]
+                                                    .copy_from_slice(&self.session_id);
+                                                pkt[SESSION_ID_LEN] = RTT_REPORT_FRAME_TYPE;
+                                                pkt[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5]
+                                                    .copy_from_slice(&rtt_us.to_be_bytes());
+                                            }
+                                            let job = OutboundJob {
+                                                addr: from,
+                                                buf_idx,
+                                                len: RTT_REPORT_LEN,
+                                            };
+                                            if self.outbound_tx.try_send(job).is_err() {
+                                                self.outbound_pool.release(buf_idx);
+                                            }
                                         }
                                     }
                                 }
@@ -1178,15 +1229,8 @@ impl UdpRelay {
 
                 self.packets_received.fetch_add(1, Ordering::Relaxed);
                 let now = Instant::now();
-                self.last_activity_ms
-                    .store(now_mono_ms(), Ordering::Relaxed);
-                // Mark relay as healthy on every successful data packet
-                self.relay_health
-                    .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
-                self.unanswered_keepalives.store(0, Ordering::Relaxed);
-                {
-                    let mut guard = self.last_receive_time.lock();
-                    *guard = Some(now);
+                if from == **self.relay_addr.load() {
+                    self.record_current_relay_liveness(now);
                 }
 
                 Ok(Some(&frame_buffer[SESSION_ID_LEN..len]))
@@ -1217,13 +1261,10 @@ impl UdpRelay {
         Ok(Some(payload.len()))
     }
 
-    /// Send an immediate keepalive (session_id-only packet) to the current relay.
+    /// Send an immediate keepalive PING to the current relay.
     /// Used after auto-routing switch to establish session on the new relay ASAP.
     pub fn send_keepalive_now(&self) -> Result<()> {
-        let current_addr = **self.relay_addr.load();
-        self.socket
-            .send_to(&self.session_id, current_addr)
-            .context("Failed to send immediate keepalive")?;
+        let current_addr = self.send_ping_to_current_relay("immediate keepalive")?;
         self.record_outbound_activity();
         log::info!(
             "UDP Relay: Sent immediate keepalive to {} (session {:016x})",
@@ -1243,20 +1284,24 @@ impl UdpRelay {
     /// path froze every other Tokio task on the worker thread for 100ms.
     pub fn send_keepalive_burst(&self) -> Result<()> {
         let current_addr = **self.relay_addr.load();
+        // Count before sending so a fast PONG cannot be overwritten by a later increment.
+        self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
         for i in 0..3 {
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            match self.socket.send_to(&self.session_id, current_addr) {
+            let frame = self.build_ping_frame();
+            match self.socket.send_to(&frame, current_addr) {
                 Ok(_) => {}
-                Err(e) if i == 0 => return Err(e.into()),
+                Err(e) if i == 0 => {
+                    self.rollback_unanswered_keepalive();
+                    return Err(e.into());
+                }
                 Err(e) => {
                     log::warn!("UDP Relay: Keepalive burst #{} failed: {}", i + 1, e);
                 }
             }
         }
-        // Count burst as unanswered keepalive so Dead state is reachable
-        self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
         self.record_outbound_activity();
         log::info!(
             "UDP Relay: Sent keepalive burst (3 packets) to {} (session {:016x})",
@@ -1272,19 +1317,23 @@ impl UdpRelay {
     /// other task on the runtime worker for the full 100ms.
     pub async fn send_keepalive_burst_async(&self) -> Result<()> {
         let current_addr = **self.relay_addr.load();
+        self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
         for i in 0..3 {
             if i > 0 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            match self.socket.send_to(&self.session_id, current_addr) {
+            let frame = self.build_ping_frame();
+            match self.socket.send_to(&frame, current_addr) {
                 Ok(_) => {}
-                Err(e) if i == 0 => return Err(e.into()),
+                Err(e) if i == 0 => {
+                    self.rollback_unanswered_keepalive();
+                    return Err(e.into());
+                }
                 Err(e) => {
                     log::warn!("UDP Relay: Keepalive burst #{} failed: {}", i + 1, e);
                 }
             }
         }
-        self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
         self.record_outbound_activity();
         log::info!(
             "UDP Relay: Sent async keepalive burst (3 packets) to {} (session {:016x})",
@@ -1297,19 +1346,21 @@ impl UdpRelay {
     /// Send keepalive to maintain NAT binding.
     ///
     /// Also increments the unanswered keepalive counter. The counter is reset
-    /// to zero whenever an inbound data packet is received (in `receive_inbound`).
+    /// to zero whenever the current relay provides liveness evidence.
     pub fn send_keepalive(&self) -> Result<()> {
-        let now_ms = now_mono_ms();
+        self.send_keepalive_at(now_mono_ms())
+    }
+
+    fn send_keepalive_at(&self, now_ms: u64) -> Result<()> {
         let last_ms = self.last_activity_ms.load(Ordering::Relaxed);
         let elapsed = Duration::from_millis(now_ms.saturating_sub(last_ms));
         if elapsed >= KEEPALIVE_INTERVAL {
-            // Send empty payload with just session ID
-            let current_addr = **self.relay_addr.load();
-            self.socket
-                .send_to(&self.session_id, current_addr)
-                .context("Failed to send keepalive")?;
-            self.record_outbound_activity();
             self.unanswered_keepalives.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = self.send_ping_to_current_relay("keepalive") {
+                self.rollback_unanswered_keepalive();
+                return Err(e);
+            }
+            self.record_outbound_activity();
             log::trace!("UDP Relay: Sent keepalive");
         }
         Ok(())
@@ -1458,6 +1509,7 @@ impl UdpRelay {
         self.relay_health
             .store(RelayHealthState::NoTrafficYet as u8, Ordering::Relaxed);
         self.unanswered_keepalives.store(0, Ordering::Relaxed);
+        *self.last_receive_time.lock() = None;
         *self.first_outbound_time.lock() = None;
         log::info!(
             "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
@@ -1692,6 +1744,35 @@ impl RelayContext {
 mod tests {
     use super::*;
 
+    fn relay_loopback_addr(relay: &UdpRelay) -> SocketAddr {
+        let local_port = relay
+            .try_clone_socket()
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        SocketAddr::from(([127, 0, 0, 1], local_port))
+    }
+
+    fn make_pong_frame(relay: &UdpRelay) -> [u8; PONG_FRAME_LEN] {
+        let seq: u32 = 1;
+        let client_ts_mono_ms = now_mono_ms();
+        let mut frame = [0u8; PONG_FRAME_LEN];
+        frame[..SESSION_ID_LEN].copy_from_slice(relay.session_id_bytes());
+        frame[SESSION_ID_LEN] = PONG_FRAME_TYPE;
+        frame[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5].copy_from_slice(&seq.to_be_bytes());
+        frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
+            .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
+        frame[SESSION_ID_LEN + 13..SESSION_ID_LEN + 21].copy_from_slice(&0u64.to_be_bytes());
+        frame
+    }
+
+    fn bind_fake_relay(relay: &UdpRelay) -> UdpSocket {
+        let fake_relay = UdpSocket::bind("127.0.0.1:0").unwrap();
+        relay.switch_relay(fake_relay.local_addr().unwrap());
+        fake_relay
+    }
+
     #[test]
     fn test_session_id_generation() {
         let mut id1 = [0u8; 8];
@@ -1830,41 +1911,122 @@ mod tests {
     }
 
     #[test]
-    fn test_receive_inbound_ignores_pong_and_records_ping_stats() {
+    fn test_valid_current_pong_is_liveness_evidence() {
         let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
         relay.set_ping_enabled(true);
-
-        // Use an ephemeral socket as our "relay server", then switch the expected source.
-        let fake_relay = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let fake_addr = fake_relay.local_addr().unwrap();
-        relay.switch_relay(fake_addr);
-
-        let local_port = relay
-            .try_clone_socket()
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        // Relay sockets bind on 0.0.0.0; use loopback as the concrete destination for send_to.
-        let local_addr = SocketAddr::from(([127, 0, 0, 1], local_port));
-
-        let seq: u32 = 1;
-        let client_ts_mono_ms = now_mono_ms();
-        let mut frame = [0u8; PONG_FRAME_LEN];
-        frame[..SESSION_ID_LEN].copy_from_slice(relay.session_id_bytes());
-        frame[SESSION_ID_LEN] = PONG_FRAME_TYPE;
-        frame[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5].copy_from_slice(&seq.to_be_bytes());
-        frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
-            .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
-        frame[SESSION_ID_LEN + 13..SESSION_ID_LEN + 21].copy_from_slice(&0u64.to_be_bytes());
+        let fake_relay = bind_fake_relay(&relay);
+        relay
+            .unanswered_keepalives
+            .store(RELAY_DEAD_KEEPALIVE_THRESHOLD - 1, Ordering::Relaxed);
+        let local_addr = relay_loopback_addr(&relay);
+        let frame = make_pong_frame(&relay);
 
         fake_relay.send_to(&frame, local_addr).unwrap();
 
         let mut buffer = [0u8; 1600];
         let result = relay.receive_inbound(&mut buffer).unwrap();
         assert_eq!(result, None);
+        assert_eq!(relay.relay_health(), RelayHealthState::Healthy);
+        assert_eq!(relay.unanswered_keepalives.load(Ordering::Relaxed), 0);
+        assert!(relay.last_receive_time.lock().is_some());
 
         let snap = relay.ping_snapshot();
         assert!(snap.received >= 1);
+    }
+
+    #[test]
+    fn test_malformed_current_pong_is_not_liveness_evidence() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let fake_relay = bind_fake_relay(&relay);
+        relay
+            .unanswered_keepalives
+            .store(RELAY_DEAD_KEEPALIVE_THRESHOLD, Ordering::Relaxed);
+        *relay.first_outbound_time.lock() =
+            Some(Instant::now() - Duration::from_secs(RELAY_STALE_THRESHOLD.as_secs() + 1));
+        let local_addr = relay_loopback_addr(&relay);
+        let frame = make_pong_frame(&relay);
+
+        fake_relay
+            .send_to(&frame[..PONG_FRAME_LEN - 1], local_addr)
+            .unwrap();
+
+        let mut buffer = [0u8; 1600];
+        let result = relay.receive_inbound(&mut buffer).unwrap();
+        assert_eq!(result, None);
+        assert!(relay.last_receive_time.lock().is_none());
+
+        relay.check_health();
+        assert_eq!(relay.relay_health(), RelayHealthState::Dead);
+    }
+
+    #[test]
+    fn test_wrong_source_pong_is_not_liveness_evidence() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let _expected_relay = bind_fake_relay(&relay);
+        relay
+            .unanswered_keepalives
+            .store(RELAY_DEAD_KEEPALIVE_THRESHOLD, Ordering::Relaxed);
+        *relay.first_outbound_time.lock() =
+            Some(Instant::now() - Duration::from_secs(RELAY_STALE_THRESHOLD.as_secs() + 1));
+        let wrong_source = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let local_addr = relay_loopback_addr(&relay);
+        let frame = make_pong_frame(&relay);
+
+        wrong_source.send_to(&frame, local_addr).unwrap();
+
+        let mut buffer = [0u8; 1600];
+        let result = relay.receive_inbound(&mut buffer).unwrap();
+        assert_eq!(result, None);
+        assert!(relay.last_receive_time.lock().is_none());
+
+        relay.check_health();
+        assert_eq!(relay.relay_health(), RelayHealthState::Dead);
+    }
+
+    #[test]
+    fn test_never_sent_session_does_not_false_die_at_startup() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        relay
+            .unanswered_keepalives
+            .store(RELAY_DEAD_KEEPALIVE_THRESHOLD, Ordering::Relaxed);
+
+        relay.check_health();
+
+        assert_eq!(relay.relay_health(), RelayHealthState::NoTrafficYet);
+    }
+
+    #[test]
+    fn test_real_silence_still_reaches_dead() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        relay
+            .unanswered_keepalives
+            .store(RELAY_DEAD_KEEPALIVE_THRESHOLD, Ordering::Relaxed);
+        *relay.first_outbound_time.lock() =
+            Some(Instant::now() - Duration::from_secs(RELAY_STALE_THRESHOLD.as_secs() + 1));
+
+        relay.check_health();
+
+        assert_eq!(relay.relay_health(), RelayHealthState::Dead);
+    }
+
+    #[test]
+    fn test_send_keepalive_emits_ping_frame() {
+        let relay_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        relay_socket
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        let relay = UdpRelay::new(relay_socket.local_addr().unwrap(), false).unwrap();
+        relay.last_activity_ms.store(0, Ordering::Relaxed);
+
+        relay
+            .send_keepalive_at(KEEPALIVE_INTERVAL.as_millis() as u64 + 1)
+            .unwrap();
+
+        let mut frame = [0u8; 1600];
+        let (len, _from) = relay_socket.recv_from(&mut frame).unwrap();
+        assert_eq!(len, PING_FRAME_LEN);
+        assert_eq!(&frame[..SESSION_ID_LEN], relay.session_id_bytes());
+        assert_eq!(frame[SESSION_ID_LEN], PING_FRAME_TYPE);
+        assert_eq!(relay.unanswered_keepalives.load(Ordering::Relaxed), 1);
     }
 }
