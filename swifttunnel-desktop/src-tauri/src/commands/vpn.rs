@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::events::{SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent};
@@ -9,6 +10,8 @@ use swifttunnel_core::settings::AdapterBindingMode;
 use swifttunnel_core::vpn::{
     AdapterBindingPreference, BindingPreferenceSource, BindingPreflightInfo, preflight_binding,
 };
+
+const VPN_CONNECT_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Serialize)]
 pub struct VpnStateResponse {
@@ -410,8 +413,9 @@ pub async fn vpn_connect(
     };
 
     let mut vpn = state.vpn_connection.lock().await;
-    let result = vpn
-        .connect(
+    let connect_result = tokio::time::timeout(
+        VPN_CONNECT_COMMAND_TIMEOUT,
+        vpn.connect(
             &access_token,
             &connect_region,
             tunnel_apps,
@@ -424,14 +428,40 @@ pub async fn vpn_connect(
             binding_preference,
             game_process_performance,
             enable_api_tunneling,
-        )
-        .await
-        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+        ),
+    )
+    .await;
+
+    let result = match connect_result {
+        Ok(result) => result.map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e)),
+        Err(_) => {
+            log::error!(
+                "vpn_connect timed out after {}s; cleaning up partial tunnel state",
+                VPN_CONNECT_COMMAND_TIMEOUT.as_secs()
+            );
+            let cleanup_result = vpn
+                .disconnect()
+                .await
+                .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+            let mut message = format!(
+                "VPN connection timed out after {}s. SwiftTunnel stopped this connect attempt and cleaned up the partial tunnel state.",
+                VPN_CONNECT_COMMAND_TIMEOUT.as_secs()
+            );
+            if let Err(cleanup_error) = cleanup_result {
+                log::warn!("vpn_connect timeout cleanup also failed: {}", cleanup_error);
+                message.push_str(" Cleanup after the timeout also failed: ");
+                message.push_str(&cleanup_error);
+            }
+            Err(message)
+        }
+    };
     if result.is_ok() {
         // Publish the inner split-tunnel driver handle so polling commands
         // can read throughput/diagnostics/ping without queuing behind the
         // outer vpn_connection mutex.
         *state.split_tunnel_handle.write() = vpn.split_tunnel_handle();
+    } else {
+        *state.split_tunnel_handle.write() = None;
     }
     drop(vpn);
 

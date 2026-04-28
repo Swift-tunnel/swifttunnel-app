@@ -50,7 +50,25 @@ describe("stores/boostStore", () => {
     expect(boostUpdateConfig).toHaveBeenCalledTimes(1);
     expect(boostUpdateConfig).toHaveBeenCalledWith("{\"profile\":\"Balanced\"}");
     expect(useBoostStore.getState().error).toBeNull();
+    expect(useBoostStore.getState().warning).toBeNull();
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("stores warnings separately from fatal config errors", async () => {
+    boostUpdateConfig.mockResolvedValue({
+      warnings: ["Roblox version folder was not found. Launch Roblox once."],
+      applied_config: { profile: "Balanced" },
+    });
+
+    const useBoostStore = await loadStore();
+    await useBoostStore.getState().updateConfig("{\"profile\":\"Balanced\"}");
+
+    expect(useBoostStore.getState().error).toBeNull();
+    expect(useBoostStore.getState().warning).toContain("Launch Roblox once");
+    expect(notify).toHaveBeenCalledWith(
+      "Boost applied with warnings",
+      "Some optimizations could not be applied.",
+    );
   });
 
   it("stores error and notifies when config update fails", async () => {
@@ -62,6 +80,7 @@ describe("stores/boostStore", () => {
     ).rejects.toThrow("boom");
 
     expect(useBoostStore.getState().error).toBe("Error: boom");
+    expect(useBoostStore.getState().warning).toBeNull();
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith(
       "Boost config failed",
@@ -79,7 +98,8 @@ describe("stores/boostStore", () => {
     const useBoostStore = await loadStore();
     await expect(useBoostStore.getState().syncEffectiveConfig()).resolves.toBe(applied_config);
 
-    expect(useBoostStore.getState().error).toContain("Disable Nagle");
+    expect(useBoostStore.getState().error).toBeNull();
+    expect(useBoostStore.getState().warning).toContain("Disable Nagle");
     expect(notify).not.toHaveBeenCalled();
   });
 
@@ -156,6 +176,7 @@ describe("stores/boostStore", () => {
     await useBoostStore.getState().cleanRam();
 
     expect(useBoostStore.getState().error).toBe("Error: boom");
+    expect(useBoostStore.getState().warning).toBeNull();
     expect(useBoostStore.getState().isCleaningRam).toBe(false);
     expect(useBoostStore.getState().ramCleanStartSnapshot).toBeNull();
     expect(useBoostStore.getState().ramCleanDoneSnapshot).toBeNull();

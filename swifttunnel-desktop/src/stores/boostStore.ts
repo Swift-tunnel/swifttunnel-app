@@ -39,6 +39,7 @@ interface BoostStore {
   ramCleanDoneSnapshot: SystemMemorySnapshot | null;
 
   error: string | null;
+  warning: string | null;
 
   // System info
   isAdmin: boolean;
@@ -75,6 +76,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
   ramCleanStartSnapshot: null,
   ramCleanDoneSnapshot: null,
   error: null,
+  warning: null,
   isAdmin: false,
   osVersion: "",
   cpuCount: 1,
@@ -126,11 +128,11 @@ export const useBoostStore = create<BoostStore>((set) => ({
 
   updateConfig: async (configJson) => {
     try {
-      set({ error: null });
+      set({ error: null, warning: null });
       const result = await boostUpdateConfig(configJson);
       if (result.warnings.length > 0) {
         const message = result.warnings.join("; ");
-        set({ error: message });
+        set({ warning: message });
         await notify(
           "Boost applied with warnings",
           "Some optimizations could not be applied.",
@@ -139,7 +141,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
       return result.applied_config ?? JSON.parse(configJson);
     } catch (e) {
       const message = String(e);
-      set({ error: message });
+      set({ error: message, warning: null });
       await notify("Boost config failed", "Could not save optimization profile.");
       throw e;
     }
@@ -147,10 +149,10 @@ export const useBoostStore = create<BoostStore>((set) => ({
 
   syncEffectiveConfig: async () => {
     try {
-      set({ error: null });
+      set({ error: null, warning: null });
       const result = await boostSyncEffectiveConfig();
       if (result.warnings.length > 0) {
-        set({ error: result.warnings.join("; ") });
+        set({ warning: result.warnings.join("; ") });
       }
       return result.applied_config;
     } catch (error) {
@@ -165,6 +167,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
     try {
       set({
         error: null,
+        warning: null,
         isCleaningRam: true,
         ramCleanStage: "start",
         ramCleanTrimmedCount: 0,
@@ -195,6 +198,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
       const message = String(e);
       set({
         error: message,
+        warning: null,
         isCleaningRam: false,
         ramCleanStage: null,
         ramCleanStartSnapshot: null,
@@ -209,13 +213,13 @@ export const useBoostStore = create<BoostStore>((set) => ({
       await boostRestartRoblox();
     } catch (e) {
       const message = String(e);
-      set({ error: message });
+      set({ error: message, warning: null });
       await notify("Restart failed", "Could not restart Roblox.");
     }
   },
 
   clearError: () => {
-    set({ error: null });
+    set({ error: null, warning: null });
   },
 
   handleMetricsEvent: (event) => {

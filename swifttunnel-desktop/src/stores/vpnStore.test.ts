@@ -95,6 +95,7 @@ describe("stores/vpnStore", () => {
     systemResetDriver.mockReset();
     notify.mockReset();
 
+    vpnDisconnect.mockResolvedValue(undefined);
     vpnGetDiagnostics.mockResolvedValue(null);
     vpnPreflightBinding.mockResolvedValue({
       status: "ok",
@@ -168,6 +169,7 @@ describe("stores/vpnStore", () => {
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
     expect(vpnConnect).not.toHaveBeenCalled();
+    expect(vpnDisconnect).not.toHaveBeenCalled();
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().driverSetupState).toBe("error");
     expect(useVpnStore.getState().error).toContain("network timeout");
@@ -335,6 +337,7 @@ describe("stores/vpnStore", () => {
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
     expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnDisconnect).toHaveBeenCalledTimes(1);
     expect(vpnConnect).toHaveBeenCalledTimes(2);
     expect(vpnPreflightBinding).toHaveBeenCalledTimes(2);
     expect(useVpnStore.getState().state).toBe("connected");
@@ -366,9 +369,30 @@ describe("stores/vpnStore", () => {
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
     expect(vpnGetState).not.toHaveBeenCalled();
+    expect(vpnDisconnect).toHaveBeenCalledTimes(1);
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().error).toContain("different relay account");
     expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);
+  });
+
+  it("preserves the connect failure when cleanup also fails", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockRejectedValueOnce(
+      new Error("Relay preflight enforcement blocked connection."),
+    );
+    vpnDisconnect.mockRejectedValueOnce(new Error("cleanup unavailable"));
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(vpnDisconnect).toHaveBeenCalledTimes(1);
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain(
+      "Relay preflight enforcement blocked connection.",
+    );
+    expect(useVpnStore.getState().error).toContain(
+      "Cleanup after failed connect also failed: cleanup unavailable",
+    );
   });
 
   it("times out a hung backend connect instead of spinning forever", async () => {
@@ -388,6 +412,7 @@ describe("stores/vpnStore", () => {
     await connectPromise;
 
     expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(vpnDisconnect).toHaveBeenCalledTimes(1);
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);
     expect(useVpnStore.getState().error).toContain("VPN connection timed out");
@@ -403,6 +428,7 @@ describe("stores/vpnStore", () => {
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
     expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(vpnDisconnect).toHaveBeenCalledTimes(1);
     expect(vpnConnect).toHaveBeenCalledTimes(1);
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().error).toContain("timed out");

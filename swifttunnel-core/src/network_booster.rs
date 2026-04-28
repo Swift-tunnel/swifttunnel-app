@@ -455,14 +455,9 @@ impl NetworkBooster {
     }
 
     fn remove_prioritize_game_traffic(&self) -> Result<()> {
+        let script = Self::legacy_qos_policy_removal_script(LEGACY_ROBLOX_PRIORITY_POLICY);
         let output = hidden_command("powershell")
-            .args(&[
-                "-Command",
-                &format!(
-                    "Remove-NetQosPolicy -Name '{}' -Confirm:$false -ErrorAction SilentlyContinue",
-                    LEGACY_ROBLOX_PRIORITY_POLICY
-                ),
-            ])
+            .args(["-Command", &script])
             .output()?;
 
         if !output.status.success() {
@@ -471,6 +466,21 @@ impl NetworkBooster {
             ));
         }
         Ok(())
+    }
+
+    fn powershell_single_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn legacy_qos_policy_removal_script(policy_name: &str) -> String {
+        let quoted_policy = Self::powershell_single_quote(policy_name);
+        format!(
+            "$ErrorActionPreference = 'Stop'; \
+             $policy = Get-NetQosPolicy -Name {quoted_policy} -ErrorAction SilentlyContinue; \
+             if ($null -eq $policy) {{ Write-Output 'SwiftTunnel:LegacyQoSAbsent'; exit 0; }} \
+             Remove-NetQosPolicy -Name {quoted_policy} -Confirm:$false -ErrorAction Stop; \
+             Write-Output 'SwiftTunnel:LegacyQoSRemoved'"
+        )
     }
 
     /// Test network latency to Roblox servers
@@ -1205,6 +1215,24 @@ mod tests {
         );
         assert_eq!(NetworkBooster::parse_registry_dword(""), None);
         assert_eq!(NetworkBooster::parse_registry_dword("invalid"), None);
+    }
+
+    #[test]
+    fn legacy_qos_removal_script_treats_missing_exact_policy_as_success() {
+        let script = NetworkBooster::legacy_qos_policy_removal_script("RobloxPriority");
+
+        assert!(script.contains("Get-NetQosPolicy -Name 'RobloxPriority'"));
+        assert!(script.contains("SwiftTunnel:LegacyQoSAbsent"));
+        assert!(script.contains("exit 0"));
+        assert!(!script.contains("RobloxPriority*"));
+    }
+
+    #[test]
+    fn legacy_qos_removal_script_escapes_policy_names() {
+        let script = NetworkBooster::legacy_qos_policy_removal_script("Roblox'Priority");
+
+        assert!(script.contains("Get-NetQosPolicy -Name 'Roblox''Priority'"));
+        assert!(!script.contains("-Name 'Roblox'Priority'"));
     }
 
     #[test]

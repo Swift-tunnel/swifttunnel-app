@@ -82,6 +82,7 @@ function isAlreadyConnectedMessage(message: string): boolean {
 
 const VPN_PREFLIGHT_TIMEOUT_MS = 20_000;
 const VPN_CONNECT_TIMEOUT_MS = 90_000;
+const VPN_CONNECT_CLEANUP_TIMEOUT_MS = 15_000;
 
 function formatTimeout(timeoutMs: number): string {
   const seconds = timeoutMs / 1000;
@@ -109,6 +110,23 @@ function withTimeout<T>(
       clearTimeout(timeoutId);
     }
   });
+}
+
+async function cleanupFailedConnectAttempt(): Promise<string | null> {
+  try {
+    await withTimeout(
+      vpnDisconnect(),
+      "VPN cleanup",
+      VPN_CONNECT_CLEANUP_TIMEOUT_MS,
+    );
+    return null;
+  } catch (error) {
+    const message = getErrorMessage(error);
+    reportError("Failed to clean up VPN after connect failure", error, {
+      dedupeKey: "vpn-connect-cleanup",
+    });
+    return message;
+  }
 }
 
 let connectAttemptSeq = 0;
@@ -445,13 +463,27 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           !autoRepairedBindingSignatures.has(preflight.network_signature)
         ) {
           autoRepairedBindingSignatures.add(preflight.network_signature);
+          const cleanupError = await cleanupFailedConnectAttempt();
+          if (!isCurrentConnectAttempt(attempt)) return;
+          if (cleanupError) {
+            throw new Error(
+              `${message}\n\nCleanup after failed connect also failed: ${cleanupError}`,
+            );
+          }
           await get().repairDriver();
           if (!isCurrentConnectAttempt(attempt)) return;
           await get().connect(region, gamePresets);
           return;
         }
         if (!isAlreadyConnectedMessage(message)) {
-          throw e;
+          const cleanupError = await cleanupFailedConnectAttempt();
+          if (!isCurrentConnectAttempt(attempt)) return;
+          if (cleanupError) {
+            throw new Error(
+              `${message}\n\nCleanup after failed connect also failed: ${cleanupError}`,
+            );
+          }
+          throw new Error(message);
         }
       }
       if (!isCurrentConnectAttempt(attempt)) return;

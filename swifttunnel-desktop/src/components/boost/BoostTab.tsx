@@ -15,6 +15,7 @@ import {
   Chip,
   Spinner,
   Slider,
+  ErrorBanner,
 } from "../ui";
 import {
   PROFILES,
@@ -135,8 +136,8 @@ export function BoostTab() {
     });
     setDraft(appliedConfig);
     saveSettings();
-    const currentError = useBoostStore.getState().error;
-    if (currentError) {
+    const currentWarning = useBoostStore.getState().warning;
+    if (currentWarning) {
       addToast({ type: "warning", message: "Boost applied with warnings" });
     } else {
       addToast({ type: "success", message: "Boost settings applied" });
@@ -226,8 +227,8 @@ export function BoostTab() {
         setDraft(appliedConfig);
         saveSettings();
 
-        const currentError = useBoostStore.getState().error;
-        if (currentError) {
+        const currentWarning = useBoostStore.getState().warning;
+        if (currentWarning) {
           addToast({ type: "warning", message: "Network boost could not fully apply" });
         } else {
           addToast({ type: "success", message: "Network boost updated" });
@@ -276,16 +277,11 @@ export function BoostTab() {
   return (
     <div className="flex w-full flex-col gap-5 pb-24">
       {boost.error && (
-        <div
-          className="rounded-[var(--radius-card)] px-3.5 py-2.5 text-[12px]"
-          style={{
-            backgroundColor: "var(--color-status-error-soft-10)",
-            border: "1px solid var(--color-status-error-soft-20)",
-            color: "var(--color-status-error)",
-          }}
-        >
-          {boost.error}
-        </div>
+        <ErrorBanner tone="error">{boost.error}</ErrorBanner>
+      )}
+
+      {boost.warning && (
+        <ErrorBanner tone="warning">{boost.warning}</ErrorBanner>
       )}
 
       <RamCleanerCard
