@@ -202,6 +202,51 @@ jobs:
         run: |
           node scripts/check-desktop-version-sync.mjs $env:EXPECTED_VERSION
 
+      - name: Generate release notes
+        id: release_notes
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          $previousTag = git tag --sort=-v:refname --merged HEAD |
+            Where-Object { $_ -match '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?(?:\+[0-9A-Za-z\.-]+)?$' -and $_ -ne $env:TAG } |
+            Select-Object -First 1
+
+          $payloadPath = Join-Path $env:RUNNER_TEMP "release-notes-payload.json"
+          $payload = [ordered]@{
+            tag_name = $env:TAG
+            target_commitish = (git rev-parse HEAD).Trim()
+          }
+          if (-not [string]::IsNullOrWhiteSpace($previousTag)) {
+            $payload.previous_tag_name = $previousTag
+          }
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($payloadPath, ($payload | ConvertTo-Json -Depth 8), $utf8NoBom)
+
+          $notesJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" --method POST --input $payloadPath
+          if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($notesJson)) {
+            $notes = $notesJson | ConvertFrom-Json
+            $body = $notes.body.Trim()
+          }
+
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            $range = if ([string]::IsNullOrWhiteSpace($previousTag)) { "HEAD" } else { "$previousTag..HEAD" }
+            $changes = @(git log --pretty=format:"- %s" $range)
+            if ($changes.Count -eq 0) {
+              $changes = @("- Maintenance release.")
+            }
+            $body = "## What's Changed`n" + ($changes -join "`n")
+            if (-not [string]::IsNullOrWhiteSpace($previousTag)) {
+              $body += "`n`n**Full Changelog**: https://github.com/$env:GITHUB_REPOSITORY/compare/$previousTag...$env:TAG"
+            }
+          }
+
+          $delimiter = "EOF_$([Guid]::NewGuid().ToString('N'))"
+          "body<<$delimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $body | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $delimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -458,10 +503,10 @@ jobs:
           projectPath: swifttunnel-desktop
           tagName: ${{ steps.meta.outputs.tag }}
           releaseName: SwiftTunnel v${{ steps.meta.outputs.version }}
-          releaseBody: See release assets to download this version.
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: ${{ steps.meta.outputs.prerelease }}
-          generateReleaseNotes: true
+          generateReleaseNotes: false
           includeUpdaterJson: true
           updaterJsonPreferNsis: false
 
@@ -563,6 +608,11 @@ jobs:
                     name = "Channel"
                     value = $channelLabel
                     inline = $true
+                  },
+                  @{
+                    name = "Release"
+                    value = $release.url
+                    inline = $false
                   }
                 )
               }
