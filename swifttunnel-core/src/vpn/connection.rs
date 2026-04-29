@@ -56,8 +56,7 @@ const ADAPTER_RESET_ROLLBACK_REASON: &str = "adapter_reset_rollback";
 
 /// Error string surfaced to the UI on watchdog rollback. Wording deliberately
 /// asks the user to retry — the path is recoverable on next connect.
-const ADAPTER_RESET_ROLLBACK_MESSAGE: &str =
-    "SwiftTunnel rolled back the connection because your network adapter went offline during setup. This usually clears up on its own — please try connecting again.";
+const ADAPTER_RESET_ROLLBACK_MESSAGE: &str = "SwiftTunnel rolled back the connection because your network adapter went offline during setup. This usually clears up on its own — please try connecting again.";
 const ETW_CONNECTION_READY_TIMEOUT_MS: u64 = 150;
 const ETW_CONNECTION_READY_POLL_MS: u64 = 5;
 /// Number of ICMP samples to collect per relay candidate when probing.
