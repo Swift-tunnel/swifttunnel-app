@@ -58,8 +58,7 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    delete_ipv6_marker, has_ipv6_binding_native, query_ipv6_binding_enabled,
-    restore_ipv6_from_marker, write_ipv6_marker,
+    IPV6_BLOCK_RULE_NAME, delete_ipv6_marker, restore_ipv6_from_marker, write_ipv6_marker_firewall,
 };
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
@@ -3587,37 +3586,54 @@ impl ParallelInterceptor {
         self.tso_was_disabled = false;
     }
 
-    fn build_disable_ipv6_script(adapter_friendly_name: &str) -> String {
-        // Use explicit error output so failures are visible in logs for diagnostics.
+    fn build_disable_ipv6_script(_adapter_friendly_name: &str) -> String {
+        // Block outbound IPv6 via a Windows Firewall rule using `netsh advfirewall`.
+        //
+        // Why not `Disable-NetAdapterBinding -ComponentId ms_tcpip6` (the
+        // pre-2.0.15 approach):
+        //   That cmdlet rebinds the NDIS stack on the adapter, which
+        //   physically takes the link offline and back. On many real-world
+        //   NICs (Realtek, USB-Ethernet dongles, Parallels VirtIO, some Intel
+        //   variants) the relink takes 2-10 seconds and Windows reports the
+        //   connection as dropped — users see "my Ethernet just turned off
+        //   when I clicked Connect." It also routes through WMI, which hangs
+        //   15s+ on slow-WMI systems and was responsible for "Driver
+        //   initialization timed out" errors on first connect.
+        //
+        // Why netsh, not `New-NetFirewallRule`:
+        //   `New-NetFirewallRule` goes through the MSFT_NetFirewallRule WMI
+        //   provider, which has the same hang profile as the binding cmdlet.
+        //   `netsh advfirewall` is a native binary, returns in <100ms, and
+        //   doesn't touch the adapter binding.
+        //
+        // The rule blocks all outbound traffic to any IPv6 destination
+        // (`::/0`). SwiftTunnel is IPv4-only, so this is exactly the leak
+        // we're closing. The rule is removed on disconnect, and crash
+        // recovery (via the IPv6 marker file) cleans it up on next launch
+        // if the app died mid-session.
         format!(
             r#"
-            $ErrorActionPreference = 'Stop'
-            $adapter = '{}'
+            $ErrorActionPreference = 'Continue'
+            $name = '{rule}'
 
-            try {{
-                # Disable IPv6 binding on the adapter (requires elevation)
-                Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false | Out-Null
+            # Idempotent: drop any pre-existing rule before adding so a stale
+            # half-configured rule never persists.
+            $null = & netsh.exe advfirewall firewall delete rule name="$name" 2>&1
 
-                # Verify it was disabled
-                $binding = Get-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6
-                if (-not $binding) {{
-                    Write-Output 'IPv6 binding not present'
-                    exit 0
-                }}
+            $output = & netsh.exe advfirewall firewall add rule `
+                name="$name" `
+                dir=out action=block remoteip=::/0 profile=any 2>&1
+            $exit = $LASTEXITCODE
 
-                if (-not $binding.Enabled) {{
-                    Write-Output 'IPv6 disabled'
-                    exit 0
-                }}
-
-                Write-Error ('IPv6 binding still enabled on adapter: ' + $adapter)
-                exit 1
-            }} catch {{
-                Write-Error ('Failed to disable IPv6 on adapter ' + $adapter + ': ' + $_.Exception.Message)
+            if ($exit -ne 0) {{
+                Write-Error ('netsh add rule exited ' + $exit + ': ' + (($output | Out-String).Trim()))
                 exit 1
             }}
+
+            Write-Output 'IPv6 outbound blocked via firewall rule'
+            exit 0
             "#,
-            adapter_friendly_name.replace("'", "''")
+            rule = IPV6_BLOCK_RULE_NAME
         )
     }
 
@@ -3628,18 +3644,20 @@ impl ParallelInterceptor {
         let friendly_name = match &self.physical_adapter_friendly_name {
             Some(name) => name.clone(),
             None => {
-                log::warn!("No physical adapter friendly name available, skipping IPv6 disable");
+                log::warn!(
+                    "No physical adapter friendly name available, skipping IPv6 firewall block"
+                );
                 return Ok(());
             }
         };
 
         // IPv4-only ISP guard: SwiftTunnel needs an IPv4 default route to work.
-        // If there isn't one, disabling IPv6 would leave the user with no
+        // If there isn't one, blocking IPv6 would leave the user with no
         // network at all. Bail out early with a typed error so the UI surfaces
         // the right message instead of "tunneling failed somewhere".
         if Self::get_default_route_info_for_targets(&[]).is_none() {
             log::error!(
-                "No IPv4 default route found — refusing to disable IPv6 (likely IPv6-only network)"
+                "No IPv4 default route found — refusing to block IPv6 (likely IPv6-only network)"
             );
             return Err(VpnError::SplitTunnelSetupFailed(
                 "IPv6-only network: SwiftTunnel needs IPv4 connectivity to tunnel game traffic."
@@ -3648,69 +3666,33 @@ impl ParallelInterceptor {
         }
 
         log::info!(
-            "Disabling IPv6 on adapter: {} (SwiftTunnel is IPv4-only)",
+            "Blocking outbound IPv6 via firewall rule (adapter: {}, SwiftTunnel is IPv4-only)",
             friendly_name
         );
 
-        // Fast path: if the adapter has no IPv6 binding at all, skip the
-        // PowerShell disable entirely. `Disable-NetAdapterBinding` goes
-        // through WMI, which hangs for 20-30s on Realtek / slow-WMI systems
-        // even when there's nothing to disable (see support log from
-        // ferdi@2026-04-19). `has_ipv6_binding_native` uses the IP Helper
-        // API and returns in <1ms.
-        if let Some(if_index) = self.physical_adapter_if_index {
-            match has_ipv6_binding_native(if_index) {
-                Some(false) => {
-                    log::info!(
-                        "IPv6 already not bound on adapter {} (IP Helper fast-path); skipping disable",
-                        friendly_name
-                    );
-                    self.ipv6_was_disabled = false;
-                    delete_ipv6_marker();
-                    return Ok(());
-                }
-                Some(true) => {
-                    // IPv6 is bound — fall through to the slower check +
-                    // disable path. We don't skip the PowerShell
-                    // `query_ipv6_binding_enabled` below because it returns
-                    // the *enabled* state (bound + enabled vs. bound + force-
-                    // disabled) which the marker needs for accurate restore.
-                }
-                None => {
-                    // API error — fall through, let PowerShell handle it.
-                    log::debug!(
-                        "Native IPv6 probe failed for if_index {} — falling back to PowerShell",
-                        if_index
-                    );
-                }
-            }
-        }
-
-        if matches!(query_ipv6_binding_enabled(&friendly_name), Some(false)) {
-            log::info!(
-                "IPv6 was already disabled on adapter {} before SwiftTunnel; leaving it unchanged",
-                friendly_name
-            );
-            self.ipv6_was_disabled = false;
-            delete_ipv6_marker();
-            return Ok(());
-        }
-
-        write_ipv6_marker(&friendly_name);
+        // Write the marker BEFORE the netsh add. If we crash between add and
+        // marker write, the rule lingers across reboots and the user has no
+        // way to clean it up other than rerunning SwiftTunnel — which we
+        // accept, because the marker-then-add ordering would have the inverse
+        // race (marker exists but no rule, restore is a no-op, normal). The
+        // current ordering means recovery always over-cleans, never
+        // under-cleans.
+        write_ipv6_marker_firewall(&friendly_name);
         self.ipv6_was_disabled = true;
 
-        // Disable IPv6 binding on the adapter.
-        // This prevents Roblox/Windows from preferring IPv6 and bypassing our IPv4-only tunnel.
         let script = Self::build_disable_ipv6_script(&friendly_name);
 
-        // Give this more time than offload toggles; adapter binding changes can be slow on some systems.
-        let timeout_secs = 15;
+        // netsh.exe completes in ~50-100ms. 5s is generous slack for very
+        // loaded systems; if it actually times out at 5s, something is
+        // seriously wrong with the host's firewall service.
+        let timeout_secs = 5;
         let output = runner(&script, timeout_secs);
 
         if output.success {
             log::info!(
-                "IPv6 disabled successfully on {} - all traffic will use IPv4",
-                friendly_name
+                "IPv6 outbound blocked on {} via firewall rule '{}' — all traffic will use IPv4",
+                friendly_name,
+                IPV6_BLOCK_RULE_NAME
             );
             return Ok(());
         }
@@ -3722,7 +3704,7 @@ impl ParallelInterceptor {
             .collect();
 
         log::warn!(
-            "Failed to disable IPv6 on {} (exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
+            "Failed to install IPv6 block rule on {} (exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
             friendly_name,
             output.exit_code,
             output.timed_out,
@@ -3731,15 +3713,13 @@ impl ParallelInterceptor {
         );
 
         log::warn!(
-            "Refusing to continue without IPv6 disable on adapter '{}'. IPv6 traffic may bypass VPN.{}{}",
-            friendly_name,
+            "Refusing to continue without IPv6 outbound block. IPv6 traffic may bypass VPN.{}{}",
             if details.is_empty() { "" } else { " Details: " },
             details
         );
 
         Err(VpnError::SplitTunnelSetupFailed(format!(
-            "Failed to disable IPv6 on adapter '{}'. SwiftTunnel is IPv4-only; leaving IPv6 enabled could let game traffic bypass the tunnel.{}{}",
-            friendly_name,
+            "Failed to install IPv6 block firewall rule. SwiftTunnel is IPv4-only; leaving IPv6 unblocked could let game traffic bypass the tunnel.{}{}",
             if details.is_empty() { "" } else { " Details: " },
             details
         )))
@@ -3757,49 +3737,61 @@ impl ParallelInterceptor {
         self.disable_ipv6_with_runner(Self::run_powershell_with_timeout_capture)
     }
 
-    /// Re-enable IPv6 on the physical adapter
+    /// Restore IPv6 connectivity by removing the outbound block rule.
     ///
-    /// Called when the VPN disconnects to restore normal IPv6 connectivity.
+    /// Called when the VPN disconnects. The marker file records which method
+    /// was used to block IPv6 in this session (current code uses a firewall
+    /// rule; legacy markers from older installs used adapter binding). The
+    /// no-marker fallback path also targets the firewall rule because every
+    /// in-progress block this version writes uses that method.
     pub fn enable_ipv6(&mut self) {
         if !self.ipv6_was_disabled {
             return;
         }
 
-        let friendly_name = match &self.physical_adapter_friendly_name {
-            Some(name) => name.clone(),
-            None => return,
-        };
+        let friendly_name = self
+            .physical_adapter_friendly_name
+            .clone()
+            .unwrap_or_default();
 
-        log::info!("Re-enabling IPv6 on adapter: {}", friendly_name);
+        log::info!(
+            "Removing IPv6 outbound block (adapter: {})",
+            if friendly_name.is_empty() {
+                "<unknown>"
+            } else {
+                &friendly_name
+            }
+        );
 
         match restore_ipv6_from_marker() {
             Some(true) => {
-                log::info!("IPv6 restored to original state on {}", friendly_name);
+                log::info!("IPv6 restored on {}", friendly_name);
                 delete_ipv6_marker();
             }
             Some(false) => {
                 log::warn!("Failed to restore IPv6 state - will retry on next launch if needed");
             }
             None => {
+                // No marker found — likely a marker-write race or manual
+                // tampering. Best-effort: try to delete the firewall rule
+                // anyway (idempotent; silently no-ops if absent).
                 let script = format!(
                     r#"
                     $ErrorActionPreference = 'SilentlyContinue'
-                    $adapter = '{}'
-
-                    # Re-enable IPv6 binding on the adapter
-                    Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null
-
-                    Write-Host 'IPv6 enabled'
+                    $null = & netsh.exe advfirewall firewall delete rule name="{}" 2>&1
+                    Write-Host 'IPv6 block rule removed (best-effort)'
                     "#,
-                    friendly_name.replace("'", "''")
+                    IPV6_BLOCK_RULE_NAME
                 );
 
                 if Self::run_powershell_with_timeout(&script, 5) {
-                    log::info!("IPv6 re-enabled on {}", friendly_name);
+                    log::info!("IPv6 block rule removed on {}", friendly_name);
                     delete_ipv6_marker();
                 } else {
                     log::warn!(
-                        "Failed to re-enable IPv6 - manual re-enable may be needed via Network Settings"
+                        "Failed to remove IPv6 block rule '{}' — run `netsh advfirewall firewall delete rule name=\"{}\"` manually if connectivity is affected",
+                        IPV6_BLOCK_RULE_NAME,
+                        IPV6_BLOCK_RULE_NAME
                     );
                 }
             }
@@ -10080,9 +10072,9 @@ mod tests {
                 stdout: String::new(),
                 stderr: "Access is denied.".to_string(),
             })
-            .expect_err("IPv6 disable failure must abort connect");
+            .expect_err("IPv6 block failure must abort connect");
 
-        assert!(error.to_string().contains("Failed to disable IPv6"));
+        assert!(error.to_string().contains("IPv6 block firewall rule"));
         assert!(interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
     }
