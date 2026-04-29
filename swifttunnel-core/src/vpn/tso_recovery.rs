@@ -78,11 +78,13 @@ fn get_marker_path() -> Option<PathBuf> {
 
 /// Per-query timeout for adapter offload probes.
 ///
-/// 6 queries × 2s = 12s absolute worst case for a full marker capture. A hung
-/// WMI provider on a flaky NIC (Realtek RTL8821CE in the 2026-04-19 incident)
-/// can otherwise block `.output()` for 30–60s, freezing whichever thread
-/// called us. Every call site now runs this off the connect path, but the
-/// bound is still the right belt-and-braces.
+/// 2 queries × 2s = 4s absolute worst case for a full marker capture (LSO v2
+/// IPv4 + IPv6; checksum-offload values are no longer captured because we
+/// don't toggle them on connect any more). A hung WMI provider on a flaky
+/// NIC (Realtek RTL8821CE in the 2026-04-19 incident) can otherwise block
+/// `.output()` for 30–60s, freezing whichever thread called us. Every call
+/// site now runs this off the connect path, but the bound is still the right
+/// belt-and-braces.
 const ADAPTER_QUERY_TIMEOUT_SECS: u64 = 2;
 
 fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32> {

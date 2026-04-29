@@ -4,6 +4,11 @@
 //! internet" when the relay-health monitor is about to declare a session dead.
 //! On Windows we ask `GetNetworkConnectivityHint` — the same NLM signal that
 //! drives the "No internet access" badge in the system tray.
+//!
+//! Minimum supported Windows: 10 build 17763 (1809). The `windows` crate
+//! late-binds these symbols, so older builds return a non-success status
+//! through `status.is_err()` and we degrade gracefully to `Unknown` rather
+//! than failing to load.
 
 /// Authoritative-enough verdict on whether this device can currently reach
 /// the public internet.
@@ -38,10 +43,19 @@ pub fn probe() -> LocalConnectivity {
     match hint.ConnectivityLevel {
         NetworkConnectivityLevelHintInternetAccess
         | NetworkConnectivityLevelHintConstrainedInternetAccess => LocalConnectivity::Reachable,
-        NetworkConnectivityLevelHintLocalAccess
-        | NetworkConnectivityLevelHintNone
-        | NetworkConnectivityLevelHintHidden => LocalConnectivity::Offline,
-        NetworkConnectivityLevelHintUnknown => LocalConnectivity::Unknown,
+        NetworkConnectivityLevelHintLocalAccess | NetworkConnectivityLevelHintNone => {
+            LocalConnectivity::Offline
+        }
+        // `Hidden` means NLM couldn't determine the interface's connectivity
+        // properties — typical on VPN-managed virtual adapters, hidden-SSID
+        // corporate networks, and some Wi-Fi drivers. It is *not* a reliable
+        // "offline" signal and treating it as one would cause the post-connect
+        // watchdog to fire spurious adapter-reset rollbacks on those configs.
+        // Mapped to `Unknown` so the existing "do not override the relay
+        // failure path" semantic carries through.
+        NetworkConnectivityLevelHintHidden | NetworkConnectivityLevelHintUnknown => {
+            LocalConnectivity::Unknown
+        }
         _ => LocalConnectivity::Unknown,
     }
 }

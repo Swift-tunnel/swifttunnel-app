@@ -41,10 +41,11 @@ const REFRESH_INTERVAL_MS: u64 = 500;
 const ADAPTER_WATCHDOG_WINDOW_SECS: u64 = 30;
 
 /// Number of consecutive `LocalConnectivity::Offline` ticks (each spaced
-/// `REFRESH_INTERVAL_MS` apart) before the watchdog aborts the session. With
-/// the 500ms tick this is a 3s sustained offline floor — long enough to
+/// `REFRESH_INTERVAL_MS` apart, and only counted when relay health is
+/// also non-`Healthy`) before the watchdog aborts the session. With the
+/// 500ms tick this is a 3s sustained dual-signal floor — long enough to
 /// ignore brief link flaps (Wi-Fi handover, momentary route refresh) and
-/// short enough to abort well before the relay-dead timeout fires (~5s+).
+/// short enough to abort well before the relay-dead timeout fires.
 const ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD: u32 = 6;
 
 /// Cleanup-reason marker propagated through the existing teardown path when
@@ -155,10 +156,12 @@ fn classify_relay_health(
 /// async monitor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WatchdogTickAction {
-    /// Window still active; observed `LocalConnectivity` did not push the
-    /// counter past threshold. The caller stores `consecutive_offline_ticks`
-    /// for the next tick. `Reachable` and `Unknown` reset to 0; `Offline`
-    /// increments.
+    /// Window still active; the dual-signal gate did not push the counter
+    /// past threshold. The caller stores `consecutive_offline_ticks` for
+    /// the next tick. The counter only increments when probe is `Offline`
+    /// AND relay health is *not* `Healthy`; any other combination resets
+    /// it to 0 — `Reachable`, `Unknown`, or relay still `Healthy` are all
+    /// "internet works" signals from the watchdog's perspective.
     Continue { consecutive_offline_ticks: u32 },
     /// Counter reached the offline-tick threshold inside the window — abort
     /// the session and run the standard teardown with this reason/message.
@@ -174,19 +177,32 @@ enum WatchdogTickAction {
 fn watchdog_tick(
     elapsed_since_connect: Duration,
     probe: LocalConnectivity,
+    relay_health: super::udp_relay::RelayHealthState,
     prior_consecutive_offline_ticks: u32,
 ) -> WatchdogTickAction {
+    use super::udp_relay::RelayHealthState;
+
     if elapsed_since_connect >= Duration::from_secs(ADAPTER_WATCHDOG_WINDOW_SECS) {
         return WatchdogTickAction::Disarmed;
     }
 
-    // `Unknown` is treated as a probe failure, NOT as offline — the existing
-    // `classify_relay_health` path uses the same "do not act on Unknown"
-    // semantic, and we mirror it here so a flaky NLM API can't abort an
-    // otherwise-healthy connect.
-    let new_count = match probe {
-        LocalConnectivity::Offline => prior_consecutive_offline_ticks.saturating_add(1),
-        LocalConnectivity::Reachable | LocalConnectivity::Unknown => 0,
+    // Two-signal gate. NLM Offline alone is a heuristic — captive/filtered
+    // networks, hidden-SSID corporate setups, and NLM bugs can produce
+    // false-positive Offline reports on machines that are actually online.
+    // Relay `Healthy` is positive ground truth: we've recently received an
+    // inbound packet through this NIC, so the user provably has working
+    // internet right now regardless of what NLM says. Only count an Offline
+    // tick if both signals agree something is wrong.
+    //
+    // `Unknown` for the probe (API failure / non-Windows / Hidden hint) and
+    // `Reachable` both reset the counter — same "do not act on Unknown"
+    // semantic that `classify_relay_health` uses.
+    let new_count = match (probe, relay_health) {
+        (
+            LocalConnectivity::Offline,
+            RelayHealthState::NoTrafficYet | RelayHealthState::Stale | RelayHealthState::Dead,
+        ) => prior_consecutive_offline_ticks.saturating_add(1),
+        _ => 0,
     };
 
     if new_count >= ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD {
@@ -2021,14 +2037,23 @@ impl VpnConnection {
                         // touching adapter properties — `LocalConnectivity::probe`
                         // goes Offline (`No internet access` in NLM terms) when
                         // the IPv4 default route disappears. Firing here
-                        // surfaces a clear retry message in ~3s instead of the
-                        // ~22s the user otherwise waits for the relay-dead
+                        // surfaces a clear retry message in seconds instead of
+                        // the ~22s the user otherwise waits for the relay-dead
                         // path to declare the same outcome.
+                        //
+                        // Two-signal gate: the offline counter only increments
+                        // when relay health is non-Healthy as well. A Healthy
+                        // relay means we've recently received an inbound
+                        // packet through this NIC, which overrides any NLM
+                        // false-positive (captive portals, virtual adapters,
+                        // hidden-SSID corp networks). See `watchdog_tick`.
                         if watchdog_armed {
                             let probe = super::local_connectivity::probe();
+                            let relay_health_now = relay_health_monitor.relay_health();
                             match watchdog_tick(
                                 connect_started_at.elapsed(),
                                 probe,
+                                relay_health_now,
                                 watchdog_offline_ticks,
                             ) {
                                 WatchdogTickAction::Continue { consecutive_offline_ticks } => {
@@ -2072,6 +2097,15 @@ impl VpnConnection {
                                             guard.cleanup_all(cleanup_reason);
                                         }
                                         break;
+                                    } else {
+                                        // State already left Connected — a concurrent
+                                        // path (user-initiated disconnect, the relay-
+                                        // health monitor beating us to the transition)
+                                        // owns teardown. Disarm so the next tick doesn't
+                                        // re-enter Abort with the same prior counter and
+                                        // spam log::error every 500ms until stop_flag.
+                                        watchdog_armed = false;
+                                        watchdog_offline_ticks = 0;
                                     }
                                 }
                             }
@@ -2785,12 +2819,24 @@ mod tests {
         assert_eq!(action, RelayHealthAction::Continue { relay_status: None });
     }
 
+    /// Default relay health for tests where the relay-health gate isn't
+    /// the variable under test. `NoTrafficYet` is what the relay reports
+    /// during the early connect window before the first inbound packet,
+    /// which matches the realistic scenario the watchdog is designed for.
+    const TEST_RELAY_NOT_HEALTHY: super::super::udp_relay::RelayHealthState =
+        super::super::udp_relay::RelayHealthState::NoTrafficYet;
+
     #[test]
     fn test_watchdog_continues_on_first_offline_tick() {
         // One offline tick alone must not fire — we only abort on a sustained
         // outage. The counter should bump from 0 to 1 and the caller should
         // store it for next tick.
-        let action = watchdog_tick(Duration::from_secs(1), LocalConnectivity::Offline, 0);
+        let action = watchdog_tick(
+            Duration::from_secs(1),
+            LocalConnectivity::Offline,
+            TEST_RELAY_NOT_HEALTHY,
+            0,
+        );
 
         assert_eq!(
             action,
@@ -2805,7 +2851,12 @@ mod tests {
         // A brief Offline → Reachable sequence must NOT push the watchdog past
         // its threshold. This covers Wi-Fi handover, momentary route refresh,
         // sleep/resume settle: all transient and should be ignored.
-        let after_offline_1 = watchdog_tick(Duration::from_secs(1), LocalConnectivity::Offline, 0);
+        let after_offline_1 = watchdog_tick(
+            Duration::from_secs(1),
+            LocalConnectivity::Offline,
+            TEST_RELAY_NOT_HEALTHY,
+            0,
+        );
         let count_after_offline = match after_offline_1 {
             WatchdogTickAction::Continue {
                 consecutive_offline_ticks,
@@ -2816,6 +2867,7 @@ mod tests {
         let after_offline_2 = watchdog_tick(
             Duration::from_secs(2),
             LocalConnectivity::Offline,
+            TEST_RELAY_NOT_HEALTHY,
             count_after_offline,
         );
         let count_after_offline_2 = match after_offline_2 {
@@ -2829,6 +2881,7 @@ mod tests {
         let after_reachable = watchdog_tick(
             Duration::from_secs(3),
             LocalConnectivity::Reachable,
+            TEST_RELAY_NOT_HEALTHY,
             count_after_offline_2,
         );
         assert_eq!(
@@ -2850,7 +2903,12 @@ mod tests {
         let mut count = 0u32;
         for tick in 1..ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD {
             let elapsed = Duration::from_millis(500 * tick as u64);
-            match watchdog_tick(elapsed, LocalConnectivity::Offline, count) {
+            match watchdog_tick(
+                elapsed,
+                LocalConnectivity::Offline,
+                TEST_RELAY_NOT_HEALTHY,
+                count,
+            ) {
                 WatchdogTickAction::Continue {
                     consecutive_offline_ticks,
                 } => count = consecutive_offline_ticks,
@@ -2863,7 +2921,12 @@ mod tests {
 
         let final_elapsed =
             Duration::from_millis(500 * ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD as u64);
-        let action = watchdog_tick(final_elapsed, LocalConnectivity::Offline, count);
+        let action = watchdog_tick(
+            final_elapsed,
+            LocalConnectivity::Offline,
+            TEST_RELAY_NOT_HEALTHY,
+            count,
+        );
 
         match action {
             WatchdogTickAction::Abort {
@@ -2890,13 +2953,19 @@ mod tests {
     #[test]
     fn test_watchdog_does_not_fire_on_unknown_probe() {
         // `Unknown` is treated as a probe failure (NLM API hung,
-        // non-Windows build, hint=Unknown), NOT as offline. Mirrors the
-        // existing semantic in `classify_relay_health` — a flaky NLM API
-        // must not be allowed to abort an otherwise-healthy connect.
+        // non-Windows build, hint=Unknown, hint=Hidden), NOT as offline.
+        // Mirrors the existing semantic in `classify_relay_health` — a
+        // flaky NLM API must not be allowed to abort an otherwise-healthy
+        // connect.
         let mut count = 0u32;
         for tick in 1..(ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD * 4) {
             let elapsed = Duration::from_millis(500 * tick as u64);
-            match watchdog_tick(elapsed, LocalConnectivity::Unknown, count) {
+            match watchdog_tick(
+                elapsed,
+                LocalConnectivity::Unknown,
+                TEST_RELAY_NOT_HEALTHY,
+                count,
+            ) {
                 WatchdogTickAction::Continue {
                     consecutive_offline_ticks,
                 } => {
@@ -2930,6 +2999,7 @@ mod tests {
         let action = watchdog_tick(
             elapsed,
             LocalConnectivity::Offline,
+            TEST_RELAY_NOT_HEALTHY,
             ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD + 100,
         );
 
@@ -2948,7 +3018,12 @@ mod tests {
         // offlines mid-session are a different problem (handled by the
         // existing relay-health classifier).
         let elapsed = Duration::from_secs(600);
-        let action = watchdog_tick(elapsed, LocalConnectivity::Offline, 0);
+        let action = watchdog_tick(
+            elapsed,
+            LocalConnectivity::Offline,
+            TEST_RELAY_NOT_HEALTHY,
+            0,
+        );
 
         assert_eq!(
             action,
@@ -2965,6 +3040,7 @@ mod tests {
         let action = watchdog_tick(
             Duration::from_secs(2),
             LocalConnectivity::Reachable,
+            TEST_RELAY_NOT_HEALTHY,
             ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD - 1,
         );
 
@@ -2973,6 +3049,68 @@ mod tests {
             WatchdogTickAction::Continue {
                 consecutive_offline_ticks: 0,
             }
+        );
+    }
+
+    #[test]
+    fn test_watchdog_does_not_fire_when_relay_is_healthy() {
+        // Relay-health gate (Codex P1): NLM Offline alone is a heuristic
+        // and can be wrong on captive/filtered networks, virtual-adapter
+        // configs, and certain Wi-Fi drivers. `RelayHealthState::Healthy`
+        // means we've recently received an inbound packet from the relay
+        // — positive ground truth that internet is working through this
+        // NIC right now. In that case, even a sustained Offline NLM
+        // signal must NOT push the watchdog past threshold.
+        use super::super::udp_relay::RelayHealthState;
+        let mut count = 0u32;
+        for tick in 1..(ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD * 4) {
+            let elapsed = Duration::from_millis(500 * tick as u64);
+            match watchdog_tick(
+                elapsed,
+                LocalConnectivity::Offline,
+                RelayHealthState::Healthy,
+                count,
+            ) {
+                WatchdogTickAction::Continue {
+                    consecutive_offline_ticks,
+                } => {
+                    assert_eq!(
+                        consecutive_offline_ticks, 0,
+                        "relay Healthy must keep the counter at 0 even when probe is Offline (tick {}, count {})",
+                        tick, consecutive_offline_ticks
+                    );
+                    count = consecutive_offline_ticks;
+                }
+                WatchdogTickAction::Disarmed => return,
+                WatchdogTickAction::Abort { .. } => panic!(
+                    "watchdog must not fire when relay is Healthy (tick {})",
+                    tick
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_watchdog_resets_on_relay_recovery_to_healthy() {
+        // Counter sits one short of threshold (relay was Stale, NLM Offline,
+        // counter has been climbing). Then the relay flips back to Healthy
+        // — internet has recovered through some other path before NLM
+        // caught up — the next tick must reset the counter to 0 and not
+        // fire. Guards against stale state racing the recovery.
+        use super::super::udp_relay::RelayHealthState;
+        let action = watchdog_tick(
+            Duration::from_secs(2),
+            LocalConnectivity::Offline,
+            RelayHealthState::Healthy,
+            ADAPTER_WATCHDOG_OFFLINE_TICK_THRESHOLD - 1,
+        );
+
+        assert_eq!(
+            action,
+            WatchdogTickAction::Continue {
+                consecutive_offline_ticks: 0,
+            },
+            "relay flipping back to Healthy must reset the offline-tick counter"
         );
     }
 
