@@ -1,9 +1,15 @@
-//! IPv6 binding crash recovery
+//! IPv6 leak-prevention crash recovery
 //!
-//! When SwiftTunnel disables IPv6 on the physical network adapter for split tunneling,
-//! it stores the original binding state in a marker file. If the app crashes before
-//! restoring that state, startup recovery restores the adapter to its exact prior
-//! configuration instead of blindly enabling IPv6.
+//! While connected, SwiftTunnel installs a Windows Firewall rule that blocks
+//! outbound IPv6. The marker file records that we did so (and which method we
+//! used) so a startup recovery pass can clean up after a crash without
+//! guessing at adapter state. Old installations used a different method
+//! (`Disable-NetAdapterBinding ms_tcpip6`); we keep the deserialization shape
+//! backwards-compatible so an upgrade across that boundary still recovers
+//! cleanly.
+
+pub const IPV6_BLOCK_RULE_NAME: &str = "SwiftTunnel-Block-IPv6-Outbound";
+pub const IPV6_BLOCK_REMOTE_IPS: &str = "2000::/3,64:ff9b::/96";
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -12,10 +18,29 @@ use std::path::PathBuf;
 /// Marker file name stored in %LOCALAPPDATA%/SwiftTunnel/
 const IPV6_MARKER_FILE: &str = "ipv6_disabled.marker";
 
+/// How SwiftTunnel prevented IPv6 leakage during the session this marker
+/// belongs to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DisableMethod {
+    /// Pre-2.0.15 method: `Disable-NetAdapterBinding -ComponentId ms_tcpip6`.
+    /// Causes an NDIS rebind which physically takes the adapter offline for
+    /// 2-10s on many real-world NICs (Realtek, USB-Ethernet, Parallels VirtIO,
+    /// some Intel) — users see "my Ethernet just turned off." Default for
+    /// markers that predate the method field.
+    #[default]
+    BindingDisable,
+    /// Current method: a Windows Firewall outbound block rule named
+    /// [`IPV6_BLOCK_RULE_NAME`] that drops public IPv6/NAT64 traffic. No
+    /// adapter rebind, no WMI involvement.
+    FirewallRule,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Ipv6Marker {
     adapter_name: String,
     originally_enabled: Option<bool>,
+    #[serde(default)]
+    method: DisableMethod,
 }
 
 impl Ipv6Marker {
@@ -23,6 +48,15 @@ impl Ipv6Marker {
         Self {
             adapter_name,
             originally_enabled: None,
+            method: DisableMethod::BindingDisable,
+        }
+    }
+
+    pub(crate) fn for_firewall_rule(adapter_name: String) -> Self {
+        Self {
+            adapter_name,
+            originally_enabled: None,
+            method: DisableMethod::FirewallRule,
         }
     }
 
@@ -30,12 +64,41 @@ impl Ipv6Marker {
         &self.adapter_name
     }
 
-    fn restore_command(&self) -> &'static str {
-        match self.originally_enabled {
-            Some(false) => {
-                "Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false 2>$null"
-            }
-            _ => "Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null",
+    pub fn method(&self) -> &DisableMethod {
+        &self.method
+    }
+
+    fn restore_command(&self) -> String {
+        match self.method {
+            DisableMethod::FirewallRule => format!(
+                r#"
+        $name = "{}"
+        $deleteOutput = & netsh.exe advfirewall firewall delete rule name="$name" 2>&1
+        $deleteExit = $LASTEXITCODE
+        $showOutput = & netsh.exe advfirewall firewall show rule name="$name" 2>&1
+        $showExit = $LASTEXITCODE
+        $deleteText = ($deleteOutput | Out-String).Trim()
+        $showText = ($showOutput | Out-String).Trim()
+
+        if ($showExit -eq 0) {{
+            Write-Error ('IPv6 block firewall rule still exists after delete attempt. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText)
+            exit 1
+        }}
+
+        if ($deleteExit -ne 0 -and $showText -notmatch 'No rules match') {{
+            Write-Error ('Could not verify IPv6 block firewall rule removal. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText + '. Show output: ' + $showText)
+            exit 1
+        }}
+        "#,
+                IPV6_BLOCK_RULE_NAME
+            ),
+            DisableMethod::BindingDisable => match self.originally_enabled {
+                Some(false) => {
+                    "Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false 2>$null".to_string()
+                }
+                _ => "Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null"
+                    .to_string(),
+            },
         }
     }
 }
@@ -192,22 +255,39 @@ pub fn has_ipv6_binding_native(_if_index: u32) -> Option<bool> {
 
 /// Write IPv6 disabled marker with adapter name and original binding state.
 pub fn write_ipv6_marker(adapter_name: &str) {
+    let marker = Ipv6Marker {
+        adapter_name: adapter_name.trim().to_string(),
+        originally_enabled: query_ipv6_binding_enabled(adapter_name),
+        method: DisableMethod::BindingDisable,
+    };
+    write_marker(&marker);
+}
+
+/// Write a marker indicating the firewall-rule method was used to block IPv6.
+/// Used by the modern disable path so a crash-recovery pass can run
+/// `netsh advfirewall firewall delete rule` to clean up.
+pub fn write_ipv6_marker_firewall(adapter_name: &str) {
+    let marker = Ipv6Marker::for_firewall_rule(adapter_name.trim().to_string());
+    write_marker(&marker);
+}
+
+fn write_marker(marker: &Ipv6Marker) {
     if let Some(marker_path) = get_marker_path() {
         if let Some(parent) = marker_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
-        let marker = Ipv6Marker {
-            adapter_name: adapter_name.trim().to_string(),
-            originally_enabled: query_ipv6_binding_enabled(adapter_name),
-        };
-        let payload =
-            serde_json::to_vec(&marker).unwrap_or_else(|_| adapter_name.as_bytes().to_vec());
+        let payload = serde_json::to_vec(marker)
+            .unwrap_or_else(|_| marker.adapter_name().as_bytes().to_vec());
 
         if let Err(e) = fs::write(&marker_path, payload) {
             log::warn!("Failed to write IPv6 marker file: {}", e);
         } else {
-            log::debug!("IPv6 marker written for adapter: {}", marker.adapter_name());
+            log::debug!(
+                "IPv6 marker written for adapter: {} (method: {:?})",
+                marker.adapter_name(),
+                marker.method()
+            );
         }
     }
 }
@@ -343,6 +423,28 @@ mod tests {
 
         let after_delete = read_ipv6_marker();
         assert_eq!(after_delete, None);
+    }
+
+    #[test]
+    fn test_firewall_rule_restore_command_references_block_rule_name() {
+        let marker = Ipv6Marker::for_firewall_rule("Ethernet".to_string());
+        let cmd = marker.restore_command();
+        assert!(cmd.contains(IPV6_BLOCK_RULE_NAME), "{}", cmd);
+        assert!(cmd.contains("netsh.exe advfirewall firewall delete rule"));
+        assert!(cmd.contains("netsh.exe advfirewall firewall show rule"));
+        assert!(cmd.contains("exit 1"));
+    }
+
+    #[test]
+    fn test_legacy_marker_round_trip_uses_binding_disable_method() {
+        // Markers written by pre-2.0.15 builds do not include the `method`
+        // field. They must deserialize as BindingDisable so the restore path
+        // runs Enable-NetAdapterBinding (matching the original behavior).
+        let legacy_payload = br#"{"adapter_name":"Ethernet","originally_enabled":true}"#;
+        let marker: Ipv6Marker = serde_json::from_slice(legacy_payload).unwrap();
+        assert_eq!(marker.method(), &DisableMethod::BindingDisable);
+        assert_eq!(marker.adapter_name(), "Ethernet");
+        assert!(marker.restore_command().contains("Enable-NetAdapterBinding"));
     }
 
     #[cfg(not(target_os = "windows"))]
