@@ -651,6 +651,35 @@ static LEAKED_THREADS: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_BYPASS: AtomicU64 = AtomicU64::new(0);
+
+/// Counter for tunneled packets that exceeded `MAX_PACKET_SIZE` and were
+/// truncated before forwarding to the relay. This can happen because we
+/// no longer disable LSO/TSO on the physical adapter (see comment in
+/// `start()`); the NIC may hand us a TCP super-segment up to 64KB. For
+/// Roblox traffic this is expected to be effectively zero (UDP for game
+/// data, small TCP for API), but we sample-log occurrences so unexpected
+/// truncation in the field is observable instead of silent.
+static TUNNEL_TRUNCATED_SUPER_SEGMENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Sample-log a tunneled-packet truncation so that frequent truncation
+/// doesn't spam stlog, but rare/first-time occurrences are visible.
+/// Logs the first 5 events and then on each power-of-two boundary
+/// (matching the `log_sampled_connect_event` cadence in connection.rs).
+fn log_super_segment_truncation_sampled(actual_len: usize) {
+    let event = TUNNEL_TRUNCATED_SUPER_SEGMENTS.fetch_add(1, Ordering::Relaxed) + 1;
+    if event <= 5 || event.is_power_of_two() {
+        log::warn!(
+            "Tunneled packet truncated: {} byte super-segment clamped to \
+             MAX_PACKET_SIZE={} (TCP super-segment via NIC LSO; tunnel \
+             correctness for this stream may degrade until OS reduces \
+             segment size). Event #{}",
+            actual_len,
+            MAX_PACKET_SIZE,
+            event
+        );
+    }
+}
+
 const V3_NO_INBOUND_WARNING_SECS: u64 = 10;
 
 /// Number of worker threads we had to detach via `mem::forget` because they
@@ -4643,6 +4672,9 @@ fn forward_tunneled_packet_from_reader(
     let forward_result = if ip_packet.len() >= 20 {
         PACKET_BUFFER.with(|buf| {
             let mut fix_buf = buf.borrow_mut();
+            if ip_packet.len() > MAX_PACKET_SIZE {
+                log_super_segment_truncation_sampled(ip_packet.len());
+            }
             let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
             clamp_tcp_mss_for_relay(&mut fix_buf[..pkt_len], relay.max_inner_packet_len());
@@ -5167,6 +5199,9 @@ fn run_packet_reader(
                     // Tunnel packet: dispatch to worker. (Copy only when tunneling.)
                     // Use ArrayVec for stack allocation - avoids heap alloc per packet
                     let mut packet_data: ArrayVec<u8, MAX_PACKET_SIZE> = ArrayVec::new();
+                    if data.len() > MAX_PACKET_SIZE {
+                        log_super_segment_truncation_sampled(data.len());
+                    }
                     let copy_len = data.len().min(MAX_PACKET_SIZE);
                     packet_data.try_extend_from_slice(&data[..copy_len]).ok();
 
@@ -5478,6 +5513,9 @@ fn run_packet_worker(
                     let forward_result = if ip_packet.len() >= 20 {
                         PACKET_BUFFER.with(|buf| {
                             let mut fix_buf = buf.borrow_mut();
+                            if ip_packet.len() > MAX_PACKET_SIZE {
+                                log_super_segment_truncation_sampled(ip_packet.len());
+                            }
                             let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
                             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
                             clamp_tcp_mss_for_relay(
