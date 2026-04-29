@@ -240,14 +240,27 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   fetchState: async () => {
     try {
       const resp = await vpnGetState();
-      set({
-        state: resp.state,
-        region: resp.region,
-        serverEndpoint: resp.server_endpoint,
-        assignedIp: resp.assigned_ip,
-        splitTunnelActive: resp.split_tunnel_active,
-        tunneledProcesses: resp.tunneled_processes,
-        error: resp.error,
+      set((current) => {
+        const staleReadyPoll =
+          resp.state === "disconnected" &&
+          resp.error === null &&
+          current.state !== "disconnecting" &&
+          (current.connectAttemptInFlight ||
+            (current.state === "error" && current.error !== null));
+
+        if (staleReadyPoll) {
+          return {};
+        }
+
+        return {
+          state: resp.state,
+          region: resp.region,
+          serverEndpoint: resp.server_endpoint,
+          assignedIp: resp.assigned_ip,
+          splitTunnelActive: resp.split_tunnel_active,
+          tunneledProcesses: resp.tunneled_processes,
+          error: resp.error,
+        };
       });
     } catch (e) {
       set({ error: String(e) });
