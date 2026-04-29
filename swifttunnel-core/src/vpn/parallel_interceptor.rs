@@ -3865,16 +3865,42 @@ impl ParallelInterceptor {
 
         self.ensure_winpkfilter_binding()?;
 
-        // Disable TSO/LSO on physical adapter BEFORE starting packet capture
-        // This prevents the NIC from creating super-packets that exceed our buffer size
-        self.disable_adapter_offload()?;
+        // Why we no longer disable LSO/TSO here (2.0.21):
+        //
+        // The previous "disable LSO via Set-NetAdapterAdvancedProperty"
+        // approach was the last remaining adapter-property toggle in the
+        // connect path. Each `Set-NetAdapterAdvancedProperty` call notifies
+        // the NDIS stack via WMI, and on Realtek / Killer / USB-Ethernet /
+        // some Intel NICs that triggers a transient adapter reset to apply
+        // the new value — the same family of failure mode documented for
+        // `Disable-NetAdapterBinding ms_tcpip6` further down. With users
+        // reporting "SwiftTunnel kills my internet when I press Connect"
+        // (2026-04 tushi report: route disappeared 4s into the session
+        // while the background TSO-disable script was still landing
+        // changes), the cost of bouncing the NIC turned out to be far
+        // worse than the buffer-truncation correctness concern that
+        // motivated the disable.
+        //
+        // What this means for tunneled traffic: super-segments larger than
+        // MAX_PACKET_SIZE (1600 bytes, see top of file) will be truncated
+        // in the forwarding path. In practice this does not affect Roblox:
+        // game traffic is UDP (which has no segmentation offload) and the
+        // TCP tunneling we do is for small Roblox API/bootstrap calls
+        // whose payloads are well under the MTU. If a future use case
+        // tunnels large TCP transfers and runs into super-segment
+        // truncation, the right fix is a larger forwarding buffer or
+        // software segmentation in the forward path — not bringing this
+        // disable back.
+        //
+        // Existing on-disk TSO markers from older builds are still
+        // restored on app launch by `tso_recovery::recover_tso_on_startup`,
+        // so users upgrading from <=2.0.20 don't end up with LSO stuck off.
 
-        // Disable IPv6 on physical adapter - SwiftTunnel is IPv4-only
-        // This prevents Roblox/Windows from preferring IPv6 and bypassing our tunnel
-        if let Err(e) = self.disable_ipv6() {
-            self.enable_adapter_offload();
-            return Err(e);
-        }
+        // Disable IPv6 on physical adapter - SwiftTunnel is IPv4-only.
+        // This uses a netsh advfirewall rule (non-link-bouncing); the
+        // historical link-bouncing alternative is documented at
+        // `disable_ipv6_with_runner`.
+        self.disable_ipv6()?;
 
         self.stop_flag.store(false, Ordering::Release);
         // Reset the panic flag alongside stop_flag. `workers_panicked` is
@@ -4120,8 +4146,14 @@ impl ParallelInterceptor {
             injected
         );
 
-        // Re-enable TSO/LSO on physical adapter
-        self.enable_adapter_offload();
+        // We no longer disable LSO on connect (see comment in `start`), so
+        // there's nothing to re-enable here for fresh sessions. Calling
+        // `enable_adapter_offload` regardless is still safe — the method
+        // short-circuits when `tso_was_disabled` is false — but we leave it
+        // out so the disconnect path doesn't issue any
+        // `Set-NetAdapterAdvancedProperty` calls at all and runs faster.
+        // Marker-driven recovery for legacy installs continues to run via
+        // `tso_recovery::recover_tso_on_startup` at app launch.
 
         // Re-enable IPv6 on physical adapter
         self.enable_ipv6();
