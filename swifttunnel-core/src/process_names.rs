@@ -25,6 +25,14 @@ fn is_roblox_process_name_lowercase(process_name_lower: &str) -> bool {
         .any(|candidate_stem| candidate_stem == stem)
 }
 
+fn is_roblox_tunnel_alias_lowercase(alias_lower: &str) -> bool {
+    process_stem(alias_lower) == "roblox" || is_roblox_process_name_lowercase(alias_lower)
+}
+
+fn is_generic_store_host_lowercase(name_lower: &str) -> bool {
+    process_stem(name_lower) == "windows10universal"
+}
+
 pub fn process_name_matches_alias(process_name: &str, alias: &str) -> bool {
     let process_name = basename(process_name).to_ascii_lowercase();
     let alias = basename(alias).to_ascii_lowercase();
@@ -32,13 +40,17 @@ pub fn process_name_matches_alias(process_name: &str, alias: &str) -> bool {
 }
 
 pub fn process_name_matches_tunnel_app(process_name_lower: &str, tunnel_app_lower: &str) -> bool {
+    if is_generic_store_host_lowercase(process_name_lower)
+        || is_generic_store_host_lowercase(tunnel_app_lower)
+    {
+        return false;
+    }
+
     let name_stem = process_stem(process_name_lower);
     let app_stem = process_stem(tunnel_app_lower);
     name_stem == app_stem
-        || name_stem.contains(app_stem)
-        || app_stem.contains(name_stem)
         || (is_roblox_process_name_lowercase(process_name_lower)
-            && is_roblox_process_name_lowercase(tunnel_app_lower))
+            && is_roblox_tunnel_alias_lowercase(tunnel_app_lower))
 }
 
 pub fn process_name_matches_any_tunnel_app<'a>(
@@ -71,12 +83,28 @@ mod tests {
             assert!(is_roblox_process_name(name), "expected {name} to match");
         }
 
-        // Windows10Universal.exe is the generic UWP app host — Photos, Calculator, every
-        // Microsoft Store app runs under that name. Microsoft Store Roblox actually runs
-        // as RobloxPlayerBeta.exe, so the host name is never the right tunnel signal.
+        // Windows10Universal.exe is the generic UWP app host: Photos, Calculator, every
+        // Microsoft Store app runs under that name. It is not tunnel-eligible.
         assert!(!is_roblox_process_name("Windows10Universal.exe"));
         assert!(!is_roblox_process_name("chrome.exe"));
         assert!(!is_roblox_process_name("robloxhelper.exe"));
+    }
+
+    #[test]
+    fn test_is_roblox_process_name_rejects_store_package_path() {
+        assert!(!is_roblox_process_name(
+            r"C:\Program Files\WindowsApps\ROBLOXCORPORATION.ROBLOX_2.617.655.0_x64__55nm5eh3cm0pr\Windows10Universal.exe"
+        ));
+        assert!(!is_roblox_process_name(
+            r"\Device\HarddiskVolume3\Program Files\WindowsApps\ROBLOXCORPORATION.ROBLOX_2.617.655.0_x64__55nm5eh3cm0pr\Windows10Universal.exe"
+        ));
+        assert!(!is_roblox_process_name(
+            r"C:\Program Files\WindowsApps\Microsoft.MicrosoftSolitaireCollection_4.20.0.0_x64__8wekyb3d8bbwe\Windows10Universal.exe"
+        ));
+        assert!(!process_name_matches_tunnel_app(
+            r"c:\program files\windowsapps\microsoft.mahjong_1.0.0.0_x64__8wekyb3d8bbwe\windows10universal.exe",
+            "robloxplayerbeta.exe"
+        ));
     }
 
     #[test]
@@ -90,5 +118,41 @@ mod tests {
             "roblox"
         ));
         assert!(!process_name_matches_tunnel_app("chrome.exe", "roblox"));
+        assert!(!process_name_matches_tunnel_app(
+            "robloxhelper.exe",
+            "roblox"
+        ));
+    }
+
+    #[test]
+    fn test_process_name_matches_tunnel_app_rejects_substring_lookalikes() {
+        assert!(!process_name_matches_tunnel_app(
+            "player.exe",
+            "robloxplayerbeta.exe"
+        ));
+        assert!(!process_name_matches_tunnel_app(
+            "window.exe",
+            "windows10universal.exe"
+        ));
+        assert!(!process_name_matches_tunnel_app(
+            "robloxstudiohelper.exe",
+            "robloxstudio.exe"
+        ));
+    }
+
+    #[test]
+    fn test_process_name_matches_tunnel_app_rejects_store_package_identity() {
+        assert!(!process_name_matches_tunnel_app(
+            r"c:\program files\windowsapps\robloxcorporation.roblox_2.617.655.0_x64__55nm5eh3cm0pr\windows10universal.exe",
+            "robloxplayerbeta.exe"
+        ));
+        assert!(!process_name_matches_tunnel_app(
+            "windows10universal.exe",
+            "robloxplayerbeta.exe"
+        ));
+        assert!(!process_name_matches_tunnel_app(
+            "windows10universal.exe",
+            "windows10universal.exe"
+        ));
     }
 }

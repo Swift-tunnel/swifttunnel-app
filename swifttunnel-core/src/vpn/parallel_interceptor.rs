@@ -5584,9 +5584,7 @@ fn collect_tunnel_tcp_ports_for_api_tunneling(
         .iter()
         .filter_map(|(pid, name)| {
             let name_lower = name.to_lowercase();
-            if tunnel_apps.contains(&name_lower)
-                || process_name_matches_any_tunnel_app(&name_lower, tunnel_apps)
-            {
+            if process_name_matches_any_tunnel_app(&name_lower, tunnel_apps) {
                 Some(*pid)
             } else {
                 None
@@ -6419,8 +6417,7 @@ type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
 fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool {
     let name_lower = name.to_lowercase();
-    snapshot.tunnel_apps.contains(&name_lower)
-        || process_name_matches_any_tunnel_app(&name_lower, &snapshot.tunnel_apps)
+    process_name_matches_any_tunnel_app(&name_lower, &snapshot.tunnel_apps)
 }
 
 fn tcp_owner_matches_tunnel_scope<P>(
@@ -10804,6 +10801,44 @@ mod tests {
             &mut inline_cache,
             true,
         ));
+    }
+
+    #[test]
+    fn test_tunnel_scope_rejects_legacy_store_host_exact_match() {
+        let tunnel_apps: HashSet<String> =
+            ["windows10universal.exe".to_string()].into_iter().collect();
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: tunnel_apps.clone(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        assert!(!process_name_in_tunnel_scope(
+            "Windows10Universal.exe",
+            &snapshot
+        ));
+
+        let pid = 3333;
+        let port = 53004;
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(10, 0, 0, 12), port, Protocol::Tcp),
+            pid,
+        );
+        let mut pid_names = HashMap::new();
+        pid_names.insert(pid, "Windows10Universal.exe".to_string());
+
+        assert!(
+            collect_tunnel_tcp_ports_for_api_tunneling(&connections, &pid_names, &tunnel_apps)
+                .is_empty()
+        );
     }
 
     #[test]

@@ -1824,7 +1824,8 @@ impl VpnConnection {
 
                                     // STEP 2: Register with the driver's process cache (also wakes cache refresher)
                                     let driver_guard = driver.lock().await;
-                                    driver_guard.register_process_immediate(event.pid, event.name.clone());
+                                    driver_guard
+                                        .register_process_immediate(event.pid, event.name.clone());
                                     drop(driver_guard);
                                     etw_events_received = true;
                                 }

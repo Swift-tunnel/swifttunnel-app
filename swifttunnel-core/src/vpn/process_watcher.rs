@@ -21,7 +21,7 @@
 //! - Administrator privileges (for kernel-level ETW provider)
 //! - Windows 10 or later
 
-use crate::process_names::{is_roblox_process_name, process_name_matches_alias};
+use crate::process_names::process_name_matches_any_tunnel_app;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::RwLock;
 use std::collections::HashSet;
@@ -422,11 +422,7 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
 }
 
 fn should_watch_process(process_name_lower: &str, watch_list: &HashSet<String>) -> bool {
-    watch_list.iter().any(|watched_process| {
-        process_name_matches_alias(process_name_lower, watched_process)
-            || (is_roblox_process_name(process_name_lower)
-                && is_roblox_process_name(watched_process))
-    })
+    process_name_matches_any_tunnel_app(process_name_lower, watch_list)
 }
 
 /// Parse process start event from EVENT_RECORD
@@ -667,5 +663,28 @@ mod tests {
         ));
         assert!(!should_watch_process("chrome.exe", &watch_list));
         assert!(!should_watch_process("player.exe", &watch_list));
+    }
+
+    #[test]
+    fn test_should_watch_process_rejects_store_roblox_package_path() {
+        let watch_list: HashSet<String> =
+            ["robloxplayerbeta.exe".to_string()].into_iter().collect();
+
+        assert!(!should_watch_process(
+            r"c:\program files\windowsapps\robloxcorporation.roblox_2.617.655.0_x64__55nm5eh3cm0pr\windows10universal.exe",
+            &watch_list
+        ));
+        assert!(!should_watch_process("windows10universal.exe", &watch_list));
+        assert!(!should_watch_process(
+            r"c:\program files\windowsapps\microsoft.microsoftsolitairecollection_4.20.0.0_x64__8wekyb3d8bbwe\windows10universal.exe",
+            &watch_list
+        ));
+
+        let legacy_watch_list: HashSet<String> =
+            ["windows10universal.exe".to_string()].into_iter().collect();
+        assert!(!should_watch_process(
+            "windows10universal.exe",
+            &legacy_watch_list
+        ));
     }
 }

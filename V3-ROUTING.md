@@ -86,6 +86,7 @@ Inbound (Relay → Client):
 | `src/vpn/udp_relay.rs` | UDP relay client (session, keepalive, forward/receive) |
 | `src/vpn/connection.rs` | `connect_v3()` and `setup_v3_split_tunnel()` |
 | `src/vpn/parallel_interceptor.rs` | `run_v3_inbound_receiver()` for receiving relay responses |
+| `src/process_names.rs` | Roblox process-name rules for Win32 player/studio detection |
 | `src/settings.rs` | `RoutingMode::V3` enum variant |
 
 ### UdpRelay Struct
@@ -110,6 +111,10 @@ pub struct UdpRelay {
 - If the requested region has a manual server pin, Auto Route starts there and uses the pinned server. Pinned regions are scored by the pinned server's latency, not by another sibling server.
 - The periodic server ping test updates the live auto-router candidate snapshot, so relay switches use the same fresh latency data shown in the UI.
 - After Roblox game-server region detection, the auto-router still targets the matching SwiftTunnel region and picks the lowest-latency relay inside that region, honoring any forced server override.
+
+### Roblox Process Identity
+- Win32 Roblox player/studio executables are matched by exact process stem or known Roblox alias only; broad substring matches are not tunnel signals.
+- Microsoft Store/UWP Roblox is intentionally not tunnel-eligible because it runs under the generic `Windows10Universal.exe` host used by unrelated Store apps.
 
 ## Server Side
 

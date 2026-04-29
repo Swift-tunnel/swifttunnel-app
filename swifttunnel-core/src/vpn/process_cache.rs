@@ -247,12 +247,6 @@ impl ProcessSnapshot {
         let mut tunnel_pids = AHashSet::new();
 
         for (&pid, name) in pid_names {
-            // Exact match - O(1) HashSet lookup
-            if tunnel_apps.contains(name) {
-                tunnel_pids.insert(pid);
-                continue;
-            }
-
             if process_name_matches_any_tunnel_app(name, tunnel_apps) {
                 tunnel_pids.insert(pid);
             }
@@ -1054,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_tunnel_pids_exact_and_partial_match() {
+    fn test_compute_tunnel_pids_exact_and_roblox_alias_match() {
         let mut pid_names = HashMap::new();
         pid_names.insert(1, "robloxplayerbeta.exe".to_string());
         pid_names.insert(2, "robloxapp.exe".to_string());
@@ -1070,7 +1064,7 @@ mod tests {
         assert!(tunnel_pids.contains(&1), "Exact match should be tunneled");
         assert!(
             tunnel_pids.contains(&2),
-            "Stem contains match should be tunneled"
+            "Known Roblox alias should be tunneled"
         );
         assert!(
             !tunnel_pids.contains(&3),
@@ -1139,6 +1133,31 @@ mod tests {
         );
         assert!(snap.is_tunnel_pid_public(pid));
         assert!(snap.tunnel_pids.contains(&pid));
+    }
+
+    #[test]
+    fn test_register_process_immediate_rejects_store_roblox_host_path() {
+        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()]);
+        let pid = 4445;
+        let identity = r"C:\Program Files\WindowsApps\ROBLOXCORPORATION.ROBLOX_2.617.655.0_x64__55nm5eh3cm0pr\Windows10Universal.exe";
+
+        cache.register_process_immediate(pid, identity.to_string());
+
+        let snap = cache.get_snapshot();
+        assert!(!snap.is_tunnel_pid_public(pid));
+        assert!(!snap.tunnel_pids.contains(&pid));
+    }
+
+    #[test]
+    fn test_register_process_immediate_rejects_legacy_store_host_entry() {
+        let cache = LockFreeProcessCache::new(vec!["windows10universal.exe".to_string()]);
+        let pid = 4446;
+
+        cache.register_process_immediate(pid, "Windows10Universal.exe".to_string());
+
+        let snap = cache.get_snapshot();
+        assert!(!snap.is_tunnel_pid_public(pid));
+        assert!(!snap.tunnel_pids.contains(&pid));
     }
 
     #[test]
