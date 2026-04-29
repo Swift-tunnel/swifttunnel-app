@@ -24,6 +24,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// How long an ETW/process-watcher registration remains authoritative when the
+/// Windows owner tables have not published any sockets for that PID yet.
+///
+/// This covers the launch race where Roblox is detected, then the next cache
+/// refresh sees no UDP/TCP endpoints and would otherwise erase the PID before
+/// the first game packet is classified.
+const IMMEDIATE_PROCESS_RETENTION: Duration = Duration::from_secs(45);
+
+#[derive(Clone)]
+struct ImmediateProcessRegistration {
+    name: String,
+    registered_at: Instant,
+}
+
 // ============================================================================
 // GAME SERVER IP RANGES (for V2 hybrid routing)
 // ============================================================================
@@ -487,6 +501,9 @@ pub struct LockFreeProcessCache {
     explicit_tunnel_tcp_ports: Mutex<AHashSet<u16>>,
     /// Last time each API-tunnel TCP port was observed in the owner table.
     explicit_tunnel_tcp_port_last_seen: Mutex<AHashMap<u16, Instant>>,
+    /// PIDs observed by ETW or another immediate source before owner-table
+    /// refreshes can see their sockets.
+    immediate_pid_names: Mutex<AHashMap<u32, ImmediateProcessRegistration>>,
 }
 
 impl LockFreeProcessCache {
@@ -544,7 +561,20 @@ impl LockFreeProcessCache {
             explicit_tunnel_udp_ports: Mutex::new(AHashSet::new()),
             explicit_tunnel_tcp_ports: Mutex::new(AHashSet::new()),
             explicit_tunnel_tcp_port_last_seen: Mutex::new(AHashMap::new()),
+            immediate_pid_names: Mutex::new(AHashMap::new()),
         }
+    }
+
+    fn merge_recent_immediate_processes(&self, pid_names: &mut AHashMap<u32, String>) {
+        let now = Instant::now();
+        let mut immediate = self.immediate_pid_names.lock();
+        immediate.retain(|&pid, entry| {
+            let retain = now.duration_since(entry.registered_at) <= IMMEDIATE_PROCESS_RETENTION;
+            if retain {
+                pid_names.entry(pid).or_insert_with(|| entry.name.clone());
+            }
+            retain
+        });
     }
 
     /// Get current snapshot (lock-free!)
@@ -574,9 +604,10 @@ impl LockFreeProcessCache {
     pub fn update(
         &self,
         connections: AHashMap<ConnectionKey, u32>,
-        pid_names: AHashMap<u32, String>,
+        mut pid_names: AHashMap<u32, String>,
     ) {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
+        self.merge_recent_immediate_processes(&mut pid_names);
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports) = self.clone_explicit_ports();
         let new_snapshot = self.snapshot_from_parts(
@@ -599,10 +630,11 @@ impl LockFreeProcessCache {
     pub fn update_with_tcp_ports(
         &self,
         connections: AHashMap<ConnectionKey, u32>,
-        pid_names: AHashMap<u32, String>,
+        mut pid_names: AHashMap<u32, String>,
         tcp_ports: &[u16],
     ) {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
+        self.merge_recent_immediate_processes(&mut pid_names);
         let explicit_tunnel_tcp_ports = self.replace_explicit_tcp_ports_locked(tcp_ports);
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
@@ -625,11 +657,12 @@ impl LockFreeProcessCache {
     pub fn update_with_recent_tcp_ports(
         &self,
         connections: AHashMap<ConnectionKey, u32>,
-        pid_names: AHashMap<u32, String>,
+        mut pid_names: AHashMap<u32, String>,
         tcp_ports: &[u16],
         retain_for: Duration,
     ) {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
+        self.merge_recent_immediate_processes(&mut pid_names);
         let explicit_tunnel_tcp_ports =
             self.retain_recent_explicit_tcp_ports_locked(tcp_ports, retain_for);
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
@@ -715,6 +748,13 @@ impl LockFreeProcessCache {
         {
             return;
         }
+        self.immediate_pid_names.lock().insert(
+            pid,
+            ImmediateProcessRegistration {
+                name: name_lower.clone(),
+                registered_at: Instant::now(),
+            },
+        );
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Clone existing data and add the new process
@@ -736,6 +776,14 @@ impl LockFreeProcessCache {
             name,
             pid
         );
+    }
+
+    #[cfg(test)]
+    fn age_immediate_process_for_test(&self, pid: u32, age: Duration) {
+        let mut immediate = self.immediate_pid_names.lock();
+        if let Some(entry) = immediate.get_mut(&pid) {
+            entry.registered_at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+        }
     }
 
     /// Immediately register a UDP source port as tunnel-owned.
@@ -1117,6 +1165,44 @@ mod tests {
         );
         assert!(snap1.is_tunnel_pid_public(pid));
         assert!(snap1.tunnel_pids.contains(&pid));
+    }
+
+    #[test]
+    fn test_update_retains_recent_immediate_process_without_endpoint() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+        let pid = 2233;
+
+        cache.register_process_immediate(pid, "RobloxPlayerBeta.exe".to_string());
+        cache.update(HashMap::new(), HashMap::new());
+
+        let snap = cache.get_snapshot();
+        assert_eq!(
+            snap.pid_names.get(&pid).map(|s| s.as_str()),
+            Some("robloxplayerbeta.exe")
+        );
+        assert!(
+            snap.tunnel_pids.contains(&pid),
+            "recent ETW registration must survive an empty owner-table refresh"
+        );
+    }
+
+    #[test]
+    fn test_update_drops_expired_immediate_process_without_endpoint() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+        let pid = 2244;
+
+        cache.register_process_immediate(pid, "RobloxPlayerBeta.exe".to_string());
+        cache.age_immediate_process_for_test(
+            pid,
+            IMMEDIATE_PROCESS_RETENTION + Duration::from_secs(1),
+        );
+        cache.update(HashMap::new(), HashMap::new());
+
+        let snap = cache.get_snapshot();
+        assert!(
+            !snap.tunnel_pids.contains(&pid),
+            "expired immediate registrations must not tunnel unrelated PID reuse forever"
+        );
     }
 
     #[test]
