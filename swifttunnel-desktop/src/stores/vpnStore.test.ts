@@ -539,6 +539,31 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().connectAttemptInFlight).toBe(true);
   });
 
+  it("ignores stale disconnected polls while a connect attempt is pending", async () => {
+    vpnGetState.mockResolvedValue({
+      state: "disconnected",
+      region: null,
+      server_endpoint: null,
+      assigned_ip: null,
+      relay_auth_mode: null,
+      split_tunnel_active: false,
+      tunneled_processes: [],
+      error: null,
+    });
+
+    const useVpnStore = await loadStore();
+    useVpnStore.setState({
+      state: "fetching_config",
+      error: null,
+      connectAttemptInFlight: true,
+    });
+
+    await useVpnStore.getState().fetchState();
+
+    expect(useVpnStore.getState().state).toBe("fetching_config");
+    expect(useVpnStore.getState().connectAttemptInFlight).toBe(true);
+  });
+
   it("does not let stale disconnected events clear a visible connect error", async () => {
     const useVpnStore = await loadStore();
     useVpnStore.setState({
