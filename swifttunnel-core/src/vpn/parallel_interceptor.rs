@@ -3439,8 +3439,27 @@ impl ParallelInterceptor {
 
         log::info!("Disabling TSO/LSO on adapter: {}", friendly_name);
 
-        // Disable Large Send Offload v2 for IPv4 and IPv6
-        // These are the standard registry keywords for TSO/LSO
+        // Disable Large Send Offload v2 for IPv4 and IPv6.
+        //
+        // We deliberately do NOT touch *TCPChecksumOffload* / *UDPChecksumOffload*
+        // here, even though the pre-2026-04 builds did. Each
+        // `Set-NetAdapterAdvancedProperty` call notifies the NDIS stack via WMI
+        // and on many real-world NICs (Realtek, Killer, USB-Ethernet, some
+        // Intel) each property change triggers a transient adapter reset to
+        // apply the new value — the same family of failure mode documented for
+        // `Disable-NetAdapterBinding ms_tcpip6` further down. Six sequential
+        // resets in a few seconds was thrashing the NIC enough to drop the
+        // IPv4 default route mid-connect (tushi report, 2026-04 stlog: route
+        // disappeared 4s after a successful relay handshake while this
+        // background script was still landing changes). Cutting the script
+        // from 6 properties to 2 cuts that thrash by ~67%.
+        //
+        // Tunneled correctness does not depend on disabling NIC checksum
+        // offload — `fix_packet_checksums` (this file, ~7350) zeros and
+        // recomputes IP/TCP/UDP checksums in software on every forwarded
+        // packet (callers at ~4605 outbound and ~5443 inbound). Bypassed
+        // (non-tunneled) traffic is unaffected: the NIC stamps checksums on
+        // the way out exactly like it does on a non-SwiftTunnel system.
         let script = format!(
             r#"
             $ErrorActionPreference = 'SilentlyContinue'
@@ -3451,13 +3470,6 @@ impl ParallelInterceptor {
 
             # Disable LSO v2 IPv6
             Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 0 2>$null
-
-            # Also disable TCP/UDP checksum offload to ensure we handle all checksums
-            # (Some NICs have separate settings for Tx and Rx)
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv4' -RegistryValue 0 2>$null
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv4' -RegistryValue 0 2>$null
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv6' -RegistryValue 0 2>$null
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv6' -RegistryValue 0 2>$null
 
             Write-Host 'Offload disabled'
             "#,
@@ -3578,6 +3590,12 @@ impl ParallelInterceptor {
                 log::warn!("Failed to restore TSO - will retry on next launch");
             }
             None => {
+                // Fallback restore (no marker file). Mirrors the disable
+                // script: only LSO is re-enabled because that's all we
+                // disable. The marker-driven path (`restore_tso_from_marker`)
+                // still emits checksum-offload restore commands for legacy
+                // markers from pre-2026-04 builds, so users who upgrade
+                // mid-session don't end up with checksum offload stuck off.
                 let script = format!(
                     r#"
                     $ErrorActionPreference = 'SilentlyContinue'
@@ -3586,12 +3604,6 @@ impl ParallelInterceptor {
                     # Re-enable LSO v2
                     Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4' -RegistryValue 1 2>$null
                     Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 1 2>$null
-
-                    # Re-enable checksum offload
-                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv4' -RegistryValue 3 2>$null
-                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv4' -RegistryValue 3 2>$null
-                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv6' -RegistryValue 3 2>$null
-                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv6' -RegistryValue 3 2>$null
 
                     Write-Host 'Offload enabled'
                     "#,

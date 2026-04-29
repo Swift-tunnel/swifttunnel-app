@@ -22,6 +22,7 @@ pub mod auto_routing;
 pub mod connection;
 pub mod error_messages;
 pub mod ipv6_recovery;
+pub mod local_connectivity;
 pub mod parallel_interceptor;
 pub mod process_cache;
 pub mod process_performance;

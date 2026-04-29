@@ -59,13 +59,14 @@ impl TsoMarker {
             return captured_commands;
         }
 
+        // Legacy / no-captured-values fallback. Only re-enable LSO — checksum
+        // offload is no longer something we touch on connect, so we must not
+        // forcibly re-enable it here either (a user who manually disabled
+        // checksum offload for their own reasons would otherwise have it
+        // silently restored on next disconnect).
         vec![
             "Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4' -RegistryValue 1 2>$null".to_string(),
             "Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 1 2>$null".to_string(),
-            "Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv4' -RegistryValue 3 2>$null".to_string(),
-            "Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv4' -RegistryValue 3 2>$null".to_string(),
-            "Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*TCPChecksumOffloadIPv6' -RegistryValue 3 2>$null".to_string(),
-            "Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*UDPChecksumOffloadIPv6' -RegistryValue 3 2>$null".to_string(),
         ]
     }
 }
@@ -151,26 +152,24 @@ fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32>
 }
 
 fn capture_tso_marker(adapter_name: &str) -> TsoMarker {
+    // We only capture/restore LSO. Checksum-offload toggles are no longer
+    // performed on connect (they triggered repeated NIC resets that dropped
+    // the default route mid-connect), so capturing them would only cost
+    // 4 extra Get-NetAdapterAdvancedProperty calls — each up to
+    // ADAPTER_QUERY_TIMEOUT_SECS — for values we'll never use on restore.
+    //
+    // The struct still has the fields so on-disk markers from older builds
+    // still deserialize cleanly; their restore commands still run via
+    // `TsoMarker::restore_commands` so users upgrading mid-session don't end
+    // up with checksum offload stuck disabled.
     TsoMarker {
         adapter_name: adapter_name.trim().to_string(),
         lso_v2_ipv4: query_adapter_offload_value(adapter_name, "*LsoV2IPv4"),
         lso_v2_ipv6: query_adapter_offload_value(adapter_name, "*LsoV2IPv6"),
-        tcp_checksum_offload_ipv4: query_adapter_offload_value(
-            adapter_name,
-            "*TCPChecksumOffloadIPv4",
-        ),
-        udp_checksum_offload_ipv4: query_adapter_offload_value(
-            adapter_name,
-            "*UDPChecksumOffloadIPv4",
-        ),
-        tcp_checksum_offload_ipv6: query_adapter_offload_value(
-            adapter_name,
-            "*TCPChecksumOffloadIPv6",
-        ),
-        udp_checksum_offload_ipv6: query_adapter_offload_value(
-            adapter_name,
-            "*UDPChecksumOffloadIPv6",
-        ),
+        tcp_checksum_offload_ipv4: None,
+        udp_checksum_offload_ipv4: None,
+        tcp_checksum_offload_ipv6: None,
+        udp_checksum_offload_ipv6: None,
     }
 }
 
