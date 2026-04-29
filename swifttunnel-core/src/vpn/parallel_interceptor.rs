@@ -651,6 +651,35 @@ static LEAKED_THREADS: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_BYPASS: AtomicU64 = AtomicU64::new(0);
+
+/// Counter for tunneled packets that exceeded `MAX_PACKET_SIZE` and were
+/// truncated before forwarding to the relay. This can happen because we
+/// no longer disable LSO/TSO on the physical adapter (see comment in
+/// `start()`); the NIC may hand us a TCP super-segment up to 64KB. For
+/// Roblox traffic this is expected to be effectively zero (UDP for game
+/// data, small TCP for API), but we sample-log occurrences so unexpected
+/// truncation in the field is observable instead of silent.
+static TUNNEL_TRUNCATED_SUPER_SEGMENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Sample-log a tunneled-packet truncation so that frequent truncation
+/// doesn't spam stlog, but rare/first-time occurrences are visible.
+/// Logs the first 5 events and then on each power-of-two boundary
+/// (matching the `log_sampled_connect_event` cadence in connection.rs).
+fn log_super_segment_truncation_sampled(actual_len: usize) {
+    let event = TUNNEL_TRUNCATED_SUPER_SEGMENTS.fetch_add(1, Ordering::Relaxed) + 1;
+    if event <= 5 || event.is_power_of_two() {
+        log::warn!(
+            "Tunneled packet truncated: {} byte super-segment clamped to \
+             MAX_PACKET_SIZE={} (TCP super-segment via NIC LSO; tunnel \
+             correctness for this stream may degrade until OS reduces \
+             segment size). Event #{}",
+            actual_len,
+            MAX_PACKET_SIZE,
+            event
+        );
+    }
+}
+
 const V3_NO_INBOUND_WARNING_SECS: u64 = 10;
 
 /// Number of worker threads we had to detach via `mem::forget` because they
@@ -3865,16 +3894,42 @@ impl ParallelInterceptor {
 
         self.ensure_winpkfilter_binding()?;
 
-        // Disable TSO/LSO on physical adapter BEFORE starting packet capture
-        // This prevents the NIC from creating super-packets that exceed our buffer size
-        self.disable_adapter_offload()?;
+        // Why we no longer disable LSO/TSO here (2.0.21):
+        //
+        // The previous "disable LSO via Set-NetAdapterAdvancedProperty"
+        // approach was the last remaining adapter-property toggle in the
+        // connect path. Each `Set-NetAdapterAdvancedProperty` call notifies
+        // the NDIS stack via WMI, and on Realtek / Killer / USB-Ethernet /
+        // some Intel NICs that triggers a transient adapter reset to apply
+        // the new value — the same family of failure mode documented for
+        // `Disable-NetAdapterBinding ms_tcpip6` further down. With users
+        // reporting "SwiftTunnel kills my internet when I press Connect"
+        // (2026-04 tushi report: route disappeared 4s into the session
+        // while the background TSO-disable script was still landing
+        // changes), the cost of bouncing the NIC turned out to be far
+        // worse than the buffer-truncation correctness concern that
+        // motivated the disable.
+        //
+        // What this means for tunneled traffic: super-segments larger than
+        // MAX_PACKET_SIZE (1600 bytes, see top of file) will be truncated
+        // in the forwarding path. In practice this does not affect Roblox:
+        // game traffic is UDP (which has no segmentation offload) and the
+        // TCP tunneling we do is for small Roblox API/bootstrap calls
+        // whose payloads are well under the MTU. If a future use case
+        // tunnels large TCP transfers and runs into super-segment
+        // truncation, the right fix is a larger forwarding buffer or
+        // software segmentation in the forward path — not bringing this
+        // disable back.
+        //
+        // Existing on-disk TSO markers from older builds are still
+        // restored on app launch by `tso_recovery::recover_tso_on_startup`,
+        // so users upgrading from <=2.0.20 don't end up with LSO stuck off.
 
-        // Disable IPv6 on physical adapter - SwiftTunnel is IPv4-only
-        // This prevents Roblox/Windows from preferring IPv6 and bypassing our tunnel
-        if let Err(e) = self.disable_ipv6() {
-            self.enable_adapter_offload();
-            return Err(e);
-        }
+        // Disable IPv6 on physical adapter - SwiftTunnel is IPv4-only.
+        // This uses a netsh advfirewall rule (non-link-bouncing); the
+        // historical link-bouncing alternative is documented at
+        // `disable_ipv6_with_runner`.
+        self.disable_ipv6()?;
 
         self.stop_flag.store(false, Ordering::Release);
         // Reset the panic flag alongside stop_flag. `workers_panicked` is
@@ -4120,8 +4175,14 @@ impl ParallelInterceptor {
             injected
         );
 
-        // Re-enable TSO/LSO on physical adapter
-        self.enable_adapter_offload();
+        // We no longer disable LSO on connect (see comment in `start`), so
+        // there's nothing to re-enable here for fresh sessions. Calling
+        // `enable_adapter_offload` regardless is still safe — the method
+        // short-circuits when `tso_was_disabled` is false — but we leave it
+        // out so the disconnect path doesn't issue any
+        // `Set-NetAdapterAdvancedProperty` calls at all and runs faster.
+        // Marker-driven recovery for legacy installs continues to run via
+        // `tso_recovery::recover_tso_on_startup` at app launch.
 
         // Re-enable IPv6 on physical adapter
         self.enable_ipv6();
@@ -4611,6 +4672,9 @@ fn forward_tunneled_packet_from_reader(
     let forward_result = if ip_packet.len() >= 20 {
         PACKET_BUFFER.with(|buf| {
             let mut fix_buf = buf.borrow_mut();
+            if ip_packet.len() > MAX_PACKET_SIZE {
+                log_super_segment_truncation_sampled(ip_packet.len());
+            }
             let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
             clamp_tcp_mss_for_relay(&mut fix_buf[..pkt_len], relay.max_inner_packet_len());
@@ -5135,6 +5199,9 @@ fn run_packet_reader(
                     // Tunnel packet: dispatch to worker. (Copy only when tunneling.)
                     // Use ArrayVec for stack allocation - avoids heap alloc per packet
                     let mut packet_data: ArrayVec<u8, MAX_PACKET_SIZE> = ArrayVec::new();
+                    if data.len() > MAX_PACKET_SIZE {
+                        log_super_segment_truncation_sampled(data.len());
+                    }
                     let copy_len = data.len().min(MAX_PACKET_SIZE);
                     packet_data.try_extend_from_slice(&data[..copy_len]).ok();
 
@@ -5446,6 +5513,9 @@ fn run_packet_worker(
                     let forward_result = if ip_packet.len() >= 20 {
                         PACKET_BUFFER.with(|buf| {
                             let mut fix_buf = buf.borrow_mut();
+                            if ip_packet.len() > MAX_PACKET_SIZE {
+                                log_super_segment_truncation_sampled(ip_packet.len());
+                            }
                             let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
                             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
                             clamp_tcp_mss_for_relay(
