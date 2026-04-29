@@ -707,7 +707,7 @@ fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
-struct PowerShellRunOutput {
+struct CommandRunOutput {
     success: bool,
     timed_out: bool,
     exit_code: Option<i32>,
@@ -715,7 +715,7 @@ struct PowerShellRunOutput {
     stderr: String,
 }
 
-impl PowerShellRunOutput {
+impl CommandRunOutput {
     fn best_error_text(&self) -> Option<&str> {
         let stderr = self.stderr.trim();
         if !stderr.is_empty() {
@@ -728,9 +728,9 @@ impl PowerShellRunOutput {
         None
     }
 
-    fn summarize_failure(&self, timeout_secs: u64) -> String {
+    fn summarize_failure(&self, timeout_secs: u64, command_label: &str) -> String {
         if self.timed_out {
-            return format!("PowerShell timed out after {timeout_secs}s.");
+            return format!("{command_label} timed out after {timeout_secs}s.");
         }
 
         if let Some(text) = self.best_error_text() {
@@ -739,11 +739,11 @@ impl PowerShellRunOutput {
 
         if let Some(code) = self.exit_code {
             return format!(
-                "PowerShell exited with code {code} without emitting an error message."
+                "{command_label} exited with code {code} without emitting an error message."
             );
         }
 
-        "PowerShell exited without emitting an error message.".to_string()
+        format!("{command_label} exited without emitting an error message.")
     }
 }
 
@@ -2943,10 +2943,14 @@ impl ParallelInterceptor {
         Ok(())
     }
 
-    /// Run a PowerShell command with a timeout and capture output.
+    /// Run a command with a timeout and capture output.
     ///
     /// Uses spawn + try_wait loop to implement timeout without extra dependencies.
-    fn run_powershell_with_timeout_capture(script: &str, timeout_secs: u64) -> PowerShellRunOutput {
+    fn run_command_with_timeout_capture(
+        program: &str,
+        args: &[&str],
+        timeout_secs: u64,
+    ) -> CommandRunOutput {
         use std::io::Read;
         use std::time::{Duration, Instant};
 
@@ -2958,20 +2962,20 @@ impl ParallelInterceptor {
             out
         }
 
-        let mut child = match crate::hidden_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        let mut child = match crate::hidden_command(program)
+            .args(args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
         {
             Ok(child) => child,
             Err(e) => {
-                return PowerShellRunOutput {
+                return CommandRunOutput {
                     success: false,
                     timed_out: false,
                     exit_code: None,
                     stdout: String::new(),
-                    stderr: format!("Failed to spawn PowerShell: {e}"),
+                    stderr: format!("Failed to spawn {program}: {e}"),
                 };
             }
         };
@@ -2986,7 +2990,7 @@ impl ParallelInterceptor {
                     // Process finished - drain pipes
                     let stdout = read_pipe_to_string(child.stdout.take());
                     let stderr = read_pipe_to_string(child.stderr.take());
-                    return PowerShellRunOutput {
+                    return CommandRunOutput {
                         success: status.success(),
                         timed_out: false,
                         exit_code: status.code(),
@@ -2998,14 +3002,15 @@ impl ParallelInterceptor {
                     // Still running - check timeout
                     if start.elapsed() >= timeout {
                         log::warn!(
-                            "PowerShell timed out after {}s, killing process",
+                            "{} timed out after {}s, killing process",
+                            program,
                             timeout_secs
                         );
                         let _ = child.kill();
                         let _ = child.wait(); // Reap the process
                         let stdout = read_pipe_to_string(child.stdout.take());
                         let stderr = read_pipe_to_string(child.stderr.take());
-                        return PowerShellRunOutput {
+                        return CommandRunOutput {
                             success: false,
                             timed_out: true,
                             exit_code: None,
@@ -3017,18 +3022,18 @@ impl ParallelInterceptor {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
-                    log::warn!("Error waiting for PowerShell: {}", e);
+                    log::warn!("Error waiting for {}: {}", program, e);
                     let _ = child.kill();
                     let _ = child.wait(); // Reap the process
                     let stdout = read_pipe_to_string(child.stdout.take());
                     let stderr = read_pipe_to_string(child.stderr.take());
-                    return PowerShellRunOutput {
+                    return CommandRunOutput {
                         success: false,
                         timed_out: false,
                         exit_code: None,
                         stdout,
                         stderr: if stderr.trim().is_empty() {
-                            format!("Error waiting for PowerShell: {e}")
+                            format!("Error waiting for {program}: {e}")
                         } else {
                             stderr
                         },
@@ -3036,6 +3041,11 @@ impl ParallelInterceptor {
                 }
             }
         }
+    }
+
+    /// Run a PowerShell command with a timeout and capture output.
+    fn run_powershell_with_timeout_capture(script: &str, timeout_secs: u64) -> CommandRunOutput {
+        Self::run_command_with_timeout_capture("powershell", &["-Command", script], timeout_secs)
     }
 
     /// Run a PowerShell command with a timeout.
@@ -3368,7 +3378,7 @@ impl ParallelInterceptor {
                 output.stderr.trim()
             );
 
-            last_details = output.summarize_failure(Self::BINDING_TIMEOUT_SECS);
+            last_details = output.summarize_failure(Self::BINDING_TIMEOUT_SECS, "PowerShell");
 
             // Nonfatal failures (missing CIM support) should not be retried.
             if Self::is_nonfatal_winpkfilter_validation_failure(&last_details) {
@@ -3600,10 +3610,17 @@ impl ParallelInterceptor {
         self.tso_was_disabled = false;
     }
 
-    fn build_disable_ipv6_script(
-        _adapter_friendly_name: &str,
-        firewall_interface_type: &str,
-    ) -> String {
+    fn build_delete_ipv6_block_rule_args() -> Vec<String> {
+        vec![
+            "advfirewall".to_string(),
+            "firewall".to_string(),
+            "delete".to_string(),
+            "rule".to_string(),
+            format!("name={IPV6_BLOCK_RULE_NAME}"),
+        ]
+    }
+
+    fn build_add_ipv6_block_rule_args(firewall_interface_type: &str) -> Vec<String> {
         // Block outbound IPv6 via a Windows Firewall rule using `netsh advfirewall`.
         //
         // Why not `Disable-NetAdapterBinding -ComponentId ms_tcpip6` (the
@@ -3617,11 +3634,10 @@ impl ParallelInterceptor {
         //   15s+ on slow-WMI systems and was responsible for "Driver
         //   initialization timed out" errors on first connect.
         //
-        // Why netsh, not `New-NetFirewallRule`:
-        //   `New-NetFirewallRule` goes through the MSFT_NetFirewallRule WMI
-        //   provider, which has the same hang profile as the binding cmdlet.
-        //   `netsh advfirewall` is a native binary, returns in <100ms, and
-        //   doesn't touch the adapter binding.
+        // Why direct netsh, not PowerShell or `New-NetFirewallRule`:
+        //   PowerShell startup and firewall CIM/WMI providers can hang on
+        //   slow-WMI systems. `netsh advfirewall` is a native binary, returns
+        //   quickly, and doesn't touch the adapter binding.
         //
         // The rule blocks public IPv6 plus the well-known NAT64 prefix. It
         // deliberately leaves loopback, link-local, multicast, and ULA ranges
@@ -3630,39 +3646,27 @@ impl ParallelInterceptor {
         // adapter alias, only by interface type; when we know the selected
         // adapter kind we use that narrower type to avoid touching unrelated
         // interface classes.
-        format!(
-            r#"
-            $ErrorActionPreference = 'Continue'
-            $name = '{rule}'
-            $remoteIps = '{remote_ips}'
-            $interfaceType = '{interface_type}'
+        vec![
+            "advfirewall".to_string(),
+            "firewall".to_string(),
+            "add".to_string(),
+            "rule".to_string(),
+            format!("name={IPV6_BLOCK_RULE_NAME}"),
+            "dir=out".to_string(),
+            "action=block".to_string(),
+            format!("remoteip={IPV6_BLOCK_REMOTE_IPS}"),
+            format!("interfacetype={firewall_interface_type}"),
+            "profile=any".to_string(),
+        ]
+    }
 
-            # Idempotent: drop any pre-existing rule before adding so a stale
-            # half-configured rule never persists.
-            $null = & netsh.exe advfirewall firewall delete rule name="$name" 2>&1
-
-            $output = & netsh.exe advfirewall firewall add rule `
-                name="$name" `
-                dir=out action=block remoteip=$remoteIps interfacetype=$interfaceType profile=any 2>&1
-            $exit = $LASTEXITCODE
-
-            if ($exit -ne 0) {{
-                Write-Error ('netsh add rule exited ' + $exit + ': ' + (($output | Out-String).Trim()))
-                exit 1
-            }}
-
-            Write-Output 'IPv6 outbound blocked via firewall rule'
-            exit 0
-            "#,
-            rule = IPV6_BLOCK_RULE_NAME,
-            remote_ips = IPV6_BLOCK_REMOTE_IPS,
-            interface_type = firewall_interface_type
-        )
+    fn run_netsh_with_timeout_capture(args: &[&str], timeout_secs: u64) -> CommandRunOutput {
+        Self::run_command_with_timeout_capture("netsh", args, timeout_secs)
     }
 
     fn disable_ipv6_with_runner<F>(&mut self, runner: F) -> VpnResult<()>
     where
-        F: Fn(&str, u64) -> PowerShellRunOutput,
+        F: Fn(&[&str], u64) -> CommandRunOutput,
     {
         let friendly_name = match &self.physical_adapter_friendly_name {
             Some(name) => name.clone(),
@@ -3707,13 +3711,17 @@ impl ParallelInterceptor {
         write_ipv6_marker_firewall(&friendly_name);
         self.ipv6_was_disabled = true;
 
-        let script = Self::build_disable_ipv6_script(&friendly_name, firewall_interface_type);
-
         // netsh.exe completes in ~50-100ms. 5s is generous slack for very
         // loaded systems; if it actually times out at 5s, something is
         // seriously wrong with the host's firewall service.
         let timeout_secs = 5;
-        let output = runner(&script, timeout_secs);
+        let delete_args = Self::build_delete_ipv6_block_rule_args();
+        let delete_arg_refs: Vec<&str> = delete_args.iter().map(String::as_str).collect();
+        let _ = runner(&delete_arg_refs, timeout_secs);
+
+        let add_args = Self::build_add_ipv6_block_rule_args(firewall_interface_type);
+        let add_arg_refs: Vec<&str> = add_args.iter().map(String::as_str).collect();
+        let output = runner(&add_arg_refs, timeout_secs);
 
         if output.success {
             log::info!(
@@ -3725,7 +3733,7 @@ impl ParallelInterceptor {
         }
 
         let details: String = output
-            .summarize_failure(timeout_secs)
+            .summarize_failure(timeout_secs, "netsh")
             .chars()
             .take(240)
             .collect();
@@ -3761,7 +3769,7 @@ impl ParallelInterceptor {
     /// This is a common cause of "detection works but tunneling fails" - the process is
     /// detected, but its IPv6 traffic bypasses the VPN.
     pub fn disable_ipv6(&mut self) -> VpnResult<()> {
-        self.disable_ipv6_with_runner(Self::run_powershell_with_timeout_capture)
+        self.disable_ipv6_with_runner(Self::run_netsh_with_timeout_capture)
     }
 
     /// Restore IPv6 connectivity by removing the outbound block rule.
@@ -3802,16 +3810,9 @@ impl ParallelInterceptor {
                 // No marker found — likely a marker-write race or manual
                 // tampering. Best-effort: try to delete the firewall rule
                 // anyway (idempotent; silently no-ops if absent).
-                let script = format!(
-                    r#"
-                    $ErrorActionPreference = 'SilentlyContinue'
-                    $null = & netsh.exe advfirewall firewall delete rule name="{}" 2>&1
-                    Write-Host 'IPv6 block rule removed (best-effort)'
-                    "#,
-                    IPV6_BLOCK_RULE_NAME
-                );
-
-                if Self::run_powershell_with_timeout(&script, 5) {
+                let delete_args = Self::build_delete_ipv6_block_rule_args();
+                let delete_arg_refs: Vec<&str> = delete_args.iter().map(String::as_str).collect();
+                if Self::run_netsh_with_timeout_capture(&delete_arg_refs, 5).success {
                     log::info!("IPv6 block rule removed on {}", friendly_name);
                     delete_ipv6_marker();
                 } else {
@@ -10069,12 +10070,11 @@ mod tests {
     }
 
     #[test]
-    fn test_disable_ipv6_script_blocks_public_ipv6_on_interface_type() {
-        let script = ParallelInterceptor::build_disable_ipv6_script("Ethernet", "lan");
-        assert!(script.contains(IPV6_BLOCK_REMOTE_IPS), "{}", script);
-        assert!(script.contains("interfacetype=$interfaceType"), "{}", script);
-        assert!(script.contains("$interfaceType = 'lan'"), "{}", script);
-        assert!(!script.contains("remoteip=::/0"), "{}", script);
+    fn test_disable_ipv6_netsh_args_block_public_ipv6_on_interface_type() {
+        let args = ParallelInterceptor::build_add_ipv6_block_rule_args("lan");
+        assert!(args.contains(&format!("remoteip={IPV6_BLOCK_REMOTE_IPS}")));
+        assert!(args.contains(&"interfacetype=lan".to_string()));
+        assert!(!args.contains(&"remoteip=::/0".to_string()));
     }
 
     #[test]
@@ -10105,7 +10105,7 @@ mod tests {
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         interceptor
-            .disable_ipv6_with_runner(|_, _| PowerShellRunOutput {
+            .disable_ipv6_with_runner(|_, _| CommandRunOutput {
                 success: true,
                 timed_out: false,
                 exit_code: Some(0),
@@ -10123,7 +10123,7 @@ mod tests {
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         let error = interceptor
-            .disable_ipv6_with_runner(|_, _| PowerShellRunOutput {
+            .disable_ipv6_with_runner(|_, _| CommandRunOutput {
                 success: false,
                 timed_out: false,
                 exit_code: Some(1),
@@ -10138,8 +10138,8 @@ mod tests {
     }
 
     #[test]
-    fn test_summarize_powershell_failure_uses_exit_code_when_output_is_empty() {
-        let output = PowerShellRunOutput {
+    fn test_summarize_command_failure_uses_exit_code_when_output_is_empty() {
+        let output = CommandRunOutput {
             success: false,
             timed_out: false,
             exit_code: Some(1),
@@ -10148,7 +10148,7 @@ mod tests {
         };
 
         assert_eq!(
-            output.summarize_failure(8),
+            output.summarize_failure(8, "PowerShell"),
             "PowerShell exited with code 1 without emitting an error message."
         );
     }
