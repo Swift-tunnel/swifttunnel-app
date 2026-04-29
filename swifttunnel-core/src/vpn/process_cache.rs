@@ -741,13 +741,11 @@ impl LockFreeProcessCache {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
         let old_snap = self.get_snapshot();
         let name_lower = name.to_lowercase();
-        if old_snap
-            .pid_names
-            .get(&pid)
-            .is_some_and(|existing| existing == &name_lower)
-        {
-            return;
-        }
+
+        // Always refresh the retention timestamp first. If ETW re-fires for a PID
+        // already in the snapshot, the entry might be on the verge of expiring and
+        // would be silently dropped from the next empty owner-table refresh
+        // otherwise. Re-inserting resets the 45-second window.
         self.immediate_pid_names.lock().insert(
             pid,
             ImmediateProcessRegistration {
@@ -755,6 +753,14 @@ impl LockFreeProcessCache {
                 registered_at: Instant::now(),
             },
         );
+
+        if old_snap
+            .pid_names
+            .get(&pid)
+            .is_some_and(|existing| existing == &name_lower)
+        {
+            return;
+        }
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
 
         // Clone existing data and add the new process
@@ -1406,6 +1412,42 @@ mod tests {
         cache.register_process_immediate(7001, "robloxplayerbeta.exe".to_string());
 
         assert_eq!(cache.get_snapshot().version, first_version);
+    }
+
+    #[test]
+    fn test_register_process_immediate_refreshes_retention_for_existing_pid() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
+        let pid = 7002;
+
+        cache.register_process_immediate(pid, "RobloxPlayerBeta.exe".to_string());
+        // Bring the entry close to expiry. Without the timestamp refresh below,
+        // the next aging step would push it past IMMEDIATE_PROCESS_RETENTION.
+        cache.age_immediate_process_for_test(
+            pid,
+            IMMEDIATE_PROCESS_RETENTION - Duration::from_secs(2),
+        );
+
+        // Same PID/name re-fires from ETW. The snapshot already has it, so the
+        // duplicate-snapshot-rebuild guard short-circuits — but the immediate
+        // retention timestamp must still be refreshed so the entry survives the
+        // next empty owner-table refresh.
+        cache.register_process_immediate(pid, "RobloxPlayerBeta.exe".to_string());
+
+        // Now age forward by another (retention - 2s). With the refresh, total
+        // elapsed from the latest registration is still < retention. Without
+        // the refresh, total elapsed would be ~2*(retention - 2s) > retention
+        // and the PID would be silently dropped.
+        cache.age_immediate_process_for_test(
+            pid,
+            IMMEDIATE_PROCESS_RETENTION - Duration::from_secs(2),
+        );
+        cache.update(HashMap::new(), HashMap::new());
+
+        let snap = cache.get_snapshot();
+        assert!(
+            snap.tunnel_pids.contains(&pid),
+            "ETW re-registration must refresh the immediate retention timestamp"
+        );
     }
 
     #[test]

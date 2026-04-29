@@ -117,6 +117,14 @@ const INJECT_DEAD_STREAK: u32 = 24;
 /// declared dead. The first failures are treated as a retryable route/socket
 /// hiccup; exhausting the budget surfaces a real connection error.
 const RELAY_SEND_UNREACHABLE_DEAD_THRESHOLD: u32 = 3;
+/// Consecutive send failures of *any* class (not just network-unreachable) that
+/// escalate the relay to Stale. This catches persistent non-repairable errors
+/// (e.g. ENOBUFS/EPERM/EACCES) that would otherwise leave health untouched
+/// while the connection silently stops moving traffic.
+const RELAY_SEND_FAILURE_STALE_THRESHOLD: u32 = 8;
+/// Consecutive send failures of any class that escalate the relay to Dead so the
+/// connection monitor tears down instead of sitting in a fake Connected state.
+const RELAY_SEND_FAILURE_DEAD_THRESHOLD: u32 = 24;
 
 /// Relay health states visible to the connection manager and UI.
 ///
@@ -187,16 +195,30 @@ fn is_relay_network_unreachable_error(err: &std::io::Error) -> bool {
     )
 }
 
-fn record_relay_send_success(send_unreachable_streak: &AtomicU32) {
+fn record_relay_send_success(send_unreachable_streak: &AtomicU32, send_failure_streak: &AtomicU32) {
     if send_unreachable_streak.load(Ordering::Relaxed) != 0 {
         send_unreachable_streak.store(0, Ordering::Relaxed);
     }
+    if send_failure_streak.load(Ordering::Relaxed) != 0 {
+        send_failure_streak.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Monotonically escalate `relay_health` to at least `target`.
+///
+/// `RelayHealthState` is laid out so worse states have larger discriminants
+/// (Healthy=0, NoTrafficYet=1, Stale=2, Dead=3). Using `fetch_max` makes the
+/// transition atomic: a concurrent writer that already moved health to Dead
+/// can never be silently downgraded to Stale by a later non-Dead update.
+fn escalate_relay_health(relay_health: &AtomicU8, target: RelayHealthState) {
+    relay_health.fetch_max(target as u8, Ordering::Relaxed);
 }
 
 fn record_relay_send_error(
     send_errors: &AtomicU64,
     relay_health: &AtomicU8,
     send_unreachable_streak: &AtomicU32,
+    send_failure_streak: &AtomicU32,
     err: &std::io::Error,
     relay_addr: SocketAddr,
     context: &'static str,
@@ -212,14 +234,42 @@ fn record_relay_send_error(
         );
     }
 
+    let total_failures = send_failure_streak.fetch_add(1, Ordering::Relaxed) + 1;
+
     if !is_relay_network_unreachable_error(err) {
         send_unreachable_streak.store(0, Ordering::Relaxed);
+
+        // Persistent non-repairable failures still need to surface as a real
+        // health degradation; otherwise the connection monitor sees Healthy
+        // forever while every send fails with EPERM/ENOBUFS/etc.
+        if total_failures >= RELAY_SEND_FAILURE_DEAD_THRESHOLD {
+            escalate_relay_health(relay_health, RelayHealthState::Dead);
+            log::error!(
+                "UDP Relay: Health -> DEAD (relay_send_failure streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
+                total_failures,
+                RELAY_SEND_FAILURE_DEAD_THRESHOLD,
+                relay_addr,
+                context,
+                err.raw_os_error()
+            );
+        } else if total_failures >= RELAY_SEND_FAILURE_STALE_THRESHOLD {
+            escalate_relay_health(relay_health, RelayHealthState::Stale);
+            log::warn!(
+                "UDP Relay: Health -> STALE (relay_send_failure streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
+                total_failures,
+                RELAY_SEND_FAILURE_STALE_THRESHOLD,
+                relay_addr,
+                context,
+                err.raw_os_error()
+            );
+        }
+
         return RelaySendFailureAction::NonRepairable;
     }
 
     let streak = send_unreachable_streak.fetch_add(1, Ordering::Relaxed) + 1;
     if streak >= RELAY_SEND_UNREACHABLE_DEAD_THRESHOLD {
-        relay_health.store(RelayHealthState::Dead as u8, Ordering::Relaxed);
+        escalate_relay_health(relay_health, RelayHealthState::Dead);
         log::error!(
             "UDP Relay: Health -> DEAD (relay_send_unreachable streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
             streak,
@@ -230,9 +280,7 @@ fn record_relay_send_error(
         );
         RelaySendFailureAction::RetryBudgetExhausted(streak)
     } else {
-        if relay_health.load(Ordering::Relaxed) != RelayHealthState::Dead as u8 {
-            relay_health.store(RelayHealthState::Stale as u8, Ordering::Relaxed);
-        }
+        escalate_relay_health(relay_health, RelayHealthState::Stale);
         log::warn!(
             "UDP Relay: relay_send_unreachable is retryable for now (streak {}/{}, relay {}, context {}, raw_os_error {:?})",
             streak,
@@ -461,6 +509,9 @@ pub struct UdpRelay {
     send_errors: Arc<AtomicU64>,
     /// Consecutive structured network-unreachable send failures.
     send_unreachable_streak: Arc<AtomicU32>,
+    /// Consecutive send failures of any class (catches non-repairable errors
+    /// like ENOBUFS/EPERM that don't trip the unreachable retry budget).
+    send_failure_streak: Arc<AtomicU32>,
     /// Effective outer MTU for relay packets (<= 1500), refreshed periodically on Windows.
     relay_path_mtu: AtomicUsize,
     relay_path_context: RelayPathContext,
@@ -596,6 +647,7 @@ impl UdpRelay {
         let ping = Arc::new(PingMetrics::new());
         let send_errors = Arc::new(AtomicU64::new(0));
         let send_unreachable_streak = Arc::new(AtomicU32::new(0));
+        let send_failure_streak = Arc::new(AtomicU32::new(0));
         let relay_health = Arc::new(AtomicU8::new(RelayHealthState::NoTrafficYet as u8));
 
         let sender_socket = socket
@@ -606,6 +658,7 @@ impl UdpRelay {
         let sender_ping = Arc::clone(&ping);
         let sender_send_errors = Arc::clone(&send_errors);
         let sender_send_unreachable_streak = Arc::clone(&send_unreachable_streak);
+        let sender_send_failure_streak = Arc::clone(&send_failure_streak);
         let sender_relay_health = Arc::clone(&relay_health);
         let sender_session_id = session_id;
         let sender_panicked = Arc::new(AtomicBool::new(false));
@@ -643,14 +696,16 @@ impl UdpRelay {
                                 // Send and release buffer slot.
                                 let bytes = unsafe { sender_pool.buffer(job.buf_idx) };
                                 match sender_socket.send_to(&bytes[..job.len], job.addr) {
-                                    Ok(_) => {
-                                        record_relay_send_success(&sender_send_unreachable_streak)
-                                    }
+                                    Ok(_) => record_relay_send_success(
+                                        &sender_send_unreachable_streak,
+                                        &sender_send_failure_streak,
+                                    ),
                                     Err(e) => {
                                         record_relay_send_error(
                                             &sender_send_errors,
                                             &sender_relay_health,
                                             &sender_send_unreachable_streak,
+                                            &sender_send_failure_streak,
                                             &e,
                                             job.addr,
                                             "data",
@@ -699,13 +754,17 @@ impl UdpRelay {
 
                         match sender_socket.send_to(&frame, relay_addr) {
                             Ok(_) => {
-                                record_relay_send_success(&sender_send_unreachable_streak);
+                                record_relay_send_success(
+                                    &sender_send_unreachable_streak,
+                                    &sender_send_failure_streak,
+                                );
                             }
                             Err(e) => {
                                 record_relay_send_error(
                                     &sender_send_errors,
                                     &sender_relay_health,
                                     &sender_send_unreachable_streak,
+                                    &sender_send_failure_streak,
                                     &e,
                                     relay_addr,
                                     "ping",
@@ -785,6 +844,7 @@ impl UdpRelay {
             outbound_drops: AtomicU64::new(0),
             send_errors,
             send_unreachable_streak,
+            send_failure_streak,
             relay_path_mtu: AtomicUsize::new(initial_mtu.mtu),
             relay_path_context: path_context,
             relay_path_mtu_is_fallback: AtomicBool::new(initial_mtu.is_fallback),
@@ -889,6 +949,11 @@ impl UdpRelay {
     /// Current consecutive structured network-unreachable send failures.
     pub fn send_unreachable_streak(&self) -> u32 {
         self.send_unreachable_streak.load(Ordering::Relaxed)
+    }
+
+    /// Current consecutive send failures of any class.
+    pub fn send_failure_streak(&self) -> u32 {
+        self.send_failure_streak.load(Ordering::Relaxed)
     }
 
     fn rollback_unanswered_keepalive(&self) {
@@ -1523,8 +1588,7 @@ impl UdpRelay {
 
             if unanswered >= RELAY_DEAD_KEEPALIVE_THRESHOLD {
                 if current != RelayHealthState::Dead {
-                    self.relay_health
-                        .store(RelayHealthState::Dead as u8, Ordering::Relaxed);
+                    escalate_relay_health(&self.relay_health, RelayHealthState::Dead);
                     log::error!(
                         "UDP Relay: Health -> DEAD (no inbound ever, {} unanswered keepalives, {}s since first outbound, session {:016x})",
                         unanswered,
@@ -1534,8 +1598,7 @@ impl UdpRelay {
                 }
             } else if silence >= RELAY_STALE_THRESHOLD && current == RelayHealthState::NoTrafficYet
             {
-                self.relay_health
-                    .store(RelayHealthState::Stale as u8, Ordering::Relaxed);
+                escalate_relay_health(&self.relay_health, RelayHealthState::Stale);
                 log::warn!(
                     "UDP Relay: Health -> STALE (no inbound ever, {}s since first outbound, {} unanswered keepalives, session {:016x})",
                     silence.as_secs(),
@@ -1557,8 +1620,7 @@ impl UdpRelay {
 
         if unanswered >= RELAY_DEAD_KEEPALIVE_THRESHOLD {
             if current != RelayHealthState::Dead {
-                self.relay_health
-                    .store(RelayHealthState::Dead as u8, Ordering::Relaxed);
+                escalate_relay_health(&self.relay_health, RelayHealthState::Dead);
                 log::error!(
                     "UDP Relay: Health -> DEAD ({} unanswered keepalives, {}s silence, session {:016x})",
                     unanswered,
@@ -1568,8 +1630,7 @@ impl UdpRelay {
             }
         } else if silence >= RELAY_STALE_THRESHOLD {
             if current == RelayHealthState::Healthy {
-                self.relay_health
-                    .store(RelayHealthState::Stale as u8, Ordering::Relaxed);
+                escalate_relay_health(&self.relay_health, RelayHealthState::Stale);
                 log::warn!(
                     "UDP Relay: Health -> STALE ({}s since last inbound packet, {} unanswered keepalives, session {:016x})",
                     silence.as_secs(),
@@ -1586,8 +1647,7 @@ impl UdpRelay {
         let current_after = self.relay_health();
         if streak >= INJECT_DEAD_STREAK {
             if current_after != RelayHealthState::Dead {
-                self.relay_health
-                    .store(RelayHealthState::Dead as u8, Ordering::Relaxed);
+                escalate_relay_health(&self.relay_health, RelayHealthState::Dead);
                 log::error!(
                     "UDP Relay: Health -> DEAD (inject failure streak {} >= {}, session {:016x})",
                     streak,
@@ -1601,8 +1661,7 @@ impl UdpRelay {
                 RelayHealthState::Healthy | RelayHealthState::NoTrafficYet
             )
         {
-            self.relay_health
-                .store(RelayHealthState::Stale as u8, Ordering::Relaxed);
+            escalate_relay_health(&self.relay_health, RelayHealthState::Stale);
             log::warn!(
                 "UDP Relay: Health -> STALE (inject failure streak {} >= {}, session {:016x})",
                 streak,
@@ -1625,7 +1684,7 @@ impl UdpRelay {
         self.stop_flag.store(true, Ordering::Release);
         let ping = self.ping.snapshot();
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, send_errors: {}, send_unreachable_streak: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, health: {}, ping: {}/{} {:.1}% loss)",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, send_errors: {}, send_unreachable_streak: {}, send_failure_streak: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, health: {}, ping: {}/{} {:.1}% loss)",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
@@ -1633,6 +1692,7 @@ impl UdpRelay {
             self.outbound_drops.load(Ordering::Relaxed),
             self.send_errors.load(Ordering::Relaxed),
             self.send_unreachable_streak.load(Ordering::Relaxed),
+            self.send_failure_streak.load(Ordering::Relaxed),
             self.point_to_point_mtu_clamp_active.load(Ordering::Acquire),
             self.point_to_point_mtu_clamp_events.load(Ordering::Relaxed),
             self.relay_health().as_str(),
@@ -2035,7 +2095,8 @@ mod tests {
     fn test_network_unreachable_send_errors_exhaust_retry_budget() {
         let send_errors = AtomicU64::new(0);
         let relay_health = AtomicU8::new(RelayHealthState::Healthy as u8);
-        let streak = AtomicU32::new(0);
+        let unreachable = AtomicU32::new(0);
+        let failure = AtomicU32::new(0);
         let relay_addr: SocketAddr = "127.0.0.1:51821".parse().unwrap();
         let err = std::io::Error::from_raw_os_error(10051);
 
@@ -2043,7 +2104,8 @@ mod tests {
             record_relay_send_error(
                 &send_errors,
                 &relay_health,
-                &streak,
+                &unreachable,
+                &failure,
                 &err,
                 relay_addr,
                 "data"
@@ -2059,7 +2121,8 @@ mod tests {
             record_relay_send_error(
                 &send_errors,
                 &relay_health,
-                &streak,
+                &unreachable,
+                &failure,
                 &err,
                 relay_addr,
                 "data"
@@ -2070,7 +2133,8 @@ mod tests {
             record_relay_send_error(
                 &send_errors,
                 &relay_health,
-                &streak,
+                &unreachable,
+                &failure,
                 &err,
                 relay_addr,
                 "data"
@@ -2087,7 +2151,8 @@ mod tests {
     fn test_non_repairable_send_error_does_not_trigger_unreachable_recovery() {
         let send_errors = AtomicU64::new(0);
         let relay_health = AtomicU8::new(RelayHealthState::Healthy as u8);
-        let streak = AtomicU32::new(2);
+        let unreachable = AtomicU32::new(2);
+        let failure = AtomicU32::new(0);
         let relay_addr: SocketAddr = "127.0.0.1:51821".parse().unwrap();
         let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "blocked");
 
@@ -2095,14 +2160,17 @@ mod tests {
             record_relay_send_error(
                 &send_errors,
                 &relay_health,
-                &streak,
+                &unreachable,
+                &failure,
                 &err,
                 relay_addr,
                 "data"
             ),
             RelaySendFailureAction::NonRepairable
         );
-        assert_eq!(streak.load(Ordering::Relaxed), 0);
+        // Unreachable streak resets so it can't masquerade as fast-budget exhaustion.
+        assert_eq!(unreachable.load(Ordering::Relaxed), 0);
+        // A single non-repairable failure must not yet escalate health.
         assert_eq!(
             RelayHealthState::from_u8(relay_health.load(Ordering::Relaxed)),
             RelayHealthState::Healthy
@@ -2110,12 +2178,103 @@ mod tests {
     }
 
     #[test]
-    fn test_success_resets_network_unreachable_send_streak() {
-        let streak = AtomicU32::new(2);
+    fn test_persistent_non_repairable_send_errors_escalate_to_dead() {
+        let send_errors = AtomicU64::new(0);
+        let relay_health = AtomicU8::new(RelayHealthState::Healthy as u8);
+        let unreachable = AtomicU32::new(0);
+        let failure = AtomicU32::new(0);
+        let relay_addr: SocketAddr = "127.0.0.1:51821".parse().unwrap();
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "blocked");
 
-        record_relay_send_success(&streak);
+        for _ in 0..(RELAY_SEND_FAILURE_STALE_THRESHOLD - 1) {
+            record_relay_send_error(
+                &send_errors,
+                &relay_health,
+                &unreachable,
+                &failure,
+                &err,
+                relay_addr,
+                "data",
+            );
+        }
+        // Still below the slow threshold — stay Healthy.
+        assert_eq!(
+            RelayHealthState::from_u8(relay_health.load(Ordering::Relaxed)),
+            RelayHealthState::Healthy
+        );
 
-        assert_eq!(streak.load(Ordering::Relaxed), 0);
+        // Crossing the Stale threshold escalates without ever seeing an unreachable code.
+        record_relay_send_error(
+            &send_errors,
+            &relay_health,
+            &unreachable,
+            &failure,
+            &err,
+            relay_addr,
+            "data",
+        );
+        assert_eq!(
+            RelayHealthState::from_u8(relay_health.load(Ordering::Relaxed)),
+            RelayHealthState::Stale
+        );
+
+        for _ in 0..(RELAY_SEND_FAILURE_DEAD_THRESHOLD - RELAY_SEND_FAILURE_STALE_THRESHOLD) {
+            record_relay_send_error(
+                &send_errors,
+                &relay_health,
+                &unreachable,
+                &failure,
+                &err,
+                relay_addr,
+                "data",
+            );
+        }
+        assert_eq!(
+            RelayHealthState::from_u8(relay_health.load(Ordering::Relaxed)),
+            RelayHealthState::Dead
+        );
+        // Unreachable streak must never have been touched by non-repairable errors.
+        assert_eq!(unreachable.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_concurrent_unreachable_stale_cannot_downgrade_dead() {
+        // Simulates the TOCTOU window where check_health() escalated relay_health
+        // to Dead between the sender thread observing an unreachable error and
+        // committing its Stale escalation. The monotonic fetch_max must not
+        // silently downgrade the relay back to Stale.
+        let send_errors = AtomicU64::new(0);
+        let relay_health = AtomicU8::new(RelayHealthState::Dead as u8);
+        let unreachable = AtomicU32::new(0);
+        let failure = AtomicU32::new(0);
+        let relay_addr: SocketAddr = "127.0.0.1:51821".parse().unwrap();
+        let err = std::io::Error::from_raw_os_error(10051);
+
+        record_relay_send_error(
+            &send_errors,
+            &relay_health,
+            &unreachable,
+            &failure,
+            &err,
+            relay_addr,
+            "data",
+        );
+
+        assert_eq!(
+            RelayHealthState::from_u8(relay_health.load(Ordering::Relaxed)),
+            RelayHealthState::Dead
+        );
+    }
+
+    #[test]
+    fn test_success_resets_send_streaks() {
+        let unreachable = AtomicU32::new(2);
+        let failure = AtomicU32::new(5);
+
+        record_relay_send_success(&unreachable, &failure);
+
+        assert_eq!(unreachable.load(Ordering::Relaxed), 0);
+        assert_eq!(failure.load(Ordering::Relaxed), 0);
     }
 
     #[test]
