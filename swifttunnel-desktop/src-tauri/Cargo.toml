@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "2.0.19"
+version = "2.0.20"
 default-run = "swifttunnel-desktop"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
