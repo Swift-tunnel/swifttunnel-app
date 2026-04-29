@@ -12,6 +12,13 @@ use winrt_notification::{Duration, IconCrop, Sound, Toast};
 /// Only works when the app is installed with a matching Start menu shortcut.
 const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.GameBooster";
 
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+enum NotificationIcon {
+    App,
+    Swifty,
+}
+
 /// Check if our custom AUMID is registered (Start menu shortcut exists)
 #[cfg(windows)]
 fn is_aumid_registered() -> bool {
@@ -42,39 +49,55 @@ fn get_aumid() -> &'static str {
 
 /// Get the path to the SwiftTunnel icon
 #[cfg(windows)]
-fn get_icon_path() -> Option<std::path::PathBuf> {
-    // Try installed location first
-    let installed_path = Path::new(r"C:\Program Files\SwiftTunnel\swifttunnel.ico");
+fn get_icon_path(icon: NotificationIcon) -> Option<std::path::PathBuf> {
+    let filename = match icon {
+        NotificationIcon::App => "swifttunnel.ico",
+        NotificationIcon::Swifty => "swifty.png",
+    };
+
+    // Try installed locations first.
+    let installed_path = Path::new(r"C:\Program Files\SwiftTunnel").join(filename);
     if installed_path.exists() {
-        return Some(installed_path.to_path_buf());
+        return Some(installed_path);
+    }
+
+    let installed_resource_path = Path::new(r"C:\Program Files\SwiftTunnel")
+        .join("resources")
+        .join(filename);
+    if installed_resource_path.exists() {
+        return Some(installed_resource_path);
     }
 
     // Try relative to executable (for development)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let dev_path = exe_dir.join("swifttunnel.ico");
+            let dev_path = exe_dir.join(filename);
             if dev_path.exists() {
                 return Some(dev_path);
             }
-            // Also try assets folder
-            let assets_path = exe_dir.join("assets").join("swifttunnel.ico");
+
+            let resource_path = exe_dir.join("resources").join(filename);
+            if resource_path.exists() {
+                return Some(resource_path);
+            }
+
+            // Also try assets folder.
+            let assets_path = exe_dir.join("assets").join(filename);
             if assets_path.exists() {
                 return Some(assets_path);
             }
         }
     }
 
-    log::debug!("Notification icon not found in any expected location");
+    log::debug!(
+        "Notification icon {} not found in any expected location",
+        filename
+    );
     None
 }
 
-/// Show a Windows toast notification
-///
-/// # Arguments
-/// * `title` - The notification title (e.g., "Connected to server")
-/// * `message` - The notification body (e.g., "Location: Singapore, SG")
 #[cfg(windows)]
-pub fn show_notification(title: &str, message: &str) {
+fn show_notification_with_icon(title: &str, message: &str, icon: NotificationIcon) {
     // Run on a background thread to avoid blocking the GUI thread
     let title = title.to_string();
     let message = message.to_string();
@@ -86,11 +109,8 @@ pub fn show_notification(title: &str, message: &str) {
             .sound(Some(Sound::Default))
             .duration(Duration::Short);
 
-        // Add icon if available (only when using our own AUMID)
-        if aumid == SWIFTTUNNEL_AUMID {
-            if let Some(icon_path) = get_icon_path() {
-                toast = toast.icon(&icon_path, IconCrop::Square, "SwiftTunnel");
-            }
+        if let Some(icon_path) = get_icon_path(icon) {
+            toast = toast.icon(&icon_path, IconCrop::Square, "SwiftTunnel");
         }
 
         match toast.show() {
@@ -100,20 +120,36 @@ pub fn show_notification(title: &str, message: &str) {
     });
 }
 
+/// Show a Windows toast notification
+///
+/// # Arguments
+/// * `title` - The notification title (e.g., "Connected to server")
+/// * `message` - The notification body (e.g., "Location: Singapore, SG")
+#[cfg(windows)]
+pub fn show_notification(title: &str, message: &str) {
+    show_notification_with_icon(title, message, NotificationIcon::App);
+}
+
 #[cfg(not(windows))]
 pub fn show_notification(_title: &str, _message: &str) {}
 
 /// Show a relay switch notification (auto-routing)
 ///
 /// Only fires when the relay server ACTUALLY switches, not just on game server detection.
-pub fn show_relay_switch(from_region: &str, to_region: &str, game_location: &str) {
-    show_notification(
-        "Auto Routing: Relay switched",
-        &format!(
-            "{} → {} (game server: {})",
-            from_region, to_region, game_location
-        ),
-    );
+pub fn show_relay_switch(_from_region: &str, to_region: &str, game_location: &str) {
+    let routed_region = crate::discord_rpc::region_display_label(to_region);
+    let title = format!("Routed to {}", routed_region);
+    let message = format!("Game server: {}", game_location);
+
+    #[cfg(windows)]
+    {
+        show_notification_with_icon(&title, &message, NotificationIcon::Swifty);
+    }
+
+    #[cfg(not(windows))]
+    {
+        show_notification(&title, &message);
+    }
 }
 
 /// Show a server location notification (Bloxstrap-style)

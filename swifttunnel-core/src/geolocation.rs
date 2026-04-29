@@ -1,9 +1,9 @@
 //! IP Geolocation module
 //!
-//! Uses the SwiftTunnel web resolver as the primary region lookup. The web
-//! resolver keeps the IPinfo token server-side, caches provider responses, and
-//! applies central overrides. A local Roblox IP table remains as an offline
-//! fallback when the resolver is unreachable or low-confidence.
+//! Uses the SwiftTunnel web resolver for region lookup. The resolver keeps the
+//! IPinfo token server-side, caches provider responses, and applies central
+//! overrides. Auto-routing only switches relays when the resolver returns a
+//! structured Roblox or SwiftTunnel region id.
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -494,140 +494,71 @@ async fn resolve_game_server_region_from_api(ip: Ipv4Addr) -> Option<GameServerR
     response.json().await.ok()
 }
 
-fn local_table_lookup(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
-    let region = roblox_ip_to_region(ip);
-    if region == RobloxRegion::Unknown {
-        None
-    } else {
-        Some((region.clone(), region.display_name().to_string()))
-    }
-}
-
-fn resolve_api_response_or_local(
+fn resolve_api_response(
     ip: Ipv4Addr,
     response: Option<GameServerRegionResponse>,
 ) -> Option<(RobloxRegion, String)> {
-    match response {
-        Some(response) => {
-            let api_region = response
-                .swifttunnel_region_id
-                .as_deref()
-                .and_then(roblox_region_from_swifttunnel_region_id)
-                .or_else(|| {
-                    response
-                        .roblox_region_id
-                        .as_deref()
-                        .and_then(roblox_region_from_id)
-                });
-            let location = response
-                .location
-                .as_ref()
-                .and_then(format_api_location)
-                .or_else(|| api_region.as_ref().map(|r| r.display_name().to_string()))
-                .unwrap_or_else(|| "Unknown".to_string());
-            let confidence = response.confidence.as_deref().unwrap_or("low");
-
-            if confidence == "low" {
-                if let Some(local) = local_table_lookup(ip) {
-                    log::info!(
-                        "Geo lookup: {} -> {} ({}) [local fallback after low-confidence resolver: provider={:?}, swifttunnel_region={:?}]",
-                        ip,
-                        local.1,
-                        local.0.display_name(),
-                        response.provider,
-                        response.swifttunnel_region_id
-                    );
-                    return Some(local);
-                }
-            }
-
-            if let Some(region) = api_region {
-                log::info!(
-                    "Geo lookup: {} -> {} ({}) [SwiftTunnel resolver: provider={:?}, confidence={}, swifttunnel_region={:?}]",
-                    ip,
-                    location,
-                    region.display_name(),
-                    response.provider,
-                    confidence,
-                    response.swifttunnel_region_id
-                );
-                return Some((region, location));
-            }
-
-            local_table_lookup(ip)
-        }
+    let response = match response {
+        Some(response) => response,
         None => {
-            let local = local_table_lookup(ip);
-            if let Some((region, location)) = &local {
-                log::info!(
-                    "Geo lookup: {} -> {} ({}) [local fallback after resolver failure]",
-                    ip,
-                    location,
-                    region.display_name()
-                );
-            }
-            local
+            log::warn!(
+                "Geo lookup: SwiftTunnel resolver failed for {}; no region selected",
+                ip
+            );
+            return None;
         }
+    };
+
+    let api_region = response
+        .swifttunnel_region_id
+        .as_deref()
+        .and_then(roblox_region_from_swifttunnel_region_id)
+        .or_else(|| {
+            response
+                .roblox_region_id
+                .as_deref()
+                .and_then(roblox_region_from_id)
+        });
+    let location = response
+        .location
+        .as_ref()
+        .and_then(format_api_location)
+        .or_else(|| api_region.as_ref().map(|r| r.display_name().to_string()))
+        .unwrap_or_else(|| "Unknown".to_string());
+    let confidence = response.confidence.as_deref().unwrap_or("unknown");
+
+    if let Some(region) = api_region {
+        log::info!(
+            "Geo lookup: {} -> {} ({}) [SwiftTunnel resolver: provider={:?}, confidence={}, swifttunnel_region={:?}]",
+            ip,
+            location,
+            region.display_name(),
+            response.provider,
+            confidence,
+            response.swifttunnel_region_id
+        );
+        return Some((region, location));
     }
+
+    log::warn!(
+        "Geo lookup: SwiftTunnel resolver returned no usable region for {} [location={}, provider={:?}, confidence={}, roblox_region={:?}, swifttunnel_region={:?}]",
+        ip,
+        location,
+        response.provider,
+        confidence,
+        response.roblox_region_id,
+        response.swifttunnel_region_id
+    );
+    None
 }
 
 /// Look up a game server IP's region.
 ///
-/// Uses the SwiftTunnel web resolver first. The resolver is IPinfo-primary and
-/// owns the provider token/cache/overrides. If the resolver fails or returns
-/// low-confidence data, fall back to the local Roblox /24 table.
+/// Uses the SwiftTunnel web resolver. The resolver is IPinfo-primary and owns
+/// the provider token/cache/overrides. Auto-routing only receives a region when
+/// the resolver returns a recognized structured region id.
 pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
-    resolve_api_response_or_local(ip, resolve_game_server_region_from_api(ip).await)
-}
-
-/// Map a Roblox game server IP to its geographic region.
-///
-/// Uses hard-coded /24 subnet mappings based on BTRoblox's verified
-/// `serverRegionsByIp` table (the most widely-used, community-validated source).
-///
-/// Only includes octets that BTRoblox has explicitly verified. Unverified octets
-/// return `Unknown` to avoid silent misrouting — the caller should fall back to
-/// ipinfo.io for those IPs.
-///
-/// Sources:
-/// - BTRoblox extension (js/feat/serverdetails.js) `serverRegionsByIp`
-/// - https://devforum.roblox.com/t/roblox-server-region-a-list-of-roblox-ip-ranges/3094401
-pub fn roblox_ip_to_region(ip: Ipv4Addr) -> RobloxRegion {
-    let octets = ip.octets();
-
-    // Only 128.116.0.0/17 contains regional game servers
-    if octets[0] != 128 || octets[1] != 116 {
-        return RobloxRegion::Unknown;
-    }
-
-    // Map by third octet (/24 blocks) — BTRoblox verified entries only
-    match octets[2] {
-        // ── Asia-Pacific ──────────────────────────────────────────────
-        46 | 50 | 54 | 97 => RobloxRegion::Singapore,
-        55 | 120 => RobloxRegion::Tokyo,
-        104 => RobloxRegion::Mumbai,
-        51 => RobloxRegion::Sydney,
-
-        // ── Europe ────────────────────────────────────────────────────
-        33 | 35 | 119 => RobloxRegion::London,
-        21 => RobloxRegion::Amsterdam,
-        13 => RobloxRegion::Paris,
-        5 | 44 | 123 => RobloxRegion::Frankfurt,
-
-        // ── Americas ──────────────────────────────────────────────────
-        86 => RobloxRegion::Brazil,
-
-        // US East (Ashburn, NYC, Atlanta, Miami)
-        0 | 11 | 22 | 32 | 45 | 53 | 56 | 74 | 80 | 87 | 99 | 102 | 127 => RobloxRegion::UsEast,
-
-        // US Central (Chicago, Dallas)
-        48 | 84 | 88 | 95 => RobloxRegion::UsCentral,
-
-        // US West (LA, Seattle, San Jose)
-        1 | 57 | 63 | 67 | 81 | 105 | 115 | 116 | 117 => RobloxRegion::UsWest,
-
-        _ => RobloxRegion::Unknown,
-    }
+    resolve_api_response(ip, resolve_game_server_region_from_api(ip).await)
 }
 
 #[cfg(test)]
@@ -666,197 +597,6 @@ mod tests {
         assert_eq!(
             format_location(&info),
             Some("Ashburn, Virginia, US".to_string())
-        );
-    }
-
-    // ── roblox_ip_to_region tests (BTRoblox verified entries) ─────────
-
-    #[test]
-    fn test_roblox_ip_to_region_singapore() {
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 50, 100)),
-            RobloxRegion::Singapore
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 46, 1)),
-            RobloxRegion::Singapore,
-            "Octet 46 is Singapore per BTRoblox (was incorrectly UsCentral)"
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 54, 1)),
-            RobloxRegion::Singapore,
-            "Octet 54 is Singapore per BTRoblox (was incorrectly Amsterdam)"
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 97, 50)),
-            RobloxRegion::Singapore
-        );
-    }
-
-    #[test]
-    fn test_roblox_ip_to_region_tokyo() {
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 55, 1)),
-            RobloxRegion::Tokyo
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 120, 1)),
-            RobloxRegion::Tokyo
-        );
-    }
-
-    #[test]
-    fn test_roblox_ip_to_region_europe() {
-        // London
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 33, 1)),
-            RobloxRegion::London
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 35, 1)),
-            RobloxRegion::London
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 119, 1)),
-            RobloxRegion::London
-        );
-        // Amsterdam
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 21, 1)),
-            RobloxRegion::Amsterdam
-        );
-        // Frankfurt
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 5, 1)),
-            RobloxRegion::Frankfurt
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 44, 1)),
-            RobloxRegion::Frankfurt
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 123, 1)),
-            RobloxRegion::Frankfurt
-        );
-        // Paris
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 13, 1)),
-            RobloxRegion::Paris
-        );
-    }
-
-    #[test]
-    fn test_roblox_ip_to_region_brazil() {
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 86, 1)),
-            RobloxRegion::Brazil,
-            "Octet 86 is São Paulo/Brazil per BTRoblox (was incorrectly UsWest)"
-        );
-    }
-
-    #[test]
-    fn test_roblox_ip_to_region_us_east() {
-        // Ashburn
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 0, 1)),
-            RobloxRegion::UsEast,
-            "Octet 0 is Ashburn/UsEast per BTRoblox (was incorrectly Unknown)"
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 102, 1)),
-            RobloxRegion::UsEast
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 80, 1)),
-            RobloxRegion::UsEast
-        );
-        // NYC
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 32, 200)),
-            RobloxRegion::UsEast
-        );
-        // Atlanta
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 22, 1)),
-            RobloxRegion::UsEast
-        );
-        // Miami
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 45, 1)),
-            RobloxRegion::UsEast
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 127, 1)),
-            RobloxRegion::UsEast
-        );
-    }
-
-    #[test]
-    fn test_roblox_ip_to_region_us_central() {
-        // Chicago
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 48, 1)),
-            RobloxRegion::UsCentral
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 84, 1)),
-            RobloxRegion::UsCentral
-        );
-        // Dallas
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 95, 1)),
-            RobloxRegion::UsCentral
-        );
-    }
-
-    #[test]
-    fn test_roblox_ip_to_region_us_west() {
-        // LA
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 1, 1)),
-            RobloxRegion::UsWest
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 63, 1)),
-            RobloxRegion::UsWest
-        );
-        // Seattle
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 115, 1)),
-            RobloxRegion::UsWest
-        );
-        // San Jose
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 57, 1)),
-            RobloxRegion::UsWest
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 105, 1)),
-            RobloxRegion::UsWest
-        );
-    }
-
-    #[test]
-    fn test_roblox_ip_to_region_unknown_for_unverified_octets() {
-        // Non-Roblox IPs
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(1, 1, 1, 1)),
-            RobloxRegion::Unknown
-        );
-        // Above /17 range
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 200, 1)),
-            RobloxRegion::Unknown
-        );
-        // Unverified octets within /17 (not in BTRoblox table) → Unknown
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 14, 1)),
-            RobloxRegion::Unknown
-        );
-        assert_eq!(
-            roblox_ip_to_region(Ipv4Addr::new(128, 116, 30, 1)),
-            RobloxRegion::Unknown,
-            "Octets not in BTRoblox should return Unknown"
         );
     }
 
@@ -1021,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolver_response_beats_local_table_when_confident() {
+    fn test_resolver_response_returns_structured_region_when_confident() {
         let response = GameServerRegionResponse {
             provider: Some("ipinfo".to_string()),
             location: Some(GameServerRegionLocation {
@@ -1035,10 +775,7 @@ mod tests {
             confidence: Some("high".to_string()),
         };
 
-        // 128.116.50.x is Singapore in the local table, so this proves the
-        // resolver is authoritative when confidence is not low.
-        let resolved =
-            resolve_api_response_or_local(Ipv4Addr::new(128, 116, 50, 10), Some(response));
+        let resolved = resolve_api_response(Ipv4Addr::new(128, 116, 50, 10), Some(response));
         assert_eq!(
             resolved,
             Some((RobloxRegion::Tokyo, "Tokyo, JP".to_string()))
@@ -1060,8 +797,7 @@ mod tests {
             confidence: Some("high".to_string()),
         };
 
-        let resolved =
-            resolve_api_response_or_local(Ipv4Addr::new(128, 116, 102, 10), Some(response));
+        let resolved = resolve_api_response(Ipv4Addr::new(128, 116, 102, 10), Some(response));
         assert_eq!(
             resolved,
             Some((RobloxRegion::UsCentral, "Dallas, Texas, US".to_string()))
@@ -1069,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn test_low_confidence_resolver_falls_back_to_local_table() {
+    fn test_low_confidence_resolver_uses_structured_region_without_local_override() {
         let response = GameServerRegionResponse {
             provider: Some("ipinfo".to_string()),
             location: Some(GameServerRegionLocation {
@@ -1083,17 +819,35 @@ mod tests {
             confidence: Some("low".to_string()),
         };
 
-        let resolved =
-            resolve_api_response_or_local(Ipv4Addr::new(128, 116, 55, 10), Some(response));
-        assert_eq!(resolved, Some((RobloxRegion::Tokyo, "Tokyo".to_string())));
+        let resolved = resolve_api_response(Ipv4Addr::new(128, 116, 55, 10), Some(response));
+        assert_eq!(
+            resolved,
+            Some((RobloxRegion::UsEast, "US East".to_string()))
+        );
     }
 
     #[test]
-    fn test_resolver_failure_falls_back_to_local_table() {
-        let resolved = resolve_api_response_or_local(Ipv4Addr::new(128, 116, 95, 10), None);
-        assert_eq!(
-            resolved,
-            Some((RobloxRegion::UsCentral, "US Central".to_string()))
-        );
+    fn test_resolver_failure_returns_none_without_local_fallback() {
+        let resolved = resolve_api_response(Ipv4Addr::new(128, 116, 95, 10), None);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn test_resolver_response_without_structured_region_returns_none() {
+        let response = GameServerRegionResponse {
+            provider: Some("ipinfo".to_string()),
+            location: Some(GameServerRegionLocation {
+                city: Some("Dallas".to_string()),
+                region: Some("Texas".to_string()),
+                country: Some("US".to_string()),
+                loc: None,
+            }),
+            roblox_region_id: None,
+            swifttunnel_region_id: None,
+            confidence: Some("high".to_string()),
+        };
+
+        let resolved = resolve_api_response(Ipv4Addr::new(128, 116, 95, 10), Some(response));
+        assert_eq!(resolved, None);
     }
 }

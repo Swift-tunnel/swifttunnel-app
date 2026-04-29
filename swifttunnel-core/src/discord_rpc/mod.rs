@@ -7,4 +7,4 @@ mod manager;
 mod state;
 
 pub use manager::DiscordManager;
-pub use state::{DiscordActivity, DiscordState};
+pub use state::{DiscordActivity, DiscordState, region_display_label};
