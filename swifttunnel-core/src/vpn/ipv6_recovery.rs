@@ -9,6 +9,7 @@
 //! cleanly.
 
 pub const IPV6_BLOCK_RULE_NAME: &str = "SwiftTunnel-Block-IPv6-Outbound";
+pub const IPV6_BLOCK_REMOTE_IPS: &str = "2000::/3,64:ff9b::/96";
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -29,8 +30,8 @@ pub enum DisableMethod {
     #[default]
     BindingDisable,
     /// Current method: a Windows Firewall outbound block rule named
-    /// [`IPV6_BLOCK_RULE_NAME`] that drops traffic to `::/0`. No adapter
-    /// rebind, no WMI involvement.
+    /// [`IPV6_BLOCK_RULE_NAME`] that drops public IPv6/NAT64 traffic. No
+    /// adapter rebind, no WMI involvement.
     FirewallRule,
 }
 
@@ -67,19 +68,36 @@ impl Ipv6Marker {
         &self.method
     }
 
-    fn restore_command(&self) -> &'static str {
+    fn restore_command(&self) -> String {
         match self.method {
-            DisableMethod::FirewallRule => {
-                // Idempotent: netsh returns non-zero if the rule is missing,
-                // but we don't care — `2>&1 | Out-Null` swallows both. The
-                // outer script verifies the rule is gone afterwards.
-                "$null = & netsh.exe advfirewall firewall delete rule name=\"SwiftTunnel-Block-IPv6-Outbound\" 2>&1"
-            }
+            DisableMethod::FirewallRule => format!(
+                r#"
+        $name = "{}"
+        $deleteOutput = & netsh.exe advfirewall firewall delete rule name="$name" 2>&1
+        $deleteExit = $LASTEXITCODE
+        $showOutput = & netsh.exe advfirewall firewall show rule name="$name" 2>&1
+        $showExit = $LASTEXITCODE
+        $deleteText = ($deleteOutput | Out-String).Trim()
+        $showText = ($showOutput | Out-String).Trim()
+
+        if ($showExit -eq 0) {{
+            Write-Error ('IPv6 block firewall rule still exists after delete attempt. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText)
+            exit 1
+        }}
+
+        if ($deleteExit -ne 0 -and $showText -notmatch 'No rules match') {{
+            Write-Error ('Could not verify IPv6 block firewall rule removal. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText + '. Show output: ' + $showText)
+            exit 1
+        }}
+        "#,
+                IPV6_BLOCK_RULE_NAME
+            ),
             DisableMethod::BindingDisable => match self.originally_enabled {
                 Some(false) => {
-                    "Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false 2>$null"
+                    "Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false 2>$null".to_string()
                 }
-                _ => "Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null",
+                _ => "Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null"
+                    .to_string(),
             },
         }
     }
@@ -409,14 +427,12 @@ mod tests {
 
     #[test]
     fn test_firewall_rule_restore_command_references_block_rule_name() {
-        // restore_command returns a &'static str so we can't format the rule
-        // name in. This guards against IPV6_BLOCK_RULE_NAME being renamed
-        // without also updating the netsh delete literal — which would leave
-        // an orphaned rule on every disconnect.
         let marker = Ipv6Marker::for_firewall_rule("Ethernet".to_string());
         let cmd = marker.restore_command();
         assert!(cmd.contains(IPV6_BLOCK_RULE_NAME), "{}", cmd);
         assert!(cmd.contains("netsh.exe advfirewall firewall delete rule"));
+        assert!(cmd.contains("netsh.exe advfirewall firewall show rule"));
+        assert!(cmd.contains("exit 1"));
     }
 
     #[test]

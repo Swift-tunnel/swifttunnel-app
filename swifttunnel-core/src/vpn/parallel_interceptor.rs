@@ -58,7 +58,8 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    IPV6_BLOCK_RULE_NAME, delete_ipv6_marker, restore_ipv6_from_marker, write_ipv6_marker_firewall,
+    IPV6_BLOCK_REMOTE_IPS, IPV6_BLOCK_RULE_NAME, delete_ipv6_marker, restore_ipv6_from_marker,
+    write_ipv6_marker_firewall,
 };
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
@@ -774,6 +775,8 @@ pub struct ParallelInterceptor {
     physical_adapter_name: Option<String>,
     /// Physical adapter friendly name (e.g., "Ethernet") for offload control
     physical_adapter_friendly_name: Option<String>,
+    /// Physical adapter kind (ethernet/wifi/ppp/tunnel/other) for firewall scoping
+    physical_adapter_kind: Option<String>,
     /// Physical adapter interface index (IfIndex) for default-route validation
     physical_adapter_if_index: Option<u32>,
     /// Whether we disabled TSO on the physical adapter (to restore on cleanup)
@@ -875,6 +878,7 @@ impl ParallelInterceptor {
             physical_adapter_idx: None,
             physical_adapter_name: None,
             physical_adapter_friendly_name: None,
+            physical_adapter_kind: None,
             physical_adapter_if_index: None,
             tso_was_disabled: false,
             ipv6_was_disabled: false,
@@ -1922,6 +1926,15 @@ impl ParallelInterceptor {
         }
     }
 
+    fn firewall_interface_type_for_adapter_kind(kind: Option<&str>) -> &'static str {
+        match kind {
+            Some("wifi") => "wireless",
+            Some("ethernet") => "lan",
+            Some("ppp") => "ras",
+            _ => "any",
+        }
+    }
+
     fn get_adapter_details_for_if_index(if_index: u32) -> Option<(String, String, String)> {
         use windows::Win32::NetworkManagement::IpHelper::{
             GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
@@ -2892,6 +2905,7 @@ impl ParallelInterceptor {
             self.physical_adapter_idx = Some(idx);
             self.physical_adapter_name = Some(internal_name.clone());
             self.physical_adapter_friendly_name = Some(friendly_name.clone());
+            self.physical_adapter_kind = Some(selected.kind.clone());
             self.physical_adapter_if_index = if_index;
             log::info!(
                 "Selected physical adapter: {} (index {}, internal: '{}', if_index: {:?}, score: {})",
@@ -3586,7 +3600,10 @@ impl ParallelInterceptor {
         self.tso_was_disabled = false;
     }
 
-    fn build_disable_ipv6_script(_adapter_friendly_name: &str) -> String {
+    fn build_disable_ipv6_script(
+        _adapter_friendly_name: &str,
+        firewall_interface_type: &str,
+    ) -> String {
         // Block outbound IPv6 via a Windows Firewall rule using `netsh advfirewall`.
         //
         // Why not `Disable-NetAdapterBinding -ComponentId ms_tcpip6` (the
@@ -3606,15 +3623,19 @@ impl ParallelInterceptor {
         //   `netsh advfirewall` is a native binary, returns in <100ms, and
         //   doesn't touch the adapter binding.
         //
-        // The rule blocks all outbound traffic to any IPv6 destination
-        // (`::/0`). SwiftTunnel is IPv4-only, so this is exactly the leak
-        // we're closing. The rule is removed on disconnect, and crash
-        // recovery (via the IPv6 marker file) cleans it up on next launch
-        // if the app died mid-session.
+        // The rule blocks public IPv6 plus the well-known NAT64 prefix. It
+        // deliberately leaves loopback, link-local, multicast, and ULA ranges
+        // alone so local IPv6 IPC and LAN discovery are not broken while
+        // SwiftTunnel is connected. `netsh advfirewall` cannot scope by exact
+        // adapter alias, only by interface type; when we know the selected
+        // adapter kind we use that narrower type to avoid touching unrelated
+        // interface classes.
         format!(
             r#"
             $ErrorActionPreference = 'Continue'
             $name = '{rule}'
+            $remoteIps = '{remote_ips}'
+            $interfaceType = '{interface_type}'
 
             # Idempotent: drop any pre-existing rule before adding so a stale
             # half-configured rule never persists.
@@ -3622,7 +3643,7 @@ impl ParallelInterceptor {
 
             $output = & netsh.exe advfirewall firewall add rule `
                 name="$name" `
-                dir=out action=block remoteip=::/0 profile=any 2>&1
+                dir=out action=block remoteip=$remoteIps interfacetype=$interfaceType profile=any 2>&1
             $exit = $LASTEXITCODE
 
             if ($exit -ne 0) {{
@@ -3633,7 +3654,9 @@ impl ParallelInterceptor {
             Write-Output 'IPv6 outbound blocked via firewall rule'
             exit 0
             "#,
-            rule = IPV6_BLOCK_RULE_NAME
+            rule = IPV6_BLOCK_RULE_NAME,
+            remote_ips = IPV6_BLOCK_REMOTE_IPS,
+            interface_type = firewall_interface_type
         )
     }
 
@@ -3665,9 +3688,13 @@ impl ParallelInterceptor {
             ));
         }
 
+        let firewall_interface_type =
+            Self::firewall_interface_type_for_adapter_kind(self.physical_adapter_kind.as_deref());
+
         log::info!(
-            "Blocking outbound IPv6 via firewall rule (adapter: {}, SwiftTunnel is IPv4-only)",
-            friendly_name
+            "Blocking public IPv6 via firewall rule (adapter: {}, interface_type: {}, SwiftTunnel is IPv4-only)",
+            friendly_name,
+            firewall_interface_type
         );
 
         // Write the marker BEFORE the netsh add. If we crash between add and
@@ -3680,7 +3707,7 @@ impl ParallelInterceptor {
         write_ipv6_marker_firewall(&friendly_name);
         self.ipv6_was_disabled = true;
 
-        let script = Self::build_disable_ipv6_script(&friendly_name);
+        let script = Self::build_disable_ipv6_script(&friendly_name, firewall_interface_type);
 
         // netsh.exe completes in ~50-100ms. 5s is generous slack for very
         // loaded systems; if it actually times out at 5s, something is
@@ -3690,7 +3717,7 @@ impl ParallelInterceptor {
 
         if output.success {
             log::info!(
-                "IPv6 outbound blocked on {} via firewall rule '{}' — all traffic will use IPv4",
+                "Public IPv6 blocked on {} via firewall rule '{}' — game traffic will use IPv4",
                 friendly_name,
                 IPV6_BLOCK_RULE_NAME
             );
@@ -3725,11 +3752,11 @@ impl ParallelInterceptor {
         )))
     }
 
-    /// Disable IPv6 on the physical adapter
+    /// Block public IPv6 egress while the IPv4-only tunnel is active.
     ///
     /// SwiftTunnel is IPv4-only. If IPv6 is enabled, Roblox or Windows may prefer IPv6,
-    /// causing traffic to bypass our IPv4 tunnel entirely. Disabling IPv6 on the physical
-    /// adapter ensures all traffic goes through our interceptor.
+    /// causing traffic to bypass our IPv4 tunnel entirely. Blocking public IPv6/NAT64
+    /// destinations forces game traffic back to IPv4 without rebinding the adapter.
     ///
     /// This is a common cause of "detection works but tunneling fails" - the process is
     /// detected, but its IPv6 traffic bypasses the VPN.
@@ -4213,6 +4240,7 @@ impl ParallelInterceptor {
         let old_physical_adapter_idx = self.physical_adapter_idx;
         let old_physical_adapter_name = self.physical_adapter_name.clone();
         let old_physical_adapter_friendly_name = self.physical_adapter_friendly_name.clone();
+        let old_physical_adapter_kind = self.physical_adapter_kind.clone();
         let old_physical_adapter_if_index = self.physical_adapter_if_index;
         let old_default_route_if_index = prev_default_if_index;
         let old_default_route_next_hop = prev_default_next_hop;
@@ -4238,6 +4266,7 @@ impl ParallelInterceptor {
             self.physical_adapter_idx = old_physical_adapter_idx;
             self.physical_adapter_name = old_physical_adapter_name;
             self.physical_adapter_friendly_name = old_physical_adapter_friendly_name;
+            self.physical_adapter_kind = old_physical_adapter_kind;
             self.physical_adapter_if_index = old_physical_adapter_if_index;
             self.default_route_if_index = old_default_route_if_index;
             self.default_route_next_hop = old_default_route_next_hop;
@@ -10017,6 +10046,35 @@ mod tests {
             .disable_ipv6_with_runner(|_, _| panic!("runner should not be called"))
             .unwrap();
         assert!(!interceptor.ipv6_was_disabled);
+    }
+
+    #[test]
+    fn test_firewall_interface_type_maps_known_adapter_kinds() {
+        assert_eq!(
+            ParallelInterceptor::firewall_interface_type_for_adapter_kind(Some("ethernet")),
+            "lan"
+        );
+        assert_eq!(
+            ParallelInterceptor::firewall_interface_type_for_adapter_kind(Some("wifi")),
+            "wireless"
+        );
+        assert_eq!(
+            ParallelInterceptor::firewall_interface_type_for_adapter_kind(Some("ppp")),
+            "ras"
+        );
+        assert_eq!(
+            ParallelInterceptor::firewall_interface_type_for_adapter_kind(Some("other")),
+            "any"
+        );
+    }
+
+    #[test]
+    fn test_disable_ipv6_script_blocks_public_ipv6_on_interface_type() {
+        let script = ParallelInterceptor::build_disable_ipv6_script("Ethernet", "lan");
+        assert!(script.contains(IPV6_BLOCK_REMOTE_IPS), "{}", script);
+        assert!(script.contains("interfacetype=$interfaceType"), "{}", script);
+        assert!(script.contains("$interfaceType = 'lan'"), "{}", script);
+        assert!(!script.contains("remoteip=::/0"), "{}", script);
     }
 
     #[test]
