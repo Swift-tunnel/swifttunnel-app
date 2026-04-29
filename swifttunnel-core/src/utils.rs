@@ -57,7 +57,7 @@ fn resolve_windows_command_path(program: &str) -> PathBuf {
 fn is_system32_program(program: &str) -> bool {
     matches!(
         program.to_ascii_lowercase().as_str(),
-        "pnputil" | "pnputil.exe" | "msiexec" | "msiexec.exe"
+        "pnputil" | "pnputil.exe" | "msiexec" | "msiexec.exe" | "netsh" | "netsh.exe"
     )
 }
 

@@ -339,7 +339,72 @@ fn build_restore_script(marker: &Ipv6Marker) -> String {
     )
 }
 
+fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
+    let name_arg = format!("name={IPV6_BLOCK_RULE_NAME}");
+
+    let delete_output = crate::hidden_command("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            name_arg.as_str(),
+        ])
+        .output();
+    let delete_output = match delete_output {
+        Ok(output) => output,
+        Err(e) => {
+            log::error!("Failed to run netsh for IPv6 firewall restore: {}", e);
+            return false;
+        }
+    };
+
+    let show_output = crate::hidden_command("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", name_arg.as_str()])
+        .output();
+    let show_output = match show_output {
+        Ok(output) => output,
+        Err(e) => {
+            log::error!("Failed to verify IPv6 firewall restore with netsh: {}", e);
+            return false;
+        }
+    };
+
+    if show_output.status.success() {
+        log::warn!(
+            "IPv6 block firewall rule still exists after delete attempt for adapter {}",
+            adapter_name
+        );
+        return false;
+    }
+
+    let show_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&show_output.stdout),
+        String::from_utf8_lossy(&show_output.stderr)
+    );
+
+    if !delete_output.status.success() && !show_text.contains("No rules match") {
+        log::warn!(
+            "Could not verify IPv6 block firewall rule removal for adapter {}: {}",
+            adapter_name,
+            show_text.trim()
+        );
+        return false;
+    }
+
+    log::info!(
+        "IPv6 firewall block rule removed successfully for adapter: {}",
+        adapter_name
+    );
+    true
+}
+
 fn restore_ipv6_for_marker(marker: &Ipv6Marker) -> bool {
+    if marker.method() == &DisableMethod::FirewallRule {
+        return restore_firewall_rule_marker(marker.adapter_name());
+    }
+
     let script = build_restore_script(marker);
     match crate::hidden_command("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -444,7 +509,11 @@ mod tests {
         let marker: Ipv6Marker = serde_json::from_slice(legacy_payload).unwrap();
         assert_eq!(marker.method(), &DisableMethod::BindingDisable);
         assert_eq!(marker.adapter_name(), "Ethernet");
-        assert!(marker.restore_command().contains("Enable-NetAdapterBinding"));
+        assert!(
+            marker
+                .restore_command()
+                .contains("Enable-NetAdapterBinding")
+        );
     }
 
     #[cfg(not(target_os = "windows"))]
