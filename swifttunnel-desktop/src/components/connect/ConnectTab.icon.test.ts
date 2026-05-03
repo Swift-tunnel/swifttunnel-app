@@ -6,6 +6,7 @@ describe("ConnectTab hero button", () => {
   it("renders the primary connect/disconnect action via the Button component", () => {
     expect(connectTabSource).toContain('"Connect"');
     expect(connectTabSource).toContain('"Disconnect"');
+    expect(connectTabSource).toContain('"Disconnecting…"');
     expect(connectTabSource).toMatch(/<Button[^>]*variant=\{buttonVariant\}/);
   });
 

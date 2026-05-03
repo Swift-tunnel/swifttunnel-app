@@ -215,6 +215,68 @@ describe("stores/updaterStore", () => {
     expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
   });
 
+  it("updates install progress from updater progress events", async () => {
+    updaterCheckChannel.mockResolvedValue({
+      current_version: "1.0.0",
+      available_version: "1.5.1",
+      release_tag: "v1.5.1",
+      channel: "Stable",
+    });
+    let resolveInstall: (value: {
+      installed_version: string;
+      release_tag: string;
+    }) => void;
+    updaterInstallChannel.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveInstall = resolve;
+        }),
+    );
+
+    const useUpdaterStore = await loadStore();
+    await useUpdaterStore.getState().checkForUpdates(false);
+    const installPromise = useUpdaterStore.getState().installUpdate();
+
+    useUpdaterStore
+      .getState()
+      .handleUpdaterProgress({ downloaded: 50, total: 100 });
+
+    expect(useUpdaterStore.getState().status).toBe("installing");
+    expect(useUpdaterStore.getState().progressPercent).toBe(50);
+
+    useUpdaterStore.getState().handleUpdaterDone();
+    expect(useUpdaterStore.getState().progressPercent).toBe(100);
+
+    resolveInstall!({ installed_version: "1.5.1", release_tag: "v1.5.1" });
+    await installPromise;
+  });
+
+  it("signals activity when updater progress has an unknown total", async () => {
+    updaterCheckChannel.mockResolvedValue({
+      current_version: "1.0.0",
+      available_version: "1.5.1",
+      release_tag: "v1.5.1",
+      channel: "Stable",
+    });
+    updaterInstallChannel.mockImplementation(
+      () =>
+        new Promise(() => {
+          // Keep install in progress for the progress event assertion.
+        }),
+    );
+
+    const useUpdaterStore = await loadStore();
+    await useUpdaterStore.getState().checkForUpdates(false);
+    void useUpdaterStore.getState().installUpdate();
+
+    useUpdaterStore
+      .getState()
+      .handleUpdaterProgress({ downloaded: 1024, total: null });
+
+    expect(useUpdaterStore.getState().status).toBe("installing");
+    expect(useUpdaterStore.getState().progressPercent).toBe(1);
+  });
+
   it("transitions to error state when check fails", async () => {
     updaterCheckChannel.mockRejectedValue(new Error("network down"));
 

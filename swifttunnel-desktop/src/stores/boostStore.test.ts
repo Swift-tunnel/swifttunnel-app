@@ -317,6 +317,21 @@ describe("stores/boostStore", () => {
     ]);
   });
 
+  it("keeps restart failures observable to callers", async () => {
+    boostRestartRoblox.mockRejectedValue(new Error("Roblox is still running"));
+
+    const useBoostStore = await loadStore();
+
+    await expect(useBoostStore.getState().restartRoblox()).rejects.toThrow(
+      "Roblox is still running",
+    );
+    expect(useBoostStore.getState().error).toContain("Roblox is still running");
+    expect(notify).toHaveBeenCalledWith(
+      "Restart failed",
+      "Could not restart Roblox.",
+    );
+  });
+
   it("progresses through flushing_modified stage", async () => {
     const useBoostStore = await loadStore();
 

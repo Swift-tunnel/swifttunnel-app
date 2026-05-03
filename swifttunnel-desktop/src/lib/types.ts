@@ -440,6 +440,11 @@ export interface RamCleanProgressEvent {
   warning: string | null;
 }
 
+export interface UpdaterProgressEvent {
+  downloaded: number;
+  total: number | null;
+}
+
 // ── Tabs ──
 
 export type TabId = "connect" | "boost" | "network" | "settings";
