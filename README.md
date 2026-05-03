@@ -2,7 +2,7 @@
   <img src="https://swifttunnel.net/logo.png" alt="SwiftTunnel" width="120" />
 </p>
 
-<h1 align="center">SwiftTunnel</h1>
+<h1 align="center">BW</h1>
 
 <p align="center">
   <strong>Game faster. Lag less.</strong>
