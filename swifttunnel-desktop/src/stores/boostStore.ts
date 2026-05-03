@@ -215,6 +215,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
       const message = String(e);
       set({ error: message, warning: null });
       await notify("Restart failed", "Could not restart Roblox.");
+      throw e;
     }
   },
 

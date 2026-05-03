@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { notify } from "../lib/notifications";
 import { updaterCheckChannel, updaterInstallChannel } from "../lib/commands";
 import { useSettingsStore } from "./settingsStore";
+import type { UpdaterProgressEvent } from "../lib/types";
 
 declare const __APP_VERSION__: string;
 
@@ -30,6 +31,8 @@ interface UpdaterStore {
 
   checkForUpdates: (manual?: boolean, autoInstall?: boolean) => Promise<void>;
   installUpdate: () => Promise<void>;
+  handleUpdaterProgress: (event: UpdaterProgressEvent) => void;
+  handleUpdaterDone: () => void;
 }
 
 export const useUpdaterStore = create<UpdaterStore>((set) => ({
@@ -139,5 +142,30 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
         error: String(e),
       });
     }
+  },
+
+  handleUpdaterProgress: (event) => {
+    let progressPercent: number | null = null;
+
+    if (event.total && event.total > 0) {
+      progressPercent = Math.max(
+        0,
+        Math.min(99, Math.round((event.downloaded / event.total) * 100)),
+      );
+    } else if (event.downloaded > 0) {
+      progressPercent = 1;
+    }
+
+    if (progressPercent !== null) {
+      set((state) =>
+        state.status === "installing" ? { progressPercent } : {},
+      );
+    }
+  },
+
+  handleUpdaterDone: () => {
+    set((state) =>
+      state.status === "installing" ? { progressPercent: 100 } : {},
+    );
   },
 }));

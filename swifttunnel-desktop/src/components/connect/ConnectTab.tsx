@@ -249,6 +249,8 @@ export function ConnectTab() {
 
   const heroLabel = isConnected
     ? "Tunneled to"
+    : vpnState === "disconnecting"
+      ? "Disconnecting"
     : isTransitioning
       ? "Establishing"
       : vpnState === "error"
@@ -278,6 +280,7 @@ export function ConnectTab() {
     if (connectStatus.kind === "driver_outdated") return "Reset driver";
     if (connectStatus.kind === "reboot_required") return "Restart required";
     if (isConnected) return "Disconnect";
+    if (vpnState === "disconnecting") return "Disconnecting…";
     if (isConnectBusy) return isTransitioning ? "Connecting…" : "Working…";
     return "Connect";
   })();
@@ -751,13 +754,12 @@ function RegionRow({
   }, [menuOpen]);
 
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      disabled={disabled}
+    <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      className="group relative flex h-10 items-center gap-3 px-3.5 text-left transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-50"
+      className={`group relative flex h-10 items-center gap-3 px-3.5 text-left transition-colors duration-100 ${
+        disabled ? "cursor-not-allowed opacity-50" : ""
+      }`}
       style={{
         backgroundColor: selected
           ? "var(--color-accent-primary-soft-8)"
@@ -770,66 +772,74 @@ function RegionRow({
         boxShadow: selected ? "inset 2px 0 0 #ffffff" : "none",
       }}
     >
-      <span className="text-[14px] leading-none">
-        {countryFlag(region.country_code)}
-      </span>
-
-      <span
-        className="truncate text-[12.5px] font-medium"
-        style={{
-          color: selected
-            ? "var(--color-text-primary)"
-            : "var(--color-text-primary)",
-          letterSpacing: "-0.005em",
-        }}
+      <button
+        type="button"
+        onClick={onSelect}
+        disabled={disabled}
+        className="flex min-w-0 flex-1 items-center gap-3 self-stretch text-left disabled:cursor-not-allowed"
       >
-        {region.name}
-      </span>
+        <span className="text-[14px] leading-none">
+          {countryFlag(region.country_code)}
+        </span>
 
-      {forcedServer ? (
         <span
-          className="font-mono text-[10px] text-text-primary"
-          title={`Forced server: ${forcedServer}`}
+          className="truncate text-[12.5px] font-medium"
+          style={{
+            color: selected
+              ? "var(--color-text-primary)"
+              : "var(--color-text-primary)",
+            letterSpacing: "-0.005em",
+          }}
         >
-          {forcedServer}
+          {region.name}
         </span>
-      ) : (
-        <span className="font-mono text-[10px] text-text-dimmed">
-          {region.servers.length}
-        </span>
-      )}
 
-      {lastUsed && !selected && (
-        <span
-          className="text-[9px] font-semibold uppercase tracking-[0.12em]"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          Last
-        </span>
-      )}
-
-      <span className="flex-1" />
-
-      {latency !== null && latColor && (
-        <span className="flex shrink-0 items-center gap-1.5">
+        {forcedServer ? (
           <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ backgroundColor: latColor }}
-          />
-          <span
-            className="font-mono text-[11.5px] font-medium tabular-nums"
-            style={{ color: "var(--color-text-primary)" }}
+            className="font-mono text-[10px] text-text-primary"
+            title={`Forced server: ${forcedServer}`}
           >
-            {latency}
+            {forcedServer}
           </span>
-          <span className="text-[10px] text-text-muted">ms</span>
-        </span>
-      )}
+        ) : (
+          <span className="font-mono text-[10px] text-text-dimmed">
+            {region.servers.length}
+          </span>
+        )}
 
-      {region.servers.length > 1 && (hover || menuOpen || forcedServer) && (
+        {lastUsed && !selected && (
+          <span
+            className="text-[9px] font-semibold uppercase tracking-[0.12em]"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            Last
+          </span>
+        )}
+
+        <span className="flex-1" />
+
+        {latency !== null && latColor && (
+          <span className="flex shrink-0 items-center gap-1.5">
+            <span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ backgroundColor: latColor }}
+            />
+            <span
+              className="font-mono text-[11.5px] font-medium tabular-nums"
+              style={{ color: "var(--color-text-primary)" }}
+            >
+              {latency}
+            </span>
+            <span className="text-[10px] text-text-muted">ms</span>
+          </span>
+        )}
+      </button>
+
+      {region.servers.length > 1 && (
         <ServerMenu
           menuRef={menuRef}
           open={menuOpen}
+          disabled={disabled}
           onToggle={() => setMenuOpen((v) => !v)}
           servers={region.servers}
           forcedServer={forcedServer}
@@ -839,13 +849,14 @@ function RegionRow({
           }}
         />
       )}
-    </button>
+    </div>
   );
 }
 
 function ServerMenu({
   menuRef,
   open,
+  disabled,
   onToggle,
   servers,
   forcedServer,
@@ -853,6 +864,7 @@ function ServerMenu({
 }: {
   menuRef: React.RefObject<HTMLDivElement | null>;
   open: boolean;
+  disabled: boolean;
   onToggle: () => void;
   servers: string[];
   forcedServer: string | undefined;
@@ -860,21 +872,18 @@ function ServerMenu({
 }) {
   return (
     <div className="relative" ref={menuRef}>
-      <span
-        role="button"
-        tabIndex={0}
+      <button
+        type="button"
+        aria-label="Choose server"
+        aria-expanded={open}
+        disabled={disabled}
         onClick={(e) => {
           e.stopPropagation();
           onToggle();
         }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.stopPropagation();
-            e.preventDefault();
-            onToggle();
-          }
-        }}
-        className="flex h-5 w-5 items-center justify-center rounded transition-colors"
+        className={`flex h-5 w-5 items-center justify-center rounded transition-colors focus:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed ${
+          open || forcedServer ? "opacity-100" : "opacity-0"
+        }`}
         style={{
           color: forcedServer
             ? "var(--color-text-primary)"
@@ -896,7 +905,7 @@ function ServerMenu({
           <circle cx="19" cy="12" r="1" />
           <circle cx="5" cy="12" r="1" />
         </svg>
-      </span>
+      </button>
 
       {open && (
         <div

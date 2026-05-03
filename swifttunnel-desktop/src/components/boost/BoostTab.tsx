@@ -173,13 +173,13 @@ export function BoostTab() {
       if (hasConfigChanges) {
         appliedConfig = await boost.updateConfig(JSON.stringify(draft));
       }
+      await boost.restartRoblox();
       updateSettings({
         config: appliedConfig,
         game_process_performance: draftGPP,
       });
       setDraft(appliedConfig);
       saveSettings();
-      await boost.restartRoblox();
     } finally {
       setIsRestarting(false);
     }
@@ -511,7 +511,9 @@ export function BoostTab() {
                   <Button
                     variant="primary"
                     size="sm"
-                    onClick={() => void restartAndApply()}
+                    onClick={() => {
+                      void restartAndApply().catch(() => {});
+                    }}
                     disabled={isRestarting || Boolean(windowValidationError)}
                     loading={isRestarting}
                   >
@@ -592,7 +594,12 @@ function SettingRow({
         )
       }
     >
-      <Toggle enabled={enabled} onChange={onChange} disabled={disabled} />
+      <Toggle
+        enabled={enabled}
+        onChange={onChange}
+        disabled={disabled}
+        ariaLabel={title}
+      />
     </Row>
   );
 }

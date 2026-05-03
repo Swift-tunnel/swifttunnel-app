@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useAuthStore } from "../../stores/authStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
@@ -14,6 +14,7 @@ import {
   InfoIcon,
   SectionHeader,
   Slider,
+  Dialog,
 } from "../ui";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
@@ -69,6 +70,8 @@ export function SettingsTab() {
 
   const [isUninstalling, setIsUninstalling] = useState(false);
   const [uninstallError, setUninstallError] = useState<string | null>(null);
+  const [confirmUninstallOpen, setConfirmUninstallOpen] = useState(false);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const adapterBindingMode = settings.adapter_binding_mode;
   const manualAdapterBinding = adapterBindingMode === "manual";
@@ -88,11 +91,33 @@ export function SettingsTab() {
     }
   })();
 
-  function set(partial: Partial<AppSettings>) {
+  function set(partial: Partial<AppSettings>, options?: { toast?: boolean }) {
     update(partial);
     save();
-    addToast({ type: "success", message: "Settings saved" });
+    if (options?.toast !== false) {
+      addToast({ type: "success", message: "Settings saved" });
+    }
   }
+
+  function setQuietDebounced(partial: Partial<AppSettings>) {
+    update(partial);
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+    saveTimeoutRef.current = setTimeout(() => {
+      saveTimeoutRef.current = null;
+      void save();
+    }, 500);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        void save();
+      }
+    };
+  }, [save]);
 
   useEffect(() => {
     let cancelled = false;
@@ -306,6 +331,7 @@ export function SettingsTab() {
         >
           <Toggle
             enabled={settings.run_on_startup}
+            ariaLabel="Run on startup"
             onChange={(v) => set({ run_on_startup: v })}
           />
         </Row>
@@ -315,6 +341,7 @@ export function SettingsTab() {
         >
           <Toggle
             enabled={settings.auto_reconnect}
+            ariaLabel="Auto-reconnect tunnel"
             onChange={(v) => set({ auto_reconnect: v })}
           />
         </Row>
@@ -324,6 +351,7 @@ export function SettingsTab() {
         >
           <Toggle
             enabled={settings.enable_discord_rpc}
+            ariaLabel="Discord Rich Presence"
             onChange={(v) => set({ enable_discord_rpc: v })}
           />
         </Row>
@@ -433,6 +461,7 @@ export function SettingsTab() {
         >
           <Toggle
             enabled={settings.enable_api_tunneling}
+            ariaLabel="API Tunneling"
             onChange={(v) => set({ enable_api_tunneling: v })}
           />
         </Row>
@@ -524,6 +553,7 @@ export function SettingsTab() {
         >
           <Toggle
             enabled={settings.update_settings.auto_check}
+            ariaLabel="Auto update"
             onChange={(v) =>
               set({
                 update_settings: { ...settings.update_settings, auto_check: v },
@@ -653,6 +683,7 @@ export function SettingsTab() {
           >
             <Toggle
               enabled={settings.experimental_mode}
+              ariaLabel="Practice mode"
               onChange={(v) => set({ experimental_mode: v })}
             />
           </Row>
@@ -672,7 +703,9 @@ export function SettingsTab() {
                     max={100}
                     step={5}
                     value={settings.artificial_latency_ms}
-                    onChange={(v) => set({ artificial_latency_ms: v })}
+                    onChange={(v) =>
+                      setQuietDebounced({ artificial_latency_ms: v })
+                    }
                   />
                 </div>
               </div>
@@ -685,7 +718,9 @@ export function SettingsTab() {
             <input
               type="text"
               value={settings.custom_relay_server}
-              onChange={(e) => set({ custom_relay_server: e.target.value })}
+              onChange={(e) =>
+                setQuietDebounced({ custom_relay_server: e.target.value })
+              }
               placeholder="auto"
               className="w-40 rounded-[4px] px-2 py-1.5 font-mono text-[12px] outline-none transition-colors"
               style={{
@@ -787,16 +822,7 @@ export function SettingsTab() {
           <Button
             variant="destructive"
             size="sm"
-            onClick={async () => {
-              setIsUninstalling(true);
-              setUninstallError(null);
-              try {
-                await systemUninstall();
-              } catch (e) {
-                setUninstallError(String(e));
-                setIsUninstalling(false);
-              }
-            }}
+            onClick={() => setConfirmUninstallOpen(true)}
             disabled={isUninstalling}
             loading={isUninstalling}
           >
@@ -809,6 +835,53 @@ export function SettingsTab() {
           </div>
         )}
       </Section>
+      <Dialog
+        open={confirmUninstallOpen}
+        onClose={() => {
+          if (!isUninstalling) setConfirmUninstallOpen(false);
+        }}
+        title="Uninstall SwiftTunnel?"
+        description="This removes the app and attempts to revert SwiftTunnel system changes."
+      >
+        <div className="flex flex-col gap-4">
+          <p className="text-[12px] leading-relaxed text-text-secondary">
+            SwiftTunnel will run its uninstall cleanup, including driver,
+            optimizer, and Roblox configuration cleanup. This cannot be undone
+            from inside the app.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setConfirmUninstallOpen(false)}
+              disabled={isUninstalling}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={async () => {
+                setIsUninstalling(true);
+                setUninstallError(null);
+                try {
+                  await systemUninstall();
+                  setIsUninstalling(false);
+                  setConfirmUninstallOpen(false);
+                } catch (e) {
+                  setUninstallError(String(e));
+                  setIsUninstalling(false);
+                  setConfirmUninstallOpen(false);
+                }
+              }}
+              disabled={isUninstalling}
+              loading={isUninstalling}
+            >
+              Uninstall
+            </Button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }
