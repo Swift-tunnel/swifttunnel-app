@@ -1555,7 +1555,9 @@ impl VpnConnection {
                                 router_for_lookup.clear_pending_lookup(ip);
                                 continue;
                             }
-                            if !router_for_lookup.pin_active_game_server(ip) {
+                            if !router_for_lookup
+                                .pin_active_game_server_for_session(ip, session_epoch)
+                            {
                                 log::info!(
                                     "Auto-routing: Ignoring lookup for {} (generation {}) after active game server changed",
                                     ip,

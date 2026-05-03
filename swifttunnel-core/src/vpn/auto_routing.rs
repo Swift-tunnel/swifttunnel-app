@@ -388,7 +388,19 @@ impl AutoRouter {
     /// Pin the first structured game-server lookup accepted for this session.
     /// Returns false when another IP already owns the active session.
     pub fn pin_active_game_server(&self, ip: Ipv4Addr) -> bool {
+        let session_epoch = self.lookup_session_epoch.load(Ordering::Acquire);
+        self.pin_active_game_server_for_session(ip, session_epoch)
+    }
+
+    /// Pin only if the lookup belongs to the currently active session.
+    ///
+    /// The session check happens while holding the active-IP lock so reset()
+    /// cannot clear the pin between a stale lookup's session check and pin.
+    pub fn pin_active_game_server_for_session(&self, ip: Ipv4Addr, session_epoch: u64) -> bool {
         let mut active = self.active_game_server_ip.write();
+        if !self.is_current_lookup_session(session_epoch) {
+            return false;
+        }
         match *active {
             Some(active_ip) => active_ip == ip,
             None => {
@@ -626,10 +638,10 @@ impl AutoRouter {
         *self.current_game_region.write() = None;
         *self.current_relay_addr.write() = None;
         self.seen_game_servers.write().clear();
+        self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
         *self.active_game_server_ip.write() = None;
         self.pending_lookups.write().clear();
         self.latest_lookup_generation.store(0, Ordering::Release);
-        self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
         self.pending_any.store(false, Ordering::Release);
         self.auto_routing_bypassed.store(false, Ordering::Release);
         self.clear_lookup_channel();
@@ -867,6 +879,10 @@ mod tests {
 
         router.reset();
         assert!(!router.is_current_lookup_session(session_epoch));
+        assert!(
+            !router
+                .pin_active_game_server_for_session(Ipv4Addr::new(128, 116, 50, 1), session_epoch)
+        );
     }
 
     #[test]
