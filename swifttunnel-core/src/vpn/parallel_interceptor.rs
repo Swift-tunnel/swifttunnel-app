@@ -9769,7 +9769,8 @@ mod tests {
             AutoRoutingPacketAction::Hold
         );
         assert!(router.is_lookup_pending(dst_ip));
-        let (queued_ip, generation) = rx.try_recv().expect("lookup should be queued");
+        let (queued_ip, generation, _session_epoch) =
+            rx.try_recv().expect("lookup should be queued");
         assert_eq!(queued_ip, dst_ip);
         assert_eq!(generation, 1);
     }

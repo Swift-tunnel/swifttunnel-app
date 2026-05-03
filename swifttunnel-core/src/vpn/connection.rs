@@ -1527,15 +1527,25 @@ impl VpnConnection {
         // Spawn background task for async ipinfo.io region lookups
         if auto_routing_enabled {
             let (lookup_tx, mut lookup_rx) =
-                tokio::sync::mpsc::unbounded_channel::<(std::net::Ipv4Addr, u64)>();
+                tokio::sync::mpsc::unbounded_channel::<(std::net::Ipv4Addr, u64, u64)>();
             auto_router.set_lookup_channel(lookup_tx);
 
             let router_for_lookup = Arc::clone(&auto_router);
             let state_for_lookup = Arc::clone(&self.state);
             let lookup_handle = tokio::spawn(async move {
-                while let Some((ip, generation)) = lookup_rx.recv().await {
+                while let Some((ip, generation, session_epoch)) = lookup_rx.recv().await {
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
+                            if !router_for_lookup.is_current_lookup_session(session_epoch) {
+                                log::info!(
+                                    "Auto-routing: Ignoring stale lookup for {} (generation {}, session {}) after router reset",
+                                    ip,
+                                    generation,
+                                    session_epoch
+                                );
+                                router_for_lookup.clear_pending_lookup(ip);
+                                continue;
+                            }
                             if !router_for_lookup.should_process_lookup_result(ip) {
                                 log::info!(
                                     "Auto-routing: Ignoring lookup for {} (generation {}) because another game server is active",
@@ -1662,9 +1672,11 @@ impl VpnConnection {
                                     )
                                     .await;
 
-                                    if !router_for_lookup.is_active_game_server(ip) {
+                                    if !router_for_lookup.is_current_lookup_session(session_epoch)
+                                        || !router_for_lookup.is_active_game_server(ip)
+                                    {
                                         log::info!(
-                                            "Auto-routing: Ignoring probe refinement for {} (generation {}) because it is no longer active",
+                                            "Auto-routing: Ignoring probe refinement for {} (generation {}) because it is stale or no longer active",
                                             ip,
                                             generation
                                         );

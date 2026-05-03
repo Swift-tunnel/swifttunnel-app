@@ -56,9 +56,12 @@ pub struct AutoRouter {
     /// Log of auto-routing events for UI display
     event_log: RwLock<VecDeque<AutoRoutingEvent>>,
     /// Channel to send game server IPs for async geolocation lookup
-    lookup_sender: RwLock<Option<tokio::sync::mpsc::UnboundedSender<(Ipv4Addr, u64)>>>,
+    lookup_sender: RwLock<Option<tokio::sync::mpsc::UnboundedSender<(Ipv4Addr, u64, u64)>>>,
     /// Monotonic generation assigned to newly detected game-server lookups.
     latest_lookup_generation: AtomicU64,
+    /// Session epoch copied into lookup messages so post-reset results cannot
+    /// mutate a freshly reset router.
+    lookup_session_epoch: AtomicU64,
     /// IPs currently being looked up — packets to these are held (dropped) until
     /// the lookup completes, preventing the game server from seeing a relay IP change.
     pending_lookups: RwLock<HashSet<Ipv4Addr>>,
@@ -115,6 +118,7 @@ impl AutoRouter {
             event_log: RwLock::new(VecDeque::new()),
             lookup_sender: RwLock::new(None),
             latest_lookup_generation: AtomicU64::new(0),
+            lookup_session_epoch: AtomicU64::new(1),
             pending_lookups: RwLock::new(HashSet::new()),
             pending_any: AtomicBool::new(false),
             whitelisted_regions: RwLock::new(HashSet::new()),
@@ -124,7 +128,10 @@ impl AutoRouter {
     }
 
     /// Set the channel for sending game server IPs to the background lookup task
-    pub fn set_lookup_channel(&self, sender: tokio::sync::mpsc::UnboundedSender<(Ipv4Addr, u64)>) {
+    pub fn set_lookup_channel(
+        &self,
+        sender: tokio::sync::mpsc::UnboundedSender<(Ipv4Addr, u64, u64)>,
+    ) {
         *self.lookup_sender.write() = Some(sender);
     }
 
@@ -310,8 +317,12 @@ impl AutoRouter {
         }
 
         let generation = self.latest_lookup_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let session_epoch = self.lookup_session_epoch.load(Ordering::Acquire);
 
-        if sender.send((game_server_ip, generation)).is_err() {
+        if sender
+            .send((game_server_ip, generation, session_epoch))
+            .is_err()
+        {
             log::warn!(
                 "Auto-routing: Lookup channel closed — releasing packets for {} and disabling holding behavior",
                 game_server_ip
@@ -356,6 +367,10 @@ impl AutoRouter {
     /// Check whether a lookup result is still allowed to change relay state.
     pub fn is_current_lookup_generation(&self, generation: u64) -> bool {
         self.latest_lookup_generation.load(Ordering::Acquire) == generation
+    }
+
+    pub fn is_current_lookup_session(&self, session_epoch: u64) -> bool {
+        self.lookup_session_epoch.load(Ordering::Acquire) == session_epoch
     }
 
     /// Whether a completed lookup result is allowed to affect routing.
@@ -614,6 +629,7 @@ impl AutoRouter {
         *self.active_game_server_ip.write() = None;
         self.pending_lookups.write().clear();
         self.latest_lookup_generation.store(0, Ordering::Release);
+        self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
         self.pending_any.store(false, Ordering::Release);
         self.auto_routing_bypassed.store(false, Ordering::Release);
         self.clear_lookup_channel();
@@ -809,9 +825,11 @@ mod tests {
 
         // First call sends to channel
         router.evaluate_game_server(ip);
-        let (received_ip, generation) = rx.try_recv().expect("first lookup should be sent");
+        let (received_ip, generation, session_epoch) =
+            rx.try_recv().expect("first lookup should be sent");
         assert_eq!(received_ip, ip);
         assert_eq!(generation, 1);
+        assert!(router.is_current_lookup_session(session_epoch));
 
         // Second call with same IP should NOT send again
         router.evaluate_game_server(ip);
@@ -825,13 +843,30 @@ mod tests {
         router.set_lookup_channel(tx);
 
         router.evaluate_game_server(Ipv4Addr::new(128, 116, 50, 1));
-        let (_, first_generation) = rx.try_recv().expect("first lookup");
+        let (_, first_generation, first_session_epoch) = rx.try_recv().expect("first lookup");
         assert!(router.is_current_lookup_generation(first_generation));
+        assert!(router.is_current_lookup_session(first_session_epoch));
 
         router.evaluate_game_server(Ipv4Addr::new(128, 116, 55, 1));
-        let (_, second_generation) = rx.try_recv().expect("second lookup");
+        let (_, second_generation, second_session_epoch) = rx.try_recv().expect("second lookup");
         assert!(!router.is_current_lookup_generation(first_generation));
         assert!(router.is_current_lookup_generation(second_generation));
+        assert_eq!(first_session_epoch, second_session_epoch);
+        assert!(router.is_current_lookup_session(second_session_epoch));
+    }
+
+    #[test]
+    fn test_reset_invalidates_inflight_lookup_session() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        router.evaluate_game_server(Ipv4Addr::new(128, 116, 50, 1));
+        let (_, _generation, session_epoch) = rx.try_recv().expect("lookup");
+        assert!(router.is_current_lookup_session(session_epoch));
+
+        router.reset();
+        assert!(!router.is_current_lookup_session(session_epoch));
     }
 
     #[test]
