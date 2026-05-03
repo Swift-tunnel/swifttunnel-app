@@ -90,6 +90,15 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 const OUTBOUND_FRAME_MAX: usize = SESSION_ID_LEN + RELAY_PATH_MTU_UPPER_BOUND;
 const OUTBOUND_POOL_SLOTS: usize = 4096;
 const OUTBOUND_QUEUE_CAP: usize = 4096;
+/// Maximum time a data packet may sit in the relay sender queue.
+///
+/// Game traffic should drop under transient local send-buffer pressure rather than
+/// arrive seconds late and show up as 1000ms+ in-game ping. Control/report frames
+/// are exempt because they do not become gameplay input.
+const OUTBOUND_DATA_MAX_QUEUE_AGE_MS: u64 = 250;
+/// Bound blocking UDP sends so rare OS send-buffer stalls cannot freeze the sender
+/// long enough to build a multi-second data backlog.
+const SEND_TIMEOUT: Duration = Duration::from_millis(5);
 
 /// Control-plane ping for RTT/jitter telemetry (optional).
 const PING_INTERVAL: Duration = Duration::from_millis(50); // 20Hz
@@ -341,6 +350,14 @@ struct OutboundJob {
     addr: SocketAddr,
     buf_idx: usize,
     len: usize,
+    enqueued_at_ms: u64,
+    kind: OutboundJobKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundJobKind {
+    Data,
+    Control,
 }
 
 struct OutboundPool {
@@ -505,6 +522,8 @@ pub struct UdpRelay {
     oversize_drops: AtomicU64,
     /// Outbound frames dropped due to send queue pressure.
     outbound_drops: AtomicU64,
+    /// Outbound data frames dropped because they sat in the sender queue too long.
+    stale_queue_drops: Arc<AtomicU64>,
     /// Sender thread UDP send_to() errors.
     send_errors: Arc<AtomicU64>,
     /// Consecutive structured network-unreachable send failures.
@@ -570,6 +589,9 @@ impl UdpRelay {
         socket
             .set_read_timeout(Some(READ_TIMEOUT))
             .context("Failed to set read timeout")?;
+        socket
+            .set_write_timeout(Some(SEND_TIMEOUT))
+            .context("Failed to set write timeout")?;
 
         // Increase send and receive buffers to 256KB to handle burst traffic
         // Default Windows SO_SNDBUF is only 8KB which causes WouldBlock under
@@ -646,6 +668,7 @@ impl UdpRelay {
         let (outbound_tx, outbound_rx) = channel::bounded::<OutboundJob>(OUTBOUND_QUEUE_CAP);
         let ping = Arc::new(PingMetrics::new());
         let send_errors = Arc::new(AtomicU64::new(0));
+        let stale_queue_drops = Arc::new(AtomicU64::new(0));
         let send_unreachable_streak = Arc::new(AtomicU32::new(0));
         let send_failure_streak = Arc::new(AtomicU32::new(0));
         let relay_health = Arc::new(AtomicU8::new(RelayHealthState::NoTrafficYet as u8));
@@ -657,6 +680,7 @@ impl UdpRelay {
         let sender_stop = Arc::clone(&stop_flag);
         let sender_ping = Arc::clone(&ping);
         let sender_send_errors = Arc::clone(&send_errors);
+        let sender_stale_queue_drops = Arc::clone(&stale_queue_drops);
         let sender_send_unreachable_streak = Arc::clone(&send_unreachable_streak);
         let sender_send_failure_streak = Arc::clone(&send_failure_streak);
         let sender_relay_health = Arc::clone(&relay_health);
@@ -690,6 +714,27 @@ impl UdpRelay {
 
                         match outbound_rx.recv_timeout(timeout) {
                             Ok(job) => {
+                                let now_ms = now_mono_ms();
+                                if should_drop_stale_outbound_job(
+                                    job.kind,
+                                    job.enqueued_at_ms,
+                                    now_ms,
+                                ) {
+                                    let drops =
+                                        sender_stale_queue_drops.fetch_add(1, Ordering::Relaxed)
+                                            + 1;
+                                    if drops <= 5 || drops.is_power_of_two() {
+                                        log::warn!(
+                                            "UDP Relay: Dropping stale queued data packet (age {}ms > {}ms, drop #{})",
+                                            now_ms.saturating_sub(job.enqueued_at_ms),
+                                            OUTBOUND_DATA_MAX_QUEUE_AGE_MS,
+                                            drops
+                                        );
+                                    }
+                                    sender_pool.release(job.buf_idx);
+                                    continue;
+                                }
+
                                 last_relay_addr = Some(job.addr);
                                 last_data_at = Some(Instant::now());
 
@@ -842,6 +887,7 @@ impl UdpRelay {
             packets_received: AtomicU64::new(0),
             oversize_drops: AtomicU64::new(0),
             outbound_drops: AtomicU64::new(0),
+            stale_queue_drops,
             send_errors,
             send_unreachable_streak,
             send_failure_streak,
@@ -1305,6 +1351,8 @@ impl UdpRelay {
             addr: current_addr,
             buf_idx,
             len: total_len,
+            enqueued_at_ms: now_mono_ms(),
+            kind: OutboundJobKind::Data,
         };
         if self.outbound_tx.try_send(job).is_err() {
             let drops = self.outbound_drops.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1405,6 +1453,8 @@ impl UdpRelay {
                                                 addr: from,
                                                 buf_idx,
                                                 len: RTT_REPORT_LEN,
+                                                enqueued_at_ms: now_mono_ms(),
+                                                kind: OutboundJobKind::Control,
                                             };
                                             if self.outbound_tx.try_send(job).is_err() {
                                                 self.outbound_pool.release(buf_idx);
@@ -1684,12 +1734,13 @@ impl UdpRelay {
         self.stop_flag.store(true, Ordering::Release);
         let ping = self.ping.snapshot();
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, send_errors: {}, send_unreachable_streak: {}, send_failure_streak: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, health: {}, ping: {}/{} {:.1}% loss)",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, stale_queue_drops: {}, send_errors: {}, send_unreachable_streak: {}, send_failure_streak: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, health: {}, ping: {}/{} {:.1}% loss)",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
             self.oversize_drops.load(Ordering::Relaxed),
             self.outbound_drops.load(Ordering::Relaxed),
+            self.stale_queue_drops.load(Ordering::Relaxed),
             self.send_errors.load(Ordering::Relaxed),
             self.send_unreachable_streak.load(Ordering::Relaxed),
             self.send_failure_streak.load(Ordering::Relaxed),
@@ -1779,6 +1830,12 @@ fn now_mono_ms() -> u64 {
         let start = START.get_or_init(Instant::now);
         start.elapsed().as_millis() as u64
     }
+}
+
+#[inline]
+fn should_drop_stale_outbound_job(kind: OutboundJobKind, enqueued_at_ms: u64, now_ms: u64) -> bool {
+    kind == OutboundJobKind::Data
+        && now_ms.saturating_sub(enqueued_at_ms) > OUTBOUND_DATA_MAX_QUEUE_AGE_MS
 }
 
 #[inline]
@@ -2315,6 +2372,36 @@ mod tests {
         let outcome = relay.forward_outbound(&payload).unwrap();
         assert_eq!(outcome, RelaySendOutcome::Oversize);
         assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_stale_data_queue_jobs_are_dropped() {
+        let now = 10_000;
+        assert!(should_drop_stale_outbound_job(
+            OutboundJobKind::Data,
+            now - OUTBOUND_DATA_MAX_QUEUE_AGE_MS - 1,
+            now
+        ));
+    }
+
+    #[test]
+    fn test_fresh_data_queue_jobs_are_not_dropped() {
+        let now = 10_000;
+        assert!(!should_drop_stale_outbound_job(
+            OutboundJobKind::Data,
+            now - OUTBOUND_DATA_MAX_QUEUE_AGE_MS,
+            now
+        ));
+    }
+
+    #[test]
+    fn test_stale_control_queue_jobs_are_not_dropped() {
+        let now = 10_000;
+        assert!(!should_drop_stale_outbound_job(
+            OutboundJobKind::Control,
+            now - OUTBOUND_DATA_MAX_QUEUE_AGE_MS - 1,
+            now
+        ));
     }
 
     #[test]
