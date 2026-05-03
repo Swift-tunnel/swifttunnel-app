@@ -1,4 +1,4 @@
-import type { AppSettings } from "./types";
+import type { AppSettings, NetworkConfig } from "./types";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: "dark",
@@ -71,9 +71,55 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enable_api_tunneling: false,
 };
 
+function isLegacyMasterOnlyNetworkConfig(
+  raw: Partial<NetworkConfig> | undefined,
+): boolean {
+  return Boolean(
+    raw?.enable_network_boost &&
+    raw.prioritize_roblox_traffic === undefined &&
+    raw.disable_nagle === undefined &&
+    raw.disable_network_throttling === undefined &&
+    raw.gaming_qos === undefined &&
+    raw.firewall_fix === undefined,
+  );
+}
+
+export function normalizeNetworkBoostConfig(
+  config: NetworkConfig,
+  options: { legacyMasterOnly?: boolean } = {},
+): NetworkConfig {
+  const next = { ...config };
+  const hasSpecificBoost =
+    next.prioritize_roblox_traffic ||
+    next.disable_nagle ||
+    next.disable_network_throttling ||
+    next.gaming_qos ||
+    next.firewall_fix;
+
+  if (
+    options.legacyMasterOnly &&
+    next.enable_network_boost &&
+    !hasSpecificBoost
+  ) {
+    next.disable_nagle = true;
+    next.disable_network_throttling = true;
+    next.gaming_qos = true;
+  }
+
+  next.enable_network_boost =
+    next.prioritize_roblox_traffic ||
+    next.disable_nagle ||
+    next.disable_network_throttling ||
+    next.gaming_qos ||
+    next.firewall_fix;
+
+  return next;
+}
+
 export function mergeAppSettings(
   raw: Partial<AppSettings> | undefined,
 ): AppSettings {
+  const rawNetworkSettings = raw?.config?.network_settings;
   const settings = {
     ...DEFAULT_SETTINGS,
     ...raw,
@@ -93,8 +139,16 @@ export function mergeAppSettings(
         ...raw?.config?.roblox_settings,
       },
       network_settings: {
-        ...DEFAULT_SETTINGS.config.network_settings,
-        ...raw?.config?.network_settings,
+        ...normalizeNetworkBoostConfig(
+          {
+            ...DEFAULT_SETTINGS.config.network_settings,
+            ...rawNetworkSettings,
+          },
+          {
+            legacyMasterOnly:
+              isLegacyMasterOnlyNetworkConfig(rawNetworkSettings),
+          },
+        ),
       },
     },
     window_state: {

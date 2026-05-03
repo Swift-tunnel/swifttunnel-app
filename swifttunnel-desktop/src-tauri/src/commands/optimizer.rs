@@ -157,8 +157,9 @@ pub async fn boost_update_config(
     state: State<'_, AppState>,
     config_json: String,
 ) -> Result<BoostUpdateResult, String> {
-    let config: swifttunnel_core::structs::Config =
+    let mut config: swifttunnel_core::structs::Config =
         serde_json::from_str(&config_json).map_err(|e| format!("Invalid config: {}", e))?;
+    config.network_settings.normalize_legacy_master_boost();
 
     let settings = state.settings.clone();
     let performance_monitor = state.performance_monitor.clone();
@@ -242,10 +243,13 @@ pub async fn boost_sync_effective_config(
     let network_booster = state.network_booster.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let current_config = {
+        let mut current_config = {
             let s = settings.lock();
             s.config.clone()
         };
+        current_config
+            .network_settings
+            .normalize_legacy_master_boost();
 
         let effective_network_config = {
             let nb = network_booster.lock();
