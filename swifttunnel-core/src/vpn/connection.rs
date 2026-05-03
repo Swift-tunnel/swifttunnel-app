@@ -1536,9 +1536,18 @@ impl VpnConnection {
                 while let Some((ip, generation)) = lookup_rx.recv().await {
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
-                            if !router_for_lookup.is_current_lookup_generation(generation) {
+                            if !router_for_lookup.should_process_lookup_result(ip) {
                                 log::info!(
-                                    "Auto-routing: Ignoring stale lookup for {} (generation {})",
+                                    "Auto-routing: Ignoring lookup for {} (generation {}) because another game server is active",
+                                    ip,
+                                    generation
+                                );
+                                router_for_lookup.clear_pending_lookup(ip);
+                                continue;
+                            }
+                            if !router_for_lookup.pin_active_game_server(ip) {
+                                log::info!(
+                                    "Auto-routing: Ignoring lookup for {} (generation {}) after active game server changed",
                                     ip,
                                     generation
                                 );
@@ -1653,9 +1662,9 @@ impl VpnConnection {
                                     )
                                     .await;
 
-                                    if !router_for_lookup.is_current_lookup_generation(generation) {
+                                    if !router_for_lookup.is_active_game_server(ip) {
                                         log::info!(
-                                            "Auto-routing: Ignoring stale probe refinement for {} (generation {})",
+                                            "Auto-routing: Ignoring probe refinement for {} (generation {}) because it is no longer active",
                                             ip,
                                             generation
                                         );
@@ -1726,7 +1735,7 @@ impl VpnConnection {
                         }
                         None => {
                             log::warn!(
-                                "Auto-routing: ipinfo.io lookup failed for {}, releasing packets on current relay",
+                                "Auto-routing: SwiftTunnel resolver lookup failed for {}, releasing packets on current relay",
                                 ip
                             );
                             // Release packets even on failure — better to route through

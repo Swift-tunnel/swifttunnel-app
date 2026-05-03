@@ -152,8 +152,12 @@ fn format_api_location(location: &GameServerRegionLocation) -> Option<String> {
 pub fn is_roblox_game_server_ip(ip: Ipv4Addr) -> bool {
     let ip_u32 = u32::from(ip);
 
-    // Roblox IP ranges (network, mask)
-    // Note: 128.116.0.0/17 covers ALL regional game servers
+    // Roblox regional game-server IP ranges (network, mask).
+    //
+    // Keep this list scoped to game-server ranges only. Roblox-owned API,
+    // matchmaking, and infrastructure CIDRs also resolve through IPinfo, but
+    // they are not valid auto-routing signals and can pull an in-game session
+    // toward San Mateo/US West when contacted mid-session.
     const ROBLOX_RANGES: &[(u32, u32)] = &[
         // Primary game servers (all regions)
         (0x80740000, 0xFFFF8000), // 128.116.0.0/17
@@ -163,14 +167,6 @@ pub fn is_roblox_game_server_ip(ip: Ipv4Addr) -> bool {
         (0x678C1C00, 0xFFFFFE00), // 103.140.28.0/23
         // China (Luobu)
         (0x678EDC00, 0xFFFFFE00), // 103.142.220.0/23
-        // API/Matchmaking
-        (0x17ADC000, 0xFFFFFF00), // 23.173.192.0/24
-        (0x8DC10300, 0xFFFFFF00), // 141.193.3.0/24
-        (0xCDC93E00, 0xFFFFFF00), // 205.201.62.0/24
-        // Infrastructure
-        (0xCC09B800, 0xFFFFFF00), // 204.9.184.0/24
-        (0xCC0DA800, 0xFFFFFC00), // 204.13.168.0/22
-        (0xCC0DAC00, 0xFFFFFE00), // 204.13.172.0/23
     ];
 
     for &(network, mask) in ROBLOX_RANGES {
@@ -570,10 +566,13 @@ mod tests {
         // Should match - in Roblox range
         assert!(is_roblox_game_server_ip(Ipv4Addr::new(128, 116, 50, 100)));
         assert!(is_roblox_game_server_ip(Ipv4Addr::new(209, 206, 42, 10)));
+        assert!(is_roblox_game_server_ip(Ipv4Addr::new(103, 140, 28, 10)));
 
-        // Should not match - outside ranges
+        // Should not match - outside game-server ranges
         assert!(!is_roblox_game_server_ip(Ipv4Addr::new(1, 1, 1, 1)));
         assert!(!is_roblox_game_server_ip(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(!is_roblox_game_server_ip(Ipv4Addr::new(23, 173, 192, 10)));
+        assert!(!is_roblox_game_server_ip(Ipv4Addr::new(204, 9, 184, 10)));
     }
 
     #[test]

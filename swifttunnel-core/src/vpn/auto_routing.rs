@@ -1,7 +1,8 @@
 //! Auto Routing - Automatic relay server switching based on game server region
 //!
-//! Detects when a Roblox player gets teleported to a game server in a different
-//! region and automatically switches the relay server for optimal latency.
+//! Detects the first structured Roblox game-server region for a VPN session and
+//! switches the relay server for optimal latency. Once a game server is pinned,
+//! later Roblox-owned endpoints cannot change the route until disconnect.
 //!
 //! Similar to GearUp's AIR (Adaptive Intelligent Routing) and ExitLag's
 //! automatic region detection.
@@ -42,8 +43,14 @@ pub struct AutoRouter {
     last_switch_time: RwLock<Instant>,
     /// Number of switches in the current minute window
     switches_this_minute: RwLock<(u32, Instant)>,
-    /// Game server IPs we've already routed (to detect new teleports)
+    /// Game server IPs we've already evaluated this session
     seen_game_servers: RwLock<HashSet<Ipv4Addr>>,
+    /// First structured game-server IP accepted for this VPN session.
+    ///
+    /// Roblox can contact several Roblox-owned endpoints while a user is already
+    /// playing. Once a real game-server lookup succeeds, later candidate IPs
+    /// must not override that route until disconnect resets the session.
+    active_game_server_ip: RwLock<Option<Ipv4Addr>>,
     /// Callback: list of (region_id, relay_addr, cached_latency_ms) for available servers
     available_servers: RwLock<Vec<(String, SocketAddr, Option<u32>)>>,
     /// Log of auto-routing events for UI display
@@ -103,6 +110,7 @@ impl AutoRouter {
             ),
             switches_this_minute: RwLock::new((0, Instant::now())),
             seen_game_servers: RwLock::new(HashSet::new()),
+            active_game_server_ip: RwLock::new(None),
             available_servers: RwLock::new(Vec::new()),
             event_log: RwLock::new(VecDeque::new()),
             lookup_sender: RwLock::new(None),
@@ -350,6 +358,38 @@ impl AutoRouter {
         self.latest_lookup_generation.load(Ordering::Acquire) == generation
     }
 
+    /// Whether a completed lookup result is allowed to affect routing.
+    ///
+    /// Before the first structured lookup succeeds, candidates may resolve in
+    /// channel order. After one IP is accepted, superficially similar Roblox
+    /// traffic cannot flip the relay mid-game.
+    pub fn should_process_lookup_result(&self, ip: Ipv4Addr) -> bool {
+        match *self.active_game_server_ip.read() {
+            Some(active_ip) => active_ip == ip,
+            None => true,
+        }
+    }
+
+    /// Pin the first structured game-server lookup accepted for this session.
+    /// Returns false when another IP already owns the active session.
+    pub fn pin_active_game_server(&self, ip: Ipv4Addr) -> bool {
+        let mut active = self.active_game_server_ip.write();
+        match *active {
+            Some(active_ip) => active_ip == ip,
+            None => {
+                *active = Some(ip);
+                log::info!("Auto-routing: Active game server pinned to {}", ip);
+                true
+            }
+        }
+    }
+
+    pub fn is_active_game_server(&self, ip: Ipv4Addr) -> bool {
+        self.active_game_server_ip
+            .read()
+            .is_some_and(|active_ip| active_ip == ip)
+    }
+
     /// Resolve the best relay server for a game region.
     ///
     /// Returns `None` if:
@@ -571,6 +611,7 @@ impl AutoRouter {
         *self.current_game_region.write() = None;
         *self.current_relay_addr.write() = None;
         self.seen_game_servers.write().clear();
+        *self.active_game_server_ip.write() = None;
         self.pending_lookups.write().clear();
         self.latest_lookup_generation.store(0, Ordering::Release);
         self.pending_any.store(false, Ordering::Release);
@@ -794,6 +835,35 @@ mod tests {
     }
 
     #[test]
+    fn test_active_game_server_pins_first_successful_lookup() {
+        let router = AutoRouter::new(true, "singapore");
+        let first_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let later_ip = Ipv4Addr::new(128, 116, 55, 1);
+
+        assert!(router.should_process_lookup_result(first_ip));
+        assert!(router.should_process_lookup_result(later_ip));
+        assert!(router.pin_active_game_server(first_ip));
+
+        assert!(router.should_process_lookup_result(first_ip));
+        assert!(!router.should_process_lookup_result(later_ip));
+        assert!(router.is_active_game_server(first_ip));
+        assert!(!router.pin_active_game_server(later_ip));
+    }
+
+    #[test]
+    fn test_active_game_server_allows_retry_until_lookup_succeeds() {
+        let router = AutoRouter::new(true, "singapore");
+        let failed_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let retry_ip = Ipv4Addr::new(128, 116, 55, 1);
+
+        assert!(router.should_process_lookup_result(failed_ip));
+        assert!(router.should_process_lookup_result(retry_ip));
+
+        assert!(router.pin_active_game_server(retry_ip));
+        assert!(!router.should_process_lookup_result(failed_ip));
+    }
+
+    #[test]
     fn test_pending_lookup_marked_and_cleared() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let router = AutoRouter::new(true, "singapore");
@@ -875,9 +945,11 @@ mod tests {
 
         router.get_best_server_for_region(&RobloxRegion::UsEast);
         assert!(router.is_bypassed());
+        assert!(router.pin_active_game_server(Ipv4Addr::new(128, 116, 50, 1)));
 
         router.reset();
         assert!(!router.is_bypassed());
+        assert!(router.should_process_lookup_result(Ipv4Addr::new(128, 116, 55, 1)));
     }
 
     #[test]
