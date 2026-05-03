@@ -288,6 +288,7 @@ impl AppSettings {
                 normalize_guid_ascii_lowercase(&guid).map(|normalized| (signature, normalized))
             })
             .collect();
+        self.config.network_settings.normalize_legacy_master_boost();
         self.selected_game_presets = default_game_presets();
         // Older releases serialized false as the default even though the app has
         // no user-facing toggle. Keep app-close safe for shared/cafe PCs.
@@ -500,6 +501,51 @@ mod tests {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!loaded.auto_routing_enabled);
+    }
+
+    #[test]
+    fn test_settings_sanitize_migrates_legacy_network_boost_master() {
+        let mut settings: AppSettings = serde_json::from_str(
+            r#"{
+              "theme": "dark",
+              "config": {
+                "network_settings": {
+                  "enable_network_boost": true
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        settings.sanitize_in_place();
+
+        assert!(settings.config.network_settings.enable_network_boost);
+        assert!(settings.config.network_settings.disable_nagle);
+        assert!(settings.config.network_settings.disable_network_throttling);
+        assert!(settings.config.network_settings.gaming_qos);
+        assert!(!settings.config.network_settings.firewall_fix);
+    }
+
+    #[test]
+    fn test_settings_sanitize_preserves_all_off_network_boosts() {
+        let mut settings: AppSettings = serde_json::from_str(
+            r#"{
+              "theme": "dark",
+              "config": {
+                "network_settings": {
+                  "enable_network_boost": false
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        settings.sanitize_in_place();
+
+        assert!(!settings.config.network_settings.enable_network_boost);
+        assert!(!settings.config.network_settings.disable_nagle);
+        assert!(!settings.config.network_settings.disable_network_throttling);
+        assert!(!settings.config.network_settings.gaming_qos);
     }
 
     #[test]

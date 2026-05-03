@@ -204,6 +204,59 @@ fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(windows)]
+fn reapply_saved_network_boosts(state: &AppState) {
+    let (requested_config, normalized_config_changed) = {
+        let mut settings = state.settings.lock();
+        let original = settings.config.network_settings.clone();
+        settings
+            .config
+            .network_settings
+            .normalize_legacy_master_boost();
+        (
+            settings.config.network_settings.clone(),
+            settings.config.network_settings != original,
+        )
+    };
+
+    if !requested_config.has_enabled_boosts() {
+        if normalized_config_changed {
+            let snapshot = state.settings.lock().clone();
+            if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
+                warn!("Failed to persist normalized network boost state: {}", e);
+            }
+        }
+        return;
+    }
+
+    info!("Reapplying saved network boost settings on startup");
+    let outcome = state
+        .network_booster
+        .lock()
+        .reconcile_optimizations_checked(&requested_config);
+
+    if !outcome.warnings.is_empty() {
+        warn!(
+            "Saved network boosts reapplied with warnings: {}",
+            outcome.warnings.join("; ")
+        );
+    }
+
+    if outcome.applied_config != requested_config || normalized_config_changed {
+        let snapshot = {
+            let mut settings = state.settings.lock();
+            settings.config.network_settings = outcome.applied_config;
+            settings.clone()
+        };
+        if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
+            warn!("Failed to persist reapplied network boost state: {}", e);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn reapply_saved_network_boosts(_state: &AppState) {}
+
 pub fn run() {
     logging::init();
     let launched_from_startup = autostart::launched_from_startup_flag();
@@ -295,6 +348,7 @@ pub fn run() {
 
             // Recover network booster state from persisted snapshot (crash recovery)
             app_state.network_booster.lock().recover_from_snapshot();
+            reapply_saved_network_boosts(&app_state);
 
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
             let vpn_state_rx = app_state.vpn_state_handle.clone();

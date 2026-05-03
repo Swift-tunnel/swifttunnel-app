@@ -3,6 +3,7 @@ import type {
   OptimizationProfile,
   StandbyPurgeResult,
 } from "../../lib/types";
+import { normalizeNetworkBoostConfig } from "../../lib/settings";
 
 export const PROFILES: {
   id: OptimizationProfile;
@@ -60,12 +61,12 @@ export function getPresetConfig(
           target_fps: 360,
           ultraboost: true,
         },
-        network_settings: {
+        network_settings: normalizeNetworkBoostConfig({
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
           gaming_qos: true,
-        },
+        }),
       };
     case "Balanced":
       return {
@@ -88,12 +89,12 @@ export function getPresetConfig(
           target_fps: 144,
           ultraboost: false,
         },
-        network_settings: {
+        network_settings: normalizeNetworkBoostConfig({
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
           gaming_qos: true,
-        },
+        }),
       };
     case "HighEnd":
       return {
@@ -116,12 +117,12 @@ export function getPresetConfig(
           target_fps: 60,
           ultraboost: false,
         },
-        network_settings: {
+        network_settings: normalizeNetworkBoostConfig({
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
           gaming_qos: true,
-        },
+        }),
       };
     default:
       return base;
@@ -133,7 +134,9 @@ export function configsEqual(a: Config, b: Config): boolean {
 }
 
 export function robloxSettingsChanged(a: Config, b: Config): boolean {
-  return JSON.stringify(a.roblox_settings) !== JSON.stringify(b.roblox_settings);
+  return (
+    JSON.stringify(a.roblox_settings) !== JSON.stringify(b.roblox_settings)
+  );
 }
 
 export function validateWindowDimension(

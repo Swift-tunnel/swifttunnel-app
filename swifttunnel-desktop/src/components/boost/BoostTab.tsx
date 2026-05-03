@@ -4,6 +4,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
 import { systemRestartAsAdmin } from "../../lib/commands";
+import { normalizeNetworkBoostConfig } from "../../lib/settings";
 import { notify } from "../../lib/notifications";
 import {
   Toggle,
@@ -56,7 +57,9 @@ export function BoostTab() {
   const [restartAdminState, setRestartAdminState] = useState<
     "idle" | "restarting" | "error"
   >("idle");
-  const [restartAdminError, setRestartAdminError] = useState<string | null>(null);
+  const [restartAdminError, setRestartAdminError] = useState<string | null>(
+    null,
+  );
   const [networkApplying, setNetworkApplying] = useState(false);
 
   const savedConfig = settings.config;
@@ -67,7 +70,8 @@ export function BoostTab() {
   }, [savedConfig]);
 
   const savedGPP = settings.game_process_performance;
-  const [draftGPP, setDraftGPP] = useState<GameProcessPerformanceSettings>(savedGPP);
+  const [draftGPP, setDraftGPP] =
+    useState<GameProcessPerformanceSettings>(savedGPP);
 
   useEffect(() => {
     setDraftGPP(savedGPP);
@@ -77,7 +81,12 @@ export function BoostTab() {
     let canceled = false;
     void boost.syncEffectiveConfig().then((appliedConfig) => {
       if (canceled || !appliedConfig) return;
-      if (!configsEqual(appliedConfig, useSettingsStore.getState().settings.config)) {
+      if (
+        !configsEqual(
+          appliedConfig,
+          useSettingsStore.getState().settings.config,
+        )
+      ) {
         updateSettings({ config: appliedConfig });
         void useSettingsStore.getState().save();
       }
@@ -215,11 +224,16 @@ export function BoostTab() {
       const nextDraft = {
         ...draft,
         profile: "Custom" as const,
-        network_settings: { ...draft.network_settings, ...p },
+        network_settings: normalizeNetworkBoostConfig({
+          ...draft.network_settings,
+          ...p,
+        }),
       };
       setNetworkApplying(true);
       try {
-        const appliedConfig = await boost.updateConfig(JSON.stringify(nextDraft));
+        const appliedConfig = await boost.updateConfig(
+          JSON.stringify(nextDraft),
+        );
         updateSettings({
           config: appliedConfig,
           game_process_performance: draftGPP,
@@ -229,7 +243,10 @@ export function BoostTab() {
 
         const currentWarning = useBoostStore.getState().warning;
         if (currentWarning) {
-          addToast({ type: "warning", message: "Network boost could not fully apply" });
+          addToast({
+            type: "warning",
+            message: "Network boost could not fully apply",
+          });
         } else {
           addToast({ type: "success", message: "Network boost updated" });
         }
@@ -276,9 +293,7 @@ export function BoostTab() {
 
   return (
     <div className="flex w-full flex-col gap-5 pb-24">
-      {boost.error && (
-        <ErrorBanner tone="error">{boost.error}</ErrorBanner>
-      )}
+      {boost.error && <ErrorBanner tone="error">{boost.error}</ErrorBanner>}
 
       {boost.warning && (
         <ErrorBanner tone="warning">{boost.warning}</ErrorBanner>
@@ -343,10 +358,7 @@ export function BoostTab() {
       </section>
 
       {/* ── Roblox ── */}
-      <Section
-        title="Roblox"
-        tag={`${rblxCount} / 3 on`}
-      >
+      <Section title="Roblox" tag={`${rblxCount} / 3 on`}>
         <SettingRow
           title="Unlock FPS"
           desc="Remove 60 FPS cap"
@@ -370,12 +382,18 @@ export function BoostTab() {
           height={draft.roblox_settings.window_height}
           onWidthChange={(w) =>
             updateRblxOpt({
-              window_width: parseWindowDimensionInput(String(w), MIN_WINDOW_WIDTH),
+              window_width: parseWindowDimensionInput(
+                String(w),
+                MIN_WINDOW_WIDTH,
+              ),
             })
           }
           onHeightChange={(h) =>
             updateRblxOpt({
-              window_height: parseWindowDimensionInput(String(h), MIN_WINDOW_HEIGHT),
+              window_height: parseWindowDimensionInput(
+                String(h),
+                MIN_WINDOW_HEIGHT,
+              ),
             })
           }
           error={windowValidationError}
@@ -433,7 +451,9 @@ export function BoostTab() {
             desc="Full bandwidth while gaming"
             tooltip="Windows throttles network I/O when multimedia is playing. Disabling prevents sudden bandwidth drops."
             enabled={draft.network_settings.disable_network_throttling}
-            onChange={(v) => void applyNetworkOpt({ disable_network_throttling: v })}
+            onChange={(v) =>
+              void applyNetworkOpt({ disable_network_throttling: v })
+            }
             disabled={networkApplying}
           />
           <SettingRow
@@ -755,7 +775,9 @@ function ResolutionRow({
             step={2}
             value={width}
             onChange={(e) =>
-              onWidthChange(parseWindowDimensionInput(e.target.value, MIN_WINDOW_WIDTH))
+              onWidthChange(
+                parseWindowDimensionInput(e.target.value, MIN_WINDOW_WIDTH),
+              )
             }
             className="boost-input rounded-[4px] px-3 py-1.5 font-mono text-[13px] outline-none transition-colors"
             style={{
@@ -777,7 +799,9 @@ function ResolutionRow({
             step={2}
             value={height}
             onChange={(e) =>
-              onHeightChange(parseWindowDimensionInput(e.target.value, MIN_WINDOW_HEIGHT))
+              onHeightChange(
+                parseWindowDimensionInput(e.target.value, MIN_WINDOW_HEIGHT),
+              )
             }
             className="boost-input rounded-[4px] px-3 py-1.5 font-mono text-[13px] outline-none transition-colors"
             style={{
@@ -940,84 +964,90 @@ function RamCleanerCard({
           )}
         </div>
 
-      {showBottom && (
-        <div
-          className="space-y-2 border-t px-4 py-3"
-          style={{ borderColor: "var(--color-border-subtle)" }}
-        >
-          {isCleaning && (
-            <div className="flex items-center gap-2 text-[11.5px] text-text-muted">
-              <Spinner size={10} color="var(--color-accent-primary)" />
-              <span>
-                {stage === "flushing_modified"
-                  ? "Flushing modified pages…"
-                  : stage === "standby_purge"
-                    ? "Purging standby list…"
-                    : stage
-                      ? stage
-                      : "Cleaning…"}
-                {trimmedCount > 0 ? ` · Trimmed: ${trimmedCount}` : ""}
-                {currentProcess ? ` · ${currentProcess}` : ""}
-              </span>
-            </div>
-          )}
-          {!isAdmin && (
-            <div className="text-[11.5px] text-text-muted">
-              Deep clean requires Administrator.{" "}
-              <button
-                type="button"
-                onClick={onRestartAsAdmin}
-                disabled={restartState === "restarting"}
-                className="font-semibold text-accent-secondary hover:underline disabled:opacity-60"
-              >
-                {restartState === "restarting"
-                  ? "Restarting…"
-                  : "Restart as Admin"}
-              </button>
-              {restartState === "error" && restartError && (
-                <div className="mt-1 text-[11px] text-status-error">
-                  {restartError}
-                </div>
-              )}
-            </div>
-          )}
-          {result && (
-            <div
-              className="rounded-[5px] px-3 py-2 text-[11px] text-text-muted"
-              style={{ backgroundColor: "var(--color-bg-elevated)" }}
-            >
-              <div className="flex flex-wrap gap-x-5 gap-y-1">
-                <ResultPill label="Freed" value={formatDeltaMb(result.freed_mb)} />
-                {result.standby_freed_mb != null && (
-                  <ResultPill
-                    label="Standby"
-                    value={formatDeltaMb(result.standby_freed_mb)}
-                  />
-                )}
-                {result.modified_freed_mb != null && (
-                  <ResultPill
-                    label="Modified"
-                    value={formatDeltaMb(result.modified_freed_mb)}
-                  />
-                )}
-                <ResultPill label="Trimmed" value={String(result.trimmed_count)} />
-                <ResultPill
-                  label="Deep clean"
-                  value={deepCleanLabel(result.standby_purge)}
-                />
+        {showBottom && (
+          <div
+            className="space-y-2 border-t px-4 py-3"
+            style={{ borderColor: "var(--color-border-subtle)" }}
+          >
+            {isCleaning && (
+              <div className="flex items-center gap-2 text-[11.5px] text-text-muted">
+                <Spinner size={10} color="var(--color-accent-primary)" />
+                <span>
+                  {stage === "flushing_modified"
+                    ? "Flushing modified pages…"
+                    : stage === "standby_purge"
+                      ? "Purging standby list…"
+                      : stage
+                        ? stage
+                        : "Cleaning…"}
+                  {trimmedCount > 0 ? ` · Trimmed: ${trimmedCount}` : ""}
+                  {currentProcess ? ` · ${currentProcess}` : ""}
+                </span>
               </div>
-              {result.warnings.length > 0 && (
-                <div className="mt-1.5 text-[10.5px] text-status-warning">
-                  <Chip tone="warning" size="xs">
-                    {result.warnings.length} warning
-                    {result.warnings.length !== 1 ? "s" : ""}
-                  </Chip>
+            )}
+            {!isAdmin && (
+              <div className="text-[11.5px] text-text-muted">
+                Deep clean requires Administrator.{" "}
+                <button
+                  type="button"
+                  onClick={onRestartAsAdmin}
+                  disabled={restartState === "restarting"}
+                  className="font-semibold text-accent-secondary hover:underline disabled:opacity-60"
+                >
+                  {restartState === "restarting"
+                    ? "Restarting…"
+                    : "Restart as Admin"}
+                </button>
+                {restartState === "error" && restartError && (
+                  <div className="mt-1 text-[11px] text-status-error">
+                    {restartError}
+                  </div>
+                )}
+              </div>
+            )}
+            {result && (
+              <div
+                className="rounded-[5px] px-3 py-2 text-[11px] text-text-muted"
+                style={{ backgroundColor: "var(--color-bg-elevated)" }}
+              >
+                <div className="flex flex-wrap gap-x-5 gap-y-1">
+                  <ResultPill
+                    label="Freed"
+                    value={formatDeltaMb(result.freed_mb)}
+                  />
+                  {result.standby_freed_mb != null && (
+                    <ResultPill
+                      label="Standby"
+                      value={formatDeltaMb(result.standby_freed_mb)}
+                    />
+                  )}
+                  {result.modified_freed_mb != null && (
+                    <ResultPill
+                      label="Modified"
+                      value={formatDeltaMb(result.modified_freed_mb)}
+                    />
+                  )}
+                  <ResultPill
+                    label="Trimmed"
+                    value={String(result.trimmed_count)}
+                  />
+                  <ResultPill
+                    label="Deep clean"
+                    value={deepCleanLabel(result.standby_purge)}
+                  />
                 </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+                {result.warnings.length > 0 && (
+                  <div className="mt-1.5 text-[10.5px] text-status-warning">
+                    <Chip tone="warning" size="xs">
+                      {result.warnings.length} warning
+                      {result.warnings.length !== 1 ? "s" : ""}
+                    </Chip>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </section>
   );

@@ -183,7 +183,7 @@ impl GraphicsQuality {
 }
 
 /// Network optimization settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NetworkConfig {
     pub enable_network_boost: bool,
     pub prioritize_roblox_traffic: bool,
@@ -211,6 +211,66 @@ impl Default for NetworkConfig {
             gaming_qos: false,
             firewall_fix: false, // Off by default, one-click fix for Roblox launch crashes
         }
+    }
+}
+
+impl NetworkConfig {
+    fn any_specific_boost_enabled(&self) -> bool {
+        self.prioritize_roblox_traffic
+            || self.disable_nagle
+            || self.disable_network_throttling
+            || self.gaming_qos
+            || self.firewall_fix
+    }
+
+    pub fn has_enabled_boosts(&self) -> bool {
+        self.any_specific_boost_enabled()
+    }
+
+    pub fn normalize_legacy_master_boost(&mut self) {
+        self.enable_network_boost = self.any_specific_boost_enabled();
+    }
+}
+
+impl<'de> Deserialize<'de> for NetworkConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        struct NetworkConfigWire {
+            enable_network_boost: Option<bool>,
+            prioritize_roblox_traffic: Option<bool>,
+            disable_nagle: Option<bool>,
+            disable_network_throttling: Option<bool>,
+            gaming_qos: Option<bool>,
+            firewall_fix: Option<bool>,
+        }
+
+        let wire = NetworkConfigWire::deserialize(deserializer)?;
+        let has_any_specific_field = wire.prioritize_roblox_traffic.is_some()
+            || wire.disable_nagle.is_some()
+            || wire.disable_network_throttling.is_some()
+            || wire.gaming_qos.is_some()
+            || wire.firewall_fix.is_some();
+
+        let mut config = NetworkConfig {
+            enable_network_boost: wire.enable_network_boost.unwrap_or(false),
+            prioritize_roblox_traffic: wire.prioritize_roblox_traffic.unwrap_or(false),
+            disable_nagle: wire.disable_nagle.unwrap_or(false),
+            disable_network_throttling: wire.disable_network_throttling.unwrap_or(false),
+            gaming_qos: wire.gaming_qos.unwrap_or(false),
+            firewall_fix: wire.firewall_fix.unwrap_or(false),
+        };
+
+        if config.enable_network_boost && !has_any_specific_field {
+            config.disable_nagle = true;
+            config.disable_network_throttling = true;
+            config.gaming_qos = true;
+        }
+
+        config.normalize_legacy_master_boost();
+        Ok(config)
     }
 }
 
@@ -499,6 +559,51 @@ mod tests {
         assert!(!cfg.disable_network_throttling);
         assert!(!cfg.gaming_qos);
         assert!(!cfg.firewall_fix);
+    }
+
+    #[test]
+    fn test_network_config_deserializes_legacy_master_boost_to_real_toggles() {
+        let cfg: NetworkConfig = serde_json::from_str(r#"{"enable_network_boost": true}"#).unwrap();
+
+        assert!(cfg.enable_network_boost);
+        assert!(cfg.disable_nagle);
+        assert!(cfg.disable_network_throttling);
+        assert!(cfg.gaming_qos);
+        assert!(!cfg.prioritize_roblox_traffic);
+        assert!(!cfg.firewall_fix);
+    }
+
+    #[test]
+    fn test_network_config_does_not_invent_boosts_when_master_is_explicitly_stale() {
+        let cfg: NetworkConfig = serde_json::from_str(
+            r#"{
+              "enable_network_boost": true,
+              "prioritize_roblox_traffic": false,
+              "disable_nagle": false,
+              "disable_network_throttling": false,
+              "gaming_qos": false,
+              "firewall_fix": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!cfg.enable_network_boost);
+        assert!(!cfg.has_enabled_boosts());
+    }
+
+    #[test]
+    fn test_network_config_master_tracks_specific_boosts() {
+        let mut cfg = NetworkConfig {
+            disable_network_throttling: true,
+            ..Default::default()
+        };
+
+        cfg.normalize_legacy_master_boost();
+
+        assert!(cfg.enable_network_boost);
+        assert!(!cfg.disable_nagle);
+        assert!(cfg.disable_network_throttling);
+        assert!(!cfg.gaming_qos);
     }
 
     #[test]

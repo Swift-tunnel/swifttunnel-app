@@ -55,11 +55,86 @@ describe("stores/settingsStore", () => {
       useSettingsStore.getState().settings.config.roblox_settings.window_width,
     ).toBe(1280);
     expect(
-      useSettingsStore.getState().settings.config.roblox_settings.graphics_quality,
+      useSettingsStore.getState().settings.config.roblox_settings
+        .graphics_quality,
     ).toBe("Automatic");
     expect(
       useSettingsStore.getState().settings.config.roblox_settings.unlock_fps,
     ).toBe(false);
+  });
+
+  it("migrates legacy master network boost into current per-toggle boosts", async () => {
+    settingsLoad.mockResolvedValue({
+      ...DEFAULT_SETTINGS,
+      config: {
+        ...DEFAULT_SETTINGS.config,
+        network_settings: {
+          enable_network_boost: true,
+        },
+      },
+    });
+
+    const useSettingsStore = await loadStore();
+    await useSettingsStore.getState().load();
+
+    const network =
+      useSettingsStore.getState().settings.config.network_settings;
+    expect(network.enable_network_boost).toBe(true);
+    expect(network.disable_nagle).toBe(true);
+    expect(network.disable_network_throttling).toBe(true);
+    expect(network.gaming_qos).toBe(true);
+    expect(network.firewall_fix).toBe(false);
+  });
+
+  it("preserves explicit all-off network boosts even with a stale master flag", async () => {
+    settingsLoad.mockResolvedValue({
+      ...DEFAULT_SETTINGS,
+      config: {
+        ...DEFAULT_SETTINGS.config,
+        network_settings: {
+          ...DEFAULT_SETTINGS.config.network_settings,
+          enable_network_boost: true,
+          disable_nagle: false,
+          disable_network_throttling: false,
+          gaming_qos: false,
+          prioritize_roblox_traffic: false,
+          firewall_fix: false,
+        },
+      },
+    });
+
+    const useSettingsStore = await loadStore();
+    await useSettingsStore.getState().load();
+
+    const network =
+      useSettingsStore.getState().settings.config.network_settings;
+    expect(network.enable_network_boost).toBe(false);
+    expect(network.disable_nagle).toBe(false);
+    expect(network.disable_network_throttling).toBe(false);
+    expect(network.gaming_qos).toBe(false);
+  });
+
+  it("does not enable network boosts when legacy master is off", async () => {
+    settingsLoad.mockResolvedValue({
+      ...DEFAULT_SETTINGS,
+      config: {
+        ...DEFAULT_SETTINGS.config,
+        network_settings: {
+          ...DEFAULT_SETTINGS.config.network_settings,
+          enable_network_boost: false,
+        },
+      },
+    });
+
+    const useSettingsStore = await loadStore();
+    await useSettingsStore.getState().load();
+
+    const network =
+      useSettingsStore.getState().settings.config.network_settings;
+    expect(network.enable_network_boost).toBe(false);
+    expect(network.disable_nagle).toBe(false);
+    expect(network.disable_network_throttling).toBe(false);
+    expect(network.gaming_qos).toBe(false);
   });
 
   it("defaults minimize_to_tray to true when load fails", async () => {
@@ -72,10 +147,12 @@ describe("stores/settingsStore", () => {
     expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(true);
     expect(useSettingsStore.getState().settings.run_on_startup).toBe(false);
     expect(useSettingsStore.getState().settings.auto_reconnect).toBe(false);
-    expect(useSettingsStore.getState().settings.resume_vpn_on_startup).toBe(false);
-    expect(useSettingsStore.getState().settings.preferred_physical_adapter_guid).toBe(
-      null,
+    expect(useSettingsStore.getState().settings.resume_vpn_on_startup).toBe(
+      false,
     );
+    expect(
+      useSettingsStore.getState().settings.preferred_physical_adapter_guid,
+    ).toBe(null);
     expect(useSettingsStore.getState().settings.adapter_binding_mode).toBe(
       "smart_auto",
     );
@@ -90,20 +167,22 @@ describe("stores/settingsStore", () => {
     expect(
       useSettingsStore.getState().settings.game_process_performance.unbind_cpu0,
     ).toBe(false);
-    expect(useSettingsStore.getState().settings.config.roblox_settings.window_width).toBe(
-      1280,
-    );
     expect(
-      useSettingsStore.getState().settings.config.roblox_settings.graphics_quality,
+      useSettingsStore.getState().settings.config.roblox_settings.window_width,
+    ).toBe(1280);
+    expect(
+      useSettingsStore.getState().settings.config.roblox_settings
+        .graphics_quality,
     ).toBe("Automatic");
     expect(
       useSettingsStore.getState().settings.config.roblox_settings.unlock_fps,
     ).toBe(false);
-    expect(useSettingsStore.getState().settings.config.roblox_settings.window_height).toBe(
-      720,
-    );
     expect(
-      useSettingsStore.getState().settings.config.roblox_settings.window_fullscreen,
+      useSettingsStore.getState().settings.config.roblox_settings.window_height,
+    ).toBe(720);
+    expect(
+      useSettingsStore.getState().settings.config.roblox_settings
+        .window_fullscreen,
     ).toBe(false);
   });
 

@@ -116,10 +116,13 @@ impl NetworkBooster {
     ) -> NetworkApplyOutcome {
         info!("Reconciling network optimizations");
 
-        let mut applied_config = config.clone();
+        let mut requested_config = config.clone();
+        requested_config.normalize_legacy_master_boost();
+
+        let mut applied_config = requested_config.clone();
         let mut warnings = Vec::new();
 
-        if config.prioritize_roblox_traffic {
+        if requested_config.prioritize_roblox_traffic {
             if let Err(e) = self.prioritize_game_traffic() {
                 applied_config.prioritize_roblox_traffic = false;
                 warnings.push(format!("Prioritize Roblox traffic: {}", e));
@@ -129,7 +132,7 @@ impl NetworkBooster {
         }
 
         // Tier 1 (Safe) Network Boosts
-        if config.disable_nagle {
+        if requested_config.disable_nagle {
             if let Err(e) = self.disable_nagle_algorithm() {
                 applied_config.disable_nagle = false;
                 warnings.push(format!("Disable Nagle's algorithm: {}", e));
@@ -138,7 +141,7 @@ impl NetworkBooster {
             warnings.push(format!("Restore Nagle's algorithm defaults: {}", e));
         }
 
-        if config.disable_network_throttling {
+        if requested_config.disable_network_throttling {
             if let Err(e) = self.disable_network_throttling() {
                 applied_config.disable_network_throttling = false;
                 warnings.push(format!("Disable network throttling: {}", e));
@@ -147,7 +150,7 @@ impl NetworkBooster {
             warnings.push(format!("Restore network throttling defaults: {}", e));
         }
 
-        if config.gaming_qos {
+        if requested_config.gaming_qos {
             if let Err(e) = self.enable_gaming_qos() {
                 applied_config.gaming_qos = false;
                 warnings.push(format!("Enable gaming QoS: {}", e));
@@ -156,7 +159,7 @@ impl NetworkBooster {
             warnings.push(format!("Disable gaming QoS: {}", e));
         }
 
-        if config.firewall_fix {
+        if requested_config.firewall_fix {
             if let Err(e) = self.firewall_fixer.apply() {
                 applied_config.firewall_fix = false;
                 warnings.push(format!("Apply Roblox firewall fix: {}", e));
@@ -166,8 +169,10 @@ impl NetworkBooster {
         }
 
         self.persist_snapshot();
+        applied_config.normalize_legacy_master_boost();
 
-        let effective_config = self.effective_network_config(&applied_config);
+        let mut effective_config = self.effective_network_config(&applied_config);
+        effective_config.normalize_legacy_master_boost();
         if applied_config.disable_nagle && !effective_config.disable_nagle {
             warnings.push("Disable Nagle's algorithm did not verify after apply".to_string());
         }
@@ -306,8 +311,10 @@ impl NetworkBooster {
 
     pub fn effective_network_config(&self, desired: &NetworkConfig) -> NetworkConfig {
         let mut effective = desired.clone();
+        effective.normalize_legacy_master_boost();
+        let requested = effective.clone();
 
-        if desired.disable_nagle {
+        if requested.disable_nagle {
             let adapter_guids = self.list_adapter_guids();
             effective.disable_nagle = !adapter_guids.is_empty()
                 && adapter_guids.iter().all(|guid| {
@@ -320,7 +327,7 @@ impl NetworkBooster {
                 });
         }
 
-        if desired.disable_network_throttling {
+        if requested.disable_network_throttling {
             effective.disable_network_throttling = Self::query_registry_dword(
                 NETWORK_SYSTEM_PROFILE_KEY,
                 REG_VALUE_NETWORK_THROTTLING_INDEX,
@@ -331,7 +338,7 @@ impl NetworkBooster {
                 ) == Some(0);
         }
 
-        if desired.gaming_qos {
+        if requested.gaming_qos {
             let dscp_enabled = Self::query_registry_dword(
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
                 "Do not use NLA",
@@ -348,11 +355,12 @@ impl NetworkBooster {
                 dscp_enabled && roblox_policies_present && relay_policies_present;
         }
 
-        if desired.prioritize_roblox_traffic {
+        if requested.prioritize_roblox_traffic {
             effective.prioritize_roblox_traffic =
                 Self::qos_policy_exists(LEGACY_ROBLOX_PRIORITY_POLICY);
         }
 
+        effective.normalize_legacy_master_boost();
         effective
     }
 
