@@ -4638,6 +4638,14 @@ fn forward_tunneled_packet_from_reader(
     if ip_packet.len() >= 20 {
         let dst_ip = Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
         if is_roblox_game_server_ip(dst_ip) {
+            if let Some(auto_router) = auto_router {
+                if auto_router.is_lookup_pending(dst_ip) {
+                    return ReaderTunnelAction::Consumed;
+                }
+            }
+        }
+
+        if auto_routing_candidate_dst_ip(data) == Some(dst_ip) {
             if let Some(mut servers) = detected_game_servers.try_write() {
                 if servers.len() < MAX_DETECTED_GAME_SERVERS || servers.contains(&dst_ip) {
                     if servers.insert(dst_ip) {
@@ -6452,6 +6460,8 @@ enum AutoRoutingPacketAction {
     Hold,
 }
 
+const ROBLOX_GAME_SERVER_PORT_START: u16 = 49152;
+
 #[inline(always)]
 fn is_ipv4_fragment(data: &[u8]) -> bool {
     let ip_start = match parse_ipv4_header_offset(data) {
@@ -6475,6 +6485,46 @@ fn queue_overflow_action(mode: QueueOverflowMode, data: &[u8]) -> QueueFullActio
             }
         }
     }
+}
+
+#[inline(always)]
+fn auto_routing_candidate_dst_ip(data: &[u8]) -> Option<Ipv4Addr> {
+    let ip_start = parse_ipv4_header_offset(data)?;
+    let ihl = ((data[ip_start] & 0x0F) as usize) * 4;
+    if ihl < 20 {
+        return None;
+    }
+
+    let dst_ip = Ipv4Addr::new(
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    );
+    if !is_roblox_game_server_ip(dst_ip) {
+        return None;
+    }
+
+    let fragment_bits = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
+    if (fragment_bits & 0x1FFF) != 0 {
+        return None;
+    }
+
+    if data[ip_start + 9] != 17 {
+        return None;
+    }
+
+    let transport_start = ip_start + ihl;
+    if data.len() < transport_start + 4 {
+        return None;
+    }
+
+    let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
+    if dst_port < ROBLOX_GAME_SERVER_PORT_START {
+        return None;
+    }
+
+    Some(dst_ip)
 }
 
 /// Apply the auto-routing hold gate for packets that could otherwise escape.
@@ -6503,7 +6553,7 @@ fn auto_routing_packet_action(
         return AutoRoutingPacketAction::Hold;
     }
 
-    if evaluate_new_server {
+    if evaluate_new_server && auto_routing_candidate_dst_ip(data) == Some(dst_ip) {
         auto_router.evaluate_game_server(dst_ip);
         if auto_router.is_lookup_pending(dst_ip) {
             return AutoRoutingPacketAction::Hold;
@@ -9719,9 +9769,44 @@ mod tests {
             AutoRoutingPacketAction::Hold
         );
         assert!(router.is_lookup_pending(dst_ip));
-        let (queued_ip, generation) = rx.try_recv().expect("lookup should be queued");
+        let (queued_ip, generation, _session_epoch) =
+            rx.try_recv().expect("lookup should be queued");
         assert_eq!(queued_ip, dst_ip);
         assert_eq!(generation, 1);
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_ignores_roblox_tcp_api_packet() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        router.set_lookup_channel(tx);
+
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let frame = build_ipv4_frame(6, Ipv4Addr::new(192, 168, 1, 210), dst_ip, 53020, 443);
+
+        assert_eq!(
+            auto_routing_packet_action(&frame, Some(&router), true),
+            AutoRoutingPacketAction::Pass
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(dst_ip));
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_ignores_low_port_udp_to_roblox_range() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        router.set_lookup_channel(tx);
+
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let frame = build_ipv4_frame(17, Ipv4Addr::new(192, 168, 1, 210), dst_ip, 53020, 3478);
+
+        assert_eq!(
+            auto_routing_packet_action(&frame, Some(&router), true),
+            AutoRoutingPacketAction::Pass
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(dst_ip));
     }
 
     #[test]
@@ -9769,6 +9854,23 @@ mod tests {
 
         let dst_ip = Ipv4Addr::new(128, 117, 50, 100);
         let frame = build_ipv4_frame(17, Ipv4Addr::new(192, 168, 1, 213), dst_ip, 53023, 54023);
+
+        assert_eq!(
+            auto_routing_packet_action(&frame, Some(&router), true),
+            AutoRoutingPacketAction::Pass
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(dst_ip));
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_ignores_roblox_infrastructure_destination() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        router.set_lookup_channel(tx);
+
+        let dst_ip = Ipv4Addr::new(23, 173, 192, 10);
+        let frame = build_ipv4_frame(17, Ipv4Addr::new(192, 168, 1, 214), dst_ip, 53024, 55000);
 
         assert_eq!(
             auto_routing_packet_action(&frame, Some(&router), true),
