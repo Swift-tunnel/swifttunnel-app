@@ -96,6 +96,13 @@ body {
   font-feature-settings: "ss01", "cv11", "cv05";
 }
 
+html[data-renderer-active="false"] *,
+html[data-renderer-active="false"] *::before,
+html[data-renderer-active="false"] *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+
 .mono,
 .font-mono {
   font-family: "Geist Mono", "JetBrains Mono", "Cascadia Code", "Consolas", ui-monospace, monospace;

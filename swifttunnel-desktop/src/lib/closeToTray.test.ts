@@ -17,11 +17,13 @@ describe("createCloseToTrayHandler", () => {
     const persistGate = deferred<void>();
     const hide = vi.fn(async () => {});
     const close = vi.fn(async () => {});
+    const onHiddenToTray = vi.fn();
 
     const handler = createCloseToTrayHandler({
       persistWindowState: () => persistGate.promise,
       hide,
       close,
+      onHiddenToTray,
       shouldMinimizeToTray: () => true,
     });
 
@@ -36,6 +38,7 @@ describe("createCloseToTrayHandler", () => {
     await p;
 
     expect(hide).toHaveBeenCalledTimes(1);
+    expect(onHiddenToTray).toHaveBeenCalledTimes(1);
     expect(close).not.toHaveBeenCalled();
   });
 
@@ -83,6 +86,7 @@ describe("createCloseToTrayHandler", () => {
   it("falls back to a real close if hide fails (without recursion)", async () => {
     const preventDefault = vi.fn();
     const persistWindowState = vi.fn(async () => {});
+    const onHiddenToTray = vi.fn();
 
     const hide = vi.fn(async () => {
       throw new Error("hide failed");
@@ -98,6 +102,7 @@ describe("createCloseToTrayHandler", () => {
       persistWindowState,
       hide,
       close,
+      onHiddenToTray,
       shouldMinimizeToTray: () => true,
     });
 
@@ -106,6 +111,7 @@ describe("createCloseToTrayHandler", () => {
     expect(preventDefault).toHaveBeenCalledTimes(1);
     expect(persistWindowState).toHaveBeenCalledTimes(1);
     expect(hide).toHaveBeenCalledTimes(1);
+    expect(onHiddenToTray).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledTimes(1);
   });
 });

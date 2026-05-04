@@ -7,6 +7,7 @@ pub const SERVER_LIST_UPDATED: &str = "server-list-updated";
 pub const THROUGHPUT_UPDATE: &str = "throughput-update";
 pub const PERFORMANCE_METRICS_UPDATE: &str = "performance-metrics-update";
 pub const RAM_CLEAN_PROGRESS: &str = "ram-clean-progress";
+pub const WINDOW_VISIBILITY_CHANGED: &str = "window-visibility-changed";
 
 /// VPN state change event payload
 #[derive(Clone, Serialize)]

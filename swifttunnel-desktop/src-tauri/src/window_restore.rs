@@ -1,4 +1,4 @@
-use tauri::WebviewWindow;
+use tauri::{Emitter, WebviewWindow};
 
 trait WindowOps {
     fn unminimize(&self) -> Result<(), String>;
@@ -28,6 +28,7 @@ fn restore_window<W: WindowOps>(window: &W) {
 
 pub fn restore_main_window(window: &WebviewWindow) {
     restore_window(window);
+    let _ = window.emit(crate::events::WINDOW_VISIBILITY_CHANGED, true);
 }
 
 #[cfg(test)]
