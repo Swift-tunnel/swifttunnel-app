@@ -5,6 +5,10 @@ import { useUpdaterStore } from "../../stores/updaterStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useToastStore } from "../../stores/toastStore";
 import {
+  useActiveInterval,
+  useRendererActivityStore,
+} from "../../lib/rendererActivity";
+import {
   Toggle,
   Button,
   Chip,
@@ -51,6 +55,7 @@ export function SettingsTab() {
   const vpnState = useVpnStore((s) => s.state);
   const vpnDiagnostics = useVpnStore((s) => s.diagnostics);
   const fetchVpnDiagnostics = useVpnStore((s) => s.fetchDiagnostics);
+  const rendererActive = useRendererActivityStore((s) => s.isActive);
 
   const addToast = useToastStore((s) => s.addToast);
 
@@ -145,13 +150,15 @@ export function SettingsTab() {
   }, []);
 
   useEffect(() => {
+    if (!rendererActive) return;
     void fetchVpnDiagnostics();
-    if (vpnState !== "connected") return;
-    const id = setInterval(() => {
-      void fetchVpnDiagnostics();
-    }, 3000);
-    return () => clearInterval(id);
-  }, [fetchVpnDiagnostics, vpnState]);
+  }, [fetchVpnDiagnostics, rendererActive]);
+
+  useActiveInterval(
+    fetchVpnDiagnostics,
+    3000,
+    vpnState === "connected",
+  );
 
   async function generateDiagnosticsBundle() {
     setIsGeneratingDiagnostics(true);

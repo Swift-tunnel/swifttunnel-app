@@ -8,6 +8,7 @@ type CloseToTrayDeps = {
   persistWindowState: () => Promise<void>;
   hide: () => Promise<void>;
   close: () => Promise<void>;
+  onHiddenToTray?: () => void;
   shouldMinimizeToTray?: () => boolean;
   isDisposed?: () => boolean;
 };
@@ -54,6 +55,7 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
 
     try {
       await deps.hide();
+      deps.onHiddenToTray?.();
     } catch (error) {
       reportError("Failed to hide window to tray", error, {
         dedupeKey: "close-to-tray-hide",

@@ -11,6 +11,10 @@ import {
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import {
+  useActiveInterval,
+  useRendererActivityStore,
+} from "../../lib/rendererActivity";
+import {
   isConnectActionBusy,
   resolveConnectStatus,
   stateLabel,
@@ -66,6 +70,7 @@ export function ConnectTab() {
   const getLatency = useServerStore((s) => s.getLatency);
   const fetchLatencies = useServerStore((s) => s.fetchLatencies);
   const refreshServers = useServerStore((s) => s.refresh);
+  const rendererActive = useRendererActivityStore((s) => s.isActive);
 
   const connectedRegion = findRegionForVpnRegion(regions, vpnRegion);
   const connectedServerLabel = formatConnectedServerLabel(
@@ -115,11 +120,7 @@ export function ConnectTab() {
     };
   }, [save]);
 
-  useEffect(() => {
-    if (!isConnected) return;
-    const id = setInterval(fetchThroughput, 1000);
-    return () => clearInterval(id);
-  }, [isConnected, fetchThroughput]);
+  useActiveInterval(fetchThroughput, 1000, isConnected);
 
   useEffect(() => {
     if (!isConnected) {
@@ -127,7 +128,13 @@ export function ConnectTab() {
       prevBytesRef.current = null;
       return;
     }
-    const id = setInterval(() => {
+    if (!rendererActive) {
+      prevBytesRef.current = null;
+    }
+  }, [isConnected, rendererActive]);
+
+  useActiveInterval(
+    () => {
       const { bytesUp, bytesDown } = useVpnStore.getState();
       const now = Date.now();
       const prev = prevBytesRef.current;
@@ -140,31 +147,24 @@ export function ConnectTab() {
         );
       }
       prevBytesRef.current = { up: bytesUp, down: bytesDown, t: now };
-    }, 1000);
-    return () => {
-      clearInterval(id);
-      prevBytesRef.current = null;
-    };
-  }, [isConnected]);
+    },
+    1000,
+    isConnected,
+  );
+
+  useActiveInterval(
+    () => fetchState(),
+    2000,
+    isConnected || isTransitioning,
+  );
 
   useEffect(() => {
-    if (!isConnected && !isTransitioning) return;
-    const id = setInterval(() => void fetchState(), 2000);
-    return () => clearInterval(id);
-  }, [isConnected, isTransitioning, fetchState]);
-
-  useEffect(() => {
+    if (!rendererActive) return;
     void fetchLatencies();
-    const id = setInterval(() => void fetchLatencies(), 15000);
-    return () => clearInterval(id);
-  }, [fetchLatencies]);
+  }, [fetchLatencies, rendererActive]);
 
-  useEffect(() => {
-    if (!isConnected) return;
-    void fetchPing();
-    const id = setInterval(() => void fetchPing(), 3000);
-    return () => clearInterval(id);
-  }, [isConnected, fetchPing]);
+  useActiveInterval(() => fetchLatencies(), 15000);
+  useActiveInterval(fetchPing, 3000, isConnected);
 
   useEffect(() => {
     if (connectedAt === null) {
@@ -172,12 +172,35 @@ export function ConnectTab() {
       return;
     }
     setElapsed(Math.floor((Date.now() - connectedAt) / 1000));
-    const id = setInterval(
-      () => setElapsed(Math.floor((Date.now() - connectedAt) / 1000)),
-      1000,
-    );
-    return () => clearInterval(id);
-  }, [connectedAt]);
+  }, [connectedAt, rendererActive]);
+
+  useActiveInterval(
+    () => {
+      if (connectedAt !== null) {
+        setElapsed(Math.floor((Date.now() - connectedAt) / 1000));
+      }
+    },
+    1000,
+    connectedAt !== null,
+  );
+
+  useEffect(() => {
+    if (!rendererActive) return;
+    if (isConnected || isTransitioning) {
+      void fetchState();
+    }
+    if (isConnected) {
+      void fetchThroughput();
+      void fetchPing();
+    }
+  }, [
+    fetchPing,
+    fetchState,
+    fetchThroughput,
+    isConnected,
+    isTransitioning,
+    rendererActive,
+  ]);
 
   function selectRegion(regionId: string) {
     update({ selected_region: regionId, auto_routing_enabled: false });

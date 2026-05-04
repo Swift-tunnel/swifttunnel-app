@@ -7,6 +7,10 @@ import { systemRestartAsAdmin } from "../../lib/commands";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
 import { notify } from "../../lib/notifications";
 import {
+  useActiveInterval,
+  useRendererActivityStore,
+} from "../../lib/rendererActivity";
+import {
   Toggle,
   SectionHeader,
   Tooltip,
@@ -53,6 +57,7 @@ export function BoostTab() {
 
   const boost = useBoostStore();
   const addToast = useToastStore((s) => s.addToast);
+  const rendererActive = useRendererActivityStore((s) => s.isActive);
 
   const [restartAdminState, setRestartAdminState] = useState<
     "idle" | "restarting" | "error"
@@ -116,22 +121,23 @@ export function BoostTab() {
   );
   const windowValidationError = windowWidthError ?? windowHeightError;
 
-  useEffect(() => {
-    const id = setInterval(boost.fetchMetrics, 2000);
-    return () => clearInterval(id);
-  }, [boost.fetchMetrics]);
+  useActiveInterval(boost.fetchMetrics, 2000);
 
   useEffect(() => {
     void boost.fetchSystemMemory();
   }, [boost.fetchSystemMemory]);
 
   useEffect(() => {
-    const intervalMs = boost.isCleaningRam ? 250 : 1000;
-    const id = setInterval(() => {
+    if (rendererActive) {
+      void boost.fetchMetrics();
       void boost.fetchSystemMemory();
-    }, intervalMs);
-    return () => clearInterval(id);
-  }, [boost.fetchSystemMemory, boost.isCleaningRam]);
+    }
+  }, [boost.fetchMetrics, boost.fetchSystemMemory, rendererActive]);
+
+  useActiveInterval(
+    boost.fetchSystemMemory,
+    boost.isCleaningRam ? 250 : 1000,
+  );
 
   const applyChanges = useCallback(async () => {
     if (windowValidationError) return;

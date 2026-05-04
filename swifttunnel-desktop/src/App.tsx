@@ -21,6 +21,10 @@ import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { runAppBootstrap } from "./lib/appBootstrap";
 import { reportError } from "./lib/errors";
+import {
+  installRendererActivityListeners,
+  useRendererActivityStore,
+} from "./lib/rendererActivity";
 import { systemLaunchedFromStartup } from "./lib/commands";
 import {
   ensureWindowStateVisible,
@@ -58,6 +62,16 @@ function App() {
   const fetchVpnState = useVpnStore((s) => s.fetchState);
   const connectVpn = useVpnStore((s) => s.connect);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+  const rendererActive = useRendererActivityStore((s) => s.isActive);
+  const setWindowVisible = useRendererActivityStore((s) => s.setWindowVisible);
+
+  useEffect(() => installRendererActivityListeners(), []);
+
+  useEffect(() => {
+    document.documentElement.dataset.rendererActive = rendererActive
+      ? "true"
+      : "false";
+  }, [rendererActive]);
 
   useEffect(() => {
     let disposed = false;
@@ -82,10 +96,12 @@ function App() {
           const fromStartup = await systemLaunchedFromStartup();
           if (!fromStartup && !disposed) {
             await getCurrentWindow().show();
+            setWindowVisible(true);
           }
         } catch {
           if (!disposed) {
             await getCurrentWindow().show();
+            setWindowVisible(true);
           }
         }
       }
@@ -109,6 +125,7 @@ function App() {
     fetchVpnState,
     connectVpn,
     checkForUpdates,
+    setWindowVisible,
   ]);
 
   useEffect(() => {
@@ -246,6 +263,7 @@ function App() {
             persistWindowState,
             hide: () => appWindow.hide(),
             close: () => appWindow.close(),
+            onHiddenToTray: () => setWindowVisible(false),
             shouldMinimizeToTray: () =>
               useSettingsStore.getState().settings.minimize_to_tray,
             isDisposed: () => disposed,

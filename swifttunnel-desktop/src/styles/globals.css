@@ -121,6 +121,13 @@ body {
   font-feature-settings: "ss01", "cv11";
 }
 
+html[data-renderer-active="false"] *,
+html[data-renderer-active="false"] *::before,
+html[data-renderer-active="false"] *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+
 /* Mono numerics everywhere — use `.mono` or a tailwind font-mono class */
 .mono,
 .font-mono {
