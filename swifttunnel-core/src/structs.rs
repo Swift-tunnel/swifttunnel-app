@@ -266,7 +266,6 @@ impl<'de> Deserialize<'de> for NetworkConfig {
         if config.enable_network_boost && !has_any_specific_field {
             config.disable_nagle = true;
             config.disable_network_throttling = true;
-            config.gaming_qos = true;
         }
 
         config.normalize_legacy_master_boost();
@@ -568,7 +567,7 @@ mod tests {
         assert!(cfg.enable_network_boost);
         assert!(cfg.disable_nagle);
         assert!(cfg.disable_network_throttling);
-        assert!(cfg.gaming_qos);
+        assert!(!cfg.gaming_qos);
         assert!(!cfg.prioritize_roblox_traffic);
         assert!(!cfg.firewall_fix);
     }

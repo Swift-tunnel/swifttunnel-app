@@ -82,7 +82,7 @@ describe("stores/settingsStore", () => {
     expect(network.enable_network_boost).toBe(true);
     expect(network.disable_nagle).toBe(true);
     expect(network.disable_network_throttling).toBe(true);
-    expect(network.gaming_qos).toBe(true);
+    expect(network.gaming_qos).toBe(false);
     expect(network.firewall_fix).toBe(false);
   });
 

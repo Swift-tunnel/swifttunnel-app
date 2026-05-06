@@ -103,7 +103,6 @@ export function normalizeNetworkBoostConfig(
   ) {
     next.disable_nagle = true;
     next.disable_network_throttling = true;
-    next.gaming_qos = true;
   }
 
   next.enable_network_boost =
