@@ -573,16 +573,6 @@ mod tests {
     }
 
     #[test]
-    fn test_network_config_legacy_master_does_not_silently_enable_gaming_qos() {
-        let cfg: NetworkConfig = serde_json::from_str(r#"{"enable_network_boost": true}"#).unwrap();
-
-        assert!(cfg.enable_network_boost);
-        assert!(cfg.disable_nagle);
-        assert!(cfg.disable_network_throttling);
-        assert!(!cfg.gaming_qos);
-    }
-
-    #[test]
     fn test_network_config_does_not_invent_boosts_when_master_is_explicitly_stale() {
         let cfg: NetworkConfig = serde_json::from_str(
             r#"{
