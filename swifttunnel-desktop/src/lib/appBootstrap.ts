@@ -30,7 +30,7 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
   ]);
 
   const authState = deps.getAuthState();
-  if (authState === "logged_in" || authState === "banned") {
+  if (authState === "logged_in") {
     await deps.refreshAuthProfile();
     await Promise.all([deps.fetchAuth(), deps.fetchVpnState()]);
   }

@@ -110,4 +110,35 @@ describe("app bootstrap", () => {
 
     expect(connectVpn).not.toHaveBeenCalled();
   });
+
+  it("does not refresh profile or reconnect once auth is already banned", async () => {
+    const fetchAuth = vi.fn().mockResolvedValue(undefined);
+    const fetchVpnState = vi.fn().mockResolvedValue(undefined);
+    const refreshAuthProfile = vi.fn().mockResolvedValue(undefined);
+    const connectVpn = vi.fn().mockResolvedValue(undefined);
+
+    await runAppBootstrap({
+      initEventListeners: vi.fn().mockResolvedValue(undefined),
+      fetchAuth,
+      loadSettings: vi.fn().mockResolvedValue(undefined),
+      fetchServers: vi.fn().mockResolvedValue(undefined),
+      fetchSystemInfo: vi.fn().mockResolvedValue(undefined),
+      fetchVpnState,
+      refreshAuthProfile,
+      getSettings: () => ({
+        ...DEFAULT_SETTINGS,
+        auto_reconnect: true,
+        resume_vpn_on_startup: true,
+      }),
+      getAuthState: () => "banned",
+      getVpnState: () => "disconnected",
+      connectVpn,
+      checkForUpdates: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(fetchAuth).toHaveBeenCalledTimes(1);
+    expect(fetchVpnState).toHaveBeenCalledTimes(1);
+    expect(refreshAuthProfile).not.toHaveBeenCalled();
+    expect(connectVpn).not.toHaveBeenCalled();
+  });
 });

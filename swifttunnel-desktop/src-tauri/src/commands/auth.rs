@@ -144,7 +144,7 @@ pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
     true
 }
 
-async fn apply_ban_cleanup(app: &AppHandle, state: &AppState) -> bool {
+pub(crate) async fn apply_ban_cleanup(app: &AppHandle, state: &AppState) -> bool {
     if cleanup_banned_session(state).await {
         emit_auth_state(app, state).await;
         return true;

@@ -112,6 +112,22 @@ impl AuthManager {
         }
     }
 
+    pub fn mark_current_session_banned(&self, reason_suffix: &str) -> Result<(), AuthError> {
+        let mut session = match self.get_state() {
+            AuthState::LoggedIn(session) | AuthState::Banned(session) => session,
+            _ => return Err(AuthError::NotAuthenticated),
+        };
+
+        session.user.is_banned = true;
+        session.user.banned_reason = Self::reason_from_ban_suffix(reason_suffix);
+
+        if let Err(e) = self.storage.store_session(&session) {
+            warn!("Failed to store banned session: {}", e);
+        }
+        self.set_session_state(session);
+        Ok(())
+    }
+
     fn ban_suffix(reason: &Option<String>) -> String {
         reason
             .as_ref()

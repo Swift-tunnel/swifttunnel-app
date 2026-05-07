@@ -104,6 +104,14 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             "Not signed in.\n\nPlease sign in to continue.".to_string()
         }
 
+        VpnError::UserBanned(reason) => {
+            if reason.is_empty() {
+                "This account is banned.".to_string()
+            } else {
+                format!("This account is banned{}.", reason)
+            }
+        }
+
         // Split tunnel generic
         VpnError::SplitTunnel(msg) => {
             format!("Split tunnel error.\n\n{}", simplify_message(msg))
@@ -154,6 +162,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::ConfigFetch(_) => "Config fetch failed",
         VpnError::InvalidConfig(_) => "Invalid config",
         VpnError::NotAuthenticated => "Not authenticated",
+        VpnError::UserBanned(_) => "Account banned",
         VpnError::SplitTunnel(_) => "Split tunnel error",
         VpnError::Io(_) => "System error",
     }
@@ -216,5 +225,13 @@ mod tests {
     fn test_short_error() {
         let error = VpnError::NotAuthenticated;
         assert_eq!(short_error(&error), "Not authenticated");
+    }
+
+    #[test]
+    fn test_user_friendly_user_banned() {
+        let error = VpnError::UserBanned(": abuse".to_string());
+        let msg = user_friendly_error(&error);
+        assert_eq!(msg, "This account is banned: abuse.");
+        assert_eq!(short_error(&error), "Account banned");
     }
 }

@@ -94,6 +94,9 @@ pub enum VpnError {
     #[error("Not authenticated")]
     NotAuthenticated,
 
+    #[error("Account banned{0}")]
+    UserBanned(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -174,6 +177,12 @@ mod tests {
     fn test_vpn_error_display_not_authenticated() {
         let err = VpnError::NotAuthenticated;
         assert_eq!(err.to_string(), "Not authenticated");
+    }
+
+    #[test]
+    fn test_vpn_error_display_user_banned() {
+        let err = VpnError::UserBanned(": chargeback".to_string());
+        assert_eq!(err.to_string(), "Account banned: chargeback");
     }
 
     #[test]

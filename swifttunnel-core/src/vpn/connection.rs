@@ -16,7 +16,7 @@ use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
 use super::{VpnError, VpnResult};
 use crate::auth::http_client::AuthClient;
-use crate::auth::types::{RelayPreflightMode, RelayQueueFullMode, VpnConfig};
+use crate::auth::types::{AuthError, RelayPreflightMode, RelayQueueFullMode, VpnConfig};
 use crate::settings::GameProcessPerformanceSettings;
 use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
@@ -246,6 +246,13 @@ fn select_candidate_after_preflight(
         fallback.addr,
         fallback.queue_full_mode,
     ))
+}
+
+fn relay_ticket_ban_reason(error: &AuthError) -> Option<String> {
+    match error {
+        AuthError::UserBanned(reason) => Some(reason.clone()),
+        _ => None,
+    }
 }
 
 fn pick_lowest_latency_server<'a>(
@@ -1276,6 +1283,13 @@ impl VpnConnection {
                 {
                     Ok(ticket) => ticket,
                     Err(e) => {
+                        if let Some(reason) = relay_ticket_ban_reason(&e) {
+                            log::warn!(
+                                "V3: Relay ticket rejected because the current account is banned"
+                            );
+                            let _ = driver.close();
+                            return Err(VpnError::UserBanned(reason));
+                        }
                         log::warn!(
                             "V3: Relay ticket unavailable for '{}' ({})",
                             candidate_region,
@@ -3617,6 +3631,20 @@ mod tests {
     #[test]
     fn test_average_probe_latency_truncates_fractional_values() {
         assert_eq!(average_probe_latency(&[1, 2, 2]), Some(1));
+    }
+
+    #[test]
+    fn test_relay_ticket_ban_detection_uses_structured_error_only() {
+        assert_eq!(
+            relay_ticket_ban_reason(&AuthError::UserBanned(": abuse".to_string())),
+            Some(": abuse".to_string())
+        );
+        assert_eq!(
+            relay_ticket_ban_reason(&AuthError::ApiError(
+                r#"{"error":"user_banned appears in a log","code":"internal_error"}"#.to_string()
+            )),
+            None
+        );
     }
 
     #[test]
