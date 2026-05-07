@@ -3,7 +3,9 @@
 use super::http_client::{AuthClient, UserProfileResponse};
 use super::oauth_server::{DEFAULT_OAUTH_PORT, OAuthServer, OAuthServerResult};
 use super::storage::SecureStorage;
-use super::types::{AuthError, AuthSession, AuthState, OAuthPendingState, UserInfo};
+use super::types::{
+    AuthError, AuthSession, AuthState, OAuthPendingState, SupabaseAuthResponse, UserInfo,
+};
 use chrono::{Duration, Utc};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex;
@@ -134,6 +136,29 @@ impl AuthManager {
         session.user.banned_reason = profile.banned_reason;
         session.user.banned_at = profile.banned_at;
         session
+    }
+
+    fn session_from_auth_response(
+        auth_response: SupabaseAuthResponse,
+        fallback_email: String,
+        is_tester: bool,
+        is_banned: bool,
+        banned_reason: Option<String>,
+        banned_at: Option<String>,
+    ) -> AuthSession {
+        AuthSession {
+            access_token: auth_response.access_token,
+            refresh_token: auth_response.refresh_token,
+            expires_at: Utc::now() + Duration::seconds(auth_response.expires_in),
+            user: UserInfo {
+                id: auth_response.user.id,
+                email: auth_response.user.email.unwrap_or(fallback_email),
+                is_tester,
+                is_banned,
+                banned_reason,
+                banned_at,
+            },
+        }
     }
 
     fn store_and_set_session_state(&self, session: AuthSession) -> Result<(), AuthError> {
@@ -289,6 +314,10 @@ impl AuthManager {
                         let _ = self.force_logout();
                         return Err(e);
                     }
+                    if matches!(e, AuthError::UserBanned(_)) {
+                        self.storage.reset_refresh_failures();
+                        return Err(e);
+                    }
 
                     warn!("Token refresh attempt {} failed: {}", attempt, e);
 
@@ -340,6 +369,21 @@ impl AuthManager {
             .await
         {
             Ok(profile) => profile,
+            Err(AuthError::UserBanned(reason)) => {
+                let banned_session = Self::session_from_auth_response(
+                    refresh_response,
+                    session.user.email.clone(),
+                    session.user.is_tester,
+                    true,
+                    Self::reason_from_ban_suffix(&reason),
+                    session.user.banned_at.clone(),
+                );
+                if let Err(e) = self.storage.store_session(&banned_session) {
+                    warn!("Failed to store banned refresh session: {}", e);
+                }
+                self.set_session_state(banned_session);
+                return Err(AuthError::UserBanned(reason));
+            }
             Err(e) => {
                 debug!(
                     "Failed to fetch profile on refresh (keeping old value): {}",
@@ -358,22 +402,14 @@ impl AuthManager {
             }
         };
 
-        Ok(AuthSession {
-            access_token: refresh_response.access_token,
-            refresh_token: refresh_response.refresh_token,
-            expires_at: Utc::now() + Duration::seconds(refresh_response.expires_in),
-            user: UserInfo {
-                id: refresh_response.user.id,
-                email: refresh_response
-                    .user
-                    .email
-                    .unwrap_or_else(|| session.user.email.clone()),
-                is_tester: profile.is_tester,
-                is_banned: profile.is_banned,
-                banned_reason: profile.banned_reason,
-                banned_at: profile.banned_at,
-            },
-        })
+        Ok(Self::session_from_auth_response(
+            refresh_response,
+            session.user.email.clone(),
+            profile.is_tester,
+            profile.is_banned,
+            profile.banned_reason,
+            profile.banned_at,
+        ))
     }
 
     /// Re-fetch the user profile and update the stored session
@@ -731,6 +767,21 @@ impl AuthManager {
                 );
                 profile
             }
+            Err(AuthError::UserBanned(reason)) => {
+                let session = Self::session_from_auth_response(
+                    auth_response,
+                    exchange_response.email,
+                    false,
+                    true,
+                    Self::reason_from_ban_suffix(&reason),
+                    None,
+                );
+                if let Err(e) = self.storage.store_session(&session) {
+                    warn!("Failed to store banned OAuth session: {}", e);
+                }
+                self.set_session_state(session);
+                return Err(AuthError::UserBanned(reason));
+            }
             Err(e) => {
                 error!("Failed to verify user profile after OAuth: {}", e);
                 {
@@ -742,19 +793,14 @@ impl AuthManager {
         };
 
         // Create session
-        let session = AuthSession {
-            access_token: auth_response.access_token,
-            refresh_token: auth_response.refresh_token,
-            expires_at: Utc::now() + Duration::seconds(auth_response.expires_in),
-            user: UserInfo {
-                id: auth_response.user.id,
-                email: auth_response.user.email.unwrap_or(exchange_response.email),
-                is_tester: profile.is_tester,
-                is_banned: profile.is_banned,
-                banned_reason: profile.banned_reason,
-                banned_at: profile.banned_at,
-            },
-        };
+        let session = Self::session_from_auth_response(
+            auth_response,
+            exchange_response.email,
+            profile.is_tester,
+            profile.is_banned,
+            profile.banned_reason,
+            profile.banned_at,
+        );
 
         self.store_and_set_session_state(session.clone())?;
 
@@ -798,6 +844,7 @@ impl Default for AuthManager {
 #[cfg(test)]
 mod tests {
     use super::AuthManager;
+    use crate::auth::types::{SupabaseAuthResponse, SupabaseUser};
     use url::form_urlencoded;
 
     #[test]
@@ -841,6 +888,39 @@ mod tests {
         assert_eq!(
             AuthManager::reason_from_ban_suffix(": chargeback"),
             Some("chargeback".to_string())
+        );
+    }
+
+    #[test]
+    fn auth_response_session_preserves_ban_fields_and_fallback_email() {
+        let response = SupabaseAuthResponse {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_in: 3600,
+            expires_at: None,
+            token_type: "bearer".to_string(),
+            user: SupabaseUser {
+                id: "user-1".to_string(),
+                email: None,
+            },
+        };
+
+        let session = AuthManager::session_from_auth_response(
+            response,
+            "fallback@example.com".to_string(),
+            true,
+            true,
+            Some("chargeback".to_string()),
+            Some("2026-05-07T00:00:00.000Z".to_string()),
+        );
+
+        assert_eq!(session.user.email, "fallback@example.com");
+        assert!(session.user.is_tester);
+        assert!(session.user.is_banned);
+        assert_eq!(session.user.banned_reason.as_deref(), Some("chargeback"));
+        assert_eq!(
+            session.user.banned_at.as_deref(),
+            Some("2026-05-07T00:00:00.000Z")
         );
     }
 }

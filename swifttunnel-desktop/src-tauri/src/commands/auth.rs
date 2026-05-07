@@ -211,12 +211,11 @@ pub async fn auth_complete_oauth(
     callback_state: String,
 ) -> Result<(), String> {
     let auth = state.auth_manager.lock().await;
-    let result = auth
-        .complete_oauth_callback(&token, &callback_state)
-        .await
-        .map_err(|e| e.to_string());
+    let complete_result = auth.complete_oauth_callback(&token, &callback_state).await;
+    let should_run_ban_cleanup = matches!(complete_result, Ok(()) | Err(AuthError::UserBanned(_)));
+    let result = complete_result.map_err(|e| e.to_string());
     drop(auth);
-    let emitted = result.is_ok() && apply_ban_cleanup(&app, &state).await;
+    let emitted = should_run_ban_cleanup && apply_ban_cleanup(&app, &state).await;
     if !emitted {
         emit_auth_state(&app, &state).await;
     }

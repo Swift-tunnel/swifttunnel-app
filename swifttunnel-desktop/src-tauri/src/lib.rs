@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use log::{info, warn};
 use state::AppState;
-use swifttunnel_core::auth::types::AuthState;
+use swifttunnel_core::auth::types::{AuthError, AuthState};
 use tauri::{Emitter, Manager};
 use window_restore::restore_main_window;
 
@@ -474,9 +474,15 @@ pub fn run() {
                         let result = auth.refresh_profile().await;
                         drop(auth);
 
-                        if let Err(e) = result {
-                            log::warn!("Failed to refresh profile on startup: {}", e);
-                        } else {
+                        let should_emit_state =
+                            matches!(result, Ok(()) | Err(AuthError::UserBanned(_)));
+                        if let Err(e) = &result {
+                            if !matches!(e, AuthError::UserBanned(_)) {
+                                log::warn!("Failed to refresh profile on startup: {}", e);
+                            }
+                        }
+
+                        if should_emit_state {
                             commands::auth::cleanup_banned_session(&state).await;
                             commands::auth::emit_auth_state(&app_handle, &state).await;
                         }
