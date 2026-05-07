@@ -154,6 +154,19 @@ impl AuthManager {
         session
     }
 
+    fn fallback_profile(user_id: String) -> UserProfileResponse {
+        UserProfileResponse {
+            id: user_id,
+            full_name: None,
+            username: None,
+            is_admin: false,
+            is_tester: false,
+            is_banned: false,
+            banned_reason: None,
+            banned_at: None,
+        }
+    }
+
     fn session_from_auth_response(
         auth_response: SupabaseAuthResponse,
         fallback_email: String,
@@ -246,10 +259,10 @@ impl AuthManager {
                         return Err(AuthError::UserBanned(reason));
                     }
                     Err(e) => {
-                        error!("Failed to verify user profile during sign-in: {}", e);
-                        let mut state = self.state.lock();
-                        *state = AuthState::Error(e.to_string());
-                        return Err(e);
+                        warn!(
+                            "Failed to fetch user profile during sign-in; continuing with default profile fields: {}",
+                            e
+                        );
                     }
                 }
 
@@ -818,12 +831,11 @@ impl AuthManager {
                 return Err(AuthError::UserBanned(reason));
             }
             Err(e) => {
-                error!("Failed to verify user profile after OAuth: {}", e);
-                {
-                    let mut state = self.state.lock();
-                    *state = AuthState::Error(e.to_string());
-                }
-                return Err(e);
+                warn!(
+                    "Failed to fetch user profile after OAuth; continuing with default profile fields: {}",
+                    e
+                );
+                Self::fallback_profile(auth_response.user.id.clone())
             }
         };
 
@@ -924,6 +936,16 @@ mod tests {
             AuthManager::reason_from_ban_suffix(": chargeback"),
             Some("chargeback".to_string())
         );
+    }
+
+    #[test]
+    fn fallback_profile_is_not_banned_or_tester() {
+        let profile = AuthManager::fallback_profile("user-1".to_string());
+        assert_eq!(profile.id, "user-1");
+        assert!(!profile.is_tester);
+        assert!(!profile.is_banned);
+        assert!(profile.banned_reason.is_none());
+        assert!(profile.banned_at.is_none());
     }
 
     #[test]
