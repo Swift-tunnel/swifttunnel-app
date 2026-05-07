@@ -991,10 +991,16 @@ impl RobloxOptimizer {
             return Ok(());
         }
 
+        let mut failures = Vec::new();
+
         for client_settings in client_settings_paths {
             let settings_path = client_settings.join("ClientAppSettings.json");
 
-            if settings_path.exists() {
+            if !settings_path.exists() {
+                continue;
+            }
+
+            let result = (|| -> Result<()> {
                 let content = fs::read_to_string(&settings_path)?;
                 let mut settings: HashMap<String, serde_json::Value> =
                     serde_json::from_str(&content).unwrap_or_default();
@@ -1015,11 +1021,33 @@ impl RobloxOptimizer {
                     let json = serde_json::to_string_pretty(&settings)?;
                     fs::write(&settings_path, json)?;
                 }
-                info!("FFlag optimizations removed from ClientAppSettings.json");
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => {
+                    info!("FFlag optimizations removed from ClientAppSettings.json");
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to remove FFlags from {}: {}",
+                        settings_path.display(),
+                        e
+                    );
+                    failures.push(format!("{}: {}", settings_path.display(), e));
+                }
             }
         }
 
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Failed to remove FFlags from {} Roblox version folder(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ))
+        }
     }
 
     #[cfg(test)]
@@ -1545,6 +1573,53 @@ mod tests {
             assert!(!content.contains("FFlagDebugGraphicsPreferD3D11"));
             assert!(content.contains("FStringUserOwnedFlag"));
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_all_fflags_continues_after_folder_error() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_remove_partial_error");
+        let _ = fs::remove_dir_all(&dir);
+        let versions_dir = dir.join("Roblox").join("Versions");
+        let broken_version = versions_dir.join("version-broken");
+        let good_version = versions_dir.join("version-good");
+
+        for version in [&broken_version, &good_version] {
+            fs::create_dir_all(version.join("ClientSettings")).unwrap();
+            fs::write(version.join("RobloxPlayerBeta.exe"), "").unwrap();
+        }
+
+        fs::create_dir_all(
+            broken_version
+                .join("ClientSettings")
+                .join("ClientAppSettings.json"),
+        )
+        .unwrap();
+        fs::write(
+            good_version
+                .join("ClientSettings")
+                .join("ClientAppSettings.json"),
+            r#"{
+  "FFlagDebugGraphicsPreferD3D11": "True",
+  "FStringUserOwnedFlag": "keep-me"
+}"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let result = opt.remove_all_fflags_in_paths(vec![
+            broken_version.join("ClientSettings"),
+            good_version.join("ClientSettings"),
+        ]);
+
+        assert!(result.is_err());
+        let good_settings_path = good_version
+            .join("ClientSettings")
+            .join("ClientAppSettings.json");
+        let content = fs::read_to_string(good_settings_path).unwrap();
+        assert!(!content.contains("FFlagDebugGraphicsPreferD3D11"));
+        assert!(content.contains("FStringUserOwnedFlag"));
 
         let _ = fs::remove_dir_all(&dir);
     }

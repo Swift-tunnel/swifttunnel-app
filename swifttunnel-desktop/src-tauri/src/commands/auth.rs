@@ -3,7 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::events::{AUTH_STATE_CHANGED, AuthStateEvent};
 use crate::state::AppState;
-use swifttunnel_core::auth::types::AuthState;
+use swifttunnel_core::auth::types::{AuthError, AuthState};
 
 #[derive(Serialize)]
 pub struct AuthStateResponse {
@@ -252,9 +252,11 @@ pub async fn auth_refresh_profile(
     app: AppHandle,
 ) -> Result<(), String> {
     let auth = state.auth_manager.lock().await;
-    let result = auth.refresh_profile().await.map_err(|e| e.to_string());
+    let refresh_result = auth.refresh_profile().await;
+    let should_run_ban_cleanup = matches!(refresh_result, Ok(()) | Err(AuthError::UserBanned(_)));
+    let result = refresh_result.map_err(|e| e.to_string());
     drop(auth);
-    let emitted = result.is_ok() && apply_ban_cleanup(&app, &state).await;
+    let emitted = should_run_ban_cleanup && apply_ban_cleanup(&app, &state).await;
     if !emitted {
         emit_auth_state(&app, &state).await;
     }

@@ -119,6 +119,15 @@ impl AuthManager {
             .unwrap_or_default()
     }
 
+    fn reason_from_ban_suffix(suffix: &str) -> Option<String> {
+        let trimmed = suffix.strip_prefix(':').unwrap_or(suffix).trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
     fn session_from_profile(mut session: AuthSession, profile: UserProfileResponse) -> AuthSession {
         session.user.is_tester = profile.is_tester;
         session.user.is_banned = profile.is_banned;
@@ -377,10 +386,20 @@ impl AuthManager {
             _ => return Ok(()),
         };
 
-        let profile = self
-            .client
-            .fetch_user_profile(&session.access_token)
-            .await?;
+        let profile = match self.client.fetch_user_profile(&session.access_token).await {
+            Ok(profile) => profile,
+            Err(AuthError::UserBanned(reason)) => {
+                let mut banned_session = session;
+                banned_session.user.is_banned = true;
+                banned_session.user.banned_reason = Self::reason_from_ban_suffix(&reason);
+                if let Err(e) = self.storage.store_session(&banned_session) {
+                    warn!("Failed to store banned profile session: {}", e);
+                }
+                self.set_session_state(banned_session);
+                return Err(AuthError::UserBanned(reason));
+            }
+            Err(err) => return Err(err),
+        };
         info!(
             "Profile refreshed on startup: is_tester={}, is_banned={}",
             profile.is_tester, profile.is_banned
@@ -812,6 +831,16 @@ mod tests {
         assert_eq!(
             AuthManager::ban_suffix(&Some("  chargeback  ".to_string())),
             ": chargeback"
+        );
+    }
+
+    #[test]
+    fn reason_from_ban_suffix_trims_display_prefix() {
+        assert_eq!(AuthManager::reason_from_ban_suffix(""), None);
+        assert_eq!(AuthManager::reason_from_ban_suffix(":   "), None);
+        assert_eq!(
+            AuthManager::reason_from_ban_suffix(": chargeback"),
+            Some("chargeback".to_string())
         );
     }
 }

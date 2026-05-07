@@ -8,7 +8,7 @@ type AppBootstrapDeps = {
   fetchServers: () => Promise<void>;
   fetchSystemInfo: () => Promise<void>;
   fetchVpnState: () => Promise<void>;
-  refreshAuthProfile?: () => Promise<void>;
+  refreshAuthProfile: () => Promise<void>;
   getSettings: () => AppSettings;
   getAuthState: () => AuthState;
   getVpnState: () => VpnState;
@@ -30,10 +30,7 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
   ]);
 
   const authState = deps.getAuthState();
-  if (
-    deps.refreshAuthProfile &&
-    (authState === "logged_in" || authState === "banned")
-  ) {
+  if (authState === "logged_in" || authState === "banned") {
     await deps.refreshAuthProfile();
   }
 
