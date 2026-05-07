@@ -55,4 +55,18 @@ describe("stores/authStore", () => {
     expect(useAuthStore.getState().isTester).toBe(true);
     expect(useAuthStore.getState().isBanned).toBe(false);
   });
+
+  it("surfaces refresh failures and clears stale refresh errors on retry", async () => {
+    commands.authRefreshProfile
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce(undefined);
+
+    const useAuthStore = await loadStore();
+
+    await useAuthStore.getState().refreshProfile();
+    expect(useAuthStore.getState().error).toBe("Error: network down");
+
+    await useAuthStore.getState().refreshProfile();
+    expect(useAuthStore.getState().error).toBeNull();
+  });
 });

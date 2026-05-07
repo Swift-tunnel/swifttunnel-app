@@ -122,6 +122,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
   refreshProfile: async () => {
     try {
+      set({ error: null });
       await authRefreshProfile();
     } catch (e) {
       set({ error: String(e) });

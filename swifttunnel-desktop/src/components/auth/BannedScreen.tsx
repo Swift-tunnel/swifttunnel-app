@@ -8,6 +8,7 @@ export function BannedScreen() {
   const email = useAuthStore((s) => s.email);
   const reason = useAuthStore((s) => s.bannedReason);
   const bannedAt = useAuthStore((s) => s.bannedAt);
+  const error = useAuthStore((s) => s.error);
   const logout = useAuthStore((s) => s.logout);
   const refreshProfile = useAuthStore((s) => s.refreshProfile);
   const [refreshing, setRefreshing] = useState(false);
@@ -110,6 +111,12 @@ export function BannedScreen() {
             </div>
           )}
         </motion.div>
+
+        {error && (
+          <p className="text-center text-[11px] leading-5 text-status-error">
+            {error}
+          </p>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <Button

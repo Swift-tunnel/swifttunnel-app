@@ -32,6 +32,7 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
   const authState = deps.getAuthState();
   if (authState === "logged_in" || authState === "banned") {
     await deps.refreshAuthProfile();
+    await Promise.all([deps.fetchAuth(), deps.fetchVpnState()]);
   }
 
   const loadedSettings = deps.getSettings();
