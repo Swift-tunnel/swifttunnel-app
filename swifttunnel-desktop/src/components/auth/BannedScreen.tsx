@@ -4,6 +4,19 @@ import { useAuthStore } from "../../stores/authStore";
 import { Button, Spinner } from "../ui";
 import swiftLogo from "../../assets/swift.png";
 
+export function formatBannedAt(bannedAt: string | null) {
+  if (!bannedAt) {
+    return null;
+  }
+
+  const date = new Date(bannedAt);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date.toLocaleString();
+}
+
 export function BannedScreen() {
   const email = useAuthStore((s) => s.email);
   const reason = useAuthStore((s) => s.bannedReason);
@@ -12,6 +25,7 @@ export function BannedScreen() {
   const logout = useAuthStore((s) => s.logout);
   const refreshProfile = useAuthStore((s) => s.refreshProfile);
   const [refreshing, setRefreshing] = useState(false);
+  const formattedBannedAt = formatBannedAt(bannedAt);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -102,11 +116,11 @@ export function BannedScreen() {
               </p>
             </div>
           )}
-          {bannedAt && (
+          {formattedBannedAt && (
             <div className="flex items-center justify-between gap-3">
               <span className="text-[11px] text-text-muted">Banned</span>
               <span className="font-mono text-[11px] text-text-primary">
-                {new Date(bannedAt).toLocaleString()}
+                {formattedBannedAt}
               </span>
             </div>
           )}
