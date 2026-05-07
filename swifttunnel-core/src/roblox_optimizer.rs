@@ -835,12 +835,14 @@ impl RobloxOptimizer {
         create_missing: bool,
     ) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
+        let mut failures = Vec::new();
         for version_folder in version_folders {
             match Self::get_client_settings_path_for_version_checked(version_folder, create_missing)
             {
                 Ok(Some(path)) => paths.push(path),
                 Ok(None) => {}
                 Err(e) => {
+                    failures.push(format!("{}: {}", version_folder.display(), e));
                     warn!(
                         "Skipping Roblox version folder {} while collecting ClientSettings: {}",
                         version_folder.display(),
@@ -848,6 +850,13 @@ impl RobloxOptimizer {
                     );
                 }
             }
+        }
+        if paths.is_empty() && !failures.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Failed to collect ClientSettings from {} Roblox version folder(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ));
         }
         Ok(paths)
     }
