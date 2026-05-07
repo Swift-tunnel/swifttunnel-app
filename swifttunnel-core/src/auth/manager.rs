@@ -113,6 +113,8 @@ impl AuthManager {
     fn ban_suffix(reason: &Option<String>) -> String {
         reason
             .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
             .map(|value| format!(": {}", value))
             .unwrap_or_default()
     }
@@ -776,6 +778,7 @@ impl Default for AuthManager {
 
 #[cfg(test)]
 mod tests {
+    use super::AuthManager;
     use url::form_urlencoded;
 
     #[test]
@@ -800,5 +803,15 @@ mod tests {
             .finish();
         // Spaces become +, & and = get percent-encoded
         assert_eq!(query, "state=hello+world%26foo%3Dbar");
+    }
+
+    #[test]
+    fn ban_suffix_trims_empty_reasons() {
+        assert_eq!(AuthManager::ban_suffix(&None), "");
+        assert_eq!(AuthManager::ban_suffix(&Some("   ".to_string())), "");
+        assert_eq!(
+            AuthManager::ban_suffix(&Some("  chargeback  ".to_string())),
+            ": chargeback"
+        );
     }
 }

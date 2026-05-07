@@ -4,7 +4,6 @@ use tauri::{AppHandle, Emitter, State};
 use crate::events::{AUTH_STATE_CHANGED, AuthStateEvent};
 use crate::state::AppState;
 use swifttunnel_core::auth::types::AuthState;
-use swifttunnel_core::structs::Config;
 
 #[derive(Serialize)]
 pub struct AuthStateResponse {
@@ -133,7 +132,6 @@ pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
 
     let snapshot = {
         let mut settings = state.settings.lock();
-        settings.config = Config::default();
         settings.resume_vpn_on_startup = false;
         settings.clone()
     };
@@ -145,10 +143,12 @@ pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
     true
 }
 
-async fn apply_ban_cleanup(app: &AppHandle, state: &AppState) {
+async fn apply_ban_cleanup(app: &AppHandle, state: &AppState) -> bool {
     if cleanup_banned_session(state).await {
         emit_auth_state(app, state).await;
+        return true;
     }
+    false
 }
 
 #[tauri::command]
@@ -216,10 +216,10 @@ pub async fn auth_complete_oauth(
         .await
         .map_err(|e| e.to_string());
     drop(auth);
-    if result.is_ok() {
-        apply_ban_cleanup(&app, &state).await;
+    let emitted = result.is_ok() && apply_ban_cleanup(&app, &state).await;
+    if !emitted {
+        emit_auth_state(&app, &state).await;
     }
-    emit_auth_state(&app, &state).await;
     result
 }
 
@@ -254,9 +254,9 @@ pub async fn auth_refresh_profile(
     let auth = state.auth_manager.lock().await;
     let result = auth.refresh_profile().await.map_err(|e| e.to_string());
     drop(auth);
-    if result.is_ok() {
-        apply_ban_cleanup(&app, &state).await;
+    let emitted = result.is_ok() && apply_ban_cleanup(&app, &state).await;
+    if !emitted {
+        emit_auth_state(&app, &state).await;
     }
-    emit_auth_state(&app, &state).await;
     result
 }
