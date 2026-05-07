@@ -908,10 +908,7 @@ impl RobloxOptimizer {
             }
         }
 
-        for client_settings in client_settings_paths {
-            self.apply_client_fflags_in_path(config, &client_settings)?;
-        }
-        Ok(FFlagApplyOutcome::Applied)
+        self.apply_client_fflags_in_paths(config, client_settings_paths)
     }
 
     #[cfg(test)]
@@ -934,9 +931,62 @@ impl RobloxOptimizer {
             }
         }
 
-        for client_settings in client_settings_paths {
-            self.apply_client_fflags_in_path(config, &client_settings)?;
+        self.apply_client_fflags_in_paths(config, client_settings_paths)
+    }
+
+    fn apply_client_fflags_in_paths(
+        &self,
+        config: &RobloxSettingsConfig,
+        client_settings_paths: Vec<PathBuf>,
+    ) -> Result<FFlagApplyOutcome> {
+        let mut applied_any = false;
+        let mut active_failure = None;
+        let mut secondary_failures = Vec::new();
+
+        for (index, client_settings) in client_settings_paths.iter().enumerate() {
+            match self.apply_client_fflags_in_path(config, client_settings) {
+                Ok(_) => {
+                    applied_any = true;
+                }
+                Err(e) => {
+                    let failure = format!("{}: {}", client_settings.display(), e);
+                    warn!(
+                        "Failed to apply FFlags to Roblox version folder {}: {}",
+                        client_settings.display(),
+                        e
+                    );
+                    if index == 0 {
+                        active_failure = Some(failure);
+                    } else {
+                        secondary_failures.push(failure);
+                    }
+                }
+            }
         }
+
+        if let Some(failure) = active_failure {
+            return Err(anyhow::anyhow!(
+                "Failed to apply FFlags to the active Roblox version folder: {}",
+                failure
+            ));
+        }
+
+        if !applied_any {
+            return Err(anyhow::anyhow!(
+                "Failed to apply FFlags to {} Roblox version folder(s): {}",
+                secondary_failures.len(),
+                secondary_failures.join("; ")
+            ));
+        }
+
+        if !secondary_failures.is_empty() {
+            warn!(
+                "Applied FFlags to the active Roblox version, but failed to update {} older Roblox version folder(s): {}",
+                secondary_failures.len(),
+                secondary_failures.join("; ")
+            );
+        }
+
         Ok(FFlagApplyOutcome::Applied)
     }
 
@@ -1584,6 +1634,54 @@ mod tests {
             .join("ClientAppSettings.json");
         let content = fs::read_to_string(good_settings_path).unwrap();
         assert!(content.contains("FFlagDebugGraphicsPreferD3D11"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_reports_success_when_only_older_version_write_fails() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_apply_secondary_error");
+        let _ = fs::remove_dir_all(&dir);
+        let active_settings = dir.join("active").join("ClientSettings");
+        let old_settings = dir.join("old").join("ClientSettings");
+        fs::create_dir_all(&active_settings).unwrap();
+        fs::create_dir_all(old_settings.join("ClientAppSettings.json")).unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        let outcome =
+            opt.apply_client_fflags_in_paths(&config, vec![active_settings.clone(), old_settings]);
+
+        assert_eq!(outcome.unwrap(), FFlagApplyOutcome::Applied);
+        let content = fs::read_to_string(active_settings.join("ClientAppSettings.json")).unwrap();
+        assert!(content.contains("FFlagDebugGraphicsPreferD3D11"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_does_not_mask_active_version_write_failure() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_apply_primary_error");
+        let _ = fs::remove_dir_all(&dir);
+        let active_settings = dir.join("active").join("ClientSettings");
+        let old_settings = dir.join("old").join("ClientSettings");
+        fs::create_dir_all(active_settings.join("ClientAppSettings.json")).unwrap();
+        fs::create_dir_all(&old_settings).unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        let result = opt.apply_client_fflags_in_paths(&config, vec![active_settings, old_settings]);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("active Roblox"));
 
         let _ = fs::remove_dir_all(&dir);
     }

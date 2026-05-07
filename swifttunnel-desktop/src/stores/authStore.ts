@@ -123,7 +123,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   refreshProfile: async () => {
     try {
       await authRefreshProfile();
-      await get().fetchState();
     } catch (e) {
       set({ error: String(e) });
     }
