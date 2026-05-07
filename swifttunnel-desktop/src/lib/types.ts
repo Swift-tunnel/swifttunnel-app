@@ -7,6 +7,7 @@ export type AuthState =
   | "logging_in"
   | "awaiting_oauth"
   | "logged_in"
+  | "banned"
   | `error:${string}`;
 
 export interface AuthStateResponse {
@@ -14,6 +15,9 @@ export interface AuthStateResponse {
   email: string | null;
   user_id: string | null;
   is_tester: boolean;
+  is_banned: boolean;
+  banned_reason: string | null;
+  banned_at: string | null;
 }
 
 export interface OAuthPollResult {
@@ -393,7 +397,13 @@ export interface DriverCheckResponse {
   status: string;
   message: string;
   reboot_required: boolean;
-  recommended_action: "none" | "install" | "reset_service" | "reinstall" | "reboot" | string;
+  recommended_action:
+    | "none"
+    | "install"
+    | "reset_service"
+    | "reinstall"
+    | "reboot"
+    | string;
 }
 
 // ── Events ──
@@ -410,6 +420,9 @@ export interface AuthStateEvent {
   state: string;
   email: string | null;
   user_id: string | null;
+  is_banned?: boolean;
+  banned_reason?: string | null;
+  banned_at?: string | null;
 }
 
 export interface ThroughputEvent {

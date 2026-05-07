@@ -728,6 +728,9 @@ mod tests {
                 id: format!("user_{}", suffix),
                 email: format!("{}@example.com", suffix),
                 is_tester: false,
+                is_banned: false,
+                banned_reason: None,
+                banned_at: None,
             },
         }
     }

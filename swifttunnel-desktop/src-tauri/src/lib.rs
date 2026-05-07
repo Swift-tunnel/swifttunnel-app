@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use log::{info, warn};
 use state::AppState;
+use swifttunnel_core::auth::types::AuthState;
 use tauri::{Emitter, Manager};
 use window_restore::restore_main_window;
 
@@ -257,6 +258,30 @@ fn reapply_saved_network_boosts(state: &AppState) {
 #[cfg(not(windows))]
 fn reapply_saved_network_boosts(_state: &AppState) {}
 
+#[cfg(windows)]
+fn reapply_saved_roblox_fflags(state: &AppState) {
+    let roblox_config = {
+        let settings = state.settings.lock();
+        settings.config.roblox_settings.clone()
+    };
+
+    if !roblox_config.ultraboost {
+        return;
+    }
+
+    info!("Reapplying saved Roblox FFlags on startup");
+    if let Err(e) = state
+        .roblox_optimizer
+        .lock()
+        .reapply_saved_client_fflags(&roblox_config)
+    {
+        warn!("Failed to reapply saved Roblox FFlags on startup: {}", e);
+    }
+}
+
+#[cfg(not(windows))]
+fn reapply_saved_roblox_fflags(_state: &AppState) {}
+
 pub fn run() {
     logging::init();
     let launched_from_startup = autostart::launched_from_startup_flag();
@@ -346,9 +371,41 @@ pub fn run() {
             let app_state = AppState::new(runtime.clone(), launched_from_startup)
                 .expect("Failed to initialize app state");
 
-            // Recover network booster state from persisted snapshot (crash recovery)
-            app_state.network_booster.lock().recover_from_snapshot();
-            reapply_saved_network_boosts(&app_state);
+            let account_is_banned = runtime.block_on(async {
+                let auth = app_state.auth_manager.lock().await;
+                if matches!(
+                    auth.get_state(),
+                    AuthState::LoggedIn(_) | AuthState::Banned(_)
+                ) {
+                    info!("Refreshing user profile before saved boost recovery");
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        auth.refresh_profile(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            warn!("Failed to refresh profile before boost recovery: {}", e);
+                        }
+                        Err(_) => {
+                            warn!("Timed out refreshing profile before boost recovery");
+                        }
+                    }
+                }
+
+                matches!(auth.get_state(), AuthState::Banned(_))
+            });
+
+            if account_is_banned {
+                info!("Stored account is banned; clearing boosts before startup recovery");
+                runtime.block_on(commands::auth::cleanup_banned_session(&app_state));
+            } else {
+                // Recover network booster state from persisted snapshot (crash recovery)
+                app_state.network_booster.lock().recover_from_snapshot();
+                reapply_saved_network_boosts(&app_state);
+                reapply_saved_roblox_fflags(&app_state);
+            }
 
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
             let vpn_state_rx = app_state.vpn_state_handle.clone();
@@ -403,11 +460,25 @@ pub fn run() {
             let app_handle = app.handle().clone();
             runtime.spawn(async move {
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    let auth = state.auth_manager.lock().await;
-                    if auth.is_logged_in() {
+                    let should_refresh = {
+                        let auth = state.auth_manager.lock().await;
+                        matches!(
+                            auth.get_state(),
+                            AuthState::LoggedIn(_) | AuthState::Banned(_)
+                        )
+                    };
+
+                    if should_refresh {
                         info!("Refreshing user profile on startup...");
-                        if let Err(e) = auth.refresh_profile().await {
+                        let auth = state.auth_manager.lock().await;
+                        let result = auth.refresh_profile().await;
+                        drop(auth);
+
+                        if let Err(e) = result {
                             log::warn!("Failed to refresh profile on startup: {}", e);
+                        } else {
+                            commands::auth::cleanup_banned_session(&state).await;
+                            commands::auth::emit_auth_state(&app_handle, &state).await;
                         }
                     }
                 }

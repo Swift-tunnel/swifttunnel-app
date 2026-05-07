@@ -1,6 +1,6 @@
 //! Authentication manager - handles login/logout and token management
 
-use super::http_client::AuthClient;
+use super::http_client::{AuthClient, UserProfileResponse};
 use super::oauth_server::{DEFAULT_OAUTH_PORT, OAuthServer, OAuthServerResult};
 use super::storage::SecureStorage;
 use super::types::{AuthError, AuthSession, AuthState, OAuthPendingState, UserInfo};
@@ -54,7 +54,11 @@ impl AuthManager {
                     info!("Session is expired but will be refreshed on first API call.");
                 }
                 info!("========================================");
-                AuthState::LoggedIn(session)
+                if session.user.is_banned {
+                    AuthState::Banned(session)
+                } else {
+                    AuthState::LoggedIn(session)
+                }
             }
             Ok(None) => {
                 info!("No stored session found in Windows Credential Manager.");
@@ -72,6 +76,7 @@ impl AuthManager {
             "AuthManager initialized with state: {:?}",
             match &initial_state {
                 AuthState::LoggedIn(_) => "LoggedIn",
+                AuthState::Banned(_) => "Banned",
                 AuthState::LoggedOut => "LoggedOut",
                 AuthState::LoggingIn => "LoggingIn",
                 AuthState::AwaitingOAuthCallback(_) => "AwaitingOAuthCallback",
@@ -100,8 +105,38 @@ impl AuthManager {
     /// Get the current user info if logged in
     pub fn get_user(&self) -> Option<UserInfo> {
         match self.get_state() {
-            AuthState::LoggedIn(session) => Some(session.user),
+            AuthState::LoggedIn(session) | AuthState::Banned(session) => Some(session.user),
             _ => None,
+        }
+    }
+
+    fn ban_suffix(reason: &Option<String>) -> String {
+        reason
+            .as_ref()
+            .map(|value| format!(": {}", value))
+            .unwrap_or_default()
+    }
+
+    fn session_from_profile(mut session: AuthSession, profile: UserProfileResponse) -> AuthSession {
+        session.user.is_tester = profile.is_tester;
+        session.user.is_banned = profile.is_banned;
+        session.user.banned_reason = profile.banned_reason;
+        session.user.banned_at = profile.banned_at;
+        session
+    }
+
+    fn store_and_set_session_state(&self, session: AuthSession) -> Result<(), AuthError> {
+        self.storage.store_session(&session)?;
+        self.set_session_state(session);
+        Ok(())
+    }
+
+    fn set_session_state(&self, session: AuthSession) {
+        let mut state = self.state.lock();
+        if session.user.is_banned {
+            *state = AuthState::Banned(session);
+        } else {
+            *state = AuthState::LoggedIn(session);
         }
     }
 
@@ -122,16 +157,28 @@ impl AuthManager {
                     id: response.user.id,
                     email: response.user.email.unwrap_or_else(|| email.to_string()),
                     is_tester: false,
+                    is_banned: false,
+                    banned_reason: None,
+                    banned_at: None,
                 };
 
-                // Fetch user profile to get tester status
+                // Fetch user profile to get tester and ban status.
                 match self.client.fetch_user_profile(&response.access_token).await {
                     Ok(profile) => {
                         user_info.is_tester = profile.is_tester;
-                        info!("User profile fetched: is_tester={}", profile.is_tester);
+                        user_info.is_banned = profile.is_banned;
+                        user_info.banned_reason = profile.banned_reason;
+                        user_info.banned_at = profile.banned_at;
+                        info!(
+                            "User profile fetched: is_tester={}, is_banned={}",
+                            user_info.is_tester, user_info.is_banned
+                        );
                     }
                     Err(e) => {
-                        warn!("Failed to fetch user profile (non-fatal): {}", e);
+                        error!("Failed to verify user profile during sign-in: {}", e);
+                        let mut state = self.state.lock();
+                        *state = AuthState::Error(e.to_string());
+                        return Err(e);
                     }
                 }
 
@@ -142,17 +189,17 @@ impl AuthManager {
                     user: user_info,
                 };
 
-                // Store session
-                self.storage.store_session(&session)?;
+                self.store_and_set_session_state(session.clone())?;
 
-                // Update state
-                {
-                    let mut state = self.state.lock();
-                    *state = AuthState::LoggedIn(session);
+                if session.user.is_banned {
+                    warn!("Sign in completed for banned user {}", session.user.id);
+                    Err(AuthError::UserBanned(Self::ban_suffix(
+                        &session.user.banned_reason,
+                    )))
+                } else {
+                    info!("Sign in successful!");
+                    Ok(())
                 }
-
-                info!("Sign in successful!");
-                Ok(())
             }
             Err(e) => {
                 error!("Sign in failed: {}", e);
@@ -175,6 +222,11 @@ impl AuthManager {
     pub async fn refresh_if_needed(&self) -> Result<(), AuthError> {
         let session = match self.get_state() {
             AuthState::LoggedIn(session) => session,
+            AuthState::Banned(session) => {
+                return Err(AuthError::UserBanned(Self::ban_suffix(
+                    &session.user.banned_reason,
+                )));
+            }
             _ => return Err(AuthError::NotAuthenticated),
         };
 
@@ -206,6 +258,12 @@ impl AuthManager {
 
                     {
                         let mut state = self.state.lock();
+                        if new_session.user.is_banned {
+                            let reason = new_session.user.banned_reason.clone();
+                            *state = AuthState::Banned(new_session);
+                            warn!("Token refresh detected banned account");
+                            return Err(AuthError::UserBanned(Self::ban_suffix(&reason)));
+                        }
                         *state = AuthState::LoggedIn(new_session);
                     }
 
@@ -264,19 +322,28 @@ impl AuthManager {
     async fn try_refresh_token(&self, session: &AuthSession) -> Result<AuthSession, AuthError> {
         let refresh_response = self.client.refresh_token(&session.refresh_token).await?;
 
-        // Re-fetch tester status on refresh (in case admin changed it)
-        let is_tester = match self
+        // Re-fetch profile status on refresh (in case admin changed tester or ban status)
+        let profile = match self
             .client
             .fetch_user_profile(&refresh_response.access_token)
             .await
         {
-            Ok(profile) => profile.is_tester,
+            Ok(profile) => profile,
             Err(e) => {
                 debug!(
                     "Failed to fetch profile on refresh (keeping old value): {}",
                     e
                 );
-                session.user.is_tester
+                UserProfileResponse {
+                    id: session.user.id.clone(),
+                    full_name: None,
+                    username: None,
+                    is_admin: false,
+                    is_tester: session.user.is_tester,
+                    is_banned: session.user.is_banned,
+                    banned_reason: session.user.banned_reason.clone(),
+                    banned_at: session.user.banned_at.clone(),
+                }
             }
         };
 
@@ -290,7 +357,10 @@ impl AuthManager {
                     .user
                     .email
                     .unwrap_or_else(|| session.user.email.clone()),
-                is_tester,
+                is_tester: profile.is_tester,
+                is_banned: profile.is_banned,
+                banned_reason: profile.banned_reason,
+                banned_at: profile.banned_at,
             },
         })
     }
@@ -301,7 +371,7 @@ impl AuthManager {
     /// (e.g., tester access granted/revoked) without requiring a full re-login.
     pub async fn refresh_profile(&self) -> Result<(), AuthError> {
         let session = match self.get_state() {
-            AuthState::LoggedIn(session) => session,
+            AuthState::LoggedIn(session) | AuthState::Banned(session) => session,
             _ => return Ok(()),
         };
 
@@ -310,29 +380,27 @@ impl AuthManager {
             .fetch_user_profile(&session.access_token)
             .await?;
         info!(
-            "Profile refreshed on startup: is_tester={}",
-            profile.is_tester
+            "Profile refreshed on startup: is_tester={}, is_banned={}",
+            profile.is_tester, profile.is_banned
         );
 
-        if profile.is_tester != session.user.is_tester {
+        if profile.is_tester != session.user.is_tester
+            || profile.is_banned != session.user.is_banned
+            || profile.banned_reason != session.user.banned_reason
+            || profile.banned_at != session.user.banned_at
+        {
             info!(
-                "Tester status changed: {} -> {}",
-                session.user.is_tester, profile.is_tester
+                "Profile status changed: tester {} -> {}, banned {} -> {}",
+                session.user.is_tester,
+                profile.is_tester,
+                session.user.is_banned,
+                profile.is_banned
             );
-            let updated_session = AuthSession {
-                user: UserInfo {
-                    is_tester: profile.is_tester,
-                    ..session.user
-                },
-                ..session
-            };
-
-            let _ = self.storage.store_session(&updated_session);
-
-            {
-                let mut state = self.state.lock();
-                *state = AuthState::LoggedIn(updated_session);
+            let updated_session = Self::session_from_profile(session, profile);
+            if let Err(e) = self.storage.store_session(&updated_session) {
+                warn!("Failed to store refreshed profile session: {}", e);
             }
+            self.set_session_state(updated_session);
         }
 
         Ok(())
@@ -344,6 +412,9 @@ impl AuthManager {
 
         match self.get_state() {
             AuthState::LoggedIn(session) => Ok(session.access_token),
+            AuthState::Banned(session) => Err(AuthError::UserBanned(Self::ban_suffix(
+                &session.user.banned_reason,
+            ))),
             _ => Err(AuthError::NotAuthenticated),
         }
     }
@@ -626,25 +697,26 @@ impl AuthManager {
             }
         };
 
-        // Fetch user profile to get tester status
-        let is_tester = match self
+        // Fetch user profile to get tester and ban status
+        let profile = match self
             .client
             .fetch_user_profile(&auth_response.access_token)
             .await
         {
             Ok(profile) => {
                 info!(
-                    "User profile fetched after OAuth: is_tester={}",
-                    profile.is_tester
+                    "User profile fetched after OAuth: is_tester={}, is_banned={}",
+                    profile.is_tester, profile.is_banned
                 );
-                profile.is_tester
+                profile
             }
             Err(e) => {
-                warn!(
-                    "Failed to fetch user profile after OAuth (non-fatal): {}",
-                    e
-                );
-                false
+                error!("Failed to verify user profile after OAuth: {}", e);
+                {
+                    let mut state = self.state.lock();
+                    *state = AuthState::Error(e.to_string());
+                }
+                return Err(e);
             }
         };
 
@@ -656,20 +728,20 @@ impl AuthManager {
             user: UserInfo {
                 id: auth_response.user.id,
                 email: auth_response.user.email.unwrap_or(exchange_response.email),
-                is_tester,
+                is_tester: profile.is_tester,
+                is_banned: profile.is_banned,
+                banned_reason: profile.banned_reason,
+                banned_at: profile.banned_at,
             },
         };
 
-        // Store session
-        self.storage.store_session(&session)?;
+        self.store_and_set_session_state(session.clone())?;
 
-        // Update state
-        {
-            let mut state = self.state.lock();
-            *state = AuthState::LoggedIn(session);
+        if session.user.is_banned {
+            warn!("Google OAuth completed for banned user {}", session.user.id);
+        } else {
+            info!("Google OAuth sign-in successful!");
         }
-
-        info!("Google OAuth sign-in successful!");
         Ok(())
     }
 

@@ -755,31 +755,41 @@ impl RobloxOptimizer {
     }
 
     fn find_roblox_version_folder_in(local_app_data: &PathBuf) -> Option<PathBuf> {
+        Self::find_roblox_version_folders_in(local_app_data)
+            .into_iter()
+            .next()
+    }
+
+    fn find_roblox_version_folders() -> Vec<PathBuf> {
+        let Some(local_app_data) = std::env::var("LOCALAPPDATA").ok() else {
+            return Vec::new();
+        };
+        Self::find_roblox_version_folders_in(&PathBuf::from(local_app_data))
+    }
+
+    fn find_roblox_version_folders_in(local_app_data: &PathBuf) -> Vec<PathBuf> {
         let versions_dir = local_app_data.join("Roblox").join("Versions");
 
         if !versions_dir.exists() {
-            return None;
+            return Vec::new();
         }
 
-        // Find the most recently modified version-* folder
-        let mut latest_version: Option<(PathBuf, std::time::SystemTime)> = None;
+        let mut versions: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
 
         if let Ok(entries) = fs::read_dir(&versions_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name()?.to_string_lossy();
+                    let Some(name) = path.file_name().map(|value| value.to_string_lossy()) else {
+                        continue;
+                    };
                     if name.starts_with("version-") {
-                        // Check if RobloxPlayerBeta.exe exists in this folder
                         if path.join("RobloxPlayerBeta.exe").exists() {
                             if let Ok(metadata) = entry.metadata() {
-                                if let Ok(modified) = metadata.modified() {
-                                    if latest_version.is_none()
-                                        || modified > latest_version.as_ref()?.1
-                                    {
-                                        latest_version = Some((path, modified));
-                                    }
-                                }
+                                let modified = metadata
+                                    .modified()
+                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                                versions.push((path, modified));
                             }
                         }
                     }
@@ -787,7 +797,8 @@ impl RobloxOptimizer {
             }
         }
 
-        latest_version.map(|(path, _)| path)
+        versions.sort_by(|(_, left), (_, right)| right.cmp(left));
+        versions.into_iter().map(|(path, _)| path).collect()
     }
 
     /// Get the ClientSettings folder path (creates it if needed).
@@ -797,6 +808,11 @@ impl RobloxOptimizer {
             None => return Ok(None),
         };
         Self::get_client_settings_path_for_version(&version_folder)
+    }
+
+    fn get_client_settings_paths(create_missing: bool) -> Result<Vec<PathBuf>> {
+        let version_folders = Self::find_roblox_version_folders();
+        Self::get_client_settings_paths_for_versions(&version_folders, create_missing)
     }
 
     #[cfg(test)]
@@ -811,10 +827,43 @@ impl RobloxOptimizer {
     }
 
     fn get_client_settings_path_for_version(version_folder: &PathBuf) -> Result<Option<PathBuf>> {
+        Self::get_client_settings_path_for_version_checked(version_folder, true)
+    }
+
+    fn get_client_settings_paths_for_versions(
+        version_folders: &[PathBuf],
+        create_missing: bool,
+    ) -> Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for version_folder in version_folders {
+            if let Some(path) =
+                Self::get_client_settings_path_for_version_checked(version_folder, create_missing)?
+            {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    }
+
+    #[cfg(test)]
+    fn get_client_settings_paths_for_local_app_data(
+        local_app_data: &PathBuf,
+        create_missing: bool,
+    ) -> Result<Vec<PathBuf>> {
+        let version_folders = Self::find_roblox_version_folders_in(local_app_data);
+        Self::get_client_settings_paths_for_versions(&version_folders, create_missing)
+    }
+
+    fn get_client_settings_path_for_version_checked(
+        version_folder: &PathBuf,
+        create_missing: bool,
+    ) -> Result<Option<PathBuf>> {
         let client_settings = version_folder.join("ClientSettings");
 
-        // Create ClientSettings folder if it doesn't exist
         if !client_settings.exists() {
+            if !create_missing {
+                return Ok(None);
+            }
             fs::create_dir_all(&client_settings)?;
             info!("Created ClientSettings folder at: {:?}", client_settings);
         } else if !client_settings.is_dir() {
@@ -830,16 +879,23 @@ impl RobloxOptimizer {
     /// When ultraboost is enabled, writes all allowlisted performance FFlags.
     /// Always cleans up old blocked FFlags from previous versions.
     fn apply_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<FFlagApplyOutcome> {
-        match Self::get_client_settings_path()? {
-            Some(client_settings) => self.apply_client_fflags_in_path(config, &client_settings),
-            None if config.ultraboost => Err(anyhow::anyhow!(
-                "Roblox version folder was not found. Launch Roblox once, then apply Ultraboost again."
-            )),
-            None => {
+        let client_settings_paths = Self::get_client_settings_paths(config.ultraboost)?;
+        if client_settings_paths.is_empty() {
+            if config.ultraboost {
+                return Err(anyhow::anyhow!(
+                    "Roblox version folder was not found. Launch Roblox once, then apply Ultraboost again."
+                ));
+            }
+            {
                 info!("No Roblox version folder found, skipping FFlag cleanup");
-                Ok(FFlagApplyOutcome::SkippedMissingRobloxVersion)
+                return Ok(FFlagApplyOutcome::SkippedMissingRobloxVersion);
             }
         }
+
+        for client_settings in client_settings_paths {
+            self.apply_client_fflags_in_path(config, &client_settings)?;
+        }
+        Ok(FFlagApplyOutcome::Applied)
     }
 
     #[cfg(test)]
@@ -848,16 +904,24 @@ impl RobloxOptimizer {
         config: &RobloxSettingsConfig,
         local_app_data: &PathBuf,
     ) -> Result<FFlagApplyOutcome> {
-        match Self::get_client_settings_path_for_local_app_data(local_app_data)? {
-            Some(client_settings) => self.apply_client_fflags_in_path(config, &client_settings),
-            None if config.ultraboost => Err(anyhow::anyhow!(
-                "Roblox version folder was not found. Launch Roblox once, then apply Ultraboost again."
-            )),
-            None => {
+        let client_settings_paths =
+            Self::get_client_settings_paths_for_local_app_data(local_app_data, config.ultraboost)?;
+        if client_settings_paths.is_empty() {
+            if config.ultraboost {
+                return Err(anyhow::anyhow!(
+                    "Roblox version folder was not found. Launch Roblox once, then apply Ultraboost again."
+                ));
+            }
+            {
                 info!("No Roblox version folder found, skipping FFlag cleanup");
-                Ok(FFlagApplyOutcome::SkippedMissingRobloxVersion)
+                return Ok(FFlagApplyOutcome::SkippedMissingRobloxVersion);
             }
         }
+
+        for client_settings in client_settings_paths {
+            self.apply_client_fflags_in_path(config, &client_settings)?;
+        }
+        Ok(FFlagApplyOutcome::Applied)
     }
 
     fn apply_client_fflags_in_path(
@@ -917,41 +981,57 @@ impl RobloxOptimizer {
 
     /// Remove all SwiftTunnel FFlag settings from ClientAppSettings.json
     fn remove_all_fflags(&self) -> Result<()> {
-        let client_settings = match Self::get_client_settings_path()? {
-            Some(path) => path,
-            None => {
-                info!("No Roblox version folder found, skipping FFlag cleanup");
-                return Ok(());
+        let client_settings_paths = Self::get_client_settings_paths(false)?;
+        self.remove_all_fflags_in_paths(client_settings_paths)
+    }
+
+    fn remove_all_fflags_in_paths(&self, client_settings_paths: Vec<PathBuf>) -> Result<()> {
+        if client_settings_paths.is_empty() {
+            info!("No Roblox version folder found, skipping FFlag cleanup");
+            return Ok(());
+        }
+
+        for client_settings in client_settings_paths {
+            let settings_path = client_settings.join("ClientAppSettings.json");
+
+            if settings_path.exists() {
+                let content = fs::read_to_string(&settings_path)?;
+                let mut settings: HashMap<String, serde_json::Value> =
+                    serde_json::from_str(&content).unwrap_or_default();
+
+                // Remove all ultraboost FFlags
+                for (key, _) in Self::ULTRABOOST_FFLAGS {
+                    settings.remove(*key);
+                }
+
+                // Remove old blocked FFlags (legacy cleanup)
+                for key in Self::LEGACY_BLOCKED_FFLAGS {
+                    settings.remove(*key);
+                }
+
+                if settings.is_empty() {
+                    fs::remove_file(&settings_path)?;
+                } else {
+                    let json = serde_json::to_string_pretty(&settings)?;
+                    fs::write(&settings_path, json)?;
+                }
+                info!("FFlag optimizations removed from ClientAppSettings.json");
             }
-        };
-
-        let settings_path = client_settings.join("ClientAppSettings.json");
-
-        if settings_path.exists() {
-            let content = fs::read_to_string(&settings_path)?;
-            let mut settings: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&content).unwrap_or_default();
-
-            // Remove all ultraboost FFlags
-            for (key, _) in Self::ULTRABOOST_FFLAGS {
-                settings.remove(*key);
-            }
-
-            // Remove old blocked FFlags (legacy cleanup)
-            for key in Self::LEGACY_BLOCKED_FFLAGS {
-                settings.remove(*key);
-            }
-
-            if settings.is_empty() {
-                fs::remove_file(&settings_path)?;
-            } else {
-                let json = serde_json::to_string_pretty(&settings)?;
-                fs::write(&settings_path, json)?;
-            }
-            info!("FFlag optimizations removed from ClientAppSettings.json");
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn remove_all_fflags_for_local_app_data(&self, local_app_data: &PathBuf) -> Result<()> {
+        let client_settings_paths =
+            Self::get_client_settings_paths_for_local_app_data(local_app_data, false)?;
+        self.remove_all_fflags_in_paths(client_settings_paths)
+    }
+
+    /// Reapply saved ClientAppSettings FFlags after Roblox creates a new version folder.
+    pub fn reapply_saved_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<()> {
+        self.apply_client_fflags(config).map(|_| ())
     }
 }
 
@@ -1362,6 +1442,109 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not a folder"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_updates_all_valid_version_folders() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_all_versions");
+        let _ = fs::remove_dir_all(&dir);
+        let versions_dir = dir.join("Roblox").join("Versions");
+        let old_version = versions_dir.join("version-old");
+        let new_version = versions_dir.join("version-new");
+        fs::create_dir_all(&old_version).unwrap();
+        fs::create_dir_all(&new_version).unwrap();
+        fs::write(old_version.join("RobloxPlayerBeta.exe"), "").unwrap();
+        fs::write(new_version.join("RobloxPlayerBeta.exe"), "").unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        let outcome = opt.apply_client_fflags_for_local_app_data(&config, &dir);
+
+        assert_eq!(outcome.unwrap(), FFlagApplyOutcome::Applied);
+        for version in [&old_version, &new_version] {
+            let settings_path = version
+                .join("ClientSettings")
+                .join("ClientAppSettings.json");
+            let content = fs::read_to_string(settings_path).unwrap();
+            assert!(content.contains("FFlagDebugGraphicsPreferD3D11"));
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_ignores_version_like_folder_without_player_exe() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_ignore_nearmiss");
+        let _ = fs::remove_dir_all(&dir);
+        let versions_dir = dir.join("Roblox").join("Versions");
+        let valid_version = versions_dir.join("version-valid");
+        let near_miss = versions_dir.join("version-without-player");
+        fs::create_dir_all(&valid_version).unwrap();
+        fs::create_dir_all(&near_miss).unwrap();
+        fs::write(valid_version.join("RobloxPlayerBeta.exe"), "").unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        opt.apply_client_fflags_for_local_app_data(&config, &dir)
+            .unwrap();
+
+        assert!(
+            valid_version
+                .join("ClientSettings")
+                .join("ClientAppSettings.json")
+                .exists()
+        );
+        assert!(
+            !near_miss.join("ClientSettings").exists(),
+            "version-like folders without RobloxPlayerBeta.exe must not be repaired"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_all_fflags_cleans_every_version_and_preserves_user_flags() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_remove_all_versions");
+        let _ = fs::remove_dir_all(&dir);
+        let versions_dir = dir.join("Roblox").join("Versions");
+        let first_version = versions_dir.join("version-first");
+        let second_version = versions_dir.join("version-second");
+
+        for version in [&first_version, &second_version] {
+            let client_settings = version.join("ClientSettings");
+            fs::create_dir_all(&client_settings).unwrap();
+            fs::write(version.join("RobloxPlayerBeta.exe"), "").unwrap();
+            fs::write(
+                client_settings.join("ClientAppSettings.json"),
+                r#"{
+  "FFlagDebugGraphicsPreferD3D11": "True",
+  "FStringUserOwnedFlag": "keep-me"
+}"#,
+            )
+            .unwrap();
+        }
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        opt.remove_all_fflags_for_local_app_data(&dir).unwrap();
+
+        for version in [&first_version, &second_version] {
+            let settings_path = version
+                .join("ClientSettings")
+                .join("ClientAppSettings.json");
+            let content = fs::read_to_string(settings_path).unwrap();
+            assert!(!content.contains("FFlagDebugGraphicsPreferD3D11"));
+            assert!(content.contains("FStringUserOwnedFlag"));
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

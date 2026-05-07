@@ -10,6 +10,7 @@ describe("app bootstrap", () => {
     const fetchServers = vi.fn().mockResolvedValue(undefined);
     const fetchSystemInfo = vi.fn().mockResolvedValue(undefined);
     const fetchVpnState = vi.fn().mockResolvedValue(undefined);
+    const refreshAuthProfile = vi.fn().mockResolvedValue(undefined);
     const connectVpn = vi.fn().mockResolvedValue(undefined);
     const checkForUpdates = vi.fn().mockResolvedValue(undefined);
 
@@ -20,6 +21,7 @@ describe("app bootstrap", () => {
       fetchServers,
       fetchSystemInfo,
       fetchVpnState,
+      refreshAuthProfile,
       getSettings: () => ({
         ...DEFAULT_SETTINGS,
         auto_reconnect: true,
@@ -37,6 +39,7 @@ describe("app bootstrap", () => {
     expect(fetchServers).toHaveBeenCalledTimes(1);
     expect(fetchSystemInfo).toHaveBeenCalledTimes(1);
     expect(fetchVpnState).toHaveBeenCalledTimes(1);
+    expect(refreshAuthProfile).toHaveBeenCalledTimes(1);
     expect(connectVpn).toHaveBeenCalledWith("singapore", ["roblox"]);
     expect(checkForUpdates).toHaveBeenCalledWith(false, true);
   });
@@ -44,6 +47,7 @@ describe("app bootstrap", () => {
   it("skips reconnect and update check when startup conditions are not met", async () => {
     const connectVpn = vi.fn().mockResolvedValue(undefined);
     const checkForUpdates = vi.fn().mockResolvedValue(undefined);
+    const refreshAuthProfile = vi.fn().mockResolvedValue(undefined);
 
     await runAppBootstrap({
       initEventListeners: vi.fn().mockResolvedValue(undefined),
@@ -52,6 +56,7 @@ describe("app bootstrap", () => {
       fetchServers: vi.fn().mockResolvedValue(undefined),
       fetchSystemInfo: vi.fn().mockResolvedValue(undefined),
       fetchVpnState: vi.fn().mockResolvedValue(undefined),
+      refreshAuthProfile,
       getSettings: () => ({
         ...DEFAULT_SETTINGS,
         update_settings: { auto_check: false, last_check: null },
@@ -64,5 +69,34 @@ describe("app bootstrap", () => {
 
     expect(connectVpn).not.toHaveBeenCalled();
     expect(checkForUpdates).not.toHaveBeenCalled();
+    expect(refreshAuthProfile).not.toHaveBeenCalled();
+  });
+
+  it("refreshes profile before reconnect so a startup ban can block auto-connect", async () => {
+    const connectVpn = vi.fn().mockResolvedValue(undefined);
+    let authState: "logged_in" | "banned" = "logged_in";
+
+    await runAppBootstrap({
+      initEventListeners: vi.fn().mockResolvedValue(undefined),
+      fetchAuth: vi.fn().mockResolvedValue(undefined),
+      loadSettings: vi.fn().mockResolvedValue(undefined),
+      fetchServers: vi.fn().mockResolvedValue(undefined),
+      fetchSystemInfo: vi.fn().mockResolvedValue(undefined),
+      fetchVpnState: vi.fn().mockResolvedValue(undefined),
+      refreshAuthProfile: vi.fn().mockImplementation(async () => {
+        authState = "banned";
+      }),
+      getSettings: () => ({
+        ...DEFAULT_SETTINGS,
+        auto_reconnect: true,
+        resume_vpn_on_startup: true,
+      }),
+      getAuthState: () => authState,
+      getVpnState: () => "disconnected",
+      connectVpn,
+      checkForUpdates: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(connectVpn).not.toHaveBeenCalled();
   });
 });
