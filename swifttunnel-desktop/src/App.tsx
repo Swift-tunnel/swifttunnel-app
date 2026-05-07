@@ -7,6 +7,7 @@ import {
 } from "@tauri-apps/api/window";
 import { AppShell } from "./components/shell/AppShell";
 import { LoginScreen } from "./components/auth/LoginScreen";
+import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
 import { BoostTab } from "./components/boost/BoostTab";
 import { NetworkTab } from "./components/network/NetworkTab";
@@ -48,6 +49,7 @@ function App() {
   const authState = useAuthStore((s) => s.state);
   const isLoading = useAuthStore((s) => s.isLoading);
   const fetchAuth = useAuthStore((s) => s.fetchState);
+  const refreshAuthProfile = useAuthStore((s) => s.refreshProfile);
   const isSettingsLoaded = useSettingsStore((s) => s.isLoaded);
   const setTab = useSettingsStore((s) => s.setTab);
   const updateSettings = useSettingsStore((s) => s.update);
@@ -70,6 +72,7 @@ function App() {
         fetchServers,
         fetchSystemInfo,
         fetchVpnState,
+        refreshAuthProfile,
         getSettings: () => useSettingsStore.getState().settings,
         getAuthState: () => useAuthStore.getState().state,
         getVpnState: () => useVpnStore.getState().state,
@@ -107,6 +110,7 @@ function App() {
     fetchServers,
     fetchSystemInfo,
     fetchVpnState,
+    refreshAuthProfile,
     connectVpn,
     checkForUpdates,
   ]);
@@ -306,6 +310,10 @@ function App() {
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent-primary border-t-transparent" />
       </div>
     );
+  }
+
+  if (authState === "banned") {
+    return <BannedScreen />;
   }
 
   if (authState !== "logged_in") {

@@ -16,6 +16,9 @@ interface AuthStore {
   email: string | null;
   userId: string | null;
   isTester: boolean;
+  isBanned: boolean;
+  bannedReason: string | null;
+  bannedAt: string | null;
   isLoading: boolean;
   error: string | null;
 
@@ -34,6 +37,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   email: null,
   userId: null,
   isTester: false,
+  isBanned: false,
+  bannedReason: null,
+  bannedAt: null,
   isLoading: true,
   error: null,
 
@@ -45,6 +51,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         email: resp.email,
         userId: resp.user_id,
         isTester: resp.is_tester,
+        isBanned: resp.is_banned,
+        bannedReason: resp.banned_reason,
+        bannedAt: resp.banned_at,
         isLoading: false,
         error: null,
       });
@@ -101,6 +110,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         email: null,
         userId: null,
         isTester: false,
+        isBanned: false,
+        bannedReason: null,
+        bannedAt: null,
         error: null,
       });
     } catch (e) {
@@ -110,18 +122,24 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
   refreshProfile: async () => {
     try {
+      set({ error: null });
       await authRefreshProfile();
-      await get().fetchState();
     } catch (e) {
       set({ error: String(e) });
     }
   },
 
   handleStateEvent: (event) => {
+    const isBanned = Boolean(event.is_banned);
+
     set({
       state: event.state as AuthState,
       email: event.email,
       userId: event.user_id,
+      isBanned,
+      bannedReason: event.banned_reason ?? null,
+      bannedAt: event.banned_at ?? null,
+      isTester: isBanned ? false : Boolean(event.is_tester),
     });
   },
 }));

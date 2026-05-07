@@ -6,9 +6,11 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::events::{SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent};
 use crate::state::AppState;
+use swifttunnel_core::auth::types::AuthError;
 use swifttunnel_core::settings::AdapterBindingMode;
 use swifttunnel_core::vpn::{
-    AdapterBindingPreference, BindingPreferenceSource, BindingPreflightInfo, preflight_binding,
+    AdapterBindingPreference, BindingPreferenceSource, BindingPreflightInfo, VpnError,
+    preflight_binding,
 };
 
 const VPN_CONNECT_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
@@ -216,6 +218,37 @@ fn persist_session_settings(
     swifttunnel_core::settings::save_settings(&snapshot)
 }
 
+fn vpn_error_is_user_banned(error: &VpnError) -> bool {
+    matches!(error, VpnError::UserBanned(_))
+}
+
+async fn emit_ban_cleanup(app: &AppHandle, state: &AppState) {
+    let emitted = crate::commands::auth::apply_ban_cleanup(app, state).await;
+    if !emitted {
+        crate::commands::auth::emit_auth_state(app, state).await;
+    }
+}
+
+async fn mark_and_emit_ban_cleanup(app: &AppHandle, state: &AppState, reason: &str) {
+    let mark_result = {
+        let auth = state.auth_manager.lock().await;
+        auth.mark_current_session_banned(reason)
+    };
+    if let Err(e) = mark_result {
+        log::warn!("Failed to mark session banned after VPN ban signal: {}", e);
+    }
+
+    emit_ban_cleanup(app, state).await;
+}
+
+async fn handle_connect_auth_error(app: &AppHandle, state: &AppState, error: AuthError) -> String {
+    let message = error.to_string();
+    if let AuthError::UserBanned(reason) = error {
+        mark_and_emit_ban_cleanup(app, state, &reason).await;
+    }
+    message
+}
+
 /// Tear down the live VPN session and drop all in-memory state that points at
 /// it. Always clears the published split-tunnel handle, sets Discord idle, and
 /// persists the disconnected session — even when the driver-level disconnect
@@ -330,6 +363,7 @@ pub async fn vpn_preflight_binding(
 #[tauri::command]
 pub async fn vpn_connect(
     state: State<'_, AppState>,
+    app: AppHandle,
     region: String,
     game_presets: Vec<String>,
 ) -> Result<(), String> {
@@ -409,7 +443,13 @@ pub async fn vpn_connect(
     // Get access token
     let access_token = {
         let auth = state.auth_manager.lock().await;
-        auth.get_access_token().await.map_err(|e| e.to_string())?
+        match auth.get_access_token().await {
+            Ok(token) => token,
+            Err(e) => {
+                drop(auth);
+                return Err(handle_connect_auth_error(&app, &state, e).await);
+            }
+        }
     };
 
     let mut vpn = state.vpn_connection.lock().await;
@@ -432,8 +472,16 @@ pub async fn vpn_connect(
     )
     .await;
 
+    let mut connect_ban_reason = None;
     let result = match connect_result {
-        Ok(result) => result.map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e)),
+        Ok(result) => result.map_err(|e| {
+            if vpn_error_is_user_banned(&e) {
+                if let VpnError::UserBanned(reason) = &e {
+                    connect_ban_reason = Some(reason.clone());
+                }
+            }
+            swifttunnel_core::vpn::user_friendly_error(&e)
+        }),
         Err(_) => {
             log::error!(
                 "vpn_connect timed out after {}s; cleaning up partial tunnel state",
@@ -464,6 +512,10 @@ pub async fn vpn_connect(
         *state.split_tunnel_handle.write() = None;
     }
     drop(vpn);
+
+    if let Some(reason) = connect_ban_reason {
+        mark_and_emit_ban_cleanup(&app, &state, &reason).await;
+    }
 
     let discord_region = if result.is_ok() {
         let conn_state = state.vpn_state_handle.borrow().clone();
@@ -950,6 +1002,16 @@ mod tests {
             ServerListSource::Api,
         );
         list
+    }
+
+    #[test]
+    fn vpn_ban_detection_uses_typed_error_only() {
+        assert!(vpn_error_is_user_banned(&VpnError::UserBanned(
+            ": chargeback".to_string()
+        )));
+        assert!(!vpn_error_is_user_banned(&VpnError::Connection(
+            "Account banned appears in unrelated text".to_string()
+        )));
     }
 
     #[test]

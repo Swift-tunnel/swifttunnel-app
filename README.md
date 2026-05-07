@@ -50,12 +50,14 @@ Built-in performance optimizations:
 - **FPS Unlocker** — Remove the 60 FPS cap
 - **Network Tweaks** — Optimize TCP/UDP settings, DNS, and adapter config
 - **System Boosts** — Process priority, timer resolution, memory management
+- **Roblox FFlags** — Ultraboost writes every valid Roblox `version-*` folder and re-applies saved flags on startup so Roblox updates do not drop the settings.
 
 ### 🔒 Lightweight & Safe
 - No kernel drivers required for basic operation
 - Anti-cheat friendly — uses standard Windows APIs
 - Minimal resource usage (~20MB RAM)
 - All optimizations are reversible
+- Banned accounts are blocked in-app and trigger best-effort cleanup of saved VPN, Roblox, network, and system boosts.
 
 ### 🌍 Auto Region Detection
 Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected and still complete the relay-ticket handshake, drained relays are excluded through `/api/vpn/servers`, stale lookups cannot switch after a newer game-server IP, and live ping-test refreshes keep Auto Route's server choices current while connected.

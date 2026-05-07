@@ -3,6 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::events::{AUTH_STATE_CHANGED, AuthStateEvent};
 use crate::state::AppState;
+use swifttunnel_core::auth::types::{AuthError, AuthState};
 
 #[derive(Serialize)]
 pub struct AuthStateResponse {
@@ -10,44 +11,75 @@ pub struct AuthStateResponse {
     pub email: Option<String>,
     pub user_id: Option<String>,
     pub is_tester: bool,
+    pub is_banned: bool,
+    pub banned_reason: Option<String>,
+    pub banned_at: Option<String>,
 }
 
-fn map_auth_state(auth_state: swifttunnel_core::auth::types::AuthState) -> AuthStateResponse {
+fn map_auth_state(auth_state: AuthState) -> AuthStateResponse {
     match auth_state {
-        swifttunnel_core::auth::types::AuthState::LoggedIn(session) => AuthStateResponse {
+        AuthState::LoggedIn(session) => AuthStateResponse {
             state: "logged_in".to_string(),
             email: Some(session.user.email),
             user_id: Some(session.user.id),
             is_tester: session.user.is_tester,
+            is_banned: false,
+            banned_reason: None,
+            banned_at: None,
         },
-        swifttunnel_core::auth::types::AuthState::LoggedOut => AuthStateResponse {
+        AuthState::Banned(session) => AuthStateResponse {
+            state: "banned".to_string(),
+            email: Some(session.user.email),
+            user_id: Some(session.user.id),
+            is_tester: false,
+            is_banned: true,
+            banned_reason: session.user.banned_reason,
+            banned_at: session.user.banned_at,
+        },
+        AuthState::LoggedOut => AuthStateResponse {
             state: "logged_out".to_string(),
             email: None,
             user_id: None,
             is_tester: false,
+            is_banned: false,
+            banned_reason: None,
+            banned_at: None,
         },
-        swifttunnel_core::auth::types::AuthState::LoggingIn => AuthStateResponse {
+        AuthState::LoggingIn => AuthStateResponse {
             state: "logging_in".to_string(),
             email: None,
             user_id: None,
             is_tester: false,
+            is_banned: false,
+            banned_reason: None,
+            banned_at: None,
         },
-        swifttunnel_core::auth::types::AuthState::AwaitingOAuthCallback(_) => AuthStateResponse {
+        AuthState::AwaitingOAuthCallback(_) => AuthStateResponse {
             state: "awaiting_oauth".to_string(),
             email: None,
             user_id: None,
             is_tester: false,
+            is_banned: false,
+            banned_reason: None,
+            banned_at: None,
         },
-        swifttunnel_core::auth::types::AuthState::Error(msg) => AuthStateResponse {
+        AuthState::Error(msg) => AuthStateResponse {
             state: format!("error:{}", msg),
             email: None,
             user_id: None,
             is_tester: false,
+            is_banned: false,
+            banned_reason: None,
+            banned_at: None,
         },
     }
 }
 
-async fn emit_auth_state(app: &AppHandle, state: &AppState) {
+fn is_auth_banned(auth_state: &AuthState) -> bool {
+    matches!(auth_state, AuthState::Banned(_))
+}
+
+pub(crate) async fn emit_auth_state(app: &AppHandle, state: &AppState) {
     let auth = state.auth_manager.lock().await;
     let auth_state = auth.get_state();
     let response = map_auth_state(auth_state);
@@ -57,8 +89,67 @@ async fn emit_auth_state(app: &AppHandle, state: &AppState) {
         state: response.state,
         email: response.email,
         user_id: response.user_id,
+        is_tester: response.is_tester,
+        is_banned: response.is_banned,
+        banned_reason: response.banned_reason,
+        banned_at: response.banned_at,
     };
     let _ = app.emit(AUTH_STATE_CHANGED, payload);
+}
+
+pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
+    let auth_state = {
+        let auth = state.auth_manager.lock().await;
+        auth.get_state()
+    };
+
+    if !is_auth_banned(&auth_state) {
+        return false;
+    }
+
+    log::warn!("Account is banned; disconnecting VPN and restoring saved boosts");
+
+    if let Err(e) = crate::commands::vpn::disconnect_and_persist(state).await {
+        log::warn!("Failed to disconnect VPN after ban detection: {}", e);
+    }
+
+    let roblox_pid = {
+        let mut monitor = state.performance_monitor.lock();
+        monitor.get_roblox_pid().unwrap_or(0)
+    };
+
+    if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
+        log::warn!("Failed to restore system boosts after ban detection: {}", e);
+    }
+    if let Err(e) = state.network_booster.lock().restore() {
+        log::warn!(
+            "Failed to restore network boosts after ban detection: {}",
+            e
+        );
+    }
+    if let Err(e) = state.roblox_optimizer.lock().restore_settings() {
+        log::warn!("Failed to restore Roblox boosts after ban detection: {}", e);
+    }
+
+    let snapshot = {
+        let mut settings = state.settings.lock();
+        settings.resume_vpn_on_startup = false;
+        settings.clone()
+    };
+
+    if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
+        log::warn!("Failed to persist boost cleanup after ban detection: {}", e);
+    }
+
+    true
+}
+
+pub(crate) async fn apply_ban_cleanup(app: &AppHandle, state: &AppState) -> bool {
+    if cleanup_banned_session(state).await {
+        emit_auth_state(app, state).await;
+        return true;
+    }
+    false
 }
 
 #[tauri::command]
@@ -121,12 +212,14 @@ pub async fn auth_complete_oauth(
     callback_state: String,
 ) -> Result<(), String> {
     let auth = state.auth_manager.lock().await;
-    let result = auth
-        .complete_oauth_callback(&token, &callback_state)
-        .await
-        .map_err(|e| e.to_string());
+    let complete_result = auth.complete_oauth_callback(&token, &callback_state).await;
+    let should_run_ban_cleanup = matches!(complete_result, Ok(()) | Err(AuthError::UserBanned(_)));
+    let result = complete_result.map_err(|e| e.to_string());
     drop(auth);
-    emit_auth_state(&app, &state).await;
+    let emitted = should_run_ban_cleanup && apply_ban_cleanup(&app, &state).await;
+    if !emitted {
+        emit_auth_state(&app, &state).await;
+    }
     result
 }
 
@@ -159,8 +252,13 @@ pub async fn auth_refresh_profile(
     app: AppHandle,
 ) -> Result<(), String> {
     let auth = state.auth_manager.lock().await;
-    let result = auth.refresh_profile().await.map_err(|e| e.to_string());
+    let refresh_result = auth.refresh_profile().await;
+    let should_run_ban_cleanup = matches!(refresh_result, Ok(()) | Err(AuthError::UserBanned(_)));
+    let result = refresh_result.map_err(|e| e.to_string());
     drop(auth);
-    emit_auth_state(&app, &state).await;
+    let emitted = should_run_ban_cleanup && apply_ban_cleanup(&app, &state).await;
+    if !emitted {
+        emit_auth_state(&app, &state).await;
+    }
     result
 }

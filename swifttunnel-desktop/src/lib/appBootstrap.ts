@@ -8,11 +8,15 @@ type AppBootstrapDeps = {
   fetchServers: () => Promise<void>;
   fetchSystemInfo: () => Promise<void>;
   fetchVpnState: () => Promise<void>;
+  refreshAuthProfile: () => Promise<void>;
   getSettings: () => AppSettings;
   getAuthState: () => AuthState;
   getVpnState: () => VpnState;
   connectVpn: (region: string, gamePresets: string[]) => Promise<void>;
-  checkForUpdates: (showNoUpdatesMessage: boolean, autoInstall?: boolean) => Promise<void>;
+  checkForUpdates: (
+    showNoUpdatesMessage: boolean,
+    autoInstall?: boolean,
+  ) => Promise<void>;
 };
 
 export async function runAppBootstrap(deps: AppBootstrapDeps) {
@@ -24,6 +28,12 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
     deps.fetchSystemInfo(),
     deps.fetchVpnState(),
   ]);
+
+  const authState = deps.getAuthState();
+  if (authState === "logged_in") {
+    await deps.refreshAuthProfile();
+    await Promise.all([deps.fetchAuth(), deps.fetchVpnState()]);
+  }
 
   const loadedSettings = deps.getSettings();
   if (

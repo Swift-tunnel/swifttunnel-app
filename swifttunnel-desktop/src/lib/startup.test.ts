@@ -18,6 +18,12 @@ describe("shouldAutoReconnectOnLaunch", () => {
         resume_vpn_on_startup: true,
       }),
     ).toBe(false);
+    expect(
+      shouldAutoReconnectOnLaunch("banned", "disconnected", {
+        auto_reconnect: true,
+        resume_vpn_on_startup: true,
+      }),
+    ).toBe(false);
   });
 
   it("returns false when reconnect is disabled or no prior active tunnel marker exists", () => {

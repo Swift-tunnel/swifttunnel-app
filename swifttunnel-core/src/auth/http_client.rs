@@ -5,6 +5,7 @@ use super::types::{
 };
 use log::{debug, error, info};
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::json;
 
 /// Response from the user profile API
@@ -19,6 +20,20 @@ pub struct UserProfileResponse {
     pub is_admin: bool,
     #[serde(default)]
     pub is_tester: bool,
+    #[serde(default)]
+    pub is_banned: bool,
+    #[serde(default)]
+    pub banned_reason: Option<String>,
+    #[serde(default)]
+    pub banned_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiErrorResponse {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    banned_reason: Option<String>,
 }
 
 const API_BASE_URL: &str = "https://swifttunnel.net";
@@ -160,6 +175,9 @@ impl AuthClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             error!("Get VPN config failed: {} - {}", status, body);
+            if let Some(error) = user_banned_error_from_body(&body) {
+                return Err(error);
+            }
             return Err(AuthError::ApiError(format!(
                 "Config fetch failed: {} - {}",
                 status, body
@@ -206,6 +224,9 @@ impl AuthClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             error!("Relay ticket fetch failed: {} - {}", status, body);
+            if let Some(error) = user_banned_error_from_body(&body) {
+                return Err(error);
+            }
             return Err(AuthError::ApiError(format!(
                 "Relay ticket fetch failed: {} - {}",
                 status, body
@@ -255,6 +276,9 @@ impl AuthClient {
             let body = response.text().await.unwrap_or_default();
             error!("Exchange token failed: {} - {}", status, body);
 
+            if let Some(error) = user_banned_error_from_body(&body) {
+                return Err(error);
+            }
             if body.contains("Invalid exchange token") {
                 return Err(AuthError::ApiError(
                     "Invalid or expired exchange token. Please try again.".to_string(),
@@ -306,6 +330,9 @@ impl AuthClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             error!("Fetch user profile failed: {} - {}", status, body);
+            if let Some(error) = user_banned_error_from_body(&body) {
+                return Err(error);
+            }
             return Err(AuthError::ApiError(format!(
                 "Profile fetch failed: {} - {}",
                 status, body
@@ -407,6 +434,25 @@ pub(crate) fn is_refresh_token_permanently_invalid(body: &str) -> bool {
         || body.contains("refresh_token_already_used")
 }
 
+fn user_banned_error_from_body(body: &str) -> Option<AuthError> {
+    let parsed: ApiErrorResponse = serde_json::from_str(body).ok()?;
+    if parsed.code.as_deref() != Some("user_banned") {
+        return None;
+    }
+
+    Some(AuthError::UserBanned(ban_reason_suffix(
+        parsed.banned_reason,
+    )))
+}
+
+fn ban_reason_suffix(reason: Option<String>) -> String {
+    reason
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(": {}", value))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +482,21 @@ mod tests {
         ));
         assert!(!is_refresh_token_permanently_invalid("rate_limit_exceeded"));
         assert!(!is_refresh_token_permanently_invalid(""));
+    }
+
+    #[test]
+    fn test_user_banned_error_uses_structured_code() {
+        let body = r#"{"error":"User banned","code":"user_banned","banned_reason":"chargeback"}"#;
+
+        let error = user_banned_error_from_body(body).unwrap();
+
+        assert_eq!(error.to_string(), "Account banned: chargeback");
+    }
+
+    #[test]
+    fn test_user_banned_error_ignores_incidental_text() {
+        let body = r#"{"error":"user_banned appeared in a log line","code":"internal_error"}"#;
+
+        assert!(user_banned_error_from_body(body).is_none());
     }
 }

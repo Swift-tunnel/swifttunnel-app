@@ -14,6 +14,8 @@ pub enum AuthState {
     AwaitingOAuthCallback(OAuthPendingState),
     /// Logged in with valid tokens
     LoggedIn(AuthSession),
+    /// Account is banned; tokens are kept only to display ban details and allow sign-out.
+    Banned(AuthSession),
     /// Error state
     Error(String),
 }
@@ -62,6 +64,13 @@ pub struct UserInfo {
     /// Whether user has tester access (gates experimental features)
     #[serde(default)]
     pub is_tester: bool,
+    /// Whether admin has blocked this account from desktop access.
+    #[serde(default)]
+    pub is_banned: bool,
+    #[serde(default)]
+    pub banned_reason: Option<String>,
+    #[serde(default)]
+    pub banned_at: Option<String>,
 }
 
 /// Supabase auth response
@@ -208,6 +217,9 @@ pub enum AuthError {
 
     #[error("Session expired, please sign in again")]
     RefreshTokenInvalid,
+
+    #[error("Account banned{0}")]
+    UserBanned(String),
 }
 
 #[cfg(test)]
@@ -224,6 +236,9 @@ mod tests {
                 id: "user-1".to_string(),
                 email: "test@example.com".to_string(),
                 is_tester: false,
+                is_banned: false,
+                banned_reason: None,
+                banned_at: None,
             },
         }
     }
@@ -318,6 +333,10 @@ mod tests {
         assert_eq!(
             AuthError::RefreshTokenInvalid.to_string(),
             "Session expired, please sign in again"
+        );
+        assert_eq!(
+            AuthError::UserBanned(": abuse".to_string()).to_string(),
+            "Account banned: abuse"
         );
     }
 
