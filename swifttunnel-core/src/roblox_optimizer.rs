@@ -836,10 +836,17 @@ impl RobloxOptimizer {
     ) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
         for version_folder in version_folders {
-            if let Some(path) =
-                Self::get_client_settings_path_for_version_checked(version_folder, create_missing)?
+            match Self::get_client_settings_path_for_version_checked(version_folder, create_missing)
             {
-                paths.push(path);
+                Ok(Some(path)) => paths.push(path),
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        "Skipping Roblox version folder {} while collecting ClientSettings: {}",
+                        version_folder.display(),
+                        e
+                    );
+                }
             }
         }
         Ok(paths)
@@ -1536,6 +1543,38 @@ mod tests {
             !near_miss.join("ClientSettings").exists(),
             "version-like folders without RobloxPlayerBeta.exe must not be repaired"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_skips_broken_legacy_version_folder() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_skip_broken_legacy");
+        let _ = fs::remove_dir_all(&dir);
+        let versions_dir = dir.join("Roblox").join("Versions");
+        let broken_version = versions_dir.join("version-broken");
+        let good_version = versions_dir.join("version-good");
+
+        for version in [&broken_version, &good_version] {
+            fs::create_dir_all(version).unwrap();
+            fs::write(version.join("RobloxPlayerBeta.exe"), "").unwrap();
+        }
+        fs::write(broken_version.join("ClientSettings"), "not a directory").unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        let outcome = opt.apply_client_fflags_for_local_app_data(&config, &dir);
+
+        assert_eq!(outcome.unwrap(), FFlagApplyOutcome::Applied);
+        let good_settings_path = good_version
+            .join("ClientSettings")
+            .join("ClientAppSettings.json");
+        let content = fs::read_to_string(good_settings_path).unwrap();
+        assert!(content.contains("FFlagDebugGraphicsPreferD3D11"));
 
         let _ = fs::remove_dir_all(&dir);
     }

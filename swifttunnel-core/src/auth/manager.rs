@@ -190,8 +190,12 @@ impl AuthManager {
         match self.client.sign_in_with_password(email, password).await {
             Ok(response) => {
                 let mut user_info = UserInfo {
-                    id: response.user.id,
-                    email: response.user.email.unwrap_or_else(|| email.to_string()),
+                    id: response.user.id.clone(),
+                    email: response
+                        .user
+                        .email
+                        .clone()
+                        .unwrap_or_else(|| email.to_string()),
                     is_tester: false,
                     is_banned: false,
                     banned_reason: None,
@@ -209,6 +213,21 @@ impl AuthManager {
                             "User profile fetched: is_tester={}, is_banned={}",
                             user_info.is_tester, user_info.is_banned
                         );
+                    }
+                    Err(AuthError::UserBanned(reason)) => {
+                        let session = Self::session_from_auth_response(
+                            response,
+                            email.to_string(),
+                            false,
+                            true,
+                            Self::reason_from_ban_suffix(&reason),
+                            None,
+                        );
+                        if let Err(e) = self.storage.store_session(&session) {
+                            warn!("Failed to store banned password session: {}", e);
+                        }
+                        self.set_session_state(session);
+                        return Err(AuthError::UserBanned(reason));
                     }
                     Err(e) => {
                         error!("Failed to verify user profile during sign-in: {}", e);
