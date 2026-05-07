@@ -138,7 +138,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       isBanned,
       bannedReason: event.banned_reason ?? null,
       bannedAt: event.banned_at ?? null,
-      isTester: isBanned ? false : get().isTester,
+      isTester: isBanned ? false : Boolean(event.is_tester),
     });
   },
 }));

@@ -89,6 +89,7 @@ pub(crate) async fn emit_auth_state(app: &AppHandle, state: &AppState) {
         state: response.state,
         email: response.email,
         user_id: response.user_id,
+        is_tester: response.is_tester,
         is_banned: response.is_banned,
         banned_reason: response.banned_reason,
         banned_at: response.banned_at,

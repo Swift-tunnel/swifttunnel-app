@@ -24,6 +24,7 @@ pub struct AuthStateEvent {
     pub state: String,
     pub email: Option<String>,
     pub user_id: Option<String>,
+    pub is_tester: bool,
     pub is_banned: bool,
     pub banned_reason: Option<String>,
     pub banned_at: Option<String>,

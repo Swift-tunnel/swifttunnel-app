@@ -420,6 +420,7 @@ export interface AuthStateEvent {
   state: string;
   email: string | null;
   user_id: string | null;
+  is_tester?: boolean;
   is_banned?: boolean;
   banned_reason?: string | null;
   banned_at?: string | null;
