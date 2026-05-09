@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../../lib/settings";
 import {
   getPresetConfig,
+  rememberedPowerPlanForSwiftTunnel,
   nextPowerPlanForSwiftTunnelToggle,
   parseWindowDimensionInput,
   previousNonSwiftTunnelPowerPlan,
@@ -14,6 +15,7 @@ describe("boost config helpers", () => {
 
     expect(result.profile).toBe("LowEnd");
     expect(result.system_optimization.power_plan).toBe("SwiftTunnel");
+    expect(result.system_optimization.previous_power_plan).toBe("Balanced");
     expect(result.roblox_settings.graphics_quality).toBe("Level1");
     expect(result.network_settings.enable_network_boost).toBe(true);
     expect(result.network_settings.disable_nagle).toBe(true);
@@ -42,6 +44,15 @@ describe("boost config helpers", () => {
       "Balanced",
     );
     expect(previousNonSwiftTunnelPowerPlan("SwiftTunnel")).toBe(
+      "HighPerformance",
+    );
+  });
+
+  it("uses the persisted previous power plan when SwiftTunnel is saved", () => {
+    expect(rememberedPowerPlanForSwiftTunnel("SwiftTunnel", "Balanced")).toBe(
+      "Balanced",
+    );
+    expect(rememberedPowerPlanForSwiftTunnel("SwiftTunnel", null)).toBe(
       "HighPerformance",
     );
   });

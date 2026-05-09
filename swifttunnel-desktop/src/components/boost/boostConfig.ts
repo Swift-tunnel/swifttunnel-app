@@ -56,6 +56,10 @@ export function getPresetConfig(
           disable_game_bar: true,
           disable_fullscreen_optimization: true,
           power_plan: "SwiftTunnel",
+          previous_power_plan: rememberedPowerPlanForSwiftTunnel(
+            current.system_optimization.power_plan,
+            current.system_optimization.previous_power_plan,
+          ),
         },
         roblox_settings: {
           ...current.roblox_settings,
@@ -84,6 +88,7 @@ export function getPresetConfig(
           disable_game_bar: true,
           disable_fullscreen_optimization: true,
           power_plan: "HighPerformance",
+          previous_power_plan: "HighPerformance",
         },
         roblox_settings: {
           ...current.roblox_settings,
@@ -112,6 +117,7 @@ export function getPresetConfig(
           disable_game_bar: false,
           disable_fullscreen_optimization: true,
           power_plan: "HighPerformance",
+          previous_power_plan: "HighPerformance",
         },
         roblox_settings: {
           ...current.roblox_settings,
@@ -169,10 +175,19 @@ export function parseWindowDimensionInput(
 }
 
 export function previousNonSwiftTunnelPowerPlan(
-  plan: PowerPlan,
+  plan: PowerPlan | null | undefined,
   fallback: PowerPlan = SWIFTTUNNEL_POWER_PLAN_FALLBACK,
 ): PowerPlan {
-  return plan === "SwiftTunnel" ? fallback : plan;
+  return plan && plan !== "SwiftTunnel" ? plan : fallback;
+}
+
+export function rememberedPowerPlanForSwiftTunnel(
+  currentPowerPlan: PowerPlan,
+  previousPowerPlan: PowerPlan | null | undefined,
+): PowerPlan {
+  return currentPowerPlan === "SwiftTunnel"
+    ? previousNonSwiftTunnelPowerPlan(previousPowerPlan)
+    : currentPowerPlan;
 }
 
 export function nextPowerPlanForSwiftTunnelToggle(

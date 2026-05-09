@@ -262,16 +262,29 @@ impl SystemOptimizer {
         Some(Self::output_contains_guid(&output_str, guid))
     }
 
-    fn set_active_power_plan_guid(guid: &str) {
+    fn set_active_power_plan_guid(guid: &str) -> bool {
         let output = hidden_command("powercfg")
             .args(["/setactive", guid])
             .output();
 
         match output {
-            Ok(result) if result.status.success() => {}
-            Ok(_) => warn!("Failed to restore power plan {}", guid),
-            Err(e) => warn!("Failed to restore power plan {}: {}", guid, e),
+            Ok(result) if result.status.success() => true,
+            Ok(_) => {
+                warn!("Failed to restore power plan {}", guid);
+                false
+            }
+            Err(e) => {
+                warn!("Failed to restore power plan {}: {}", guid, e);
+                false
+            }
         }
+    }
+
+    fn can_delete_imported_swifttunnel_power_plan(
+        original_restore_succeeded: bool,
+        balanced_fallback_succeeded: bool,
+    ) -> bool {
+        original_restore_succeeded || balanced_fallback_succeeded
     }
 
     fn delete_power_plan_guid(guid: &str) {
@@ -932,15 +945,34 @@ impl SystemOptimizer {
             Self::restore_registry_dword(GAME_BAR_KEY, GAME_BAR_VALUE, snapshot);
         }
 
+        let mut original_power_plan_restored = false;
         if let Some(snapshot) = self.original_power_plan_guid.take() {
             if let Some(guid) = snapshot {
-                Self::set_active_power_plan_guid(&guid);
+                original_power_plan_restored = Self::set_active_power_plan_guid(&guid);
             }
         }
 
         if self.swifttunnel_power_plan_imported {
-            Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID);
-            self.swifttunnel_power_plan_imported = false;
+            let balanced_fallback_restored = if original_power_plan_restored {
+                false
+            } else {
+                warn!(
+                    "Original power plan was not restored before deleting SwiftTunnel power plan; falling back to Balanced"
+                );
+                Self::set_active_power_plan_guid(BALANCED_POWER_PLAN_GUID)
+            };
+
+            if Self::can_delete_imported_swifttunnel_power_plan(
+                original_power_plan_restored,
+                balanced_fallback_restored,
+            ) {
+                Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID);
+                self.swifttunnel_power_plan_imported = false;
+            } else {
+                warn!(
+                    "Skipping SwiftTunnel power plan deletion because no safe replacement plan could be activated"
+                );
+            }
         }
 
         Ok(())
@@ -1068,6 +1100,17 @@ mod tests {
             Some(true)
         ));
         assert!(!SystemOptimizer::should_import_swifttunnel_power_plan(None));
+    }
+
+    #[test]
+    fn imported_power_plan_delete_requires_a_safe_active_replacement() {
+        assert!(SystemOptimizer::can_delete_imported_swifttunnel_power_plan(
+            true, false
+        ));
+        assert!(SystemOptimizer::can_delete_imported_swifttunnel_power_plan(
+            false, true
+        ));
+        assert!(!SystemOptimizer::can_delete_imported_swifttunnel_power_plan(false, false));
     }
 
     #[test]

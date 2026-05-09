@@ -50,6 +50,8 @@ pub struct SystemOptimizationConfig {
     pub clear_standby_memory: bool,
     pub disable_game_bar: bool,
     pub power_plan: PowerPlan,
+    #[serde(default)]
+    pub previous_power_plan: Option<PowerPlan>,
     // Tier 1 (Safe) Boosts
     #[serde(default)]
     pub timer_resolution_1ms: bool,
@@ -81,6 +83,7 @@ impl Default for SystemOptimizationConfig {
             clear_standby_memory: false,
             disable_game_bar: false,
             power_plan: PowerPlan::Balanced,
+            previous_power_plan: None,
             // Tier 1 boosts are opt-in by default.
             timer_resolution_1ms: false,
             mmcss_gaming_profile: false,

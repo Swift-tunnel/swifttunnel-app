@@ -14,6 +14,7 @@ const MOCK_SETTINGS: AppSettings = {
       clear_standby_memory: true,
       disable_game_bar: true,
       power_plan: "HighPerformance",
+      previous_power_plan: "HighPerformance",
       timer_resolution_1ms: true,
       mmcss_gaming_profile: true,
       game_mode_enabled: true,

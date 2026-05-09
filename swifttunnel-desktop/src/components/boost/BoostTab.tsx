@@ -29,6 +29,7 @@ import {
   nextPowerPlanForSwiftTunnelToggle,
   parseWindowDimensionInput,
   previousNonSwiftTunnelPowerPlan,
+  rememberedPowerPlanForSwiftTunnel,
   robloxSettingsChanged,
   validateWindowDimension,
 } from "./boostConfig";
@@ -68,7 +69,10 @@ export function BoostTab() {
   const savedConfig = settings.config;
   const [draft, setDraft] = useState<Config>(savedConfig);
   const [previousPowerPlan, setPreviousPowerPlan] = useState<PowerPlan>(() =>
-    previousNonSwiftTunnelPowerPlan(savedConfig.system_optimization.power_plan),
+    rememberedPowerPlanForSwiftTunnel(
+      savedConfig.system_optimization.power_plan,
+      savedConfig.system_optimization.previous_power_plan,
+    ),
   );
 
   useEffect(() => {
@@ -79,8 +83,17 @@ export function BoostTab() {
     const savedPowerPlan = savedConfig.system_optimization.power_plan;
     if (savedPowerPlan !== "SwiftTunnel") {
       setPreviousPowerPlan(savedPowerPlan);
+    } else if (savedConfig.system_optimization.previous_power_plan) {
+      setPreviousPowerPlan(
+        previousNonSwiftTunnelPowerPlan(
+          savedConfig.system_optimization.previous_power_plan,
+        ),
+      );
     }
-  }, [savedConfig.system_optimization.power_plan]);
+  }, [
+    savedConfig.system_optimization.power_plan,
+    savedConfig.system_optimization.previous_power_plan,
+  ]);
 
   const savedGPP = settings.game_process_performance;
   const [draftGPP, setDraftGPP] =
@@ -234,14 +247,21 @@ export function BoostTab() {
 
   function updateSwiftTunnelPowerPlan(enabled: boolean) {
     const currentPowerPlan = draft.system_optimization.power_plan;
+    const rememberedPowerPlan = previousNonSwiftTunnelPowerPlan(
+      enabled && currentPowerPlan !== "SwiftTunnel"
+        ? currentPowerPlan
+        : previousPowerPlan,
+    );
     if (enabled && currentPowerPlan !== "SwiftTunnel") {
-      setPreviousPowerPlan(currentPowerPlan);
+      setPreviousPowerPlan(rememberedPowerPlan);
     }
+    const nextPowerPlan = nextPowerPlanForSwiftTunnelToggle(
+      enabled,
+      rememberedPowerPlan,
+    );
     updateSysOpt({
-      power_plan: nextPowerPlanForSwiftTunnelToggle(
-        enabled,
-        previousPowerPlan,
-      ),
+      power_plan: nextPowerPlan,
+      previous_power_plan: rememberedPowerPlan,
     });
   }
 
