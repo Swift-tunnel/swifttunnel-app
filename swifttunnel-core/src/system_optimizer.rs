@@ -302,7 +302,7 @@ impl SystemOptimizer {
             .args(["/import", &path_arg, SWIFTTUNNEL_POWER_PLAN_GUID])
             .output();
 
-        match output {
+        let import_result = match output {
             Ok(result) if result.status.success() => {
                 let _ = hidden_command("powercfg")
                     .args([
@@ -327,7 +327,17 @@ impl SystemOptimizer {
                 "Failed to run powercfg /import for SwiftTunnel power plan: {}",
                 e
             )),
+        };
+
+        if let Err(e) = fs::remove_file(&staged_path) {
+            warn!(
+                "Failed to remove staged SwiftTunnel power plan file {}: {}",
+                staged_path.display(),
+                e
+            );
         }
+
+        import_result
     }
 
     fn ensure_swifttunnel_power_plan(&mut self) -> Result<()> {
@@ -621,6 +631,8 @@ impl SystemOptimizer {
         if matches!(plan, PowerPlan::SwiftTunnel) {
             if let Err(e) = self.ensure_swifttunnel_power_plan() {
                 warn!("Could not prepare SwiftTunnel power plan: {}", e);
+                warn!("Skipping SwiftTunnel power plan activation because setup did not complete");
+                return Ok(());
             }
         }
 
