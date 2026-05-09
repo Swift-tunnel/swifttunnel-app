@@ -200,7 +200,11 @@ export interface BoostUpdateResult {
 }
 
 export type OptimizationProfile = "LowEnd" | "Balanced" | "HighEnd" | "Custom";
-export type PowerPlan = "Balanced" | "HighPerformance" | "Ultimate";
+export type PowerPlan =
+  | "Balanced"
+  | "HighPerformance"
+  | "Ultimate"
+  | "SwiftTunnel";
 export type GraphicsQuality =
   | "Automatic"
   | "Manual"
@@ -222,6 +226,7 @@ export interface SystemOptimizationConfig {
   clear_standby_memory: boolean;
   disable_game_bar: boolean;
   power_plan: PowerPlan;
+  previous_power_plan: PowerPlan | null;
   timer_resolution_1ms: boolean;
   mmcss_gaming_profile: boolean;
   game_mode_enabled: boolean;

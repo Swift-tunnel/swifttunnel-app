@@ -1,9 +1,12 @@
 import type {
   Config,
   OptimizationProfile,
+  PowerPlan,
   StandbyPurgeResult,
 } from "../../lib/types";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
+
+export const SWIFTTUNNEL_POWER_PLAN_FALLBACK: PowerPlan = "HighPerformance";
 
 export const PROFILES: {
   id: OptimizationProfile;
@@ -52,7 +55,11 @@ export function getPresetConfig(
           clear_standby_memory: true,
           disable_game_bar: true,
           disable_fullscreen_optimization: true,
-          power_plan: "Ultimate",
+          power_plan: "SwiftTunnel",
+          previous_power_plan: rememberedPowerPlanForSwiftTunnel(
+            current.system_optimization.power_plan,
+            current.system_optimization.previous_power_plan,
+          ),
         },
         roblox_settings: {
           ...current.roblox_settings,
@@ -81,6 +88,7 @@ export function getPresetConfig(
           disable_game_bar: true,
           disable_fullscreen_optimization: true,
           power_plan: "HighPerformance",
+          previous_power_plan: "HighPerformance",
         },
         roblox_settings: {
           ...current.roblox_settings,
@@ -109,6 +117,7 @@ export function getPresetConfig(
           disable_game_bar: false,
           disable_fullscreen_optimization: true,
           power_plan: "HighPerformance",
+          previous_power_plan: "HighPerformance",
         },
         roblox_settings: {
           ...current.roblox_settings,
@@ -163,6 +172,31 @@ export function parseWindowDimensionInput(
 ): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function previousNonSwiftTunnelPowerPlan(
+  plan: PowerPlan | null | undefined,
+  fallback: PowerPlan = SWIFTTUNNEL_POWER_PLAN_FALLBACK,
+): PowerPlan {
+  return plan && plan !== "SwiftTunnel" ? plan : fallback;
+}
+
+export function rememberedPowerPlanForSwiftTunnel(
+  currentPowerPlan: PowerPlan,
+  previousPowerPlan: PowerPlan | null | undefined,
+): PowerPlan {
+  return currentPowerPlan === "SwiftTunnel"
+    ? previousNonSwiftTunnelPowerPlan(previousPowerPlan)
+    : currentPowerPlan;
+}
+
+export function nextPowerPlanForSwiftTunnelToggle(
+  enabled: boolean,
+  previousPowerPlan: PowerPlan,
+): PowerPlan {
+  return enabled
+    ? "SwiftTunnel"
+    : previousNonSwiftTunnelPowerPlan(previousPowerPlan);
 }
 
 export function countActive(...flags: boolean[]): number {

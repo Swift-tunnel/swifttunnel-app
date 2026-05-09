@@ -57,7 +57,14 @@ fn resolve_windows_command_path(program: &str) -> PathBuf {
 fn is_system32_program(program: &str) -> bool {
     matches!(
         program.to_ascii_lowercase().as_str(),
-        "pnputil" | "pnputil.exe" | "msiexec" | "msiexec.exe" | "netsh" | "netsh.exe"
+        "pnputil"
+            | "pnputil.exe"
+            | "msiexec"
+            | "msiexec.exe"
+            | "netsh"
+            | "netsh.exe"
+            | "powercfg"
+            | "powercfg.exe"
     )
 }
 
@@ -786,10 +793,12 @@ mod tests {
             std::env::temp_dir().join(format!("swifttunnel_test_sys32_{}", std::process::id()));
         let pnputil = root.join("System32").join("pnputil.exe");
         let msiexec = root.join("System32").join("msiexec.exe");
+        let powercfg = root.join("System32").join("powercfg.exe");
 
         fs::create_dir_all(pnputil.parent().unwrap()).expect("create System32 dir");
         fs::write(&pnputil, b"").expect("create fake pnputil");
         fs::write(&msiexec, b"").expect("create fake msiexec");
+        fs::write(&powercfg, b"").expect("create fake powercfg");
 
         assert_eq!(
             resolve_windows_command_path_with_root("pnputil", Some(root.as_path())),
@@ -798,6 +807,10 @@ mod tests {
         assert_eq!(
             resolve_windows_command_path_with_root("msiexec", Some(root.as_path())),
             msiexec
+        );
+        assert_eq!(
+            resolve_windows_command_path_with_root("powercfg", Some(root.as_path())),
+            powercfg
         );
         // Without .exe suffix should also work
         assert_eq!(

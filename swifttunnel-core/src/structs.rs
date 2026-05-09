@@ -50,6 +50,8 @@ pub struct SystemOptimizationConfig {
     pub clear_standby_memory: bool,
     pub disable_game_bar: bool,
     pub power_plan: PowerPlan,
+    #[serde(default)]
+    pub previous_power_plan: Option<PowerPlan>,
     // Tier 1 (Safe) Boosts
     #[serde(default)]
     pub timer_resolution_1ms: bool,
@@ -81,6 +83,7 @@ impl Default for SystemOptimizationConfig {
             clear_standby_memory: false,
             disable_game_bar: false,
             power_plan: PowerPlan::Balanced,
+            previous_power_plan: None,
             // Tier 1 boosts are opt-in by default.
             timer_resolution_1ms: false,
             mmcss_gaming_profile: false,
@@ -95,6 +98,7 @@ pub enum PowerPlan {
     Balanced,
     HighPerformance,
     Ultimate,
+    SwiftTunnel,
 }
 
 /// Roblox-specific settings
@@ -399,6 +403,16 @@ pub mod boost_info {
         requires_admin: false,
     };
 
+    pub const SWIFTTUNNEL_POWER_PLAN: BoostInfo = BoostInfo {
+        id: "swifttunnel_power_plan",
+        title: "SwiftTunnel Power Plan",
+        short_desc: "Custom low-latency power profile",
+        long_desc: "Imports and activates SwiftTunnel's custom Windows power plan while boosts are enabled. The previous active power plan is restored automatically when boosts turn off.",
+        impact: "More consistent CPU and device responsiveness",
+        risk_level: RiskLevel::Safe,
+        requires_admin: true,
+    };
+
     // Network Boosts (Tier 1)
     pub const DISABLE_NAGLE: BoostInfo = BoostInfo {
         id: "disable_nagle",
@@ -452,8 +466,14 @@ pub mod boost_info {
     };
 
     /// Get all system boost infos
-    pub fn system_boosts() -> [&'static BoostInfo; 4] {
-        [&HIGH_PRIORITY, &TIMER_RESOLUTION, &MMCSS, &GAME_MODE]
+    pub fn system_boosts() -> [&'static BoostInfo; 5] {
+        [
+            &HIGH_PRIORITY,
+            &TIMER_RESOLUTION,
+            &MMCSS,
+            &GAME_MODE,
+            &SWIFTTUNNEL_POWER_PLAN,
+        ]
     }
 
     /// Get all network boost infos
@@ -691,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_system_boosts_count() {
-        assert_eq!(boost_info::system_boosts().len(), 4);
+        assert_eq!(boost_info::system_boosts().len(), 5);
     }
 
     #[test]
@@ -728,6 +748,10 @@ mod tests {
         assert!(
             boost_info::FIREWALL_FIX.requires_admin,
             "Firewall fix uses netsh, must require admin"
+        );
+        assert!(
+            boost_info::SWIFTTUNNEL_POWER_PLAN.requires_admin,
+            "Power plan import/activation uses powercfg, must require admin"
         );
     }
 

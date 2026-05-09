@@ -12,6 +12,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
       clear_standby_memory: false,
       disable_game_bar: false,
       power_plan: "Balanced",
+      previous_power_plan: null,
       timer_resolution_1ms: false,
       mmcss_gaming_profile: false,
       game_mode_enabled: false,

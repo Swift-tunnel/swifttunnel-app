@@ -26,7 +26,10 @@ import {
   formatGbFromMb,
   getPresetConfig,
   memColor,
+  nextPowerPlanForSwiftTunnelToggle,
   parseWindowDimensionInput,
+  previousNonSwiftTunnelPowerPlan,
+  rememberedPowerPlanForSwiftTunnel,
   robloxSettingsChanged,
   validateWindowDimension,
 } from "./boostConfig";
@@ -35,6 +38,7 @@ import type {
   GameProcessPerformanceSettings,
   NetworkConfig,
   OptimizationProfile,
+  PowerPlan,
   RobloxSettingsConfig,
   SystemOptimizationConfig,
   SystemMemorySnapshot,
@@ -64,10 +68,32 @@ export function BoostTab() {
 
   const savedConfig = settings.config;
   const [draft, setDraft] = useState<Config>(savedConfig);
+  const [previousPowerPlan, setPreviousPowerPlan] = useState<PowerPlan>(() =>
+    rememberedPowerPlanForSwiftTunnel(
+      savedConfig.system_optimization.power_plan,
+      savedConfig.system_optimization.previous_power_plan,
+    ),
+  );
 
   useEffect(() => {
     setDraft(savedConfig);
   }, [savedConfig]);
+
+  useEffect(() => {
+    const savedPowerPlan = savedConfig.system_optimization.power_plan;
+    if (savedPowerPlan !== "SwiftTunnel") {
+      setPreviousPowerPlan(savedPowerPlan);
+    } else if (savedConfig.system_optimization.previous_power_plan) {
+      setPreviousPowerPlan(
+        previousNonSwiftTunnelPowerPlan(
+          savedConfig.system_optimization.previous_power_plan,
+        ),
+      );
+    }
+  }, [
+    savedConfig.system_optimization.power_plan,
+    savedConfig.system_optimization.previous_power_plan,
+  ]);
 
   const savedGPP = settings.game_process_performance;
   const [draftGPP, setDraftGPP] =
@@ -219,6 +245,26 @@ export function BoostTab() {
     }));
   }
 
+  function updateSwiftTunnelPowerPlan(enabled: boolean) {
+    const currentPowerPlan = draft.system_optimization.power_plan;
+    const rememberedPowerPlan = previousNonSwiftTunnelPowerPlan(
+      enabled && currentPowerPlan !== "SwiftTunnel"
+        ? currentPowerPlan
+        : previousPowerPlan,
+    );
+    if (enabled && currentPowerPlan !== "SwiftTunnel") {
+      setPreviousPowerPlan(rememberedPowerPlan);
+    }
+    const nextPowerPlan = nextPowerPlanForSwiftTunnelToggle(
+      enabled,
+      rememberedPowerPlan,
+    );
+    updateSysOpt({
+      power_plan: nextPowerPlan,
+      previous_power_plan: rememberedPowerPlan,
+    });
+  }
+
   const applyNetworkOpt = useCallback(
     async (p: Partial<NetworkConfig>) => {
       const nextDraft = {
@@ -269,12 +315,14 @@ export function BoostTab() {
     setDraftGPP((prev) => ({ ...prev, ...p }));
   }
 
-  const sysCount = [
+  const systemBoostFlags = [
     draft.system_optimization.set_high_priority,
     draft.system_optimization.timer_resolution_1ms,
     draft.system_optimization.mmcss_gaming_profile,
     draft.system_optimization.game_mode_enabled,
-  ].filter(Boolean).length;
+    draft.system_optimization.power_plan === "SwiftTunnel",
+  ];
+  const sysCount = systemBoostFlags.filter(Boolean).length;
   const netCount = [
     draft.network_settings.disable_nagle,
     draft.network_settings.disable_network_throttling,
@@ -408,7 +456,7 @@ export function BoostTab() {
 
       {/* ── System + Network side-by-side ── */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <Section title="System" tag={`${sysCount} / 4 on`}>
+        <Section title="System" tag={`${sysCount} / ${systemBoostFlags.length} on`}>
           <SettingRow
             title="High Priority Mode"
             desc="Boost game process priority (+5-15 FPS)"
@@ -434,6 +482,13 @@ export function BoostTab() {
             desc="System resource prioritization"
             enabled={draft.system_optimization.game_mode_enabled}
             onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
+          />
+          <SettingRow
+            title="SwiftTunnel Power Plan"
+            desc="Custom low-latency Windows power profile"
+            tooltip="Imports and activates SwiftTunnel's optimized power plan while boosts are enabled. Your previous power plan is restored when boosts are disabled."
+            enabled={draft.system_optimization.power_plan === "SwiftTunnel"}
+            onChange={updateSwiftTunnelPowerPlan}
           />
         </Section>
 
