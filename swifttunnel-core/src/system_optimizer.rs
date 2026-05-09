@@ -346,13 +346,11 @@ impl SystemOptimizer {
             return self.import_swifttunnel_power_plan();
         }
 
-        match installed {
-            Some(true) | Some(false) => Ok(()),
-            None => {
-                warn!("Could not list power plans before activating SwiftTunnel power plan");
-                Ok(())
-            }
+        if installed.is_none() {
+            warn!("Could not list power plans before activating SwiftTunnel power plan");
         }
+
+        Ok(())
     }
 
     fn should_import_swifttunnel_power_plan(installed: Option<bool>) -> bool {

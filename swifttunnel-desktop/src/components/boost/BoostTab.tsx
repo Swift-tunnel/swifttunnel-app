@@ -269,13 +269,14 @@ export function BoostTab() {
     setDraftGPP((prev) => ({ ...prev, ...p }));
   }
 
-  const sysCount = [
+  const systemBoostFlags = [
     draft.system_optimization.set_high_priority,
     draft.system_optimization.timer_resolution_1ms,
     draft.system_optimization.mmcss_gaming_profile,
     draft.system_optimization.game_mode_enabled,
     draft.system_optimization.power_plan === "SwiftTunnel",
-  ].filter(Boolean).length;
+  ];
+  const sysCount = systemBoostFlags.filter(Boolean).length;
   const netCount = [
     draft.network_settings.disable_nagle,
     draft.network_settings.disable_network_throttling,
@@ -409,7 +410,7 @@ export function BoostTab() {
 
       {/* ── System + Network side-by-side ── */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <Section title="System" tag={`${sysCount} / 5 on`}>
+        <Section title="System" tag={`${sysCount} / ${systemBoostFlags.length} on`}>
           <SettingRow
             title="High Priority Mode"
             desc="Boost game process priority (+5-15 FPS)"
