@@ -52,7 +52,7 @@ export function getPresetConfig(
           clear_standby_memory: true,
           disable_game_bar: true,
           disable_fullscreen_optimization: true,
-          power_plan: "Ultimate",
+          power_plan: "SwiftTunnel",
         },
         roblox_settings: {
           ...current.roblox_settings,

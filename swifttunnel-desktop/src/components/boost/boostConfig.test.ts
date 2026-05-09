@@ -11,7 +11,7 @@ describe("boost config helpers", () => {
     const result = getPresetConfig("LowEnd", DEFAULT_SETTINGS.config);
 
     expect(result.profile).toBe("LowEnd");
-    expect(result.system_optimization.power_plan).toBe("Ultimate");
+    expect(result.system_optimization.power_plan).toBe("SwiftTunnel");
     expect(result.roblox_settings.graphics_quality).toBe("Level1");
     expect(result.network_settings.enable_network_boost).toBe(true);
     expect(result.network_settings.disable_nagle).toBe(true);

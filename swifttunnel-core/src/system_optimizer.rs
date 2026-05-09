@@ -1,6 +1,8 @@
 use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
@@ -27,6 +29,14 @@ const MMCSS_GAMES_KEY: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games";
 const MMCSS_SYSTEM_PROFILE_KEY: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
+const BALANCED_POWER_PLAN_GUID: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
+const HIGH_PERFORMANCE_POWER_PLAN_GUID: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+const ULTIMATE_POWER_PLAN_GUID: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
+const SWIFTTUNNEL_POWER_PLAN_GUID: &str = "44444444-4444-4444-4444-444444444452";
+const SWIFTTUNNEL_POWER_PLAN_NAME: &str = "SwiftTunnel";
+const SWIFTTUNNEL_POWER_PLAN_DESCRIPTION: &str = "SwiftTunnel optimized gaming power plan";
+const SWIFTTUNNEL_POWER_PLAN_BYTES: &[u8] =
+    include_bytes!("../resources/swifttunnel_power_plan.pow");
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct MmcssSnapshot {
@@ -47,6 +57,7 @@ pub struct SystemOptimizer {
     game_mode_allow_auto_snapshot: Option<Option<u32>>,
     game_mode_enabled_snapshot: Option<Option<u32>>,
     mmcss_snapshot: Option<MmcssSnapshot>,
+    swifttunnel_power_plan_imported: bool,
 }
 
 impl SystemOptimizer {
@@ -60,6 +71,7 @@ impl SystemOptimizer {
             game_mode_allow_auto_snapshot: None,
             game_mode_enabled_snapshot: None,
             mmcss_snapshot: None,
+            swifttunnel_power_plan_imported: false,
         }
     }
 
@@ -210,6 +222,21 @@ impl SystemOptimizer {
             .map(|token| token.to_ascii_lowercase())
     }
 
+    fn output_contains_guid(output: &str, guid: &str) -> bool {
+        output
+            .split(|c: char| !c.is_ascii_hexdigit() && c != '-')
+            .any(|token| token.len() == 36 && token.eq_ignore_ascii_case(guid))
+    }
+
+    fn power_plan_guid(plan: &PowerPlan) -> &'static str {
+        match plan {
+            PowerPlan::Balanced => BALANCED_POWER_PLAN_GUID,
+            PowerPlan::HighPerformance => HIGH_PERFORMANCE_POWER_PLAN_GUID,
+            PowerPlan::Ultimate => ULTIMATE_POWER_PLAN_GUID,
+            PowerPlan::SwiftTunnel => SWIFTTUNNEL_POWER_PLAN_GUID,
+        }
+    }
+
     fn active_power_plan_guid() -> Option<String> {
         let output = hidden_command("powercfg")
             .args(["/GETACTIVESCHEME"])
@@ -224,6 +251,17 @@ impl SystemOptimizer {
         Self::parse_guid_from_output(&output_str)
     }
 
+    fn is_power_plan_installed(guid: &str) -> Option<bool> {
+        let output = hidden_command("powercfg").args(["/list"]).output().ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        Some(Self::output_contains_guid(&output_str, guid))
+    }
+
     fn set_active_power_plan_guid(guid: &str) {
         let output = hidden_command("powercfg")
             .args(["/setactive", guid])
@@ -234,6 +272,81 @@ impl SystemOptimizer {
             Ok(_) => warn!("Failed to restore power plan {}", guid),
             Err(e) => warn!("Failed to restore power plan {}: {}", guid, e),
         }
+    }
+
+    fn delete_power_plan_guid(guid: &str) {
+        let output = hidden_command("powercfg").args(["/delete", guid]).output();
+
+        match output {
+            Ok(result) if result.status.success() => {}
+            Ok(_) => warn!("Failed to delete SwiftTunnel power plan {}", guid),
+            Err(e) => warn!("Failed to delete SwiftTunnel power plan {}: {}", guid, e),
+        }
+    }
+
+    fn write_swifttunnel_power_plan_resource(path: &Path) -> Result<()> {
+        fs::write(path, SWIFTTUNNEL_POWER_PLAN_BYTES)
+            .map_err(|e| anyhow::anyhow!("Failed to stage SwiftTunnel power plan: {}", e))
+    }
+
+    fn staged_swifttunnel_power_plan_path() -> PathBuf {
+        std::env::temp_dir().join("swifttunnel_power_plan.pow")
+    }
+
+    fn import_swifttunnel_power_plan(&mut self) -> Result<()> {
+        let staged_path = Self::staged_swifttunnel_power_plan_path();
+        Self::write_swifttunnel_power_plan_resource(&staged_path)?;
+
+        let path_arg = staged_path.to_string_lossy().to_string();
+        let output = hidden_command("powercfg")
+            .args(["/import", &path_arg, SWIFTTUNNEL_POWER_PLAN_GUID])
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => {
+                let _ = hidden_command("powercfg")
+                    .args([
+                        "/changename",
+                        SWIFTTUNNEL_POWER_PLAN_GUID,
+                        SWIFTTUNNEL_POWER_PLAN_NAME,
+                        SWIFTTUNNEL_POWER_PLAN_DESCRIPTION,
+                    ])
+                    .output();
+                self.swifttunnel_power_plan_imported = true;
+                info!("SwiftTunnel power plan imported successfully");
+                Ok(())
+            }
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                Err(anyhow::anyhow!(
+                    "powercfg /import failed for SwiftTunnel power plan: {}",
+                    stderr.trim()
+                ))
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "Failed to run powercfg /import for SwiftTunnel power plan: {}",
+                e
+            )),
+        }
+    }
+
+    fn ensure_swifttunnel_power_plan(&mut self) -> Result<()> {
+        let installed = Self::is_power_plan_installed(SWIFTTUNNEL_POWER_PLAN_GUID);
+        if Self::should_import_swifttunnel_power_plan(installed) {
+            return self.import_swifttunnel_power_plan();
+        }
+
+        match installed {
+            Some(true) | Some(false) => Ok(()),
+            None => {
+                warn!("Could not list power plans before activating SwiftTunnel power plan");
+                Ok(())
+            }
+        }
+    }
+
+    fn should_import_swifttunnel_power_plan(installed: Option<bool>) -> bool {
+        matches!(installed, Some(false))
     }
 
     fn capture_system_state_snapshots(&mut self, config: &SystemOptimizationConfig) {
@@ -501,13 +614,15 @@ impl SystemOptimizer {
 
     /// Set Windows power plan
     fn set_power_plan(&mut self, plan: &PowerPlan) -> Result<()> {
-        let guid = match plan {
-            PowerPlan::Balanced => "381b4222-f694-41f0-9685-ff5bb260df2e",
-            PowerPlan::HighPerformance => "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c",
-            PowerPlan::Ultimate => "e9a42b02-d5df-448d-aa00-03f14749eb61",
-        };
+        let guid = Self::power_plan_guid(plan);
 
         info!("Setting power plan to: {:?}", plan);
+
+        if matches!(plan, PowerPlan::SwiftTunnel) {
+            if let Err(e) = self.ensure_swifttunnel_power_plan() {
+                warn!("Could not prepare SwiftTunnel power plan: {}", e);
+            }
+        }
 
         let output = hidden_command("powercfg")
             .args(["/setactive", guid])
@@ -813,6 +928,11 @@ impl SystemOptimizer {
             }
         }
 
+        if self.swifttunnel_power_plan_imported {
+            Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID);
+            self.swifttunnel_power_plan_imported = false;
+        }
+
         Ok(())
     }
 
@@ -884,8 +1004,65 @@ pub fn cleanup_for_uninstall() {
 
     // 5. Restore Balanced power plan
     let _ = hidden_command("powercfg")
-        .args(["/setactive", "381b4222-f694-41f0-9685-ff5bb260df2e"])
+        .args(["/setactive", BALANCED_POWER_PLAN_GUID])
+        .output();
+
+    let _ = hidden_command("powercfg")
+        .args(["/delete", SWIFTTUNNEL_POWER_PLAN_GUID])
         .output();
 
     info!("System optimizer: uninstall cleanup completed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn power_plan_guid_maps_swifttunnel_to_embedded_plan_guid() {
+        assert_eq!(
+            SystemOptimizer::power_plan_guid(&PowerPlan::SwiftTunnel),
+            SWIFTTUNNEL_POWER_PLAN_GUID
+        );
+    }
+
+    #[test]
+    fn power_plan_guid_parser_matches_exact_guid_tokens() {
+        let output = format!(
+            "Power Scheme GUID: {}  (SwiftTunnel) *",
+            SWIFTTUNNEL_POWER_PLAN_GUID.to_ascii_uppercase()
+        );
+
+        assert!(SystemOptimizer::output_contains_guid(
+            &output,
+            SWIFTTUNNEL_POWER_PLAN_GUID
+        ));
+    }
+
+    #[test]
+    fn power_plan_guid_parser_rejects_superficially_similar_text() {
+        let output = "Power Scheme GUID: 44444444-4444-4444-4444-444444444453 (Other)";
+
+        assert!(!SystemOptimizer::output_contains_guid(
+            output,
+            SWIFTTUNNEL_POWER_PLAN_GUID
+        ));
+    }
+
+    #[test]
+    fn swifttunnel_power_plan_import_is_only_for_confirmed_missing_plan() {
+        assert!(SystemOptimizer::should_import_swifttunnel_power_plan(Some(
+            false
+        )));
+        assert!(!SystemOptimizer::should_import_swifttunnel_power_plan(
+            Some(true)
+        ));
+        assert!(!SystemOptimizer::should_import_swifttunnel_power_plan(None));
+    }
+
+    #[test]
+    fn embedded_swifttunnel_power_plan_resource_is_present() {
+        assert!(SWIFTTUNNEL_POWER_PLAN_BYTES.starts_with(b"regf"));
+        assert!(SWIFTTUNNEL_POWER_PLAN_BYTES.len() > 1024);
+    }
 }

@@ -274,6 +274,7 @@ export function BoostTab() {
     draft.system_optimization.timer_resolution_1ms,
     draft.system_optimization.mmcss_gaming_profile,
     draft.system_optimization.game_mode_enabled,
+    draft.system_optimization.power_plan === "SwiftTunnel",
   ].filter(Boolean).length;
   const netCount = [
     draft.network_settings.disable_nagle,
@@ -408,7 +409,7 @@ export function BoostTab() {
 
       {/* ── System + Network side-by-side ── */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <Section title="System" tag={`${sysCount} / 4 on`}>
+        <Section title="System" tag={`${sysCount} / 5 on`}>
           <SettingRow
             title="High Priority Mode"
             desc="Boost game process priority (+5-15 FPS)"
@@ -434,6 +435,15 @@ export function BoostTab() {
             desc="System resource prioritization"
             enabled={draft.system_optimization.game_mode_enabled}
             onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
+          />
+          <SettingRow
+            title="SwiftTunnel Power Plan"
+            desc="Custom low-latency Windows power profile"
+            tooltip="Imports and activates SwiftTunnel's optimized power plan while boosts are enabled. Your previous power plan is restored when boosts are disabled."
+            enabled={draft.system_optimization.power_plan === "SwiftTunnel"}
+            onChange={(v) =>
+              updateSysOpt({ power_plan: v ? "SwiftTunnel" : "Balanced" })
+            }
           />
         </Section>
 

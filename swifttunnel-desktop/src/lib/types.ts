@@ -200,7 +200,11 @@ export interface BoostUpdateResult {
 }
 
 export type OptimizationProfile = "LowEnd" | "Balanced" | "HighEnd" | "Custom";
-export type PowerPlan = "Balanced" | "HighPerformance" | "Ultimate";
+export type PowerPlan =
+  | "Balanced"
+  | "HighPerformance"
+  | "Ultimate"
+  | "SwiftTunnel";
 export type GraphicsQuality =
   | "Automatic"
   | "Manual"
