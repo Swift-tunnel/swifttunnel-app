@@ -1,9 +1,12 @@
 import type {
   Config,
   OptimizationProfile,
+  PowerPlan,
   StandbyPurgeResult,
 } from "../../lib/types";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
+
+export const SWIFTTUNNEL_POWER_PLAN_FALLBACK: PowerPlan = "HighPerformance";
 
 export const PROFILES: {
   id: OptimizationProfile;
@@ -163,6 +166,22 @@ export function parseWindowDimensionInput(
 ): number {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function previousNonSwiftTunnelPowerPlan(
+  plan: PowerPlan,
+  fallback: PowerPlan = SWIFTTUNNEL_POWER_PLAN_FALLBACK,
+): PowerPlan {
+  return plan === "SwiftTunnel" ? fallback : plan;
+}
+
+export function nextPowerPlanForSwiftTunnelToggle(
+  enabled: boolean,
+  previousPowerPlan: PowerPlan,
+): PowerPlan {
+  return enabled
+    ? "SwiftTunnel"
+    : previousNonSwiftTunnelPowerPlan(previousPowerPlan);
 }
 
 export function countActive(...flags: boolean[]): number {

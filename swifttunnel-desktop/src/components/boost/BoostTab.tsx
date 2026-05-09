@@ -26,7 +26,9 @@ import {
   formatGbFromMb,
   getPresetConfig,
   memColor,
+  nextPowerPlanForSwiftTunnelToggle,
   parseWindowDimensionInput,
+  previousNonSwiftTunnelPowerPlan,
   robloxSettingsChanged,
   validateWindowDimension,
 } from "./boostConfig";
@@ -35,6 +37,7 @@ import type {
   GameProcessPerformanceSettings,
   NetworkConfig,
   OptimizationProfile,
+  PowerPlan,
   RobloxSettingsConfig,
   SystemOptimizationConfig,
   SystemMemorySnapshot,
@@ -64,10 +67,20 @@ export function BoostTab() {
 
   const savedConfig = settings.config;
   const [draft, setDraft] = useState<Config>(savedConfig);
+  const [previousPowerPlan, setPreviousPowerPlan] = useState<PowerPlan>(() =>
+    previousNonSwiftTunnelPowerPlan(savedConfig.system_optimization.power_plan),
+  );
 
   useEffect(() => {
     setDraft(savedConfig);
   }, [savedConfig]);
+
+  useEffect(() => {
+    const savedPowerPlan = savedConfig.system_optimization.power_plan;
+    if (savedPowerPlan !== "SwiftTunnel") {
+      setPreviousPowerPlan(savedPowerPlan);
+    }
+  }, [savedConfig.system_optimization.power_plan]);
 
   const savedGPP = settings.game_process_performance;
   const [draftGPP, setDraftGPP] =
@@ -217,6 +230,19 @@ export function BoostTab() {
       profile: "Custom",
       system_optimization: { ...prev.system_optimization, ...p },
     }));
+  }
+
+  function updateSwiftTunnelPowerPlan(enabled: boolean) {
+    const currentPowerPlan = draft.system_optimization.power_plan;
+    if (enabled && currentPowerPlan !== "SwiftTunnel") {
+      setPreviousPowerPlan(currentPowerPlan);
+    }
+    updateSysOpt({
+      power_plan: nextPowerPlanForSwiftTunnelToggle(
+        enabled,
+        previousPowerPlan,
+      ),
+    });
   }
 
   const applyNetworkOpt = useCallback(
@@ -442,9 +468,7 @@ export function BoostTab() {
             desc="Custom low-latency Windows power profile"
             tooltip="Imports and activates SwiftTunnel's optimized power plan while boosts are enabled. Your previous power plan is restored when boosts are disabled."
             enabled={draft.system_optimization.power_plan === "SwiftTunnel"}
-            onChange={(v) =>
-              updateSysOpt({ power_plan: v ? "SwiftTunnel" : "Balanced" })
-            }
+            onChange={updateSwiftTunnelPowerPlan}
           />
         </Section>
 

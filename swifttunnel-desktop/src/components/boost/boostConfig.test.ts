@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../../lib/settings";
 import {
   getPresetConfig,
+  nextPowerPlanForSwiftTunnelToggle,
   parseWindowDimensionInput,
+  previousNonSwiftTunnelPowerPlan,
   validateWindowDimension,
 } from "./boostConfig";
 
@@ -30,5 +32,17 @@ describe("boost config helpers", () => {
   it("parses numeric dimensions and falls back for invalid input", () => {
     expect(parseWindowDimensionInput("1280", 800)).toBe(1280);
     expect(parseWindowDimensionInput("abc", 800)).toBe(800);
+  });
+
+  it("restores the previous non-SwiftTunnel plan when toggled off", () => {
+    expect(nextPowerPlanForSwiftTunnelToggle(false, "HighPerformance")).toBe(
+      "HighPerformance",
+    );
+    expect(nextPowerPlanForSwiftTunnelToggle(false, "Balanced")).toBe(
+      "Balanced",
+    );
+    expect(previousNonSwiftTunnelPowerPlan("SwiftTunnel")).toBe(
+      "HighPerformance",
+    );
   });
 });
