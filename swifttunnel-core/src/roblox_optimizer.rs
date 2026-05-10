@@ -3,7 +3,7 @@ use crate::structs::*;
 use log::{error, info, warn};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
