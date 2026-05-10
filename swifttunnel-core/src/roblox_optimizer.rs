@@ -901,16 +901,12 @@ impl RobloxOptimizer {
                 Vec::new()
             }
         };
-        match Self::get_bootstrapper_client_settings_paths_for_local_app_data(
-            local_app_data,
-            create_missing,
-        ) {
-            Ok(bootstrapper_paths) => paths.extend(bootstrapper_paths),
-            Err(e) => warn!(
-                "Skipping supported bootstrapper ClientSettings paths after collection failure: {}",
-                e
+        paths.extend(
+            Self::get_bootstrapper_client_settings_paths_for_local_app_data(
+                local_app_data,
+                create_missing,
             ),
-        }
+        );
         Ok(Self::dedupe_paths(paths))
     }
 
@@ -928,7 +924,8 @@ impl RobloxOptimizer {
             info!("Created ClientSettings folder at: {:?}", client_settings);
         } else if !client_settings.is_dir() {
             return Err(anyhow::anyhow!(
-                "Roblox ClientSettings path exists but is not a folder"
+                "ClientSettings path exists but is not a folder: {}",
+                client_settings.display()
             ));
         }
 
@@ -938,7 +935,7 @@ impl RobloxOptimizer {
     fn get_bootstrapper_client_settings_paths_for_local_app_data(
         local_app_data: &PathBuf,
         create_missing: bool,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         let mut failures = Vec::new();
 
@@ -987,7 +984,7 @@ impl RobloxOptimizer {
             );
         }
 
-        Ok(paths)
+        paths
     }
 
     fn get_bootstrapper_client_settings_path_checked(
@@ -1140,7 +1137,8 @@ impl RobloxOptimizer {
     ) -> Result<FFlagApplyOutcome> {
         if !client_settings.is_dir() {
             return Err(anyhow::anyhow!(
-                "Roblox ClientSettings path exists but is not a folder"
+                "ClientSettings path exists but is not a folder: {}",
+                client_settings.display()
             ));
         }
 
