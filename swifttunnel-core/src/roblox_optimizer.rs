@@ -1181,6 +1181,7 @@ impl RobloxOptimizer {
         if settings.is_empty() {
             if settings_path.exists() {
                 fs::remove_file(&settings_path)?;
+                Self::remove_empty_bootstrapper_client_settings_dir(client_settings)?;
             }
         } else {
             let json = serde_json::to_string_pretty(&settings)?;
@@ -1772,6 +1773,39 @@ mod tests {
             settings.get(RobloxOptimizer::FPS_UNLOCK_FFLAG),
             Some(&serde_json::json!(165))
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_removes_empty_bootstrapper_client_settings_folder_when_disabled() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_disable_empty_bootstrapper");
+        let _ = fs::remove_dir_all(&dir);
+        let client_settings = dir
+            .join("Bloxstrap")
+            .join("Modifications")
+            .join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        fs::write(
+            client_settings.join("ClientAppSettings.json"),
+            r#"{
+  "FFlagDebugGraphicsPreferD3D11": "True",
+  "DFIntTaskSchedulerTargetFps": 165
+}"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: false,
+            unlock_fps: false,
+            ..Default::default()
+        };
+
+        opt.apply_client_fflags_for_local_app_data(&config, &dir)
+            .unwrap();
+
+        assert!(!client_settings.exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
