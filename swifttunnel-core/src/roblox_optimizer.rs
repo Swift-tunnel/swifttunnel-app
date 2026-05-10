@@ -1146,15 +1146,7 @@ impl RobloxOptimizer {
 
         let settings_path = client_settings.join("ClientAppSettings.json");
 
-        // Read existing settings if file exists
-        let mut settings: HashMap<String, serde_json::Value> = if settings_path.exists() {
-            fs::read_to_string(&settings_path)
-                .ok()
-                .and_then(|content| serde_json::from_str(&content).ok())
-                .unwrap_or_default()
-        } else {
-            HashMap::new()
-        };
+        let mut settings = Self::read_client_app_settings(&settings_path)?;
 
         // Always clean up old blocked FFlags from previous versions
         for key in Self::LEGACY_BLOCKED_FFLAGS {
@@ -1201,6 +1193,23 @@ impl RobloxOptimizer {
         Ok(FFlagApplyOutcome::Applied)
     }
 
+    fn read_client_app_settings(
+        settings_path: &PathBuf,
+    ) -> Result<HashMap<String, serde_json::Value>> {
+        if !settings_path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let content = fs::read_to_string(settings_path)?;
+        serde_json::from_str(&content).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse ClientAppSettings.json at {}: {}",
+                settings_path.display(),
+                e
+            )
+        })
+    }
+
     /// Remove all SwiftTunnel FFlag settings from ClientAppSettings.json
     fn remove_all_fflags(&self) -> Result<()> {
         let client_settings_paths = Self::get_client_settings_paths(false)?;
@@ -1225,9 +1234,7 @@ impl RobloxOptimizer {
             }
 
             let result = (|| -> Result<()> {
-                let content = fs::read_to_string(&settings_path)?;
-                let mut settings: HashMap<String, serde_json::Value> =
-                    serde_json::from_str(&content).unwrap_or_default();
+                let mut settings = Self::read_client_app_settings(&settings_path)?;
 
                 // Remove all ultraboost FFlags
                 for (key, _) in Self::ULTRABOOST_FFLAGS {
@@ -1901,6 +1908,36 @@ mod tests {
     }
 
     #[test]
+    fn fflag_apply_preserves_malformed_client_app_settings() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_malformed_json_apply");
+        let _ = fs::remove_dir_all(&dir);
+        let client_settings = dir
+            .join("Bloxstrap")
+            .join("Modifications")
+            .join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        let settings_path = client_settings.join("ClientAppSettings.json");
+        fs::write(&settings_path, "{ this is not valid json").unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        let result = opt.apply_client_fflags_for_local_app_data(&config, &dir);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to parse"));
+        assert_eq!(
+            fs::read_to_string(settings_path).unwrap(),
+            "{ this is not valid json"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn fflag_apply_updates_all_valid_version_folders() {
         let dir = std::env::temp_dir().join("roblox_opt_test_fflag_all_versions");
         let _ = fs::remove_dir_all(&dir);
@@ -2156,6 +2193,31 @@ mod tests {
         assert!(!content.contains("FFlagDebugGraphicsPreferD3D11"));
         assert!(!content.contains(RobloxOptimizer::FPS_UNLOCK_FFLAG));
         assert!(content.contains("FStringUserOwnedFlag"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_all_fflags_preserves_malformed_client_app_settings() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_malformed_json_remove");
+        let _ = fs::remove_dir_all(&dir);
+        let client_settings = dir
+            .join("Bloxstrap")
+            .join("Modifications")
+            .join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        let settings_path = client_settings.join("ClientAppSettings.json");
+        fs::write(&settings_path, "{ this is not valid json").unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let result = opt.remove_all_fflags_for_local_app_data(&dir);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to parse"));
+        assert_eq!(
+            fs::read_to_string(settings_path).unwrap(),
+            "{ this is not valid json"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
