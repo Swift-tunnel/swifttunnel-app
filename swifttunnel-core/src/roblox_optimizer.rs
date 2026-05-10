@@ -890,12 +890,16 @@ impl RobloxOptimizer {
         let version_folders = Self::find_roblox_version_folders_in(local_app_data);
         let mut paths =
             Self::get_client_settings_paths_for_versions(&version_folders, create_missing)?;
-        paths.extend(
-            Self::get_bootstrapper_client_settings_paths_for_local_app_data(
-                local_app_data,
-                create_missing,
-            )?,
-        );
+        match Self::get_bootstrapper_client_settings_paths_for_local_app_data(
+            local_app_data,
+            create_missing,
+        ) {
+            Ok(bootstrapper_paths) => paths.extend(bootstrapper_paths),
+            Err(e) => warn!(
+                "Skipping supported bootstrapper ClientSettings paths after collection failure: {}",
+                e
+            ),
+        }
         Ok(Self::dedupe_paths(paths))
     }
 
@@ -964,12 +968,12 @@ impl RobloxOptimizer {
             }
         }
 
-        if paths.is_empty() && !failures.is_empty() {
-            return Err(anyhow::anyhow!(
+        if !failures.is_empty() {
+            warn!(
                 "Failed to collect ClientSettings from {} supported bootstrapper path(s): {}",
                 failures.len(),
                 failures.join("; ")
-            ));
+            );
         }
 
         Ok(paths)
@@ -1000,9 +1004,10 @@ impl RobloxOptimizer {
     }
 
     fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut seen = std::collections::HashSet::new();
         let mut deduped = Vec::new();
         for path in paths {
-            if !deduped.contains(&path) {
+            if seen.insert(path.clone()) {
                 deduped.push(path);
             }
         }
@@ -1017,9 +1022,9 @@ impl RobloxOptimizer {
         let should_write_fflags = config.ultraboost || config.unlock_fps;
         let client_settings_paths = Self::get_client_settings_paths(should_write_fflags)?;
         if client_settings_paths.is_empty() {
-            if config.ultraboost {
+            if should_write_fflags {
                 return Err(anyhow::anyhow!(
-                    "No Roblox or supported bootstrapper ClientSettings path was found. Launch Roblox once, then apply Ultraboost again."
+                    "No Roblox or supported bootstrapper ClientSettings path was found. Launch Roblox or an installed supported bootstrapper once, then apply FPS unlock or Ultraboost again."
                 ));
             }
             {
@@ -1045,9 +1050,9 @@ impl RobloxOptimizer {
             should_write_fflags,
         )?;
         if client_settings_paths.is_empty() {
-            if config.ultraboost {
+            if should_write_fflags {
                 return Err(anyhow::anyhow!(
-                    "No Roblox or supported bootstrapper ClientSettings path was found. Launch Roblox once, then apply Ultraboost again."
+                    "No Roblox or supported bootstrapper ClientSettings path was found. Launch Roblox or an installed supported bootstrapper once, then apply FPS unlock or Ultraboost again."
                 ));
             }
             {
@@ -1161,7 +1166,7 @@ impl RobloxOptimizer {
         if config.unlock_fps {
             settings.insert(
                 Self::FPS_UNLOCK_FFLAG.to_string(),
-                serde_json::json!(config.target_fps.to_string()),
+                serde_json::json!(config.target_fps),
             );
             info!(
                 "FPS unlock FFlag applied with target FPS {}",
@@ -1660,6 +1665,32 @@ mod tests {
     }
 
     #[test]
+    fn fflag_apply_reports_missing_path_when_fps_unlock_requested() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_missing_fps");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            unlock_fps: true,
+            target_fps: 165,
+            ..Default::default()
+        };
+
+        let result = opt.apply_client_fflags_for_local_app_data(&config, &dir);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("FPS unlock or Ultraboost")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn fflag_apply_updates_bloxstrap_persistent_client_settings() {
         let dir = std::env::temp_dir().join("roblox_opt_test_fflag_bloxstrap");
         let _ = fs::remove_dir_all(&dir);
@@ -1689,7 +1720,7 @@ mod tests {
         );
         assert_eq!(
             settings.get(RobloxOptimizer::FPS_UNLOCK_FFLAG),
-            Some(&serde_json::json!("165"))
+            Some(&serde_json::json!(165))
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1757,6 +1788,42 @@ mod tests {
                 .exists(),
             "unsupported bootstrapper-looking folders must not be created"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_keeps_roblox_version_when_bootstrapper_path_is_malformed() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_bad_strap_good_roblox");
+        let _ = fs::remove_dir_all(&dir);
+        let version_dir = dir.join("Roblox").join("Versions").join("version-good");
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("RobloxPlayerBeta.exe"), "").unwrap();
+        fs::create_dir_all(dir.join("Bloxstrap").join("Modifications")).unwrap();
+        fs::write(
+            dir.join("Bloxstrap")
+                .join("Modifications")
+                .join("ClientSettings"),
+            "not a directory",
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        let outcome = opt.apply_client_fflags_for_local_app_data(&config, &dir);
+
+        assert_eq!(outcome.unwrap(), FFlagApplyOutcome::Applied);
+        let content = fs::read_to_string(
+            version_dir
+                .join("ClientSettings")
+                .join("ClientAppSettings.json"),
+        )
+        .unwrap();
+        assert!(content.contains("FFlagDebugGraphicsPreferD3D11"));
 
         let _ = fs::remove_dir_all(&dir);
     }
