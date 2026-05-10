@@ -888,8 +888,19 @@ impl RobloxOptimizer {
         create_missing: bool,
     ) -> Result<Vec<PathBuf>> {
         let version_folders = Self::find_roblox_version_folders_in(local_app_data);
-        let mut paths =
-            Self::get_client_settings_paths_for_versions(&version_folders, create_missing)?;
+        let mut paths = match Self::get_client_settings_paths_for_versions(
+            &version_folders,
+            create_missing,
+        ) {
+            Ok(version_paths) => version_paths,
+            Err(e) => {
+                warn!(
+                    "Skipping Roblox version folder ClientSettings paths after collection failure: {}",
+                    e
+                );
+                Vec::new()
+            }
+        };
         match Self::get_bootstrapper_client_settings_paths_for_local_app_data(
             local_app_data,
             create_missing,
@@ -1831,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn fflag_apply_does_not_skip_malformed_client_settings_path() {
+    fn fflag_apply_reports_missing_when_only_roblox_path_is_malformed() {
         let dir = std::env::temp_dir().join("roblox_opt_test_fflag_clientsettings_file");
         let _ = fs::remove_dir_all(&dir);
         let version_dir = dir.join("Roblox").join("Versions").join("version-bad");
@@ -1841,14 +1852,50 @@ mod tests {
 
         let opt = optimizer_with_path(dir.join("settings.xml"));
         let config = RobloxSettingsConfig {
-            ultraboost: false,
+            ultraboost: true,
             ..Default::default()
         };
 
         let result = opt.apply_client_fflags_for_local_app_data(&config, &dir);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not a folder"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("supported bootstrapper ClientSettings path")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_keeps_bootstrapper_path_when_roblox_version_is_malformed() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_bad_roblox_good_strap");
+        let _ = fs::remove_dir_all(&dir);
+        let version_dir = dir.join("Roblox").join("Versions").join("version-bad");
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("RobloxPlayerBeta.exe"), "").unwrap();
+        fs::write(version_dir.join("ClientSettings"), "not a directory").unwrap();
+        fs::create_dir_all(dir.join("Bloxstrap")).unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        let outcome = opt.apply_client_fflags_for_local_app_data(&config, &dir);
+
+        assert_eq!(outcome.unwrap(), FFlagApplyOutcome::Applied);
+        let content = fs::read_to_string(
+            dir.join("Bloxstrap")
+                .join("Modifications")
+                .join("ClientSettings")
+                .join("ClientAppSettings.json"),
+        )
+        .unwrap();
+        assert!(content.contains("FFlagDebugGraphicsPreferD3D11"));
 
         let _ = fs::remove_dir_all(&dir);
     }
