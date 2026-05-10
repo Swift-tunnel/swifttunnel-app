@@ -4,6 +4,8 @@ use tauri::{AppHandle, Emitter, State};
 use crate::events::{AUTH_STATE_CHANGED, AuthStateEvent};
 use crate::state::AppState;
 use swifttunnel_core::auth::types::{AuthError, AuthState};
+use swifttunnel_core::settings::AppSettings;
+use swifttunnel_core::structs::PowerPlan;
 
 #[derive(Serialize)]
 pub struct AuthStateResponse {
@@ -79,6 +81,12 @@ fn is_auth_banned(auth_state: &AuthState) -> bool {
     matches!(auth_state, AuthState::Banned(_))
 }
 
+fn apply_banned_session_cleanup_settings(settings: &mut AppSettings) {
+    settings.resume_vpn_on_startup = false;
+    settings.config.system_optimization.power_plan = PowerPlan::Balanced;
+    settings.config.system_optimization.previous_power_plan = None;
+}
+
 pub(crate) async fn emit_auth_state(app: &AppHandle, state: &AppState) {
     let auth = state.auth_manager.lock().await;
     let auth_state = auth.get_state();
@@ -118,8 +126,17 @@ pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
         monitor.get_roblox_pid().unwrap_or(0)
     };
 
-    if let Err(e) = state.system_optimizer.lock().restore(roblox_pid) {
-        log::warn!("Failed to restore system boosts after ban detection: {}", e);
+    {
+        let mut optimizer = state.system_optimizer.lock();
+        if let Err(e) = optimizer.restore(roblox_pid) {
+            log::warn!("Failed to restore system boosts after ban detection: {}", e);
+        }
+        if let Err(e) = optimizer.cleanup_swifttunnel_power_plan_after_ban() {
+            log::warn!(
+                "Failed to clean up SwiftTunnel power plan after ban detection: {}",
+                e
+            );
+        }
     }
     if let Err(e) = state.network_booster.lock().restore() {
         log::warn!(
@@ -133,7 +150,7 @@ pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
 
     let snapshot = {
         let mut settings = state.settings.lock();
-        settings.resume_vpn_on_startup = false;
+        apply_banned_session_cleanup_settings(&mut settings);
         settings.clone()
     };
 
@@ -142,6 +159,34 @@ pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn banned_cleanup_settings_disable_power_plan_resume() {
+        let mut settings = AppSettings::default();
+        settings.resume_vpn_on_startup = true;
+        settings.config.system_optimization.power_plan = PowerPlan::SwiftTunnel;
+        settings.config.system_optimization.previous_power_plan = Some(PowerPlan::Balanced);
+
+        apply_banned_session_cleanup_settings(&mut settings);
+
+        assert!(!settings.resume_vpn_on_startup);
+        assert_eq!(
+            settings.config.system_optimization.power_plan,
+            PowerPlan::Balanced
+        );
+        assert!(
+            settings
+                .config
+                .system_optimization
+                .previous_power_plan
+                .is_none()
+        );
+    }
 }
 
 pub(crate) async fn apply_ban_cleanup(app: &AppHandle, state: &AppState) -> bool {
