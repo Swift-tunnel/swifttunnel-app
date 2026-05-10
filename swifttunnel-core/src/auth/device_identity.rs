@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 const HWID_HASH_INFO: &[u8] = b"swifttunnel-desktop-hwid-v1";
 const HWID_PREFIX: &str = "hwid:v1:";
+const ZERO_MACHINE_GUID: &str = "00000000-0000-0000-0000-000000000000";
 
 #[cfg(windows)]
 fn read_machine_guid() -> Option<String> {
@@ -26,7 +27,7 @@ fn read_machine_guid() -> Option<String> {
 
 pub(crate) fn desktop_hwid_from_machine_guid(machine_guid: &str) -> Option<String> {
     let normalized = machine_guid.trim().to_ascii_lowercase();
-    if normalized.is_empty() || normalized == "swifttunnel-unknown-machine" {
+    if is_invalid_machine_guid(&normalized) {
         return None;
     }
 
@@ -35,6 +36,15 @@ pub(crate) fn desktop_hwid_from_machine_guid(machine_guid: &str) -> Option<Strin
     hasher.update([0xff]);
     hasher.update(normalized.as_bytes());
     Some(format!("{}{:x}", HWID_PREFIX, hasher.finalize()))
+}
+
+fn is_invalid_machine_guid(machine_guid: &str) -> bool {
+    machine_guid.is_empty()
+        || machine_guid == ZERO_MACHINE_GUID
+        || machine_guid == "00000000000000000000000000000000"
+        || machine_guid == "swifttunnel-unknown-machine"
+        || machine_guid == "unknown"
+        || machine_guid == "n/a"
 }
 
 pub(crate) fn desktop_hwid() -> Option<String> {
@@ -65,5 +75,9 @@ mod tests {
         assert!(desktop_hwid_from_machine_guid("").is_none());
         assert!(desktop_hwid_from_machine_guid("   ").is_none());
         assert!(desktop_hwid_from_machine_guid("swifttunnel-unknown-machine").is_none());
+        assert!(desktop_hwid_from_machine_guid(ZERO_MACHINE_GUID).is_none());
+        assert!(desktop_hwid_from_machine_guid("00000000000000000000000000000000").is_none());
+        assert!(desktop_hwid_from_machine_guid("unknown").is_none());
+        assert!(desktop_hwid_from_machine_guid("N/A").is_none());
     }
 }
