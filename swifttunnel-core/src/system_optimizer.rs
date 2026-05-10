@@ -38,6 +38,14 @@ const SWIFTTUNNEL_POWER_PLAN_DESCRIPTION: &str = "SwiftTunnel optimized gaming p
 const SWIFTTUNNEL_POWER_PLAN_BYTES: &[u8] =
     include_bytes!("../resources/swifttunnel_power_plan.pow");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwiftTunnelPowerPlanCleanup {
+    Noop,
+    DeleteInactive,
+    ActivateBalancedThenDelete,
+    UnknownActivePlan,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct MmcssSnapshot {
     scheduling_category: Option<String>,
@@ -287,13 +295,74 @@ impl SystemOptimizer {
         original_restore_succeeded || balanced_fallback_succeeded
     }
 
-    fn delete_power_plan_guid(guid: &str) {
+    fn delete_power_plan_guid(guid: &str) -> bool {
         let output = hidden_command("powercfg").args(["/delete", guid]).output();
 
         match output {
-            Ok(result) if result.status.success() => {}
-            Ok(_) => warn!("Failed to delete SwiftTunnel power plan {}", guid),
-            Err(e) => warn!("Failed to delete SwiftTunnel power plan {}: {}", guid, e),
+            Ok(result) if result.status.success() => true,
+            Ok(_) => {
+                warn!("Failed to delete SwiftTunnel power plan {}", guid);
+                false
+            }
+            Err(e) => {
+                warn!("Failed to delete SwiftTunnel power plan {}: {}", guid, e);
+                false
+            }
+        }
+    }
+
+    fn swifttunnel_power_plan_cleanup_decision(
+        active_guid: Option<&str>,
+        installed: Option<bool>,
+    ) -> SwiftTunnelPowerPlanCleanup {
+        if active_guid.is_some_and(|guid| guid.eq_ignore_ascii_case(SWIFTTUNNEL_POWER_PLAN_GUID)) {
+            return SwiftTunnelPowerPlanCleanup::ActivateBalancedThenDelete;
+        }
+
+        match (active_guid, installed) {
+            (Some(_), Some(true)) => SwiftTunnelPowerPlanCleanup::DeleteInactive,
+            (None, Some(true)) => SwiftTunnelPowerPlanCleanup::UnknownActivePlan,
+            _ => SwiftTunnelPowerPlanCleanup::Noop,
+        }
+    }
+
+    /// Remove SwiftTunnel's custom power plan during ban cleanup even when
+    /// the in-memory import snapshot was lost across an app restart.
+    pub fn cleanup_swifttunnel_power_plan_after_ban(&mut self) -> Result<()> {
+        let active_guid = Self::active_power_plan_guid();
+        let installed = Self::is_power_plan_installed(SWIFTTUNNEL_POWER_PLAN_GUID);
+
+        match Self::swifttunnel_power_plan_cleanup_decision(active_guid.as_deref(), installed) {
+            SwiftTunnelPowerPlanCleanup::Noop => Ok(()),
+            SwiftTunnelPowerPlanCleanup::DeleteInactive => {
+                if Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID) {
+                    self.swifttunnel_power_plan_imported = false;
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "SwiftTunnel power plan is inactive but could not be deleted"
+                    ))
+                }
+            }
+            SwiftTunnelPowerPlanCleanup::ActivateBalancedThenDelete => {
+                if !Self::set_active_power_plan_guid(BALANCED_POWER_PLAN_GUID) {
+                    return Err(anyhow::anyhow!(
+                        "SwiftTunnel power plan is active and Balanced fallback could not be activated"
+                    ));
+                }
+
+                if Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID) {
+                    self.swifttunnel_power_plan_imported = false;
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Balanced fallback is active, but SwiftTunnel power plan could not be deleted"
+                    ))
+                }
+            }
+            SwiftTunnelPowerPlanCleanup::UnknownActivePlan => Err(anyhow::anyhow!(
+                "SwiftTunnel power plan is installed, but the active power plan could not be determined"
+            )),
         }
     }
 
@@ -966,8 +1035,9 @@ impl SystemOptimizer {
                 original_power_plan_restored,
                 balanced_fallback_restored,
             ) {
-                Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID);
-                self.swifttunnel_power_plan_imported = false;
+                if Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID) {
+                    self.swifttunnel_power_plan_imported = false;
+                }
             } else {
                 warn!(
                     "Skipping SwiftTunnel power plan deletion because no safe replacement plan could be activated"
@@ -1111,6 +1181,47 @@ mod tests {
             false, true
         ));
         assert!(!SystemOptimizer::can_delete_imported_swifttunnel_power_plan(false, false));
+    }
+
+    #[test]
+    fn stale_active_swifttunnel_power_plan_switches_to_balanced_before_delete() {
+        assert_eq!(
+            SystemOptimizer::swifttunnel_power_plan_cleanup_decision(
+                Some(SWIFTTUNNEL_POWER_PLAN_GUID),
+                Some(true),
+            ),
+            SwiftTunnelPowerPlanCleanup::ActivateBalancedThenDelete
+        );
+    }
+
+    #[test]
+    fn inactive_swifttunnel_power_plan_can_be_deleted_without_switching() {
+        assert_eq!(
+            SystemOptimizer::swifttunnel_power_plan_cleanup_decision(
+                Some(BALANCED_POWER_PLAN_GUID),
+                Some(true),
+            ),
+            SwiftTunnelPowerPlanCleanup::DeleteInactive
+        );
+    }
+
+    #[test]
+    fn similar_active_power_plan_does_not_trigger_balanced_fallback() {
+        assert_eq!(
+            SystemOptimizer::swifttunnel_power_plan_cleanup_decision(
+                Some("44444444-4444-4444-4444-444444444453"),
+                Some(false),
+            ),
+            SwiftTunnelPowerPlanCleanup::Noop
+        );
+    }
+
+    #[test]
+    fn installed_swifttunnel_power_plan_is_not_deleted_when_active_plan_is_unknown() {
+        assert_eq!(
+            SystemOptimizer::swifttunnel_power_plan_cleanup_decision(None, Some(true)),
+            SwiftTunnelPowerPlanCleanup::UnknownActivePlan
+        );
     }
 
     #[test]
