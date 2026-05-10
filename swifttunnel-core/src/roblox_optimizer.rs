@@ -1198,7 +1198,9 @@ impl RobloxOptimizer {
 
     fn remove_all_fflags_in_paths(&self, client_settings_paths: Vec<PathBuf>) -> Result<()> {
         if client_settings_paths.is_empty() {
-            info!("No Roblox version folder found, skipping FFlag cleanup");
+            info!(
+                "No Roblox or supported bootstrapper ClientSettings path found, skipping FFlag cleanup"
+            );
             return Ok(());
         }
 
