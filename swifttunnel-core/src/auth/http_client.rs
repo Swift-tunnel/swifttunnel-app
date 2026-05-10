@@ -1,5 +1,6 @@
 //! HTTP client for SwiftTunnel API
 
+use super::device_identity::desktop_hwid;
 use super::types::{
     AuthError, ExchangeTokenResponse, RelayTicketResponse, SupabaseAuthResponse, VpnConfig,
 };
@@ -43,6 +44,7 @@ const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOi
 /// HTTP client for authentication API calls
 pub struct AuthClient {
     client: Client,
+    device_hwid: Option<String>,
 }
 
 impl AuthClient {
@@ -54,7 +56,46 @@ impl AuthClient {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client }
+        Self {
+            client,
+            device_hwid: desktop_hwid(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_device_hwid(device_hwid: Option<String>) -> Self {
+        let client = Client::builder()
+            .user_agent("SwiftTunnel-Desktop/0.1.0")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            client,
+            device_hwid,
+        }
+    }
+
+    fn add_hwid_header(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.device_hwid {
+            Some(hwid) => request.header("X-SwiftTunnel-HWID", hwid),
+            None => request,
+        }
+    }
+
+    fn exchange_oauth_payload(&self, exchange_token: &str, state: &str) -> serde_json::Value {
+        let mut payload = json!({
+            "exchange_token": exchange_token,
+            "state": state,
+        });
+        if let Some(hwid) = &self.device_hwid {
+            payload["device_hwid"] = json!(hwid);
+        }
+        payload
+    }
+
+    pub(crate) fn device_hwid(&self) -> Option<&str> {
+        self.device_hwid.as_deref()
     }
 
     /// Sign in with email and password via Supabase
@@ -161,8 +202,7 @@ impl AuthClient {
         debug!("Fetching VPN config for region {}", region);
 
         let response = self
-            .client
-            .post(&url)
+            .add_hwid_header(self.client.post(&url))
             .header("Authorization", format!("Bearer {}", access_token))
             .json(&json!({
                 "region": region,
@@ -208,8 +248,7 @@ impl AuthClient {
         );
 
         let response = self
-            .client
-            .post(&url)
+            .add_hwid_header(self.client.post(&url))
             .header("Authorization", format!("Bearer {}", access_token))
             .header("Content-Type", "application/json")
             .json(&json!({
@@ -260,13 +299,9 @@ impl AuthClient {
         debug!("Exchanging OAuth token for session");
 
         let response = self
-            .client
-            .put(&url)
+            .add_hwid_header(self.client.put(&url))
             .header("Content-Type", "application/json")
-            .json(&json!({
-                "exchange_token": exchange_token,
-                "state": state,
-            }))
+            .json(&self.exchange_oauth_payload(exchange_token, state))
             .send()
             .await
             .map_err(|e| AuthError::NetworkError(e.to_string()))?;
@@ -319,8 +354,7 @@ impl AuthClient {
         debug!("Fetching user profile");
 
         let response = self
-            .client
-            .get(&url)
+            .add_hwid_header(self.client.get(&url))
             .header("Authorization", format!("Bearer {}", access_token))
             .send()
             .await
@@ -498,5 +532,25 @@ mod tests {
         let body = r#"{"error":"user_banned appeared in a log line","code":"internal_error"}"#;
 
         assert!(user_banned_error_from_body(body).is_none());
+    }
+
+    #[test]
+    fn exchange_oauth_payload_includes_hwid_when_available() {
+        let client = AuthClient::with_device_hwid(Some("hwid:v1:abc".to_string()));
+
+        let payload = client.exchange_oauth_payload("exchange", "state");
+
+        assert_eq!(payload["exchange_token"], "exchange");
+        assert_eq!(payload["state"], "state");
+        assert_eq!(payload["device_hwid"], "hwid:v1:abc");
+    }
+
+    #[test]
+    fn exchange_oauth_payload_omits_missing_hwid() {
+        let client = AuthClient::with_device_hwid(None);
+
+        let payload = client.exchange_oauth_payload("exchange", "state");
+
+        assert!(payload.get("device_hwid").is_none());
     }
 }

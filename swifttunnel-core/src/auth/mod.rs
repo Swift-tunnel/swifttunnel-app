@@ -6,6 +6,7 @@
 //! - Secure token storage via Keychain
 //! - Token refresh management
 
+mod device_identity;
 pub(crate) mod http_client;
 mod manager;
 pub mod oauth_server;
