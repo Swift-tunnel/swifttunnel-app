@@ -1248,6 +1248,7 @@ impl RobloxOptimizer {
 
                 if settings.is_empty() {
                     fs::remove_file(&settings_path)?;
+                    Self::remove_empty_bootstrapper_client_settings_dir(&client_settings)?;
                 } else {
                     let json = serde_json::to_string_pretty(&settings)?;
                     fs::write(&settings_path, json)?;
@@ -1279,6 +1280,37 @@ impl RobloxOptimizer {
                 failures.join("; ")
             ))
         }
+    }
+
+    fn remove_empty_bootstrapper_client_settings_dir(client_settings: &Path) -> Result<()> {
+        if !Self::is_supported_bootstrapper_client_settings_path(client_settings) {
+            return Ok(());
+        }
+
+        match fs::remove_dir(client_settings) {
+            Ok(()) => {
+                info!(
+                    "Removed empty bootstrapper ClientSettings folder at: {:?}",
+                    client_settings
+                );
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn is_supported_bootstrapper_client_settings_path(client_settings: &Path) -> bool {
+        Self::BOOTSTRAPPER_CLIENT_SETTINGS_LOCATIONS.iter().any(
+            |(project_name, relative_segments)| {
+                let mut suffix = PathBuf::from(project_name);
+                for segment in *relative_segments {
+                    suffix.push(segment);
+                }
+                client_settings.ends_with(suffix)
+            },
+        )
     }
 
     #[cfg(test)]
@@ -2178,7 +2210,7 @@ mod tests {
             client_settings.join("ClientAppSettings.json"),
             r#"{
   "FFlagDebugGraphicsPreferD3D11": "True",
-  "DFIntTaskSchedulerTargetFps": "240",
+  "DFIntTaskSchedulerTargetFps": 240,
   "FStringUserOwnedFlag": "keep-me"
 }"#,
         )
@@ -2191,6 +2223,57 @@ mod tests {
         assert!(!content.contains("FFlagDebugGraphicsPreferD3D11"));
         assert!(!content.contains(RobloxOptimizer::FPS_UNLOCK_FFLAG));
         assert!(content.contains("FStringUserOwnedFlag"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_all_fflags_removes_empty_bootstrapper_client_settings_folder() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_remove_empty_bootstrapper");
+        let _ = fs::remove_dir_all(&dir);
+        let client_settings = dir
+            .join("Bloxstrap")
+            .join("Modifications")
+            .join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        fs::write(
+            client_settings.join("ClientAppSettings.json"),
+            r#"{
+  "FFlagDebugGraphicsPreferD3D11": "True",
+  "DFIntTaskSchedulerTargetFps": 240
+}"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        opt.remove_all_fflags_for_local_app_data(&dir).unwrap();
+
+        assert!(!client_settings.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_all_fflags_keeps_unknown_empty_client_settings_folder() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_keep_unknown_empty_folder");
+        let _ = fs::remove_dir_all(&dir);
+        let client_settings = dir.join("Unknownstrap").join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        fs::write(
+            client_settings.join("ClientAppSettings.json"),
+            r#"{
+  "FFlagDebugGraphicsPreferD3D11": "True",
+  "DFIntTaskSchedulerTargetFps": 240
+}"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        opt.remove_all_fflags_in_paths(vec![client_settings.clone()])
+            .unwrap();
+
+        assert!(client_settings.exists());
+        assert!(!client_settings.join("ClientAppSettings.json").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
