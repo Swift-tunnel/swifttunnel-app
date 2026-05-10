@@ -94,10 +94,6 @@ impl AuthClient {
         payload
     }
 
-    pub(crate) fn device_hwid(&self) -> Option<&str> {
-        self.device_hwid.as_deref()
-    }
-
     /// Sign in with email and password via Supabase
     pub async fn sign_in_with_password(
         &self,

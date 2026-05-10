@@ -630,16 +630,12 @@ impl AuthManager {
             .collect();
 
         // Build the OAuth URL with the redirect port
-        let mut query = form_urlencoded::Serializer::new(String::new());
-        query
+        let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("desktop", "true")
             .append_pair("state", &state)
             .append_pair("provider", "google")
-            .append_pair("redirect_port", &port.to_string());
-        if let Some(hwid) = self.client.device_hwid() {
-            query.append_pair("hwid", hwid);
-        }
-        let query = query.finish();
+            .append_pair("redirect_port", &port.to_string())
+            .finish();
         let oauth_url = format!("{}?{}", OAUTH_LOGIN_URL, query);
 
         info!("Opening browser to: {}", oauth_url);
@@ -920,15 +916,6 @@ mod tests {
             .finish();
         // Spaces become +, & and = get percent-encoded
         assert_eq!(query, "state=hello+world%26foo%3Dbar");
-    }
-
-    #[test]
-    fn test_form_urlencoded_preserves_hashed_hwid() {
-        let query = form_urlencoded::Serializer::new(String::new())
-            .append_pair("hwid", "hwid:v1:abc123")
-            .finish();
-
-        assert_eq!(query, "hwid=hwid%3Av1%3Aabc123");
     }
 
     #[test]
