@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 /// refresh sees no UDP/TCP endpoints and would otherwise erase the PID before
 /// the first game packet is classified.
 const IMMEDIATE_PROCESS_RETENTION: Duration = Duration::from_secs(45);
+pub(crate) const DNS_PORT: u16 = 53;
 
 #[derive(Clone)]
 struct ImmediateProcessRegistration {
@@ -120,10 +121,14 @@ fn ip_in_range(ip: Ipv4Addr, network: u32, mask: u32) -> bool {
 #[inline(always)]
 pub fn is_roblox_game_server(
     dst_ip: Ipv4Addr,
-    _dst_port: u16,
+    dst_port: u16,
     protocol: Protocol,
     api_tunneling: bool,
 ) -> bool {
+    if dst_port == DNS_PORT {
+        return false;
+    }
+
     match protocol {
         Protocol::Udp => {}
         Protocol::Tcp if api_tunneling => {}
@@ -155,7 +160,11 @@ pub fn is_roblox_game_server(
 /// - Voice chat
 /// - Any other UDP the game needs
 #[inline(always)]
-pub fn is_likely_game_traffic(_dst_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
+pub fn is_likely_game_traffic(dst_port: u16, protocol: Protocol, api_tunneling: bool) -> bool {
+    if dst_port == DNS_PORT {
+        return false;
+    }
+
     match protocol {
         Protocol::Udp => true,
         Protocol::Tcp => api_tunneling,
@@ -1317,6 +1326,18 @@ mod tests {
         assert!(!is_likely_game_traffic(443, Protocol::Tcp, false));
         assert!(is_likely_game_traffic(443, Protocol::Udp, false));
         assert!(is_likely_game_traffic(443, Protocol::Udp, true));
+    }
+
+    #[test]
+    fn test_dns_traffic_bypasses_even_for_tunnel_processes() {
+        assert!(!is_likely_game_traffic(DNS_PORT, Protocol::Udp, false));
+        assert!(!is_likely_game_traffic(DNS_PORT, Protocol::Udp, true));
+        assert!(!is_likely_game_traffic(DNS_PORT, Protocol::Tcp, true));
+
+        // The DNS bypass must stay narrow: ordinary Roblox UDP and API HTTPS
+        // should still tunnel.
+        assert!(is_likely_game_traffic(3478, Protocol::Udp, false));
+        assert!(is_likely_game_traffic(443, Protocol::Tcp, true));
     }
 
     #[test]
