@@ -16,6 +16,7 @@ use std::time::Duration;
 const MARKER_START: &str = "# SwiftTunnel Roblox Proxy - START";
 const MARKER_END: &str = "# SwiftTunnel Roblox Proxy - END";
 const DNS_REPAIR_TIMEOUT: Duration = Duration::from_secs(3);
+const DNS_REPAIR_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const DNS_REPAIR_RESOLVERS: &[&str] = &[
     // IP literals avoid depending on the user's broken local DNS to find
     // the DNS-over-HTTPS resolver itself.
@@ -98,7 +99,16 @@ async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
         .iter()
         .map(|domain| async { (*domain, resolve_domain_ipv4(&client, domain).await) });
 
-    for (domain, result) in join_all(lookups).await {
+    let resolved = tokio::time::timeout(DNS_REPAIR_TOTAL_TIMEOUT, join_all(lookups))
+        .await
+        .map_err(|_| {
+            format!(
+                "Roblox bootstrap DNS repair exceeded {}s total timeout",
+                DNS_REPAIR_TOTAL_TIMEOUT.as_secs()
+            )
+        })?;
+
+    for (domain, result) in resolved {
         match result {
             Ok(ip) => overrides.push(HostOverride {
                 ip,
@@ -420,7 +430,7 @@ mod tests {
 
     #[test]
     fn domain_list_stays_allowlisted_and_exact() {
-        assert!(ROBLOX_BOOTSTRAP_DOMAINS.len() <= 32);
+        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 19);
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"evilroblox.com"));
