@@ -209,9 +209,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          $previousTag = git tag --sort=-v:refname --merged HEAD |
-            Where-Object { $_ -match '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?(?:\+[0-9A-Za-z\.-]+)?$' -and $_ -ne $env:TAG } |
-            Select-Object -First 1
+          $previousTag = ""
+          $tagCandidates = @(git tag --sort=-v:refname --merged HEAD 2>$null)
+          if ($LASTEXITCODE -eq 0) {
+            $previousTag = $tagCandidates |
+              Where-Object { $_ -match '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z\.-]+)?(?:\+[0-9A-Za-z\.-]+)?$' -and $_ -ne $env:TAG } |
+              Select-Object -First 1
+          } else {
+            Write-Warning "Could not list previous release tags; release notes will fall back without a previous tag if manual notes are unavailable."
+            $global:LASTEXITCODE = 0
+          }
 
           $body = ""
           $manualNotesPath = Join-Path "release-notes" "$($env:TAG).md"
@@ -254,6 +261,7 @@ jobs:
           "body<<$delimiter" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           $body | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           $delimiter | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $global:LASTEXITCODE = 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
