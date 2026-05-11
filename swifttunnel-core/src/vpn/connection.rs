@@ -800,6 +800,8 @@ pub struct VpnConnection {
     auto_lookup_handle: Option<tokio::task::JoinHandle<()>>,
     /// Per-process game performance tuning manager (Windows-only behavior).
     process_performance_manager: Option<Arc<Mutex<GameProcessPerformanceManager>>>,
+    /// Tracks whether this connection wrote the temporary Roblox settings hosts repair.
+    critical_settings_dns_repair_applied: bool,
 }
 
 impl VpnConnection {
@@ -814,6 +816,7 @@ impl VpnConnection {
             auto_router: None,
             auto_lookup_handle: None,
             process_performance_manager: None,
+            critical_settings_dns_repair_applied: false,
         }
     }
 
@@ -1043,6 +1046,7 @@ impl VpnConnection {
         if enable_api_tunneling && !tunnel_apps.is_empty() {
             match crate::roblox_proxy::hosts::apply_critical_settings_overrides().await {
                 Ok(()) => {
+                    self.critical_settings_dns_repair_applied = true;
                     log::info!("V3: Applied Roblox critical settings DNS repair for API tunneling");
                 }
                 Err(e) => {
@@ -2399,8 +2403,15 @@ impl VpnConnection {
         // Cleanup WFP block filters
         super::wfp_block::cleanup();
 
-        if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
-            log::warn!("Failed to remove Roblox critical settings DNS repair: {e}");
+        if self.critical_settings_dns_repair_applied {
+            match crate::roblox_proxy::hosts::remove_overrides_async().await {
+                Ok(()) => {
+                    self.critical_settings_dns_repair_applied = false;
+                }
+                Err(e) => {
+                    log::warn!("Failed to remove Roblox critical settings DNS repair: {e}");
+                }
+            }
         }
 
         // Reset auto-router
@@ -2615,8 +2626,10 @@ impl Drop for VpnConnection {
 
         super::wfp_block::cleanup();
 
-        if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
-            log::warn!("Failed to remove Roblox critical settings DNS repair during drop: {e}");
+        if self.critical_settings_dns_repair_applied {
+            if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
+                log::warn!("Failed to remove Roblox critical settings DNS repair during drop: {e}");
+            }
         }
     }
 }

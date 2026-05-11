@@ -57,7 +57,9 @@ struct DohJsonAnswer {
 /// Existing SwiftTunnel entries are removed first (idempotent).
 pub async fn apply_critical_settings_overrides() -> Result<(), String> {
     let overrides = resolve_critical_settings_overrides().await?;
-    write_overrides(&overrides)
+    tokio::task::spawn_blocking(move || write_overrides(&overrides))
+        .await
+        .map_err(|e| format!("Failed to join hosts repair task: {e}"))?
 }
 
 async fn resolve_critical_settings_overrides() -> Result<Vec<HostOverride>, String> {
@@ -100,7 +102,7 @@ async fn resolve_domain_ipv4(client: &reqwest::Client, domain: &str) -> Result<I
     let mut failures = Vec::new();
 
     for resolver in DNS_REPAIR_RESOLVERS {
-        let url = format!("{resolver}?name={domain}&type=A");
+        let url = build_doh_url(resolver, domain);
         let response = match client
             .get(&url)
             .header("accept", "application/dns-json")
@@ -170,7 +172,8 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove any SwiftTunnel Roblox Proxy entries from the hosts file.
+/// Synchronous version used from startup recovery and `Drop`.
+/// Call `remove_overrides_async` from async contexts.
 pub fn remove_overrides() -> Result<(), String> {
     let path = hosts_path();
 
@@ -186,6 +189,13 @@ pub fn remove_overrides() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Remove any SwiftTunnel Roblox Proxy entries without blocking a Tokio worker.
+pub async fn remove_overrides_async() -> Result<(), String> {
+    tokio::task::spawn_blocking(remove_overrides)
+        .await
+        .map_err(|e| format!("Failed to join hosts cleanup task: {e}"))?
 }
 
 /// Called on app startup to clean up entries left by a previous crash.
@@ -251,6 +261,14 @@ fn build_hosts_block(overrides: &[HostOverride]) -> String {
     block.push_str(MARKER_END);
     block.push('\n');
     block
+}
+
+fn build_doh_url(resolver: &str, domain: &str) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("name", domain)
+        .append_pair("type", "A")
+        .finish();
+    format!("{resolver}?{query}")
 }
 
 fn parse_usable_a_records(body: &str) -> Result<Vec<Ipv4Addr>, String> {
@@ -394,6 +412,18 @@ mod tests {
         assert!(block.contains("128.116.46.3 clientsettings.roblox.com"));
         assert!(block.contains(MARKER_END));
         assert!(!block.contains("127.66.0.1"));
+    }
+
+    #[test]
+    fn build_doh_url_encodes_domain_query_value() {
+        assert_eq!(
+            build_doh_url("https://1.1.1.1/dns-query", "clientsettingscdn.roblox.com"),
+            "https://1.1.1.1/dns-query?name=clientsettingscdn.roblox.com&type=A"
+        );
+        assert_eq!(
+            build_doh_url("https://1.1.1.1/dns-query", "bad&name=wrong"),
+            "https://1.1.1.1/dns-query?name=bad%26name%3Dwrong&type=A"
+        );
     }
 
     #[test]
