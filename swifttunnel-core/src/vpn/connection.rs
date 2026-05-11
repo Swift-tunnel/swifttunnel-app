@@ -1040,6 +1040,20 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel)
             .await;
 
+        if enable_api_tunneling && !tunnel_apps.is_empty() {
+            match crate::roblox_proxy::hosts::apply_critical_settings_overrides().await {
+                Ok(()) => {
+                    log::info!("V3: Applied Roblox critical settings DNS repair for API tunneling");
+                }
+                Err(e) => {
+                    log::warn!(
+                        "V3: Roblox critical settings DNS repair skipped; API tunneling will continue without hosts repair: {}",
+                        e
+                    );
+                }
+            }
+        }
+
         let mut active_server_region = config.region.clone();
         let mut active_server_endpoint = config.endpoint.clone();
 
@@ -2385,6 +2399,10 @@ impl VpnConnection {
         // Cleanup WFP block filters
         super::wfp_block::cleanup();
 
+        if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
+            log::warn!("Failed to remove Roblox critical settings DNS repair: {e}");
+        }
+
         // Reset auto-router
         if let Some(ref auto_router) = self.auto_router {
             auto_router.reset();
@@ -2596,6 +2614,10 @@ impl Drop for VpnConnection {
         }
 
         super::wfp_block::cleanup();
+
+        if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
+            log::warn!("Failed to remove Roblox critical settings DNS repair during drop: {e}");
+        }
     }
 }
 

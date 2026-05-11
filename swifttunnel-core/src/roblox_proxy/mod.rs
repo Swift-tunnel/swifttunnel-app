@@ -1,8 +1,9 @@
-//! Roblox proxy hosts-file cleanup (legacy migration).
+//! Roblox critical-settings DNS repair.
 //!
-//! The local TCP proxy feature has been removed. This module only
-//! retains the hosts-file cleanup logic so that users upgrading from
-//! older versions have any stale `127.66.0.1` entries removed
-//! automatically on first launch.
+//! API tunneling can carry Roblox HTTPS traffic through a SwiftTunnel
+//! relay, but Roblox still needs a working local hostname lookup before
+//! it opens that TCP connection. This module keeps a narrow hosts-file
+//! repair for the critical settings endpoints and also removes stale
+//! entries from older local-proxy builds.
 
 pub mod hosts;

@@ -1,61 +1,157 @@
-//! Windows hosts-file management for the Roblox proxy.
+//! Windows hosts-file management for Roblox critical-settings DNS repair.
 //!
-//! Adds / removes `127.66.0.1` entries for Roblox domains so that
-//! Roblox's HTTPS traffic is redirected to the local TCP relay.
-//! All entries are bookended with marker comments so they can be
-//! identified and cleaned up reliably.
+//! Adds / removes marker-delimited entries for the small set of Roblox
+//! settings hostnames that must resolve before Roblox can open its
+//! launch-time HTTPS connection. The marker names are retained from the
+//! legacy local-proxy implementation so old `127.66.0.1` entries are
+//! removed reliably.
 
 use log::{debug, info, warn};
+use serde::Deserialize;
 use std::fs;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const MARKER_START: &str = "# SwiftTunnel Roblox Proxy - START";
 const MARKER_END: &str = "# SwiftTunnel Roblox Proxy - END";
-const LOOPBACK_IP: &str = "127.66.0.1";
-
-/// Roblox domains to intercept via the local proxy.
-pub const ROBLOX_DOMAINS: &[&str] = &[
-    "clientsettings.roblox.com",
-    "clientsettingscdn.roblox.com",
-    "setup.rbxcdn.com",
-    "roblox.com",
-    "www.roblox.com",
-    "apis.roblox.com",
-    "auth.roblox.com",
-    "avatar.roblox.com",
-    "catalog.roblox.com",
-    "games.roblox.com",
-    "groups.roblox.com",
-    "thumbnails.roblox.com",
-    "users.roblox.com",
-    "assetdelivery.roblox.com",
-    "economy.roblox.com",
-    "inventory.roblox.com",
+const DNS_REPAIR_TIMEOUT: Duration = Duration::from_secs(3);
+const DNS_REPAIR_RESOLVERS: &[&str] = &[
+    // IP literals avoid depending on the user's broken local DNS to find
+    // the DNS-over-HTTPS resolver itself.
+    "https://1.1.1.1/dns-query",
+    "https://8.8.8.8/resolve",
 ];
+
+/// Exact Roblox hostnames repaired when API tunneling is enabled.
+pub const CRITICAL_SETTINGS_DOMAINS: &[&str] =
+    &["clientsettingscdn.roblox.com", "clientsettings.roblox.com"];
 
 fn hosts_path() -> PathBuf {
     PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts")
 }
 
-/// Append Roblox domain overrides to the Windows hosts file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostOverride {
+    ip: Ipv4Addr,
+    domain: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DohJsonResponse {
+    #[serde(rename = "Status")]
+    status: u32,
+    #[serde(rename = "Answer", default)]
+    answer: Vec<DohJsonAnswer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DohJsonAnswer {
+    #[serde(rename = "type")]
+    record_type: u16,
+    data: String,
+}
+
+/// Resolve and append critical Roblox settings overrides to the Windows hosts file.
 ///
 /// Existing SwiftTunnel entries are removed first (idempotent).
-pub fn apply_overrides() -> Result<(), String> {
+pub async fn apply_critical_settings_overrides() -> Result<(), String> {
+    let overrides = resolve_critical_settings_overrides().await?;
+    write_overrides(&overrides)
+}
+
+async fn resolve_critical_settings_overrides() -> Result<Vec<HostOverride>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(DNS_REPAIR_TIMEOUT)
+        .build()
+        .map_err(|e| format!("Failed to build DNS repair client: {e}"))?;
+
+    let mut overrides = Vec::new();
+    let mut failures = Vec::new();
+
+    for domain in CRITICAL_SETTINGS_DOMAINS {
+        match resolve_domain_ipv4(&client, domain).await {
+            Ok(ip) => overrides.push(HostOverride {
+                ip,
+                domain: (*domain).to_string(),
+            }),
+            Err(e) => failures.push(e),
+        }
+    }
+
+    if overrides.is_empty() {
+        return Err(format!(
+            "No critical settings hosts resolved via DNS-over-HTTPS: {}",
+            failures.join("; ")
+        ));
+    }
+
+    if !failures.is_empty() {
+        warn!(
+            "Partial Roblox critical settings DNS repair: {}",
+            failures.join("; ")
+        );
+    }
+
+    Ok(overrides)
+}
+
+async fn resolve_domain_ipv4(client: &reqwest::Client, domain: &str) -> Result<Ipv4Addr, String> {
+    let mut failures = Vec::new();
+
+    for resolver in DNS_REPAIR_RESOLVERS {
+        let url = format!("{resolver}?name={domain}&type=A");
+        let response = match client
+            .get(&url)
+            .header("accept", "application/dns-json")
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                failures.push(format!("{resolver}: request failed: {e}"));
+                continue;
+            }
+        };
+
+        if !response.status().is_success() {
+            failures.push(format!("{resolver}: HTTP {}", response.status()));
+            continue;
+        }
+
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(e) => {
+                failures.push(format!("{resolver}: response read failed: {e}"));
+                continue;
+            }
+        };
+
+        match parse_usable_a_records(&body) {
+            Ok(ips) if !ips.is_empty() => return Ok(ips[0]),
+            Ok(_) => failures.push(format!("{resolver}: no usable public A records")),
+            Err(e) => failures.push(format!("{resolver}: {e}")),
+        }
+    }
+
+    Err(format!(
+        "{domain} could not be repaired via DNS-over-HTTPS ({})",
+        failures.join("; ")
+    ))
+}
+
+fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
+    if overrides.is_empty() {
+        return Err("No hosts overrides to write".to_string());
+    }
+
     let path = hosts_path();
 
     let content =
         fs::read_to_string(&path).map_err(|e| format!("Failed to read hosts file: {e}"))?;
 
     let clean = remove_marker_block(&content);
-
-    let mut block = String::new();
-    block.push_str(MARKER_START);
-    block.push('\n');
-    for domain in ROBLOX_DOMAINS {
-        block.push_str(&format!("{LOOPBACK_IP} {domain}\n"));
-    }
-    block.push_str(MARKER_END);
-    block.push('\n');
+    let block = build_hosts_block(overrides);
 
     let mut out = clean;
     if !out.ends_with('\n') {
@@ -66,8 +162,8 @@ pub fn apply_overrides() -> Result<(), String> {
     fs::write(&path, &out).map_err(|e| format!("Failed to write hosts file: {e}"))?;
 
     info!(
-        "Applied {} Roblox domain overrides to hosts file",
-        ROBLOX_DOMAINS.len()
+        "Applied {} Roblox critical settings DNS override(s) to hosts file",
+        overrides.len()
     );
 
     flush_dns_cache();
@@ -145,6 +241,51 @@ fn remove_marker_block(content: &str) -> String {
     out
 }
 
+fn build_hosts_block(overrides: &[HostOverride]) -> String {
+    let mut block = String::new();
+    block.push_str(MARKER_START);
+    block.push('\n');
+    for entry in overrides {
+        block.push_str(&format!("{} {}\n", entry.ip, entry.domain));
+    }
+    block.push_str(MARKER_END);
+    block.push('\n');
+    block
+}
+
+fn parse_usable_a_records(body: &str) -> Result<Vec<Ipv4Addr>, String> {
+    let response: DohJsonResponse =
+        serde_json::from_str(body).map_err(|e| format!("invalid DNS JSON: {e}"))?;
+
+    if response.status != 0 {
+        return Err(format!("DNS status {}", response.status));
+    }
+
+    Ok(response
+        .answer
+        .into_iter()
+        .filter(|answer| answer.record_type == 1)
+        .filter_map(|answer| answer.data.parse::<Ipv4Addr>().ok())
+        .filter(|ip| is_usable_public_ipv4(*ip))
+        .collect())
+}
+
+fn is_usable_public_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || octets[0] == 0
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+        || (octets[0] == 198 && (18..=19).contains(&octets[1])))
+}
+
 /// Flush the Windows DNS resolver cache (`ipconfig /flushdns`).
 fn flush_dns_cache() {
     let output = crate::hidden_command("ipconfig").arg("/flushdns").output();
@@ -217,13 +358,81 @@ mod tests {
 
     #[test]
     fn domain_list_is_not_empty() {
-        assert!(ROBLOX_DOMAINS.len() >= 10);
+        assert!(!CRITICAL_SETTINGS_DOMAINS.is_empty());
     }
 
     #[test]
     fn domain_list_contains_critical_entries() {
-        assert!(ROBLOX_DOMAINS.contains(&"clientsettings.roblox.com"));
-        assert!(ROBLOX_DOMAINS.contains(&"clientsettingscdn.roblox.com"));
-        assert!(ROBLOX_DOMAINS.contains(&"setup.rbxcdn.com"));
+        assert!(CRITICAL_SETTINGS_DOMAINS.contains(&"clientsettings.roblox.com"));
+        assert!(CRITICAL_SETTINGS_DOMAINS.contains(&"clientsettingscdn.roblox.com"));
+    }
+
+    #[test]
+    fn domain_list_stays_narrow() {
+        assert_eq!(CRITICAL_SETTINGS_DOMAINS.len(), 2);
+        assert!(!CRITICAL_SETTINGS_DOMAINS.contains(&"roblox.com"));
+        assert!(!CRITICAL_SETTINGS_DOMAINS.contains(&"setup.rbxcdn.com"));
+    }
+
+    #[test]
+    fn build_hosts_block_uses_resolved_public_ips() {
+        let overrides = vec![
+            HostOverride {
+                ip: Ipv4Addr::new(65, 9, 168, 80),
+                domain: "clientsettingscdn.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: Ipv4Addr::new(128, 116, 46, 3),
+                domain: "clientsettings.roblox.com".to_string(),
+            },
+        ];
+
+        let block = build_hosts_block(&overrides);
+
+        assert!(block.contains(MARKER_START));
+        assert!(block.contains("65.9.168.80 clientsettingscdn.roblox.com"));
+        assert!(block.contains("128.116.46.3 clientsettings.roblox.com"));
+        assert!(block.contains(MARKER_END));
+        assert!(!block.contains("127.66.0.1"));
+    }
+
+    #[test]
+    fn parse_usable_a_records_accepts_cname_chain_with_public_answers() {
+        let body = r#"{
+            "Status": 0,
+            "Answer": [
+                {"name":"clientsettingscdn.roblox.com","type":5,"TTL":60,"data":"example.cloudfront.net."},
+                {"name":"example.cloudfront.net","type":1,"TTL":60,"data":"65.9.168.80"},
+                {"name":"example.cloudfront.net","type":1,"TTL":60,"data":"65.9.168.121"}
+            ]
+        }"#;
+
+        assert_eq!(
+            parse_usable_a_records(body).unwrap(),
+            vec![
+                Ipv4Addr::new(65, 9, 168, 80),
+                Ipv4Addr::new(65, 9, 168, 121)
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_usable_a_records_rejects_non_repairable_private_answer() {
+        let body = r#"{
+            "Status": 0,
+            "Answer": [
+                {"name":"clientsettingscdn.roblox.com","type":1,"TTL":60,"data":"127.0.0.1"},
+                {"name":"clientsettingscdn.roblox.com","type":1,"TTL":60,"data":"192.168.0.10"}
+            ]
+        }"#;
+
+        assert!(parse_usable_a_records(body).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_usable_a_records_rejects_nxdomain() {
+        let body = r#"{"Status": 3, "Answer": []}"#;
+
+        assert_eq!(parse_usable_a_records(body).unwrap_err(), "DNS status 3");
     }
 }
