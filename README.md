@@ -103,7 +103,7 @@ Starts on the lowest-latency region from the in-app ping test, then resolves det
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-SwiftTunnel intercepts game traffic at the network layer. Only packets from your game are optimized and routed through our servers — DNS stays on the local connection so Roblox can resolve launch-time settings endpoints normally.
+SwiftTunnel intercepts game traffic at the network layer. Only packets from your game are optimized and routed through our servers. DNS normally stays on the local connection; when API tunneling is enabled, SwiftTunnel also repairs the exact Roblox critical-settings hostnames with temporary hosts-file entries resolved over HTTPS DNS so broken local resolvers do not block launch.
 
 Roblox detection covers the standard Win32 player/studio executables by exact process stem or known Roblox alias only. Microsoft Store/UWP Roblox is intentionally not tunnel-eligible because it runs under the generic `Windows10Universal.exe` host used by unrelated Store apps.
 

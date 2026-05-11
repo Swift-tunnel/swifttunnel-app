@@ -800,6 +800,8 @@ pub struct VpnConnection {
     auto_lookup_handle: Option<tokio::task::JoinHandle<()>>,
     /// Per-process game performance tuning manager (Windows-only behavior).
     process_performance_manager: Option<Arc<Mutex<GameProcessPerformanceManager>>>,
+    /// Tracks whether this connection wrote the temporary Roblox settings hosts repair.
+    critical_settings_dns_repair_applied: bool,
 }
 
 impl VpnConnection {
@@ -814,6 +816,7 @@ impl VpnConnection {
             auto_router: None,
             auto_lookup_handle: None,
             process_performance_manager: None,
+            critical_settings_dns_repair_applied: false,
         }
     }
 
@@ -1039,6 +1042,21 @@ impl VpnConnection {
         // V3 doesn't need a virtual adapter
         self.set_state(ConnectionState::ConfiguringSplitTunnel)
             .await;
+
+        if enable_api_tunneling && !tunnel_apps.is_empty() {
+            match crate::roblox_proxy::hosts::apply_critical_settings_overrides().await {
+                Ok(()) => {
+                    self.critical_settings_dns_repair_applied = true;
+                    log::info!("V3: Applied Roblox critical settings DNS repair for API tunneling");
+                }
+                Err(e) => {
+                    log::warn!(
+                        "V3: Roblox critical settings DNS repair skipped; API tunneling will continue without hosts repair: {}",
+                        e
+                    );
+                }
+            }
+        }
 
         let mut active_server_region = config.region.clone();
         let mut active_server_endpoint = config.endpoint.clone();
@@ -2385,6 +2403,17 @@ impl VpnConnection {
         // Cleanup WFP block filters
         super::wfp_block::cleanup();
 
+        if self.critical_settings_dns_repair_applied {
+            match crate::roblox_proxy::hosts::remove_overrides_async().await {
+                Ok(()) => {
+                    self.critical_settings_dns_repair_applied = false;
+                }
+                Err(e) => {
+                    log::warn!("Failed to remove Roblox critical settings DNS repair: {e}");
+                }
+            }
+        }
+
         // Reset auto-router
         if let Some(ref auto_router) = self.auto_router {
             auto_router.reset();
@@ -2596,6 +2625,12 @@ impl Drop for VpnConnection {
         }
 
         super::wfp_block::cleanup();
+
+        if self.critical_settings_dns_repair_applied {
+            if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
+                log::warn!("Failed to remove Roblox critical settings DNS repair during drop: {e}");
+            }
+        }
     }
 }
 
