@@ -108,6 +108,8 @@ async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
 
     loop {
         tokio::select! {
+            biased;
+
             result = lookups.next() => {
                 match result {
                     Some((domain, Ok(ip))) => overrides.push(HostOverride {
