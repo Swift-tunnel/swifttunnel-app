@@ -297,6 +297,7 @@ fn is_usable_public_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_multicast()
         || ip.is_broadcast()
         || octets[0] == 0
+        || octets[0] >= 240
         || (octets[0] == 100 && (64..=127).contains(&octets[1]))
         || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
         || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
@@ -452,7 +453,8 @@ mod tests {
             "Status": 0,
             "Answer": [
                 {"name":"clientsettingscdn.roblox.com","type":1,"TTL":60,"data":"127.0.0.1"},
-                {"name":"clientsettingscdn.roblox.com","type":1,"TTL":60,"data":"192.168.0.10"}
+                {"name":"clientsettingscdn.roblox.com","type":1,"TTL":60,"data":"192.168.0.10"},
+                {"name":"clientsettingscdn.roblox.com","type":1,"TTL":60,"data":"240.0.0.1"}
             ]
         }"#;
 
