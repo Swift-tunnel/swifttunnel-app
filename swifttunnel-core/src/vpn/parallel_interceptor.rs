@@ -61,7 +61,7 @@ use super::ipv6_recovery::{
     IPV6_BLOCK_REMOTE_IPS, IPV6_BLOCK_RULE_NAME, delete_ipv6_marker, restore_ipv6_from_marker,
     write_ipv6_marker_firewall,
 };
-use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
+use super::process_cache::{DNS_PORT, LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
 use super::tso_recovery::{delete_tso_marker, restore_tso_from_marker, write_tso_marker};
 use super::{VpnError, VpnResult};
@@ -10111,7 +10111,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 40000;
-        let dst_port = 53;
+        let dst_port = 3478;
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -10131,6 +10131,38 @@ mod tests {
         inline_cache.insert((src_ip, src_port, Protocol::Udp), true);
 
         assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_should_route_bypasses_dns_even_for_inline_cache_hit() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 40000;
+        let dst_port = DNS_PORT;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, src_port, Protocol::Udp), true);
+
+        assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
             &mut inline_cache,
@@ -10529,6 +10561,50 @@ mod tests {
         inline_cache.clear();
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+    }
+
+    #[test]
+    fn test_dns_bypasses_for_tunnel_process_with_api_tunneling_enabled() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dns_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50000;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+        connections.insert(ConnectionKey::new(src_ip, src_port + 1, Protocol::Tcp), pid);
+
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids,
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let udp_dns = build_ipv4_frame(17, src_ip, dns_ip, src_port, DNS_PORT);
+        let tcp_dns = build_ipv4_frame(6, src_ip, dns_ip, src_port + 1, DNS_PORT);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &udp_dns,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        inline_cache.clear();
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &tcp_dns,
             &snapshot,
             &mut inline_cache,
             true,
