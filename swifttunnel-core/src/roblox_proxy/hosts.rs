@@ -1,11 +1,11 @@
-//! Windows hosts-file management for Roblox critical-settings DNS repair.
+//! Windows hosts-file management for Roblox bootstrap DNS repair.
 //!
-//! Adds / removes marker-delimited entries for the small set of Roblox
-//! settings hostnames that must resolve before Roblox can open its
-//! launch-time HTTPS connection. The marker names are retained from the
-//! legacy local-proxy implementation so old `127.66.0.1` entries are
-//! removed reliably.
+//! Adds / removes marker-delimited entries for the small set of Roblox launch
+//! and API hostnames that must resolve before Roblox can open its launch-time
+//! HTTPS connections. The marker names are retained from the legacy local-proxy
+//! implementation so old `127.66.0.1` entries are removed reliably.
 
+use futures_util::future::join_all;
 use log::{debug, info, warn};
 use serde::Deserialize;
 use std::fs;
@@ -24,8 +24,31 @@ const DNS_REPAIR_RESOLVERS: &[&str] = &[
 ];
 
 /// Exact Roblox hostnames repaired when API tunneling is enabled.
-pub const CRITICAL_SETTINGS_DOMAINS: &[&str] =
-    &["clientsettingscdn.roblox.com", "clientsettings.roblox.com"];
+///
+/// This intentionally stays as an allowlist of concrete launch/API names. Do
+/// not add bare `roblox.com` or lookalike domains: hosts-file repair is a DNS
+/// bypass for known Roblox bootstrap dependencies, not a wildcard resolver.
+pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
+    "clientsettingscdn.roblox.com",
+    "clientsettings.roblox.com",
+    "www.roblox.com",
+    "web.roblox.com",
+    "apis.roblox.com",
+    "auth.roblox.com",
+    "accountsettings.roblox.com",
+    "accountinformation.roblox.com",
+    "users.roblox.com",
+    "games.roblox.com",
+    "gamejoin.roblox.com",
+    "assetdelivery.roblox.com",
+    "thumbnails.roblox.com",
+    "presence.roblox.com",
+    "friends.roblox.com",
+    "chat.roblox.com",
+    "locale.roblox.com",
+    "setup.rbxcdn.com",
+    "apis.rbxcdn.com",
+];
 
 fn hosts_path() -> PathBuf {
     PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts")
@@ -52,17 +75,17 @@ struct DohJsonAnswer {
     data: String,
 }
 
-/// Resolve and append critical Roblox settings overrides to the Windows hosts file.
+/// Resolve and append Roblox bootstrap overrides to the Windows hosts file.
 ///
 /// Existing SwiftTunnel entries are removed first (idempotent).
-pub async fn apply_critical_settings_overrides() -> Result<(), String> {
-    let overrides = resolve_critical_settings_overrides().await?;
+pub async fn apply_bootstrap_overrides() -> Result<(), String> {
+    let overrides = resolve_bootstrap_overrides().await?;
     tokio::task::spawn_blocking(move || write_overrides(&overrides))
         .await
         .map_err(|e| format!("Failed to join hosts repair task: {e}"))?
 }
 
-async fn resolve_critical_settings_overrides() -> Result<Vec<HostOverride>, String> {
+async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
     let client = reqwest::Client::builder()
         .timeout(DNS_REPAIR_TIMEOUT)
         .build()
@@ -71,11 +94,15 @@ async fn resolve_critical_settings_overrides() -> Result<Vec<HostOverride>, Stri
     let mut overrides = Vec::new();
     let mut failures = Vec::new();
 
-    for domain in CRITICAL_SETTINGS_DOMAINS {
-        match resolve_domain_ipv4(&client, domain).await {
+    let lookups = ROBLOX_BOOTSTRAP_DOMAINS
+        .iter()
+        .map(|domain| async { (*domain, resolve_domain_ipv4(&client, domain).await) });
+
+    for (domain, result) in join_all(lookups).await {
+        match result {
             Ok(ip) => overrides.push(HostOverride {
                 ip,
-                domain: (*domain).to_string(),
+                domain: domain.to_string(),
             }),
             Err(e) => failures.push(e),
         }
@@ -83,14 +110,14 @@ async fn resolve_critical_settings_overrides() -> Result<Vec<HostOverride>, Stri
 
     if overrides.is_empty() {
         return Err(format!(
-            "No critical settings hosts resolved via DNS-over-HTTPS: {}",
+            "No Roblox bootstrap hosts resolved via DNS-over-HTTPS: {}",
             failures.join("; ")
         ));
     }
 
     if !failures.is_empty() {
         warn!(
-            "Partial Roblox critical settings DNS repair: {}",
+            "Partial Roblox bootstrap DNS repair: {}",
             failures.join("; ")
         );
     }
@@ -164,7 +191,7 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
     fs::write(&path, &out).map_err(|e| format!("Failed to write hosts file: {e}"))?;
 
     info!(
-        "Applied {} Roblox critical settings DNS override(s) to hosts file",
+        "Applied {} Roblox bootstrap DNS override(s) to hosts file",
         overrides.len()
     );
 
@@ -377,20 +404,33 @@ mod tests {
 
     #[test]
     fn domain_list_is_not_empty() {
-        assert!(!CRITICAL_SETTINGS_DOMAINS.is_empty());
+        assert!(!ROBLOX_BOOTSTRAP_DOMAINS.is_empty());
     }
 
     #[test]
-    fn domain_list_contains_critical_entries() {
-        assert!(CRITICAL_SETTINGS_DOMAINS.contains(&"clientsettings.roblox.com"));
-        assert!(CRITICAL_SETTINGS_DOMAINS.contains(&"clientsettingscdn.roblox.com"));
+    fn domain_list_contains_launch_entries() {
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"clientsettings.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"clientsettingscdn.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"www.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"apis.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"auth.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"gamejoin.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"setup.rbxcdn.com"));
     }
 
     #[test]
-    fn domain_list_stays_narrow() {
-        assert_eq!(CRITICAL_SETTINGS_DOMAINS.len(), 2);
-        assert!(!CRITICAL_SETTINGS_DOMAINS.contains(&"roblox.com"));
-        assert!(!CRITICAL_SETTINGS_DOMAINS.contains(&"setup.rbxcdn.com"));
+    fn domain_list_stays_allowlisted_and_exact() {
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.len() <= 32);
+        assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
+        assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
+        assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"evilroblox.com"));
+        assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com.evil.test"));
+    }
+
+    #[test]
+    fn domain_list_has_no_duplicates() {
+        let unique: std::collections::HashSet<_> = ROBLOX_BOOTSTRAP_DOMAINS.iter().collect();
+        assert_eq!(unique.len(), ROBLOX_BOOTSTRAP_DOMAINS.len());
     }
 
     #[test]
@@ -404,6 +444,10 @@ mod tests {
                 ip: Ipv4Addr::new(128, 116, 46, 3),
                 domain: "clientsettings.roblox.com".to_string(),
             },
+            HostOverride {
+                ip: Ipv4Addr::new(128, 116, 121, 3),
+                domain: "www.roblox.com".to_string(),
+            },
         ];
 
         let block = build_hosts_block(&overrides);
@@ -411,6 +455,7 @@ mod tests {
         assert!(block.contains(MARKER_START));
         assert!(block.contains("65.9.168.80 clientsettingscdn.roblox.com"));
         assert!(block.contains("128.116.46.3 clientsettings.roblox.com"));
+        assert!(block.contains("128.116.121.3 www.roblox.com"));
         assert!(block.contains(MARKER_END));
         assert!(!block.contains("127.66.0.1"));
     }
