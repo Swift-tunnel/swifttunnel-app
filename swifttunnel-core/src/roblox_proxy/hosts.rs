@@ -5,7 +5,7 @@
 //! HTTPS connections. The marker names are retained from the legacy local-proxy
 //! implementation so old `127.66.0.1` entries are removed reliably.
 
-use futures_util::future::join_all;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use log::{debug, info, warn};
 use serde::Deserialize;
 use std::fs;
@@ -92,29 +92,43 @@ async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
         .build()
         .map_err(|e| format!("Failed to build DNS repair client: {e}"))?;
 
+    let mut lookups: FuturesUnordered<_> = ROBLOX_BOOTSTRAP_DOMAINS
+        .iter()
+        .map(|domain| {
+            let client = client.clone();
+            let domain = *domain;
+            async move { (domain, resolve_domain_ipv4(&client, domain).await) }
+        })
+        .collect();
+
     let mut overrides = Vec::new();
     let mut failures = Vec::new();
+    let total_deadline = tokio::time::sleep(DNS_REPAIR_TOTAL_TIMEOUT);
+    tokio::pin!(total_deadline);
 
-    let lookups = ROBLOX_BOOTSTRAP_DOMAINS
-        .iter()
-        .map(|domain| async { (*domain, resolve_domain_ipv4(&client, domain).await) });
-
-    let resolved = tokio::time::timeout(DNS_REPAIR_TOTAL_TIMEOUT, join_all(lookups))
-        .await
-        .map_err(|_| {
-            format!(
-                "Roblox bootstrap DNS repair exceeded {}s total timeout",
-                DNS_REPAIR_TOTAL_TIMEOUT.as_secs()
-            )
-        })?;
-
-    for (domain, result) in resolved {
-        match result {
-            Ok(ip) => overrides.push(HostOverride {
-                ip,
-                domain: domain.to_string(),
-            }),
-            Err(e) => failures.push(e),
+    loop {
+        tokio::select! {
+            result = lookups.next() => {
+                match result {
+                    Some((domain, Ok(ip))) => overrides.push(HostOverride {
+                        ip,
+                        domain: domain.to_string(),
+                    }),
+                    Some((_domain, Err(e))) => failures.push(e),
+                    None => break,
+                }
+            }
+            _ = &mut total_deadline => {
+                let remaining = lookups.len();
+                if remaining > 0 {
+                    failures.push(format!(
+                        "{} Roblox bootstrap DNS lookup(s) exceeded {}s total timeout",
+                        remaining,
+                        DNS_REPAIR_TOTAL_TIMEOUT.as_secs()
+                    ));
+                }
+                break;
+            }
         }
     }
 
