@@ -8,9 +8,11 @@
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use log::{debug, info, warn};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 const MARKER_START: &str = "# SwiftTunnel Roblox Proxy - START";
@@ -23,6 +25,8 @@ const DNS_REPAIR_RESOLVERS: &[&str] = &[
     "https://1.1.1.1/dns-query",
     "https://8.8.8.8/resolve",
 ];
+
+static ACTIVE_BOOTSTRAP_IPS: OnceLock<RwLock<HashSet<Ipv4Addr>>> = OnceLock::new();
 
 /// Exact Roblox hostnames repaired when API tunneling is enabled.
 ///
@@ -81,9 +85,21 @@ struct DohJsonAnswer {
 /// Existing SwiftTunnel entries are removed first (idempotent).
 pub async fn apply_bootstrap_overrides() -> Result<(), String> {
     let overrides = resolve_bootstrap_overrides().await?;
+    let active_ips: HashSet<Ipv4Addr> = overrides.iter().map(|entry| entry.ip).collect();
+
     tokio::task::spawn_blocking(move || write_overrides(&overrides))
         .await
-        .map_err(|e| format!("Failed to join hosts repair task: {e}"))?
+        .map_err(|e| format!("Failed to join hosts repair task: {e}"))??;
+
+    set_active_bootstrap_ips(active_ips);
+    Ok(())
+}
+
+pub fn is_active_bootstrap_ip(ip: Ipv4Addr) -> bool {
+    active_bootstrap_ips()
+        .read()
+        .map(|ips| ips.contains(&ip))
+        .unwrap_or(false)
 }
 
 async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
@@ -228,6 +244,12 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
 /// Synchronous version used from startup recovery and `Drop`.
 /// Call `remove_overrides_async` from async contexts.
 pub fn remove_overrides() -> Result<(), String> {
+    let result = remove_overrides_inner();
+    clear_active_bootstrap_ips();
+    result
+}
+
+fn remove_overrides_inner() -> Result<(), String> {
     let path = hosts_path();
 
     let content =
@@ -242,6 +264,34 @@ pub fn remove_overrides() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn active_bootstrap_ips() -> &'static RwLock<HashSet<Ipv4Addr>> {
+    ACTIVE_BOOTSTRAP_IPS.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+fn set_active_bootstrap_ips(ips: HashSet<Ipv4Addr>) {
+    match active_bootstrap_ips().write() {
+        Ok(mut active) => *active = ips,
+        Err(e) => warn!("Failed to publish Roblox bootstrap route IPs: {e}"),
+    }
+}
+
+fn clear_active_bootstrap_ips() {
+    match active_bootstrap_ips().write() {
+        Ok(mut active) => active.clear(),
+        Err(e) => warn!("Failed to clear Roblox bootstrap route IPs: {e}"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_active_bootstrap_ips_for_test(ips: impl IntoIterator<Item = Ipv4Addr>) {
+    set_active_bootstrap_ips(ips.into_iter().collect());
+}
+
+#[cfg(test)]
+pub(crate) fn clear_active_bootstrap_ips_for_test() {
+    clear_active_bootstrap_ips();
 }
 
 /// Remove any SwiftTunnel Roblox Proxy entries without blocking a Tokio worker.
@@ -484,6 +534,20 @@ mod tests {
         assert!(block.contains("128.116.121.3 www.roblox.com"));
         assert!(block.contains(MARKER_END));
         assert!(!block.contains("127.66.0.1"));
+    }
+
+    #[test]
+    fn active_bootstrap_ips_are_exact_and_clearable() {
+        clear_active_bootstrap_ips_for_test();
+
+        let bootstrap_ip = Ipv4Addr::new(65, 9, 168, 80);
+        set_active_bootstrap_ips_for_test([bootstrap_ip]);
+
+        assert!(is_active_bootstrap_ip(bootstrap_ip));
+        assert!(!is_active_bootstrap_ip(Ipv4Addr::new(65, 9, 168, 81)));
+
+        clear_active_bootstrap_ips_for_test();
+        assert!(!is_active_bootstrap_ip(bootstrap_ip));
     }
 
     #[test]
