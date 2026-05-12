@@ -6899,9 +6899,11 @@ where
             .unwrap_or(false);
         let tcp_api_bootstrap_allowed =
             is_tcp_api_bootstrap_syn && !tcp_api_bootstrap_known_unrelated;
-        let is_game_dst = (protocol == Protocol::Udp
-            || (can_speculate_tcp_api && !tcp_api_bootstrap_known_unrelated))
-            && super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
+        let is_game_dst = if protocol == Protocol::Udp {
+            super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
+        } else {
+            is_roblox_http_dst && is_tcp_initial_syn && !tcp_api_bootstrap_known_unrelated
+        };
         if is_game_dst || tcp_api_bootstrap_allowed {
             // Log speculative tunneling for debugging (first 20 times only)
             thread_local! {
@@ -10729,7 +10731,7 @@ mod tests {
             created_at: std::time::Instant::now(),
         };
 
-        let frame = build_ipv4_frame(6, src_ip, dst_ip, src_port, dst_port);
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
@@ -11163,6 +11165,62 @@ mod tests {
     }
 
     #[test]
+    fn test_tcp_api_tunneling_does_not_tunnel_follow_on_packet_after_rejected_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
+        let src_port = 40013;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+        let unrelated_pid = 9004;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let syn_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_api_ip, src_port, dst_port, 0x02);
+        let follow_on_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_api_ip, src_port, dst_port, 0x18);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        let mut route = |frame: &[u8]| {
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(unrelated_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == unrelated_pid {
+                        Some("Discord.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        };
+
+        assert!(!route(&syn_frame));
+        assert!(!route(&follow_on_frame));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
     fn test_tcp_api_tunneling_does_not_bootstrap_non_syn_asset_packet() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
@@ -11217,6 +11275,39 @@ mod tests {
         };
 
         let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_speculate_roblox_non_http_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 40014;
+        let dst_port = 8443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, roblox_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(!should_route_to_vpn_with_inline_cache(
