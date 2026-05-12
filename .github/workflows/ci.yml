@@ -128,6 +128,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Manual CI dispatch requested; queueing the split tunnel testbench."
+            exit 0
+          fi
+
           set +e
           matching_runner_count="$(
             gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runners" \
