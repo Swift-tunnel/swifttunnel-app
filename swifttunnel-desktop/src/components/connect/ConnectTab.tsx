@@ -16,7 +16,7 @@ import {
   stateLabel,
 } from "./connectState";
 import { LiveGraph, type DataSample } from "./LiveGraph";
-import { Button, EmptyState, Tooltip, InfoIcon } from "../ui";
+import { Button, EmptyState, Tooltip, InfoIcon, Toggle } from "../ui";
 import type { ServerRegion } from "../../lib/types";
 
 type ConnectStatus = ReturnType<typeof resolveConnectStatus>;
@@ -194,6 +194,11 @@ export function ConnectTab() {
     if (server) cur[regionId] = server;
     else delete cur[regionId];
     update({ forced_servers: cur });
+    saveDebounced();
+  }
+
+  function setRouteAssist(enabled: boolean) {
+    update({ enable_api_tunneling: enabled });
     saveDebounced();
   }
 
@@ -379,6 +384,12 @@ export function ConnectTab() {
         </Button>
       </section>
 
+      <RouteAssistPanel
+        enabled={settings.enable_api_tunneling}
+        disabled={isConnected || isTransitioning}
+        onChange={setRouteAssist}
+      />
+
       {/* ── Throughput (connected) ── */}
       {isConnected && (
         <motion.section
@@ -542,6 +553,66 @@ export function ConnectTab() {
 }
 
 // ── Sub-components ──
+
+function RouteAssistPanel({
+  enabled,
+  disabled,
+  onChange,
+}: {
+  enabled: boolean;
+  disabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <section
+      className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] px-4 py-3"
+      style={{
+        backgroundColor: enabled
+          ? "var(--color-accent-primary-soft-10)"
+          : "var(--color-bg-card)",
+        border: `1px solid ${
+          enabled
+            ? "var(--color-accent-primary)"
+            : "var(--color-border-subtle)"
+        }`,
+      }}
+    >
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <h3 className="text-[13px] font-semibold text-text-primary">
+            Roblox Route Assist
+          </h3>
+          <Tooltip content="Routes Roblox login/API HTTP(S) through the selected relay, including browser-owned Roblox auth traffic. Non-Roblox browser traffic still bypasses SwiftTunnel.">
+            <span className="inline-flex">
+              <InfoIcon />
+            </span>
+          </Tooltip>
+          {enabled && (
+            <span
+              className="rounded-[4px] px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.1em]"
+              style={{
+                backgroundColor: "var(--color-bg-base)",
+                color: "var(--color-text-primary)",
+              }}
+            >
+              On
+            </span>
+          )}
+        </div>
+        <p className="mt-1 max-w-[620px] text-[11.5px] leading-relaxed text-text-muted">
+          Use this if you are bypassing a network ban or want a higher chance of
+          Roblox placing you near the region you tunnel to.
+        </p>
+      </div>
+      <Toggle
+        enabled={enabled}
+        disabled={disabled}
+        ariaLabel="Roblox Route Assist"
+        onChange={onChange}
+      />
+    </section>
+  );
+}
 
 function MetricCell({
   label,

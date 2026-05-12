@@ -173,10 +173,11 @@ pub struct AppSettings {
     #[serde(default)]
     pub game_process_performance: GameProcessPerformanceSettings,
 
-    /// Route game TCP/HTTPS traffic through the relay to bypass ISP blocking.
+    /// Route Roblox TCP/HTTPS traffic through the relay to bypass ISP blocking.
     ///
-    /// When enabled, TCP packets from tunnel apps are forwarded through the
-    /// V3 relay alongside UDP game traffic. Off by default.
+    /// When enabled, TCP packets from tunnel apps and browser-owned Roblox
+    /// login/API HTTP(S) flows are forwarded through the V3 relay alongside
+    /// UDP game traffic. Off by default.
     #[serde(default)]
     pub enable_api_tunneling: bool,
 }

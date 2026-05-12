@@ -449,10 +449,10 @@ export function SettingsTab() {
         )}
 
         <Row
-          label="API Tunneling"
-          desc="Route game API calls through relay to bypass ISP blocking"
+          label="Roblox Route Assist"
+          desc="Use when bypassing a network ban or to improve region-matching odds"
           tooltip={
-            <Tooltip content="TCP traffic from game processes is also tunneled through the relay server. Helps when your ISP blocks game API endpoints.">
+            <Tooltip content="Routes Roblox login/API HTTP(S), including browser-owned Roblox auth traffic, through the relay. Non-Roblox browser traffic still bypasses SwiftTunnel.">
               <span className="inline-flex">
                 <InfoIcon />
               </span>
@@ -461,7 +461,7 @@ export function SettingsTab() {
         >
           <Toggle
             enabled={settings.enable_api_tunneling}
-            ariaLabel="API Tunneling"
+            ariaLabel="Roblox Route Assist"
             onChange={(v) => set({ enable_api_tunneling: v })}
           />
         </Row>

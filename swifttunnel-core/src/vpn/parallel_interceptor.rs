@@ -6574,6 +6574,31 @@ fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool 
     process_name_matches_any_tunnel_app(&name_lower, &snapshot.tunnel_apps)
 }
 
+fn process_name_stem_lower(name: &str) -> String {
+    let file_name = name.rsplit(['\\', '/']).next().unwrap_or(name).trim();
+    let lower = file_name.to_ascii_lowercase();
+    lower
+        .strip_suffix(".exe")
+        .unwrap_or(lower.as_str())
+        .to_string()
+}
+
+fn process_name_in_browser_http_scope(name: &str) -> bool {
+    matches!(
+        process_name_stem_lower(name).as_str(),
+        "arc"
+            | "brave"
+            | "brave-browser"
+            | "chrome"
+            | "firefox"
+            | "msedge"
+            | "opera"
+            | "opera_gx"
+            | "operagx"
+            | "vivaldi"
+    )
+}
+
 fn tcp_owner_matches_tunnel_scope<P>(
     pid: u32,
     snapshot: &ProcessSnapshot,
@@ -6593,6 +6618,24 @@ where
     process_name_lookup(pid)
         .as_deref()
         .map(|name| process_name_in_tunnel_scope(name, snapshot))
+        .unwrap_or(false)
+}
+
+fn tcp_owner_matches_browser_http_scope<P>(
+    pid: u32,
+    snapshot: &ProcessSnapshot,
+    process_name_lookup: &P,
+) -> bool
+where
+    P: Fn(u32) -> Option<String>,
+{
+    if let Some(name) = snapshot.pid_names.get(&pid) {
+        return process_name_in_browser_http_scope(name);
+    }
+
+    process_name_lookup(pid)
+        .as_deref()
+        .map(process_name_in_browser_http_scope)
         .unwrap_or(false)
 }
 
@@ -6833,13 +6876,18 @@ where
         //
         // TCP speculation is allowed only when API tunneling is enabled and a
         // tunnel process is already known. This catches first SYNs for Roblox
-        // API/teleport flows before the owner table publishes the source port,
-        // without enabling broad browser-only Roblox traffic tunneling.
+        // API/teleport flows before the owner table publishes the source port.
+        // Browser-owned HTTP(S) is allowed only for Roblox destinations so
+        // login/account flows can share the selected relay without tunneling
+        // unrelated browser traffic.
         let has_tunnel_scope = !snapshot.tunnel_pids.is_empty() || !snapshot.tunnel_apps.is_empty();
         let can_speculate_tcp_api = protocol == Protocol::Tcp && api_tunneling && has_tunnel_scope;
         let is_tcp_api_bootstrap_syn =
             can_speculate_tcp_api && is_tcp_initial_syn && matches!(dst_port, 80 | 443);
-        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn {
+        let is_roblox_http_dst = can_speculate_tcp_api
+            && matches!(dst_port, 80 | 443)
+            && super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
+        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn || is_roblox_http_dst {
             tcp_owner_lookup(src_ip, src_port)
         } else {
             None
@@ -6847,12 +6895,20 @@ where
         let tcp_api_bootstrap_owned_by_tunnel = tcp_api_bootstrap_owner
             .map(|pid| tcp_owner_matches_tunnel_scope(pid, snapshot, &process_name_lookup))
             .unwrap_or(false);
+        let tcp_api_bootstrap_owned_by_browser = tcp_api_bootstrap_owner
+            .map(|pid| tcp_owner_matches_browser_http_scope(pid, snapshot, &process_name_lookup))
+            .unwrap_or(false);
+        let tcp_api_bootstrap_owned_by_browser_roblox =
+            tcp_api_bootstrap_owned_by_browser && is_roblox_http_dst;
         let tcp_api_bootstrap_known_unrelated = tcp_api_bootstrap_owner
-            .map(|pid| !tcp_owner_matches_tunnel_scope(pid, snapshot, &process_name_lookup))
+            .map(|_| {
+                !tcp_api_bootstrap_owned_by_tunnel && !tcp_api_bootstrap_owned_by_browser_roblox
+            })
             .unwrap_or(false);
         let tcp_api_bootstrap_allowed =
             is_tcp_api_bootstrap_syn && !tcp_api_bootstrap_known_unrelated;
-        let is_game_dst = (protocol == Protocol::Udp || can_speculate_tcp_api)
+        let is_game_dst = (protocol == Protocol::Udp
+            || (can_speculate_tcp_api && !tcp_api_bootstrap_known_unrelated))
             && super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
         if is_game_dst || tcp_api_bootstrap_allowed {
             // Log speculative tunneling for debugging (first 20 times only)
@@ -6869,14 +6925,15 @@ where
                 });
                 if spec_count < 20 {
                     log::info!(
-                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (Roblox destination or API bootstrap, initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={})",
+                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (Roblox destination or API bootstrap, initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={}, owner_is_browser_roblox={})",
                         src_ip,
                         src_port,
                         dst_ip,
                         dst_port,
                         is_tcp_initial_syn,
                         tcp_api_bootstrap_owner,
-                        tcp_api_bootstrap_owned_by_tunnel
+                        tcp_api_bootstrap_owned_by_tunnel,
+                        tcp_api_bootstrap_owned_by_browser_roblox
                     );
                 }
             } else {
@@ -10936,6 +10993,161 @@ mod tests {
                 |pid| {
                     if pid == unrelated_pid {
                         Some("chrome.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_allows_browser_owned_roblox_http_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
+        let src_port = 40010;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+        let browser_pid = 9002;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_api_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(browser_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == browser_pid {
+                        Some(
+                            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_allow_browser_owned_non_roblox_http_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let unrelated_ip = Ipv4Addr::new(93, 184, 216, 34);
+        let src_port = 40011;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+        let browser_pid = 9002;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, unrelated_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(browser_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == browser_pid {
+                        Some("chrome.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_allow_unrelated_owner_to_roblox_http_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
+        let src_port = 40012;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+        let unrelated_pid = 9003;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_api_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(unrelated_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == unrelated_pid {
+                        Some("Discord.exe".to_string())
                     } else {
                         None
                     }
