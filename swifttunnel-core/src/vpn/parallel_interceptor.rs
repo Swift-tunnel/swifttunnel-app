@@ -6590,53 +6590,46 @@ fn process_name_in_browser_http_scope(name: &str) -> bool {
             | "brave"
             | "brave-browser"
             | "chrome"
+            | "chromium"
+            | "chromium-browser"
             | "firefox"
             | "msedge"
             | "opera"
+            | "opera-browser"
             | "opera_gx"
             | "operagx"
             | "vivaldi"
     )
 }
 
-fn tcp_owner_matches_tunnel_scope<P>(
+fn tcp_owner_scope_match<P>(
     pid: u32,
     snapshot: &ProcessSnapshot,
     process_name_lookup: &P,
-) -> bool
+) -> (bool, bool)
 where
     P: Fn(u32) -> Option<String>,
 {
     if snapshot.is_tunnel_pid_public(pid) {
-        return true;
+        return (true, false);
     }
 
     if let Some(name) = snapshot.pid_names.get(&pid) {
-        return process_name_in_tunnel_scope(name, snapshot);
+        return (
+            process_name_in_tunnel_scope(name, snapshot),
+            process_name_in_browser_http_scope(name),
+        );
     }
 
-    process_name_lookup(pid)
-        .as_deref()
-        .map(|name| process_name_in_tunnel_scope(name, snapshot))
-        .unwrap_or(false)
-}
+    let name = process_name_lookup(pid);
+    let Some(name) = name.as_deref() else {
+        return (false, false);
+    };
 
-fn tcp_owner_matches_browser_http_scope<P>(
-    pid: u32,
-    snapshot: &ProcessSnapshot,
-    process_name_lookup: &P,
-) -> bool
-where
-    P: Fn(u32) -> Option<String>,
-{
-    if let Some(name) = snapshot.pid_names.get(&pid) {
-        return process_name_in_browser_http_scope(name);
-    }
-
-    process_name_lookup(pid)
-        .as_deref()
-        .map(process_name_in_browser_http_scope)
-        .unwrap_or(false)
+    (
+        process_name_in_tunnel_scope(name, snapshot),
+        process_name_in_browser_http_scope(name),
+    )
 }
 
 /// Debug counters for inline cache diagnostics
@@ -6885,6 +6878,7 @@ where
         let is_tcp_api_bootstrap_syn =
             can_speculate_tcp_api && is_tcp_initial_syn && matches!(dst_port, 80 | 443);
         let is_roblox_http_dst = can_speculate_tcp_api
+            && is_tcp_initial_syn
             && matches!(dst_port, 80 | 443)
             && super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
         let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn || is_roblox_http_dst {
@@ -6892,12 +6886,10 @@ where
         } else {
             None
         };
-        let tcp_api_bootstrap_owned_by_tunnel = tcp_api_bootstrap_owner
-            .map(|pid| tcp_owner_matches_tunnel_scope(pid, snapshot, &process_name_lookup))
-            .unwrap_or(false);
-        let tcp_api_bootstrap_owned_by_browser = tcp_api_bootstrap_owner
-            .map(|pid| tcp_owner_matches_browser_http_scope(pid, snapshot, &process_name_lookup))
-            .unwrap_or(false);
+        let (tcp_api_bootstrap_owned_by_tunnel, tcp_api_bootstrap_owned_by_browser) =
+            tcp_api_bootstrap_owner
+                .map(|pid| tcp_owner_scope_match(pid, snapshot, &process_name_lookup))
+                .unwrap_or((false, false));
         let tcp_api_bootstrap_owned_by_browser_roblox =
             tcp_api_bootstrap_owned_by_browser && is_roblox_http_dst;
         let tcp_api_bootstrap_known_unrelated = tcp_api_bootstrap_owner
@@ -11000,6 +10992,19 @@ mod tests {
             )
         );
         assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_browser_http_scope_matches_exact_browser_stems() {
+        assert!(process_name_in_browser_http_scope(
+            "C:\\Program Files\\Google\\Chrome\\Application\\Chrome.exe"
+        ));
+        assert!(process_name_in_browser_http_scope(
+            "C:\\Browsers\\chromium-browser.exe"
+        ));
+        assert!(process_name_in_browser_http_scope("opera-browser.exe"));
+        assert!(!process_name_in_browser_http_scope("chrome_helper.exe"));
+        assert!(!process_name_in_browser_http_scope("Discord.exe"));
     }
 
     #[test]
