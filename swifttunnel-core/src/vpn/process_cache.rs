@@ -383,9 +383,9 @@ impl ProcessSnapshot {
         }
 
         // Process not detected - use strict IP range check for speculative tunneling.
-        // This remains UDP-only. TCP API tunneling must be tied to a detected
-        // tunnel process or a tunnel-owned source port, otherwise arbitrary
-        // Roblox web traffic from other apps can be routed through the relay.
+        // This remains UDP-only in the snapshot cache. The packet classifier
+        // handles TCP API tunneling separately so owner-table checks can keep
+        // browser routing scoped to Roblox HTTP(S) instead of all web traffic.
         protocol == Protocol::Udp && is_game_server(dst_ip, dst_port, protocol, api_tunneling)
     }
 
