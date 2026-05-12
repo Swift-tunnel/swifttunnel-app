@@ -6881,7 +6881,7 @@ where
             && is_tcp_initial_syn
             && matches!(dst_port, 80 | 443)
             && super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling);
-        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn || is_roblox_http_dst {
+        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn {
             tcp_owner_lookup(src_ip, src_port)
         } else {
             None

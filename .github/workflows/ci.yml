@@ -22,6 +22,12 @@ on:
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
   workflow_dispatch:
+    inputs:
+      force_testbench:
+        description: "Queue the self-hosted Windows testbench without probing runner availability. Use only after confirming the runner is online."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -129,9 +135,9 @@ jobs:
         run: |
           set -o pipefail
 
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.force_testbench || false }}" == "true" ]]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Manual CI dispatch requested; queueing the split tunnel testbench."
+            echo "::notice::Manual CI dispatch requested with force_testbench=true; caller confirmed the split tunnel testbench runner is online."
             exit 0
           fi
 
