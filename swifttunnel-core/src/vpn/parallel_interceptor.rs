@@ -5119,17 +5119,17 @@ fn run_packet_reader(
             continue;
         }
 
+        // Load api_tunneling setting once per batch (cheap atomic load).
+        let api_tunneling = api_tunneling_enabled.load(Ordering::Relaxed);
+
         // Refresh process snapshot once per batch (cheap atomic load) so routing decisions
         // track new processes/connection tables without per-packet ArcSwap loads.
         let new_snapshot = process_cache.get_snapshot();
         if new_snapshot.version != snapshot_version {
             snapshot_version = new_snapshot.version;
-            inline_cache.clear();
+            prune_inline_cache_on_snapshot_refresh(&mut inline_cache, api_tunneling);
         }
         snapshot = new_snapshot;
-
-        // Load api_tunneling setting once per batch (cheap atomic load).
-        let api_tunneling = api_tunneling_enabled.load(Ordering::Relaxed);
 
         // Prepare passthrough queues
         passthrough_to_adapter = EthMRequest::new(b.physical_handle);
@@ -6569,6 +6569,18 @@ fn auto_routing_packet_action(
 type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), bool>;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
+fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache, api_tunneling: bool) {
+    if !api_tunneling {
+        inline_cache.clear();
+        return;
+    }
+
+    // UDP ownership entries must track the newest process snapshot, but captured
+    // Route Assist TCP flows must survive owner-table refreshes after their SYN
+    // was MSS-clamped and relayed. FIN/RST packets evict TCP entries on close.
+    inline_cache.retain(|(_, _, protocol), _| *protocol == Protocol::Tcp);
+}
+
 fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool {
     let name_lower = name.to_lowercase();
     process_name_matches_any_tunnel_app(&name_lower, &snapshot.tunnel_apps)
@@ -6828,6 +6840,9 @@ where
         INLINE_HITS.with(|c| c.set(c.get() + 1));
         let result =
             super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
+        if protocol == Protocol::Tcp && tcp_flags.is_some_and(|flags| (flags & 0x05) != 0) {
+            inline_cache.remove(&cache_key);
+        }
         if protocol == Protocol::Udp && more_fragments {
             FRAGMENT_DECISIONS.with(|cache| {
                 let mut cache = cache.borrow_mut();
@@ -10203,6 +10218,42 @@ mod tests {
             &mut inline_cache,
             false,
         ));
+    }
+
+    #[test]
+    fn test_snapshot_refresh_keeps_tcp_inline_entries_and_clears_udp_when_api_tunneling() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, 40000, Protocol::Tcp), true);
+        inline_cache.insert((src_ip, 40001, Protocol::Udp), true);
+
+        prune_inline_cache_on_snapshot_refresh(&mut inline_cache, true);
+
+        assert!(inline_cache.contains_key(&(src_ip, 40000, Protocol::Tcp)));
+        assert!(!inline_cache.contains_key(&(src_ip, 40001, Protocol::Udp)));
+
+        prune_inline_cache_on_snapshot_refresh(&mut inline_cache, false);
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_inline_cache_hit_evicts_fin_after_routing() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 40000;
+        let dst_port = 443;
+        let snapshot = ProcessSnapshot::empty(HashSet::new());
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, src_port, Protocol::Tcp), true);
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
     }
 
     #[test]
