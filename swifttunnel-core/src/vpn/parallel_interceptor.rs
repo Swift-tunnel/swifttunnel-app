@@ -6857,7 +6857,11 @@ where
                 if (flags & 0x04) != 0 {
                     true
                 } else if *entry == InlineCacheEntry::FinSeen {
-                    flags == 0x10 || (flags & 0x01) != 0
+                    // Bare ACKs after a local FIN can still acknowledge
+                    // in-flight server data in a half-closed connection.
+                    // Keep routing until RST, a second FIN, or a future SYN
+                    // reclassifies a recycled port.
+                    (flags & 0x01) != 0
                 } else if (flags & 0x01) != 0 {
                     *entry = InlineCacheEntry::FinSeen;
                     false
@@ -6938,15 +6942,19 @@ where
             && matches!(dst_port, 80 | 443)
             && (super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
                 || crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip));
-        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn {
+        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit {
             tcp_owner_lookup(src_ip, src_port)
         } else {
             None
         };
         let (tcp_api_bootstrap_owned_by_tunnel, tcp_api_bootstrap_owned_by_browser) =
-            tcp_api_bootstrap_owner
-                .map(|pid| tcp_owner_scope_match(pid, snapshot, &process_name_lookup))
-                .unwrap_or((false, false));
+            if is_tcp_api_bootstrap_syn && snapshot_tunnel_hit {
+                (true, false)
+            } else {
+                tcp_api_bootstrap_owner
+                    .map(|pid| tcp_owner_scope_match(pid, snapshot, &process_name_lookup))
+                    .unwrap_or((false, false))
+            };
         let tcp_api_bootstrap_owned_by_browser_route_assist =
             tcp_api_bootstrap_owned_by_browser && is_route_assist_http_dst;
         let tcp_api_bootstrap_known_unrelated = tcp_api_bootstrap_owner
@@ -10267,7 +10275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_inline_cache_hit_keeps_fin_for_teardown_ack() {
+    fn test_tcp_inline_cache_hit_keeps_fin_seen_through_half_close_acks() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40000;
@@ -10275,6 +10283,8 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let fin_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
         let ack_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x10);
+        let second_fin_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
 
@@ -10291,6 +10301,28 @@ mod tests {
 
         assert!(should_route_to_vpn_with_inline_cache(
             &ack_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert_eq!(
+            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
+            Some(&InlineCacheEntry::FinSeen)
+        );
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &ack_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert_eq!(
+            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
+            Some(&InlineCacheEntry::FinSeen)
+        );
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &second_fin_frame,
             &snapshot,
             &mut inline_cache,
             true,
@@ -10928,6 +10960,45 @@ mod tests {
                     None
                 }
             },
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_snapshot_syn_skips_owner_lookup() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 40001;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(
+            ConnectionKey::new(src_ip, src_port, Protocol::Tcp),
+            tunnel_pid,
+        );
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |_ip, _port| panic!("snapshot-owned SYN should not call tcp_owner_lookup"),
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
     }
