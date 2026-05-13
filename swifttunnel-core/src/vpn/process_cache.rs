@@ -336,21 +336,25 @@ impl ProcessSnapshot {
         self.is_tunnel_connection(local_ip, local_port, protocol)
     }
 
-    /// Fallback check for tunnel ownership by source port.
+    /// UDP fallback check for tunnel ownership by source port.
     ///
     /// This is a miss-path helper used when exact `(ip, port, protocol)` cache lookup
     /// fails but we still want to recover tunnel routing for packets emitted by a
     /// known tunnel app that may have shifted local IP representation.
+    ///
+    /// TCP Route Assist is intentionally excluded: the packet router must capture
+    /// and MSS-clamp the SYN before owning a TCP flow, so TCP port ownership is
+    /// metadata for handshake/speculation checks rather than a routing fallback.
     #[inline]
     pub fn should_tunnel_by_port_fallback(
         &self,
         local_port: u16,
         protocol: Protocol,
-        api_tunneling: bool,
+        _api_tunneling: bool,
     ) -> bool {
         match protocol {
             Protocol::Udp => self.tunnel_udp_ports.contains(&local_port),
-            Protocol::Tcp => api_tunneling && self.tunnel_tcp_ports.contains(&local_port),
+            Protocol::Tcp => false,
         }
     }
 
@@ -1401,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_tunnel_by_port_fallback_tcp_with_api_tunneling() {
+    fn test_should_tunnel_by_port_fallback_rejects_tcp_even_with_api_tunneling() {
         let cache = LockFreeProcessCache::new(vec!["roblox".to_string()]);
 
         let mut connections = HashMap::new();
@@ -1415,9 +1419,10 @@ mod tests {
         cache.update(connections, pid_names);
         let snap = cache.get_snapshot();
 
-        // TCP port fallback should work when api_tunneling is enabled
-        assert!(snap.should_tunnel_by_port_fallback(55000, Protocol::Tcp, true));
-        // TCP port fallback should NOT work when api_tunneling is disabled
+        // TCP ownership is still published for Route Assist handshake checks,
+        // but port fallback routing remains UDP-only.
+        assert!(snap.tunnel_tcp_ports.contains(&55000));
+        assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Tcp, true));
         assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Tcp, false));
         // UDP port fallback is unchanged regardless of api_tunneling
         assert!(!snap.should_tunnel_by_port_fallback(55000, Protocol::Udp, false));
@@ -1510,8 +1515,8 @@ mod tests {
         let first_snapshot = cache.get_snapshot();
         let first_version = first_snapshot.version;
 
-        assert!(first_snapshot.should_tunnel_by_port_fallback(443, Protocol::Tcp, true));
-        assert!(first_snapshot.should_tunnel_by_port_fallback(50000, Protocol::Tcp, true));
+        assert!(first_snapshot.tunnel_tcp_ports.contains(&443));
+        assert!(first_snapshot.tunnel_tcp_ports.contains(&50000));
         assert!(!first_snapshot.should_tunnel_by_port_fallback(443, Protocol::Tcp, false));
         drop(first_snapshot);
 
@@ -1530,8 +1535,8 @@ mod tests {
         cache.update(connections, pid_names);
 
         let updated = cache.get_snapshot();
-        assert!(updated.should_tunnel_by_port_fallback(443, Protocol::Tcp, true));
-        assert!(updated.should_tunnel_by_port_fallback(50000, Protocol::Tcp, true));
+        assert!(updated.tunnel_tcp_ports.contains(&443));
+        assert!(updated.tunnel_tcp_ports.contains(&50000));
     }
 
     #[test]
@@ -1549,8 +1554,8 @@ mod tests {
 
         let snap = cache.get_snapshot();
         assert!(snap.should_tunnel(Ipv4Addr::new(10, 0, 0, 20), 53000, Protocol::Tcp));
-        assert!(snap.should_tunnel_by_port_fallback(443, Protocol::Tcp, true));
-        assert!(snap.should_tunnel_by_port_fallback(53000, Protocol::Tcp, true));
+        assert!(snap.tunnel_tcp_ports.contains(&443));
+        assert!(snap.tunnel_tcp_ports.contains(&53000));
     }
 
     #[test]
@@ -1563,11 +1568,7 @@ mod tests {
             &[53000],
             Duration::from_secs(30),
         );
-        assert!(
-            cache
-                .get_snapshot()
-                .should_tunnel_by_port_fallback(53000, Protocol::Tcp, true)
-        );
+        assert!(cache.get_snapshot().tunnel_tcp_ports.contains(&53000));
 
         cache.update_with_recent_tcp_ports(
             HashMap::new(),
@@ -1575,11 +1576,7 @@ mod tests {
             &[],
             Duration::from_secs(30),
         );
-        assert!(
-            cache
-                .get_snapshot()
-                .should_tunnel_by_port_fallback(53000, Protocol::Tcp, true)
-        );
+        assert!(cache.get_snapshot().tunnel_tcp_ports.contains(&53000));
 
         std::thread::sleep(Duration::from_millis(2));
         cache.update_with_recent_tcp_ports(
@@ -1588,10 +1585,6 @@ mod tests {
             &[],
             Duration::from_millis(1),
         );
-        assert!(
-            !cache
-                .get_snapshot()
-                .should_tunnel_by_port_fallback(53000, Protocol::Tcp, true)
-        );
+        assert!(!cache.get_snapshot().tunnel_tcp_ports.contains(&53000));
     }
 }

@@ -6791,12 +6791,14 @@ where
     };
     let is_tcp_initial_syn =
         tcp_flags.is_some_and(|flags| (flags & 0x02) != 0 && (flags & 0x10) == 0);
+    let cache_key = (src_ip, src_port, protocol);
 
     // Phase 1: Check snapshot cache (fast path, O(1))
     //
     // IMPORTANT: This is process-based only. Destination-based speculative tunneling
     // is handled below so we can seed the inline cache for game-server hits.
-    if snapshot.should_tunnel(src_ip, src_port, protocol) {
+    let snapshot_tunnel_hit = snapshot.should_tunnel(src_ip, src_port, protocol);
+    if snapshot_tunnel_hit && !(protocol == Protocol::Tcp && api_tunneling) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         let result =
             super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
@@ -6811,11 +6813,16 @@ where
         }
         return result;
     }
-    SNAPSHOT_MISSES.with(|c| c.set(c.get() + 1));
+    if snapshot_tunnel_hit {
+        // Process ownership alone is not a Route Assist TCP decision. The packet
+        // must still flow through the captured-SYN/inline-cache phases below so
+        // cache phase counters stay mutually exclusive.
+    } else {
+        SNAPSHOT_MISSES.with(|c| c.set(c.get() + 1));
+    }
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
     // Cache ONLY stores TRUE results (v0.9.25) - finding key means it's a tunnel app
-    let cache_key = (src_ip, src_port, protocol);
     if inline_cache.contains_key(&cache_key) {
         INLINE_HITS.with(|c| c.set(c.get() + 1));
         let result =
@@ -6835,8 +6842,13 @@ where
     // Phase 3: Port-level fallback for tunnel PIDs.
     // Handles cache misses caused by local IP representation drift while keeping
     // routing decision tied to known tunnel-owned ports.
+    //
+    // TCP is deliberately excluded here. Route Assist must see and MSS-clamp the
+    // SYN before it owns a TCP flow; otherwise pre-existing Roblox HTTPS
+    // connections can be half-moved into the relay and later dropped as
+    // oversized packets.
     let mut is_tunnel_app = false;
-    if (protocol == Protocol::Udp || (protocol == Protocol::Tcp && api_tunneling))
+    if protocol == Protocol::Udp
         && snapshot.should_tunnel_by_port_fallback(src_port, protocol, api_tunneling)
     {
         is_tunnel_app = true;
@@ -10577,7 +10589,9 @@ mod tests {
 
     #[test]
     fn test_tcp_tunneled_with_api_tunneling_enabled() {
-        // TCP from a Roblox process should be tunneled when api_tunneling is enabled
+        // TCP from a Roblox process is handshake-gated when api_tunneling is
+        // enabled. Existing connections whose SYN SwiftTunnel missed must not
+        // be pulled into the relay midstream, but captured SYNs should route.
         let src_ip = Ipv4Addr::new(192, 168, 1, 100);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 50000;
@@ -10613,14 +10627,25 @@ mod tests {
             false,
         ));
 
-        // With api_tunneling: TCP SHOULD be tunneled
+        // With api_tunneling: established TCP without a captured SYN should
+        // still bypass.
         inline_cache.clear();
-        assert!(should_route_to_vpn_with_inline_cache(
+        assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
             &mut inline_cache,
             true,
         ));
+        assert!(inline_cache.is_empty());
+
+        let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
+        assert!(should_route_to_vpn_with_inline_cache(
+            &syn_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
     }
 
     #[test]
@@ -11119,6 +11144,117 @@ mod tests {
     }
 
     #[test]
+    fn test_tcp_api_tunneling_allows_tunnel_owned_http_syn_for_mss_clamp() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
+        let src_port = 40018;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(tunnel_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == tunnel_pid {
+                        Some("RobloxPlayerBeta.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_captured_roblox_syn_allows_follow_on_packet() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
+        let src_port = 40019;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let syn_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_api_ip, src_port, dst_port, 0x02);
+        let follow_on_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_api_ip, src_port, dst_port, 0x18);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &syn_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(tunnel_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == tunnel_pid {
+                        Some("RobloxPlayerBeta.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &follow_on_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |_ip, _port| None,
+                |_pid| None,
+            )
+        );
+    }
+
+    #[test]
     fn test_tcp_api_tunneling_allows_browser_owned_active_bootstrap_http_syn() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
@@ -11495,9 +11631,10 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_port_fallback_tunnels_with_api_tunneling() {
-        // TCP still tunnels when we can tie the source port back to a Roblox-owned
-        // connection, even if the exact local IP tuple is stale.
+    fn test_tcp_port_fallback_does_not_tunnel_established_api_tcp_without_captured_syn() {
+        // TCP must not tunnel just because the owner table has a Roblox source
+        // port. If SwiftTunnel missed the SYN, the connection was negotiated
+        // outside the relay and may advertise an unsafe MSS for Route Assist.
         let cached_ip = Ipv4Addr::new(10, 10, 10, 10);
         let packet_ip = Ipv4Addr::new(10, 10, 10, 11);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
@@ -11533,13 +11670,23 @@ mod tests {
         ));
 
         let mut cache_with_api: InlineCache = HashMap::new();
-        assert!(should_route_to_vpn_with_inline_cache(
+        assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
             &snapshot,
             &mut cache_with_api,
             true,
         ));
-        assert!(cache_with_api.contains_key(&(packet_ip, src_port, Protocol::Tcp)));
+        assert!(cache_with_api.is_empty());
+
+        let exact_owner_frame = build_ipv4_frame(6, cached_ip, dst_ip, src_port, dst_port);
+        let mut exact_owner_cache: InlineCache = HashMap::new();
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &exact_owner_frame,
+            &snapshot,
+            &mut exact_owner_cache,
+            true,
+        ));
+        assert!(exact_owner_cache.is_empty());
     }
 
     #[test]
@@ -11588,8 +11735,23 @@ mod tests {
         );
         let mut inline_cache: InlineCache = HashMap::new();
 
-        assert!(should_route_to_vpn_with_inline_cache(
+        assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(inline_cache.is_empty());
+
+        let syn_frame = build_ipv4_tcp_frame_with_flags(
+            Ipv4Addr::new(10, 0, 0, 99),
+            Ipv4Addr::new(128, 116, 50, 100),
+            roblox_port,
+            443,
+            0x02,
+        );
+        assert!(should_route_to_vpn_with_inline_cache(
+            &syn_frame,
             &snapshot,
             &mut inline_cache,
             true,
