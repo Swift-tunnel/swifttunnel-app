@@ -6566,7 +6566,13 @@ fn auto_routing_packet_action(
 /// Per-worker inline cache for connection lookups
 /// This amortizes the expensive GetExtendedTcpTable syscall across multiple packets
 /// from the same connection. First packet: ~500μs, subsequent packets: <1μs
-type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), bool>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InlineCacheEntry {
+    Active,
+    FinSeen,
+}
+
+type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), InlineCacheEntry>;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
 fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache, api_tunneling: bool) {
@@ -6838,22 +6844,49 @@ where
     // Phase 2: Check per-worker inline cache (fast path, O(1))
     // Cache ONLY stores TRUE results (v0.9.25) - finding key means it's a tunnel app
     if inline_cache.contains_key(&cache_key) {
-        INLINE_HITS.with(|c| c.set(c.get() + 1));
-        let result =
-            super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
-        if protocol == Protocol::Tcp && tcp_flags.is_some_and(|flags| (flags & 0x04) != 0) {
+        let recycled_tcp_syn = protocol == Protocol::Tcp
+            && is_tcp_initial_syn
+            && inline_cache
+                .get(&cache_key)
+                .is_some_and(|entry| *entry == InlineCacheEntry::FinSeen);
+        if recycled_tcp_syn {
             inline_cache.remove(&cache_key);
-        }
-        if protocol == Protocol::Udp && more_fragments {
-            FRAGMENT_DECISIONS.with(|cache| {
-                let mut cache = cache.borrow_mut();
-                if cache.len() >= 4096 {
-                    cache.clear();
+        } else {
+            INLINE_HITS.with(|c| c.set(c.get() + 1));
+            let evict_after_route = if protocol == Protocol::Tcp {
+                let entry = inline_cache
+                    .get_mut(&cache_key)
+                    .expect("checked contains_key");
+                let flags = tcp_flags.unwrap_or(0);
+                if (flags & 0x04) != 0 {
+                    true
+                } else if *entry == InlineCacheEntry::FinSeen {
+                    flags == 0x10 || (flags & 0x01) != 0
+                } else if (flags & 0x01) != 0 {
+                    *entry = InlineCacheEntry::FinSeen;
+                    false
+                } else {
+                    false
                 }
-                cache.insert(fragment_key, result);
-            });
+            } else {
+                false
+            };
+            let result =
+                super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
+            if evict_after_route {
+                inline_cache.remove(&cache_key);
+            }
+            if protocol == Protocol::Udp && more_fragments {
+                FRAGMENT_DECISIONS.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    if cache.len() >= 4096 {
+                        cache.clear();
+                    }
+                    cache.insert(fragment_key, result);
+                });
+            }
+            return result;
         }
-        return result;
     }
 
     // Phase 3: Port-level fallback for tunnel PIDs.
@@ -6884,7 +6917,7 @@ where
     // By only caching true results, we ensure that if a process wasn't found,
     // we keep trying on subsequent packets until it IS found.
     if is_tunnel_app && inline_cache.len() < 10000 {
-        inline_cache.insert(cache_key, true);
+        inline_cache.insert(cache_key, InlineCacheEntry::Active);
     }
 
     // Apply destination-based speculation if needed.
@@ -6987,7 +7020,7 @@ where
             if (protocol == Protocol::Udp || protocol == Protocol::Tcp)
                 && inline_cache.len() < 10000
             {
-                inline_cache.insert(cache_key, true);
+                inline_cache.insert(cache_key, InlineCacheEntry::Active);
             }
 
             true // Speculatively tunnel to game server
@@ -10211,7 +10244,7 @@ mod tests {
 
         let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Udp), true);
+        inline_cache.insert((src_ip, src_port, Protocol::Udp), InlineCacheEntry::Active);
 
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
@@ -10225,8 +10258,8 @@ mod tests {
     fn test_snapshot_refresh_keeps_tcp_inline_entries_and_clears_udp_when_api_tunneling() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, 40000, Protocol::Tcp), true);
-        inline_cache.insert((src_ip, 40001, Protocol::Udp), true);
+        inline_cache.insert((src_ip, 40000, Protocol::Tcp), InlineCacheEntry::Active);
+        inline_cache.insert((src_ip, 40001, Protocol::Udp), InlineCacheEntry::Active);
 
         prune_inline_cache_on_snapshot_refresh(&mut inline_cache, true);
 
@@ -10247,7 +10280,7 @@ mod tests {
         let fin_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
         let ack_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x10);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), true);
+        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
 
         assert!(should_route_to_vpn_with_inline_cache(
             &fin_frame,
@@ -10255,7 +10288,10 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert_eq!(
+            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
+            Some(&InlineCacheEntry::FinSeen)
+        );
 
         assert!(should_route_to_vpn_with_inline_cache(
             &ack_frame,
@@ -10263,7 +10299,7 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
     }
 
     #[test]
@@ -10275,10 +10311,30 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let rst_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x14);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), true);
+        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
 
         assert!(should_route_to_vpn_with_inline_cache(
             &rst_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_inline_cache_fin_seen_reclassifies_recycled_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(203, 0, 113, 20);
+        let src_port = 40000;
+        let dst_port = 443;
+        let snapshot = ProcessSnapshot::empty(HashSet::new());
+        let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::FinSeen);
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &syn_frame,
             &snapshot,
             &mut inline_cache,
             true,
@@ -10308,7 +10364,7 @@ mod tests {
 
         let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Udp), true);
+        inline_cache.insert((src_ip, src_port, Protocol::Udp), InlineCacheEntry::Active);
 
         assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
