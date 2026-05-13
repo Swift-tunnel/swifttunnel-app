@@ -6813,13 +6813,14 @@ where
         }
         return result;
     }
-    if snapshot_tunnel_hit {
-        // Process ownership alone is not a Route Assist TCP decision. The packet
-        // must still flow through the captured-SYN/inline-cache phases below so
-        // cache phase counters stay mutually exclusive.
-    } else {
+    if !snapshot_tunnel_hit {
+        // Snapshot miss: process ownership was not established, so the remaining
+        // phases (inline cache, port fallback, speculative) own the counter.
         SNAPSHOT_MISSES.with(|c| c.set(c.get() + 1));
     }
+    // When snapshot_tunnel_hit is true for TCP+api_tunneling, the packet falls
+    // through to the captured-SYN/inline-cache phases so those counters stay
+    // mutually exclusive with SNAPSHOT_HITS.
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
     // Cache ONLY stores TRUE results (v0.9.25) - finding key means it's a tunnel app
@@ -6848,9 +6849,7 @@ where
     // connections can be half-moved into the relay and later dropped as
     // oversized packets.
     let mut is_tunnel_app = false;
-    if protocol == Protocol::Udp
-        && snapshot.should_tunnel_by_port_fallback(src_port, protocol, api_tunneling)
-    {
+    if protocol == Protocol::Udp && snapshot.should_tunnel_by_port_fallback(src_port, protocol) {
         is_tunnel_app = true;
         PORT_FALLBACK_HITS.with(|c| c.set(c.get() + 1));
     }
