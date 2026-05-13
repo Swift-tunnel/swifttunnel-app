@@ -345,6 +345,7 @@ impl ProcessSnapshot {
     /// TCP Route Assist is intentionally excluded: the packet router must capture
     /// and MSS-clamp the SYN before owning a TCP flow, so TCP port ownership is
     /// metadata for handshake/speculation checks rather than a routing fallback.
+    /// Do not relax this without proving established TCP flows stay bypassed.
     #[inline]
     pub fn should_tunnel_by_port_fallback(
         &self,
