@@ -6577,7 +6577,8 @@ fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache, api_tu
 
     // UDP ownership entries must track the newest process snapshot, but captured
     // Route Assist TCP flows must survive owner-table refreshes after their SYN
-    // was MSS-clamped and relayed. FIN/RST packets evict TCP entries on close.
+    // was MSS-clamped and relayed. RST packets evict TCP entries immediately;
+    // FIN must stay cached so the final teardown ACK still uses the relay.
     inline_cache.retain(|(_, _, protocol), _| *protocol == Protocol::Tcp);
 }
 
@@ -6840,7 +6841,7 @@ where
         INLINE_HITS.with(|c| c.set(c.get() + 1));
         let result =
             super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
-        if protocol == Protocol::Tcp && tcp_flags.is_some_and(|flags| (flags & 0x05) != 0) {
+        if protocol == Protocol::Tcp && tcp_flags.is_some_and(|flags| (flags & 0x04) != 0) {
             inline_cache.remove(&cache_key);
         }
         if protocol == Protocol::Udp && more_fragments {
@@ -10237,18 +10238,47 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_inline_cache_hit_evicts_fin_after_routing() {
+    fn test_tcp_inline_cache_hit_keeps_fin_for_teardown_ack() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40000;
         let dst_port = 443;
         let snapshot = ProcessSnapshot::empty(HashSet::new());
-        let frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
+        let fin_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
+        let ack_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x10);
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert((src_ip, src_port, Protocol::Tcp), true);
 
         assert!(should_route_to_vpn_with_inline_cache(
-            &frame,
+            &fin_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &ack_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_inline_cache_hit_evicts_rst_after_routing() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 40000;
+        let dst_port = 443;
+        let snapshot = ProcessSnapshot::empty(HashSet::new());
+        let rst_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x14);
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, src_port, Protocol::Tcp), true);
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &rst_frame,
             &snapshot,
             &mut inline_cache,
             true,
