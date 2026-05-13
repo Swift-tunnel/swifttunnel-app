@@ -6844,11 +6844,7 @@ where
     // Phase 2: Check per-worker inline cache (fast path, O(1))
     // Cache ONLY stores TRUE results (v0.9.25) - finding key means it's a tunnel app
     if inline_cache.contains_key(&cache_key) {
-        let recycled_tcp_syn = protocol == Protocol::Tcp
-            && is_tcp_initial_syn
-            && inline_cache
-                .get(&cache_key)
-                .is_some_and(|entry| *entry == InlineCacheEntry::FinSeen);
+        let recycled_tcp_syn = protocol == Protocol::Tcp && is_tcp_initial_syn;
         if recycled_tcp_syn {
             inline_cache.remove(&cache_key);
         } else {
@@ -10332,6 +10328,26 @@ mod tests {
         let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::FinSeen);
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &syn_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+    }
+
+    #[test]
+    fn test_tcp_inline_cache_active_reclassifies_recycled_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(203, 0, 113, 20);
+        let src_port = 40000;
+        let dst_port = 443;
+        let snapshot = ProcessSnapshot::empty(HashSet::new());
+        let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
 
         assert!(!should_route_to_vpn_with_inline_cache(
             &syn_frame,
