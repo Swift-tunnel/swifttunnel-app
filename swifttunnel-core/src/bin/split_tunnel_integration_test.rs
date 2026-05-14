@@ -1,17 +1,17 @@
 mod testbench_shared;
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::Duration;
 
 use swifttunnel_core::settings::load_settings;
 use swifttunnel_core::vpn::{SplitTunnelDiagnostics, VpnConnection};
 use testbench_shared::{
-    DEFAULT_TCP_PROBE_COUNT, DEFAULT_TCP_PROBE_TARGET, DEFAULT_UDP_ECHO_PAYLOAD_BYTES,
-    DEFAULT_UDP_PROBE_COUNT, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS, DEFAULT_UDP_PROBE_TARGET,
-    connect_vpn, get_public_ip, init_logging, parse_common_cli_options, print_diagnostics,
-    print_preflight_summary, resolve_binding_preference, resolve_enable_api_tunneling,
-    resolve_region, resolve_test_exe,
+    DEFAULT_HTTPS_PROBE_URL, DEFAULT_TCP_PROBE_COUNT, DEFAULT_TCP_PROBE_TARGET,
+    DEFAULT_UDP_ECHO_PAYLOAD_BYTES, DEFAULT_UDP_PROBE_COUNT, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS,
+    DEFAULT_UDP_PROBE_TARGET, connect_vpn, get_public_ip, init_logging, parse_common_cli_options,
+    print_diagnostics, print_preflight_summary, resolve_binding_preference,
+    resolve_enable_api_tunneling, resolve_probe_process_name, resolve_region, resolve_test_exe,
 };
 
 fn print_usage() {
@@ -37,8 +37,10 @@ fn print_usage() {
     println!("  SWIFTTUNNEL_TEST_REGION");
     println!("  SWIFTTUNNEL_TEST_ADAPTER_GUID");
     println!("  SWIFTTUNNEL_TEST_TCP_TARGET");
+    println!("  SWIFTTUNNEL_TEST_HTTPS_GET_URL");
     println!("  SWIFTTUNNEL_TEST_CUSTOM_RELAY");
     println!("  SWIFTTUNNEL_TEST_ENABLE_API_TUNNELING");
+    println!("  --skip-manual-process-register");
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -136,6 +138,7 @@ async fn run_connected_checks(
     if !test_exe.exists() {
         return Err(format!("test executable not found: {}", test_exe.display()));
     }
+    let probe_process_name = resolve_probe_process_name(options);
 
     let udp_target = options
         .udp_target
@@ -196,21 +199,36 @@ async fn run_connected_checks(
             &port_file_arg,
         ]);
     }
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|e| format!("failed to spawn probe executable: {}", e))?;
 
     let child_pid = child.id();
     println!("Probe helper PID: {}", child_pid);
-    vpn.register_tunnel_process(child_pid, "ip_checker.exe")
-        .await
-        .map_err(|e| format!("failed to register probe process for tunneling: {}", e))?;
+    if options.skip_manual_process_register {
+        println!(
+            "Skipping manual probe process registration for {}; relying on process watcher",
+            probe_process_name
+        );
+    } else {
+        register_probe_process_or_stop(vpn, &mut child, &probe_process_name, "probe").await?;
+    }
 
-    let local_port = wait_for_probe_port(&port_file)?;
+    let local_port = match wait_for_probe_port(&port_file) {
+        Ok(port) => port,
+        Err(e) => {
+            stop_probe_child(&mut child, "probe port wait");
+            return Err(e);
+        }
+    };
     println!("Probe helper local UDP port: {}", local_port);
-    vpn.register_tunnel_udp_port(local_port)
-        .await
-        .map_err(|e| format!("failed to register probe UDP port for tunneling: {}", e))?;
+    if let Err(e) = vpn.register_tunnel_udp_port(local_port).await {
+        stop_probe_child(&mut child, "probe UDP port registration");
+        return Err(format!(
+            "failed to register probe UDP port for tunneling: {}",
+            e
+        ));
+    }
 
     let output = child
         .wait_with_output()
@@ -244,6 +262,7 @@ async fn run_connected_checks(
 
     if api_tunneling_enabled {
         run_tcp_api_probe_check(vpn, options, &after).await?;
+        run_https_api_probe_check(vpn, options).await?;
     } else {
         println!("Skipping TCP/API probe because API tunneling is disabled");
     }
@@ -257,6 +276,7 @@ async fn run_tcp_api_probe_check(
     before: &SplitTunnelDiagnostics,
 ) -> Result<(), String> {
     let test_exe = resolve_test_exe(options)?;
+    let probe_process_name = resolve_probe_process_name(options);
     let startup_delay_ms = DEFAULT_UDP_PROBE_STARTUP_DELAY_MS.to_string();
     let port_file = std::env::temp_dir().join(format!(
         "swifttunnel-probe-tcp-port-{}-{}.txt",
@@ -281,7 +301,7 @@ async fn run_tcp_api_probe_check(
         tcp_target,
         tcp_count
     );
-    let child = Command::new(&test_exe)
+    let mut child = Command::new(&test_exe)
         .args([
             "--tcp-probe",
             "--target",
@@ -298,11 +318,22 @@ async fn run_tcp_api_probe_check(
 
     let child_pid = child.id();
     println!("TCP probe helper PID: {}", child_pid);
-    vpn.register_tunnel_process(child_pid, "ip_checker.exe")
-        .await
-        .map_err(|e| format!("failed to register TCP probe process for tunneling: {}", e))?;
+    if options.skip_manual_process_register {
+        println!(
+            "Skipping manual TCP probe process registration for {}; relying on process watcher",
+            probe_process_name
+        );
+    } else {
+        register_probe_process_or_stop(vpn, &mut child, &probe_process_name, "TCP probe").await?;
+    }
 
-    let local_port = wait_for_probe_port(&port_file)?;
+    let local_port = match wait_for_probe_port(&port_file) {
+        Ok(port) => port,
+        Err(e) => {
+            stop_probe_child(&mut child, "TCP probe port wait");
+            return Err(e);
+        }
+    };
     println!("TCP probe helper local port: {}", local_port);
 
     let output = child
@@ -336,6 +367,109 @@ async fn run_tcp_api_probe_check(
     }
 
     Ok(())
+}
+
+async fn run_https_api_probe_check(
+    vpn: &mut VpnConnection,
+    options: &testbench_shared::CommonCliOptions,
+) -> Result<(), String> {
+    let before = vpn
+        .get_split_tunnel_diagnostics()
+        .ok_or_else(|| "missing split tunnel diagnostics before HTTPS probe".to_string())?;
+    let test_exe = resolve_test_exe(options)?;
+    let probe_process_name = resolve_probe_process_name(options);
+    let startup_delay_ms = DEFAULT_UDP_PROBE_STARTUP_DELAY_MS.to_string();
+    let url = options
+        .https_get_url
+        .clone()
+        .or_else(|| std::env::var("SWIFTTUNNEL_TEST_HTTPS_GET_URL").ok())
+        .unwrap_or_else(|| DEFAULT_HTTPS_PROBE_URL.to_string());
+
+    println!(
+        "Running tunneled HTTPS/API probe via {} to {}",
+        test_exe.display(),
+        url
+    );
+    let mut child = Command::new(&test_exe)
+        .args([
+            "--https-get",
+            "--url",
+            &url,
+            "--startup-delay-ms",
+            &startup_delay_ms,
+        ])
+        .spawn()
+        .map_err(|e| format!("failed to spawn HTTPS probe executable: {}", e))?;
+
+    let child_pid = child.id();
+    println!("HTTPS probe helper PID: {}", child_pid);
+    if options.skip_manual_process_register {
+        println!(
+            "Skipping manual HTTPS probe process registration for {}; relying on process watcher",
+            probe_process_name
+        );
+    } else {
+        register_probe_process_or_stop(vpn, &mut child, &probe_process_name, "HTTPS probe").await?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for HTTPS probe executable: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "HTTPS probe executable failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    if !output.stdout.is_empty() {
+        println!("{}", String::from_utf8_lossy(&output.stdout).trim());
+    }
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let after = vpn
+        .get_split_tunnel_diagnostics()
+        .ok_or_else(|| "missing split tunnel diagnostics after HTTPS probe".to_string())?;
+    print_diagnostics(&after);
+
+    if after.packets_tunneled <= before.packets_tunneled {
+        return Err(format!(
+            "expected HTTPS/API probe to increase tunneled packet counter (before={}, after={})",
+            before.packets_tunneled, after.packets_tunneled
+        ));
+    }
+
+    Ok(())
+}
+
+async fn register_probe_process_or_stop(
+    vpn: &mut VpnConnection,
+    child: &mut Child,
+    process_name: &str,
+    label: &str,
+) -> Result<(), String> {
+    if let Err(e) = vpn.register_tunnel_process(child.id(), process_name).await {
+        stop_probe_child(child, label);
+        return Err(format!(
+            "failed to register {} process for tunneling: {}",
+            label, e
+        ));
+    }
+    Ok(())
+}
+
+fn stop_probe_child(child: &mut Child, label: &str) {
+    if let Err(e) = child.kill() {
+        eprintln!(
+            "Failed to kill {} child process {}: {}",
+            label,
+            child.id(),
+            e
+        );
+    }
+    let _ = child.wait();
 }
 
 fn wait_for_probe_port(path: &Path) -> Result<u16, String> {

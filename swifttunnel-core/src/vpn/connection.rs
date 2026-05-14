@@ -7,6 +7,7 @@
 //! - Connection state tracking
 
 use super::local_connectivity::LocalConnectivity;
+use super::parallel_interceptor::WorkerPanicCause;
 use super::parallel_interceptor::{
     AdapterBindingPreference, QueueOverflowMode, ThroughputStats,
     is_point_to_point_default_route_context,
@@ -69,6 +70,13 @@ const CONNECT_FAIL_AUTH_REQUIRED: &str = "ST_CONNECT_AUTH_REQUIRED";
 const CONNECT_FAIL_POLICY_UNAVAILABLE: &str = "ST_CONNECT_POLICY_UNAVAILABLE";
 const CONNECT_FAIL_REGION_UNAVAILABLE: &str = "ST_CONNECT_REGION_UNAVAILABLE";
 
+/// Relay UDP port used *only* as a last-resort fallback when the resolved
+/// server list carried no relay candidate (and no custom relay is configured)
+/// to derive a port from. Normal connects use the per-relay `relay_port`
+/// advertised by `/api/vpn/servers`; reaching this constant means the server
+/// list was empty or malformed, which `setup_split_tunnel` logs as a warning.
+const FALLBACK_RELAY_PORT: u16 = 51821;
+
 static HANDSHAKE_TIMEOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
 static CANDIDATE_EXHAUSTED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static PREFLIGHT_ENFORCED_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -112,6 +120,20 @@ fn classify_relay_health(
 ) -> RelayHealthAction {
     use super::udp_relay::RelayHealthState;
 
+    if sender_panicked {
+        // The relay sender thread panicked or hit an unrecoverable send error.
+        // Every outbound game packet is silently dropped for the rest of this
+        // session, so the connection is effectively dead. Prefer this
+        // structured sender-failure signal even if relay health has also raced
+        // to Dead, so teardown records the primary failure instead of a generic
+        // relay-dead label.
+        return RelayHealthAction::Fatal {
+            error_message: "Relay connection failed - SwiftTunnel stopped the session because the outbound relay path failed. Please reconnect."
+                .to_string(),
+            cleanup_reason: "relay_sender_panicked",
+        };
+    }
+
     if health == RelayHealthState::Dead {
         // The relay-dead heuristic also fires when the user's own machine
         // loses internet (Wi-Fi blip, sleep/resume, ISP outage): keepalives
@@ -133,12 +155,6 @@ fn classify_relay_health(
         };
     }
 
-    if sender_panicked {
-        return RelayHealthAction::Continue {
-            relay_status: Some("panicked".to_string()),
-        };
-    }
-
     match health {
         RelayHealthState::Stale => RelayHealthAction::Continue {
             relay_status: Some("stale".to_string()),
@@ -147,6 +163,35 @@ fn classify_relay_health(
             RelayHealthAction::Continue { relay_status: None }
         }
         RelayHealthState::Dead => unreachable!("handled above"),
+    }
+}
+
+/// Maps a `WorkerPanicCause` to the user-facing error message and the
+/// teardown `cleanup_reason` marker. Pulled out as a pure function so the
+/// UI-contract wording is unit-testable.
+///
+/// `ReaderHandleLost` MUST keep wording that matches `isDriverMissing()` in
+/// swifttunnel-desktop/src/components/connect/connectState.ts — that helper
+/// substring-matches "split tunnel driver not available" AND "windows packet
+/// filter driver" (case-insensitive) to render the install-driver CTA.
+/// `InternalThreadFailed` MUST NOT contain those substrings: a panicked
+/// reader/inbound thread is an internal bug, not a missing driver, so the UI
+/// should offer a plain reconnect instead of a misleading reinstall prompt.
+fn worker_panic_error(cause: WorkerPanicCause) -> (String, &'static str) {
+    match cause {
+        WorkerPanicCause::ReaderHandleLost => (
+            "Split tunnel driver not available — the Windows Packet Filter driver lost \
+             its adapter handle and could not recover. Please reconnect, or reinstall \
+             the driver."
+                .to_string(),
+            "workers_panicked_recovery",
+        ),
+        WorkerPanicCause::InternalThreadFailed => (
+            "SwiftTunnel stopped the session because an internal networking thread failed \
+             unexpectedly. Please reconnect."
+                .to_string(),
+            "worker_thread_failed_recovery",
+        ),
     }
 }
 
@@ -1225,23 +1270,34 @@ impl VpnConnection {
             selected_relay_region = server_region.clone();
             *addr
         } else {
-            // No custom relay = use resolved server endpoint, forcing relay port 51821.
+            // No custom relay AND no relay candidate from the server list.
+            // This should not happen on a healthy connect — `/api/vpn/servers`
+            // carries a `relay_port` per relay — so we fall back to the
+            // resolved server endpoint with `FALLBACK_RELAY_PORT` and log it
+            // loudly rather than silently guessing a port.
+            log::warn!(
+                "V3: no relay candidate resolved; falling back to {} with hardcoded port {}",
+                config.endpoint,
+                FALLBACK_RELAY_PORT
+            );
             if let Ok(addr) = config.endpoint.parse::<SocketAddr>() {
-                SocketAddr::new(addr.ip(), 51821)
+                SocketAddr::new(addr.ip(), FALLBACK_RELAY_PORT)
             } else if let Ok(ip) = config.endpoint.parse::<std::net::IpAddr>() {
-                SocketAddr::new(ip, 51821)
+                SocketAddr::new(ip, FALLBACK_RELAY_PORT)
             } else {
                 let vpn_ip = config
                     .endpoint
                     .split(':')
                     .next()
                     .unwrap_or(&config.endpoint);
-                format!("{}:51821", vpn_ip).parse().map_err(|e| {
-                    VpnError::SplitTunnelSetupFailed(format!(
-                        "Invalid VPN server IP for relay: {}",
-                        e
-                    ))
-                })?
+                format!("{}:{}", vpn_ip, FALLBACK_RELAY_PORT)
+                    .parse()
+                    .map_err(|e| {
+                        VpnError::SplitTunnelSetupFailed(format!(
+                            "Invalid VPN server IP for relay: {}",
+                            e
+                        ))
+                    })?
             }
         };
 
@@ -1858,10 +1914,10 @@ impl VpnConnection {
             log::info!("V3: Currently tunneling: {:?}", running);
         }
 
-        // Capture the interceptor's panic flag before the driver moves into an
-        // Arc<Mutex<_>> — the monitor task needs lock-free access to poll it
-        // alongside relay_health and sender_panicked.
-        let workers_panicked_for_monitor = driver.workers_panicked_arc();
+        // Capture the interceptor's panic-cause flag before the driver moves
+        // into an Arc<Mutex<_>> — the monitor task needs lock-free access to
+        // poll it alongside relay_health and sender_panicked.
+        let workers_panic_cause_for_monitor = driver.workers_panic_cause_arc();
         let driver = Arc::new(Mutex::new(driver));
         self.split_tunnel = Some(Arc::clone(&driver));
 
@@ -1921,7 +1977,7 @@ impl VpnConnection {
         let auto_router_for_monitor = self.auto_router.clone();
         let process_performance_for_monitor = self.process_performance_manager.clone();
         let relay_health_monitor = relay_for_health;
-        let workers_panicked_monitor = workers_panicked_for_monitor;
+        let workers_panic_cause_monitor = workers_panic_cause_for_monitor;
 
         tokio::spawn(async move {
             log::info!("V3: Process monitor started");
@@ -2225,38 +2281,32 @@ impl VpnConnection {
                         {
                             let health = relay_health_monitor.relay_health();
 
-                            // `workers_panicked` means the split-tunnel reader
-                            // thread exhausted its rebind budget (see
-                            // `READER_MAX_REBINDS` in parallel_interceptor.rs)
-                            // or the V3 inbound receiver panicked — in either
-                            // case, zero packets will ever flow again in this
-                            // session. Previously we only dimmed `relay_status`
-                            // and the UI kept showing a green check. Now we
-                            // transition out of Connected so the UI can offer
-                            // reconnect + reinstall-driver CTAs.
-                            let workers_panicked = workers_panicked_monitor
+                            // A non-zero `workers_panic_cause` means a
+                            // split-tunnel thread failed and zero packets will
+                            // ever flow again in this session. The two causes
+                            // (see `WorkerPanicCause`) get distinct,
+                            // actionable error strings via `worker_panic_error`
+                            // — driver-handle loss renders the reinstall-driver
+                            // CTA, an internal thread panic renders a plain
+                            // reconnect. Previously both collapsed into one
+                            // "reinstall driver" message and the UI kept
+                            // showing a green check until then.
+                            let worker_panic_cause = workers_panic_cause_monitor
                                 .as_ref()
-                                .map(|f| f.load(Ordering::Acquire))
-                                .unwrap_or(false);
+                                .and_then(|f| {
+                                    WorkerPanicCause::from_u8(f.load(Ordering::Acquire))
+                                });
 
-                            if workers_panicked {
+                            if let Some(cause) = worker_panic_cause {
+                                let (error_message, cleanup_reason) =
+                                    worker_panic_error(cause);
                                 let transitioned = state_handle.send_if_modified(|state| {
                                     if matches!(*state, ConnectionState::Connected { .. }) {
                                         log::error!(
-                                            "V3: Split-tunnel reader could not recover — transitioning Connected → Error"
+                                            "V3: split-tunnel worker failure ({:?}) — transitioning Connected → Error",
+                                            cause
                                         );
-                                        // Wording MUST match `isDriverMissing()` in
-                                        // swifttunnel-desktop/src/components/connect/connectState.ts
-                                        // so the UI renders the install-driver CTA instead of plain
-                                        // text. That helper substring-matches on
-                                        // "split tunnel driver not available" AND
-                                        // "windows packet filter driver" (case-insensitive).
-                                        *state = ConnectionState::Error(
-                                            "Split tunnel driver not available — the Windows Packet Filter driver lost \
-                                             its adapter handle and could not recover. Please reconnect, or reinstall \
-                                             the driver."
-                                                .to_string(),
-                                        );
+                                        *state = ConnectionState::Error(error_message.clone());
                                         true
                                     } else {
                                         false
@@ -2289,7 +2339,7 @@ impl VpnConnection {
                                     }
                                     if let Some(ref manager) = process_performance_for_monitor {
                                         let mut guard = manager.lock().await;
-                                        guard.cleanup_all("workers_panicked_recovery");
+                                        guard.cleanup_all(cleanup_reason);
                                     }
                                     break;
                                 }
@@ -2889,6 +2939,123 @@ mod tests {
         );
 
         assert_eq!(action, RelayHealthAction::Continue { relay_status: None });
+    }
+
+    #[test]
+    fn test_sender_panicked_is_fatal_even_when_relay_health_looks_ok() {
+        // A panicked relay sender thread drops every outbound packet, but the
+        // keepalive bookkeeping that escalates `relay_health` to `Dead` lags
+        // ~60s behind. The monitor must tear the session down immediately on
+        // the `sender_panicked` signal instead of waiting for that timeout.
+        for health in [
+            super::super::udp_relay::RelayHealthState::Healthy,
+            super::super::udp_relay::RelayHealthState::NoTrafficYet,
+            super::super::udp_relay::RelayHealthState::Stale,
+        ] {
+            let action = classify_relay_health(health, true, LocalConnectivity::Unknown);
+            match action {
+                RelayHealthAction::Fatal {
+                    error_message,
+                    cleanup_reason,
+                } => {
+                    assert!(
+                        error_message.contains("outbound relay path failed"),
+                        "expected sender-panic message, got: {error_message}"
+                    );
+                    assert_eq!(cleanup_reason, "relay_sender_panicked");
+                }
+                RelayHealthAction::Continue { .. } => {
+                    panic!("a panicked sender must not remain connected (health={health:?})")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_sender_panicked_keeps_cleanup_reason_when_relay_also_dead() {
+        // Positive race fallback for W1: if the sender failure and relay-dead
+        // heuristic are both visible in the same monitor tick, preserve the
+        // structured sender-failure cleanup reason instead of masking it as a
+        // generic dead relay.
+        let action = classify_relay_health(
+            super::super::udp_relay::RelayHealthState::Dead,
+            true,
+            LocalConnectivity::Reachable,
+        );
+
+        match action {
+            RelayHealthAction::Fatal {
+                error_message,
+                cleanup_reason,
+            } => {
+                assert!(error_message.contains("outbound relay path failed"));
+                assert_eq!(cleanup_reason, "relay_sender_panicked");
+            }
+            RelayHealthAction::Continue { .. } => {
+                panic!("a panicked sender must not remain connected even when relay is dead")
+            }
+        }
+    }
+
+    #[test]
+    fn test_healthy_relay_without_sender_panic_stays_connected() {
+        // Negative companion to the test above: the fatal path must fire only
+        // for the actual `sender_panicked` signal, not for an otherwise
+        // healthy relay. Guards against the W1 fix over-triggering.
+        let action = classify_relay_health(
+            super::super::udp_relay::RelayHealthState::Healthy,
+            false,
+            LocalConnectivity::Unknown,
+        );
+        assert_eq!(action, RelayHealthAction::Continue { relay_status: None });
+    }
+
+    #[test]
+    fn test_worker_panic_error_reader_handle_lost_matches_driver_missing_ui_contract() {
+        // `isDriverMissing()` in connectState.ts substring-matches BOTH
+        // phrases (case-insensitive) to render the reinstall-driver CTA.
+        let (message, cleanup_reason) = worker_panic_error(WorkerPanicCause::ReaderHandleLost);
+        let lower = message.to_lowercase();
+        assert!(
+            lower.contains("split tunnel driver not available"),
+            "ReaderHandleLost message must trip isDriverMissing(): {message}"
+        );
+        assert!(
+            lower.contains("windows packet filter driver"),
+            "ReaderHandleLost message must trip isDriverMissing(): {message}"
+        );
+        assert_eq!(cleanup_reason, "workers_panicked_recovery");
+    }
+
+    #[test]
+    fn test_worker_panic_error_internal_thread_failed_avoids_driver_missing_ui_contract() {
+        // An internal thread panic is NOT a missing driver — the message must
+        // NOT trip `isDriverMissing()`, so the UI offers a plain reconnect
+        // instead of a misleading reinstall-driver prompt.
+        let (message, cleanup_reason) = worker_panic_error(WorkerPanicCause::InternalThreadFailed);
+        let lower = message.to_lowercase();
+        assert!(
+            !lower.contains("split tunnel driver not available"),
+            "InternalThreadFailed message must not trip isDriverMissing(): {message}"
+        );
+        assert!(
+            !lower.contains("windows packet filter driver"),
+            "InternalThreadFailed message must not trip isDriverMissing(): {message}"
+        );
+        assert_eq!(cleanup_reason, "worker_thread_failed_recovery");
+    }
+
+    #[test]
+    fn test_worker_panic_cause_u8_round_trips() {
+        for cause in [
+            WorkerPanicCause::ReaderHandleLost,
+            WorkerPanicCause::InternalThreadFailed,
+        ] {
+            assert_eq!(WorkerPanicCause::from_u8(cause.as_u8()), Some(cause));
+        }
+        // 0 is the "still running" sentinel and must never decode to a cause.
+        assert_eq!(WorkerPanicCause::from_u8(0), None);
+        assert_eq!(WorkerPanicCause::from_u8(99), None);
     }
 
     /// Default relay health for tests where the relay-health gate isn't

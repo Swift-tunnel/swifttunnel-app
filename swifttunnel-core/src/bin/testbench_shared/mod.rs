@@ -17,6 +17,8 @@ pub const DEFAULT_UDP_ECHO_PAYLOAD_BYTES: usize = 1200;
 pub const DEFAULT_UDP_PROBE_STARTUP_DELAY_MS: u64 = 1500;
 pub const DEFAULT_TCP_PROBE_TARGET: &str = "www.roblox.com:80";
 pub const DEFAULT_TCP_PROBE_COUNT: usize = 5;
+pub const DEFAULT_HTTPS_PROBE_URL: &str =
+    "https://clientsettingscdn.roblox.com/v2/settings/application/PCDesktopClient";
 
 #[derive(Debug, Clone, Default)]
 pub struct CommonCliOptions {
@@ -32,8 +34,10 @@ pub struct CommonCliOptions {
     pub udp_payload_bytes: Option<usize>,
     pub tcp_target: Option<String>,
     pub tcp_count: Option<usize>,
+    pub https_get_url: Option<String>,
     pub custom_relay_server: Option<String>,
     pub enable_api_tunneling: bool,
+    pub skip_manual_process_register: bool,
 }
 
 pub fn init_logging() {
@@ -89,8 +93,10 @@ pub fn parse_common_cli_options(args: &[String]) -> Result<CommonCliOptions, Str
                     .map_err(|_| format!("Invalid integer for {}: {}", flag, raw))?;
                 opts.tcp_count = Some(count);
             }
+            "--https-get-url" => opts.https_get_url = Some(next(flag, &mut idx)?),
             "--custom-relay" => opts.custom_relay_server = Some(next(flag, &mut idx)?),
             "--enable-api-tunneling" => opts.enable_api_tunneling = true,
+            "--skip-manual-process-register" => opts.skip_manual_process_register = true,
             "--help" | "-h" => return Err("help".to_string()),
             other => return Err(format!("Unknown argument: {}", other)),
         }
@@ -262,6 +268,16 @@ pub fn resolve_test_exe(opts: &CommonCliOptions) -> Result<PathBuf, String> {
         return Err("Current executable has no parent directory".to_string());
     };
     Ok(dir.join("ip_checker.exe"))
+}
+
+pub fn resolve_probe_process_name(opts: &CommonCliOptions) -> String {
+    opts.test_exe
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("ip_checker.exe")
+        .to_string()
 }
 
 pub fn get_public_ip() -> Result<String, String> {
@@ -550,6 +566,50 @@ pub fn run_tcp_probe(
     Ok(())
 }
 
+pub async fn run_https_get_probe(url: &str, startup_delay_ms: u64) -> Result<(), String> {
+    // Give the parent process time to register the helper PID before any TCP
+    // SYN is emitted.
+    tokio::time::sleep(Duration::from_millis(startup_delay_ms)).await;
+
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("SwiftTunnel-Testbench/1.0")
+        .build()
+        .map_err(|e| format!("Failed to build HTTPS probe client: {}", e))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTPS GET '{}' failed: {}", url, e))?;
+
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("HTTPS GET '{}' response read failed: {}", url, e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "HTTPS GET '{}' returned {} ({} bytes)",
+            url,
+            status,
+            bytes.len()
+        ));
+    }
+
+    if bytes.is_empty() {
+        return Err(format!("HTTPS GET '{}' returned an empty response", url));
+    }
+
+    println!(
+        "HTTPS GET probe response summary: url={} status={} response_bytes={}",
+        url,
+        status,
+        bytes.len()
+    );
+
+    Ok(())
+}
+
 pub async fn connect_vpn(
     vpn: &mut VpnConnection,
     opts: &CommonCliOptions,
@@ -560,10 +620,19 @@ pub async fn connect_vpn(
     let region = resolve_region(opts);
     let available_servers = load_available_servers().await?;
 
+    let mut tunnel_apps = vec!["ip_checker.exe".to_string()];
+    let probe_process_name = resolve_probe_process_name(opts);
+    if !tunnel_apps
+        .iter()
+        .any(|app| app.eq_ignore_ascii_case(&probe_process_name))
+    {
+        tunnel_apps.push(probe_process_name);
+    }
+
     vpn.connect(
         &access_token,
         &region,
-        vec!["ip_checker.exe".to_string()],
+        tunnel_apps,
         resolve_custom_relay_server(opts, settings),
         false,
         settings.config.network_settings.gaming_qos,

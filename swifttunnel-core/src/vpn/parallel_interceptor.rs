@@ -48,7 +48,7 @@ use std::net::Ipv4Addr;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -94,6 +94,53 @@ const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
     Duration::from_millis(500),
     Duration::from_secs(2),
 ];
+
+/// Why the split-tunnel interceptor's internal threads stopped, surfaced to
+/// the connection monitor so it can pick an actionable error message instead
+/// of collapsing distinct failures into one string.
+///
+/// Stored in an `AtomicU8` (`workers_panic_cause`); a value of `0` means the
+/// threads are still running. The two variants map to the two things the user
+/// can actually do about it:
+///
+/// - `ReaderHandleLost` — the packet reader could not acquire or hold its NDIS
+///   adapter handle (rebind budget exhausted, initial acquire failed, a
+///   route-change restart failed, or the reader thread had to be abandoned on
+///   a join timeout). This is the driver-handle-loss class; the UI should
+///   offer the reinstall-driver CTA.
+/// - `InternalThreadFailed` — the packet reader thread or the V3 inbound
+///   receiver thread panicked, or the inbound receiver returned a fatal error.
+///   The driver is fine; this is an internal bug, so the UI should offer a
+///   plain reconnect rather than a misleading "reinstall driver" prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerPanicCause {
+    ReaderHandleLost,
+    InternalThreadFailed,
+}
+
+impl WorkerPanicCause {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            WorkerPanicCause::ReaderHandleLost => 1,
+            WorkerPanicCause::InternalThreadFailed => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(WorkerPanicCause::ReaderHandleLost),
+            2 => Some(WorkerPanicCause::InternalThreadFailed),
+            _ => None,
+        }
+    }
+}
+
+/// Records the first worker-panic cause to occur this session. First write
+/// wins: a later generic teardown (e.g. the reader join timeout in `stop()`)
+/// must not clobber the specific cause the failing thread already reported.
+fn record_worker_panic_cause(flag: &AtomicU8, cause: WorkerPanicCause) {
+    let _ = flag.compare_exchange(0, cause.as_u8(), Ordering::AcqRel, Ordering::Acquire);
+}
 
 /// TCP owner-table refresh cadence while API tunneling is active and a tunnel
 /// process is present. Teleport/API HTTPS flows can be brief, so the normal
@@ -854,10 +901,11 @@ pub struct ParallelInterceptor {
     relay_ctx: Option<Arc<super::udp_relay::UdpRelay>>,
     /// Inbound receiver thread handle (reads from UdpRelay)
     inbound_receiver_handle: Option<JoinHandle<()>>,
-    /// Set to true if any internal thread (inbound receiver, reader, workers)
-    /// panics. The connection state machine polls this so a worker panic surfaces
-    /// as a real error instead of a silently frozen tunnel.
-    workers_panicked: Arc<AtomicBool>,
+    /// Set to a non-zero `WorkerPanicCause` discriminant if any internal thread
+    /// (inbound receiver, reader, workers) panics or loses its adapter handle.
+    /// The connection state machine polls this so a worker failure surfaces as
+    /// a real, *cause-specific* error instead of a silently frozen tunnel.
+    workers_panic_cause: Arc<AtomicU8>,
     /// Detected game server IPs (for notification purposes)
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
     /// Flag to trigger immediate cache refresh (set by ETW when game process detected)
@@ -933,7 +981,7 @@ impl ParallelInterceptor {
             throughput_stats: ThroughputStats::default(),
             relay_ctx: None,
             inbound_receiver_handle: None,
-            workers_panicked: Arc::new(AtomicBool::new(false)),
+            workers_panic_cause: Arc::new(AtomicU8::new(0)),
             detected_game_servers: Arc::new(parking_lot::RwLock::new(
                 std::collections::HashSet::new(),
             )),
@@ -3932,15 +3980,15 @@ impl ParallelInterceptor {
         self.disable_ipv6()?;
 
         self.stop_flag.store(false, Ordering::Release);
-        // Reset the panic flag alongside stop_flag. `workers_panicked` is
-        // written `true` by the reader/inbound-receiver threads on panic or
-        // budget exhaustion, and is never cleared. Without this reset, a
+        // Reset the panic cause alongside stop_flag. `workers_panic_cause` is
+        // written by the reader/inbound-receiver threads on panic or budget
+        // exhaustion, and is never cleared on its own. Without this reset, a
         // subsequent `stop()`+`start()` on the same `ParallelInterceptor`
         // (e.g. via `maybe_rebind_on_default_route_change`) would start with
-        // the flag already asserted, and the next monitor tick would
+        // the cause already asserted, and the next monitor tick would
         // immediately transition the freshly-restarted session
         // Connected→Error.
-        self.workers_panicked.store(false, Ordering::Release);
+        self.workers_panic_cause.store(0, Ordering::Release);
         self.active = true;
 
         // Create channels for workers
@@ -4025,14 +4073,16 @@ impl ParallelInterceptor {
                 VpnError::SplitTunnel("Physical adapter name not set".to_string())
             })?);
 
-        let reader_panicked_flag = Arc::clone(&self.workers_panicked);
+        let reader_panic_cause_flag = Arc::clone(&self.workers_panic_cause);
         self.reader_handle = Some(thread::spawn(move || {
             // Wrap in catch_unwind so we can distinguish graceful shutdown
             // (stop_flag set by disconnect or a sibling thread) from a reader
             // failure. The reader's L3 error branch already sets stop_flag to
-            // propagate shutdown to other threads, so we also set
-            // workers_panicked here so the connection monitor can surface the
-            // failure instead of treating it as a clean disconnect.
+            // propagate shutdown to other threads, so we also record the
+            // panic cause here so the connection monitor can surface the
+            // failure instead of treating it as a clean disconnect. A reader
+            // *error* return is the driver-handle-loss class (rebind budget
+            // exhausted / acquire failed); a reader *panic* is an internal bug.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 run_packet_reader(
                     physical_idx,
@@ -4055,10 +4105,16 @@ impl ParallelInterceptor {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     log::error!("Packet reader error: {}", e);
-                    reader_panicked_flag.store(true, Ordering::Release);
+                    record_worker_panic_cause(
+                        &reader_panic_cause_flag,
+                        WorkerPanicCause::ReaderHandleLost,
+                    );
                 }
                 Err(panic_payload) => {
-                    reader_panicked_flag.store(true, Ordering::Release);
+                    record_worker_panic_cause(
+                        &reader_panic_cause_flag,
+                        WorkerPanicCause::InternalThreadFailed,
+                    );
                     let msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
                         (*s).to_string()
                     } else if let Some(s) = panic_payload.downcast_ref::<String>() {
@@ -4078,26 +4134,36 @@ impl ParallelInterceptor {
                     let relay = Arc::clone(relay_ctx);
                     let inbound_stop = Arc::clone(&self.stop_flag);
                     let throughput = self.throughput_stats.clone();
-                    let panicked_flag = Arc::clone(&self.workers_panicked);
+                    let panic_cause_flag = Arc::clone(&self.workers_panic_cause);
 
                     self.inbound_receiver_handle = Some(thread::spawn(move || {
-                        // Wrap in catch_unwind so a panic surfaces via workers_panicked
-                        // instead of silently halting the injection path — otherwise the
-                        // tunnel appears "connected" with zero throughput.
+                        // Wrap in catch_unwind so a panic surfaces via
+                        // workers_panic_cause instead of silently halting the
+                        // injection path — otherwise the tunnel appears
+                        // "connected" with zero throughput. Both a fatal error
+                        // return and a panic are the InternalThreadFailed class:
+                        // the NDIS adapter handle is still valid, the injection
+                        // thread itself died.
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             run_v3_inbound_receiver(relay, config, inbound_stop, throughput)
                         }));
                         match result {
                             Ok(Ok(())) => {}
                             Ok(Err(e)) => {
-                                panicked_flag.store(true, Ordering::Release);
+                                record_worker_panic_cause(
+                                    &panic_cause_flag,
+                                    WorkerPanicCause::InternalThreadFailed,
+                                );
                                 log::error!(
                                     "V3 inbound receiver exited fatally — injection halted: {}",
                                     e
                                 );
                             }
                             Err(panic_payload) => {
-                                panicked_flag.store(true, Ordering::Release);
+                                record_worker_panic_cause(
+                                    &panic_cause_flag,
+                                    WorkerPanicCause::InternalThreadFailed,
+                                );
                                 let msg =
                                     if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
                                         (*s).to_string()
@@ -4140,7 +4206,15 @@ impl ParallelInterceptor {
         // Wait for threads with timeout to prevent hanging on stuck threads
         if let Some(handle) = self.reader_handle.take() {
             if !join_with_timeout(handle, "Reader") {
-                self.workers_panicked.store(true, Ordering::Release);
+                // The reader thread is wedged inside ndisapi and had to be
+                // abandoned — its adapter handle is effectively lost. First
+                // write wins, so if the reader already reported its own cause
+                // (panic / budget exhaustion) before getting stuck, that
+                // more-specific cause is preserved.
+                record_worker_panic_cause(
+                    &self.workers_panic_cause,
+                    WorkerPanicCause::ReaderHandleLost,
+                );
                 super::split_tunnel::SplitTunnelDriver::cleanup_stale_state();
             }
         }
@@ -4358,7 +4432,12 @@ impl ParallelInterceptor {
         }
 
         if let Err(e) = self.start() {
-            self.workers_panicked.store(true, Ordering::Release);
+            // Restart after a route change failed to re-acquire the adapter —
+            // driver-handle-loss class.
+            record_worker_panic_cause(
+                &self.workers_panic_cause,
+                WorkerPanicCause::ReaderHandleLost,
+            );
             return Err(e);
         }
         if let (Some(old_name), Some(new_name)) = (
@@ -4406,14 +4485,20 @@ impl ParallelInterceptor {
     /// this so a worker failure surfaces as a user-visible error instead of a
     /// silent stall.
     pub fn workers_panicked(&self) -> bool {
-        self.workers_panicked.load(Ordering::Acquire)
+        self.workers_panic_cause.load(Ordering::Acquire) != 0
     }
 
-    /// Returns a clone of the internal `workers_panicked` flag so async tasks
+    /// Returns the specific cause of the worker failure, if one has occurred.
+    pub fn workers_panic_cause(&self) -> Option<WorkerPanicCause> {
+        WorkerPanicCause::from_u8(self.workers_panic_cause.load(Ordering::Acquire))
+    }
+
+    /// Returns a clone of the internal `workers_panic_cause` flag so async tasks
     /// (e.g. the connection monitor in `connection.rs`) can observe it without
-    /// holding a reference to this interceptor.
-    pub fn workers_panicked_arc(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.workers_panicked)
+    /// holding a reference to this interceptor. Decode with
+    /// [`WorkerPanicCause::from_u8`].
+    pub fn workers_panic_cause_arc(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.workers_panic_cause)
     }
 
     /// Get snapshot for external use

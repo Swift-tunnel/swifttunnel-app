@@ -175,6 +175,22 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # This job shares the testbench runner workspace with release.yml.
+          # GitHub-backed caches do not help release tags, so preserve the
+          # runner-local Cargo outputs for the next release run.
+          clean: false
+
+      - name: Clean workspace but keep local Cargo outputs
+        shell: powershell
+        run: |
+          git reset --hard HEAD
+          git clean -ffdx -e target/ -e swifttunnel-desktop/src-tauri/target/
+          $bundleDirs = @(
+            "target/release/bundle",
+            "swifttunnel-desktop/src-tauri/target/release/bundle"
+          )
+          Remove-Item -Path $bundleDirs -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Ensure Git Bash
         shell: powershell

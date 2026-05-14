@@ -113,7 +113,7 @@ pub struct RobloxSettingsConfig {
     pub window_height: u32,
     #[serde(default = "default_roblox_window_fullscreen")]
     pub window_fullscreen: bool,
-    /// Ultraboost: applies all allowlisted performance FFlags for maximum FPS
+    /// Ultraboost: applies curated allowlisted performance FFlags for maximum FPS
     #[serde(default)]
     pub ultraboost: bool,
 }
@@ -459,8 +459,8 @@ pub mod boost_info {
         id: "ultraboost",
         title: "Ultraboost",
         short_desc: "Max performance FFlags",
-        long_desc: "Applies all Roblox-allowlisted performance FFlags for maximum FPS. Disables shadows, post-processing, grass, DPI scaling, and forces D3D11 with lowest texture and render quality. Significant visual reduction for maximum frame rates.",
-        impact: "+20-40% FPS",
+        long_desc: "Applies curated Roblox-allowlisted performance FFlags for maximum FPS. Forces D3D11 with minimum texture, render quality, anti-aliasing, sky, and grass settings while avoiding high-DPI sharpness flags that can cost frames.",
+        impact: "Maximum FPS preset",
         risk_level: RiskLevel::Safe,
         requires_admin: false,
     };

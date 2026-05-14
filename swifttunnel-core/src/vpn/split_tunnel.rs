@@ -25,7 +25,7 @@ use crate::utils::normalize_guid_ascii_lowercase;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 const DRIVER_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -299,13 +299,14 @@ impl SplitTunnelDriver {
         }
     }
 
-    /// Returns a handle to the interceptor's `workers_panicked` flag so
+    /// Returns a handle to the interceptor's `workers_panic_cause` flag so
     /// long-lived async monitors can observe reader/inbound-receiver failures
-    /// without holding a reference to the driver.
-    pub fn workers_panicked_arc(&self) -> Option<Arc<AtomicBool>> {
+    /// (and their specific cause) without holding a reference to the driver.
+    /// Decode the loaded `u8` with `WorkerPanicCause::from_u8`.
+    pub fn workers_panic_cause_arc(&self) -> Option<Arc<AtomicU8>> {
         self.parallel_interceptor
             .as_ref()
-            .map(|i| i.workers_panicked_arc())
+            .map(|i| i.workers_panic_cause_arc())
     }
 
     pub fn set_queue_overflow_mode(&mut self, mode: QueueOverflowMode) {
