@@ -723,7 +723,7 @@ impl RobloxOptimizer {
     //  ULTRABOOST FFLAGS
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// All allowlisted performance FFlags applied by Ultraboost
+    /// Allowlisted performance FFlags applied by Ultraboost.
     const ULTRABOOST_FFLAGS: &[(&str, &str)] = &[
         ("FFlagHandleAltEnterFullscreenManually", "False"),
         ("FFlagDebugGraphicsPreferD3D11", "True"),
@@ -735,7 +735,6 @@ impl RobloxOptimizer {
         ("FIntFRMMinGrassDistance", "0"),
         ("FIntFRMMaxGrassDistance", "0"),
         ("FIntGrassMovementReducedMotionFactor", "0"),
-        ("DFFlagDisableDPIScale", "True"),
     ];
 
     /// FFlag used by Bloxstrap-family bootstrappers for the framerate limiter.
@@ -749,6 +748,12 @@ impl RobloxOptimizer {
         "FFlagDisablePostFx",
         "FIntDebugTextureManagerSkipMips",
     ];
+
+    /// Former SwiftTunnel UltraBoost entries that should be removed from
+    /// existing ClientAppSettings. `DFFlagDisableDPIScale` is a valid Roblox
+    /// client flag, but it favors sharper high-DPI rendering over maximum FPS
+    /// so it is no longer written by Ultraboost.
+    const REMOVED_ULTRABOOST_FFLAGS: &[&str] = &["DFFlagDisableDPIScale"];
 
     /// Known Bloxstrap-family persistent ClientSettings locations under LOCALAPPDATA.
     ///
@@ -1023,9 +1028,9 @@ impl RobloxOptimizer {
     }
 
     /// Apply FFlag optimizations to ClientAppSettings.json
-    /// When ultraboost is enabled, writes all allowlisted performance FFlags.
+    /// When ultraboost is enabled, writes curated allowlisted performance FFlags.
     /// When FPS unlock is enabled, writes the bootstrapper-compatible FPS FFlag.
-    /// Always cleans up old blocked FFlags from previous versions.
+    /// Always cleans up old blocked or retired FFlags from previous versions.
     fn apply_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<FFlagApplyOutcome> {
         let should_write_fflags = config.ultraboost || config.unlock_fps;
         let client_settings_paths = Self::get_client_settings_paths(should_write_fflags)?;
@@ -1146,8 +1151,11 @@ impl RobloxOptimizer {
 
         let mut settings = Self::read_client_app_settings(&settings_path)?;
 
-        // Always clean up old blocked FFlags from previous versions
+        // Always clean up old blocked or retired FFlags from previous versions
         for key in Self::LEGACY_BLOCKED_FFLAGS {
+            settings.remove(*key);
+        }
+        for key in Self::REMOVED_ULTRABOOST_FFLAGS {
             settings.remove(*key);
         }
 
@@ -1244,6 +1252,9 @@ impl RobloxOptimizer {
 
                 // Remove old blocked FFlags (legacy cleanup)
                 for key in Self::LEGACY_BLOCKED_FFLAGS {
+                    settings.remove(*key);
+                }
+                for key in Self::REMOVED_ULTRABOOST_FFLAGS {
                     settings.remove(*key);
                 }
 
@@ -2034,6 +2045,47 @@ mod tests {
     }
 
     #[test]
+    fn fflag_apply_removes_retired_ultraboost_flags_when_enabled() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_retired_ultraboost");
+        let _ = fs::remove_dir_all(&dir);
+        let version = dir.join("Roblox").join("Versions").join("version-active");
+        let client_settings = version.join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        fs::write(version.join("RobloxPlayerBeta.exe"), "").unwrap();
+        fs::write(
+            client_settings.join("ClientAppSettings.json"),
+            r#"{
+  "DFFlagDisableDPIScale": "True",
+  "FStringUserOwnedFlag": "keep-me"
+}"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        opt.apply_client_fflags_for_local_app_data(&config, &dir)
+            .unwrap();
+
+        let content = fs::read_to_string(client_settings.join("ClientAppSettings.json")).unwrap();
+        let settings: HashMap<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            settings.get("FFlagDebugGraphicsPreferD3D11"),
+            Some(&serde_json::json!("True"))
+        );
+        assert!(!settings.contains_key("DFFlagDisableDPIScale"));
+        assert_eq!(
+            settings.get("FStringUserOwnedFlag"),
+            Some(&serde_json::json!("keep-me"))
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn fflag_apply_ignores_version_like_folder_without_player_exe() {
         let dir = std::env::temp_dir().join("roblox_opt_test_fflag_ignore_nearmiss");
         let _ = fs::remove_dir_all(&dir);
@@ -2378,8 +2430,8 @@ mod tests {
     fn ultraboost_fflags_count() {
         assert_eq!(
             RobloxOptimizer::ULTRABOOST_FFLAGS.len(),
-            11,
-            "Expected 11 ultraboost FFlags"
+            10,
+            "Expected 10 ultraboost FFlags"
         );
     }
 
@@ -2393,15 +2445,27 @@ mod tests {
     }
 
     #[test]
+    fn removed_ultraboost_fflags_count() {
+        assert_eq!(
+            RobloxOptimizer::REMOVED_ULTRABOOST_FFLAGS.len(),
+            1,
+            "Expected 1 retired ultraboost FFlag"
+        );
+    }
+
+    #[test]
     fn ultraboost_and_legacy_fflags_are_disjoint() {
         let ultraboost_keys: Vec<&str> = RobloxOptimizer::ULTRABOOST_FFLAGS
             .iter()
             .map(|(k, _)| *k)
             .collect();
-        for legacy_key in RobloxOptimizer::LEGACY_BLOCKED_FFLAGS {
+        for legacy_key in RobloxOptimizer::LEGACY_BLOCKED_FFLAGS
+            .iter()
+            .chain(RobloxOptimizer::REMOVED_ULTRABOOST_FFLAGS.iter())
+        {
             assert!(
                 !ultraboost_keys.contains(legacy_key),
-                "Legacy key '{}' should not appear in ultraboost FFlags",
+                "Cleaned-up key '{}' should not appear in ultraboost FFlags",
                 legacy_key
             );
         }

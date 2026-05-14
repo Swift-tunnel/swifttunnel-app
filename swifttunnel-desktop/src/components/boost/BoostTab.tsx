@@ -421,7 +421,7 @@ export function BoostTab() {
         )}
         <SettingRow
           title="Ultraboost"
-          desc="All allowlisted performance FFlags (+20-40% FPS)"
+          desc="Curated FPS-focused Roblox FFlags"
           enabled={draft.roblox_settings.ultraboost}
           onChange={(v) => updateRblxOpt({ ultraboost: v })}
         />

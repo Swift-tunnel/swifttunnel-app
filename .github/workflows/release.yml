@@ -30,6 +30,23 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag != '' && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
+          # Self-hosted testbench runner: keep local build caches available so
+          # the next step can preserve Cargo's target/ directory. GitHub-backed
+          # caches are tag-scoped here and miss across release tags.
+          clean: false
+
+      - name: Clean workspace but keep local Cargo outputs
+        shell: powershell
+        run: |
+          # actions/checkout clean=true would delete target/ before cargo can
+          # reuse it. Do the clean ourselves so only compiler outputs survive.
+          git reset --hard HEAD
+          git clean -ffdx -e target/ -e swifttunnel-desktop/src-tauri/target/
+          $bundleDirs = @(
+            "target/release/bundle",
+            "swifttunnel-desktop/src-tauri/target/release/bundle"
+          )
+          Remove-Item -Path $bundleDirs -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Ensure Git Bash
         shell: powershell
@@ -192,8 +209,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
-          cache: npm
-          cache-dependency-path: swifttunnel-desktop/package-lock.json
+          # No cache: npm. Self-hosted runner keeps the npm download cache at
+          # %LOCALAPPDATA%\npm-cache between runs, so the GitHub-backed cache
+          # would just be redundant churn (and tag-scoped, so it never hits).
 
       - name: Enforce version consistency
         shell: powershell
@@ -266,13 +284,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-          cache-on-failure: true
-          save-if: true
+      # No GitHub-backed Rust cache. Tag-triggered runs are scoped to their
+      # own ref, so each tag would always miss caches saved by prior tags.
+      # Instead, the controlled clean step above preserves compiler outputs
+      # in target/ on the testbench runner while removing stale packaged
+      # bundles before the release upload step.
 
       - name: Install frontend dependencies
         working-directory: swifttunnel-desktop

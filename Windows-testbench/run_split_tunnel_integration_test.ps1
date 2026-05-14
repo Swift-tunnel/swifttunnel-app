@@ -11,7 +11,10 @@ param(
     [int]$UdpCount,
     [int]$UdpPayloadBytes,
     [string]$TcpTarget,
-    [int]$TcpCount
+    [int]$TcpCount,
+    [string]$HttpsGetUrl,
+    [string]$TestExe,
+    [switch]$SkipManualProcessRegister
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +39,9 @@ if ($UdpCount) { $argsList += @("--udp-count", $UdpCount) }
 if ($UdpPayloadBytes) { $argsList += @("--udp-payload-bytes", $UdpPayloadBytes) }
 if ($TcpTarget) { $argsList += @("--tcp-target", $TcpTarget) }
 if ($TcpCount) { $argsList += @("--tcp-count", $TcpCount) }
+if ($HttpsGetUrl) { $argsList += @("--https-get-url", $HttpsGetUrl) }
+if ($TestExe) { $argsList += @("--test-exe", $TestExe) }
+if ($SkipManualProcessRegister) { $argsList += "--skip-manual-process-register" }
 
 & ".\target\release\split_tunnel_integration_test.exe" @argsList
 exit $LASTEXITCODE

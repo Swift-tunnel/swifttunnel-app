@@ -1,9 +1,10 @@
 mod testbench_shared;
 
 use testbench_shared::{
-    DEFAULT_TCP_PROBE_COUNT, DEFAULT_TCP_PROBE_TARGET, DEFAULT_UDP_ECHO_PAYLOAD_BYTES,
-    DEFAULT_UDP_PROBE_COUNT, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS, DEFAULT_UDP_PROBE_TARGET,
-    get_public_ip, init_logging, run_tcp_probe, run_udp_echo_probe, run_udp_probe,
+    DEFAULT_HTTPS_PROBE_URL, DEFAULT_TCP_PROBE_COUNT, DEFAULT_TCP_PROBE_TARGET,
+    DEFAULT_UDP_ECHO_PAYLOAD_BYTES, DEFAULT_UDP_PROBE_COUNT, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS,
+    DEFAULT_UDP_PROBE_TARGET, get_public_ip, init_logging, run_https_get_probe, run_tcp_probe,
+    run_udp_echo_probe, run_udp_probe,
 };
 
 fn print_usage() {
@@ -21,6 +22,10 @@ fn print_usage() {
     println!(
         "  ip_checker.exe --tcp-probe [--target {}] [--count {}] [--startup-delay-ms {}] [--port-file path]",
         DEFAULT_TCP_PROBE_TARGET, DEFAULT_TCP_PROBE_COUNT, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS
+    );
+    println!(
+        "  ip_checker.exe --https-get [--url {}] [--startup-delay-ms {}]",
+        DEFAULT_HTTPS_PROBE_URL, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS
     );
 }
 
@@ -274,6 +279,57 @@ fn main() {
             std::process::exit(1);
         }
         println!("TCP probe complete: target={} count={}", target, count);
+        return;
+    }
+
+    if args.iter().any(|arg| arg == "--https-get") {
+        let mut url = DEFAULT_HTTPS_PROBE_URL.to_string();
+        let mut startup_delay_ms = DEFAULT_UDP_PROBE_STARTUP_DELAY_MS;
+        let mut idx = 0usize;
+
+        while idx < args.len() {
+            match args[idx].as_str() {
+                "--https-get" => idx += 1,
+                "--url" => {
+                    idx += 1;
+                    let Some(value) = args.get(idx) else {
+                        eprintln!("Missing value for --url");
+                        std::process::exit(2);
+                    };
+                    url = value.clone();
+                    idx += 1;
+                }
+                "--startup-delay-ms" => {
+                    idx += 1;
+                    let Some(value) = args.get(idx) else {
+                        eprintln!("Missing value for --startup-delay-ms");
+                        std::process::exit(2);
+                    };
+                    match value.parse::<u64>() {
+                        Ok(parsed) => startup_delay_ms = parsed,
+                        Err(_) => {
+                            eprintln!("Invalid integer for --startup-delay-ms: {}", value);
+                            std::process::exit(2);
+                        }
+                    }
+                    idx += 1;
+                }
+                other => {
+                    eprintln!("Unknown argument: {}", other);
+                    std::process::exit(2);
+                }
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+        if let Err(err) = runtime.block_on(run_https_get_probe(&url, startup_delay_ms)) {
+            eprintln!("HTTPS GET probe failed: {}", err);
+            std::process::exit(1);
+        }
+        println!("HTTPS GET probe complete: url={}", url);
         return;
     }
 

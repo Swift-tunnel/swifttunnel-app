@@ -53,7 +53,7 @@ Built-in performance optimizations:
 - **FPS Unlocker** — Remove the 60 FPS cap
 - **Network Tweaks** — Optimize TCP/UDP settings, DNS, and adapter config
 - **System Boosts** — Process priority, timer resolution, memory management
-- **Roblox FFlags** — Ultraboost writes every valid Roblox `version-*` folder and re-applies saved flags on startup so Roblox updates do not drop the settings.
+- **Roblox FFlags** — Ultraboost writes every valid Roblox `version-*` folder with curated allowlisted FPS flags, cleans up retired SwiftTunnel flags such as high-DPI sharpness overrides, and re-applies saved flags on startup so Roblox updates do not drop the settings.
 
 ### 🔒 Lightweight & Safe
 - No kernel drivers required for basic operation
@@ -180,6 +180,7 @@ Notes:
 - The manual `Announce Release` workflow can resend the Discord announcement for an existing tag without rebuilding or republishing the app.
 - `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
 - Windows CI and release packaging run on the self-hosted `testbench` GitHub runner with the `swifttunnel-app` label so GitHub uses the same Windows environment we already trust for real builds.
+- Release packaging does not use GitHub-backed npm or Rust caches. Tag-scoped release runs would miss those caches; instead, the self-hosted runner keeps npm's local download cache and preserves Cargo compiler outputs between runs while removing stale packaged bundles and cleaning the rest of the workspace.
 - A scheduled GitHub reconciliation workflow dispatches the normal GitHub `Release` workflow if the newest GitHub semver tag is missing its release entry.
 
 ### GitHub Cutover Notes
