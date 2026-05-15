@@ -727,17 +727,19 @@ impl RobloxOptimizer {
     const ULTRABOOST_FFLAGS: &[(&str, &str)] = &[
         ("FFlagHandleAltEnterFullscreenManually", "False"),
         ("FFlagDebugGraphicsPreferD3D11", "True"),
-        ("FIntDebugForceMSAASamples", "1"),
+        ("FIntDebugForceMSAASamples", "0"),
         ("DFFlagTextureQualityOverrideEnabled", "True"),
         ("DFIntTextureQualityOverride", "0"),
-        ("DFIntDebugFRMQualityLevelOverride", "1"),
+        ("DFIntDebugFRMQualityLevelOverride", "4"),
         ("FFlagDebugSkyGray", "True"),
         ("FIntFRMMinGrassDistance", "0"),
         ("FIntFRMMaxGrassDistance", "0"),
         ("FIntGrassMovementReducedMotionFactor", "0"),
     ];
 
-    /// FFlag used by Bloxstrap-family bootstrappers for the framerate limiter.
+    /// Retired FFlag. Previously written for FPS unlock, but the framerate cap is
+    /// now driven solely by `FramerateCap` in GlobalBasicSettings. Still removed
+    /// from existing ClientAppSettings so prior versions' entries are cleaned up.
     const FPS_UNLOCK_FFLAG: &str = "DFIntTaskSchedulerTargetFps";
 
     /// Old blocked FFlags that must be cleaned up from previous versions
@@ -1029,15 +1031,15 @@ impl RobloxOptimizer {
 
     /// Apply FFlag optimizations to ClientAppSettings.json
     /// When ultraboost is enabled, writes curated allowlisted performance FFlags.
-    /// When FPS unlock is enabled, writes the bootstrapper-compatible FPS FFlag.
+    /// FPS unlock is handled separately via GlobalBasicSettings `FramerateCap`.
     /// Always cleans up old blocked or retired FFlags from previous versions.
     fn apply_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<FFlagApplyOutcome> {
-        let should_write_fflags = config.ultraboost || config.unlock_fps;
+        let should_write_fflags = config.ultraboost;
         let client_settings_paths = Self::get_client_settings_paths(should_write_fflags)?;
         if client_settings_paths.is_empty() {
             if should_write_fflags {
                 return Err(anyhow::anyhow!(
-                    "No Roblox or supported bootstrapper ClientSettings path was found. Launch Roblox or an installed supported bootstrapper once, then apply FPS unlock or Ultraboost again."
+                    "No Roblox or supported bootstrapper ClientSettings path was found. Launch Roblox or an installed supported bootstrapper once, then apply Ultraboost again."
                 ));
             }
             {
@@ -1057,7 +1059,7 @@ impl RobloxOptimizer {
         config: &RobloxSettingsConfig,
         local_app_data: &PathBuf,
     ) -> Result<FFlagApplyOutcome> {
-        let should_write_fflags = config.ultraboost || config.unlock_fps;
+        let should_write_fflags = config.ultraboost;
         let client_settings_paths = Self::get_client_settings_paths_for_local_app_data(
             local_app_data,
             should_write_fflags,
@@ -1065,7 +1067,7 @@ impl RobloxOptimizer {
         if client_settings_paths.is_empty() {
             if should_write_fflags {
                 return Err(anyhow::anyhow!(
-                    "No Roblox or supported bootstrapper ClientSettings path was found. Launch Roblox or an installed supported bootstrapper once, then apply FPS unlock or Ultraboost again."
+                    "No Roblox or supported bootstrapper ClientSettings path was found. Launch Roblox or an installed supported bootstrapper once, then apply Ultraboost again."
                 ));
             }
             {
@@ -1172,18 +1174,9 @@ impl RobloxOptimizer {
             }
         }
 
-        if config.unlock_fps {
-            settings.insert(
-                Self::FPS_UNLOCK_FFLAG.to_string(),
-                serde_json::json!(config.target_fps),
-            );
-            info!(
-                "FPS unlock FFlag applied with target FPS {}",
-                config.target_fps
-            );
-        } else {
-            settings.remove(Self::FPS_UNLOCK_FFLAG);
-        }
+        // FPS unlock is driven by GlobalBasicSettings `FramerateCap`; the old
+        // scheduler FFlag is retired and always stripped from existing files.
+        settings.remove(Self::FPS_UNLOCK_FFLAG);
 
         // Write or delete the file
         if settings.is_empty() {
@@ -1727,7 +1720,10 @@ mod tests {
     }
 
     #[test]
-    fn fflag_apply_reports_missing_path_when_fps_unlock_requested() {
+    fn fflag_apply_skips_missing_path_when_only_fps_unlock_requested() {
+        // FPS unlock no longer writes any FFlag (it uses GlobalBasicSettings
+        // `FramerateCap`), so requesting it with no Roblox version present is a
+        // graceful cleanup skip, not a hard error.
         let dir = std::env::temp_dir().join("roblox_opt_test_fflag_missing_fps");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1739,14 +1735,63 @@ mod tests {
             ..Default::default()
         };
 
-        let result = opt.apply_client_fflags_for_local_app_data(&config, &dir);
+        let outcome = opt.apply_client_fflags_for_local_app_data(&config, &dir);
 
-        assert!(result.is_err());
+        assert_eq!(
+            outcome.unwrap(),
+            FFlagApplyOutcome::SkippedMissingRobloxVersion
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_strips_retired_fps_flag_but_keeps_user_flags() {
+        // Positive + negative: applying Ultraboost must remove a pre-existing
+        // retired FPS scheduler flag, while leaving unrelated user flags intact.
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_retired_fps");
+        let _ = fs::remove_dir_all(&dir);
+        let client_settings = dir
+            .join("Bloxstrap")
+            .join("Modifications")
+            .join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        fs::write(
+            client_settings.join("ClientAppSettings.json"),
+            r#"{
+  "DFIntTaskSchedulerTargetFps": 240,
+  "FStringUserOwnedFlag": "keep-me"
+}"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            unlock_fps: true,
+            target_fps: 240,
+            ..Default::default()
+        };
+
+        opt.apply_client_fflags_for_local_app_data(&config, &dir)
+            .unwrap();
+
+        let content =
+            fs::read_to_string(client_settings.join("ClientAppSettings.json")).unwrap();
+        let settings: HashMap<String, serde_json::Value> =
+            serde_json::from_str(&content).unwrap();
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("FPS unlock or Ultraboost")
+            !settings.contains_key(RobloxOptimizer::FPS_UNLOCK_FFLAG),
+            "retired FPS scheduler flag must be stripped on apply"
+        );
+        assert_eq!(
+            settings.get("FStringUserOwnedFlag"),
+            Some(&serde_json::json!("keep-me")),
+            "unrelated user flags must be preserved"
+        );
+        assert_eq!(
+            settings.get("FFlagDebugGraphicsPreferD3D11"),
+            Some(&serde_json::json!("True"))
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1780,9 +1825,9 @@ mod tests {
             settings.get("FFlagDebugGraphicsPreferD3D11"),
             Some(&serde_json::json!("True"))
         );
-        assert_eq!(
-            settings.get(RobloxOptimizer::FPS_UNLOCK_FFLAG),
-            Some(&serde_json::json!(165))
+        assert!(
+            !settings.contains_key(RobloxOptimizer::FPS_UNLOCK_FFLAG),
+            "retired FPS scheduler flag must not be written"
         );
 
         let _ = fs::remove_dir_all(&dir);
