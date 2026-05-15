@@ -340,7 +340,7 @@ export function BoostTab() {
   ].filter(Boolean).length;
 
   return (
-    <div className="flex w-full flex-col gap-5 pb-24">
+    <div className="flex w-full flex-col gap-4 pb-24">
       {boost.error && <ErrorBanner tone="error">{boost.error}</ErrorBanner>}
 
       {boost.warning && (
@@ -369,11 +369,9 @@ export function BoostTab() {
           tag={draft.profile === "Custom" ? "Custom" : undefined}
         />
         <div
-          className="grid gap-1 rounded-[var(--radius-card)] p-1"
+          className="grid gap-1 rounded-[var(--radius-card)] surface-card p-1"
           style={{
             gridTemplateColumns: `repeat(${PROFILES.length}, minmax(0, 1fr))`,
-            backgroundColor: "var(--color-bg-card)",
-            border: "1px solid var(--color-border-subtle)",
           }}
         >
           {PROFILES.map((p) => {
@@ -382,19 +380,36 @@ export function BoostTab() {
               <button
                 key={p.id}
                 onClick={() => selectProfile(p.id)}
-                className="rounded-[5px] px-3 py-2 text-left transition-colors"
+                className="rounded-[7px] px-3 py-2 text-left transition-all duration-100"
                 style={{
-                  backgroundColor: sel
-                    ? "var(--color-accent-primary)"
+                  background: sel
+                    ? "linear-gradient(180deg, #ffffff 0%, #ececec 100%)"
                     : "transparent",
-                  color: sel ? "#000000" : "var(--color-text-secondary)",
+                  color: sel ? "#0a0a0a" : "var(--color-text-secondary)",
+                  boxShadow: sel
+                    ? "inset 0 1px 0 rgba(255,255,255,0.9), 0 1px 2px rgba(0,0,0,0.4)"
+                    : "none",
+                }}
+                onMouseEnter={(e) => {
+                  if (!sel)
+                    e.currentTarget.style.backgroundColor =
+                      "var(--color-bg-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  if (!sel)
+                    e.currentTarget.style.backgroundColor = "transparent";
                 }}
               >
-                <div className="text-[12.5px] font-semibold">{p.name}</div>
                 <div
-                  className="mt-0.5 text-[10.5px]"
+                  className="text-[12.5px] font-semibold"
+                  style={{ letterSpacing: "-0.005em" }}
+                >
+                  {p.name}
+                </div>
+                <div
+                  className="mt-0.5 text-[10.5px] leading-tight"
                   style={{
-                    color: sel ? "rgba(0,0,0,0.7)" : "var(--color-text-muted)",
+                    color: sel ? "rgba(0,0,0,0.65)" : "var(--color-text-muted)",
                   }}
                 >
                   {p.desc}
@@ -559,13 +574,7 @@ export function BoostTab() {
               bottom: "12px",
             }}
           >
-            <div
-              className="flex w-full items-center justify-between rounded-[var(--radius-card)] px-4 py-2.5"
-              style={{
-                backgroundColor: "var(--color-bg-elevated)",
-                border: "1px solid var(--color-border-default)",
-              }}
-            >
+            <div className="flex w-full items-center justify-between rounded-[var(--radius-card)] surface-elevated px-4 py-2.5">
               <span className="text-[12px] font-medium text-text-secondary">
                 {windowValidationError
                   ? windowValidationError
@@ -627,13 +636,7 @@ function Section({
   return (
     <section>
       <SectionHeader label={title} tag={tag} />
-      <div
-        className="overflow-hidden rounded-[var(--radius-card)]"
-        style={{
-          backgroundColor: "var(--color-bg-card)",
-          border: "1px solid var(--color-border-subtle)",
-        }}
-      >
+      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
         {children}
       </div>
     </section>
@@ -918,91 +921,94 @@ function RamCleanerCard({
   const showLive = !isCleaning && percent >= 85;
 
   return (
-    <section className="flex flex-col gap-4">
+    <section className="flex flex-col gap-3">
       {/* ── Hero ── */}
-      <div className="flex items-start justify-between gap-6 pt-1">
-        <div className="min-w-0 flex-1">
-          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-            {heroLabel}
-          </div>
-          <div className="mt-2.5 flex items-center gap-2.5">
-            <span
-              className="text-[22px] font-semibold leading-none tracking-[-0.015em]"
-              style={{ color: "var(--color-text-primary)" }}
-            >
-              {stateLabel}
-            </span>
-            {totalMb > 0 && (
-              <span className="font-mono text-[13px] text-text-muted">
-                {formatGbFromMb(usedMb)} / {formatGbFromMb(totalMb)} GB
-              </span>
-            )}
-          </div>
-          <div className="mt-3 flex items-baseline gap-4">
-            {totalMb > 0 ? (
-              <div className="flex items-baseline gap-1.5">
+      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card px-5 pt-4 pb-3">
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{
+                  backgroundColor: color,
+                  boxShadow: showLive ? `0 0 6px ${color}` : "none",
+                  animation: isCleaning
+                    ? "status-breath 1.4s ease-in-out infinite"
+                    : "none",
+                }}
+              />
+              <span className="eyebrow">{heroLabel}</span>
+              {showLive && (
                 <span
-                  className="font-mono text-[34px] font-medium leading-none tabular-nums"
-                  style={{ color: "var(--color-text-primary)" }}
-                >
-                  {percent.toFixed(0)}
-                </span>
-                <span className="text-[13px] text-text-muted">%</span>
-              </div>
-            ) : (
-              <span className="text-[13px] text-text-muted">—</span>
-            )}
-            {showLive && (
-              <div className="flex items-center gap-1.5">
-                <span
-                  className="relative h-1.5 w-1.5 rounded-full"
-                  style={{ backgroundColor: color }}
-                >
-                  <span
-                    className="absolute inset-0 animate-ping rounded-full opacity-60"
-                    style={{ backgroundColor: color }}
-                  />
-                </span>
-                <span
-                  className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
-                  style={{ color }}
+                  className="pill-base"
+                  style={{
+                    backgroundColor: `${color}1a`,
+                    color,
+                    border: `1px solid ${color}40`,
+                  }}
                 >
                   Live
                 </span>
-              </div>
-            )}
+              )}
+            </div>
+            <div className="mt-2 flex items-baseline gap-2.5">
+              <span
+                className="text-[20px] font-semibold leading-none text-text-primary"
+                style={{ letterSpacing: "-0.02em" }}
+              >
+                {stateLabel}
+              </span>
+              {totalMb > 0 && (
+                <span className="font-mono text-[12px] text-text-muted">
+                  {formatGbFromMb(usedMb)} / {formatGbFromMb(totalMb)} GB
+                </span>
+              )}
+            </div>
+            <div className="mt-3 flex items-baseline gap-1.5">
+              {totalMb > 0 ? (
+                <>
+                  <span
+                    className="lcd-readout text-[28px] font-medium leading-none"
+                    style={{ color: "var(--color-text-primary)" }}
+                  >
+                    {percent.toFixed(0)}
+                  </span>
+                  <span className="text-[12px] text-text-muted">%</span>
+                </>
+              ) : (
+                <span className="text-[12px] text-text-muted">—</span>
+              )}
+            </div>
           </div>
+          <Button
+            variant="primary"
+            size="lg"
+            onClick={onClean}
+            disabled={isCleaning}
+            loading={isCleaning}
+          >
+            {isCleaning ? "Cleaning" : "Clean RAM"}
+          </Button>
         </div>
-        <Button
-          variant="primary"
-          size="lg"
-          onClick={onClean}
-          disabled={isCleaning}
-          loading={isCleaning}
-        >
-          {isCleaning ? "Cleaning" : "Clean RAM"}
-        </Button>
-      </div>
 
-      {/* ── Memory detail card ── */}
-      <div
-        className="overflow-hidden rounded-[var(--radius-card)]"
-        style={{
-          backgroundColor: "var(--color-bg-card)",
-          border: "1px solid var(--color-border-subtle)",
-        }}
-      >
         <div
-          className="mx-4 mt-4 mb-2 h-1.5 overflow-hidden rounded-full"
-          style={{ backgroundColor: "rgba(255,255,255,0.05)" }}
+          className="mt-4 h-1.5 overflow-hidden rounded-full"
+          style={{ backgroundColor: "rgba(255,255,255,0.04)" }}
         >
           <div
             className="h-full rounded-full transition-all duration-500"
-            style={{ width: `${percent}%`, backgroundColor: color }}
+            style={{
+              width: `${percent}%`,
+              background: `linear-gradient(90deg, ${color}, ${color}cc)`,
+              boxShadow: `0 0 8px ${color}40`,
+            }}
           />
         </div>
+      </div>
 
-        <div className="flex gap-5 px-4 pb-4 text-[11px]">
+      {/* ── Memory detail card ── */}
+      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card">
+        <div className="flex gap-5 px-4 py-3 text-[11px]">
           <MemStat label="Used" value={`${formatGbFromMb(usedMb)} GB`} />
           <MemStat label="Total" value={`${formatGbFromMb(totalMb)} GB`} />
           <MemStat

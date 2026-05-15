@@ -112,70 +112,79 @@ export function NetworkTab() {
   const stabilityPingSamples = net.stabilityResult?.ping_samples ?? [];
 
   return (
-    <div className="flex w-full flex-col gap-5 pb-4">
+    <div className="flex w-full flex-col gap-4 pb-4">
       {/* ── Hero ── */}
-      <section className="flex items-start justify-between gap-6 pt-1">
-        <div className="min-w-0 flex-1">
-          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-            {heroLabel}
-          </div>
-          <div className="mt-2.5 flex items-center gap-2.5">
-            <span
-              className="text-[22px] font-semibold leading-none tracking-[-0.015em]"
-              style={{ color: "var(--color-text-primary)" }}
-            >
-              {heroState}
-            </span>
-            <span className="font-mono text-[13px] text-text-muted">
-              {anyRunning
-                ? `${completedCount}/3 done`
-                : completedCount === 0
-                  ? "no tests run yet"
-                  : `${completedCount}/3 tests`}
-            </span>
-          </div>
-          <div className="mt-3 flex items-baseline gap-4">
-            <div className="flex items-baseline gap-1.5">
+      <section
+        className="overflow-hidden rounded-[var(--radius-card)] surface-card"
+        style={{ padding: "20px 22px" }}
+      >
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
               <span
-                className="font-mono text-[34px] font-medium leading-none tabular-nums"
+                className="h-2 w-2 rounded-full"
+                style={{
+                  backgroundColor: anyRunning
+                    ? "var(--color-accent-primary)"
+                    : grade
+                      ? heroBigColor
+                      : "var(--color-text-dimmed)",
+                  animation: anyRunning
+                    ? "status-breath 1.4s ease-in-out infinite"
+                    : "none",
+                }}
+              />
+              <span className="eyebrow">{heroLabel}</span>
+              {anyRunning && (
+                <span
+                  className="pill-base"
+                  style={{
+                    backgroundColor: "var(--color-accent-primary-soft-12)",
+                    color: "var(--color-text-primary)",
+                    border: "1px solid var(--color-accent-primary-soft-20)",
+                  }}
+                >
+                  Live
+                </span>
+              )}
+            </div>
+            <div className="mt-2.5 flex items-center gap-2.5">
+              <span
+                className="text-[20px] font-semibold leading-none text-text-primary"
+                style={{ letterSpacing: "-0.02em" }}
+              >
+                {heroState}
+              </span>
+              <span className="font-mono text-[11.5px] text-text-muted">
+                {anyRunning
+                  ? `${completedCount}/3 done`
+                  : completedCount === 0
+                    ? "no tests run yet"
+                    : `${completedCount}/3 tests`}
+              </span>
+            </div>
+            <div className="mt-4 flex items-baseline gap-1.5">
+              <span
+                className="lcd-readout text-[28px] font-medium leading-none"
                 style={{ color: heroBigColor }}
               >
                 {heroBigValue}
               </span>
               {heroHint && (
-                <span className="text-[13px] text-text-muted">{heroHint}</span>
+                <span className="text-[12px] text-text-muted">{heroHint}</span>
               )}
             </div>
-            {anyRunning && (
-              <div className="flex items-center gap-1.5">
-                <span
-                  className="relative h-1.5 w-1.5 rounded-full"
-                  style={{ backgroundColor: "var(--color-accent-primary)" }}
-                >
-                  <span
-                    className="absolute inset-0 animate-ping rounded-full opacity-60"
-                    style={{ backgroundColor: "var(--color-accent-primary)" }}
-                  />
-                </span>
-                <span
-                  className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
-                  style={{ color: "var(--color-accent-primary)" }}
-                >
-                  Live
-                </span>
-              </div>
-            )}
           </div>
+          <Button
+            variant={anyRunning ? "secondary" : "primary"}
+            size="lg"
+            onClick={runAll}
+            disabled={anyRunning}
+            loading={anyRunning}
+          >
+            {anyRunning ? "Running…" : "Run All Tests"}
+          </Button>
         </div>
-        <Button
-          variant={anyRunning ? "secondary" : "primary"}
-          size="lg"
-          onClick={runAll}
-          disabled={anyRunning}
-          loading={anyRunning}
-        >
-          {anyRunning ? "Running…" : "Run All Tests"}
-        </Button>
       </section>
 
       <TestCard
@@ -186,7 +195,13 @@ export function NetworkTab() {
         onRun={() => net.runStabilityTest(duration)}
         disabled={anyRunning}
         controls={
-          <div className="flex gap-0.5 rounded-[5px] p-0.5" style={{ backgroundColor: "var(--color-bg-elevated)", border: "1px solid var(--color-border-default)" }}>
+          <div
+            className="flex gap-0.5 rounded-[6px] p-[3px]"
+            style={{
+              backgroundColor: "var(--color-bg-elevated)",
+              border: "1px solid var(--color-border-subtle)",
+            }}
+          >
             {DURATIONS.map((d) => (
               <button
                 key={d}
@@ -194,11 +209,17 @@ export function NetworkTab() {
                   e.stopPropagation();
                   setDuration(d);
                 }}
-                className="rounded-[3px] px-2 py-0.5 text-[10.5px] font-medium transition-colors"
+                className="rounded-[4px] px-2 py-0.5 text-[10.5px] font-medium transition-all"
                 style={{
-                  backgroundColor:
-                    duration === d ? "var(--color-accent-primary)" : "transparent",
-                  color: duration === d ? "#000000" : "var(--color-text-muted)",
+                  background:
+                    duration === d
+                      ? "linear-gradient(180deg, #ffffff 0%, #ececec 100%)"
+                      : "transparent",
+                  color: duration === d ? "#0a0a0a" : "var(--color-text-muted)",
+                  boxShadow:
+                    duration === d
+                      ? "inset 0 1px 0 rgba(255,255,255,0.7), 0 1px 1px rgba(0,0,0,0.3)"
+                      : "none",
                 }}
               >
                 {d >= 60 ? `${d / 60}m` : `${d}s`}

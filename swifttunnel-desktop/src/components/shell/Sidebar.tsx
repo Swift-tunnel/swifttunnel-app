@@ -42,6 +42,13 @@ function dotColor(state: VpnState): string {
   return "var(--color-status-warning)";
 }
 
+function stateLabel(state: VpnState): string {
+  if (state === "connected") return "Tunneled";
+  if (state === "error") return "Error";
+  if (state === "disconnected") return "Idle";
+  return "Working";
+}
+
 export function Sidebar() {
   const activeTab = useSettingsStore((s) => s.activeTab);
   const setTab = useSettingsStore((s) => s.setTab);
@@ -69,46 +76,54 @@ export function Sidebar() {
           : "var(--spacing-sidebar)",
         backgroundColor: "var(--color-bg-sidebar)",
         borderColor: "var(--color-border-subtle)",
-        transition: "width 0.15s cubic-bezier(0.4, 0, 0.2, 1)",
+        transition: "width 0.18s cubic-bezier(0.4, 0, 0.2, 1)",
       }}
     >
       {/* Brand */}
       <div
         data-tauri-drag-region
-        className="flex items-center gap-2.5 px-1.5 pt-3 pb-3"
+        className="flex items-center gap-2.5 px-3 pt-4 pb-3"
       >
         <img
           src={swiftLogo}
           alt="SwiftTunnel"
-          width={40}
-          height={40}
+          width={28}
+          height={28}
           className="shrink-0"
           style={{ objectFit: "contain" }}
         />
         {expanded && (
-          <div className="min-w-0 flex-1">
-            <div className="text-[13px] font-semibold leading-none tracking-[-0.01em] text-text-primary">
+          <div className="min-w-0 flex-1 overflow-hidden">
+            <div
+              className="text-[13.5px] font-semibold leading-none text-text-primary"
+              style={{ letterSpacing: "-0.018em" }}
+            >
               SwiftTunnel
             </div>
-            <div className="mt-1 font-mono text-[10px] leading-none text-text-dimmed">
+            <div className="mt-1.5 font-mono text-[9.5px] leading-none tracking-wide text-text-dimmed">
               v{__APP_VERSION__}
             </div>
           </div>
         )}
       </div>
 
+      <div
+        className="mx-3 h-px"
+        style={{ backgroundColor: "var(--color-border-subtle)" }}
+      />
+
       {/* Tabs */}
-      <div className="mt-1 flex flex-1 flex-col gap-0.5 px-1.5">
+      <div className="mt-2 flex flex-1 flex-col gap-0.5 px-2">
         {TABS.map((tab) => {
           const isActive = activeTab === tab.id;
           const button = (
             <button
               key={tab.id}
               onClick={() => setTab(tab.id)}
-              className="group relative flex h-9 items-center gap-3 rounded-[5px] px-2 text-left transition-colors duration-100"
+              className="group relative flex h-9 items-center gap-3 rounded-[6px] px-2 text-left transition-all duration-100"
               style={{
                 backgroundColor: isActive
-                  ? "var(--color-accent-primary-soft-12)"
+                  ? "var(--color-accent-primary-soft-10)"
                   : "transparent",
               }}
               onMouseEnter={(e) => {
@@ -123,15 +138,9 @@ export function Sidebar() {
               aria-label={tab.label}
               aria-current={isActive ? "page" : undefined}
             >
-              {isActive && (
-                <span
-                  className="absolute left-0 top-1/2 h-5 w-[2px] -translate-y-1/2"
-                  style={{ backgroundColor: "#ffffff" }}
-                />
-              )}
               <svg
-                width="17"
-                height="17"
+                width="16"
+                height="16"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke={
@@ -139,16 +148,16 @@ export function Sidebar() {
                     ? "var(--color-text-primary)"
                     : "var(--color-text-muted)"
                 }
-                strokeWidth="1.8"
+                strokeWidth="1.85"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                style={{ flexShrink: 0, marginLeft: 2 }}
+                style={{ flexShrink: 0, marginLeft: 4 }}
               >
                 <path d={tab.icon} />
               </svg>
               {expanded && (
                 <span
-                  className="flex-1 text-[13px] font-medium"
+                  className="flex-1 text-[12.5px] font-medium"
                   style={{
                     color: isActive
                       ? "var(--color-text-primary)"
@@ -178,13 +187,23 @@ export function Sidebar() {
       </div>
 
       {/* User tile */}
-      <div className="p-1.5">
-        <div className="flex h-10 items-center gap-2.5 rounded-[5px] px-1.5">
+      <div className="px-2 pb-2">
+        <div
+          className="mx-1 mb-2 h-px"
+          style={{ backgroundColor: "var(--color-border-subtle)" }}
+        />
+        <div
+          className="flex h-11 items-center gap-2.5 rounded-[6px] px-1.5 transition-colors"
+          style={{
+            backgroundColor: expanded ? "var(--color-bg-hover)" : "transparent",
+          }}
+        >
           <div className="relative shrink-0">
             <div
               className="flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-semibold"
               style={{
-                backgroundColor: "var(--color-bg-hover)",
+                background:
+                  "linear-gradient(135deg, var(--color-bg-elevated), var(--color-bg-active))",
                 color: "var(--color-text-primary)",
                 border: "1px solid var(--color-border-default)",
               }}
@@ -208,14 +227,21 @@ export function Sidebar() {
           </div>
           {expanded && (
             <div className="min-w-0 flex-1 leading-none">
-              <div className="truncate text-[12px] font-medium text-text-primary">
+              <div
+                className="truncate text-[12px] font-medium text-text-primary"
+                style={{ letterSpacing: "-0.005em" }}
+              >
                 {userLabel}
               </div>
               <div
-                className="mt-1 text-[10px] font-medium uppercase tracking-[0.08em]"
-                style={{ color: "var(--color-text-muted)" }}
+                className="mt-1.5 text-[10px] font-medium uppercase leading-none tracking-[0.08em]"
+                style={{
+                  color: isConnected
+                    ? "var(--color-status-connected)"
+                    : "var(--color-text-muted)",
+                }}
               >
-                {vpnState === "connected" ? "Tunneled" : "Idle"}
+                {stateLabel(vpnState)}
               </div>
             </div>
           )}

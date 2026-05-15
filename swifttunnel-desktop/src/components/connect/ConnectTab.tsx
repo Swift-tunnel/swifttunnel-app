@@ -252,15 +252,15 @@ export function ConnectTab() {
     void connect(settings.selected_region, ["roblox"]);
   }
 
-  const heroLabel = isConnected
+  const heroEyebrow = isConnected
     ? "Tunneled to"
     : vpnState === "disconnecting"
       ? "Disconnecting"
-    : isTransitioning
-      ? "Establishing"
-      : vpnState === "error"
-        ? "Connection failed"
-        : "Ready to tunnel";
+      : isTransitioning
+        ? "Establishing"
+        : vpnState === "error"
+          ? "Connection failed"
+          : "Ready to tunnel";
 
   const heroRegion = isConnected
     ? connectedRegion
@@ -290,7 +290,7 @@ export function ConnectTab() {
     return "Connect";
   })();
 
-  const buttonVariant: "primary" | "destructive" | "secondary" =
+  const buttonVariant: "primary" | "destructive" | "secondary" | "connect" =
     isConnected
       ? "destructive"
       : isConnectBusy || hasDriverAction || connectStatus.kind === "reboot_required"
@@ -300,88 +300,111 @@ export function ConnectTab() {
   const hasRegions = regions.length > 0;
 
   return (
-    <div className="flex w-full flex-col gap-7 pb-6">
-      {/* ── Hero ── */}
-      <section className="flex items-start justify-between gap-6 pt-1">
-        <div className="min-w-0 flex-1">
-          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-            {heroLabel}
-          </div>
-          <div className="mt-2.5 flex items-center gap-2.5">
-            {heroRegion && (
-              <span className="text-[22px] leading-none">
-                {countryFlag(heroRegion.country_code)}
-              </span>
-            )}
-            <span
-              className="text-[24px] font-semibold leading-none tracking-[-0.015em]"
-              style={{ color: "var(--color-text-primary)" }}
-            >
-              {heroRegionName}
-            </span>
-            {isConnected && (
-              <span
-                className="truncate font-mono text-[13px] text-text-muted"
-                title={connectedServerLabel}
-              >
-                {connectedServerLabel}
-              </span>
-            )}
-          </div>
-          <div className="mt-3 flex items-baseline gap-4">
-            {heroLatency !== null ? (
-              <div className="flex items-baseline gap-1.5">
+    <div className="flex w-full flex-col gap-4 pb-6">
+      {/* ── Hero card ── */}
+      <section
+        className={`relative overflow-hidden rounded-[var(--radius-card)] surface-card ${isConnected ? "connected-ambience" : ""}`}
+        style={{
+          padding: "20px 22px",
+        }}
+      >
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <StatusDot vpnState={vpnState} />
+              <span className="eyebrow">{heroEyebrow}</span>
+              {isConnected && (
                 <span
-                  className="font-mono text-[34px] font-medium leading-none tabular-nums"
-                  style={{ color: "var(--color-text-primary)" }}
-                >
-                  {heroLatency}
-                </span>
-                <span className="text-[13px] text-text-muted">ms</span>
-              </div>
-            ) : (
-              <span className="text-[13px] text-text-muted">—</span>
-            )}
-            {isConnected && (
-              <div className="flex items-center gap-1.5">
-                <span
-                  className="relative h-1.5 w-1.5 rounded-full"
-                  style={{ backgroundColor: "var(--color-status-connected)" }}
-                >
-                  <span
-                    className="absolute inset-0 animate-ping rounded-full opacity-60"
-                    style={{ backgroundColor: "var(--color-status-connected)" }}
-                  />
-                </span>
-                <span
-                  className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
-                  style={{ color: "var(--color-status-connected)" }}
+                  className="pill-base"
+                  style={{
+                    backgroundColor: "var(--color-status-connected-soft-10)",
+                    color: "var(--color-status-connected)",
+                    border: "1px solid var(--color-status-connected-soft-20)",
+                  }}
                 >
                   Live
                 </span>
+              )}
+            </div>
+
+            <div className="mt-2.5 flex items-center gap-2.5">
+              {heroRegion && (
+                <span className="text-[20px] leading-none">
+                  {countryFlag(heroRegion.country_code)}
+                </span>
+              )}
+              <span
+                className="truncate text-[20px] font-semibold leading-[1.1] text-text-primary"
+                style={{ letterSpacing: "-0.02em" }}
+              >
+                {heroRegionName}
+              </span>
+            </div>
+
+            {isConnected && (
+              <div
+                className="mt-1.5 truncate font-mono text-[11.5px] text-text-muted"
+                title={connectedServerLabel}
+              >
+                {connectedServerLabel}
               </div>
             )}
+
+            <div className="mt-4 flex items-center gap-5">
+              <HeroStat
+                label="Latency"
+                value={heroLatency !== null ? String(heroLatency) : "—"}
+                unit="ms"
+                color={
+                  heroLatency !== null
+                    ? getLatencyColor(heroLatency)
+                    : undefined
+                }
+              />
+              {isConnected && (
+                <>
+                  <HeroDivider />
+                  <HeroStat
+                    label="Session"
+                    value={formatElapsed(elapsed)}
+                    mono
+                  />
+                </>
+              )}
+              {isConnected && tunneled.length > 0 && (
+                <>
+                  <HeroDivider />
+                  <HeroStat
+                    label="Routing"
+                    value={`${tunneled.length}`}
+                    unit={tunneled.length === 1 ? "app" : "apps"}
+                  />
+                </>
+              )}
+            </div>
           </div>
-          {(connectStatus.kind !== "text" ||
-            vpnState === "error" ||
-            driverSetupState !== "idle") && (
-            <ConnectStatusBanner
-              status={connectStatus}
-              busy={isConnectBusy}
-              onRepair={() => void repairDriver().catch(() => {})}
-              onReset={() => void resetDriver().catch(() => {})}
-            />
-          )}
+
+          <Button
+            variant={buttonVariant}
+            size="lg"
+            onClick={handlePrimary}
+            disabled={primaryDisabled}
+            loading={isConnectBusy}
+          >
+            {buttonLabel}
+          </Button>
         </div>
-        <Button
-          variant={buttonVariant}
-          size="lg"
-          onClick={handlePrimary}
-          disabled={primaryDisabled}
-          loading={isConnectBusy}
-        >
-          {buttonLabel}
-        </Button>
+
+        {(connectStatus.kind !== "text" ||
+          vpnState === "error" ||
+          driverSetupState !== "idle") && (
+          <ConnectStatusBanner
+            status={connectStatus}
+            busy={isConnectBusy}
+            onRepair={() => void repairDriver().catch(() => {})}
+            onReset={() => void resetDriver().catch(() => {})}
+          />
+        )}
       </section>
 
       <RouteAssistPanel
@@ -400,14 +423,10 @@ export function ConnectTab() {
         >
           <LiveGraph samples={dataHistory} />
 
-          {/* Metrics row */}
-          <div
-            className="mt-2 grid grid-cols-4 overflow-hidden rounded-[var(--radius-card)]"
-            style={{ border: "1px solid var(--color-border-subtle)" }}
-          >
-            <MetricCell label="Upload" value={formatBytes(bytesUp)} mono />
-            <MetricCell label="Download" value={formatBytes(bytesDown)} mono />
-            <MetricCell label="Session" value={formatElapsed(elapsed)} mono />
+          <div className="grid grid-cols-4 overflow-hidden rounded-[var(--radius-card)] surface-card">
+            <MetricCell label="Upload" value={formatBytes(bytesUp)} mono divider />
+            <MetricCell label="Download" value={formatBytes(bytesDown)} mono divider />
+            <MetricCell label="Session" value={formatElapsed(elapsed)} mono divider />
             <MetricCell
               label="Ping"
               value={ping !== null ? `${ping}` : "—"}
@@ -426,7 +445,7 @@ export function ConnectTab() {
               {tunneled.map((p) => (
                 <span
                   key={p}
-                  className="inline-flex items-center gap-1.5 rounded-[4px] px-2 py-1 font-mono text-[10.5px]"
+                  className="inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 font-mono text-[10.5px]"
                   style={{
                     backgroundColor: "var(--color-bg-card)",
                     border: "1px solid var(--color-border-subtle)",
@@ -437,6 +456,7 @@ export function ConnectTab() {
                     className="h-1.5 w-1.5 rounded-full"
                     style={{
                       backgroundColor: "var(--color-status-connected)",
+                      boxShadow: "0 0 4px var(--color-status-connected-glow)",
                     }}
                   />
                   {p}
@@ -448,26 +468,29 @@ export function ConnectTab() {
       )}
 
       {/* ── Regions ── */}
-      <section>
-        <div className="mb-3 flex items-baseline justify-between">
+      <section className="mt-1">
+        <div className="mb-2.5 flex items-baseline justify-between">
           <div className="flex items-baseline gap-2">
-            <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-secondary">
+            <h3
+              className="text-[12.5px] font-semibold text-text-primary"
+              style={{ letterSpacing: "-0.005em" }}
+            >
               Regions
             </h3>
             {hasRegions && (
-              <span className="font-mono text-[10.5px] text-text-dimmed">
-                {regions.length} available
+              <span className="font-mono text-[11px] text-text-dimmed">
+                {regions.length}
               </span>
             )}
           </div>
           {hasRegions && !isConnected && (
             <button
               onClick={() => void refreshServers()}
-              className="inline-flex items-center gap-1 text-[10.5px] font-medium text-text-muted transition-colors hover:text-text-primary"
+              className="inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
             >
               <svg
-                width="10"
-                height="10"
+                width="11"
+                height="11"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -507,10 +530,7 @@ export function ConnectTab() {
             }
           />
         ) : (
-          <div
-            className="flex flex-col overflow-hidden rounded-[var(--radius-card)]"
-            style={{ border: "1px solid var(--color-border-subtle)" }}
-          >
+          <div className="flex flex-col overflow-hidden rounded-[var(--radius-card)] surface-card">
             <AutoRouteRow
               active={settings.auto_routing_enabled}
               disabled={isConnected || isTransitioning}
@@ -554,6 +574,80 @@ export function ConnectTab() {
 
 // ── Sub-components ──
 
+function StatusDot({ vpnState }: { vpnState: string }) {
+  const isConnected = vpnState === "connected";
+  const isError = vpnState === "error";
+  const isTransitioning =
+    !isConnected &&
+    vpnState !== "disconnected" &&
+    !isError;
+
+  const color = isConnected
+    ? "var(--color-status-connected)"
+    : isError
+      ? "var(--color-status-error)"
+      : isTransitioning
+        ? "var(--color-status-warning)"
+        : "var(--color-text-dimmed)";
+
+  return (
+    <span className="relative inline-flex h-2 w-2 items-center justify-center">
+      <span
+        className="absolute inset-0 rounded-full"
+        style={{
+          backgroundColor: color,
+          boxShadow: isConnected ? `0 0 6px ${color}` : "none",
+          animation: isTransitioning
+            ? "status-breath 1.4s ease-in-out infinite"
+            : "none",
+        }}
+      />
+    </span>
+  );
+}
+
+function HeroStat({
+  label,
+  value,
+  unit,
+  color,
+  mono,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  color?: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-text-dimmed">
+        {label}
+      </span>
+      <div className="flex items-baseline gap-1">
+        <span
+          className={`lcd-readout text-[18px] font-medium leading-none ${mono ? "" : ""}`}
+          style={{ color: color || "var(--color-text-primary)" }}
+        >
+          {value}
+        </span>
+        {unit && (
+          <span className="text-[11px] text-text-muted">{unit}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HeroDivider() {
+  return (
+    <span
+      className="h-7 w-px"
+      style={{ backgroundColor: "var(--color-border-subtle)" }}
+    />
+  );
+}
+
 function RouteAssistPanel({
   enabled,
   disabled,
@@ -565,21 +659,39 @@ function RouteAssistPanel({
 }) {
   return (
     <section
-      className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] px-4 py-3"
+      className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] px-4 py-3 transition-colors"
       style={{
         backgroundColor: enabled
-          ? "var(--color-accent-primary-soft-10)"
+          ? "var(--color-accent-primary-soft-8)"
           : "var(--color-bg-card)",
         border: `1px solid ${
           enabled
-            ? "var(--color-accent-primary)"
+            ? "var(--color-accent-primary-soft-20)"
             : "var(--color-border-subtle)"
         }`,
+        boxShadow: enabled
+          ? "inset 0 1px 0 rgba(255,255,255,0.04)"
+          : "inset 0 1px 0 rgba(255,255,255,0.025)",
       }}
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <h3 className="text-[13px] font-semibold text-text-primary">
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke={enabled ? "var(--color-text-primary)" : "var(--color-text-muted)"}
+            strokeWidth="1.85"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M3 12h4l3-9 4 18 3-9h4" />
+          </svg>
+          <h3
+            className="text-[12.5px] font-semibold text-text-primary"
+            style={{ letterSpacing: "-0.005em" }}
+          >
             Roblox Route Assist
           </h3>
           <Tooltip content="Routes Roblox login/API HTTP(S) through the selected relay, including browser-owned Roblox auth traffic. Non-Roblox browser traffic still bypasses SwiftTunnel.">
@@ -589,19 +701,19 @@ function RouteAssistPanel({
           </Tooltip>
           {enabled && (
             <span
-              className="rounded-[4px] px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.1em]"
+              className="pill-base"
               style={{
                 backgroundColor: "var(--color-bg-base)",
                 color: "var(--color-text-primary)",
+                border: "1px solid var(--color-border-default)",
               }}
             >
-              On
+              ON
             </span>
           )}
         </div>
-        <p className="mt-1 max-w-[620px] text-[11.5px] leading-relaxed text-text-muted">
-          Use this if you are bypassing a network ban or want a higher chance of
-          Roblox placing you near the region you tunnel to.
+        <p className="mt-1 max-w-[640px] text-[11.5px] leading-snug text-text-muted">
+          Use this when bypassing a network ban, or to increase the chance Roblox places you near your tunneled region.
         </p>
       </div>
       <Toggle
@@ -620,33 +732,36 @@ function MetricCell({
   hint,
   mono,
   valueColor,
+  divider,
 }: {
   label: string;
   value: string;
   hint?: string;
   mono?: boolean;
   valueColor?: string;
+  divider?: boolean;
 }) {
   return (
     <div
-      className="flex flex-col gap-1 px-3.5 py-2.5"
+      className="flex flex-col gap-1 px-4 py-2.5"
       style={{
-        backgroundColor: "var(--color-bg-card)",
-        borderRight: "1px solid var(--color-border-subtle)",
+        borderRight: divider
+          ? "1px solid var(--color-border-subtle)"
+          : undefined,
       }}
     >
-      <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+      <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-text-dimmed">
         {label}
       </span>
       <div className="flex items-baseline gap-1">
         <span
-          className={`text-[14px] font-medium ${mono ? "font-mono tabular-nums" : ""}`}
+          className={`text-[13.5px] font-medium ${mono ? "font-mono tabular-nums" : ""}`}
           style={{ color: valueColor || "var(--color-text-primary)" }}
         >
           {value}
         </span>
         {hint && (
-          <span className="text-[10px] text-text-muted">{hint}</span>
+          <span className="text-[10.5px] text-text-muted">{hint}</span>
         )}
       </div>
     </div>
@@ -679,11 +794,11 @@ function ConnectStatusBanner({
 
   return (
     <div
-      className="mt-3 flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] px-3 py-2 text-[11.5px]"
+      className="mt-3 flex flex-wrap items-center gap-2 rounded-[6px] px-3 py-2 text-[11.5px]"
       style={{
         backgroundColor: isError
           ? "var(--color-status-error-soft-10)"
-          : "var(--color-bg-card)",
+          : "var(--color-bg-elevated)",
         border: `1px solid ${
           isError
             ? "var(--color-status-error-soft-20)"
@@ -723,13 +838,12 @@ function AutoRouteRow({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="group relative flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+      className="group relative flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-50"
       style={{
         backgroundColor: active
           ? "var(--color-accent-primary-soft-8)"
           : "transparent",
         borderBottom: "1px solid var(--color-border-subtle)",
-        boxShadow: active ? "inset 2px 0 0 #ffffff" : "none",
       }}
       onMouseEnter={(e) => {
         if (!active && !disabled)
@@ -739,30 +853,42 @@ function AutoRouteRow({
         if (!active) e.currentTarget.style.backgroundColor = "transparent";
       }}
     >
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke={active ? "var(--color-text-primary)" : "var(--color-text-muted)"}
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
+      {active && (
+        <span
+          className="absolute left-0 top-1/2 h-5 w-[2px] -translate-y-1/2 rounded-r"
+          style={{ backgroundColor: "var(--color-accent-primary)" }}
+        />
+      )}
+      <span
+        className="flex h-7 w-7 items-center justify-center rounded-[6px]"
+        style={{
+          backgroundColor: active
+            ? "var(--color-accent-primary-soft-12)"
+            : "var(--color-bg-elevated)",
+          border: `1px solid ${active ? "var(--color-accent-primary-soft-20)" : "var(--color-border-subtle)"}`,
+        }}
       >
-        <polyline points="16 3 21 3 21 8" />
-        <line x1="4" y1="20" x2="21" y2="3" />
-        <polyline points="21 16 21 21 16 21" />
-        <line x1="15" y1="15" x2="21" y2="21" />
-      </svg>
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={active ? "var(--color-text-primary)" : "var(--color-text-muted)"}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <polyline points="16 3 21 3 21 8" />
+          <line x1="4" y1="20" x2="21" y2="3" />
+          <polyline points="21 16 21 21 16 21" />
+          <line x1="15" y1="15" x2="21" y2="21" />
+        </svg>
+      </span>
       <div className="flex min-w-0 flex-1 flex-col leading-tight">
         <div className="flex items-center gap-2">
           <span
-            className="text-[13px] font-medium"
-            style={{
-              color: active
-                ? "var(--color-text-primary)"
-                : "var(--color-text-primary)",
-            }}
+            className="text-[12.5px] font-medium text-text-primary"
+            style={{ letterSpacing: "-0.005em" }}
           >
             Auto Route
           </span>
@@ -778,8 +904,11 @@ function AutoRouteRow({
       </div>
       {active && (
         <span
-          className="text-[10px] font-semibold uppercase tracking-[0.1em]"
-          style={{ color: "var(--color-text-primary)" }}
+          className="pill-base"
+          style={{
+            backgroundColor: "var(--color-accent-primary-soft-12)",
+            color: "var(--color-text-primary)",
+          }}
         >
           Active
         </span>
@@ -828,7 +957,7 @@ function RegionRow({
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      className={`group relative flex h-10 items-center gap-3 px-3.5 text-left transition-colors duration-100 ${
+      className={`group relative flex h-[38px] items-center gap-3 px-3.5 text-left transition-colors duration-100 ${
         disabled ? "cursor-not-allowed opacity-50" : ""
       }`}
       style={{
@@ -840,34 +969,34 @@ function RegionRow({
         borderBottom: isLast
           ? "none"
           : "1px solid var(--color-border-subtle)",
-        boxShadow: selected ? "inset 2px 0 0 #ffffff" : "none",
       }}
     >
+      {selected && (
+        <span
+          className="absolute left-0 top-1/2 h-5 w-[2px] -translate-y-1/2 rounded-r"
+          style={{ backgroundColor: "var(--color-accent-primary)" }}
+        />
+      )}
       <button
         type="button"
         onClick={onSelect}
         disabled={disabled}
         className="flex min-w-0 flex-1 items-center gap-3 self-stretch text-left disabled:cursor-not-allowed"
       >
-        <span className="text-[14px] leading-none">
+        <span className="text-[15px] leading-none">
           {countryFlag(region.country_code)}
         </span>
 
         <span
-          className="truncate text-[12.5px] font-medium"
-          style={{
-            color: selected
-              ? "var(--color-text-primary)"
-              : "var(--color-text-primary)",
-            letterSpacing: "-0.005em",
-          }}
+          className="truncate text-[12.5px] font-medium text-text-primary"
+          style={{ letterSpacing: "-0.005em" }}
         >
           {region.name}
         </span>
 
         {forcedServer ? (
           <span
-            className="font-mono text-[10px] text-text-primary"
+            className="font-mono text-[10px] text-text-secondary"
             title={`Forced server: ${forcedServer}`}
           >
             {forcedServer}
@@ -880,46 +1009,50 @@ function RegionRow({
 
         {lastUsed && !selected && (
           <span
-            className="text-[9px] font-semibold uppercase tracking-[0.12em]"
-            style={{ color: "var(--color-text-muted)" }}
+            className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-muted"
           >
             Last
           </span>
         )}
 
         <span className="flex-1" />
+      </button>
 
-        {latency !== null && latColor && (
-          <span className="flex shrink-0 items-center gap-1.5">
+      {/* Fixed-width latency slot — always same position */}
+      <div className="flex w-[64px] shrink-0 items-center justify-end gap-1.5">
+        {latency !== null && latColor ? (
+          <>
             <span
               className="h-1.5 w-1.5 rounded-full"
               style={{ backgroundColor: latColor }}
             />
             <span
-              className="font-mono text-[11.5px] font-medium tabular-nums"
-              style={{ color: "var(--color-text-primary)" }}
+              className="w-[28px] text-right font-mono text-[11.5px] font-medium tabular-nums text-text-primary"
             >
               {latency}
             </span>
-            <span className="text-[10px] text-text-muted">ms</span>
-          </span>
-        )}
-      </button>
+            <span className="w-[14px] text-[10px] text-text-muted">ms</span>
+          </>
+        ) : null}
+      </div>
 
-      {region.servers.length > 1 && (
-        <ServerMenu
-          menuRef={menuRef}
-          open={menuOpen}
-          disabled={disabled}
-          onToggle={() => setMenuOpen((v) => !v)}
-          servers={region.servers}
-          forcedServer={forcedServer}
-          onForceServer={(srv) => {
-            onForceServer(region.id, srv);
-            setMenuOpen(false);
-          }}
-        />
-      )}
+      {/* Fixed-width menu slot — invisible placeholder when no menu */}
+      <div className="flex w-6 shrink-0 items-center justify-center">
+        {region.servers.length > 1 && (
+          <ServerMenu
+            menuRef={menuRef}
+            open={menuOpen}
+            disabled={disabled}
+            onToggle={() => setMenuOpen((v) => !v)}
+            servers={region.servers}
+            forcedServer={forcedServer}
+            onForceServer={(srv) => {
+              onForceServer(region.id, srv);
+              setMenuOpen(false);
+            }}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -952,7 +1085,7 @@ function ServerMenu({
           e.stopPropagation();
           onToggle();
         }}
-        className={`flex h-5 w-5 items-center justify-center rounded transition-colors focus:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed ${
+        className={`flex h-6 w-6 items-center justify-center rounded-[5px] transition-all focus:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed ${
           open || forcedServer ? "opacity-100" : "opacity-0"
         }`}
         style={{
@@ -963,8 +1096,8 @@ function ServerMenu({
         }}
       >
         <svg
-          width="10"
-          height="10"
+          width="11"
+          height="11"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -981,11 +1114,7 @@ function ServerMenu({
       {open && (
         <div
           onClick={(e) => e.stopPropagation()}
-          className="absolute right-0 top-7 z-50 min-w-[130px] overflow-hidden rounded-[5px]"
-          style={{
-            backgroundColor: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-border-default)",
-          }}
+          className="absolute right-0 top-7 z-50 min-w-[140px] overflow-hidden rounded-[6px] surface-elevated"
         >
           <ServerMenuItem
             label="Auto"
@@ -1071,13 +1200,8 @@ function WhitelistPanel({
   onChange: (next: string[]) => void;
 }) {
   return (
-    <div
-      className="mt-3 rounded-[var(--radius-card)] p-3.5"
-      style={{
-        border: "1px solid var(--color-border-subtle)",
-      }}
-    >
-      <div className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-secondary">
+    <div className="mt-3 rounded-[var(--radius-card)] surface-card p-3.5">
+      <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
         Regions to skip
       </div>
       <div className="mt-2.5 flex flex-wrap gap-1.5">
@@ -1095,18 +1219,18 @@ function WhitelistPanel({
                     : [...whitelisted, r.name],
                 )
               }
-              className="flex items-center gap-1.5 rounded-[4px] px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+              className="flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-60"
               style={{
                 backgroundColor: active
                   ? "var(--color-accent-primary-soft-12)"
-                  : "transparent",
-                border: `1px solid ${active ? "#ffffff" : "var(--color-border-default)"}`,
+                  : "var(--color-bg-elevated)",
+                border: `1px solid ${active ? "var(--color-accent-primary-soft-20)" : "var(--color-border-subtle)"}`,
                 color: active
                   ? "var(--color-text-primary)"
                   : "var(--color-text-muted)",
               }}
             >
-              <span className="text-[11px] leading-none">
+              <span className="text-[12px] leading-none">
                 {countryFlag(r.country_code)}
               </span>
               {r.name}

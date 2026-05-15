@@ -257,70 +257,85 @@ export function SettingsTab() {
           : "var(--color-text-muted)";
 
   return (
-    <div className="flex w-full flex-col gap-5 pb-4">
+    <div className="flex w-full flex-col gap-4 pb-4">
       {/* ── Hero ── */}
-      <section className="flex items-start justify-between gap-6 pt-1">
-        <div className="min-w-0 flex-1">
-          <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-            Account
-          </div>
-          <div className="mt-2.5 flex items-center gap-2.5">
-            <div
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold"
-              style={{
-                backgroundColor: "var(--color-bg-hover)",
-                color: "var(--color-text-primary)",
-                border: "1px solid var(--color-border-default)",
-              }}
-            >
-              {email?.[0]?.toUpperCase() || "?"}
-            </div>
-            <span
-              className="truncate text-[22px] font-semibold leading-none tracking-[-0.015em]"
-              style={{ color: "var(--color-text-primary)" }}
-            >
-              {email || "Unknown"}
-            </span>
-            {isTester && (
-              <Chip tone="neutral" uppercase size="xs">
-                Tester
-              </Chip>
-            )}
-          </div>
-          <div className="mt-3 flex items-baseline gap-4">
-            <div className="flex items-baseline gap-1.5">
+      <section
+        className="overflow-hidden rounded-[var(--radius-card)] surface-card"
+        style={{ padding: "20px 22px" }}
+      >
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
               <span
-                className="font-mono text-[22px] font-medium leading-none tabular-nums"
-                style={{ color: "var(--color-text-primary)" }}
-              >
-                v{__APP_VERSION__}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span
-                className="h-1.5 w-1.5 rounded-full"
+                className="h-2 w-2 rounded-full"
                 style={{ backgroundColor: updateColor }}
               />
+              <span className="eyebrow">Account</span>
+            </div>
+            <div className="mt-2.5 flex items-center gap-2.5">
+              <div
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold"
+                style={{
+                  background:
+                    "linear-gradient(135deg, var(--color-bg-elevated), var(--color-bg-active))",
+                  color: "var(--color-text-primary)",
+                  border: "1px solid var(--color-border-default)",
+                }}
+              >
+                {email?.[0]?.toUpperCase() || "?"}
+              </div>
               <span
-                className="text-[10.5px] font-semibold uppercase tracking-[0.12em]"
-                style={{ color: updateColor }}
+                className="truncate text-[18px] font-semibold leading-none text-text-primary"
+                style={{ letterSpacing: "-0.02em" }}
+              >
+                {email || "Unknown"}
+              </span>
+              {isTester && (
+                <Chip tone="accent" uppercase size="xs">
+                  Tester
+                </Chip>
+              )}
+            </div>
+            <div className="mt-3.5 flex items-center gap-4">
+              <div className="flex items-baseline gap-1">
+                <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-text-dimmed">
+                  Version
+                </span>
+                <span
+                  className="lcd-readout text-[14px] font-medium text-text-primary ml-2"
+                >
+                  v{__APP_VERSION__}
+                </span>
+              </div>
+              <span
+                className="h-3 w-px"
+                style={{ backgroundColor: "var(--color-border-subtle)" }}
+              />
+              <span
+                className="pill-base"
+                style={{
+                  backgroundColor: `${updateColor}1a`,
+                  color: updateColor,
+                  border: `1px solid ${updateColor}30`,
+                }}
               >
                 {updateLabel}
               </span>
             </div>
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={logout}
+            style={{
+              color: "var(--color-status-error)",
+              border: "1px solid var(--color-status-error-soft-20)",
+              backgroundColor: "var(--color-status-error-soft-10)",
+            }}
+          >
+            Log out
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={logout}
-          style={{
-            color: "var(--color-status-error)",
-            border: "1px solid var(--color-status-error-soft-20)",
-          }}
-        >
-          Log out
-        </Button>
       </section>
 
       {/* General */}
@@ -900,13 +915,7 @@ function Section({
   return (
     <section>
       <SectionHeader label={title} tag={tag} />
-      <div
-        className="overflow-hidden rounded-[var(--radius-card)]"
-        style={{
-          backgroundColor: "var(--color-bg-card)",
-          border: "1px solid var(--color-border-subtle)",
-        }}
-      >
+      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
         {children}
       </div>
     </section>

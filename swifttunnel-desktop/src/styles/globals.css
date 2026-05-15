@@ -1,71 +1,109 @@
 @import "tailwindcss";
 
-/* SwiftTunnel Design System v8 - Clean Dark Pro */
+/* SwiftTunnel Design System v9 — Refined Monochrome
+ * Direction: Linear/Vercel-grade modern desktop. Strict B&W with
+ * status accents preserved. Deliberate spacing scale, tabular numerics,
+ * subtle depth via hairlines and a single elevated card tier.
+ */
 
 @theme {
-  /* Surfaces */
-  --color-bg-base: #000000;
-  --color-bg-sidebar: #050505;
-  --color-bg-card: #0a0a0a;
-  --color-bg-elevated: #141414;
-  --color-bg-hover: #1a1a1a;
-  --color-bg-active: #242424;
-  --color-bg-input: #0a0a0a;
-  --color-bg-glass: #0e0e0e;
+  /* — Surface tiers (only three, so depth reads cleanly) — */
+  --color-bg-base: #060606;
+  --color-bg-sidebar: #0a0a0a;
+  --color-bg-card: #0e0e0e;
+  --color-bg-elevated: #161616;
+  --color-bg-hover: #1c1c1c;
+  --color-bg-active: #232323;
+  --color-bg-input: #0e0e0e;
+  --color-bg-glass: #121212;
+  --color-bg-overlay: rgba(6, 6, 6, 0.72);
 
-  /* Emphasis (replaces blue accent) */
-  --color-accent-primary: #ffffff;
-  --color-accent-secondary: #ffffff;
+  /* — Emphasis (monochrome) — */
+  --color-accent-primary: #fafafa;
+  --color-accent-secondary: #fafafa;
   --color-accent-primary-glow: #ffffff;
+  --color-accent-primary-soft-6: rgba(255, 255, 255, 0.06);
   --color-accent-primary-soft-8: rgba(255, 255, 255, 0.08);
   --color-accent-primary-soft-10: rgba(255, 255, 255, 0.1);
   --color-accent-primary-soft-12: rgba(255, 255, 255, 0.12);
   --color-accent-primary-soft-15: rgba(255, 255, 255, 0.15);
   --color-accent-primary-soft-20: rgba(255, 255, 255, 0.2);
 
-  /* Status (preserved, one notch less saturated) */
-  --color-status-connected: #22c55e;
-  --color-status-connected-glow: #4ade80;
-  --color-status-warning: #eab308;
-  --color-status-error: #ef4444;
+  /* — Status — */
+  --color-status-connected: #34d39a;
+  --color-status-connected-glow: #6ee7b7;
+  --color-status-warning: #f5b942;
+  --color-status-error: #f25151;
   --color-status-inactive: #525252;
-  --color-status-warning-soft-10: rgba(234, 179, 8, 0.1);
-  --color-status-error-soft-10: rgba(239, 68, 68, 0.1);
-  --color-status-error-soft-20: rgba(239, 68, 68, 0.2);
+  --color-status-warning-soft-10: rgba(245, 185, 66, 0.1);
+  --color-status-warning-soft-20: rgba(245, 185, 66, 0.22);
+  --color-status-error-soft-10: rgba(242, 81, 81, 0.1);
+  --color-status-error-soft-20: rgba(242, 81, 81, 0.22);
+  --color-status-connected-soft-10: rgba(52, 211, 154, 0.1);
+  --color-status-connected-soft-20: rgba(52, 211, 154, 0.22);
 
-  /* Text */
-  --color-text-primary: #fafafa;
-  --color-text-secondary: #b4b4b4;
+  /* — Text — */
+  --color-text-primary: #f5f5f5;
+  --color-text-secondary: #c4c4c4;
   --color-text-muted: #8a8a8a;
-  --color-text-dimmed: #525252;
+  --color-text-dimmed: #5a5a5a;
 
-  /* Borders */
+  /* — Borders — */
   --color-border-default: #2a2a2a;
   --color-border-subtle: #1f1f1f;
+  --color-border-strong: #353535;
   --color-border-focus: #ffffff;
-  --color-border-hover: #3a3a3a;
+  --color-border-hover: #383838;
 
-  /* Latency (preserved, one notch less saturated) */
-  --color-latency-excellent: #22c55e;
-  --color-latency-good: #84cc16;
-  --color-latency-fair: #eab308;
-  --color-latency-poor: #f97316;
-  --color-latency-bad: #ef4444;
+  /* — Latency (one notch less saturated) — */
+  --color-latency-excellent: #34d39a;
+  --color-latency-good: #a3e635;
+  --color-latency-fair: #f5b942;
+  --color-latency-poor: #fb923c;
+  --color-latency-bad: #f25151;
 
-  /* Spacing */
-  --spacing-sidebar: 52px;
-  --spacing-sidebar-expanded: 200px;
-  --spacing-content: 20px;
-  --spacing-card-gap: 12px;
+  /* — Spacing & sizing — */
+  --spacing-sidebar: 56px;
+  --spacing-sidebar-expanded: 212px;
+  --spacing-content: 18px;
+  --spacing-card-gap: 10px;
 
-  /* Radius */
-  --radius-card: 8px;
-  --radius-button: 6px;
-  --radius-input: 6px;
+  /* — Radii — */
+  --radius-card: 10px;
+  --radius-button: 7px;
+  --radius-input: 7px;
   --radius-sm: 4px;
+
+  /* — Type scale (use sparingly) — */
+  --text-micro: 10px;
+  --text-label: 11px;
+  --text-body: 12.5px;
+  --text-primary: 13.5px;
+  --text-hero-sm: 16px;
+  --text-hero: 22px;
+  --text-display: 30px;
 }
 
-/* Range sliders */
+/* — Type — */
+body {
+  background-color: var(--color-bg-base);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  font-family: "Geist", "Inter", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  letter-spacing: -0.01em;
+  font-feature-settings: "ss01", "cv11", "cv05";
+}
+
+.mono,
+.font-mono {
+  font-family: "Geist Mono", "JetBrains Mono", "Cascadia Code", "Consolas", ui-monospace, monospace;
+  font-feature-settings: "tnum", "zero", "ss02";
+  letter-spacing: -0.01em;
+}
+
+/* — Range sliders — */
 .ui-slider,
 .boost-slider {
   -webkit-appearance: none;
@@ -84,15 +122,16 @@
   background: #fff;
   cursor: pointer;
   box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.4),
+    0 1px 3px rgba(0, 0, 0, 0.6),
     0 0 0 1px rgba(255, 255, 255, 0.08);
-  transition: box-shadow 0.15s ease;
+  transition: box-shadow 0.15s ease, transform 0.1s ease;
 }
 .ui-slider::-webkit-slider-thumb:hover,
 .boost-slider::-webkit-slider-thumb:hover {
   box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.5),
-    0 0 0 3px rgba(255, 255, 255, 0.18);
+    0 1px 4px rgba(0, 0, 0, 0.7),
+    0 0 0 4px rgba(255, 255, 255, 0.14);
+  transform: scale(1.08);
 }
 .ui-slider:disabled,
 .boost-slider:disabled {
@@ -100,7 +139,7 @@
   cursor: not-allowed;
 }
 
-/* Hide number input spinners */
+/* — Hide number input spinners — */
 .boost-input {
   -moz-appearance: textfield;
 }
@@ -110,76 +149,165 @@
   margin: 0;
 }
 
-body {
-  background-color: var(--color-bg-base);
-  color: var(--color-text-primary);
-  overflow: hidden;
-  font-family: "Figtree", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  letter-spacing: -0.008em;
-  font-feature-settings: "ss01", "cv11";
-}
-
-/* Mono numerics everywhere — use `.mono` or a tailwind font-mono class */
-.mono,
-.font-mono {
-  font-family: "Azeret Mono", "Cascadia Code", "Consolas", ui-monospace, monospace;
-  font-feature-settings: "tnum", "ss01";
-  letter-spacing: -0.01em;
-}
-
-/* Utility: faint blueprint-style section divider */
+/* — Subtle dividers — */
 .hairline-divider {
   height: 1px;
   background: linear-gradient(
     90deg,
     transparent,
-    var(--color-border-subtle) 15%,
-    var(--color-border-subtle) 85%,
+    var(--color-border-subtle) 12%,
+    var(--color-border-subtle) 88%,
     transparent
   );
 }
 
+/* — Refined surface: subtle inner highlight on the top edge — */
+.surface-card {
+  background-color: var(--color-bg-card);
+  border: 1px solid var(--color-border-subtle);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.025),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.surface-elevated {
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-default);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* — Primary button gloss — */
+.btn-primary-gloss {
+  background:
+    linear-gradient(180deg, #ffffff 0%, #f0f0f0 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.06),
+    0 1px 2px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+.btn-primary-gloss:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+}
+.btn-primary-gloss:active:not(:disabled) {
+  background: linear-gradient(180deg, #f0f0f0 0%, #ffffff 100%);
+  transform: translateY(0.5px);
+}
+
+/* — Connected hero ambience: faint radial wash — */
+.connected-ambience {
+  position: relative;
+  isolation: isolate;
+}
+.connected-ambience::before {
+  content: "";
+  position: absolute;
+  inset: -40% -10% auto -10%;
+  height: 160%;
+  background: radial-gradient(
+    60% 50% at 50% 0%,
+    rgba(52, 211, 154, 0.10),
+    rgba(52, 211, 154, 0) 70%
+  );
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* — Keyframes — */
 @keyframes pulse-opacity {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.45;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 @keyframes sweep-shine {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(200%);
-  }
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
 }
 
-/* Scrollbar */
+@keyframes status-breath {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.85); }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.anim-slide-up {
+  animation: slide-up 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* — Scrollbar — */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: var(--color-border-default);
-  border-radius: 3px;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-border-hover);
+  background-clip: padding-box;
+  border: 2px solid transparent;
 }
 
-/* Drag region for Tauri window */
+/* — Tauri drag region — */
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
 }
 [data-tauri-drag-region] button,
-[data-tauri-drag-region] a {
+[data-tauri-drag-region] a,
+[data-tauri-drag-region] input {
   -webkit-app-region: no-drag;
+}
+
+/* — Focus ring — */
+:focus-visible {
+  outline: none;
+}
+
+/* — Selection — */
+::selection {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--color-text-primary);
+}
+
+/* — Numeric LCD readout — */
+.lcd-readout {
+  font-family: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+  font-feature-settings: "tnum", "zero";
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* — Section eyebrow label — */
+.eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--color-text-muted);
+  font-feature-settings: "ss01";
+}
+
+/* — Pill / chip baseline — */
+.pill-base {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.04em;
 }

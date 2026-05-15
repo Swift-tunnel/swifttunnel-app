@@ -11,14 +11,20 @@ interface RowProps {
 export function Row({ label, desc, tooltip, children, dense }: RowProps) {
   return (
     <div
-      className={`flex items-center justify-between gap-4 ${dense ? "px-4 py-2.5" : "px-4 py-3"}`}
+      className={`group flex items-center justify-between gap-4 transition-colors duration-100 ${
+        dense ? "px-3.5 py-2" : "px-3.5 py-2.5"
+      }`}
     >
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <span className="flex items-center gap-1.5 text-[13px] font-medium text-text-primary">
+      <div className="flex min-w-0 flex-col gap-[3px]">
+        <span className="flex items-center gap-1.5 text-[12.5px] font-medium leading-tight text-text-primary">
           {label}
           {tooltip}
         </span>
-        {desc && <span className="text-[11px] text-text-muted">{desc}</span>}
+        {desc && (
+          <span className="text-[11px] leading-tight text-text-muted">
+            {desc}
+          </span>
+        )}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
