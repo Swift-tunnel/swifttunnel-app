@@ -20,6 +20,7 @@ interface PendingUpdate {
 }
 
 let pendingUpdate: PendingUpdate | null = null;
+let checkRunSeq = 0;
 
 interface UpdaterStore {
   status: UpdaterStatus;
@@ -44,12 +45,15 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
   error: null,
 
   checkForUpdates: async (manual = false, autoInstall = false) => {
+    const runId = ++checkRunSeq;
     try {
       set({ status: "checking", error: null });
 
       const settingsStore = useSettingsStore.getState();
       const channel = settingsStore.settings.update_channel;
       const update = await updaterCheckChannel(channel);
+      if (runId !== checkRunSeq) return;
+
       const checkedAt = Math.floor(Date.now() / 1000);
 
       settingsStore.update({
@@ -109,6 +113,8 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
         `Version ${update.available_version} is ready to install.`,
       );
     } catch (e) {
+      if (runId !== checkRunSeq) return;
+
       set({
         status: "error",
         error: String(e),

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { UpdaterCheckResponse } from "../lib/types";
 
 const { updaterCheckChannel, updaterInstallChannel } = vi.hoisted(() => ({
   updaterCheckChannel: vi.fn(),
@@ -42,6 +43,17 @@ vi.mock("./settingsStore", () => ({
 async function loadStore() {
   vi.resetModules();
   return (await import("./updaterStore")).useUpdaterStore;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return { promise, resolve, reject };
 }
 
 describe("stores/updaterStore", () => {
@@ -213,6 +225,72 @@ describe("stores/updaterStore", () => {
     await useUpdaterStore.getState().installUpdate();
 
     expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
+  });
+
+  it("keeps the newer update check result when an older check resolves last", async () => {
+    const olderStableCheck = deferred<UpdaterCheckResponse>();
+    const newerLiveCheck = deferred<UpdaterCheckResponse>();
+    updaterCheckChannel
+      .mockReturnValueOnce(olderStableCheck.promise)
+      .mockReturnValueOnce(newerLiveCheck.promise);
+    updaterInstallChannel.mockResolvedValue({
+      installed_version: "2.0.0",
+      release_tag: "v2.0.0",
+    });
+
+    const useUpdaterStore = await loadStore();
+    const olderRun = useUpdaterStore.getState().checkForUpdates(false);
+    mockSettingsStore.settings.update_channel = "Live";
+    const newerRun = useUpdaterStore.getState().checkForUpdates(false);
+
+    newerLiveCheck.resolve({
+      current_version: "1.0.0",
+      available_version: "2.0.0",
+      release_tag: "v2.0.0",
+      channel: "Live",
+    });
+    await newerRun;
+
+    olderStableCheck.resolve({
+      current_version: "1.0.0",
+      available_version: null,
+      release_tag: null,
+      channel: "Stable",
+    });
+    await olderRun;
+
+    expect(useUpdaterStore.getState().status).toBe("update_available");
+    expect(useUpdaterStore.getState().availableVersion).toBe("2.0.0");
+
+    await useUpdaterStore.getState().installUpdate();
+    expect(updaterInstallChannel).toHaveBeenCalledWith("Live", "2.0.0");
+  });
+
+  it("does not let an older check failure overwrite a newer result", async () => {
+    const olderCheck = deferred<UpdaterCheckResponse>();
+    const newerCheck = deferred<UpdaterCheckResponse>();
+    updaterCheckChannel
+      .mockReturnValueOnce(olderCheck.promise)
+      .mockReturnValueOnce(newerCheck.promise);
+
+    const useUpdaterStore = await loadStore();
+    const olderRun = useUpdaterStore.getState().checkForUpdates(false);
+    const newerRun = useUpdaterStore.getState().checkForUpdates(false);
+
+    newerCheck.resolve({
+      current_version: "1.0.0",
+      available_version: null,
+      release_tag: null,
+      channel: "Stable",
+    });
+    await newerRun;
+
+    olderCheck.reject(new Error("old check failed"));
+    await olderRun;
+
+    expect(useUpdaterStore.getState().status).toBe("up_to_date");
+    expect(useUpdaterStore.getState().availableVersion).toBeNull();
+    expect(useUpdaterStore.getState().error).toBeNull();
   });
 
   it("updates install progress from updater progress events", async () => {
