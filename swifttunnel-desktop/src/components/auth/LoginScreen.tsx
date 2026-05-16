@@ -45,9 +45,7 @@ export async function runOAuthPollTick(deps: OAuthPollTickDeps) {
   try {
     const startedAt = deps.getStartedAt() ?? deps.now();
     const elapsedMs = deps.now() - startedAt;
-    if (!deps.isDisposed()) {
-      deps.setElapsedSecs(Math.floor(elapsedMs / 1000));
-    }
+    deps.setElapsedSecs(Math.floor(elapsedMs / 1000));
 
     if (elapsedMs >= OAUTH_TIMEOUT_MS) {
       deps.clearPoll();
