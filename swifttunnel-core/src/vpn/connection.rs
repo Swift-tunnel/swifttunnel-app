@@ -4247,14 +4247,14 @@ mod tests {
             relay_status: None,
         };
 
-        assert!(auto_route_switch_allowed(&router, 0, &connected));
+        assert!(auto_route_switch_allowed(&router, 1, &connected));
         assert!(!auto_route_switch_allowed(
             &router,
-            0,
+            1,
             &ConnectionState::Disconnecting
         ));
 
         router.reset();
-        assert!(!auto_route_switch_allowed(&router, 0, &connected));
+        assert!(!auto_route_switch_allowed(&router, 1, &connected));
     }
 }
