@@ -190,11 +190,7 @@ fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
 
     let conn_state = state.vpn_state_handle.borrow().clone();
     let has_split_tunnel_handle = state.split_tunnel_handle.read().is_some();
-    if matches!(
-        conn_state,
-        swifttunnel_core::vpn::ConnectionState::Disconnected
-    ) && !has_split_tunnel_handle
-    {
+    if !should_disconnect_vpn_on_exit(&conn_state, has_split_tunnel_handle) {
         return;
     }
 
@@ -203,6 +199,24 @@ fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
     if let Err(e) = runtime.block_on(commands::vpn::disconnect_and_persist(&state)) {
         warn!("Failed to disconnect VPN during app exit: {}", e);
     }
+}
+
+fn should_disconnect_vpn_on_exit(
+    conn_state: &swifttunnel_core::vpn::ConnectionState,
+    has_split_tunnel_handle: bool,
+) -> bool {
+    !matches!(
+        conn_state,
+        swifttunnel_core::vpn::ConnectionState::Disconnected
+    ) || has_split_tunnel_handle
+}
+
+fn should_reapply_startup_boosts(account_is_banned: bool) -> bool {
+    !account_is_banned
+}
+
+fn should_exit_after_window_destroyed(label: &str) -> bool {
+    label == "main"
 }
 
 #[cfg(windows)]
@@ -397,7 +411,7 @@ pub fn run() {
                 matches!(auth.get_state(), AuthState::Banned(_))
             });
 
-            if account_is_banned {
+            if !should_reapply_startup_boosts(account_is_banned) {
                 info!("Stored account is banned; clearing boosts before startup recovery");
                 runtime.block_on(commands::auth::cleanup_banned_session(&app_state));
             } else {
@@ -501,7 +515,7 @@ pub fn run() {
                     event: tauri::WindowEvent::Destroyed,
                     ..
                 } => {
-                    if label == "main" {
+                    if should_exit_after_window_destroyed(&label) {
                         // The main window was destroyed (not hidden). Exit the app
                         // so the tray icon doesn't leave a zombie process. The
                         // minimize-to-tray path uses hide(), not close(), so
@@ -534,4 +548,53 @@ pub fn run() {
 
 pub fn run_testbench_harness(args: &[String]) -> i32 {
     harness::run_testbench_harness(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use swifttunnel_core::vpn::ConnectionState;
+
+    fn connected_state() -> ConnectionState {
+        ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: "singapore".to_string(),
+            server_endpoint: "10.0.0.1:51821".to_string(),
+            assigned_ip: "0.0.0.0".to_string(),
+            relay_auth_mode: "authenticated".to_string(),
+            split_tunnel_active: true,
+            tunneled_processes: vec!["RobloxPlayerBeta.exe".to_string()],
+            relay_status: None,
+        }
+    }
+
+    #[test]
+    fn test_exit_disconnect_gate_keeps_tray_close_from_leaving_vpn_thread_alive() {
+        assert!(!should_disconnect_vpn_on_exit(
+            &ConnectionState::Disconnected,
+            false
+        ));
+        assert!(should_disconnect_vpn_on_exit(
+            &ConnectionState::Disconnected,
+            true
+        ));
+        assert!(should_disconnect_vpn_on_exit(&connected_state(), false));
+        assert!(should_disconnect_vpn_on_exit(
+            &ConnectionState::Disconnecting,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_startup_boost_reapply_is_gated_by_banned_state() {
+        assert!(!should_reapply_startup_boosts(true));
+        assert!(should_reapply_startup_boosts(false));
+    }
+
+    #[test]
+    fn test_only_main_window_destroy_requests_app_exit() {
+        assert!(should_exit_after_window_destroyed("main"));
+        assert!(!should_exit_after_window_destroyed("settings"));
+    }
 }
