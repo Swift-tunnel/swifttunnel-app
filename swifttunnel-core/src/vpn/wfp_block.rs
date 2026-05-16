@@ -500,20 +500,28 @@ pub fn unblock_process_by_path(image_path: &str) -> Result<(), String> {
 
     let key = image_path.to_lowercase();
 
-    if let Some(filter_id) = state.active_filters.remove(&key) {
+    if let Some(filter_id) = state.active_filters.get(&key).copied() {
         unsafe {
             let result = FwpmFilterDeleteById0(state.engine_handle, filter_id);
-            if result != 0 {
-                log::warn!(
-                    "Failed to remove block filter for '{}': 0x{:08x}",
-                    image_path,
-                    result
-                );
-            } else {
+            if result == 0 {
+                state.active_filters.remove(&key);
                 log::info!(
                     "WFP block filter removed for {} (filter_id={})",
                     image_path,
                     filter_id
+                );
+            } else if result == FWP_E_FILTER_NOT_FOUND_CODE {
+                state.active_filters.remove(&key);
+                log::info!(
+                    "WFP block filter already absent for {} (filter_id={}); removed local tracking entry",
+                    image_path,
+                    filter_id
+                );
+            } else {
+                log::warn!(
+                    "Failed to remove block filter for '{}': 0x{:08x}",
+                    image_path,
+                    result
                 );
             }
         }

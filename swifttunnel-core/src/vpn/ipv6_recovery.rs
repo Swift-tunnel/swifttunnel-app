@@ -85,10 +85,7 @@ impl Ipv6Marker {
             exit 1
         }}
 
-        if ($deleteExit -ne 0 -and $showText -notmatch 'No rules match') {{
-            Write-Error ('Could not verify IPv6 block firewall rule removal. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText + '. Show output: ' + $showText)
-            exit 1
-        }}
+        Write-Output ('IPv6 block firewall rule absent after restore. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText + '. Show output: ' + $showText)
         "#,
                 IPV6_BLOCK_RULE_NAME
             ),
@@ -359,18 +356,32 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
         }
     };
 
-    let show_output = crate::hidden_command("netsh")
-        .args(["advfirewall", "firewall", "show", "rule", name_arg.as_str()])
+    let probe_script = build_firewall_rule_probe_script(IPV6_BLOCK_RULE_NAME);
+    let probe_output = crate::hidden_command("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &probe_script])
         .output();
-    let show_output = match show_output {
-        Ok(output) => output,
+    let (probe_result, probe_text) = match probe_output {
+        Ok(output) => {
+            let probe_text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (
+                firewall_rule_probe_from_exit_code(output.status.code()),
+                probe_text,
+            )
+        }
         Err(e) => {
-            log::error!("Failed to verify IPv6 firewall restore with netsh: {}", e);
-            return false;
+            log::warn!(
+                "Failed to verify IPv6 firewall restore with PowerShell: {}",
+                e
+            );
+            (FirewallRuleProbe::ProbeFailed, e.to_string())
         }
     };
 
-    if show_output.status.success() {
+    if probe_result == FirewallRuleProbe::Present {
         log::warn!(
             "IPv6 block firewall rule still exists after delete attempt for adapter {}",
             adapter_name
@@ -378,17 +389,19 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
         return false;
     }
 
-    let show_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&show_output.stdout),
-        String::from_utf8_lossy(&show_output.stderr)
-    );
-
-    if !delete_output.status.success() && !show_text.contains("No rules match") {
+    if !firewall_rule_restored(delete_output.status.success(), probe_result) {
+        let delete_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&delete_output.stdout),
+            String::from_utf8_lossy(&delete_output.stderr)
+        );
         log::warn!(
-            "Could not verify IPv6 block firewall rule removal for adapter {}: {}",
+            "Could not verify IPv6 block firewall rule removal for adapter {}: delete_ok={} probe={:?} delete='{}' probe='{}'",
             adapter_name,
-            show_text.trim()
+            delete_output.status.success(),
+            probe_result,
+            delete_text.trim(),
+            probe_text.trim()
         );
         return false;
     }
@@ -398,6 +411,43 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
         adapter_name
     );
     true
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirewallRuleProbe {
+    Present,
+    Absent,
+    ProbeFailed,
+}
+
+fn build_firewall_rule_probe_script(rule_name: &str) -> String {
+    format!(
+        r#"
+        $rule = Get-NetFirewallRule -DisplayName '{}' -ErrorAction SilentlyContinue
+        if ($null -eq $rule) {{
+            exit 2
+        }}
+        exit 0
+        "#,
+        rule_name.replace('\'', "''")
+    )
+}
+
+fn firewall_rule_probe_from_exit_code(code: Option<i32>) -> FirewallRuleProbe {
+    match code {
+        Some(0) => FirewallRuleProbe::Present,
+        Some(2) => FirewallRuleProbe::Absent,
+        _ => FirewallRuleProbe::ProbeFailed,
+    }
+}
+
+fn firewall_rule_restored(delete_success: bool, probe: FirewallRuleProbe) -> bool {
+    match (delete_success, probe) {
+        (_, FirewallRuleProbe::Present) => false,
+        (true, _) => true,
+        (false, FirewallRuleProbe::Absent) => true,
+        (false, FirewallRuleProbe::ProbeFailed) => false,
+    }
 }
 
 fn restore_ipv6_for_marker(marker: &Ipv6Marker) -> bool {
@@ -498,6 +548,28 @@ mod tests {
         assert!(cmd.contains("netsh.exe advfirewall firewall delete rule"));
         assert!(cmd.contains("netsh.exe advfirewall firewall show rule"));
         assert!(cmd.contains("exit 1"));
+        assert!(!cmd.contains("No rules match"));
+    }
+
+    #[test]
+    fn firewall_rule_restore_uses_structured_probe_outcome() {
+        assert!(firewall_rule_restored(true, FirewallRuleProbe::Absent));
+        assert!(firewall_rule_restored(true, FirewallRuleProbe::ProbeFailed));
+        assert!(firewall_rule_restored(false, FirewallRuleProbe::Absent));
+        assert!(!firewall_rule_restored(true, FirewallRuleProbe::Present));
+        assert!(!firewall_rule_restored(false, FirewallRuleProbe::Present));
+        assert!(!firewall_rule_restored(
+            false,
+            FirewallRuleProbe::ProbeFailed
+        ));
+        assert_eq!(
+            firewall_rule_probe_from_exit_code(Some(2)),
+            FirewallRuleProbe::Absent
+        );
+        assert_eq!(
+            firewall_rule_probe_from_exit_code(Some(1)),
+            FirewallRuleProbe::ProbeFailed
+        );
     }
 
     #[test]

@@ -83,11 +83,19 @@ pub struct AutoRouter {
 /// An auto-routing event for the UI log
 #[derive(Debug, Clone)]
 pub struct AutoRoutingEvent {
+    pub kind: AutoRoutingEventKind,
     pub timestamp: Instant,
     pub from_region: String,
     pub to_region: String,
     pub game_server_region: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoRoutingEventKind {
+    RelaySwitch,
+    Bypass,
+    ForcedFallbackDegraded,
 }
 
 /// Result of evaluating a game server IP for auto-routing
@@ -444,6 +452,7 @@ impl AutoRouter {
             // Log the bypass event
             let mut log = self.event_log.write();
             log.push_back(AutoRoutingEvent {
+                kind: AutoRoutingEventKind::Bypass,
                 timestamp: Instant::now(),
                 from_region: self.current_st_region.read().clone(),
                 to_region: "BYPASS".to_string(),
@@ -472,6 +481,11 @@ impl AutoRouter {
         let servers = self.available_servers.read();
         let current_st_region = self.current_st_region.read().clone();
         let current_relay_addr = *self.current_relay_addr.read();
+        let forced_fallback_degraded = pinned_server.is_some_and(|pinned| {
+            !servers
+                .iter()
+                .any(|(server_region, _, _)| server_region == pinned)
+        });
         let candidates =
             super::connection::relay_candidates_for_region(best_st_region, &servers, pinned_server);
         if candidates.is_empty() {
@@ -488,6 +502,32 @@ impl AutoRouter {
             .min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
             .cloned()
             .expect("candidates checked as non-empty");
+
+        if forced_fallback_degraded
+            && current_st_region == resolved_region
+            && current_relay_addr == Some(resolved_addr)
+        {
+            *self.current_game_region.write() = Some(game_region.clone());
+            return None;
+        }
+
+        if let Some(pinned) = pinned_server.filter(|_| forced_fallback_degraded) {
+            let mut log = self.event_log.write();
+            log.push_back(AutoRoutingEvent {
+                kind: AutoRoutingEventKind::ForcedFallbackDegraded,
+                timestamp: Instant::now(),
+                from_region: current_st_region.clone(),
+                to_region: resolved_region.clone(),
+                game_server_region: game_region.display_name().to_string(),
+                reason: format!(
+                    "Pinned server {} unavailable - using {} instead",
+                    pinned, resolved_region
+                ),
+            });
+            if log.len() > MAX_EVENT_LOG_ENTRIES {
+                log.pop_front();
+            }
+        }
 
         if candidates.len() == 1
             && current_st_region == resolved_region
@@ -600,6 +640,7 @@ impl AutoRouter {
         };
 
         let event = AutoRoutingEvent {
+            kind: AutoRoutingEventKind::RelaySwitch,
             timestamp: now,
             from_region: from_region.to_string(),
             to_region: to_region.to_string(),
@@ -816,6 +857,53 @@ mod tests {
                 "203.0.113.2:51821".parse::<SocketAddr>().unwrap()
             ))
         );
+    }
+
+    #[test]
+    fn test_forced_server_unavailable_records_degraded_fallback() {
+        use std::collections::HashMap;
+
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("3.111.230.152:51821".parse().unwrap(), "mumbai");
+        router.set_forced_servers(HashMap::from([(
+            "singapore".to_string(),
+            "singapore-99".to_string(),
+        )]));
+
+        let best = router.get_best_server_for_region(&RobloxRegion::Singapore);
+        assert_eq!(
+            best,
+            Some((
+                "singapore".to_string(),
+                "54.255.205.216:51821".parse::<SocketAddr>().unwrap()
+            ))
+        );
+
+        let events = router.recent_events(1);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, AutoRoutingEventKind::ForcedFallbackDegraded);
+        assert!(events[0].reason.contains("singapore-99 unavailable"));
+    }
+
+    #[test]
+    fn test_forced_server_unavailable_noops_without_degraded_spam() {
+        use std::collections::HashMap;
+
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+        router.set_forced_servers(HashMap::from([(
+            "singapore".to_string(),
+            "singapore-99".to_string(),
+        )]));
+
+        assert!(
+            router
+                .get_best_server_for_region(&RobloxRegion::Singapore)
+                .is_none()
+        );
+        assert!(router.recent_events(1).is_empty());
     }
 
     #[test]

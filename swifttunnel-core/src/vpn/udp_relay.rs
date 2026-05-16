@@ -1781,6 +1781,8 @@ impl UdpRelay {
             .store(RelayHealthState::NoTrafficYet as u8, Ordering::Relaxed);
         self.unanswered_keepalives.store(0, Ordering::Relaxed);
         self.inject_error_streak.store(0, Ordering::Relaxed);
+        self.send_unreachable_streak.store(0, Ordering::Relaxed);
+        self.send_failure_streak.store(0, Ordering::Relaxed);
         *self.last_receive_time.lock() = None;
         *self.first_outbound_time.lock() = None;
         log::info!(
@@ -2576,6 +2578,19 @@ mod tests {
         relay.switch_relay("127.0.0.1:51822".parse().unwrap());
 
         assert_eq!(relay.inject_error_streak(), 0);
+        assert_eq!(relay.relay_health(), RelayHealthState::NoTrafficYet);
+    }
+
+    #[test]
+    fn test_send_failure_streaks_reset_on_relay_switch() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        relay.send_unreachable_streak.store(2, Ordering::Relaxed);
+        relay.send_failure_streak.store(4, Ordering::Relaxed);
+
+        relay.switch_relay("127.0.0.1:51822".parse().unwrap());
+
+        assert_eq!(relay.send_unreachable_streak(), 0);
+        assert_eq!(relay.send_failure_streak(), 0);
         assert_eq!(relay.relay_health(), RelayHealthState::NoTrafficYet);
     }
 

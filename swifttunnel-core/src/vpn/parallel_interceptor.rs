@@ -4202,6 +4202,11 @@ impl ParallelInterceptor {
 
         log::info!("Stopping parallel interceptor...");
         self.stop_flag.store(true, Ordering::Release);
+        let (lock, cvar) = &*self.refresh_condvar;
+        if let Ok(mut signaled) = lock.lock() {
+            *signaled = true;
+            cvar.notify_all();
+        }
 
         // Wait for threads with timeout to prevent hanging on stuck threads
         if let Some(handle) = self.reader_handle.take() {
@@ -4630,6 +4635,17 @@ fn inject_inbound_packet(
         );
         return None;
     }
+    let version = ip_packet[0] >> 4;
+    let ihl = ((ip_packet[0] & 0x0F) as usize) * 4;
+    if version != 4 || ihl < 20 || ip_packet.len() < ihl {
+        log::warn!(
+            "inject_inbound_packet: invalid IPv4 header (version={}, ihl={}, len={})",
+            version,
+            ihl,
+            ip_packet.len()
+        );
+        return None;
+    }
 
     // Log first 10 packets for debugging
     if packet_count < 10 {
@@ -4762,16 +4778,16 @@ fn forward_tunneled_packet_from_reader(
         return ReaderTunnelAction::BypassPhysical;
     }
 
-    let forward_result = if ip_packet.len() >= 20 {
+    let forward_result = if ip_packet.len() > MAX_PACKET_SIZE {
+        log_super_segment_truncation_sampled(ip_packet.len());
+        Ok(super::udp_relay::RelaySendOutcome::Oversize)
+    } else if ip_packet.len() >= 20 {
         PACKET_BUFFER.with(|buf| {
             let mut fix_buf = buf.borrow_mut();
-            if ip_packet.len() > MAX_PACKET_SIZE {
-                log_super_segment_truncation_sampled(ip_packet.len());
-            }
-            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
+            let pkt_len = ip_packet.len();
             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
             clamp_tcp_mss_for_relay(&mut fix_buf[..pkt_len], relay.max_inner_packet_len());
-            fix_packet_checksums(&mut fix_buf[..pkt_len]);
+            let _ = fix_packet_checksums(&mut fix_buf[..pkt_len]);
             relay.forward_outbound_fast(&fix_buf[..pkt_len])
         })
     } else {
@@ -5603,19 +5619,19 @@ fn run_packet_worker(
                         );
                     }
 
-                    let forward_result = if ip_packet.len() >= 20 {
+                    let forward_result = if ip_packet.len() > MAX_PACKET_SIZE {
+                        log_super_segment_truncation_sampled(ip_packet.len());
+                        Ok(super::udp_relay::RelaySendOutcome::Oversize)
+                    } else if ip_packet.len() >= 20 {
                         PACKET_BUFFER.with(|buf| {
                             let mut fix_buf = buf.borrow_mut();
-                            if ip_packet.len() > MAX_PACKET_SIZE {
-                                log_super_segment_truncation_sampled(ip_packet.len());
-                            }
-                            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
+                            let pkt_len = ip_packet.len();
                             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
                             clamp_tcp_mss_for_relay(
                                 &mut fix_buf[..pkt_len],
                                 relay.max_inner_packet_len(),
                             );
-                            fix_packet_checksums(&mut fix_buf[..pkt_len]);
+                            let _ = fix_packet_checksums(&mut fix_buf[..pkt_len]);
                             relay.forward_outbound(&fix_buf[..pkt_len])
                         })
                     } else {
@@ -6853,6 +6869,10 @@ where
         data[ip_start + 19],
     );
 
+    if super::process_cache::is_non_tunnelable_dst(dst_ip) {
+        return false;
+    }
+
     let fragment_bits = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
     let more_fragments = (fragment_bits & 0x2000) != 0;
     let fragment_offset = fragment_bits & 0x1FFF;
@@ -7681,6 +7701,7 @@ fn clamp_tcp_mss_for_relay(packet: &mut [u8], max_inner_packet_len: usize) -> bo
 
 /// Fix checksums in an IP packet (modifies packet in place)
 /// Returns true if checksums were fixed
+#[must_use]
 fn fix_packet_checksums(packet: &mut [u8]) -> bool {
     if packet.len() < 20 {
         return false;
@@ -10195,10 +10216,7 @@ mod tests {
             std::net::IpAddr::V4(ip) => ip,
             std::net::IpAddr::V6(_) => panic!("test expects IPv4 localhost"),
         };
-        let dst_ip = match server_addr.ip() {
-            std::net::IpAddr::V4(ip) => ip,
-            std::net::IpAddr::V6(_) => panic!("test expects IPv4 localhost"),
-        };
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = src_addr.port();
         let dst_port = server_addr.port();
 
