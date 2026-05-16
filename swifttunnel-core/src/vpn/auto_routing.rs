@@ -503,7 +503,10 @@ impl AutoRouter {
             .cloned()
             .expect("candidates checked as non-empty");
 
-        if current_st_region == resolved_region && current_relay_addr == Some(resolved_addr) {
+        if forced_fallback_degraded
+            && current_st_region == resolved_region
+            && current_relay_addr == Some(resolved_addr)
+        {
             *self.current_game_region.write() = Some(game_region.clone());
             return None;
         }
@@ -524,6 +527,14 @@ impl AutoRouter {
             if log.len() > MAX_EVENT_LOG_ENTRIES {
                 log.pop_front();
             }
+        }
+
+        if candidates.len() == 1
+            && current_st_region == resolved_region
+            && current_relay_addr == Some(resolved_addr)
+        {
+            *self.current_game_region.write() = Some(game_region.clone());
+            return None;
         }
 
         Some((resolved_region, resolved_addr))
