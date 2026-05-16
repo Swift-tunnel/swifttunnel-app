@@ -73,7 +73,7 @@ async function loadEventsModule() {
 
 describe("lib/events", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("unregisters all listeners on cleanup", async () => {
@@ -125,5 +125,21 @@ describe("lib/events", () => {
     await cleanupEventListeners();
 
     expect(firstUnlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses listener registration errors after cleanup invalidates init", async () => {
+    const lateRegistration = deferred<UnlistenFn>();
+    mocks.listen.mockReturnValueOnce(lateRegistration.promise);
+    const { cleanupEventListeners, initEventListeners } =
+      await loadEventsModule();
+
+    const initPromise = initEventListeners();
+    expect(mocks.listen).toHaveBeenCalledTimes(1);
+
+    cleanupEventListeners();
+    lateRegistration.reject(new Error("stale listen failed"));
+
+    await expect(initPromise).resolves.toBeUndefined();
+    expect(mocks.listen).toHaveBeenCalledTimes(1);
   });
 });

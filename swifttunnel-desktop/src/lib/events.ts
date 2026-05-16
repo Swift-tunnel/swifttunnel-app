@@ -97,15 +97,17 @@ export async function initEventListeners() {
       if (!isCurrent) return;
     }
   } catch (error) {
-    if (generation === listenerGeneration) {
-      listenerGeneration++;
-      cleanupRegisteredListeners();
+    if (generation !== listenerGeneration) {
+      return;
     }
+
+    listenerGeneration++;
+    cleanupRegisteredListeners();
     throw error;
   }
 }
 
-export async function cleanupEventListeners() {
+export function cleanupEventListeners() {
   listenerGeneration++;
   cleanupRegisteredListeners();
 }
