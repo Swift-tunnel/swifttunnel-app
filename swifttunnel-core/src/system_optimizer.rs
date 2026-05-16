@@ -68,6 +68,11 @@ pub struct SystemOptimizer {
     swifttunnel_power_plan_imported: bool,
 }
 
+pub struct SystemApplyOutcome {
+    pub applied_config: SystemOptimizationConfig,
+    pub warnings: Vec<String>,
+}
+
 impl SystemOptimizer {
     pub fn new() -> Self {
         Self {
@@ -152,7 +157,21 @@ impl SystemOptimizer {
         None
     }
 
-    fn set_registry_dword(key_path: &str, value_name: &str, value: u32) {
+    fn command_failure_message(command_label: &str, stderr: &[u8], stdout: &[u8]) -> String {
+        let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+        if !stderr.is_empty() {
+            return format!("{} failed: {}", command_label, stderr);
+        }
+
+        let stdout = String::from_utf8_lossy(stdout).trim().to_string();
+        if !stdout.is_empty() {
+            return format!("{} failed: {}", command_label, stdout);
+        }
+
+        format!("{} failed without an error message", command_label)
+    }
+
+    fn try_set_registry_dword(key_path: &str, value_name: &str, value: u32) -> Result<()> {
         let value_str = value.to_string();
         let output = hidden_command("reg")
             .args([
@@ -170,15 +189,50 @@ impl SystemOptimizer {
 
         match output {
             Ok(result) if result.status.success() => {}
-            Ok(_) => warn!("Failed to set {}\\{} to {}", key_path, value_name, value),
-            Err(e) => warn!(
-                "Failed to set {}\\{} to {}: {}",
-                key_path, value_name, value, e
-            ),
+            Ok(result) => {
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    Self::command_failure_message(
+                        &format!("reg add {}\\{}", key_path, value_name),
+                        &result.stderr,
+                        &result.stdout,
+                    )
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to run reg add {}\\{}: {}",
+                    key_path,
+                    value_name,
+                    e
+                ));
+            }
+        }
+
+        match Self::query_registry_dword(key_path, value_name) {
+            Some(actual) if actual == value => Ok(()),
+            Some(actual) => Err(anyhow::anyhow!(
+                "{}\\{} verified as {}, expected {}",
+                key_path,
+                value_name,
+                actual,
+                value
+            )),
+            None => Err(anyhow::anyhow!(
+                "{}\\{} was not readable after write",
+                key_path,
+                value_name
+            )),
         }
     }
 
-    fn set_registry_string(key_path: &str, value_name: &str, value: &str) {
+    fn set_registry_dword(key_path: &str, value_name: &str, value: u32) {
+        if let Err(e) = Self::try_set_registry_dword(key_path, value_name, value) {
+            warn!("{}", e);
+        }
+    }
+
+    fn try_set_registry_string(key_path: &str, value_name: &str, value: &str) -> Result<()> {
         let output = hidden_command("reg")
             .args([
                 "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value, "/f",
@@ -187,11 +241,46 @@ impl SystemOptimizer {
 
         match output {
             Ok(result) if result.status.success() => {}
-            Ok(_) => warn!("Failed to set {}\\{} to {}", key_path, value_name, value),
-            Err(e) => warn!(
-                "Failed to set {}\\{} to {}: {}",
-                key_path, value_name, value, e
-            ),
+            Ok(result) => {
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    Self::command_failure_message(
+                        &format!("reg add {}\\{}", key_path, value_name),
+                        &result.stderr,
+                        &result.stdout,
+                    )
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to run reg add {}\\{}: {}",
+                    key_path,
+                    value_name,
+                    e
+                ));
+            }
+        }
+
+        match Self::query_registry_string(key_path, value_name) {
+            Some(actual) if actual == value => Ok(()),
+            Some(actual) => Err(anyhow::anyhow!(
+                "{}\\{} verified as {:?}, expected {:?}",
+                key_path,
+                value_name,
+                actual,
+                value
+            )),
+            None => Err(anyhow::anyhow!(
+                "{}\\{} was not readable after write",
+                key_path,
+                value_name
+            )),
+        }
+    }
+
+    fn set_registry_string(key_path: &str, value_name: &str, value: &str) {
+        if let Err(e) = Self::try_set_registry_string(key_path, value_name, value) {
+            warn!("{}", e);
         }
     }
 
@@ -285,6 +374,46 @@ impl SystemOptimizer {
                 warn!("Failed to restore power plan {}: {}", guid, e);
                 false
             }
+        }
+    }
+
+    fn try_set_active_power_plan_guid(guid: &str) -> Result<()> {
+        let output = hidden_command("powercfg")
+            .args(["/setactive", guid])
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => {}
+            Ok(result) => {
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    Self::command_failure_message(
+                        &format!("powercfg /setactive {}", guid),
+                        &result.stderr,
+                        &result.stdout,
+                    )
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to run powercfg /setactive {}: {}",
+                    guid,
+                    e
+                ));
+            }
+        }
+
+        match Self::active_power_plan_guid() {
+            Some(active) if active.eq_ignore_ascii_case(guid) => Ok(()),
+            Some(active) => Err(anyhow::anyhow!(
+                "active power plan verified as {}, expected {}",
+                active,
+                guid
+            )),
+            None => Err(anyhow::anyhow!(
+                "active power plan could not be read after setting {}",
+                guid
+            )),
         }
     }
 
@@ -512,61 +641,121 @@ impl SystemOptimizer {
         config: &SystemOptimizationConfig,
         process_id: u32,
     ) -> Result<()> {
+        let outcome = self.apply_optimizations_checked(config, process_id);
+        if !outcome.warnings.is_empty() {
+            warn!(
+                "System optimizations applied with warnings: {}",
+                outcome.warnings.join("; ")
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Apply system optimizations and return the verified applied state.
+    ///
+    /// Process-only boosts can only be marked applied after a target process is
+    /// openable. Registry, timer, and power-plan boosts must verify via the
+    /// corresponding Windows readback before the UI persists them as active.
+    pub fn apply_optimizations_checked(
+        &mut self,
+        config: &SystemOptimizationConfig,
+        process_id: u32,
+    ) -> SystemApplyOutcome {
         info!(
             "Applying system optimizations for process ID: {}",
             process_id
         );
 
+        let mut applied_config = config.clone();
+        let mut warnings = Vec::new();
+
         self.capture_system_state_snapshots(config);
 
         if config.set_high_priority {
             if process_id == 0 {
-                info!("Skipping process priority boost: no active game process detected yet");
-            } else if let Err(e) = self.set_process_priority(process_id) {
-                // Process-specific boosts can legitimately fail during restart flows.
-                // Keep applying all other boosts; priority will be retried by runtime monitors.
-                warn!(
-                    "Could not set process priority for PID {} (will retry later): {}",
-                    process_id, e
+                applied_config.set_high_priority = false;
+                warnings.push(
+                    "High Priority Mode skipped because no active Roblox process was detected"
+                        .to_string(),
                 );
+            } else if let Err(e) = self.set_process_priority(process_id) {
+                applied_config.set_high_priority = false;
+                warnings.push(format!(
+                    "High Priority Mode could not be applied to PID {}: {}",
+                    process_id, e
+                ));
             }
         }
 
-        if config.set_cpu_affinity && !config.cpu_cores.is_empty() {
-            if process_id == 0 {
-                info!("Skipping CPU affinity boost: no active game process detected yet");
-            } else if let Err(e) = self.set_cpu_affinity(process_id, &config.cpu_cores) {
-                warn!(
-                    "Could not set CPU affinity for PID {} (will retry later): {}",
-                    process_id, e
+        if config.set_cpu_affinity {
+            if config.cpu_cores.is_empty() {
+                applied_config.set_cpu_affinity = false;
+                warnings
+                    .push("CPU affinity skipped because no CPU cores were selected".to_string());
+            } else if process_id == 0 {
+                applied_config.set_cpu_affinity = false;
+                warnings.push(
+                    "CPU affinity skipped because no active Roblox process was detected"
+                        .to_string(),
                 );
+            } else if let Err(e) = self.set_cpu_affinity(process_id, &config.cpu_cores) {
+                applied_config.set_cpu_affinity = false;
+                warnings.push(format!(
+                    "CPU affinity could not be applied to PID {}: {}",
+                    process_id, e
+                ));
             }
         }
 
         if config.disable_game_bar {
-            self.disable_game_bar()?;
+            if let Err(e) = self.disable_game_bar() {
+                applied_config.disable_game_bar = false;
+                warnings.push(format!("Disable Game Bar did not verify: {}", e));
+            }
         }
 
         if config.disable_fullscreen_optimization {
-            self.disable_fullscreen_optimizations()?;
+            if let Err(e) = self.disable_fullscreen_optimizations() {
+                applied_config.disable_fullscreen_optimization = false;
+                warnings.push(format!(
+                    "Disable fullscreen optimization did not verify: {}",
+                    e
+                ));
+            }
         }
 
-        self.set_power_plan(&config.power_plan)?;
+        if let Err(e) = self.set_power_plan(&config.power_plan) {
+            applied_config.power_plan = PowerPlan::Balanced;
+            warnings.push(format!("Power plan did not verify: {}", e));
+        }
 
         // Tier 1 (Safe) Boosts
         if config.timer_resolution_1ms {
-            self.set_timer_resolution(true)?;
+            if let Err(e) = self.set_timer_resolution(true) {
+                applied_config.timer_resolution_1ms = false;
+                warnings.push(format!("Timer resolution did not verify: {}", e));
+            }
         }
 
         if config.mmcss_gaming_profile {
-            self.apply_mmcss_profile()?;
+            if let Err(e) = self.apply_mmcss_profile() {
+                applied_config.mmcss_gaming_profile = false;
+                warnings.push(format!("MMCSS Gaming Profile did not verify: {}", e));
+            }
         }
 
         if config.game_mode_enabled {
-            self.enable_game_mode()?;
+            if let Err(e) = self.enable_game_mode() {
+                applied_config.game_mode_enabled = false;
+                warnings.push(format!("Windows Game Mode did not verify: {}", e));
+            }
         }
 
-        Ok(())
+        SystemApplyOutcome {
+            applied_config,
+            warnings,
+        }
     }
 
     /// Set Roblox process to high priority
@@ -584,9 +773,8 @@ impl SystemOptimizer {
                 return Err(anyhow::anyhow!("Failed to open process"));
             }
 
-            // Store original priority for restoration
             let current_priority = GetPriorityClass(handle);
-            if current_priority != 0 {
+            if current_priority != 0 && self.original_priority.is_none() {
                 self.original_priority = Some(current_priority);
             }
 
@@ -644,62 +832,18 @@ impl SystemOptimizer {
     fn disable_game_bar(&self) -> Result<()> {
         info!("Disabling Windows Game Bar");
 
-        let output = hidden_command("reg")
-            .args([
-                "add",
-                GAME_BAR_KEY,
-                "/v",
-                GAME_BAR_VALUE,
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
-
-        match output {
-            Ok(_) => {
-                info!("Game Bar disabled successfully");
-                Ok(())
-            }
-            Err(e) => {
-                warn!("Failed to disable Game Bar: {}", e);
-                Ok(()) // Non-critical
-            }
-        }
+        Self::try_set_registry_dword(GAME_BAR_KEY, GAME_BAR_VALUE, 0)?;
+        info!("Game Bar disabled successfully");
+        Ok(())
     }
 
     /// Disable fullscreen optimizations for Roblox
     fn disable_fullscreen_optimizations(&self) -> Result<()> {
         info!("Disabling fullscreen optimizations");
 
-        // This would typically be done by modifying the Roblox executable properties
-        // For now, we'll use registry approach
-        let output = hidden_command("reg")
-            .args([
-                "add",
-                FULLSCREEN_KEY,
-                "/v",
-                FULLSCREEN_VALUE,
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "2",
-                "/f",
-            ])
-            .output();
-
-        match output {
-            Ok(_) => {
-                info!("Fullscreen optimizations disabled");
-                Ok(())
-            }
-            Err(e) => {
-                warn!("Failed to disable fullscreen optimizations: {}", e);
-                Ok(())
-            }
-        }
+        Self::try_set_registry_dword(FULLSCREEN_KEY, FULLSCREEN_VALUE, 2)?;
+        info!("Fullscreen optimizations disabled");
+        Ok(())
     }
 
     /// Set Windows power plan
@@ -710,31 +854,16 @@ impl SystemOptimizer {
 
         if matches!(plan, PowerPlan::SwiftTunnel) {
             if let Err(e) = self.ensure_swifttunnel_power_plan() {
-                warn!("Could not prepare SwiftTunnel power plan: {}", e);
-                warn!("Skipping SwiftTunnel power plan activation because setup did not complete");
-                return Ok(());
+                return Err(anyhow::anyhow!(
+                    "could not prepare SwiftTunnel power plan: {}",
+                    e
+                ));
             }
         }
 
-        let output = hidden_command("powercfg")
-            .args(["/setactive", guid])
-            .output();
-
-        match output {
-            Ok(result) => {
-                if result.status.success() {
-                    info!("Power plan set successfully");
-                    Ok(())
-                } else {
-                    warn!("Failed to set power plan (may require admin)");
-                    Ok(())
-                }
-            }
-            Err(e) => {
-                warn!("Failed to set power plan: {}", e);
-                Ok(())
-            }
-        }
+        Self::try_set_active_power_plan_guid(guid)?;
+        info!("Power plan set successfully");
+        Ok(())
     }
 
     // ===== TIER 1 (SAFE) BOOSTS =====
@@ -767,7 +896,11 @@ impl SystemOptimizer {
                         self.timer_resolution_active = true;
                         info!("Timer resolution set to 1ms via timeBeginPeriod (fallback)");
                     } else {
-                        warn!("Failed to set timer resolution: error code {}", result);
+                        return Err(anyhow::anyhow!(
+                            "NtSetTimerResolution failed with 0x{:08X} and timeBeginPeriod failed with {}",
+                            status,
+                            result
+                        ));
                     }
                 }
             }
@@ -810,7 +943,7 @@ impl SystemOptimizer {
         ];
 
         for (key_path, value_name, value_data) in mmcss_keys.iter() {
-            Self::set_registry_string(key_path, value_name, value_data);
+            Self::try_set_registry_string(key_path, value_name, value_data)?;
         }
 
         // Set DWORD values separately
@@ -834,7 +967,7 @@ impl SystemOptimizer {
 
         for (key_path, value_name, value_data) in dword_keys.iter() {
             if let Ok(value) = value_data.parse::<u32>() {
-                Self::set_registry_dword(key_path, value_name, value);
+                Self::try_set_registry_dword(key_path, value_name, value)?;
             }
         }
 
@@ -871,7 +1004,7 @@ impl SystemOptimizer {
 
         for (key_path, value_name, value_data) in game_mode_keys.iter() {
             if let Ok(value) = value_data.parse::<u32>() {
-                Self::set_registry_dword(key_path, value_name, value);
+                Self::try_set_registry_dword(key_path, value_name, value)?;
             }
         }
 
@@ -1170,6 +1303,43 @@ mod tests {
             Some(true)
         ));
         assert!(!SystemOptimizer::should_import_swifttunnel_power_plan(None));
+    }
+
+    #[test]
+    fn checked_apply_does_not_mark_process_priority_applied_without_pid() {
+        let mut optimizer = SystemOptimizer::new();
+        let config = SystemOptimizationConfig {
+            set_high_priority: true,
+            ..Default::default()
+        };
+
+        let outcome = optimizer.apply_optimizations_checked(&config, 0);
+
+        assert!(!outcome.applied_config.set_high_priority);
+        assert!(outcome.warnings.iter().any(|warning| {
+            warning.contains("High Priority Mode skipped")
+                && warning.contains("no active Roblox process")
+        }));
+    }
+
+    #[test]
+    fn checked_apply_rejects_cpu_affinity_without_selected_cores() {
+        let mut optimizer = SystemOptimizer::new();
+        let config = SystemOptimizationConfig {
+            set_cpu_affinity: true,
+            cpu_cores: Vec::new(),
+            ..Default::default()
+        };
+
+        let outcome = optimizer.apply_optimizations_checked(&config, 1234);
+
+        assert!(!outcome.applied_config.set_cpu_affinity);
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no CPU cores were selected"))
+        );
     }
 
     #[test]

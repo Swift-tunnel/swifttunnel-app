@@ -182,8 +182,29 @@ pub async fn boost_update_config(
                 if let Err(e) = so.restore(roblox_pid) {
                     warn_list.push(format!("System optimizer restore: {}", e));
                 }
-                if let Err(e) = so.apply_optimizations(&config.system_optimization, roblox_pid) {
-                    warn_list.push(format!("System optimizer: {}", e));
+                let outcome =
+                    so.apply_optimizations_checked(&config.system_optimization, roblox_pid);
+                applied_config.system_optimization = outcome.applied_config;
+                warn_list.extend(
+                    outcome
+                        .warnings
+                        .into_iter()
+                        .map(|warning| format!("System optimizer: {}", warning)),
+                );
+            }
+
+            #[cfg(windows)]
+            if config.system_optimization.clear_standby_memory {
+                let exclude_pids = if roblox_pid == 0 {
+                    Vec::new()
+                } else {
+                    vec![roblox_pid]
+                };
+                if let Err(e) =
+                    swifttunnel_core::ram_cleaner::clean_ram(&exclude_pids, |_, _, _, _, _| {})
+                {
+                    applied_config.system_optimization.clear_standby_memory = false;
+                    warn_list.push(format!("System optimizer: RAM clean boost: {}", e));
                 }
             }
 
