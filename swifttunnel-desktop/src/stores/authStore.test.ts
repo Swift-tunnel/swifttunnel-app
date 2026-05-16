@@ -46,6 +46,18 @@ function authState(overrides: Partial<AuthStateResponse>): AuthStateResponse {
   };
 }
 
+async function waitForCallCount(
+  mock: { mock: { calls: unknown[] } },
+  count: number,
+) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    if (mock.mock.calls.length >= count) return;
+    await Promise.resolve();
+  }
+
+  expect(mock.mock.calls.length).toBeGreaterThanOrEqual(count);
+}
+
 describe("stores/authStore", () => {
   beforeEach(() => {
     Object.values(commands).forEach((mock) => mock.mockReset());
@@ -93,6 +105,34 @@ describe("stores/authStore", () => {
 
     await useAuthStore.getState().refreshProfile();
     expect(useAuthStore.getState().error).toBeNull();
+  });
+
+  it("clears loading when refreshProfile supersedes an in-flight fetch", async () => {
+    const fetchState = deferred<AuthStateResponse>();
+    commands.authGetState.mockReturnValueOnce(fetchState.promise);
+    commands.authRefreshProfile.mockResolvedValueOnce(undefined);
+
+    const useAuthStore = await loadStore();
+    const fetchRun = useAuthStore.getState().fetchState();
+    await waitForCallCount(commands.authGetState, 1);
+
+    await useAuthStore.getState().refreshProfile();
+
+    expect(useAuthStore.getState().isLoading).toBe(false);
+    expect(useAuthStore.getState().error).toBeNull();
+
+    fetchState.resolve(
+      authState({
+        state: "logged_in",
+        email: "old@example.com",
+        user_id: "old-user",
+      }),
+    );
+    await fetchRun;
+
+    expect(useAuthStore.getState().state).toBe("logged_out");
+    expect(useAuthStore.getState().email).toBeNull();
+    expect(useAuthStore.getState().isLoading).toBe(false);
   });
 
   it("does not let a stale fetch restore logged-in state after logout", async () => {
@@ -144,6 +184,44 @@ describe("stores/authStore", () => {
     await expect(pollRun).resolves.toBe(false);
 
     expect(useAuthStore.getState().state).toBe("logged_out");
+    expect(useAuthStore.getState().error).toBe("Login cancelled.");
+  });
+
+  it("returns false when OAuth completion fetch is cancelled before it writes", async () => {
+    const fetchState = deferred<AuthStateResponse>();
+    commands.authPollOAuth.mockResolvedValueOnce({
+      completed: true,
+      token: "token-1",
+      state: "callback-state",
+    });
+    commands.authCompleteOAuth.mockResolvedValueOnce(undefined);
+    commands.authGetState.mockReturnValueOnce(fetchState.promise);
+    commands.authCancelOAuth.mockResolvedValueOnce(undefined);
+
+    const useAuthStore = await loadStore();
+    useAuthStore.setState((state) => ({
+      ...state,
+      state: "awaiting_oauth",
+      isLoading: false,
+      error: null,
+    }));
+
+    const pollRun = useAuthStore.getState().pollOAuth();
+    await waitForCallCount(commands.authGetState, 1);
+
+    await useAuthStore.getState().cancelOAuth("Login cancelled.");
+
+    fetchState.resolve(
+      authState({
+        state: "logged_in",
+        email: "new@example.com",
+        user_id: "new-user",
+      }),
+    );
+    await expect(pollRun).resolves.toBe(false);
+
+    expect(useAuthStore.getState().state).toBe("logged_out");
+    expect(useAuthStore.getState().email).toBeNull();
     expect(useAuthStore.getState().error).toBe("Login cancelled.");
   });
 });

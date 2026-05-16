@@ -94,7 +94,7 @@ export const useAuthStore = create<AuthStore>((set, get) => {
           if (runId !== authRunSeq) return false;
 
           await get().fetchState();
-          return true;
+          return get().state === "logged_in" || get().state === "banned";
         }
         return false;
       } catch (e) {
@@ -153,6 +153,9 @@ export const useAuthStore = create<AuthStore>((set, get) => {
       try {
         set({ error: null });
         await authRefreshProfile();
+        if (runId === authRunSeq) {
+          set({ isLoading: false, error: null });
+        }
       } catch (e) {
         if (runId === authRunSeq) {
           set({ error: String(e) });
