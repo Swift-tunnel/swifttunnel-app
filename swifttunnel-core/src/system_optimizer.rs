@@ -322,16 +322,11 @@ impl SystemOptimizer {
         F: FnMut(RegistryWrite<'a>) -> Result<()>,
         R: FnOnce(),
     {
-        let mut applied_count = 0;
-
         for write in writes.iter().copied() {
             if let Err(e) = apply(write) {
-                if applied_count > 0 {
-                    rollback();
-                }
+                rollback();
                 return Err(e);
             }
-            applied_count += 1;
         }
 
         Ok(())
@@ -1525,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_write_plan_skips_rollback_when_first_write_fails() {
+    fn registry_write_plan_rolls_back_even_when_first_write_fails() {
         let writes = [RegistryWrite::Dword {
             key_path: "HKCU\\Software\\SwiftTunnel",
             value_name: "First",
@@ -1542,7 +1537,7 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(!rolled_back);
+        assert!(rolled_back);
     }
 
     #[test]
