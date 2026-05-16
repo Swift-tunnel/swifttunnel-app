@@ -56,6 +56,20 @@ struct MmcssSnapshot {
     system_responsiveness: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryWrite<'a> {
+    Dword {
+        key_path: &'a str,
+        value_name: &'a str,
+        value: u32,
+    },
+    String {
+        key_path: &'a str,
+        value_name: &'a str,
+        value: &'a str,
+    },
+}
+
 pub struct SystemOptimizer {
     original_priority: Option<u32>,
     timer_resolution_active: bool,
@@ -282,6 +296,40 @@ impl SystemOptimizer {
         if let Err(e) = Self::try_set_registry_string(key_path, value_name, value) {
             warn!("{}", e);
         }
+    }
+
+    fn apply_registry_write(write: RegistryWrite<'_>) -> Result<()> {
+        match write {
+            RegistryWrite::Dword {
+                key_path,
+                value_name,
+                value,
+            } => Self::try_set_registry_dword(key_path, value_name, value),
+            RegistryWrite::String {
+                key_path,
+                value_name,
+                value,
+            } => Self::try_set_registry_string(key_path, value_name, value),
+        }
+    }
+
+    fn apply_registry_writes_with_rollback<'a, F, R>(
+        writes: &[RegistryWrite<'a>],
+        mut apply: F,
+        rollback: R,
+    ) -> Result<()>
+    where
+        F: FnMut(RegistryWrite<'a>) -> Result<()>,
+        R: FnOnce(),
+    {
+        for write in writes.iter().copied() {
+            if let Err(e) = apply(write) {
+                rollback();
+                return Err(e);
+            }
+        }
+
+        Ok(())
     }
 
     fn restore_registry_dword(key_path: &str, value_name: &str, snapshot: Option<u32>) {
@@ -586,6 +634,23 @@ impl SystemOptimizer {
         matches!(installed, Some(false))
     }
 
+    fn capture_mmcss_snapshot() -> MmcssSnapshot {
+        MmcssSnapshot {
+            scheduling_category: Self::query_registry_string(
+                MMCSS_GAMES_KEY,
+                "Scheduling Category",
+            ),
+            sfio_priority: Self::query_registry_string(MMCSS_GAMES_KEY, "SFIO Priority"),
+            background_only: Self::query_registry_string(MMCSS_GAMES_KEY, "Background Only"),
+            priority: Self::query_registry_dword(MMCSS_GAMES_KEY, "Priority"),
+            clock_rate: Self::query_registry_dword(MMCSS_GAMES_KEY, "Clock Rate"),
+            system_responsiveness: Self::query_registry_dword(
+                MMCSS_SYSTEM_PROFILE_KEY,
+                "SystemResponsiveness",
+            ),
+        }
+    }
+
     fn capture_system_state_snapshots(&mut self, config: &SystemOptimizationConfig) {
         if config.disable_game_bar {
             Self::capture_dword_snapshot(&mut self.game_bar_snapshot, GAME_BAR_KEY, GAME_BAR_VALUE);
@@ -613,20 +678,7 @@ impl SystemOptimizer {
         }
 
         if config.mmcss_gaming_profile && self.mmcss_snapshot.is_none() {
-            self.mmcss_snapshot = Some(MmcssSnapshot {
-                scheduling_category: Self::query_registry_string(
-                    MMCSS_GAMES_KEY,
-                    "Scheduling Category",
-                ),
-                sfio_priority: Self::query_registry_string(MMCSS_GAMES_KEY, "SFIO Priority"),
-                background_only: Self::query_registry_string(MMCSS_GAMES_KEY, "Background Only"),
-                priority: Self::query_registry_dword(MMCSS_GAMES_KEY, "Priority"),
-                clock_rate: Self::query_registry_dword(MMCSS_GAMES_KEY, "Clock Rate"),
-                system_responsiveness: Self::query_registry_dword(
-                    MMCSS_SYSTEM_PROFILE_KEY,
-                    "SystemResponsiveness",
-                ),
-            });
+            self.mmcss_snapshot = Some(Self::capture_mmcss_snapshot());
         }
 
         if !matches!(config.power_plan, PowerPlan::Balanced)
@@ -951,56 +1003,51 @@ impl SystemOptimizer {
 
     /// Apply MMCSS (Multimedia Class Scheduler Service) gaming profile
     /// This boosts priority for game processes via the Windows scheduler
-    pub fn apply_mmcss_profile(&self) -> Result<()> {
+    pub fn apply_mmcss_profile(&mut self) -> Result<()> {
         info!("Applying MMCSS gaming profile");
+        let rollback_snapshot = self
+            .mmcss_snapshot
+            .clone()
+            .unwrap_or_else(Self::capture_mmcss_snapshot);
 
-        // Set MMCSS gaming profile registry keys
-        let mmcss_keys = [
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "Scheduling Category",
-                "High",
-            ),
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "SFIO Priority",
-                "High",
-            ),
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "Background Only",
-                "False",
-            ),
+        let mmcss_writes = [
+            RegistryWrite::String {
+                key_path: MMCSS_GAMES_KEY,
+                value_name: "Scheduling Category",
+                value: "High",
+            },
+            RegistryWrite::String {
+                key_path: MMCSS_GAMES_KEY,
+                value_name: "SFIO Priority",
+                value: "High",
+            },
+            RegistryWrite::String {
+                key_path: MMCSS_GAMES_KEY,
+                value_name: "Background Only",
+                value: "False",
+            },
+            RegistryWrite::Dword {
+                key_path: MMCSS_GAMES_KEY,
+                value_name: "Priority",
+                value: 6,
+            },
+            RegistryWrite::Dword {
+                key_path: MMCSS_GAMES_KEY,
+                value_name: "Clock Rate",
+                value: 10000,
+            },
+            RegistryWrite::Dword {
+                key_path: MMCSS_SYSTEM_PROFILE_KEY,
+                value_name: "SystemResponsiveness",
+                value: 0,
+            },
         ];
 
-        for (key_path, value_name, value_data) in mmcss_keys.iter() {
-            Self::try_set_registry_string(key_path, value_name, value_data)?;
-        }
-
-        // Set DWORD values separately
-        let dword_keys = [
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "Priority",
-                "6",
-            ),
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games",
-                "Clock Rate",
-                "10000",
-            ),
-            (
-                r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
-                "SystemResponsiveness",
-                "0",
-            ),
-        ];
-
-        for (key_path, value_name, value_data) in dword_keys.iter() {
-            if let Ok(value) = value_data.parse::<u32>() {
-                Self::try_set_registry_dword(key_path, value_name, value)?;
-            }
-        }
+        Self::apply_registry_writes_with_rollback(
+            &mmcss_writes,
+            Self::apply_registry_write,
+            || Self::restore_mmcss_snapshot(rollback_snapshot.clone()),
+        )?;
 
         info!("MMCSS gaming profile applied");
         Ok(())
@@ -1025,19 +1072,44 @@ impl SystemOptimizer {
     }
 
     /// Enable Windows Game Mode for resource prioritization
-    pub fn enable_game_mode(&self) -> Result<()> {
+    pub fn enable_game_mode(&mut self) -> Result<()> {
         info!("Enabling Windows Game Mode");
+        let rollback_allow_auto = self.game_mode_allow_auto_snapshot.unwrap_or_else(|| {
+            Self::query_registry_dword(GAME_MODE_KEY, GAME_MODE_ALLOW_AUTO_VALUE)
+        });
+        let rollback_enabled = self
+            .game_mode_enabled_snapshot
+            .unwrap_or_else(|| Self::query_registry_dword(GAME_MODE_KEY, GAME_MODE_ENABLED_VALUE));
 
-        let game_mode_keys = [
-            (GAME_MODE_KEY, GAME_MODE_ALLOW_AUTO_VALUE, "1"),
-            (GAME_MODE_KEY, GAME_MODE_ENABLED_VALUE, "1"),
+        let game_mode_writes = [
+            RegistryWrite::Dword {
+                key_path: GAME_MODE_KEY,
+                value_name: GAME_MODE_ALLOW_AUTO_VALUE,
+                value: 1,
+            },
+            RegistryWrite::Dword {
+                key_path: GAME_MODE_KEY,
+                value_name: GAME_MODE_ENABLED_VALUE,
+                value: 1,
+            },
         ];
 
-        for (key_path, value_name, value_data) in game_mode_keys.iter() {
-            if let Ok(value) = value_data.parse::<u32>() {
-                Self::try_set_registry_dword(key_path, value_name, value)?;
-            }
-        }
+        Self::apply_registry_writes_with_rollback(
+            &game_mode_writes,
+            Self::apply_registry_write,
+            || {
+                Self::restore_registry_dword(
+                    GAME_MODE_KEY,
+                    GAME_MODE_ENABLED_VALUE,
+                    rollback_enabled,
+                );
+                Self::restore_registry_dword(
+                    GAME_MODE_KEY,
+                    GAME_MODE_ALLOW_AUTO_VALUE,
+                    rollback_allow_auto,
+                );
+            },
+        )?;
 
         info!("Windows Game Mode enabled");
         Ok(())
@@ -1403,6 +1475,69 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("no CPU cores were selected"))
         );
+    }
+
+    #[test]
+    fn registry_write_plan_rolls_back_after_a_partial_failure() {
+        let writes = [
+            RegistryWrite::Dword {
+                key_path: "HKCU\\Software\\SwiftTunnel",
+                value_name: "First",
+                value: 1,
+            },
+            RegistryWrite::Dword {
+                key_path: "HKCU\\Software\\SwiftTunnel",
+                value_name: "Second",
+                value: 1,
+            },
+            RegistryWrite::Dword {
+                key_path: "HKCU\\Software\\SwiftTunnel",
+                value_name: "Third",
+                value: 1,
+            },
+        ];
+        let mut attempted = Vec::new();
+        let mut rolled_back = false;
+
+        let result = SystemOptimizer::apply_registry_writes_with_rollback(
+            &writes,
+            |write| {
+                attempted.push(write);
+                if attempted.len() == 2 {
+                    Err(anyhow::anyhow!("second write failed"))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                rolled_back = true;
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(attempted.as_slice(), &writes[..2]);
+        assert!(rolled_back);
+    }
+
+    #[test]
+    fn registry_write_plan_does_not_roll_back_when_all_writes_succeed() {
+        let writes = [RegistryWrite::String {
+            key_path: "HKCU\\Software\\SwiftTunnel",
+            value_name: "Mode",
+            value: "Enabled",
+        }];
+        let mut rolled_back = false;
+
+        let result = SystemOptimizer::apply_registry_writes_with_rollback(
+            &writes,
+            |_| Ok(()),
+            || {
+                rolled_back = true;
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!rolled_back);
     }
 
     #[test]

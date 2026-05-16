@@ -127,6 +127,40 @@ impl From<swifttunnel_core::ram_cleaner::RamCleanResult> for RamCleanResultRespo
     }
 }
 
+fn ram_clean_boost_verified(result: &swifttunnel_core::ram_cleaner::RamCleanResult) -> bool {
+    result.modified_flush.success && result.standby_purge.success
+}
+
+fn ram_clean_boost_failure_reasons(
+    result: &swifttunnel_core::ram_cleaner::RamCleanResult,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+
+    if !result.modified_flush.success {
+        reasons.push(format!(
+            "modified flush {}",
+            result
+                .modified_flush
+                .skipped_reason
+                .as_deref()
+                .unwrap_or("failed without a reported reason")
+        ));
+    }
+
+    if !result.standby_purge.success {
+        reasons.push(format!(
+            "standby purge {}",
+            result
+                .standby_purge
+                .skipped_reason
+                .as_deref()
+                .unwrap_or("failed without a reported reason")
+        ));
+    }
+
+    reasons
+}
+
 #[tauri::command]
 pub async fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, String> {
     #[cfg(windows)]
@@ -200,12 +234,35 @@ pub async fn boost_update_config(
                 } else {
                     vec![roblox_pid]
                 };
-                if let Err(e) =
-                    swifttunnel_core::ram_cleaner::clean_ram(&exclude_pids, |_, _, _, _, _| {})
-                {
-                    applied_config.system_optimization.clear_standby_memory = false;
-                    warn_list.push(format!("System optimizer: RAM clean boost: {}", e));
+                match swifttunnel_core::ram_cleaner::clean_ram(&exclude_pids, |_, _, _, _, _| {}) {
+                    Ok(result) => {
+                        for warning in &result.warnings {
+                            warn_list
+                                .push(format!("System optimizer: RAM clean boost: {}", warning));
+                        }
+
+                        if !ram_clean_boost_verified(&result) {
+                            applied_config.system_optimization.clear_standby_memory = false;
+                            let reasons = ram_clean_boost_failure_reasons(&result);
+                            warn_list.push(format!(
+                                "System optimizer: RAM clean boost did not verify: {}",
+                                reasons.join("; ")
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        applied_config.system_optimization.clear_standby_memory = false;
+                        warn_list.push(format!("System optimizer: RAM clean boost: {}", e));
+                    }
                 }
+            }
+
+            #[cfg(not(windows))]
+            if config.system_optimization.clear_standby_memory {
+                applied_config.system_optimization.clear_standby_memory = false;
+                warn_list.push(
+                    "System optimizer: RAM clean boost is only supported on Windows".to_string(),
+                );
             }
 
             {
@@ -434,5 +491,74 @@ pub async fn boost_restart_roblox(state: State<'_, AppState>) -> Result<(), Stri
     {
         let _ = state;
         Err("Roblox restart is only supported on Windows".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swifttunnel_core::ram_cleaner::{
+        ModifiedFlushResult, RamCleanResult, StandbyPurgeResult, SystemMemorySnapshot,
+    };
+
+    fn memory_snapshot() -> SystemMemorySnapshot {
+        SystemMemorySnapshot {
+            total_mb: 16_384,
+            available_mb: 4_096,
+            used_mb: 12_288,
+            load_pct: 75,
+            standby_mb: Some(512),
+            modified_mb: Some(128),
+        }
+    }
+
+    fn ram_clean_result(modified_success: bool, standby_success: bool) -> RamCleanResult {
+        RamCleanResult {
+            before: memory_snapshot(),
+            after: memory_snapshot(),
+            trimmed_count: 0,
+            standby_purge: StandbyPurgeResult {
+                attempted: standby_success,
+                success: standby_success,
+                skipped_reason: (!standby_success).then(|| "Requires Administrator".to_string()),
+            },
+            modified_flush: ModifiedFlushResult {
+                attempted: modified_success,
+                success: modified_success,
+                skipped_reason: (!modified_success)
+                    .then(|| "SeIncreaseQuotaPrivilege unavailable".to_string()),
+            },
+            freed_mb: 0,
+            standby_freed_mb: Some(0),
+            modified_freed_mb: Some(0),
+            duration_ms: 1,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ram_clean_boost_requires_both_memory_list_phases_to_succeed() {
+        assert!(ram_clean_boost_verified(&ram_clean_result(true, true)));
+        assert!(!ram_clean_boost_verified(&ram_clean_result(false, true)));
+        assert!(!ram_clean_boost_verified(&ram_clean_result(true, false)));
+    }
+
+    #[test]
+    fn ram_clean_failure_reasons_report_failed_memory_list_phases() {
+        let result = ram_clean_result(false, false);
+
+        let reasons = ram_clean_boost_failure_reasons(&result);
+
+        assert_eq!(reasons.len(), 2);
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("modified flush"))
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("standby purge"))
+        );
     }
 }
