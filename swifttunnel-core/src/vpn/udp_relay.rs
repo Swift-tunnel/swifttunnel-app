@@ -316,6 +316,7 @@ pub enum RelayAuthAckStatus {
     SidMismatch = 4,
     ServerMismatch = 5,
     AuthDisabled = 6,
+    Replay = 7,
 }
 
 impl RelayAuthAckStatus {
@@ -328,6 +329,7 @@ impl RelayAuthAckStatus {
             4 => Some(Self::SidMismatch),
             5 => Some(Self::ServerMismatch),
             6 => Some(Self::AuthDisabled),
+            7 => Some(Self::Replay),
             _ => None,
         }
     }
@@ -341,6 +343,7 @@ impl RelayAuthAckStatus {
             Self::SidMismatch => "sid_mismatch",
             Self::ServerMismatch => "server_mismatch",
             Self::AuthDisabled => "auth_disabled",
+            Self::Replay => "replay",
         }
     }
 }
@@ -2059,6 +2062,16 @@ mod tests {
         getrandom(&mut id2);
         // Should be different (with extremely high probability)
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_relay_auth_ack_status_maps_replay_structurally() {
+        assert_eq!(
+            RelayAuthAckStatus::from_u8(7),
+            Some(RelayAuthAckStatus::Replay)
+        );
+        assert_eq!(RelayAuthAckStatus::Replay.as_str(), "replay");
+        assert_eq!(RelayAuthAckStatus::from_u8(8), None);
     }
 
     #[test]
