@@ -85,7 +85,7 @@ export const useServerStore = create<ServerStore>((set, get) => {
         set({ isLoading: true });
         await serverRefresh();
         if (runId !== refreshRunSeq) {
-          // The newer refresh owns the loading state and follow-up list fetch.
+          // This superseded refresh may resolve while the newer refresh still owns loading.
           return;
         }
 

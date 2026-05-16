@@ -195,7 +195,7 @@ describe("stores/serverStore", () => {
     const newRun = useServerStore.getState().refresh();
 
     oldRefresh.resolve("old");
-    await Promise.resolve();
+    await oldRun;
     expect(serverGetList).not.toHaveBeenCalled();
     expect(useServerStore.getState().isLoading).toBe(true);
 
