@@ -8,6 +8,10 @@ import {
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
 
+let listRunSeq = 0;
+let refreshRunSeq = 0;
+let latencyRunSeq = 0;
+
 interface ServerStore {
   regions: ServerRegion[];
   servers: ServerInfo[];
@@ -33,43 +37,63 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   error: null,
 
   fetchList: async () => {
+    const runId = ++listRunSeq;
     try {
       set({ isLoading: true });
       const resp = await serverGetList();
-      set({
-        regions: resp.regions,
-        servers: resp.servers,
-        source: resp.source,
-        isLoading: false,
-        error: null,
-      });
+      set(() =>
+        runId === listRunSeq
+          ? {
+              regions: resp.regions,
+              servers: resp.servers,
+              source: resp.source,
+              isLoading: false,
+              error: null,
+            }
+          : {},
+      );
     } catch (e) {
-      set({ isLoading: false, error: String(e) });
+      set(() =>
+        runId === listRunSeq
+          ? { isLoading: false, error: String(e) }
+          : {},
+      );
     }
   },
 
   fetchLatencies: async () => {
+    const runId = ++latencyRunSeq;
     try {
       const entries = await serverGetLatencies();
       const latencies = new Map<string, number | null>();
       for (const entry of entries) {
         latencies.set(entry.region, entry.latency_ms);
       }
-      set({ latencies });
+      set(() => (runId === latencyRunSeq ? { latencies } : {}));
     } catch (error) {
-      reportError("Failed to fetch server latencies", error, {
-        dedupeKey: "server-fetch-latencies",
-      });
+      if (runId === latencyRunSeq) {
+        reportError("Failed to fetch server latencies", error, {
+          dedupeKey: "server-fetch-latencies",
+        });
+      }
     }
   },
 
   refresh: async () => {
+    const runId = ++refreshRunSeq;
+    listRunSeq++;
     try {
       set({ isLoading: true });
       await serverRefresh();
+      if (runId !== refreshRunSeq) return;
+
       await get().fetchList();
     } catch (e) {
-      set({ isLoading: false, error: String(e) });
+      set(() =>
+        runId === refreshRunSeq
+          ? { isLoading: false, error: String(e) }
+          : {},
+      );
     }
   },
 
