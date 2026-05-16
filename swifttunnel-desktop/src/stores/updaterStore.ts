@@ -19,9 +19,6 @@ interface PendingUpdate {
   channel: "Stable" | "Live";
 }
 
-let pendingUpdate: PendingUpdate | null = null;
-let checkRunSeq = 0;
-
 interface UpdaterStore {
   status: UpdaterStatus;
   currentVersion: string;
@@ -36,142 +33,145 @@ interface UpdaterStore {
   handleUpdaterDone: () => void;
 }
 
-export const useUpdaterStore = create<UpdaterStore>((set) => ({
-  status: "idle",
-  currentVersion: __APP_VERSION__,
-  availableVersion: null,
-  progressPercent: 0,
-  lastChecked: null,
-  error: null,
+export const useUpdaterStore = create<UpdaterStore>((set, get) => {
+  let pendingUpdate: PendingUpdate | null = null;
+  let checkRunSeq = 0;
 
-  checkForUpdates: async (manual = false, autoInstall = false) => {
-    const runId = ++checkRunSeq;
-    try {
-      set({ status: "checking", error: null });
+  return {
+    status: "idle",
+    currentVersion: __APP_VERSION__,
+    availableVersion: null,
+    progressPercent: 0,
+    lastChecked: null,
+    error: null,
 
-      const settingsStore = useSettingsStore.getState();
-      const channel = settingsStore.settings.update_channel;
-      const update = await updaterCheckChannel(channel);
-      if (runId !== checkRunSeq) return;
+    checkForUpdates: async (manual = false, autoInstall = false) => {
+      const runId = ++checkRunSeq;
+      try {
+        set({ status: "checking", error: null });
 
-      const checkedAt = Math.floor(Date.now() / 1000);
+        const settingsStore = useSettingsStore.getState();
+        const channel = settingsStore.settings.update_channel;
+        const update = await updaterCheckChannel(channel);
+        if (runId !== checkRunSeq) return;
 
-      settingsStore.update({
-        update_settings: {
-          ...settingsStore.settings.update_settings,
-          last_check: checkedAt,
-        },
-      });
-      void settingsStore.save();
+        const checkedAt = Math.floor(Date.now() / 1000);
 
-      if (!update.available_version) {
-        pendingUpdate = null;
-        set((prev) => ({
-          status: "up_to_date",
-          currentVersion: update.current_version || prev.currentVersion,
-          availableVersion: null,
+        settingsStore.update({
+          update_settings: {
+            ...settingsStore.settings.update_settings,
+            last_check: checkedAt,
+          },
+        });
+        void settingsStore.save();
+
+        if (!update.available_version) {
+          pendingUpdate = null;
+          set((prev) => ({
+            status: "up_to_date",
+            currentVersion: update.current_version || prev.currentVersion,
+            availableVersion: null,
+            progressPercent: 0,
+            lastChecked: checkedAt,
+          }));
+          if (manual) {
+            await notify("SwiftTunnel", "You are on the latest version.");
+          }
+          return;
+        }
+
+        pendingUpdate = {
+          version: update.available_version,
+          channel,
+        };
+        set({
+          status: "update_available",
+          currentVersion: update.current_version,
+          availableVersion: update.available_version,
           progressPercent: 0,
           lastChecked: checkedAt,
-        }));
-        if (manual) {
-          await notify("SwiftTunnel", "You are on the latest version.");
+        });
+
+        if (autoInstall) {
+          await notify(
+            "SwiftTunnel Update",
+            `Updating to v${update.available_version}, restarting...`,
+          );
+          await useUpdaterStore.getState().installUpdate();
+          return;
         }
-        return;
-      }
 
-      pendingUpdate = {
-        version: update.available_version,
-        channel,
-      };
-      set({
-        status: "update_available",
-        currentVersion: update.current_version,
-        availableVersion: update.available_version,
-        progressPercent: 0,
-        lastChecked: checkedAt,
-      });
+        if (manual) {
+          await notify(
+            "Update Available",
+            `Version ${update.available_version} is ready.`,
+          );
+          return;
+        }
 
-      if (autoInstall) {
-        await notify(
-          "SwiftTunnel Update",
-          `Updating to v${update.available_version}, restarting...`,
-        );
-        await useUpdaterStore.getState().installUpdate();
-        return;
-      }
-
-      if (manual) {
         await notify(
           "Update Available",
-          `Version ${update.available_version} is ready.`,
+          `Version ${update.available_version} is ready to install.`,
         );
-        return;
+      } catch (e) {
+        if (runId !== checkRunSeq) return;
+
+        set({
+          status: "error",
+          error: String(e),
+        });
+      }
+    },
+
+    installUpdate: async () => {
+      if (!pendingUpdate) return;
+
+      try {
+        set({ status: "installing", progressPercent: 0, error: null });
+
+        const { channel, version } = pendingUpdate;
+        await updaterInstallChannel(channel, version);
+
+        pendingUpdate = null;
+        set({
+          status: "up_to_date",
+          availableVersion: null,
+          progressPercent: 100,
+        });
+
+        await notify(
+          "SwiftTunnel Update",
+          "Update installed. Restarting application...",
+        );
+      } catch (e) {
+        set({
+          status: "error",
+          error: String(e),
+        });
+      }
+    },
+
+    handleUpdaterProgress: (event) => {
+      let progressPercent: number | null = null;
+
+      if (event.total && event.total > 0) {
+        progressPercent = Math.max(
+          0,
+          Math.min(99, Math.round((event.downloaded / event.total) * 100)),
+        );
+      } else if (event.downloaded > 0) {
+        progressPercent = 1;
       }
 
-      await notify(
-        "Update Available",
-        `Version ${update.available_version} is ready to install.`,
-      );
-    } catch (e) {
-      if (runId !== checkRunSeq) return;
+      if (progressPercent !== null && get().status === "installing") {
+        set({ progressPercent });
+      }
+    },
 
-      set({
-        status: "error",
-        error: String(e),
-      });
-    }
-  },
-
-  installUpdate: async () => {
-    if (!pendingUpdate) return;
-
-    try {
-      set({ status: "installing", progressPercent: 0, error: null });
-
-      const { channel, version } = pendingUpdate;
-      await updaterInstallChannel(channel, version);
-
-      pendingUpdate = null;
-      set({
-        status: "up_to_date",
-        availableVersion: null,
-        progressPercent: 100,
-      });
-
-      await notify(
-        "SwiftTunnel Update",
-        "Update installed. Restarting application...",
-      );
-    } catch (e) {
-      set({
-        status: "error",
-        error: String(e),
-      });
-    }
-  },
-
-  handleUpdaterProgress: (event) => {
-    let progressPercent: number | null = null;
-
-    if (event.total && event.total > 0) {
-      progressPercent = Math.max(
-        0,
-        Math.min(99, Math.round((event.downloaded / event.total) * 100)),
-      );
-    } else if (event.downloaded > 0) {
-      progressPercent = 1;
-    }
-
-    if (progressPercent !== null) {
-      set((state) =>
-        state.status === "installing" ? { progressPercent } : {},
-      );
-    }
-  },
-
-  handleUpdaterDone: () => {
-    set((state) =>
-      state.status === "installing" ? { progressPercent: 100 } : {},
-    );
-  },
-}));
+    handleUpdaterDone: () => {
+      if (get().status === "installing") {
+        set({ progressPercent: 100 });
+      }
+    },
+  };
+});
