@@ -41,6 +41,7 @@ export function Tooltip({
     anchorRef.current = el;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
+      timer.current = null;
       const r = el.getBoundingClientRect();
       let x = r.left + r.width / 2;
       let y = r.top + r.height / 2;
@@ -54,7 +55,10 @@ export function Tooltip({
   }
 
   function hide() {
-    if (timer.current) clearTimeout(timer.current);
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
     setOpen(false);
     setPos(null);
   }

@@ -14,8 +14,17 @@ export function Tooltip({
   const triggerRef = useRef<HTMLSpanElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  function clearShowTimer() {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+
   function show() {
+    clearShowTimer();
     timerRef.current = setTimeout(() => {
+      timerRef.current = null;
       if (!triggerRef.current) return;
       const rect = triggerRef.current.getBoundingClientRect();
       const flip = rect.top < 60;
@@ -29,14 +38,12 @@ export function Tooltip({
   }
 
   function hide() {
-    if (timerRef.current) clearTimeout(timerRef.current);
+    clearShowTimer();
     setVisible(false);
   }
 
   useEffect(() => {
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
+    return clearShowTimer;
   }, []);
 
   return (
