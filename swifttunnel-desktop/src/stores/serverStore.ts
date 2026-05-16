@@ -84,7 +84,10 @@ export const useServerStore = create<ServerStore>((set, get) => {
       try {
         set({ isLoading: true });
         await serverRefresh();
-        if (runId !== refreshRunSeq) return;
+        if (runId !== refreshRunSeq) {
+          // The newer refresh owns the loading state and follow-up list fetch.
+          return;
+        }
 
         await get().fetchList();
       } catch (e) {

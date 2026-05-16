@@ -44,6 +44,18 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function waitForCallCount(
+  mock: { mock: { calls: unknown[] } },
+  count: number,
+) {
+  for (let i = 0; i < 10; i++) {
+    if (mock.mock.calls.length >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  throw new Error(`Expected mock to be called at least ${count} times`);
+}
+
 function serverList(id: string): ServerListResponse {
   return {
     regions: [
@@ -157,7 +169,7 @@ describe("stores/serverStore", () => {
     const refreshRun = useServerStore.getState().refresh();
 
     refreshGate.resolve("ok");
-    await Promise.resolve();
+    await waitForCallCount(serverGetList, 2);
     refreshedList.resolve(serverList("refreshed"));
     await refreshRun;
 
@@ -167,5 +179,32 @@ describe("stores/serverStore", () => {
     expect(serverRefresh).toHaveBeenCalledTimes(1);
     expect(useServerStore.getState().source).toBe("refreshed");
     expect(useServerStore.getState().regions[0]?.id).toBe("refreshed");
+  });
+
+  it("lets the newest refresh own loading state after an older refresh is superseded", async () => {
+    const oldRefresh = deferred<string>();
+    const newRefresh = deferred<string>();
+    const refreshedList = deferred<ServerListResponse>();
+    serverRefresh
+      .mockReturnValueOnce(oldRefresh.promise)
+      .mockReturnValueOnce(newRefresh.promise);
+    serverGetList.mockReturnValueOnce(refreshedList.promise);
+
+    const useServerStore = await loadStore();
+    const oldRun = useServerStore.getState().refresh();
+    const newRun = useServerStore.getState().refresh();
+
+    oldRefresh.resolve("old");
+    await Promise.resolve();
+    expect(serverGetList).not.toHaveBeenCalled();
+    expect(useServerStore.getState().isLoading).toBe(true);
+
+    newRefresh.resolve("new");
+    await waitForCallCount(serverGetList, 1);
+    refreshedList.resolve(serverList("new"));
+    await Promise.all([oldRun, newRun]);
+
+    expect(useServerStore.getState().source).toBe("new");
+    expect(useServerStore.getState().isLoading).toBe(false);
   });
 });
