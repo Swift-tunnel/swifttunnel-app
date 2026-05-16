@@ -8,10 +8,6 @@ import {
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
 
-let listRunSeq = 0;
-let refreshRunSeq = 0;
-let latencyRunSeq = 0;
-
 interface ServerStore {
   regions: ServerRegion[];
   servers: ServerInfo[];
@@ -28,84 +24,86 @@ interface ServerStore {
   getLatency: (region: string) => number | null;
 }
 
-export const useServerStore = create<ServerStore>((set, get) => ({
-  regions: [],
-  servers: [],
-  latencies: new Map(),
-  source: "",
-  isLoading: false,
-  error: null,
+export const useServerStore = create<ServerStore>((set, get) => {
+  let listRunSeq = 0;
+  let refreshRunSeq = 0;
+  let latencyRunSeq = 0;
 
-  fetchList: async () => {
-    const runId = ++listRunSeq;
-    try {
-      set({ isLoading: true });
-      const resp = await serverGetList();
-      set(() =>
-        runId === listRunSeq
-          ? {
-              regions: resp.regions,
-              servers: resp.servers,
-              source: resp.source,
-              isLoading: false,
-              error: null,
-            }
-          : {},
-      );
-    } catch (e) {
-      set(() =>
-        runId === listRunSeq
-          ? { isLoading: false, error: String(e) }
-          : {},
-      );
-    }
-  },
+  return {
+    regions: [],
+    servers: [],
+    latencies: new Map(),
+    source: "",
+    isLoading: false,
+    error: null,
 
-  fetchLatencies: async () => {
-    const runId = ++latencyRunSeq;
-    try {
-      const entries = await serverGetLatencies();
-      const latencies = new Map<string, number | null>();
-      for (const entry of entries) {
-        latencies.set(entry.region, entry.latency_ms);
+    fetchList: async () => {
+      const runId = ++listRunSeq;
+      try {
+        set({ isLoading: true });
+        const resp = await serverGetList();
+        if (runId === listRunSeq) {
+          set({
+            regions: resp.regions,
+            servers: resp.servers,
+            source: resp.source,
+            isLoading: false,
+            error: null,
+          });
+        }
+      } catch (e) {
+        if (runId === listRunSeq) {
+          set({ isLoading: false, error: String(e) });
+        }
       }
-      set(() => (runId === latencyRunSeq ? { latencies } : {}));
-    } catch (error) {
-      if (runId === latencyRunSeq) {
-        reportError("Failed to fetch server latencies", error, {
-          dedupeKey: "server-fetch-latencies",
-        });
+    },
+
+    fetchLatencies: async () => {
+      const runId = ++latencyRunSeq;
+      try {
+        const entries = await serverGetLatencies();
+        const latencies = new Map<string, number | null>();
+        for (const entry of entries) {
+          latencies.set(entry.region, entry.latency_ms);
+        }
+        if (runId === latencyRunSeq) {
+          set({ latencies });
+        }
+      } catch (error) {
+        if (runId === latencyRunSeq) {
+          reportError("Failed to fetch server latencies", error, {
+            dedupeKey: "server-fetch-latencies",
+          });
+        }
       }
-    }
-  },
+    },
 
-  refresh: async () => {
-    const runId = ++refreshRunSeq;
-    listRunSeq++;
-    try {
-      set({ isLoading: true });
-      await serverRefresh();
-      if (runId !== refreshRunSeq) return;
+    refresh: async () => {
+      const runId = ++refreshRunSeq;
+      listRunSeq++;
+      try {
+        set({ isLoading: true });
+        await serverRefresh();
+        if (runId !== refreshRunSeq) return;
 
-      await get().fetchList();
-    } catch (e) {
-      set(() =>
-        runId === refreshRunSeq
-          ? { isLoading: false, error: String(e) }
-          : {},
-      );
-    }
-  },
+        await get().fetchList();
+      } catch (e) {
+        if (runId === refreshRunSeq) {
+          set({ isLoading: false, error: String(e) });
+        }
+      }
+    },
 
-  smartSelect: async (regionId) => {
-    try {
-      return await serverSmartSelect(regionId);
-    } catch {
-      return null;
-    }
-  },
+    smartSelect: async (regionId) => {
+      try {
+        return await serverSmartSelect(regionId);
+      } catch {
+        return null;
+      }
+    },
 
-  getLatency: (region) => {
-    return get().latencies.get(region) ?? null;
-  },
-}));
+    getLatency: (region) => {
+      return get().latencies.get(region) ?? null;
+    },
+  };
+});
