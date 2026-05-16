@@ -119,11 +119,14 @@ pub fn validate_msi_file(path: &Path, pkg: &WinpkFilterMsiPackage) -> Result<(),
     validate_msi_payload(&data, pkg)
 }
 
-/// Detect the native machine architecture using `IsWow64Process2`, with an
-/// environment-variable fallback (`PROCESSOR_ARCHITECTURE`).
+/// Detect the native machine architecture using `IsWow64Process2`, with a
+/// structured machine-attribute fallback before consulting environment vars.
 #[cfg(windows)]
 pub fn detect_native_arch() -> WinpkFilterMsiArch {
-    use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+    use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_ARM64;
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetMachineTypeAttributes, IsWow64Process2, KernelEnabled, UserEnabled,
+    };
 
     let mut process_machine: windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE =
         Default::default();
@@ -145,6 +148,17 @@ pub fn detect_native_arch() -> WinpkFilterMsiArch {
                 return WinpkFilterMsiArch::Arm64;
             }
             return WinpkFilterMsiArch::X64;
+        }
+    }
+
+    // Fallback for older/blocked IsWow64Process2 paths. On Windows-on-ARM64,
+    // GetMachineTypeAttributes reports whether ARM64 code is supported by the
+    // current host, without relying on localized environment variables.
+    unsafe {
+        if let Ok(attrs) = GetMachineTypeAttributes(IMAGE_FILE_MACHINE_ARM64.0) {
+            if (attrs & (UserEnabled | KernelEnabled)).0 != 0 {
+                return WinpkFilterMsiArch::Arm64;
+            }
         }
     }
 

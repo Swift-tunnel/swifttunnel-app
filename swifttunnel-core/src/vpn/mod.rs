@@ -10,7 +10,6 @@
 //!
 //! ## Architecture
 //!
-//! - routes.rs: Internet interface IP detection
 //! - process_tracker.rs: Connection-tracking key/stat types shared by process_cache
 //! - process_cache.rs: Lock-free RCU-style process cache for <0.1ms lookups
 //! - parallel_interceptor.rs: Per-CPU parallel packet processing
@@ -28,7 +27,6 @@ pub mod process_cache;
 pub mod process_performance;
 pub mod process_tracker;
 pub mod process_watcher;
-pub mod routes;
 pub mod servers;
 pub mod split_tunnel;
 pub mod tso_recovery;

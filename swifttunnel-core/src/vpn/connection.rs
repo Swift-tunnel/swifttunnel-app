@@ -1623,6 +1623,15 @@ impl VpnConnection {
                 while let Some((ip, generation, session_epoch)) = lookup_rx.recv().await {
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
+                            if !router_for_lookup.is_current_lookup_generation(generation) {
+                                log::info!(
+                                    "Auto-routing: Ignoring stale lookup for {} (generation {}) after newer game server observation",
+                                    ip,
+                                    generation
+                                );
+                                router_for_lookup.clear_pending_lookup(ip);
+                                continue;
+                            }
                             if !router_for_lookup.is_current_lookup_session(session_epoch) {
                                 log::info!(
                                     "Auto-routing: Ignoring stale lookup for {} (generation {}, session {}) after router reset",
@@ -1761,7 +1770,9 @@ impl VpnConnection {
                                     )
                                     .await;
 
-                                    if !router_for_lookup.is_current_lookup_session(session_epoch)
+                                    if !router_for_lookup.is_current_lookup_generation(generation)
+                                        || !router_for_lookup
+                                            .is_current_lookup_session(session_epoch)
                                         || !router_for_lookup.is_active_game_server(ip)
                                     {
                                         log::info!(
