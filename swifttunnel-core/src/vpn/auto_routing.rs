@@ -503,6 +503,11 @@ impl AutoRouter {
             .cloned()
             .expect("candidates checked as non-empty");
 
+        if current_st_region == resolved_region && current_relay_addr == Some(resolved_addr) {
+            *self.current_game_region.write() = Some(game_region.clone());
+            return None;
+        }
+
         if let Some(pinned) = pinned_server.filter(|_| forced_fallback_degraded) {
             let mut log = self.event_log.write();
             log.push_back(AutoRoutingEvent {
@@ -519,14 +524,6 @@ impl AutoRouter {
             if log.len() > MAX_EVENT_LOG_ENTRIES {
                 log.pop_front();
             }
-        }
-
-        if candidates.len() == 1
-            && current_st_region == resolved_region
-            && current_relay_addr == Some(resolved_addr)
-        {
-            *self.current_game_region.write() = Some(game_region.clone());
-            return None;
         }
 
         Some((resolved_region, resolved_addr))
@@ -857,7 +854,7 @@ mod tests {
 
         let router = AutoRouter::new(true, "singapore");
         router.set_available_servers(make_servers());
-        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+        router.set_current_relay("3.111.230.152:51821".parse().unwrap(), "mumbai");
         router.set_forced_servers(HashMap::from([(
             "singapore".to_string(),
             "singapore-99".to_string(),
@@ -876,6 +873,26 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, AutoRoutingEventKind::ForcedFallbackDegraded);
         assert!(events[0].reason.contains("singapore-99 unavailable"));
+    }
+
+    #[test]
+    fn test_forced_server_unavailable_noops_without_degraded_spam() {
+        use std::collections::HashMap;
+
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+        router.set_forced_servers(HashMap::from([(
+            "singapore".to_string(),
+            "singapore-99".to_string(),
+        )]));
+
+        assert!(
+            router
+                .get_best_server_for_region(&RobloxRegion::Singapore)
+                .is_none()
+        );
+        assert!(router.recent_events(1).is_empty());
     }
 
     #[test]
