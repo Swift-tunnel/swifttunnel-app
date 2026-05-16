@@ -97,6 +97,8 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => {
             "SwiftTunnel Update",
             `Updating to v${update.available_version}, restarting...`,
           );
+          if (runId !== checkRunSeq) return;
+
           await useUpdaterStore.getState().installUpdate();
           return;
         }

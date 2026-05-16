@@ -293,6 +293,80 @@ describe("stores/updaterStore", () => {
     expect(useUpdaterStore.getState().error).toBeNull();
   });
 
+  it("does not let an older update-available check overwrite newer up-to-date state", async () => {
+    const olderCheck = deferred<UpdaterCheckResponse>();
+    const newerCheck = deferred<UpdaterCheckResponse>();
+    updaterCheckChannel
+      .mockReturnValueOnce(olderCheck.promise)
+      .mockReturnValueOnce(newerCheck.promise);
+
+    const useUpdaterStore = await loadStore();
+    const olderRun = useUpdaterStore.getState().checkForUpdates(false);
+    const newerRun = useUpdaterStore.getState().checkForUpdates(false);
+
+    newerCheck.resolve({
+      current_version: "2.0.0",
+      available_version: null,
+      release_tag: null,
+      channel: "Stable",
+    });
+    await newerRun;
+
+    olderCheck.resolve({
+      current_version: "1.0.0",
+      available_version: "1.5.1",
+      release_tag: "v1.5.1",
+      channel: "Stable",
+    });
+    await olderRun;
+
+    expect(useUpdaterStore.getState().status).toBe("up_to_date");
+    expect(useUpdaterStore.getState().availableVersion).toBeNull();
+
+    await useUpdaterStore.getState().installUpdate();
+    expect(updaterInstallChannel).not.toHaveBeenCalled();
+  });
+
+  it("does not let a stale auto-install tail install a newer check result", async () => {
+    const notifyGate = deferred<void>();
+    updaterCheckChannel
+      .mockResolvedValueOnce({
+        current_version: "1.0.0",
+        available_version: "1.5.1",
+        release_tag: "v1.5.1",
+        channel: "Stable",
+      })
+      .mockResolvedValueOnce({
+        current_version: "1.0.0",
+        available_version: "2.0.0",
+        release_tag: "v2.0.0",
+        channel: "Stable",
+      });
+    notify.mockReturnValueOnce(notifyGate.promise).mockResolvedValue(undefined);
+    updaterInstallChannel.mockResolvedValue({
+      installed_version: "2.0.0",
+      release_tag: "v2.0.0",
+    });
+
+    const useUpdaterStore = await loadStore();
+    const olderRun = useUpdaterStore.getState().checkForUpdates(false, true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const newerRun = useUpdaterStore.getState().checkForUpdates(false, false);
+    await newerRun;
+
+    expect(useUpdaterStore.getState().status).toBe("update_available");
+    expect(useUpdaterStore.getState().availableVersion).toBe("2.0.0");
+
+    notifyGate.resolve();
+    await olderRun;
+
+    expect(updaterInstallChannel).not.toHaveBeenCalled();
+    expect(useUpdaterStore.getState().status).toBe("update_available");
+    expect(useUpdaterStore.getState().availableVersion).toBe("2.0.0");
+  });
+
   it("updates install progress from updater progress events", async () => {
     updaterCheckChannel.mockResolvedValue({
       current_version: "1.0.0",
