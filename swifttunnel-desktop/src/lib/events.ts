@@ -23,66 +23,89 @@ const EVENT_UPDATER_PROGRESS = "updater://progress";
 const EVENT_UPDATER_DONE = "updater://done";
 
 let unlisteners: UnlistenFn[] = [];
+let listenerGeneration = 0;
 
-export async function initEventListeners() {
-  // Clean up any existing listeners
-  await cleanupEventListeners();
+type EventRegistration = () => Promise<UnlistenFn>;
 
-  unlisteners.push(
-    await listen<VpnStateEvent>(EVENT_VPN_STATE_CHANGED, (event) => {
+const eventRegistrations: EventRegistration[] = [
+  () =>
+    listen<VpnStateEvent>(EVENT_VPN_STATE_CHANGED, (event) => {
       useVpnStore.getState().handleStateEvent(event.payload);
     }),
-  );
-
-  unlisteners.push(
-    await listen<AuthStateEvent>(EVENT_AUTH_STATE_CHANGED, (event) => {
+  () =>
+    listen<AuthStateEvent>(EVENT_AUTH_STATE_CHANGED, (event) => {
       useAuthStore.getState().handleStateEvent(event.payload);
     }),
-  );
-
-  unlisteners.push(
-    await listen<ThroughputEvent>(EVENT_THROUGHPUT_UPDATE, (event) => {
+  () =>
+    listen<ThroughputEvent>(EVENT_THROUGHPUT_UPDATE, (event) => {
       useVpnStore.getState().handleThroughputEvent(event.payload);
     }),
-  );
-
-  unlisteners.push(
-    await listen<PerformanceMetricsEvent>(
+  () =>
+    listen<PerformanceMetricsEvent>(
       EVENT_PERFORMANCE_METRICS_UPDATE,
       (event) => {
         useBoostStore.getState().handleMetricsEvent(event.payload);
       },
     ),
-  );
-
-  unlisteners.push(
-    await listen<RamCleanProgressEvent>(EVENT_RAM_CLEAN_PROGRESS, (event) => {
+  () =>
+    listen<RamCleanProgressEvent>(EVENT_RAM_CLEAN_PROGRESS, (event) => {
       useBoostStore.getState().handleRamCleanProgress(event.payload);
     }),
-  );
-
-  unlisteners.push(
-    await listen<string>(EVENT_SERVER_LIST_UPDATED, () => {
+  () =>
+    listen<string>(EVENT_SERVER_LIST_UPDATED, () => {
       void useServerStore.getState().fetchList();
     }),
-  );
-
-  unlisteners.push(
-    await listen<UpdaterProgressEvent>(EVENT_UPDATER_PROGRESS, (event) => {
+  () =>
+    listen<UpdaterProgressEvent>(EVENT_UPDATER_PROGRESS, (event) => {
       useUpdaterStore.getState().handleUpdaterProgress(event.payload);
     }),
-  );
-
-  unlisteners.push(
-    await listen<void>(EVENT_UPDATER_DONE, () => {
+  () =>
+    listen<void>(EVENT_UPDATER_DONE, () => {
       useUpdaterStore.getState().handleUpdaterDone();
     }),
-  );
-}
+];
 
-export async function cleanupEventListeners() {
+function cleanupRegisteredListeners() {
   for (const unlisten of unlisteners) {
     unlisten();
   }
   unlisteners = [];
+}
+
+async function registerListener(
+  generation: number,
+  registration: EventRegistration,
+) {
+  const unlisten = await registration();
+
+  if (generation !== listenerGeneration) {
+    unlisten();
+    return false;
+  }
+
+  unlisteners.push(unlisten);
+  return true;
+}
+
+export async function initEventListeners() {
+  const generation = ++listenerGeneration;
+  cleanupRegisteredListeners();
+
+  try {
+    for (const registration of eventRegistrations) {
+      const isCurrent = await registerListener(generation, registration);
+      if (!isCurrent) return;
+    }
+  } catch (error) {
+    if (generation === listenerGeneration) {
+      listenerGeneration++;
+      cleanupRegisteredListeners();
+    }
+    throw error;
+  }
+}
+
+export async function cleanupEventListeners() {
+  listenerGeneration++;
+  cleanupRegisteredListeners();
 }
