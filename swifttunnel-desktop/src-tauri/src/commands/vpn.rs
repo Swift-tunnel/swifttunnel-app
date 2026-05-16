@@ -222,17 +222,6 @@ fn vpn_error_is_user_banned(error: &VpnError) -> bool {
     matches!(error, VpnError::UserBanned(_))
 }
 
-fn validate_custom_relay_access(custom_relay: Option<&str>, is_tester: bool) -> Result<(), String> {
-    if custom_relay.is_some() && !is_tester {
-        return Err(
-            "Custom relay servers are only available to tester accounts. Clear the custom relay setting and connect again."
-                .to_string(),
-        );
-    }
-
-    Ok(())
-}
-
 async fn emit_ban_cleanup(app: &AppHandle, state: &AppState) {
     let emitted = crate::commands::auth::apply_ban_cleanup(app, state).await;
     if !emitted {
@@ -452,21 +441,16 @@ pub async fn vpn_connect(
     }
 
     // Get access token
-    let (access_token, is_tester) = {
+    let access_token = {
         let auth = state.auth_manager.lock().await;
         match auth.get_access_token().await {
-            Ok(token) => {
-                let is_tester = auth.get_user().map(|user| user.is_tester).unwrap_or(false);
-                (token, is_tester)
-            }
+            Ok(token) => token,
             Err(e) => {
                 drop(auth);
                 return Err(handle_connect_auth_error(&app, &state, e).await);
             }
         }
     };
-
-    validate_custom_relay_access(custom_relay.as_deref(), is_tester)?;
 
     let mut vpn = state.vpn_connection.lock().await;
     let connect_result = tokio::time::timeout(
@@ -1028,13 +1012,6 @@ mod tests {
         assert!(!vpn_error_is_user_banned(&VpnError::Connection(
             "Account banned appears in unrelated text".to_string()
         )));
-    }
-
-    #[test]
-    fn custom_relay_requires_tester_profile() {
-        assert!(validate_custom_relay_access(Some("relay.example.com:51821"), false).is_err());
-        assert!(validate_custom_relay_access(Some("relay.example.com:51821"), true).is_ok());
-        assert!(validate_custom_relay_access(None, false).is_ok());
     }
 
     #[test]

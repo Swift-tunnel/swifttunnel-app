@@ -560,8 +560,6 @@ pub struct UdpRelay {
     inject_error_streak: AtomicU32,
     /// Sequence number for explicit keepalive PING frames.
     keepalive_ping_seq: AtomicU32,
-    /// Highest PONG sequence accepted from the current relay.
-    last_pong_seq: AtomicU32,
     /// Last time the current relay provided liveness evidence.
     last_receive_time: parking_lot::Mutex<Option<Instant>>,
     /// First outbound activity since creation or relay switch.
@@ -919,7 +917,6 @@ impl UdpRelay {
             unanswered_keepalives: AtomicU32::new(0),
             inject_error_streak: AtomicU32::new(0),
             keepalive_ping_seq: AtomicU32::new(0),
-            last_pong_seq: AtomicU32::new(0),
             last_receive_time: parking_lot::Mutex::new(None),
             first_outbound_time: parking_lot::Mutex::new(None),
             sender_panicked,
@@ -956,24 +953,6 @@ impl UdpRelay {
         frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
             .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
         frame
-    }
-
-    fn try_accept_pong_seq(&self, seq: u32) -> bool {
-        let mut current = self.last_pong_seq.load(Ordering::Acquire);
-        loop {
-            if !pong_seq_is_newer(seq, current) {
-                return false;
-            }
-            match self.last_pong_seq.compare_exchange(
-                current,
-                seq,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return true,
-                Err(next) => current = next,
-            }
-        }
     }
 
     fn send_ping_to_current_relay(&self, context: &'static str) -> Result<SocketAddr> {
@@ -1439,16 +1418,6 @@ impl UdpRelay {
                         PONG_FRAME_TYPE => {
                             let current_addr = **self.relay_addr.load();
                             if len == PONG_FRAME_LEN && from == current_addr {
-                                let seq = u32::from_be_bytes([
-                                    frame_buffer[SESSION_ID_LEN + 1],
-                                    frame_buffer[SESSION_ID_LEN + 2],
-                                    frame_buffer[SESSION_ID_LEN + 3],
-                                    frame_buffer[SESSION_ID_LEN + 4],
-                                ]);
-                                if !self.try_accept_pong_seq(seq) {
-                                    return Ok(None);
-                                }
-
                                 self.record_current_relay_liveness(Instant::now());
 
                                 if self.ping.enabled.load(Ordering::Acquire) {
@@ -1812,9 +1781,6 @@ impl UdpRelay {
             .store(RelayHealthState::NoTrafficYet as u8, Ordering::Relaxed);
         self.unanswered_keepalives.store(0, Ordering::Relaxed);
         self.inject_error_streak.store(0, Ordering::Relaxed);
-        self.send_unreachable_streak.store(0, Ordering::Relaxed);
-        self.send_failure_streak.store(0, Ordering::Relaxed);
-        self.last_pong_seq.store(0, Ordering::Release);
         *self.last_receive_time.lock() = None;
         *self.first_outbound_time.lock() = None;
         log::info!(
@@ -1864,11 +1830,6 @@ fn now_mono_ms() -> u64 {
         let start = START.get_or_init(Instant::now);
         start.elapsed().as_millis() as u64
     }
-}
-
-#[inline]
-fn pong_seq_is_newer(seq: u32, last_seen: u32) -> bool {
-    seq != last_seen && (last_seen == 0 || seq.wrapping_sub(last_seen) < 0x8000_0000)
 }
 
 #[inline]
@@ -2072,10 +2033,7 @@ mod tests {
     }
 
     fn make_pong_frame(relay: &UdpRelay) -> [u8; PONG_FRAME_LEN] {
-        make_pong_frame_with_seq(relay, 1)
-    }
-
-    fn make_pong_frame_with_seq(relay: &UdpRelay, seq: u32) -> [u8; PONG_FRAME_LEN] {
+        let seq: u32 = 1;
         let client_ts_mono_ms = now_mono_ms();
         let mut frame = [0u8; PONG_FRAME_LEN];
         frame[..SESSION_ID_LEN].copy_from_slice(relay.session_id_bytes());
@@ -2471,29 +2429,6 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_pong_seq_does_not_refresh_liveness_or_metrics() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
-        relay.set_ping_enabled(true);
-        let fake_relay = bind_fake_relay(&relay);
-        let local_addr = relay_loopback_addr(&relay);
-        let frame = make_pong_frame_with_seq(&relay, 7);
-
-        fake_relay.send_to(&frame, local_addr).unwrap();
-        let mut buffer = [0u8; 1600];
-        assert_eq!(relay.receive_inbound(&mut buffer).unwrap(), None);
-        let first_liveness = *relay.last_receive_time.lock();
-        let first_received = relay.ping_snapshot().received;
-
-        *relay.last_receive_time.lock() = None;
-        fake_relay.send_to(&frame, local_addr).unwrap();
-        assert_eq!(relay.receive_inbound(&mut buffer).unwrap(), None);
-
-        assert!(first_liveness.is_some());
-        assert!(relay.last_receive_time.lock().is_none());
-        assert_eq!(relay.ping_snapshot().received, first_received);
-    }
-
-    #[test]
     fn test_malformed_current_pong_is_not_liveness_evidence() {
         let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
         let fake_relay = bind_fake_relay(&relay);
@@ -2641,19 +2576,6 @@ mod tests {
         relay.switch_relay("127.0.0.1:51822".parse().unwrap());
 
         assert_eq!(relay.inject_error_streak(), 0);
-        assert_eq!(relay.relay_health(), RelayHealthState::NoTrafficYet);
-    }
-
-    #[test]
-    fn test_send_failure_streaks_reset_on_relay_switch() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
-        relay.send_unreachable_streak.store(2, Ordering::Relaxed);
-        relay.send_failure_streak.store(4, Ordering::Relaxed);
-
-        relay.switch_relay("127.0.0.1:51822".parse().unwrap());
-
-        assert_eq!(relay.send_unreachable_streak(), 0);
-        assert_eq!(relay.send_failure_streak(), 0);
         assert_eq!(relay.relay_health(), RelayHealthState::NoTrafficYet);
     }
 

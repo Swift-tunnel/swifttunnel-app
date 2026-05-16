@@ -63,7 +63,7 @@ Built-in performance optimizations:
 - Banned accounts are blocked in-app and trigger best-effort cleanup of saved VPN, Roblox, network, and system boosts.
 
 ### 🌍 Auto Region Detection
-Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected and still complete the relay-ticket handshake, drained relays are excluded through `/api/vpn/servers`, stale lookups cannot switch after a newer game-server IP, and live ping-test refreshes keep Auto Route's server choices current while connected. The desktop client only switches on a non-low-confidence structured resolver region id and does not fall back to a hardcoded local Roblox-region table when the resolver fails, returns low confidence, or returns only raw location text.
+Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected and still complete the relay-ticket handshake, drained relays are excluded through `/api/vpn/servers`, stale lookups cannot switch after a newer game-server IP, and live ping-test refreshes keep Auto Route's server choices current while connected.
 
 ---
 
@@ -108,11 +108,7 @@ Starts on the lowest-latency region from the in-app ping test, then resolves det
 
 SwiftTunnel intercepts game traffic at the network layer. Only packets from your game are optimized and routed through our servers. DNS normally stays on the local connection; when Roblox Route Assist is enabled, SwiftTunnel also repairs exact Roblox launch/API hostnames with temporary hosts-file entries resolved over HTTPS DNS and routes Roblox login/API HTTP(S), including browser-owned Roblox auth traffic and the temporary CDN IPs resolved for those bootstrap hostnames, through the selected relay. Route Assist TCP routing is handshake-gated so SwiftTunnel can clamp relay-owned flows before large HTTPS packets are exchanged; non-Roblox browser traffic and already-established TCP connections still bypass SwiftTunnel.
 
-Roblox detection and restart/boost helpers cover the standard Win32 player/studio executables by exact process stem or known Roblox alias only. Microsoft Store/UWP Roblox is intentionally not tunnel-eligible and is never force-killed for boost restart because it runs under the generic `Windows10Universal.exe` host used by unrelated Store apps.
-
-Custom relay endpoints are tester-only. The desktop command checks the refreshed in-memory profile before honoring `custom_relay_server`, and tester custom relays still perform the relay-ticket policy request so bans and revocation are enforced before the user-supplied endpoint is used.
-
-Loopback, link-local, multicast, broadcast, and unspecified destinations are never sent through the relay even if a tunnel-eligible process owns the socket. Auto Route also records a degraded event when a forced server pin is unavailable and the client falls back to another relay in the target region.
+Roblox detection covers the standard Win32 player/studio executables by exact process stem or known Roblox alias only. Microsoft Store/UWP Roblox is intentionally not tunnel-eligible because it runs under the generic `Windows10Universal.exe` host used by unrelated Store apps.
 
 
 ## Building

@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 const LEGACY_ROBLOX_PRIORITY_POLICY: &str = "RobloxPriority";
-const ROBLOX_QOS_EXECUTABLES: [&str; 3] = [
+const ROBLOX_QOS_EXECUTABLES: [&str; 4] = [
     "RobloxPlayerBeta.exe",
     "RobloxStudioBeta.exe",
     "RobloxCrashHandler.exe",
+    "Windows10Universal.exe",
 ];
 const RELAY_QOS_EXECUTABLES: [&str; 2] = ["SwiftTunnel.exe", "swifttunnel-desktop.exe"];
 const NETWORK_SYSTEM_PROFILE_KEY: &str =

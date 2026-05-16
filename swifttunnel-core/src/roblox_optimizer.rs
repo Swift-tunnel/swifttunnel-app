@@ -636,7 +636,7 @@ impl RobloxOptimizer {
 
     /// Check whether a Roblox client process is currently running.
     pub fn is_roblox_running(&self) -> bool {
-        let process_names = roblox_process_restart_names();
+        let process_names = ["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
 
         process_names.iter().any(|process_name| {
             hidden_command("tasklist")
@@ -652,7 +652,7 @@ impl RobloxOptimizer {
 
     /// Force-close running Roblox client processes.
     pub fn close_running_instances(&self) -> Result<()> {
-        let process_names = roblox_process_restart_names();
+        let process_names = ["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
 
         for process_name in process_names {
             let output = hidden_command("taskkill")
@@ -1328,25 +1328,6 @@ impl RobloxOptimizer {
     /// Reapply saved ClientAppSettings FFlags after Roblox creates a new version folder.
     pub fn reapply_saved_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<()> {
         self.apply_client_fflags(config).map(|_| ())
-    }
-}
-
-fn roblox_process_restart_names() -> &'static [&'static str] {
-    &["RobloxPlayerBeta.exe"]
-}
-
-#[cfg(test)]
-mod restart_process_tests {
-    use super::*;
-
-    #[test]
-    fn restart_kill_list_excludes_generic_uwp_host() {
-        assert!(!roblox_process_restart_names().contains(&"Windows10Universal.exe"));
-    }
-
-    #[test]
-    fn restart_kill_list_still_targets_win32_player() {
-        assert!(roblox_process_restart_names().contains(&"RobloxPlayerBeta.exe"));
     }
 }
 

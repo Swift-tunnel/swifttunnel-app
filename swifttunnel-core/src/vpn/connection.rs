@@ -70,6 +70,13 @@ const CONNECT_FAIL_AUTH_REQUIRED: &str = "ST_CONNECT_AUTH_REQUIRED";
 const CONNECT_FAIL_POLICY_UNAVAILABLE: &str = "ST_CONNECT_POLICY_UNAVAILABLE";
 const CONNECT_FAIL_REGION_UNAVAILABLE: &str = "ST_CONNECT_REGION_UNAVAILABLE";
 
+/// Relay UDP port used *only* as a last-resort fallback when the resolved
+/// server list carried no relay candidate (and no custom relay is configured)
+/// to derive a port from. Normal connects use the per-relay `relay_port`
+/// advertised by `/api/vpn/servers`; reaching this constant means the server
+/// list was empty or malformed, which `setup_split_tunnel` logs as a warning.
+const FALLBACK_RELAY_PORT: u16 = 51821;
+
 static HANDSHAKE_TIMEOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
 static CANDIDATE_EXHAUSTED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static PREFLIGHT_ENFORCED_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -836,8 +843,6 @@ pub struct VpnConnection {
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     /// Background task that performs async auto-routing IP lookups.
     auto_lookup_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Background task that monitors process cache, relay health, and recovery.
-    process_monitor_handle: Option<tokio::task::JoinHandle<()>>,
     /// Per-process game performance tuning manager (Windows-only behavior).
     process_performance_manager: Option<Arc<Mutex<GameProcessPerformanceManager>>>,
     /// Tracks whether this connection wrote the temporary Roblox bootstrap hosts repair.
@@ -855,7 +860,6 @@ impl VpnConnection {
             etw_watcher: None,
             auto_router: None,
             auto_lookup_handle: None,
-            process_monitor_handle: None,
             process_performance_manager: None,
             bootstrap_dns_repair_applied: false,
         }
@@ -1266,11 +1270,35 @@ impl VpnConnection {
             selected_relay_region = server_region.clone();
             *addr
         } else {
-            let _ = driver.close();
-            return Err(VpnError::ConfigFetch(format!(
-                "Selected region '{}' has no available relay candidate",
-                config.region
-            )));
+            // No custom relay AND no relay candidate from the server list.
+            // This should not happen on a healthy connect — `/api/vpn/servers`
+            // carries a `relay_port` per relay — so we fall back to the
+            // resolved server endpoint with `FALLBACK_RELAY_PORT` and log it
+            // loudly rather than silently guessing a port.
+            log::warn!(
+                "V3: no relay candidate resolved; falling back to {} with hardcoded port {}",
+                config.endpoint,
+                FALLBACK_RELAY_PORT
+            );
+            if let Ok(addr) = config.endpoint.parse::<SocketAddr>() {
+                SocketAddr::new(addr.ip(), FALLBACK_RELAY_PORT)
+            } else if let Ok(ip) = config.endpoint.parse::<std::net::IpAddr>() {
+                SocketAddr::new(ip, FALLBACK_RELAY_PORT)
+            } else {
+                let vpn_ip = config
+                    .endpoint
+                    .split(':')
+                    .next()
+                    .unwrap_or(&config.endpoint);
+                format!("{}:{}", vpn_ip, FALLBACK_RELAY_PORT)
+                    .parse()
+                    .map_err(|e| {
+                        VpnError::SplitTunnelSetupFailed(format!(
+                            "Invalid VPN server IP for relay: {}",
+                            e
+                        ))
+                    })?
+            }
         };
 
         log::info!("V3: Creating UDP relay to {}", relay_addr);
@@ -1298,41 +1326,14 @@ impl VpnConnection {
         };
 
         let mut relay_auth_mode = if custom_relay_server.is_some() {
-            "custom_policy_pending".to_string()
+            "custom_legacy".to_string()
         } else {
             "legacy_fallback".to_string()
         };
         let mut queue_full_mode = RelayQueueFullMode::Bypass;
 
         if custom_relay_server.is_some() {
-            let auth_client = AuthClient::new();
-            let session_id_hex = relay.session_id_hex();
-            match auth_client
-                .get_relay_ticket(access_token, &config.region, &session_id_hex)
-                .await
-            {
-                Ok(ticket) => {
-                    queue_full_mode = ticket.queue_full_mode();
-                    relay_auth_mode = "custom_policy_checked".to_string();
-                    log::warn!(
-                        "V3: Custom relay enabled after relay-ticket policy check; relay auth handshake is skipped because the endpoint is user supplied"
-                    );
-                }
-                Err(e) => {
-                    if let Some(reason) = relay_ticket_ban_reason(&e) {
-                        log::warn!(
-                            "V3: Custom relay policy check rejected because the current account is banned"
-                        );
-                        let _ = driver.close();
-                        return Err(VpnError::UserBanned(reason));
-                    }
-                    let _ = driver.close();
-                    return Err(VpnError::Connection(format!(
-                        "Custom relay policy check failed: {}",
-                        e
-                    )));
-                }
-            }
+            log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
         } else {
             let auth_client = AuthClient::new();
             let session_id_hex = relay.session_id_hex();
@@ -1623,15 +1624,6 @@ impl VpnConnection {
                 while let Some((ip, generation, session_epoch)) = lookup_rx.recv().await {
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
-                            if !router_for_lookup.is_current_lookup_generation(generation) {
-                                log::info!(
-                                    "Auto-routing: Ignoring stale lookup for {} (generation {}) after newer game server observation",
-                                    ip,
-                                    generation
-                                );
-                                router_for_lookup.clear_pending_lookup(ip);
-                                continue;
-                            }
                             if !router_for_lookup.is_current_lookup_session(session_epoch) {
                                 log::info!(
                                     "Auto-routing: Ignoring stale lookup for {} (generation {}, session {}) after router reset",
@@ -1770,9 +1762,7 @@ impl VpnConnection {
                                     )
                                     .await;
 
-                                    if !router_for_lookup.is_current_lookup_generation(generation)
-                                        || !router_for_lookup
-                                            .is_current_lookup_session(session_epoch)
+                                    if !router_for_lookup.is_current_lookup_session(session_epoch)
                                         || !router_for_lookup.is_active_game_server(ip)
                                     {
                                         log::info!(
@@ -1981,15 +1971,15 @@ impl VpnConnection {
         }
 
         // Start process monitor (event-driven ETW + periodic refresh)
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        self.process_monitor_stop = Arc::clone(&stop_flag);
+        self.process_monitor_stop.store(false, Ordering::SeqCst);
+        let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
         let auto_router_for_monitor = self.auto_router.clone();
         let process_performance_for_monitor = self.process_performance_manager.clone();
         let relay_health_monitor = relay_for_health;
         let workers_panic_cause_monitor = workers_panic_cause_for_monitor;
 
-        let process_monitor_handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             log::info!("V3: Process monitor started");
             // Match previous behavior: first periodic refresh occurs after the interval.
             let first_tick =
@@ -2436,7 +2426,6 @@ impl VpnConnection {
 
             log::info!("V3: Process monitor stopped");
         });
-        self.process_monitor_handle = Some(process_monitor_handle);
 
         log::info!("V3 split tunnel configured - game traffic relayed via UDP");
         Ok((running, relay_auth_mode, selected_relay_region, relay_addr))
@@ -2484,14 +2473,6 @@ impl VpnConnection {
         if let Some(handle) = self.auto_lookup_handle.take() {
             handle.abort();
             let _ = handle.await;
-        }
-
-        if let Some(handle) = self.process_monitor_handle.take() {
-            match tokio::time::timeout(Duration::from_millis(750), handle).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => log::warn!("Process monitor task join failed: {}", e),
-                Err(_) => log::warn!("Process monitor did not stop within 750ms"),
-            }
         }
 
         if let Some(manager) = self.process_performance_manager.take() {
