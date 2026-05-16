@@ -59,7 +59,7 @@ interface BoostStore {
   handleRamCleanProgress: (event: RamCleanProgressEvent) => void;
 }
 
-export const useBoostStore = create<BoostStore>((set) => ({
+export const useBoostStore = create<BoostStore>((set, get) => ({
   fps: 0,
   cpuUsage: 0,
   ramUsage: 0,
@@ -164,6 +164,8 @@ export const useBoostStore = create<BoostStore>((set) => ({
   },
 
   cleanRam: async () => {
+    if (get().isCleaningRam) return;
+
     try {
       set({
         error: null,

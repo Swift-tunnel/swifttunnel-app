@@ -161,6 +161,54 @@ describe("stores/boostStore", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
+  it("ignores a second RAM clean while one is already running", async () => {
+    boostGetSystemMemory.mockResolvedValue({
+      total_mb: 16000,
+      used_mb: 10000,
+      available_mb: 6000,
+      load_pct: 63,
+      standby_mb: null,
+      modified_mb: null,
+    });
+
+    const resp = {
+      before: { total_mb: 16000, used_mb: 10000, available_mb: 6000, load_pct: 63, standby_mb: null, modified_mb: null },
+      after: { total_mb: 16000, used_mb: 9000, available_mb: 7000, load_pct: 56, standby_mb: null, modified_mb: null },
+      trimmed_count: 8,
+      standby_purge: { attempted: true, success: true, skipped_reason: null },
+      modified_flush: { attempted: true, success: true, skipped_reason: null },
+      freed_mb: 1000,
+      standby_freed_mb: null,
+      modified_freed_mb: null,
+      duration_ms: 900,
+      warnings: [],
+    };
+
+    let resolveClean: (value: typeof resp) => void;
+    boostCleanRam.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveClean = resolve;
+        }),
+    );
+
+    const useBoostStore = await loadStore();
+    const firstClean = useBoostStore.getState().cleanRam();
+    const secondClean = useBoostStore.getState().cleanRam();
+
+    await secondClean;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(boostCleanRam).toHaveBeenCalledTimes(1);
+    expect(useBoostStore.getState().isCleaningRam).toBe(true);
+
+    resolveClean!(resp);
+    await firstClean;
+
+    expect(boostCleanRam).toHaveBeenCalledTimes(1);
+    expect(useBoostStore.getState().isCleaningRam).toBe(false);
+    expect(useBoostStore.getState().ramCleanResult).toEqual(resp);
+  });
+
   it("stores error and notifies when RAM clean fails", async () => {
     boostGetSystemMemory.mockResolvedValue({
       total_mb: 16000,
