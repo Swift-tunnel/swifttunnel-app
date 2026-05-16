@@ -1574,8 +1574,7 @@ impl VpnConnection {
                         );
                         let _ = driver.close();
                         return Err(VpnError::Connection(
-                            "No relay candidate authenticated; connection was rolled back"
-                                .to_string(),
+                            "No relay candidates available; connection was rolled back".to_string(),
                         ));
                     }
                 }
