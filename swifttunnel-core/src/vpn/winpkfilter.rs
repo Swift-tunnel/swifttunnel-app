@@ -205,6 +205,8 @@ fn load_machine_type_attributes_api() -> Option<MachineTypeAttributesApi> {
 
 #[cfg(windows)]
 unsafe extern "system" {
+    // Keep these raw imports narrow so GetMachineTypeAttributes stays optional
+    // at load time on older Windows builds that do not export it.
     fn GetModuleHandleW(lpmodulename: *const u16) -> isize;
     fn GetProcAddress(hmodule: isize, lpprocname: *const u8) -> *const std::ffi::c_void;
 }
@@ -218,11 +220,15 @@ fn kernel32_proc_address(symbol: &'static [u8]) -> Option<*const std::ffi::c_voi
 
     let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
     if module == 0 {
+        log::debug!("kernel32.dll was not loaded while resolving optional Win32 API");
         return None;
     }
 
     let address = unsafe { GetProcAddress(module, symbol.as_ptr()) };
     if address.is_null() {
+        let symbol_name = std::str::from_utf8(symbol.strip_suffix(&[0]).unwrap_or(symbol))
+            .unwrap_or("<non-utf8>");
+        log::debug!("optional Win32 API {symbol_name} is unavailable; falling back");
         None
     } else {
         Some(address)
@@ -243,7 +249,9 @@ fn detect_native_arch_from_signals(
     }
 
     if let Some(attrs) = machine_attrs {
-        if attrs != 0 {
+        const USER_ENABLED: u32 = 1;
+        const KERNEL_ENABLED: u32 = 2;
+        if (attrs & (USER_ENABLED | KERNEL_ENABLED)) != 0 {
             return WinpkFilterMsiArch::Arm64;
         }
     }
@@ -1101,6 +1109,10 @@ Provider Name:      NDISAPI
         assert_eq!(
             detect_native_arch_from_signals(None, Some(1), Some("AMD64")),
             WinpkFilterMsiArch::Arm64
+        );
+        assert_eq!(
+            detect_native_arch_from_signals(None, Some(4), Some("AMD64")),
+            WinpkFilterMsiArch::X64
         );
     }
 
