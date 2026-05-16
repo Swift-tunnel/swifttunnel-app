@@ -70,7 +70,7 @@ describe("LoginScreen OAuth polling", () => {
 
   it("clears and cancels the OAuth flow on timeout", async () => {
     const deps = createDeps({
-      now: vi.fn(() => 120_000),
+      now: vi.fn(() => 999_999),
     });
 
     await runOAuthPollTick(deps);
