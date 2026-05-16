@@ -31,12 +31,12 @@ export const useToastStore = create<ToastStore>((set) => ({
 
   addToast: (toast) => {
     const id = String(++nextId);
-    set((s) => ({ toasts: [...s.toasts, { ...toast, id }] }));
     const timeout = setTimeout(() => {
       toastTimeouts.delete(id);
       set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
     }, 4000);
     toastTimeouts.set(id, timeout);
+    set((s) => ({ toasts: [...s.toasts, { ...toast, id }] }));
   },
 
   removeToast: (id) => {

@@ -47,4 +47,30 @@ describe("stores/toastStore", () => {
 
     expect(useToastStore.getState().toasts).toHaveLength(0);
   });
+
+  it("lets synchronous subscribers clear the auto-dismiss timer", async () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    const useToastStore = await loadStore();
+    const unsubscribe = useToastStore.subscribe((state) => {
+      const toast = state.toasts[0];
+      if (toast) {
+        useToastStore.getState().removeToast(toast.id);
+      }
+    });
+
+    try {
+      useToastStore
+        .getState()
+        .addToast({ type: "info", message: "Remove immediately" });
+    } finally {
+      unsubscribe();
+    }
+
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(1);
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+
+    vi.advanceTimersByTime(4000);
+
+    expect(useToastStore.getState().toasts).toHaveLength(0);
+  });
 });
