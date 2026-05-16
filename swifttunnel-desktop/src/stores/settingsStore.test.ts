@@ -12,15 +12,35 @@ vi.mock("../lib/commands", () => ({
   settingsSave,
 }));
 
+const { reportError } = vi.hoisted(() => ({
+  reportError: vi.fn(),
+}));
+
+vi.mock("../lib/errors", () => ({
+  reportError,
+}));
+
 async function loadStore() {
   vi.resetModules();
   return (await import("./settingsStore")).useSettingsStore;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+
+  return { promise, resolve, reject };
 }
 
 describe("stores/settingsStore", () => {
   beforeEach(() => {
     settingsLoad.mockReset();
     settingsSave.mockReset();
+    reportError.mockReset();
   });
 
   it("loads settings and sets activeTab from current_tab", async () => {
@@ -216,5 +236,77 @@ describe("stores/settingsStore", () => {
     expect(payload.config.roblox_settings.window_width).toBe(1280);
     expect(payload.config.roblox_settings.window_height).toBe(720);
     expect(payload.config.roblox_settings.window_fullscreen).toBe(false);
+  });
+
+  it("serializes overlapping saves so the later payload writes last", async () => {
+    const firstWrite = deferred<void>();
+    settingsSave
+      .mockReturnValueOnce(firstWrite.promise)
+      .mockResolvedValueOnce(undefined);
+
+    const useSettingsStore = await loadStore();
+    useSettingsStore.setState((s) => ({
+      ...s,
+      activeTab: "connect",
+      settings: { ...s.settings, theme: "light" },
+    }));
+    const firstSave = useSettingsStore.getState().save();
+    await Promise.resolve();
+
+    useSettingsStore.setState((s) => ({
+      ...s,
+      activeTab: "boost",
+      settings: { ...s.settings, theme: "dark" },
+    }));
+    const secondSave = useSettingsStore.getState().save();
+    await Promise.resolve();
+
+    expect(settingsSave).toHaveBeenCalledTimes(1);
+    expect((settingsSave.mock.calls[0]?.[0] as AppSettings).theme).toBe(
+      "light",
+    );
+
+    firstWrite.resolve();
+    await Promise.all([firstSave, secondSave]);
+
+    expect(settingsSave).toHaveBeenCalledTimes(2);
+    const secondPayload = settingsSave.mock.calls[1]?.[0] as AppSettings;
+    expect(secondPayload.theme).toBe("dark");
+    expect(secondPayload.current_tab).toBe("boost");
+  });
+
+  it("continues queued saves after an earlier write fails", async () => {
+    const firstWrite = deferred<void>();
+    settingsSave
+      .mockReturnValueOnce(firstWrite.promise)
+      .mockResolvedValueOnce(undefined);
+
+    const useSettingsStore = await loadStore();
+    useSettingsStore.setState((s) => ({
+      ...s,
+      settings: { ...s.settings, theme: "light" },
+    }));
+    const firstSave = useSettingsStore.getState().save();
+    await Promise.resolve();
+
+    useSettingsStore.setState((s) => ({
+      ...s,
+      settings: { ...s.settings, theme: "dark" },
+    }));
+    const secondSave = useSettingsStore.getState().save();
+    await Promise.resolve();
+
+    expect(settingsSave).toHaveBeenCalledTimes(1);
+    firstWrite.reject(new Error("disk full"));
+    await Promise.all([firstSave, secondSave]);
+
+    expect(settingsSave).toHaveBeenCalledTimes(2);
+    expect((settingsSave.mock.calls[1]?.[0] as AppSettings).theme).toBe(
+      "dark",
+    );
+    expect(reportError).toHaveBeenCalledWith(
+      "Failed to save settings",
+      expect.any(Error),
+    );
   });
 });
