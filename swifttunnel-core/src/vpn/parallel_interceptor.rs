@@ -43,7 +43,7 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::Ipv4Addr;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -78,6 +78,40 @@ const MAX_PACKET_SIZE: usize = 1600;
 /// unbounded; at this cap we stop recording new IPs for the remainder of the
 /// session (existing IPs still re-register harmlessly).
 const MAX_DETECTED_GAME_SERVERS: usize = 10_000;
+const THREAD_DETECTED_GAME_SERVER_CACHE_CAP: usize = 1024;
+
+thread_local! {
+    static THREAD_DETECTED_GAME_SERVERS: RefCell<HashSet<Ipv4Addr>> =
+        RefCell::new(HashSet::new());
+}
+
+fn record_detected_game_server(
+    detected_game_servers: &parking_lot::RwLock<HashSet<Ipv4Addr>>,
+    dst_ip: Ipv4Addr,
+) {
+    let first_seen_on_thread = THREAD_DETECTED_GAME_SERVERS.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        if seen.contains(&dst_ip) {
+            return false;
+        }
+        if seen.len() >= THREAD_DETECTED_GAME_SERVER_CACHE_CAP {
+            seen.clear();
+        }
+        seen.insert(dst_ip)
+    });
+
+    if !first_seen_on_thread {
+        return;
+    }
+
+    if let Some(mut servers) = detected_game_servers.try_write() {
+        if servers.len() < MAX_DETECTED_GAME_SERVERS || servers.contains(&dst_ip) {
+            if servers.insert(dst_ip) {
+                log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
+            }
+        }
+    }
+}
 
 /// Packet reader rebind budget. Transient NDIS glitches (sleep/resume, WLAN
 /// roam, driver reset, ndisrd.sys handle staleness) can make `read_packets`
@@ -4747,13 +4781,7 @@ fn forward_tunneled_packet_from_reader(
         }
 
         if auto_routing_candidate_dst_ip(data) == Some(dst_ip) {
-            if let Some(mut servers) = detected_game_servers.try_write() {
-                if servers.len() < MAX_DETECTED_GAME_SERVERS || servers.contains(&dst_ip) {
-                    if servers.insert(dst_ip) {
-                        log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
-                    }
-                }
-            }
+            record_detected_game_server(detected_game_servers, dst_ip);
 
             if let Some(auto_router) = auto_router {
                 auto_router.evaluate_game_server(dst_ip);
@@ -4787,8 +4815,11 @@ fn forward_tunneled_packet_from_reader(
             let pkt_len = ip_packet.len();
             fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
             clamp_tcp_mss_for_relay(&mut fix_buf[..pkt_len], relay.max_inner_packet_len());
-            let _ = fix_packet_checksums(&mut fix_buf[..pkt_len]);
-            relay.forward_outbound_fast(&fix_buf[..pkt_len])
+            if !fix_packet_checksums(&mut fix_buf[..pkt_len]) {
+                Ok(super::udp_relay::RelaySendOutcome::Oversize)
+            } else {
+                relay.forward_outbound_fast(&fix_buf[..pkt_len])
+            }
         })
     } else {
         relay.forward_outbound_fast(ip_packet)
@@ -5546,21 +5577,7 @@ fn run_packet_worker(
                     let dst_ip =
                         Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
                     if is_roblox_game_server_ip(dst_ip) {
-                        // Non-blocking write - skip if lock contended (prevents freeze)
-                        if let Some(mut servers) = detected_game_servers.try_write() {
-                            // Cap the set so long sessions teleporting across many
-                            // game instances don't grow memory without bound.
-                            if servers.len() < MAX_DETECTED_GAME_SERVERS
-                                || servers.contains(&dst_ip)
-                            {
-                                if servers.insert(dst_ip) {
-                                    log::info!(
-                                        "Game server detected: {} (tunneled by SwiftTunnel)",
-                                        dst_ip
-                                    );
-                                }
-                            }
-                        }
+                        record_detected_game_server(&detected_game_servers, dst_ip);
 
                         // Auto-routing was evaluated before any bypass path could run.
                     }
@@ -5631,8 +5648,11 @@ fn run_packet_worker(
                                 &mut fix_buf[..pkt_len],
                                 relay.max_inner_packet_len(),
                             );
-                            let _ = fix_packet_checksums(&mut fix_buf[..pkt_len]);
-                            relay.forward_outbound(&fix_buf[..pkt_len])
+                            if !fix_packet_checksums(&mut fix_buf[..pkt_len]) {
+                                Ok(super::udp_relay::RelaySendOutcome::Oversize)
+                            } else {
+                                relay.forward_outbound(&fix_buf[..pkt_len])
+                            }
                         })
                     } else {
                         relay.forward_outbound(ip_packet)
@@ -5837,8 +5857,31 @@ fn bounded_ip_helper_entries(
 }
 
 #[cfg(target_os = "windows")]
-fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
+struct TcpOwnerPidCache {
+    refreshed_at: Option<Instant>,
+    entries: ahash::AHashMap<(Ipv4Addr, u16), u32>,
+}
+
+#[cfg(target_os = "windows")]
+impl TcpOwnerPidCache {
+    fn new() -> Self {
+        Self {
+            refreshed_at: None,
+            entries: ahash::AHashMap::with_capacity(512),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+thread_local! {
+    static TCP_OWNER_PID_CACHE: RefCell<TcpOwnerPidCache> = RefCell::new(TcpOwnerPidCache::new());
+}
+
+#[cfg(target_os = "windows")]
+fn read_tcp_owner_pid_table() -> ahash::AHashMap<(Ipv4Addr, u16), u32> {
     use windows::Win32::NetworkManagement::IpHelper::*;
+
+    let mut entries = ahash::AHashMap::with_capacity(512);
 
     unsafe {
         let mut size: u32 = 0;
@@ -5851,7 +5894,7 @@ fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
             0,
         );
         if size == 0 {
-            return None;
+            return entries;
         }
 
         let mut buffer = vec![0u8; size as usize];
@@ -5864,12 +5907,12 @@ fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
             0,
         ) != 0
         {
-            return None;
+            return entries;
         }
 
         let header_size = std::mem::size_of::<u32>();
         if buffer.len() < header_size {
-            return None;
+            return entries;
         }
 
         let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
@@ -5883,13 +5926,30 @@ fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
             );
             let entry_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
             let entry_port = u16::from_be(entry.dwLocalPort as u16);
-            if entry_ip == local_ip && entry_port == local_port {
-                return Some(entry.dwOwningPid);
-            }
+            entries.insert((entry_ip, entry_port), entry.dwOwningPid);
         }
     }
 
-    None
+    entries
+}
+
+#[cfg(target_os = "windows")]
+fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
+    const TCP_OWNER_PID_CACHE_TTL: Duration = Duration::from_millis(100);
+
+    TCP_OWNER_PID_CACHE.with(|cache| {
+        let now = Instant::now();
+        let mut cache = cache.borrow_mut();
+        let stale = cache
+            .refreshed_at
+            .is_none_or(|refreshed_at| now.duration_since(refreshed_at) >= TCP_OWNER_PID_CACHE_TTL);
+        if stale {
+            cache.entries = read_tcp_owner_pid_table();
+            cache.refreshed_at = Some(now);
+        }
+
+        cache.entries.get(&(local_ip, local_port)).copied()
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
