@@ -161,6 +161,19 @@ fn ram_clean_boost_failure_reasons(
     reasons
 }
 
+fn ram_clean_boost_warnings(
+    result: &swifttunnel_core::ram_cleaner::RamCleanResult,
+    mut progress_warnings: Vec<String>,
+) -> Vec<String> {
+    for warning in &result.warnings {
+        if !progress_warnings.contains(warning) {
+            progress_warnings.push(warning.clone());
+        }
+    }
+
+    progress_warnings
+}
+
 #[tauri::command]
 pub async fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, String> {
     #[cfg(windows)]
@@ -234,9 +247,17 @@ pub async fn boost_update_config(
                 } else {
                     vec![roblox_pid]
                 };
-                match swifttunnel_core::ram_cleaner::clean_ram(&exclude_pids, |_, _, _, _, _| {}) {
+                let mut progress_warnings = Vec::new();
+                match swifttunnel_core::ram_cleaner::clean_ram(
+                    &exclude_pids,
+                    |_, _, _, _, warning| {
+                        if let Some(warning) = warning {
+                            progress_warnings.push(warning);
+                        }
+                    },
+                ) {
                     Ok(result) => {
-                        for warning in &result.warnings {
+                        for warning in ram_clean_boost_warnings(&result, progress_warnings) {
                             warn_list
                                 .push(format!("System optimizer: RAM clean boost: {}", warning));
                         }
@@ -251,6 +272,10 @@ pub async fn boost_update_config(
                         }
                     }
                     Err(e) => {
+                        for warning in progress_warnings {
+                            warn_list
+                                .push(format!("System optimizer: RAM clean boost: {}", warning));
+                        }
                         applied_config.system_optimization.clear_standby_memory = false;
                         warn_list.push(format!("System optimizer: RAM clean boost: {}", e));
                     }
@@ -559,6 +584,32 @@ mod tests {
             reasons
                 .iter()
                 .any(|reason| reason.contains("standby purge"))
+        );
+    }
+
+    #[test]
+    fn ram_clean_warnings_include_callback_only_messages_and_dedupe_result_messages() {
+        let mut result = ram_clean_result(true, true);
+        result.warnings = vec![
+            "trim failed for browser.exe".to_string(),
+            "aggregate warning".to_string(),
+        ];
+
+        let warnings = ram_clean_boost_warnings(
+            &result,
+            vec![
+                "trim failed for browser.exe".to_string(),
+                "callback-only warning".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            warnings,
+            vec![
+                "trim failed for browser.exe".to_string(),
+                "callback-only warning".to_string(),
+                "aggregate warning".to_string(),
+            ]
         );
     }
 }
