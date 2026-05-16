@@ -85,6 +85,7 @@ static CANDIDATE_EXHAUSTED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static PREFLIGHT_ENFORCED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static AUTH_REQUIRED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static AUTH_REPLAY_EVENTS: AtomicU64 = AtomicU64::new(0);
+static UNAUTHENTICATED_RELAY_EVENTS: AtomicU64 = AtomicU64::new(0);
 static POLICY_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 static REGION_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 
@@ -1596,7 +1597,7 @@ impl VpnConnection {
                     }
                     Err(CONNECT_FAIL_UNAUTHENTICATED_RELAY) => {
                         log_sampled_connect_event(
-                            &AUTH_REQUIRED_EVENTS,
+                            &UNAUTHENTICATED_RELAY_EVENTS,
                             CONNECT_FAIL_UNAUTHENTICATED_RELAY,
                             format!(
                                 "No relay candidate authenticated for '{}' (session {})",
