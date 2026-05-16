@@ -1269,7 +1269,7 @@ impl VpnConnection {
             let _ = driver.close();
             return Err(VpnError::ConfigFetch(format!(
                 "Selected region '{}' has no available relay candidate",
-                region
+                config.region
             )));
         };
 
