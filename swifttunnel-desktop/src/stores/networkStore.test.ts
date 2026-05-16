@@ -125,6 +125,52 @@ describe("stores/networkStore", () => {
     expect(useNetworkStore.getState().speedError).toBeNull();
   });
 
+  it("does not let an older stability error overwrite a newer success", async () => {
+    const older = deferred<StabilityResultResponse>();
+    const newer = deferred<StabilityResultResponse>();
+    networkStartStabilityTest
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+
+    const useNetworkStore = await loadStore();
+    const olderRun = useNetworkStore.getState().runStabilityTest(5);
+    const newerRun = useNetworkStore.getState().runStabilityTest(5);
+
+    newer.resolve(stabilityResult(35));
+    await newerRun;
+    older.reject(new Error("old stability run timed out"));
+    await olderRun;
+
+    expect(useNetworkStore.getState().stabilityStatus).toBe("complete");
+    expect(useNetworkStore.getState().stabilityResult).toEqual(
+      stabilityResult(35),
+    );
+    expect(useNetworkStore.getState().stabilityError).toBeNull();
+  });
+
+  it("does not let an older bufferbloat error overwrite a newer success", async () => {
+    const older = deferred<BufferbloatResultResponse>();
+    const newer = deferred<BufferbloatResultResponse>();
+    networkStartBufferbloatTest
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(newer.promise);
+
+    const useNetworkStore = await loadStore();
+    const olderRun = useNetworkStore.getState().runBufferbloatTest();
+    const newerRun = useNetworkStore.getState().runBufferbloatTest();
+
+    newer.resolve(bufferbloatResult(8));
+    await newerRun;
+    older.reject(new Error("old bufferbloat run timed out"));
+    await olderRun;
+
+    expect(useNetworkStore.getState().bufferbloatStatus).toBe("complete");
+    expect(useNetworkStore.getState().bufferbloatResult).toEqual(
+      bufferbloatResult(8),
+    );
+    expect(useNetworkStore.getState().bufferbloatError).toBeNull();
+  });
+
   it("reset invalidates in-flight diagnostic results", async () => {
     const stability = deferred<StabilityResultResponse>();
     const speed = deferred<SpeedResultResponse>();

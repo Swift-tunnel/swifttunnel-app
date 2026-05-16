@@ -35,106 +35,114 @@ interface NetworkStore {
   reset: () => void;
 }
 
-let stabilityRunSeq = 0;
-let speedRunSeq = 0;
-let bufferbloatRunSeq = 0;
+export const useNetworkStore = create<NetworkStore>((set) => {
+  let stabilityRunSeq = 0;
+  let speedRunSeq = 0;
+  let bufferbloatRunSeq = 0;
 
-export const useNetworkStore = create<NetworkStore>((set) => ({
-  stabilityStatus: "idle",
-  stabilityResult: null,
-  stabilityError: null,
-  speedStatus: "idle",
-  speedResult: null,
-  speedError: null,
-  bufferbloatStatus: "idle",
-  bufferbloatResult: null,
-  bufferbloatError: null,
+  return {
+    stabilityStatus: "idle",
+    stabilityResult: null,
+    stabilityError: null,
+    speedStatus: "idle",
+    speedResult: null,
+    speedError: null,
+    bufferbloatStatus: "idle",
+    bufferbloatResult: null,
+    bufferbloatError: null,
 
-  runStabilityTest: async (durationSecs = 10) => {
-    const runId = ++stabilityRunSeq;
-    try {
+    runStabilityTest: async (durationSecs = 10) => {
+      const runId = ++stabilityRunSeq;
+      try {
+        set({
+          stabilityStatus: "running",
+          stabilityResult: null,
+          stabilityError: null,
+        });
+        const result = await networkStartStabilityTest(durationSecs);
+        if (runId === stabilityRunSeq) {
+          set({
+            stabilityStatus: "complete",
+            stabilityResult: result,
+            stabilityError: null,
+          });
+        }
+      } catch (e) {
+        if (runId === stabilityRunSeq) {
+          set({
+            stabilityStatus: "error",
+            stabilityResult: null,
+            stabilityError: String(e),
+          });
+        }
+      }
+    },
+
+    runSpeedTest: async () => {
+      const runId = ++speedRunSeq;
+      try {
+        set({ speedStatus: "running", speedResult: null, speedError: null });
+        const result = await networkStartSpeedTest();
+        if (runId === speedRunSeq) {
+          set({
+            speedStatus: "complete",
+            speedResult: result,
+            speedError: null,
+          });
+        }
+      } catch (e) {
+        if (runId === speedRunSeq) {
+          set({
+            speedStatus: "error",
+            speedResult: null,
+            speedError: String(e),
+          });
+        }
+      }
+    },
+
+    runBufferbloatTest: async () => {
+      const runId = ++bufferbloatRunSeq;
+      try {
+        set({
+          bufferbloatStatus: "running",
+          bufferbloatResult: null,
+          bufferbloatError: null,
+        });
+        const result = await networkStartBufferbloatTest();
+        if (runId === bufferbloatRunSeq) {
+          set({
+            bufferbloatStatus: "complete",
+            bufferbloatResult: result,
+            bufferbloatError: null,
+          });
+        }
+      } catch (e) {
+        if (runId === bufferbloatRunSeq) {
+          set({
+            bufferbloatStatus: "error",
+            bufferbloatResult: null,
+            bufferbloatError: String(e),
+          });
+        }
+      }
+    },
+
+    reset: () => {
+      stabilityRunSeq++;
+      speedRunSeq++;
+      bufferbloatRunSeq++;
       set({
-        stabilityStatus: "running",
+        stabilityStatus: "idle",
         stabilityResult: null,
         stabilityError: null,
-      });
-      const result = await networkStartStabilityTest(durationSecs);
-      set(() =>
-        runId === stabilityRunSeq
-          ? { stabilityStatus: "complete", stabilityResult: result }
-          : {},
-      );
-    } catch (e) {
-      set(() =>
-        runId === stabilityRunSeq
-          ? { stabilityStatus: "error", stabilityError: String(e) }
-          : {},
-      );
-    }
-  },
-
-  runSpeedTest: async () => {
-    const runId = ++speedRunSeq;
-    try {
-      set({ speedStatus: "running", speedResult: null, speedError: null });
-      const result = await networkStartSpeedTest();
-      set(() =>
-        runId === speedRunSeq
-          ? { speedStatus: "complete", speedResult: result }
-          : {},
-      );
-    } catch (e) {
-      set(() =>
-        runId === speedRunSeq
-          ? { speedStatus: "error", speedError: String(e) }
-          : {},
-      );
-    }
-  },
-
-  runBufferbloatTest: async () => {
-    const runId = ++bufferbloatRunSeq;
-    try {
-      set({
-        bufferbloatStatus: "running",
+        speedStatus: "idle",
+        speedResult: null,
+        speedError: null,
+        bufferbloatStatus: "idle",
         bufferbloatResult: null,
         bufferbloatError: null,
       });
-      const result = await networkStartBufferbloatTest();
-      set(() =>
-        runId === bufferbloatRunSeq
-          ? {
-              bufferbloatStatus: "complete",
-              bufferbloatResult: result,
-            }
-          : {},
-      );
-    } catch (e) {
-      set(() =>
-        runId === bufferbloatRunSeq
-          ? {
-              bufferbloatStatus: "error",
-              bufferbloatError: String(e),
-            }
-          : {},
-      );
-    }
-  },
-
-  reset: () => {
-    stabilityRunSeq++;
-    speedRunSeq++;
-    bufferbloatRunSeq++;
-    set({
-      stabilityStatus: "idle",
-      stabilityResult: null,
-      stabilityError: null,
-      speedStatus: "idle",
-      speedResult: null,
-      speedError: null,
-      bufferbloatStatus: "idle",
-      bufferbloatResult: null,
-      bufferbloatError: null,
-    });
-  },
-}));
+    },
+  };
+});
