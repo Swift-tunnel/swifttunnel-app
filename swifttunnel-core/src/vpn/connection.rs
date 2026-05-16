@@ -91,14 +91,10 @@ static REGION_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 struct RelayCandidateAttempt {
-    region: String,
-    addr: SocketAddr,
-    authenticated: bool,
     policy_known: bool,
     auth_required: bool,
     auth_ack_status: Option<RelayAuthAckStatus>,
     preflight_mode: RelayPreflightMode,
-    queue_full_mode: RelayQueueFullMode,
 }
 
 fn log_sampled_connect_event(counter: &AtomicU64, code: &str, message: impl AsRef<str>) {
@@ -268,44 +264,34 @@ fn watchdog_tick(
     }
 }
 
-fn select_candidate_after_preflight(
-    attempts: &[RelayCandidateAttempt],
-) -> Result<(String, SocketAddr, RelayQueueFullMode), &'static str> {
-    if let Some(attempt) = attempts.iter().find(|attempt| attempt.authenticated) {
-        return Ok((
-            attempt.region.clone(),
-            attempt.addr,
-            attempt.queue_full_mode,
-        ));
-    }
-
+fn failed_candidate_preflight_reason(attempts: &[RelayCandidateAttempt]) -> &'static str {
     if attempts.is_empty() {
-        return Err(CONNECT_FAIL_CANDIDATE_EXHAUSTED);
+        return CONNECT_FAIL_CANDIDATE_EXHAUSTED;
     }
 
     if attempts
         .iter()
         .any(|attempt| attempt.auth_ack_status == Some(RelayAuthAckStatus::Replay))
     {
-        return Err(CONNECT_FAIL_AUTH_REPLAY);
+        return CONNECT_FAIL_AUTH_REPLAY;
     }
 
     if attempts.iter().any(|attempt| attempt.auth_required) {
-        return Err(CONNECT_FAIL_AUTH_REQUIRED);
+        return CONNECT_FAIL_AUTH_REQUIRED;
     }
 
     if attempts
         .iter()
         .any(|attempt| attempt.preflight_mode == RelayPreflightMode::Enforce)
     {
-        return Err(CONNECT_FAIL_PREFLIGHT_ENFORCED);
+        return CONNECT_FAIL_PREFLIGHT_ENFORCED;
     }
 
     if attempts.iter().any(|attempt| !attempt.policy_known) {
-        return Err(CONNECT_FAIL_POLICY_UNAVAILABLE);
+        return CONNECT_FAIL_POLICY_UNAVAILABLE;
     }
 
-    Err(CONNECT_FAIL_UNAUTHENTICATED_RELAY)
+    CONNECT_FAIL_UNAUTHENTICATED_RELAY
 }
 
 fn auto_route_switch_allowed(
@@ -1394,14 +1380,10 @@ impl VpnConnection {
                             e
                         );
                         attempt_results.push(RelayCandidateAttempt {
-                            region: candidate_region.clone(),
-                            addr: *candidate_addr,
-                            authenticated: false,
                             policy_known: false,
                             auth_required: false,
                             auth_ack_status: None,
                             preflight_mode: RelayPreflightMode::Legacy,
-                            queue_full_mode: RelayQueueFullMode::Bypass,
                         });
                         continue;
                     }
@@ -1422,16 +1404,6 @@ impl VpnConnection {
                         selected_relay_region = candidate_region.clone();
                         relay_addr = *candidate_addr;
                         queue_full_mode = candidate_queue_full_mode;
-                        attempt_results.push(RelayCandidateAttempt {
-                            region: candidate_region.clone(),
-                            addr: *candidate_addr,
-                            authenticated: true,
-                            policy_known: true,
-                            auth_required: ticket.auth_required,
-                            auth_ack_status: Some(RelayAuthAckStatus::Ok),
-                            preflight_mode: candidate_preflight_mode,
-                            queue_full_mode: candidate_queue_full_mode,
-                        });
                         authenticated = true;
                         if idx > 0 {
                             log::info!(
@@ -1456,14 +1428,10 @@ impl VpnConnection {
                             session_id_hex
                         );
                         attempt_results.push(RelayCandidateAttempt {
-                            region: candidate_region.clone(),
-                            addr: *candidate_addr,
-                            authenticated: false,
                             policy_known: true,
                             auth_required: ticket.auth_required,
                             auth_ack_status: Some(status),
                             preflight_mode: candidate_preflight_mode,
-                            queue_full_mode: candidate_queue_full_mode,
                         });
                     }
                     Ok(None) => {
@@ -1477,14 +1445,10 @@ impl VpnConnection {
                             ),
                         );
                         attempt_results.push(RelayCandidateAttempt {
-                            region: candidate_region.clone(),
-                            addr: *candidate_addr,
-                            authenticated: false,
                             policy_known: true,
                             auth_required: ticket.auth_required,
                             auth_ack_status: None,
                             preflight_mode: candidate_preflight_mode,
-                            queue_full_mode: candidate_queue_full_mode,
                         });
                     }
                     Err(e) => {
@@ -1495,14 +1459,10 @@ impl VpnConnection {
                             e
                         );
                         attempt_results.push(RelayCandidateAttempt {
-                            region: candidate_region.clone(),
-                            addr: *candidate_addr,
-                            authenticated: false,
                             policy_known: true,
                             auth_required: ticket.auth_required,
                             auth_ack_status: None,
                             preflight_mode: candidate_preflight_mode,
-                            queue_full_mode: candidate_queue_full_mode,
                         });
                     }
                 }
@@ -1527,15 +1487,8 @@ impl VpnConnection {
                     );
                 }
 
-                match select_candidate_after_preflight(&attempt_results) {
-                    Ok((_, _, _)) => {
-                        let _ = driver.close();
-                        return Err(VpnError::Connection(
-                            "Relay candidate selection violated authentication invariant"
-                                .to_string(),
-                        ));
-                    }
-                    Err(CONNECT_FAIL_PREFLIGHT_ENFORCED) => {
+                match failed_candidate_preflight_reason(&attempt_results) {
+                    CONNECT_FAIL_PREFLIGHT_ENFORCED => {
                         log_sampled_connect_event(
                             &PREFLIGHT_ENFORCED_EVENTS,
                             CONNECT_FAIL_PREFLIGHT_ENFORCED,
@@ -1550,7 +1503,7 @@ impl VpnConnection {
                                 .to_string(),
                         ));
                     }
-                    Err(CONNECT_FAIL_AUTH_REQUIRED) => {
+                    CONNECT_FAIL_AUTH_REQUIRED => {
                         log_sampled_connect_event(
                             &AUTH_REQUIRED_EVENTS,
                             CONNECT_FAIL_AUTH_REQUIRED,
@@ -1565,7 +1518,7 @@ impl VpnConnection {
                                 .to_string(),
                         ));
                     }
-                    Err(CONNECT_FAIL_AUTH_REPLAY) => {
+                    CONNECT_FAIL_AUTH_REPLAY => {
                         log_sampled_connect_event(
                             &AUTH_REPLAY_EVENTS,
                             CONNECT_FAIL_AUTH_REPLAY,
@@ -1580,7 +1533,7 @@ impl VpnConnection {
                                 .to_string(),
                         ));
                     }
-                    Err(CONNECT_FAIL_POLICY_UNAVAILABLE) => {
+                    CONNECT_FAIL_POLICY_UNAVAILABLE => {
                         log_sampled_connect_event(
                             &POLICY_UNAVAILABLE_EVENTS,
                             CONNECT_FAIL_POLICY_UNAVAILABLE,
@@ -1595,7 +1548,7 @@ impl VpnConnection {
                                 .to_string(),
                         ));
                     }
-                    Err(CONNECT_FAIL_UNAUTHENTICATED_RELAY) => {
+                    CONNECT_FAIL_UNAUTHENTICATED_RELAY => {
                         log_sampled_connect_event(
                             &UNAUTHENTICATED_RELAY_EVENTS,
                             CONNECT_FAIL_UNAUTHENTICATED_RELAY,
@@ -1610,7 +1563,7 @@ impl VpnConnection {
                                 .to_string(),
                         ));
                     }
-                    Err(code) => {
+                    code => {
                         log_sampled_connect_event(
                             &CANDIDATE_EXHAUSTED_EVENTS,
                             code,
@@ -3476,24 +3429,16 @@ mod tests {
     }
 
     fn relay_attempt(
-        region: &str,
-        addr: &str,
-        authenticated: bool,
         policy_known: bool,
         auth_required: bool,
         auth_ack_status: Option<RelayAuthAckStatus>,
         preflight_mode: RelayPreflightMode,
-        queue_full_mode: RelayQueueFullMode,
     ) -> RelayCandidateAttempt {
         RelayCandidateAttempt {
-            region: region.to_string(),
-            addr: parse_addr(addr),
-            authenticated,
             policy_known,
             auth_required,
             auth_ack_status,
             preflight_mode,
-            queue_full_mode,
         }
     }
 
@@ -3970,267 +3915,119 @@ mod tests {
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_prefers_authenticated_candidate() {
+    fn test_failed_candidate_preflight_rejects_unauthenticated_legacy_fallback() {
         let attempts = vec![
             relay_attempt(
-                "germany-01",
-                "10.0.0.1:51821",
-                false,
-                true,
-                false,
-                None,
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Bypass,
-            ),
-            relay_attempt(
-                "germany-02",
-                "10.0.0.2:51821",
-                true,
-                true,
-                true,
-                Some(RelayAuthAckStatus::Ok),
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Drop,
-            ),
-            relay_attempt(
-                "germany-03",
-                "10.0.0.3:51821",
-                false,
-                true,
-                true,
-                None,
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Bypass,
-            ),
-        ];
-
-        let selected = select_candidate_after_preflight(&attempts).unwrap();
-        assert_eq!(
-            selected,
-            (
-                "germany-02".to_string(),
-                parse_addr("10.0.0.2:51821"),
-                RelayQueueFullMode::Drop
-            )
-        );
-    }
-
-    #[test]
-    fn test_select_candidate_after_preflight_rejects_unauthenticated_legacy_fallback() {
-        let attempts = vec![
-            relay_attempt(
-                "germany-01",
-                "10.0.0.1:51821",
-                false,
                 true,
                 false,
                 Some(RelayAuthAckStatus::AuthDisabled),
                 RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Bypass,
             ),
-            relay_attempt(
-                "germany-02",
-                "10.0.0.2:51821",
-                false,
-                true,
-                false,
-                None,
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Drop,
-            ),
+            relay_attempt(true, false, None, RelayPreflightMode::Legacy),
         ];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("legacy-looking non-authenticated candidates must not connect");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_UNAUTHENTICATED_RELAY);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_enforce_rejects_fallback() {
+    fn test_failed_candidate_preflight_enforce_rejects_fallback() {
         let attempts = vec![relay_attempt(
-            "germany-01",
-            "10.0.0.1:51821",
-            false,
             true,
             false,
             None,
             RelayPreflightMode::Enforce,
-            RelayQueueFullMode::Bypass,
         )];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("enforced preflight should reject fallback");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_PREFLIGHT_ENFORCED);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_auth_required_rejects_legacy_fallback() {
-        let attempts = vec![relay_attempt(
-            "germany-01",
-            "10.0.0.1:51821",
-            false,
-            true,
-            true,
-            None,
-            RelayPreflightMode::Legacy,
-            RelayQueueFullMode::Bypass,
-        )];
+    fn test_failed_candidate_preflight_auth_required_rejects_legacy_fallback() {
+        let attempts = vec![relay_attempt(true, true, None, RelayPreflightMode::Legacy)];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("required auth should reject unauthenticated legacy fallback");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_AUTH_REQUIRED);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_strictest_policy_rejects_fallback() {
+    fn test_failed_candidate_preflight_strictest_policy_rejects_fallback() {
         let attempts = vec![
-            relay_attempt(
-                "germany-01",
-                "10.0.0.1:51821",
-                false,
-                true,
-                false,
-                None,
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Bypass,
-            ),
-            relay_attempt(
-                "germany-02",
-                "10.0.0.2:51821",
-                false,
-                true,
-                true,
-                None,
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Drop,
-            ),
+            relay_attempt(true, false, None, RelayPreflightMode::Legacy),
+            relay_attempt(true, true, None, RelayPreflightMode::Legacy),
         ];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("auth-required candidate should reject unauthenticated fallback");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_AUTH_REQUIRED);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_all_unknown_policy_rejects_fallback() {
+    fn test_failed_candidate_preflight_all_unknown_policy_rejects_fallback() {
         let attempts = vec![relay_attempt(
-            "germany-01",
-            "10.0.0.1:51821",
-            false,
             false,
             false,
             None,
             RelayPreflightMode::Legacy,
-            RelayQueueFullMode::Bypass,
         )];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("unknown relay policy must not mask missing authentication");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_POLICY_UNAVAILABLE);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_replay_rejects_stale_session() {
+    fn test_failed_candidate_preflight_replay_rejects_stale_session() {
         let attempts = vec![relay_attempt(
-            "germany-01",
-            "10.0.0.1:51821",
-            false,
             true,
             false,
             Some(RelayAuthAckStatus::Replay),
             RelayPreflightMode::Legacy,
-            RelayQueueFullMode::Bypass,
         )];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("replayed relay ticket must be fatal for this connect attempt");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_AUTH_REPLAY);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_bad_format_does_not_trigger_replay_repair() {
+    fn test_failed_candidate_preflight_bad_format_does_not_trigger_replay_repair() {
         let attempts = vec![relay_attempt(
-            "germany-01",
-            "10.0.0.1:51821",
-            false,
             true,
             false,
             Some(RelayAuthAckStatus::BadFormat),
             RelayPreflightMode::Legacy,
-            RelayQueueFullMode::Bypass,
         )];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("bad-format ack is non-repairable but not a stale-ticket replay");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_UNAUTHENTICATED_RELAY);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_empty_attempts_rejects_connection() {
+    fn test_failed_candidate_preflight_empty_attempts_rejects_connection() {
         let attempts = Vec::new();
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("empty relay attempts cannot satisfy primary tunnel success");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_CANDIDATE_EXHAUSTED);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_auth_policy_beats_unknown_policy() {
+    fn test_failed_candidate_preflight_auth_policy_beats_unknown_policy() {
         let attempts = vec![
-            relay_attempt(
-                "germany-01",
-                "10.0.0.1:51821",
-                false,
-                false,
-                false,
-                None,
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Bypass,
-            ),
-            relay_attempt(
-                "germany-02",
-                "10.0.0.2:51821",
-                false,
-                true,
-                true,
-                None,
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Drop,
-            ),
+            relay_attempt(false, false, None, RelayPreflightMode::Legacy),
+            relay_attempt(true, true, None, RelayPreflightMode::Legacy),
         ];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("structured auth-required policy must still reject fallback");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_AUTH_REQUIRED);
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_enforced_policy_beats_unknown_policy() {
+    fn test_failed_candidate_preflight_enforced_policy_beats_unknown_policy() {
         let attempts = vec![
-            relay_attempt(
-                "germany-01",
-                "10.0.0.1:51821",
-                false,
-                false,
-                false,
-                None,
-                RelayPreflightMode::Legacy,
-                RelayQueueFullMode::Bypass,
-            ),
-            relay_attempt(
-                "germany-02",
-                "10.0.0.2:51821",
-                false,
-                true,
-                false,
-                None,
-                RelayPreflightMode::Enforce,
-                RelayQueueFullMode::Drop,
-            ),
+            relay_attempt(false, false, None, RelayPreflightMode::Legacy),
+            relay_attempt(true, false, None, RelayPreflightMode::Enforce),
         ];
 
-        let error = select_candidate_after_preflight(&attempts)
-            .expect_err("structured enforced preflight must still reject fallback");
+        let error = failed_candidate_preflight_reason(&attempts);
         assert_eq!(error, CONNECT_FAIL_PREFLIGHT_ENFORCED);
     }
 
