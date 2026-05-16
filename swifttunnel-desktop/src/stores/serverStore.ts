@@ -28,6 +28,7 @@ export const useServerStore = create<ServerStore>((set, get) => {
   let listRunSeq = 0;
   let refreshRunSeq = 0;
   let latencyRunSeq = 0;
+  let activeListRun: Promise<void> | null = null;
 
   return {
     regions: [],
@@ -37,25 +38,34 @@ export const useServerStore = create<ServerStore>((set, get) => {
     isLoading: false,
     error: null,
 
-    fetchList: async () => {
+    fetchList: () => {
       const runId = ++listRunSeq;
-      try {
-        set({ isLoading: true });
-        const resp = await serverGetList();
-        if (runId === listRunSeq) {
-          set({
-            regions: resp.regions,
-            servers: resp.servers,
-            source: resp.source,
-            isLoading: false,
-            error: null,
-          });
+      const run = (async () => {
+        try {
+          set({ isLoading: true });
+          const resp = await serverGetList();
+          if (runId === listRunSeq) {
+            set({
+              regions: resp.regions,
+              servers: resp.servers,
+              source: resp.source,
+              isLoading: false,
+              error: null,
+            });
+          }
+        } catch (e) {
+          if (runId === listRunSeq) {
+            set({ isLoading: false, error: String(e) });
+          }
         }
-      } catch (e) {
-        if (runId === listRunSeq) {
-          set({ isLoading: false, error: String(e) });
+      })();
+
+      activeListRun = run;
+      return run.finally(() => {
+        if (activeListRun === run) {
+          activeListRun = null;
         }
-      }
+      });
     },
 
     fetchLatencies: async () => {
@@ -90,6 +100,16 @@ export const useServerStore = create<ServerStore>((set, get) => {
         }
 
         await get().fetchList();
+        let awaitedListRun: Promise<void> | null = null;
+        while (
+          runId === refreshRunSeq &&
+          get().isLoading &&
+          activeListRun &&
+          activeListRun !== awaitedListRun
+        ) {
+          awaitedListRun = activeListRun;
+          await awaitedListRun;
+        }
       } catch (e) {
         if (runId === refreshRunSeq) {
           set({ isLoading: false, error: String(e) });

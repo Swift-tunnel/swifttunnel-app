@@ -207,4 +207,38 @@ describe("stores/serverStore", () => {
     expect(useServerStore.getState().source).toBe("new");
     expect(useServerStore.getState().isLoading).toBe(false);
   });
+
+  it("waits for a standalone list fetch that supersedes a refresh-owned list fetch", async () => {
+    const refreshList = deferred<ServerListResponse>();
+    const standaloneList = deferred<ServerListResponse>();
+    serverRefresh.mockResolvedValueOnce("ok");
+    serverGetList
+      .mockReturnValueOnce(refreshList.promise)
+      .mockReturnValueOnce(standaloneList.promise);
+
+    const useServerStore = await loadStore();
+    const refreshRun = useServerStore.getState().refresh();
+    let refreshSettled = false;
+    void refreshRun.then(() => {
+      refreshSettled = true;
+    });
+    await waitForCallCount(serverGetList, 1);
+
+    const standaloneRun = useServerStore.getState().fetchList();
+    await waitForCallCount(serverGetList, 2);
+
+    refreshList.resolve(serverList("refresh"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(useServerStore.getState().isLoading).toBe(true);
+    expect(useServerStore.getState().source).toBe("");
+    expect(refreshSettled).toBe(false);
+
+    standaloneList.resolve(serverList("standalone"));
+    await Promise.all([refreshRun, standaloneRun]);
+
+    expect(useServerStore.getState().source).toBe("standalone");
+    expect(useServerStore.getState().isLoading).toBe(false);
+    expect(refreshSettled).toBe(true);
+  });
 });
