@@ -522,6 +522,17 @@ fn resolve_api_response(
         .or_else(|| api_region.as_ref().map(|r| r.display_name().to_string()))
         .unwrap_or_else(|| "Unknown".to_string());
     let confidence = response.confidence.as_deref().unwrap_or("unknown");
+    if confidence.eq_ignore_ascii_case("low") {
+        log::warn!(
+            "Geo lookup: SwiftTunnel resolver returned low confidence for {}; keeping current relay [location={}, provider={:?}, roblox_region={:?}, swifttunnel_region={:?}]",
+            ip,
+            location,
+            response.provider,
+            response.roblox_region_id,
+            response.swifttunnel_region_id
+        );
+        return None;
+    }
 
     if let Some(region) = api_region {
         log::info!(
@@ -552,7 +563,8 @@ fn resolve_api_response(
 ///
 /// Uses the SwiftTunnel web resolver. The resolver is IPinfo-primary and owns
 /// the provider token/cache/overrides. Auto-routing only receives a region when
-/// the resolver returns a recognized structured region id.
+/// the resolver returns a recognized structured region id with non-low
+/// confidence; it does not invent a local fallback from raw city/state text.
 pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
     resolve_api_response(ip, resolve_game_server_region_from_api(ip).await)
 }
@@ -804,29 +816,26 @@ mod tests {
     }
 
     #[test]
-    fn test_low_confidence_resolver_uses_structured_region_without_local_override() {
+    fn test_low_confidence_resolver_returns_none_without_local_override() {
         let response = GameServerRegionResponse {
             provider: Some("ipinfo".to_string()),
             location: Some(GameServerRegionLocation {
-                city: None,
-                region: None,
+                city: Some("Dallas".to_string()),
+                region: Some("Texas".to_string()),
                 country: Some("US".to_string()),
                 loc: None,
             }),
-            roblox_region_id: Some("us-east".to_string()),
-            swifttunnel_region_id: Some("us-east".to_string()),
+            roblox_region_id: Some("us-west".to_string()),
+            swifttunnel_region_id: Some("us-west".to_string()),
             confidence: Some("low".to_string()),
         };
 
         let resolved = resolve_api_response(Ipv4Addr::new(128, 116, 55, 10), Some(response));
-        assert_eq!(
-            resolved,
-            Some((RobloxRegion::UsEast, "US East".to_string()))
-        );
+        assert_eq!(resolved, None);
     }
 
     #[test]
-    fn test_resolver_failure_returns_none_without_local_fallback() {
+    fn test_resolver_failure_returns_none_without_hardcoded_fallback() {
         let resolved = resolve_api_response(Ipv4Addr::new(128, 116, 95, 10), None);
         assert_eq!(resolved, None);
     }

@@ -3,11 +3,10 @@ use crate::structs::*;
 use log::{info, warn};
 use std::path::PathBuf;
 
-const ROBLOX_EXECUTABLES: [&str; 4] = [
+const ROBLOX_EXECUTABLES: [&str; 3] = [
     "RobloxPlayerBeta.exe",
     "RobloxStudioBeta.exe",
     "RobloxCrashHandler.exe",
-    "Windows10Universal.exe",
 ];
 
 const FIREWALL_RULE_PREFIX: &str = "SwiftTunnel - Roblox";
@@ -307,6 +306,11 @@ fn find_roblox_executables() -> Vec<(String, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roblox_firewall_executables_exclude_generic_uwp_host() {
+        assert!(!ROBLOX_EXECUTABLES.contains(&"Windows10Universal.exe"));
+    }
 
     #[test]
     fn firewall_fixer_default_not_applied() {

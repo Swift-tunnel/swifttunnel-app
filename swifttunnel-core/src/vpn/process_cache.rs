@@ -172,6 +172,17 @@ pub fn is_likely_game_traffic(dst_port: u16, protocol: Protocol, api_tunneling: 
     }
 }
 
+/// Destinations that must never be sent through the relay, even when the
+/// owning process is tunnel-eligible.
+#[inline(always)]
+pub fn is_non_tunnelable_dst(dst_ip: Ipv4Addr) -> bool {
+    dst_ip.is_unspecified()
+        || dst_ip.is_loopback()
+        || dst_ip.is_link_local()
+        || dst_ip.is_multicast()
+        || dst_ip.is_broadcast()
+}
+
 /// Check if destination is any known game server (extensible for future games)
 #[inline(always)]
 pub fn is_game_server(
@@ -1338,6 +1349,20 @@ mod tests {
         // should still tunnel.
         assert!(is_likely_game_traffic(3478, Protocol::Udp, false));
         assert!(is_likely_game_traffic(443, Protocol::Tcp, true));
+    }
+
+    #[test]
+    fn test_non_tunnelable_destinations_are_filtered() {
+        for ip in [
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(127, 0, 0, 1),
+            Ipv4Addr::new(169, 254, 1, 1),
+            Ipv4Addr::new(224, 0, 0, 251),
+            Ipv4Addr::new(255, 255, 255, 255),
+        ] {
+            assert!(is_non_tunnelable_dst(ip), "{ip} should bypass");
+        }
+        assert!(!is_non_tunnelable_dst(Ipv4Addr::new(128, 116, 50, 10)));
     }
 
     #[test]

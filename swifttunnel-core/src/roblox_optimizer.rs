@@ -636,7 +636,7 @@ impl RobloxOptimizer {
 
     /// Check whether a Roblox client process is currently running.
     pub fn is_roblox_running(&self) -> bool {
-        let process_names = ["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
+        let process_names = roblox_process_restart_names();
 
         process_names.iter().any(|process_name| {
             hidden_command("tasklist")
@@ -652,7 +652,7 @@ impl RobloxOptimizer {
 
     /// Force-close running Roblox client processes.
     pub fn close_running_instances(&self) -> Result<()> {
-        let process_names = ["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
+        let process_names = roblox_process_restart_names();
 
         for process_name in process_names {
             let output = hidden_command("taskkill")
@@ -1331,6 +1331,25 @@ impl RobloxOptimizer {
     }
 }
 
+fn roblox_process_restart_names() -> &'static [&'static str] {
+    &["RobloxPlayerBeta.exe"]
+}
+
+#[cfg(test)]
+mod restart_process_tests {
+    use super::*;
+
+    #[test]
+    fn restart_kill_list_excludes_generic_uwp_host() {
+        assert!(!roblox_process_restart_names().contains(&"Windows10Universal.exe"));
+    }
+
+    #[test]
+    fn restart_kill_list_still_targets_win32_player() {
+        assert!(roblox_process_restart_names().contains(&"RobloxPlayerBeta.exe"));
+    }
+}
+
 impl Default for RobloxOptimizer {
     fn default() -> Self {
         Self::new()
@@ -1776,10 +1795,8 @@ mod tests {
         opt.apply_client_fflags_for_local_app_data(&config, &dir)
             .unwrap();
 
-        let content =
-            fs::read_to_string(client_settings.join("ClientAppSettings.json")).unwrap();
-        let settings: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&content).unwrap();
+        let content = fs::read_to_string(client_settings.join("ClientAppSettings.json")).unwrap();
+        let settings: HashMap<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
         assert!(
             !settings.contains_key(RobloxOptimizer::FPS_UNLOCK_FFLAG),
             "retired FPS scheduler flag must be stripped on apply"

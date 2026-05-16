@@ -85,10 +85,7 @@ impl Ipv6Marker {
             exit 1
         }}
 
-        if ($deleteExit -ne 0 -and $showText -notmatch 'No rules match') {{
-            Write-Error ('Could not verify IPv6 block firewall rule removal. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText + '. Show output: ' + $showText)
-            exit 1
-        }}
+        Write-Output ('IPv6 block firewall rule absent after restore. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText + '. Show output: ' + $showText)
         "#,
                 IPV6_BLOCK_RULE_NAME
             ),
@@ -378,13 +375,15 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
         return false;
     }
 
-    let show_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&show_output.stdout),
-        String::from_utf8_lossy(&show_output.stderr)
-    );
-
-    if !delete_output.status.success() && !show_text.contains("No rules match") {
+    if !firewall_rule_absent_after_restore(
+        delete_output.status.success(),
+        show_output.status.success(),
+    ) {
+        let show_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&show_output.stdout),
+            String::from_utf8_lossy(&show_output.stderr)
+        );
         log::warn!(
             "Could not verify IPv6 block firewall rule removal for adapter {}: {}",
             adapter_name,
@@ -398,6 +397,10 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
         adapter_name
     );
     true
+}
+
+fn firewall_rule_absent_after_restore(_delete_success: bool, show_success: bool) -> bool {
+    !show_success
 }
 
 fn restore_ipv6_for_marker(marker: &Ipv6Marker) -> bool {
@@ -498,6 +501,15 @@ mod tests {
         assert!(cmd.contains("netsh.exe advfirewall firewall delete rule"));
         assert!(cmd.contains("netsh.exe advfirewall firewall show rule"));
         assert!(cmd.contains("exit 1"));
+        assert!(!cmd.contains("No rules match"));
+    }
+
+    #[test]
+    fn firewall_rule_restore_uses_show_status_not_localized_text() {
+        assert!(firewall_rule_absent_after_restore(false, false));
+        assert!(firewall_rule_absent_after_restore(true, false));
+        assert!(!firewall_rule_absent_after_restore(true, true));
+        assert!(!firewall_rule_absent_after_restore(false, true));
     }
 
     #[test]
