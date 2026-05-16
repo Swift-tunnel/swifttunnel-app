@@ -125,7 +125,7 @@ pub fn validate_msi_file(path: &Path, pkg: &WinpkFilterMsiPackage) -> Result<(),
 pub fn detect_native_arch() -> WinpkFilterMsiArch {
     use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE_ARM64;
     use windows::Win32::System::Threading::{
-        GetCurrentProcess, GetMachineTypeAttributes, IsWow64Process2, KernelEnabled, UserEnabled,
+        GetCurrentProcess, IsWow64Process2, KernelEnabled, UserEnabled,
     };
 
     let mut process_machine: windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE =
@@ -153,17 +153,102 @@ pub fn detect_native_arch() -> WinpkFilterMsiArch {
 
     // Fallback for older/blocked IsWow64Process2 paths. On Windows-on-ARM64,
     // GetMachineTypeAttributes reports whether ARM64 code is supported by the
-    // current host, without relying on localized environment variables.
-    unsafe {
-        if let Ok(attrs) = GetMachineTypeAttributes(IMAGE_FILE_MACHINE_ARM64.0) {
-            if (attrs & (UserEnabled | KernelEnabled)).0 != 0 {
-                return WinpkFilterMsiArch::Arm64;
+    // current host, without relying on localized environment variables. Resolve
+    // it dynamically because older Windows builds do not export this symbol; a
+    // static import prevents the process from reaching main with 0xC0000139.
+    if let Some(api) = machine_type_attributes_api() {
+        unsafe {
+            let mut attrs = Default::default();
+            if (api.get_machine_type_attributes)(IMAGE_FILE_MACHINE_ARM64.0, &mut attrs).is_ok() {
+                if (attrs & (UserEnabled | KernelEnabled)).0 != 0 {
+                    return WinpkFilterMsiArch::Arm64;
+                }
             }
         }
     }
 
     // Fallback: PROCESSOR_ARCHITECTURE env var.
     if let Ok(arch) = std::env::var("PROCESSOR_ARCHITECTURE") {
+        if arch.eq_ignore_ascii_case("ARM64") {
+            return WinpkFilterMsiArch::Arm64;
+        }
+    }
+
+    WinpkFilterMsiArch::X64
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct MachineTypeAttributesApi {
+    get_machine_type_attributes: unsafe extern "system" fn(
+        u16,
+        *mut windows::Win32::System::Threading::MACHINE_ATTRIBUTES,
+    ) -> windows::core::HRESULT,
+}
+
+#[cfg(windows)]
+fn machine_type_attributes_api() -> Option<MachineTypeAttributesApi> {
+    static API: std::sync::OnceLock<Option<MachineTypeAttributesApi>> = std::sync::OnceLock::new();
+    *API.get_or_init(load_machine_type_attributes_api)
+}
+
+#[cfg(windows)]
+fn load_machine_type_attributes_api() -> Option<MachineTypeAttributesApi> {
+    let address = kernel32_proc_address(b"GetMachineTypeAttributes\0")?;
+    let api = unsafe {
+        MachineTypeAttributesApi {
+            get_machine_type_attributes: std::mem::transmute(address),
+        }
+    };
+    Some(api)
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn GetModuleHandleW(lpmodulename: *const u16) -> isize;
+    fn GetProcAddress(hmodule: isize, lpprocname: *const u8) -> *const std::ffi::c_void;
+}
+
+#[cfg(windows)]
+fn kernel32_proc_address(symbol: &'static [u8]) -> Option<*const std::ffi::c_void> {
+    let module_name: Vec<u16> = "kernel32.dll"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
+    if module == 0 {
+        return None;
+    }
+
+    let address = unsafe { GetProcAddress(module, symbol.as_ptr()) };
+    if address.is_null() {
+        None
+    } else {
+        Some(address)
+    }
+}
+
+#[cfg(test)]
+fn detect_native_arch_from_signals(
+    is_wow64_native_machine: Option<u16>,
+    machine_attrs: Option<u32>,
+    processor_architecture: Option<&str>,
+) -> WinpkFilterMsiArch {
+    if let Some(native_machine) = is_wow64_native_machine {
+        if native_machine == 0xAA64 {
+            return WinpkFilterMsiArch::Arm64;
+        }
+        return WinpkFilterMsiArch::X64;
+    }
+
+    if let Some(attrs) = machine_attrs {
+        if attrs != 0 {
+            return WinpkFilterMsiArch::Arm64;
+        }
+    }
+
+    if let Some(arch) = processor_architecture {
         if arch.eq_ignore_ascii_case("ARM64") {
             return WinpkFilterMsiArch::Arm64;
         }
@@ -1000,6 +1085,38 @@ Provider Name:      NDISAPI
             arch == WinpkFilterMsiArch::X64 || arch == WinpkFilterMsiArch::Arm64,
             "unexpected arch: {:?}",
             arch
+        );
+    }
+
+    #[test]
+    fn detect_native_arch_signal_priority_uses_structured_results() {
+        assert_eq!(
+            detect_native_arch_from_signals(Some(0xAA64), None, None),
+            WinpkFilterMsiArch::Arm64
+        );
+        assert_eq!(
+            detect_native_arch_from_signals(Some(0x8664), Some(1), Some("ARM64")),
+            WinpkFilterMsiArch::X64
+        );
+        assert_eq!(
+            detect_native_arch_from_signals(None, Some(1), Some("AMD64")),
+            WinpkFilterMsiArch::Arm64
+        );
+    }
+
+    #[test]
+    fn detect_native_arch_signal_fallback_treats_missing_optional_api_as_x64() {
+        assert_eq!(
+            detect_native_arch_from_signals(None, None, Some("ARM64")),
+            WinpkFilterMsiArch::Arm64
+        );
+        assert_eq!(
+            detect_native_arch_from_signals(None, None, Some("AMD64")),
+            WinpkFilterMsiArch::X64
+        );
+        assert_eq!(
+            detect_native_arch_from_signals(None, None, None),
+            WinpkFilterMsiArch::X64
         );
     }
 
