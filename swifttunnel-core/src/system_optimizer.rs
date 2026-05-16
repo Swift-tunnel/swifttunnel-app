@@ -334,6 +334,24 @@ impl SystemOptimizer {
         }
     }
 
+    fn power_plan_from_guid(guid: &str) -> Option<PowerPlan> {
+        if guid.eq_ignore_ascii_case(BALANCED_POWER_PLAN_GUID) {
+            Some(PowerPlan::Balanced)
+        } else if guid.eq_ignore_ascii_case(HIGH_PERFORMANCE_POWER_PLAN_GUID) {
+            Some(PowerPlan::HighPerformance)
+        } else if guid.eq_ignore_ascii_case(ULTIMATE_POWER_PLAN_GUID) {
+            Some(PowerPlan::Ultimate)
+        } else if guid.eq_ignore_ascii_case(SWIFTTUNNEL_POWER_PLAN_GUID) {
+            Some(PowerPlan::SwiftTunnel)
+        } else {
+            None
+        }
+    }
+
+    fn active_power_plan() -> Option<PowerPlan> {
+        Self::active_power_plan_guid().and_then(|guid| Self::power_plan_from_guid(&guid))
+    }
+
     fn active_power_plan_guid() -> Option<String> {
         let output = hidden_command("powercfg")
             .args(["/GETACTIVESCHEME"])
@@ -636,6 +654,7 @@ impl SystemOptimizer {
     }
 
     /// Apply all system optimizations
+    #[deprecated(note = "Use apply_optimizations_checked so verified applied_config is preserved")]
     pub fn apply_optimizations(
         &mut self,
         config: &SystemOptimizationConfig,
@@ -726,8 +745,20 @@ impl SystemOptimizer {
         }
 
         if let Err(e) = self.set_power_plan(&config.power_plan) {
-            applied_config.power_plan = PowerPlan::Balanced;
-            warnings.push(format!("Power plan did not verify: {}", e));
+            if let Some(active_power_plan) = Self::active_power_plan() {
+                applied_config.power_plan = active_power_plan;
+                warnings.push(format!(
+                    "Power plan did not verify: {}; active plan read back as {:?}",
+                    e, active_power_plan
+                ));
+            } else {
+                applied_config.power_plan =
+                    config.previous_power_plan.unwrap_or(PowerPlan::Balanced);
+                warnings.push(format!(
+                    "Power plan did not verify and the active plan could not be mapped to a SwiftTunnel option: {}",
+                    e
+                ));
+            }
         }
 
         // Tier 1 (Safe) Boosts
@@ -1268,6 +1299,38 @@ mod tests {
         assert_eq!(
             SystemOptimizer::power_plan_guid(&PowerPlan::SwiftTunnel),
             SWIFTTUNNEL_POWER_PLAN_GUID
+        );
+    }
+
+    #[test]
+    fn power_plan_from_guid_maps_known_plan_guids() {
+        assert_eq!(
+            SystemOptimizer::power_plan_from_guid(BALANCED_POWER_PLAN_GUID),
+            Some(PowerPlan::Balanced)
+        );
+        assert_eq!(
+            SystemOptimizer::power_plan_from_guid(HIGH_PERFORMANCE_POWER_PLAN_GUID),
+            Some(PowerPlan::HighPerformance)
+        );
+        assert_eq!(
+            SystemOptimizer::power_plan_from_guid(ULTIMATE_POWER_PLAN_GUID),
+            Some(PowerPlan::Ultimate)
+        );
+        assert_eq!(
+            SystemOptimizer::power_plan_from_guid(SWIFTTUNNEL_POWER_PLAN_GUID),
+            Some(PowerPlan::SwiftTunnel)
+        );
+    }
+
+    #[test]
+    fn power_plan_from_guid_rejects_unknown_or_similar_guid() {
+        assert_eq!(
+            SystemOptimizer::power_plan_from_guid("44444444-4444-4444-4444-444444444453"),
+            None
+        );
+        assert_eq!(
+            SystemOptimizer::power_plan_from_guid("not-a-real-guid"),
+            None
         );
     }
 
