@@ -10216,10 +10216,7 @@ mod tests {
             std::net::IpAddr::V4(ip) => ip,
             std::net::IpAddr::V6(_) => panic!("test expects IPv4 localhost"),
         };
-        let dst_ip = match server_addr.ip() {
-            std::net::IpAddr::V4(ip) => ip,
-            std::net::IpAddr::V6(_) => panic!("test expects IPv4 localhost"),
-        };
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = src_addr.port();
         let dst_port = server_addr.port();
 
