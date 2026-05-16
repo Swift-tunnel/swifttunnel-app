@@ -26,6 +26,45 @@ const FEATURES = [
   },
 ];
 
+type OAuthPollTickDeps = {
+  isDisposed: () => boolean;
+  isPolling: () => boolean;
+  setPolling: (polling: boolean) => void;
+  getStartedAt: () => number | null;
+  now: () => number;
+  setElapsedSecs: (elapsedSecs: number) => void;
+  clearPoll: () => void;
+  cancelOAuth: (reason?: string) => Promise<void>;
+  pollOAuth: () => Promise<boolean>;
+};
+
+export async function runOAuthPollTick(deps: OAuthPollTickDeps) {
+  if (deps.isPolling() || deps.isDisposed()) return;
+  deps.setPolling(true);
+
+  try {
+    const startedAt = deps.getStartedAt() ?? deps.now();
+    const elapsedMs = deps.now() - startedAt;
+    if (!deps.isDisposed()) {
+      deps.setElapsedSecs(Math.floor(elapsedMs / 1000));
+    }
+
+    if (elapsedMs >= OAUTH_TIMEOUT_MS) {
+      deps.clearPoll();
+      await deps.cancelOAuth("Login timed out. Please try again.");
+      return;
+    }
+
+    const done = await deps.pollOAuth();
+    if (deps.isDisposed()) return;
+    if (done) {
+      deps.clearPoll();
+    }
+  } finally {
+    deps.setPolling(false);
+  }
+}
+
 export function LoginScreen() {
   const { state, error, startOAuth, pollOAuth, cancelOAuth } = useAuthStore();
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -53,32 +92,19 @@ export function LoginScreen() {
       setElapsedSecs(0);
 
       pollRef.current = setInterval(async () => {
-        if (polling || disposed) return;
-        polling = true;
-
-        try {
-          const startedAt = startedAtRef.current ?? Date.now();
-          const elapsedMs = Date.now() - startedAt;
-          if (!disposed) {
-            setElapsedSecs(Math.floor(elapsedMs / 1000));
-          }
-
-          if (elapsedMs >= OAUTH_TIMEOUT_MS) {
-            clearPoll();
-            if (!disposed) {
-              await cancelOAuth("Login timed out. Please try again.");
-            }
-            return;
-          }
-
-          const done = await pollOAuth();
-          if (disposed) return;
-          if (done) {
-            clearPoll();
-          }
-        } finally {
-          polling = false;
-        }
+        await runOAuthPollTick({
+          isDisposed: () => disposed,
+          isPolling: () => polling,
+          setPolling: (next) => {
+            polling = next;
+          },
+          getStartedAt: () => startedAtRef.current,
+          now: () => Date.now(),
+          setElapsedSecs,
+          clearPoll,
+          cancelOAuth,
+          pollOAuth,
+        });
       }, 1000);
     } else {
       startedAtRef.current = null;
