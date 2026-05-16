@@ -39,35 +39,46 @@ export function LoginScreen() {
 
   useEffect(() => {
     let polling = false;
+    let disposed = false;
+
+    const clearPoll = () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
 
     if (isAwaiting) {
       startedAtRef.current = Date.now();
       setElapsedSecs(0);
 
       pollRef.current = setInterval(async () => {
-        if (polling) return;
+        if (polling || disposed) return;
         polling = true;
 
-        const startedAt = startedAtRef.current ?? Date.now();
-        const elapsedMs = Date.now() - startedAt;
-        setElapsedSecs(Math.floor(elapsedMs / 1000));
-
-        if (elapsedMs >= OAUTH_TIMEOUT_MS) {
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
+        try {
+          const startedAt = startedAtRef.current ?? Date.now();
+          const elapsedMs = Date.now() - startedAt;
+          if (!disposed) {
+            setElapsedSecs(Math.floor(elapsedMs / 1000));
           }
-          await cancelOAuth("Login timed out. Please try again.");
-          polling = false;
-          return;
-        }
 
-        const done = await pollOAuth();
-        if (done && pollRef.current) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
+          if (elapsedMs >= OAUTH_TIMEOUT_MS) {
+            clearPoll();
+            if (!disposed) {
+              await cancelOAuth("Login timed out. Please try again.");
+            }
+            return;
+          }
+
+          const done = await pollOAuth();
+          if (disposed) return;
+          if (done) {
+            clearPoll();
+          }
+        } finally {
+          polling = false;
         }
-        polling = false;
       }, 1000);
     } else {
       startedAtRef.current = null;
@@ -75,10 +86,8 @@ export function LoginScreen() {
     }
 
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
+      disposed = true;
+      clearPoll();
     };
   }, [cancelOAuth, isAwaiting, pollOAuth]);
 
