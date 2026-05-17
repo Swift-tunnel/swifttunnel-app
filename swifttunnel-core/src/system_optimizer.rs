@@ -960,12 +960,26 @@ impl SystemOptimizer {
             1,
         );
 
-        // The kernel reads this key only at boot — log so users grepping for
-        // "why isn't my timer boost working" get a useful breadcrumb.
-        info!(
-            "Wrote {}\\{}=1; reboot required for the global override to take effect on Windows 11 22H2+",
-            GLOBAL_TIMER_RESOLUTION_KEY, GLOBAL_TIMER_RESOLUTION_VALUE
-        );
+        // `set_registry_dword` is fire-and-forget (it only warns on failure)
+        // because most callers in this module want best-effort semantics.
+        // For this HKLM write we actually care: a non-admin session will be
+        // rejected by Windows, and logging "Wrote …=1" anyway leaves users
+        // chasing a phantom reboot prompt. Verify via readback before
+        // claiming success, and downgrade to warn! when the write was
+        // dropped so the failure shows up in user logs.
+        match Self::query_registry_dword(
+            GLOBAL_TIMER_RESOLUTION_KEY,
+            GLOBAL_TIMER_RESOLUTION_VALUE,
+        ) {
+            Some(1) => info!(
+                "Wrote {}\\{}=1; reboot required for the global override to take effect on Windows 11 22H2+",
+                GLOBAL_TIMER_RESOLUTION_KEY, GLOBAL_TIMER_RESOLUTION_VALUE
+            ),
+            other => warn!(
+                "GlobalTimerResolutionRequests write was not visible after apply (read back {:?}); admin rights may be required for HKLM\\…\\kernel — the 0.5ms timer boost will remain process-scoped on Windows 11",
+                other
+            ),
+        }
     }
 
     fn restore_global_timer_resolution_override(&mut self) {
