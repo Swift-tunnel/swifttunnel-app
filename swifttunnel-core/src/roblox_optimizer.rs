@@ -715,13 +715,15 @@ impl RobloxOptimizer {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Self::parse_registry_string_value(&stdout, value_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "reg query succeeded for {}\\{} but no REG_SZ row was parsed",
-                key_path,
-                value_name
-            )
-        })
+        Self::parse_registry_string_value(&stdout, value_name)
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "reg query succeeded for {}\\{} but no REG_SZ row was parsed",
+                    key_path,
+                    value_name
+                )
+            })
     }
 
     fn parse_registry_string_value(reg_query_output: &str, value_name: &str) -> Option<String> {
