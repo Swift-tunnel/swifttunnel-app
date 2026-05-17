@@ -244,10 +244,8 @@ export interface RobloxSettingsConfig {
 
 export interface NetworkConfig {
   enable_network_boost: boolean;
-  prioritize_roblox_traffic: boolean;
   disable_nagle: boolean;
   disable_network_throttling: boolean;
-  gaming_qos: boolean;
   firewall_fix: boolean;
 }
 

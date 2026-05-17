@@ -393,7 +393,6 @@ pub async fn vpn_connect(
     let (
         custom_relay,
         mut auto_routing,
-        relay_qos_enabled,
         whitelisted_regions,
         forced_servers,
         game_process_performance,
@@ -405,7 +404,6 @@ pub async fn vpn_connect(
             Some(settings_snapshot.custom_relay_server.clone())
         },
         settings_snapshot.auto_routing_enabled,
-        settings_snapshot.config.network_settings.gaming_qos,
         settings_snapshot.whitelisted_regions.clone(),
         settings_snapshot.forced_servers.clone(),
         settings_snapshot.game_process_performance,
@@ -461,7 +459,6 @@ pub async fn vpn_connect(
             tunnel_apps,
             custom_relay,
             auto_routing,
-            relay_qos_enabled,
             available_servers,
             whitelisted_regions,
             forced_servers,

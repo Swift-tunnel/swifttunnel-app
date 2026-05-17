@@ -17,7 +17,7 @@ const FEATURES = [
   {
     icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
     title: "Boost suite",
-    desc: "FPS unlock, RAM cleaner, gaming QoS",
+    desc: "FPS unlock, RAM cleaner, latency tweaks",
   },
   {
     icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20",

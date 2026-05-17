@@ -460,7 +460,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
     let (
         custom_relay,
         auto_routing,
-        relay_qos_enabled,
         whitelisted_regions,
         forced_servers,
         binding_preference,
@@ -490,7 +489,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
                 }
             }),
             snapshot.auto_routing_enabled,
-            snapshot.config.network_settings.gaming_qos,
             snapshot.whitelisted_regions.clone(),
             snapshot.forced_servers.clone(),
             binding_preference,
@@ -520,7 +518,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
             tunnel_apps,
             custom_relay,
             auto_routing,
-            relay_qos_enabled,
             available_servers,
             whitelisted_regions,
             forced_servers,

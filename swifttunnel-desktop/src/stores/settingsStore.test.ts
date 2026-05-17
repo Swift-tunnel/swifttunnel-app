@@ -82,11 +82,10 @@ describe("stores/settingsStore", () => {
     expect(network.enable_network_boost).toBe(true);
     expect(network.disable_nagle).toBe(true);
     expect(network.disable_network_throttling).toBe(true);
-    expect(network.gaming_qos).toBe(false);
     expect(network.firewall_fix).toBe(false);
   });
 
-  it("preserves explicit all-off network boosts even with a stale master flag", async () => {
+  it("drops removed QoS fields without enabling replacement boosts", async () => {
     settingsLoad.mockResolvedValue({
       ...DEFAULT_SETTINGS,
       config: {
@@ -96,8 +95,8 @@ describe("stores/settingsStore", () => {
           enable_network_boost: true,
           disable_nagle: false,
           disable_network_throttling: false,
-          gaming_qos: false,
-          prioritize_roblox_traffic: false,
+          gaming_qos: true,
+          prioritize_roblox_traffic: true,
           firewall_fix: false,
         },
       },
@@ -111,7 +110,8 @@ describe("stores/settingsStore", () => {
     expect(network.enable_network_boost).toBe(false);
     expect(network.disable_nagle).toBe(false);
     expect(network.disable_network_throttling).toBe(false);
-    expect(network.gaming_qos).toBe(false);
+    expect("gaming_qos" in network).toBe(false);
+    expect("prioritize_roblox_traffic" in network).toBe(false);
   });
 
   it("does not enable network boosts when legacy master is off", async () => {
@@ -134,7 +134,6 @@ describe("stores/settingsStore", () => {
     expect(network.enable_network_boost).toBe(false);
     expect(network.disable_nagle).toBe(false);
     expect(network.disable_network_throttling).toBe(false);
-    expect(network.gaming_qos).toBe(false);
   });
 
   it("defaults minimize_to_tray to true when load fails", async () => {

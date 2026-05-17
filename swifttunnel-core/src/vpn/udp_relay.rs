@@ -573,13 +573,12 @@ impl UdpRelay {
     /// Create a new UDP relay connection to the specified server
     ///
     /// relay_addr should already be resolved (use tokio::net::lookup_host for DNS)
-    pub fn new(relay_addr: SocketAddr, relay_qos_enabled: bool) -> Result<Self> {
-        Self::new_with_path_context(relay_addr, relay_qos_enabled, RelayPathContext::default())
+    pub fn new(relay_addr: SocketAddr) -> Result<Self> {
+        Self::new_with_path_context(relay_addr, RelayPathContext::default())
     }
 
     pub fn new_with_path_context(
         relay_addr: SocketAddr,
-        relay_qos_enabled: bool,
         path_context: RelayPathContext,
     ) -> Result<Self> {
         // Bind to any available port
@@ -624,35 +623,6 @@ impl UdpRelay {
                 );
                 if result != 0 {
                     log::warn!("UDP Relay: Failed to set SO_SNDBUF to 256KB, using default");
-                }
-            }
-
-            if relay_qos_enabled {
-                // DSCP EF (46) => TOS byte 184. This prioritizes relay traffic if the path
-                // honors DSCP (router + ISP + relay uplink policy dependent).
-                let tos: i32 = 46 << 2;
-                unsafe {
-                    let tos_bytes = std::slice::from_raw_parts(&tos as *const i32 as *const u8, 4);
-                    let result = windows::Win32::Networking::WinSock::setsockopt(
-                        sock,
-                        windows::Win32::Networking::WinSock::IPPROTO_IP.0,
-                        windows::Win32::Networking::WinSock::IP_TOS,
-                        Some(tos_bytes),
-                    );
-                    if result != 0 {
-                        log::warn!("UDP Relay: Failed to set IP_TOS DSCP EF; continuing");
-                    }
-
-                    // Best-effort for IPv6 traffic class when dual-stack is used.
-                    let result = windows::Win32::Networking::WinSock::setsockopt(
-                        sock,
-                        windows::Win32::Networking::WinSock::IPPROTO_IPV6.0,
-                        windows::Win32::Networking::WinSock::IPV6_TCLASS,
-                        Some(tos_bytes),
-                    );
-                    if result != 0 {
-                        log::debug!("UDP Relay: Could not set IPV6_TCLASS DSCP EF");
-                    }
                 }
             }
         }
@@ -844,10 +814,9 @@ impl UdpRelay {
             .context("Failed to spawn udp-relay-sender thread")?;
 
         log::info!(
-            "UDP Relay: Created session {:016x} to {} (relay_qos={})",
+            "UDP Relay: Created session {:016x} to {}",
             u64::from_be_bytes(session_id),
-            relay_addr,
-            relay_qos_enabled
+            relay_addr
         );
 
         let detected_mtu = detect_relay_path_mtu(relay_addr);
@@ -2336,7 +2305,7 @@ mod tests {
 
     #[test]
     fn test_forward_outbound_drops_oversize_payload() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay.set_relay_path_mtu_for_test(1500);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
         let payload = vec![0u8; max_payload + 1];
@@ -2347,7 +2316,7 @@ mod tests {
 
     #[test]
     fn test_forward_outbound_allows_max_payload() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay.set_relay_path_mtu_for_test(1500);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
         let payload = vec![0u8; max_payload];
@@ -2360,7 +2329,7 @@ mod tests {
 
     #[test]
     fn test_forward_outbound_respects_lower_path_mtu() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay.set_relay_path_mtu_for_test(1400);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
         assert_eq!(
@@ -2406,7 +2375,7 @@ mod tests {
 
     #[test]
     fn test_valid_current_pong_is_liveness_evidence() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay.set_ping_enabled(true);
         let fake_relay = bind_fake_relay(&relay);
         relay
@@ -2430,7 +2399,7 @@ mod tests {
 
     #[test]
     fn test_malformed_current_pong_is_not_liveness_evidence() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         let fake_relay = bind_fake_relay(&relay);
         relay
             .unanswered_keepalives
@@ -2455,7 +2424,7 @@ mod tests {
 
     #[test]
     fn test_wrong_source_pong_is_not_liveness_evidence() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         let _expected_relay = bind_fake_relay(&relay);
         relay
             .unanswered_keepalives
@@ -2479,7 +2448,7 @@ mod tests {
 
     #[test]
     fn test_never_sent_session_does_not_false_die_at_startup() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay
             .unanswered_keepalives
             .store(RELAY_DEAD_KEEPALIVE_THRESHOLD, Ordering::Relaxed);
@@ -2491,7 +2460,7 @@ mod tests {
 
     #[test]
     fn test_real_silence_still_reaches_dead() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay
             .unanswered_keepalives
             .store(RELAY_DEAD_KEEPALIVE_THRESHOLD, Ordering::Relaxed);
@@ -2508,7 +2477,7 @@ mod tests {
         // Reproduces the tokyo-02 scenario: pongs keep `last_receive_time` fresh and
         // `unanswered_keepalives` at zero, so the keepalive-based health checks would
         // call this Healthy. The inject streak must override that.
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay
             .relay_health
             .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
@@ -2525,7 +2494,7 @@ mod tests {
 
     #[test]
     fn test_inject_failure_streak_escalates_to_dead() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay
             .relay_health
             .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
@@ -2543,7 +2512,7 @@ mod tests {
     fn test_inject_success_resets_streak_and_does_not_flip_health() {
         // Negative test: a relay producing some bad packets but mostly good ones must NOT
         // be flagged as Stale. Only sustained, no-recovery failure triggers the override.
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay
             .relay_health
             .store(RelayHealthState::Healthy as u8, Ordering::Relaxed);
@@ -2567,7 +2536,7 @@ mod tests {
 
     #[test]
     fn test_inject_streak_resets_on_relay_switch() {
-        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap(), false).unwrap();
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         for _ in 0..(INJECT_STALE_STREAK + 2) {
             relay.record_inject_outcome(false);
         }
@@ -2585,7 +2554,7 @@ mod tests {
         relay_socket
             .set_read_timeout(Some(Duration::from_millis(250)))
             .unwrap();
-        let relay = UdpRelay::new(relay_socket.local_addr().unwrap(), false).unwrap();
+        let relay = UdpRelay::new(relay_socket.local_addr().unwrap()).unwrap();
         relay.last_activity_ms.store(0, Ordering::Relaxed);
 
         relay

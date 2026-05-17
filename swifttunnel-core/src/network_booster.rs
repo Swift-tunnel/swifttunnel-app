@@ -7,13 +7,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 const LEGACY_ROBLOX_PRIORITY_POLICY: &str = "RobloxPriority";
-const ROBLOX_QOS_EXECUTABLES: [&str; 4] = [
-    "RobloxPlayerBeta.exe",
-    "RobloxStudioBeta.exe",
-    "RobloxCrashHandler.exe",
-    "Windows10Universal.exe",
+// QoS policies written by previous SwiftTunnel versions. The feature is gone,
+// but cleanup still removes SwiftTunnel-owned policies so upgrades do not
+// strand stale DSCP tagging rules on user machines.
+const REMOVED_QOS_POLICY_NAMES: &[&str] = &[
+    "SwiftTunnel_QoS_RobloxPlayerBeta",
+    "SwiftTunnel_QoS_RobloxStudioBeta",
+    "SwiftTunnel_QoS_RobloxCrashHandler",
+    "SwiftTunnel_QoS_Relay_SwiftTunnel",
+    "SwiftTunnel_QoS_Relay_swifttunnel-desktop",
+    "SwiftTunnel_QoS_Windows10Universal",
 ];
-const RELAY_QOS_EXECUTABLES: [&str; 2] = ["SwiftTunnel.exe", "swifttunnel-desktop.exe"];
 const NETWORK_SYSTEM_PROFILE_KEY: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
 const REG_VALUE_TCP_ACK_FREQUENCY: &str = "TcpAckFrequency";
@@ -59,7 +63,6 @@ fn snapshot_path() -> Option<PathBuf> {
 }
 
 pub struct NetworkBooster {
-    qos_enabled: bool,
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
     qos_registry_snapshot: Option<QosRegistrySnapshot>,
@@ -74,7 +77,6 @@ pub struct NetworkApplyOutcome {
 impl NetworkBooster {
     pub fn new() -> Self {
         Self {
-            qos_enabled: false,
             nagle_registry_snapshot: HashMap::new(),
             network_throttling_snapshot: None,
             qos_registry_snapshot: None,
@@ -109,7 +111,7 @@ impl NetworkBooster {
     /// Reconcile network optimizations and report which toggles actually applied.
     ///
     /// This is used by the desktop UI so a toggle only persists as "on" after
-    /// the backing registry/QoS operation succeeds.
+    /// the backing registry operation succeeds.
     pub fn reconcile_optimizations_checked(
         &mut self,
         config: &NetworkConfig,
@@ -122,14 +124,7 @@ impl NetworkBooster {
         let mut applied_config = requested_config.clone();
         let mut warnings = Vec::new();
 
-        if requested_config.prioritize_roblox_traffic {
-            if let Err(e) = self.prioritize_game_traffic() {
-                applied_config.prioritize_roblox_traffic = false;
-                warnings.push(format!("Prioritize Roblox traffic: {}", e));
-            }
-        } else if let Err(e) = self.remove_prioritize_game_traffic() {
-            warnings.push(format!("Remove Roblox priority QoS policy: {}", e));
-        }
+        Self::cleanup_removed_qos_policies();
 
         // Tier 1 (Safe) Network Boosts
         if requested_config.disable_nagle {
@@ -148,15 +143,6 @@ impl NetworkBooster {
             }
         } else if let Err(e) = self.restore_network_throttling() {
             warnings.push(format!("Restore network throttling defaults: {}", e));
-        }
-
-        if requested_config.gaming_qos {
-            if let Err(e) = self.enable_gaming_qos() {
-                applied_config.gaming_qos = false;
-                warnings.push(format!("Enable gaming QoS: {}", e));
-            }
-        } else if let Err(e) = self.disable_gaming_qos() {
-            warnings.push(format!("Disable gaming QoS: {}", e));
         }
 
         if requested_config.firewall_fix {
@@ -180,13 +166,6 @@ impl NetworkBooster {
         {
             warnings.push("Disable network throttling did not verify after apply".to_string());
         }
-        if applied_config.gaming_qos && !effective_config.gaming_qos {
-            warnings.push("Gaming QoS did not verify after apply".to_string());
-        }
-        if applied_config.prioritize_roblox_traffic && !effective_config.prioritize_roblox_traffic {
-            warnings.push("Roblox priority QoS did not verify after apply".to_string());
-        }
-
         NetworkApplyOutcome {
             applied_config: effective_config,
             warnings,
@@ -293,22 +272,6 @@ impl NetworkBooster {
         None
     }
 
-    fn registry_key_exists(key_path: &str) -> bool {
-        hidden_command("reg")
-            .args(["query", key_path])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    }
-
-    fn qos_policy_exists(policy_name: &str) -> bool {
-        let policy_path = format!(
-            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
-            policy_name
-        );
-        Self::registry_key_exists(&policy_path)
-    }
-
     pub fn effective_network_config(&self, desired: &NetworkConfig) -> NetworkConfig {
         let mut effective = desired.clone();
         effective.normalize_legacy_master_boost();
@@ -336,28 +299,6 @@ impl NetworkBooster {
                     NETWORK_SYSTEM_PROFILE_KEY,
                     REG_VALUE_SYSTEM_RESPONSIVENESS,
                 ) == Some(0);
-        }
-
-        if requested.gaming_qos {
-            let dscp_enabled = Self::query_registry_dword(
-                r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS",
-                "Do not use NLA",
-            ) == Some(1);
-            let roblox_policies_present = ROBLOX_QOS_EXECUTABLES.iter().all(|exe| {
-                let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
-                Self::qos_policy_exists(&policy_name)
-            });
-            let relay_policies_present = RELAY_QOS_EXECUTABLES.iter().all(|exe| {
-                let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
-                Self::qos_policy_exists(&policy_name)
-            });
-            effective.gaming_qos =
-                dscp_enabled && roblox_policies_present && relay_policies_present;
-        }
-
-        if requested.prioritize_roblox_traffic {
-            effective.prioritize_roblox_traffic =
-                Self::qos_policy_exists(LEGACY_ROBLOX_PRIORITY_POLICY);
         }
 
         effective.normalize_legacy_master_boost();
@@ -439,30 +380,7 @@ impl NetworkBooster {
         }
     }
 
-    /// Prioritize game traffic using QoS
-    fn prioritize_game_traffic(&self) -> Result<()> {
-        info!("Prioritizing Roblox game traffic");
-
-        // Use Windows QoS to prioritize Roblox traffic
-        let output = hidden_command("powershell")
-            .args(&[
-                "-Command",
-                "New-NetQosPolicy -Name 'RobloxPriority' -AppPathNameMatchCondition 'RobloxPlayerBeta.exe' -NetworkProfile All -PriorityValue8021Action 7 -ErrorAction SilentlyContinue"
-            ])
-            .output()?;
-
-        if output.status.success() {
-            info!("QoS policy created for Roblox");
-        } else {
-            return Err(anyhow::anyhow!(
-                "failed to create QoS policy (Administrator may be required)"
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn remove_prioritize_game_traffic(&self) -> Result<()> {
+    fn remove_legacy_roblox_priority_policy() -> Result<()> {
         let script = Self::legacy_qos_policy_removal_script(LEGACY_ROBLOX_PRIORITY_POLICY);
         let output = hidden_command("powershell")
             .args(["-Command", &script])
@@ -470,10 +388,26 @@ impl NetworkBooster {
 
         if !output.status.success() {
             return Err(anyhow::anyhow!(
-                "failed to remove legacy RobloxPriority QoS policy"
+                "failed to remove removed RobloxPriority QoS policy"
             ));
         }
         Ok(())
+    }
+
+    fn cleanup_removed_qos_policies() {
+        for policy_name in REMOVED_QOS_POLICY_NAMES {
+            let policy_path = format!(
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+                policy_name
+            );
+            let _ = hidden_command("reg")
+                .args(["delete", &policy_path, "/f"])
+                .output();
+        }
+
+        if let Err(e) = Self::remove_legacy_roblox_priority_policy() {
+            warn!("Removed QoS policy cleanup failed: {}", e);
+        }
     }
 
     fn powershell_single_quote(value: &str) -> String {
@@ -644,303 +578,23 @@ impl NetworkBooster {
         Ok(())
     }
 
-    // ===== GAMING QOS =====
-
-    /// Enable Gaming QoS - marks Roblox and relay UDP packets with DSCP EF (46)
-    /// This uses Windows QoS Policy via registry to mark packets without needing socket ownership
-    pub fn enable_gaming_qos(&mut self) -> Result<()> {
-        info!("Enabling Gaming QoS with DSCP EF (46) priority");
-
-        let run_reg_add = |args: &[&str], label: &str| -> Result<()> {
-            let output = hidden_command("reg").args(args).output()?;
-            if !output.status.success() {
-                return Err(anyhow::anyhow!("failed to write {}", label));
-            }
-            Ok(())
+    fn restore_removed_qos_registry_snapshot(&mut self) -> Result<()> {
+        let Some(snapshot) = self.qos_registry_snapshot.clone() else {
+            return Ok(());
         };
 
-        if self.qos_registry_snapshot.is_none() {
-            self.qos_registry_snapshot = Some(QosRegistrySnapshot {
-                do_not_use_nla: Self::query_registry_dword(TCPIP_QOS_KEY, REG_VALUE_DO_NOT_USE_NLA),
-                disable_user_tos_setting: Self::query_registry_dword(
-                    TCPIP_PARAMETERS_KEY,
-                    REG_VALUE_DISABLE_USER_TOS_SETTING,
-                ),
-            });
-        }
-
-        // Step 1: Enable DSCP tagging in Windows (required for QoS policies to work)
-        // Create QoS key under Tcpip if it doesn't exist, then set "Do not use NLA" = 1
-        run_reg_add(
-            &[
-                "add",
-                TCPIP_QOS_KEY,
-                "/v",
-                REG_VALUE_DO_NOT_USE_NLA,
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "1",
-                "/f",
-            ],
-            "DSCP tagging registry key",
+        Self::restore_registry_dword(
+            TCPIP_QOS_KEY,
+            REG_VALUE_DO_NOT_USE_NLA,
+            snapshot.do_not_use_nla,
         )?;
-        info!("DSCP tagging enabled in registry");
-
-        // Step 2: Also disable the UserTOSSetting override
-        run_reg_add(
-            &[
-                "add",
-                TCPIP_PARAMETERS_KEY,
-                "/v",
-                REG_VALUE_DISABLE_USER_TOS_SETTING,
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ],
-            "UserTOSSetting registry key",
+        Self::restore_registry_dword(
+            TCPIP_PARAMETERS_KEY,
+            REG_VALUE_DISABLE_USER_TOS_SETTING,
+            snapshot.disable_user_tos_setting,
         )?;
-
-        // Step 3: Create QoS policies for Roblox and tunnel relay app traffic.
-        // DSCP 46 = 101110 binary = highest priority for low-latency traffic.
-        let write_policy =
-            |policy_name: String, exe: &str, protocol: &str, remote_port: &str| -> Result<()> {
-                let policy_path = format!(
-                    r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
-                    policy_name
-                );
-
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Version",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        "1.0",
-                        "/f",
-                    ],
-                    "QoS policy Version",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Application Name",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        exe,
-                        "/f",
-                    ],
-                    "QoS policy Application Name",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Protocol",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        protocol,
-                        "/f",
-                    ],
-                    "QoS policy Protocol",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "DSCP Value",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        "46",
-                        "/f",
-                    ],
-                    "QoS policy DSCP Value",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Throttle Rate",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        "-1",
-                        "/f",
-                    ],
-                    "QoS policy Throttle Rate",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Local Port",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        "*",
-                        "/f",
-                    ],
-                    "QoS policy Local Port",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Local IP",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        "*",
-                        "/f",
-                    ],
-                    "QoS policy Local IP",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Local IP Prefix Length",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        "*",
-                        "/f",
-                    ],
-                    "QoS policy Local IP Prefix Length",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Remote Port",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        remote_port,
-                        "/f",
-                    ],
-                    "QoS policy Remote Port",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Remote IP",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        "*",
-                        "/f",
-                    ],
-                    "QoS policy Remote IP",
-                )?;
-                run_reg_add(
-                    &[
-                        "add",
-                        &policy_path,
-                        "/v",
-                        "Remote IP Prefix Length",
-                        "/t",
-                        "REG_SZ",
-                        "/d",
-                        "*",
-                        "/f",
-                    ],
-                    "QoS policy Remote IP Prefix Length",
-                )?;
-                Ok(())
-            };
-
-        for exe in ROBLOX_QOS_EXECUTABLES {
-            let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
-            write_policy(policy_name, exe, "*", "*")?;
-            info!("Created QoS policy for {}", exe);
-        }
-
-        // Fallback for tunnel traffic: app process packets to relay port 51821.
-        for exe in RELAY_QOS_EXECUTABLES {
-            let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
-            write_policy(policy_name, exe, "UDP", "51821")?;
-            info!("Created relay QoS policy for {}", exe);
-        }
-
-        self.qos_enabled = true;
-        info!("Gaming QoS enabled - Roblox + relay traffic marked with DSCP 46 (EF)");
+        self.qos_registry_snapshot = None;
         Ok(())
-    }
-
-    /// Disable Gaming QoS - removes the QoS policies and DSCP registry keys
-    pub fn disable_gaming_qos(&mut self) -> Result<()> {
-        info!("Disabling Gaming QoS");
-
-        for exe in ROBLOX_QOS_EXECUTABLES {
-            let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
-            let policy_path = format!(
-                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
-                policy_name
-            );
-
-            // Delete the policy key
-            let _ = hidden_command("reg")
-                .args(["delete", &policy_path, "/f"])
-                .output();
-        }
-
-        for exe in RELAY_QOS_EXECUTABLES {
-            let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
-            let policy_path = format!(
-                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
-                policy_name
-            );
-            let _ = hidden_command("reg")
-                .args(["delete", &policy_path, "/f"])
-                .output();
-        }
-
-        if let Some(snapshot) = self.qos_registry_snapshot.clone() {
-            Self::restore_registry_dword(
-                TCPIP_QOS_KEY,
-                REG_VALUE_DO_NOT_USE_NLA,
-                snapshot.do_not_use_nla,
-            )?;
-            Self::restore_registry_dword(
-                TCPIP_PARAMETERS_KEY,
-                REG_VALUE_DISABLE_USER_TOS_SETTING,
-                snapshot.disable_user_tos_setting,
-            )?;
-            self.qos_registry_snapshot = None;
-        } else {
-            info!(
-                "No Gaming QoS registry snapshot captured; leaving global DSCP/TOS values unchanged"
-            );
-        }
-
-        self.qos_enabled = false;
-        info!("Gaming QoS disabled");
-        Ok(())
-    }
-
-    /// Check if Gaming QoS is currently enabled
-    pub fn is_qos_enabled(&self) -> bool {
-        self.qos_enabled
     }
 
     /// Restore original DNS settings
@@ -957,12 +611,9 @@ impl NetworkBooster {
             errors.push(format!("network throttling registry restore: {}", e));
         }
 
-        // Remove old QoS policy (legacy)
-        if let Err(e) = self.remove_prioritize_game_traffic() {
-            warn!("Legacy QoS policy removal failed during restore: {}", e);
-        }
-        if let Err(e) = self.disable_gaming_qos() {
-            errors.push(format!("Gaming QoS restore: {}", e));
+        Self::cleanup_removed_qos_policies();
+        if let Err(e) = self.restore_removed_qos_registry_snapshot() {
+            errors.push(format!("removed QoS registry snapshot restore: {}", e));
         }
 
         // Remove firewall rules
@@ -1065,46 +716,16 @@ pub fn cleanup_all_system_state() -> Result<()> {
         warn!("Cleanup: failed to remove hosts overrides: {e}");
     }
 
-    // 2. Delete SwiftTunnel QoS registry policies
-    for exe in ROBLOX_QOS_EXECUTABLES {
-        let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
-        let policy_path = format!(
-            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
-            policy_name
-        );
-        let _ = hidden_command("reg")
-            .args(["delete", &policy_path, "/f"])
-            .output();
-    }
-    for exe in RELAY_QOS_EXECUTABLES {
-        let policy_name = format!("SwiftTunnel_QoS_Relay_{}", exe.replace(".exe", ""));
-        let policy_path = format!(
-            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
-            policy_name
-        );
-        let _ = hidden_command("reg")
-            .args(["delete", &policy_path, "/f"])
-            .output();
-    }
+    // 2. Delete removed SwiftTunnel QoS policies from older releases.
+    NetworkBooster::cleanup_removed_qos_policies();
 
     info!(
-        "Cleanup: leaving global TCP/QoS registry values untouched unless a persisted SwiftTunnel snapshot restored them"
+        "Cleanup: leaving global TCP registry values untouched unless a persisted SwiftTunnel snapshot restored them"
     );
 
     // 3. Remove firewall rules.
     let mut firewall = FirewallFixer::new();
     let _ = firewall.restore();
-
-    // 4. Delete legacy RobloxPriority QoS policy
-    let _ = hidden_command("powershell")
-        .args([
-            "-Command",
-            &format!(
-                "Remove-NetQosPolicy -Name '{}' -Confirm:$false -ErrorAction SilentlyContinue",
-                LEGACY_ROBLOX_PRIORITY_POLICY
-            ),
-        ])
-        .output();
 
     // 8. Remove the snapshot file itself
     NetworkBooster::clear_snapshot();
@@ -1266,10 +887,8 @@ mod tests {
     fn apply_optimizations_succeeds_despite_individual_failures() {
         let mut booster = NetworkBooster::new();
         let config = NetworkConfig {
-            prioritize_roblox_traffic: true,
             disable_nagle: true,
             disable_network_throttling: true,
-            gaming_qos: true,
             ..Default::default()
         };
 
@@ -1291,14 +910,28 @@ mod tests {
     fn apply_optimizations_with_nothing_enabled() {
         let mut booster = NetworkBooster::new();
         let config = NetworkConfig {
-            prioritize_roblox_traffic: false,
             disable_nagle: false,
             disable_network_throttling: false,
-            gaming_qos: false,
             ..Default::default()
         };
 
         let result = booster.apply_optimizations(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn removed_qos_policy_cleanup_covers_all_swifttunnel_policy_names() {
+        assert!(
+            REMOVED_QOS_POLICY_NAMES.contains(&"SwiftTunnel_QoS_Windows10Universal"),
+            "removed QoS cleanup list must strip the over-broad Store host policy"
+        );
+        assert!(
+            REMOVED_QOS_POLICY_NAMES.contains(&"SwiftTunnel_QoS_RobloxPlayerBeta"),
+            "removed QoS cleanup list must strip the former Roblox player policy"
+        );
+        assert!(
+            REMOVED_QOS_POLICY_NAMES.contains(&"SwiftTunnel_QoS_Relay_swifttunnel-desktop"),
+            "removed QoS cleanup list must strip the former relay policy"
+        );
     }
 }
