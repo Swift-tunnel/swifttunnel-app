@@ -4,10 +4,17 @@ resolver = "2"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
-strip = "debuginfo"
-panic = "unwind"
+# `strip = "symbols"` removes debuginfo *and* the symbol table, saving
+# 200-800 KB on top of `"debuginfo"` alone. Crash dumps still resolve via
+# PDB if shipped separately.
+strip = "symbols"
+# `panic = "abort"` removes unwind tables and landing pads from every
+# function (5-10% binary shrink, smaller stack frames). Tauri/our code
+# doesn't rely on `std::panic::catch_unwind` for control flow, so a panic
+# in a command becomes a process abort instead of an Err to JS.
+panic = "abort"
 
 # Faster builds for proc-macro/build-script crates without penalizing runtime
 [profile.release.build-override]
