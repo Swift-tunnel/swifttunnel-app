@@ -428,17 +428,33 @@ impl RobloxOptimizer {
     /// existing preference values that target those paths are deleted so the
     /// system reverts to Windows' default GPU selection.
     fn sync_gpu_preference(enable: bool) -> Result<()> {
-        let executables = Self::collect_roblox_gpu_executables();
-        if executables.is_empty() {
+        let mut targets: Vec<String> = Self::collect_roblox_gpu_executables()
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        // On the disable path, also pick up GPU-preference entries written
+        // by older Roblox version folders that have since been deleted by
+        // Roblox auto-update. Functionally inert (Windows ignores prefs
+        // for non-existent paths) but they accumulate over update cycles
+        // and clutter diagnostics — Greptile flagged this hygiene gap.
+        if !enable {
+            for stale in Self::collect_stale_roblox_gpu_preference_names() {
+                if !targets.contains(&stale) {
+                    targets.push(stale);
+                }
+            }
+        }
+
+        if targets.is_empty() {
             // Nothing to do — Roblox isn't installed (or hasn't been launched
-            // yet). Not an error: avoid noisy popups if the user enables
-            // Ultraboost before installing Roblox.
+            // yet) AND no stale entries exist. Not an error: avoid noisy
+            // popups if the user enables Ultraboost before installing Roblox.
             return Ok(());
         }
 
         let mut failures: Vec<String> = Vec::new();
-        for path in executables {
-            let path_str = path.to_string_lossy().to_string();
+        for path_str in targets {
             let result = if enable {
                 Self::set_registry_string_value(
                     Self::USER_GPU_PREFERENCES_KEY,
@@ -469,6 +485,58 @@ impl RobloxOptimizer {
                 failures.join("; ")
             ))
         }
+    }
+
+    /// Enumerate `HKCU\SOFTWARE\Microsoft\DirectX\UserGpuPreferences` value
+    /// names that look like a Roblox version-folder executable. Used by the
+    /// disable path to clean up entries written for version-* folders that
+    /// Roblox auto-updated away — `reg query` returns the value name (the
+    /// full exe path) regardless of whether the file still exists on disk.
+    fn collect_stale_roblox_gpu_preference_names() -> Vec<String> {
+        let output = match hidden_command("reg")
+            .args(["query", Self::USER_GPU_PREFERENCES_KEY])
+            .output()
+        {
+            Ok(out) if out.status.success() => out,
+            // No key at all means nothing to clean up.
+            _ => return Vec::new(),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Self::parse_gpu_preference_names(&stdout)
+    }
+
+    /// Pure parser pulled out so tests can validate without running `reg`.
+    /// Picks rows that name an executable under a Roblox version folder.
+    fn parse_gpu_preference_names(reg_query_output: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for line in reg_query_output.lines() {
+            // `reg query` rows look like:
+            //   "    C:\…\version-abcdef\RobloxPlayerBeta.exe    REG_SZ    GpuPreference=2;"
+            // The value name is everything between leading whitespace and
+            // the type column (`REG_SZ` etc.).
+            let Some((name_part, _rest)) = line.split_once("    REG_SZ") else {
+                continue;
+            };
+            let name = name_part.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let lowered = name.to_ascii_lowercase();
+            // Only pick up entries that look like our prior writes: under a
+            // Roblox version folder AND one of our known executable stems.
+            if !lowered.contains(r"\roblox\versions\version-") {
+                continue;
+            }
+            let is_known_exe = Self::ROBLOX_GPU_EXECUTABLES
+                .iter()
+                .any(|exe| lowered.ends_with(&exe.to_ascii_lowercase()));
+            if !is_known_exe {
+                continue;
+            }
+            names.push(name.to_string());
+        }
+        names
     }
 
     fn collect_roblox_gpu_executables() -> Vec<PathBuf> {
@@ -2662,6 +2730,41 @@ mod tests {
             1,
             "Expected 1 retired ultraboost FFlag"
         );
+    }
+
+    /// Regression test for the GPU-preference cleanup gap Greptile flagged:
+    /// `sync_gpu_preference(false)` must also pick up entries written for
+    /// Roblox version folders that have been auto-updated away. Parses a
+    /// fake `reg query` table including unrelated apps + a stale entry.
+    #[test]
+    fn parse_gpu_preference_names_picks_only_roblox_version_entries() {
+        let sample = r#"
+HKEY_CURRENT_USER\SOFTWARE\Microsoft\DirectX\UserGpuPreferences
+    DirectXUserGlobalSettings    REG_SZ    VRROptimizeEnable=0;
+    C:\Program Files\Discord\Discord.exe    REG_SZ    GpuPreference=2;
+    C:\Users\evelyn\AppData\Local\Roblox\Versions\version-aaa111\RobloxPlayerBeta.exe    REG_SZ    GpuPreference=2;
+    C:\Users\evelyn\AppData\Local\Roblox\Versions\version-bbb222\RobloxStudioBeta.exe    REG_SZ    GpuPreference=2;
+    C:\Users\evelyn\AppData\Local\Roblox\Versions\version-ccc333\Other.exe    REG_SZ    GpuPreference=2;
+"#;
+        let names = RobloxOptimizer::parse_gpu_preference_names(sample);
+        assert_eq!(
+            names,
+            vec![
+                "C:\\Users\\evelyn\\AppData\\Local\\Roblox\\Versions\\version-aaa111\\RobloxPlayerBeta.exe".to_string(),
+                "C:\\Users\\evelyn\\AppData\\Local\\Roblox\\Versions\\version-bbb222\\RobloxStudioBeta.exe".to_string(),
+            ],
+            "Must keep Roblox version entries and exclude Discord, the global setting, and non-known exes"
+        );
+    }
+
+    #[test]
+    fn parse_gpu_preference_names_returns_empty_for_no_matches() {
+        let sample = r#"
+HKEY_CURRENT_USER\SOFTWARE\Microsoft\DirectX\UserGpuPreferences
+    DirectXUserGlobalSettings    REG_SZ    VRROptimizeEnable=0;
+    C:\Program Files\Steam\Steam.exe    REG_SZ    GpuPreference=2;
+"#;
+        assert!(RobloxOptimizer::parse_gpu_preference_names(sample).is_empty());
     }
 
     #[test]
