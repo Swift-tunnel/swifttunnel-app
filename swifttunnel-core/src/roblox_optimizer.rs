@@ -394,8 +394,118 @@ impl RobloxOptimizer {
             warnings.push(msg);
         }
 
+        // Per-app GPU preference: on hybrid laptops (Intel iGPU + dGPU)
+        // Roblox often defaults to the integrated GPU. Setting "High
+        // performance" via HKCU\...\UserGpuPreferences routes it to the
+        // discrete GPU, which can be 3-10× the framerate. Reversed when
+        // Ultraboost is disabled.
+        if let Err(e) = Self::sync_gpu_preference(config.ultraboost) {
+            let msg = format!("Could not sync Roblox GPU preference: {}", e);
+            warn!("{}", msg);
+            warnings.push(msg);
+        }
+
         info!("Roblox optimizations applied successfully");
         Ok(warnings)
+    }
+
+    /// `HKCU\SOFTWARE\Microsoft\DirectX\UserGpuPreferences` — Windows uses
+    /// this key to route per-app GPU selection. The value name is the
+    /// executable's absolute path; the data is `GpuPreference=N;` where
+    /// `2` = High performance and `1` = Power saving.
+    const USER_GPU_PREFERENCES_KEY: &'static str =
+        r"HKCU\SOFTWARE\Microsoft\DirectX\UserGpuPreferences";
+    const ROBLOX_GPU_EXECUTABLES: &'static [&'static str] =
+        &["RobloxPlayerBeta.exe", "RobloxStudioBeta.exe"];
+    const GPU_PREFERENCE_HIGH_PERFORMANCE: &'static str = "GpuPreference=2;";
+
+    /// Mirror the Ultraboost toggle into Windows' per-app GPU preference.
+    ///
+    /// When `enable == true`, every `RobloxPlayerBeta.exe` /
+    /// `RobloxStudioBeta.exe` discovered under
+    /// `%LOCALAPPDATA%\Roblox\Versions\version-*` is registered as
+    /// `GpuPreference=2;` (High performance). When `enable == false`, any
+    /// existing preference values that target those paths are deleted so the
+    /// system reverts to Windows' default GPU selection.
+    fn sync_gpu_preference(enable: bool) -> Result<()> {
+        let executables = Self::collect_roblox_gpu_executables();
+        if executables.is_empty() {
+            // Nothing to do — Roblox isn't installed (or hasn't been launched
+            // yet). Not an error: avoid noisy popups if the user enables
+            // Ultraboost before installing Roblox.
+            return Ok(());
+        }
+
+        for path in executables {
+            let path_str = path.to_string_lossy().to_string();
+            let result = if enable {
+                Self::set_registry_string_value(
+                    Self::USER_GPU_PREFERENCES_KEY,
+                    &path_str,
+                    Self::GPU_PREFERENCE_HIGH_PERFORMANCE,
+                )
+            } else {
+                Self::delete_registry_value(Self::USER_GPU_PREFERENCES_KEY, &path_str)
+            };
+
+            if let Err(e) = result {
+                warn!(
+                    "GPU preference {} for {} failed: {}",
+                    if enable { "apply" } else { "clear" },
+                    path_str,
+                    e
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_roblox_gpu_executables() -> Vec<PathBuf> {
+        let version_folders = Self::find_roblox_version_folders();
+        let mut out = Vec::new();
+        for folder in version_folders {
+            for exe in Self::ROBLOX_GPU_EXECUTABLES {
+                let candidate = folder.join(exe);
+                if candidate.exists() {
+                    out.push(candidate);
+                }
+            }
+        }
+        out
+    }
+
+    fn set_registry_string_value(key_path: &str, value_name: &str, data: &str) -> Result<()> {
+        let output = hidden_command("reg")
+            .args([
+                "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", data, "/f",
+            ])
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow::anyhow!("reg add failed: {}", stderr.trim()))
+        }
+    }
+
+    fn delete_registry_value(key_path: &str, value_name: &str) -> Result<()> {
+        let output = hidden_command("reg")
+            .args(["delete", key_path, "/v", value_name, "/f"])
+            .output()?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        // `reg delete` returns non-zero when the value doesn't exist; treat
+        // that as success because the desired post-state is "value absent".
+        // Anything else (permission denied, key locked) is propagated.
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        if stderr.contains("cannot find") || stderr.contains("unable to find") {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("reg delete failed: {}", stderr.trim()))
+        }
     }
 
     /// Apply XML-level settings (FPS cap, graphics quality, window size).
@@ -724,17 +834,42 @@ impl RobloxOptimizer {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// Allowlisted performance FFlags applied by Ultraboost.
+    ///
+    /// Every entry was verified against Roblox's Sept-2025 client FFlag
+    /// allowlist; non-allowlisted flags are silently ignored by the engine
+    /// and are intentionally not written here. Additions over the prior
+    /// version:
+    ///   * `DFFlagDebugPauseVoxelizer=True` — pauses the voxel-lighting
+    ///     voxelizer thread, cutting CPU work in scenes with Voxel
+    ///     dynamic lighting (most legacy games).
+    ///   * Four CSG LOD switching distances pinned at `0` — forces the
+    ///     lowest-poly LOD bucket at the shortest possible distance.
+    ///   * `FFlagDebugGraphicsPreferVulkan=False` /
+    ///     `FFlagDebugGraphicsPreferOpenGL=False` — defensive negations so
+    ///     a bootstrapper preset cannot silently undo our D3D11 selection
+    ///     (Vulkan on Roblox/Windows is unofficial and crash-prone).
+    ///
+    /// `DFIntDebugFRMQualityLevelOverride` is `1` (lowest) instead of the
+    /// prior `4`; Roblox's FRM quality scales 1-21 and community
+    /// performance presets use the minimum for maximum FPS.
     const ULTRABOOST_FFLAGS: &[(&str, &str)] = &[
         ("FFlagHandleAltEnterFullscreenManually", "False"),
         ("FFlagDebugGraphicsPreferD3D11", "True"),
+        ("FFlagDebugGraphicsPreferVulkan", "False"),
+        ("FFlagDebugGraphicsPreferOpenGL", "False"),
         ("FIntDebugForceMSAASamples", "0"),
         ("DFFlagTextureQualityOverrideEnabled", "True"),
         ("DFIntTextureQualityOverride", "0"),
-        ("DFIntDebugFRMQualityLevelOverride", "4"),
+        ("DFIntDebugFRMQualityLevelOverride", "1"),
         ("FFlagDebugSkyGray", "True"),
         ("FIntFRMMinGrassDistance", "0"),
         ("FIntFRMMaxGrassDistance", "0"),
         ("FIntGrassMovementReducedMotionFactor", "0"),
+        ("DFFlagDebugPauseVoxelizer", "True"),
+        ("DFIntCSGLevelOfDetailSwitchingDistance", "0"),
+        ("DFIntCSGLevelOfDetailSwitchingDistanceL12", "0"),
+        ("DFIntCSGLevelOfDetailSwitchingDistanceL23", "0"),
+        ("DFIntCSGLevelOfDetailSwitchingDistanceL34", "0"),
     ];
 
     /// Retired FFlag. Previously written for FPS unlock, but the framerate cap is
@@ -742,11 +877,16 @@ impl RobloxOptimizer {
     /// from existing ClientAppSettings so prior versions' entries are cleaned up.
     const FPS_UNLOCK_FFLAG: &str = "DFIntTaskSchedulerTargetFps";
 
-    /// Old blocked FFlags that must be cleaned up from previous versions
+    /// Old blocked FFlags that must be cleaned up from previous versions.
+    ///
+    /// `DFFlagDebugPauseVoxelizer` was previously listed here because earlier
+    /// builds wrote it as a disabled override. It is now actively part of
+    /// `ULTRABOOST_FFLAGS` (it's allowlisted and yields a real CPU lift on
+    /// voxel-lighting scenes), so removing it from the cleanup list prevents
+    /// us from immediately stripping our own write.
     const LEGACY_BLOCKED_FFLAGS: &[&str] = &[
         "DFIntDebugDynamicRenderKiloPixels",
         "FIntRenderShadowIntensity",
-        "DFFlagDebugPauseVoxelizer",
         "FFlagDisablePostFx",
         "FIntDebugTextureManagerSkipMips",
     ];
@@ -1348,6 +1488,11 @@ impl RobloxOptimizer {
         let optimizer = Self::new();
         if let Err(e) = optimizer.remove_all_fflags() {
             warn!("Failed to remove Roblox FFlags during uninstall: {e}");
+        }
+        // Also drop the per-app dGPU preference entries we may have written.
+        // Best-effort; missing values are not an error.
+        if let Err(e) = Self::sync_gpu_preference(false) {
+            warn!("Failed to clear Roblox GPU preference during uninstall: {e}");
         }
         info!("Roblox optimizer: uninstall cleanup completed");
     }
@@ -2471,19 +2616,23 @@ mod tests {
 
     #[test]
     fn ultraboost_fflags_count() {
+        // 10 originals + Vulkan/OpenGL defensive negations + 5 new allowlisted
+        // perf flags (DFFlagDebugPauseVoxelizer + 4 CSG LOD distance entries).
         assert_eq!(
             RobloxOptimizer::ULTRABOOST_FFLAGS.len(),
-            10,
-            "Expected 10 ultraboost FFlags"
+            17,
+            "Expected 17 ultraboost FFlags"
         );
     }
 
     #[test]
     fn legacy_blocked_fflags_count() {
+        // DFFlagDebugPauseVoxelizer moved out of LEGACY_BLOCKED_FFLAGS because
+        // it is now an active Ultraboost flag (allowlisted and useful).
         assert_eq!(
             RobloxOptimizer::LEGACY_BLOCKED_FFLAGS.len(),
-            5,
-            "Expected 5 legacy blocked FFlags"
+            4,
+            "Expected 4 legacy blocked FFlags"
         );
     }
 

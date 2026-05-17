@@ -7,13 +7,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 const LEGACY_ROBLOX_PRIORITY_POLICY: &str = "RobloxPriority";
-const ROBLOX_QOS_EXECUTABLES: [&str; 4] = [
+// UWP Roblox shares the generic Windows10Universal.exe Store host with other
+// Microsoft Store apps. A QoS policy keyed to that name would tag Mail,
+// Weather, etc. with DSCP EF (46), competing with real game traffic for the
+// router's EF queue. UWP Roblox is intentionally not tunnel-eligible per
+// CLAUDE.md, so we omit it from the executable list.
+const ROBLOX_QOS_EXECUTABLES: [&str; 3] = [
     "RobloxPlayerBeta.exe",
     "RobloxStudioBeta.exe",
     "RobloxCrashHandler.exe",
-    "Windows10Universal.exe",
 ];
 const RELAY_QOS_EXECUTABLES: [&str; 2] = ["SwiftTunnel.exe", "swifttunnel-desktop.exe"];
+// QoS policies written by previous SwiftTunnel versions that must be cleaned
+// up on upgrade. Without removal, a stale Windows10Universal DSCP policy from
+// an older build would keep tagging unrelated Microsoft Store app traffic
+// long after this release ships.
+const LEGACY_QOS_POLICY_NAMES: &[&str] = &["SwiftTunnel_QoS_Windows10Universal"];
 const NETWORK_SYSTEM_PROFILE_KEY: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
 const REG_VALUE_TCP_ACK_FREQUENCY: &str = "TcpAckFrequency";
@@ -651,6 +660,10 @@ impl NetworkBooster {
     pub fn enable_gaming_qos(&mut self) -> Result<()> {
         info!("Enabling Gaming QoS with DSCP EF (46) priority");
 
+        // Strip QoS policies from prior SwiftTunnel versions before writing
+        // fresh ones (covers Windows10Universal removal on upgrade).
+        Self::remove_legacy_qos_policies();
+
         let run_reg_add = |args: &[&str], label: &str| -> Result<()> {
             let output = hidden_command("reg").args(args).output()?;
             if !output.status.success() {
@@ -887,9 +900,28 @@ impl NetworkBooster {
         Ok(())
     }
 
+    /// Delete QoS policies left behind by older SwiftTunnel versions.
+    /// Safe to call repeatedly — `reg delete` on a missing key returns an
+    /// error status, which we ignore.
+    fn remove_legacy_qos_policies() {
+        for policy_name in LEGACY_QOS_POLICY_NAMES {
+            let policy_path = format!(
+                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+                policy_name
+            );
+            let _ = hidden_command("reg")
+                .args(["delete", &policy_path, "/f"])
+                .output();
+        }
+    }
+
     /// Disable Gaming QoS - removes the QoS policies and DSCP registry keys
     pub fn disable_gaming_qos(&mut self) -> Result<()> {
         info!("Disabling Gaming QoS");
+
+        // Also strip legacy policy names so disable+enable cycles clean up
+        // stale entries even when the user never re-enables.
+        Self::remove_legacy_qos_policies();
 
         for exe in ROBLOX_QOS_EXECUTABLES {
             let policy_name = format!("SwiftTunnel_QoS_{}", exe.replace(".exe", ""));
@@ -1300,5 +1332,36 @@ mod tests {
 
         let result = booster.apply_optimizations(&config);
         assert!(result.is_ok());
+    }
+
+    /// Negative test (per global CLAUDE.md failure-mode rules): the UWP host
+    /// `Windows10Universal.exe` must never appear in the QoS exec list — a
+    /// DSCP EF policy keyed to it would mark unrelated Microsoft Store apps
+    /// (Mail, Weather, etc.) with the same high-priority class as gameplay
+    /// traffic, defeating the point of EF.
+    #[test]
+    fn windows10universal_is_not_in_qos_executable_list() {
+        assert!(!ROBLOX_QOS_EXECUTABLES.contains(&"Windows10Universal.exe"));
+    }
+
+    #[test]
+    fn roblox_qos_executables_are_real_roblox_binaries() {
+        for exe in &ROBLOX_QOS_EXECUTABLES {
+            assert!(
+                exe.starts_with("Roblox"),
+                "unexpected QoS target {exe}: must be a Roblox-prefixed exe"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_qos_policy_names_targets_the_old_windows10universal_policy() {
+        // On upgrade, prior SwiftTunnel versions left a
+        // SwiftTunnel_QoS_Windows10Universal policy behind. The cleanup list
+        // must include it so we don't keep tagging unrelated Store traffic.
+        assert!(
+            LEGACY_QOS_POLICY_NAMES.contains(&"SwiftTunnel_QoS_Windows10Universal"),
+            "legacy QoS cleanup list lost its Windows10Universal entry"
+        );
     }
 }

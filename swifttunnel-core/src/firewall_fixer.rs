@@ -3,11 +3,14 @@ use crate::structs::*;
 use log::{info, warn};
 use std::path::PathBuf;
 
-const ROBLOX_EXECUTABLES: [&str; 4] = [
+// UWP Roblox runs under Windows10Universal.exe, a generic Store host shared by
+// unrelated Microsoft Store apps. Adding firewall rules keyed to that name
+// would scope to Mail, Weather, etc. Per CLAUDE.md, UWP Roblox is intentionally
+// not tunnel-eligible, so we omit it here.
+const ROBLOX_EXECUTABLES: [&str; 3] = [
     "RobloxPlayerBeta.exe",
     "RobloxStudioBeta.exe",
     "RobloxCrashHandler.exe",
-    "Windows10Universal.exe",
 ];
 
 const FIREWALL_RULE_PREFIX: &str = "SwiftTunnel - Roblox";
@@ -51,6 +54,13 @@ impl FirewallFixer {
         }
 
         info!("Applying Roblox firewall fix");
+
+        // Remove any stale SwiftTunnel rules first so a Roblox reinstall (which
+        // changes the executable path under Versions\version-*) doesn't leave
+        // orphaned `program=` filters pointing at vanished paths. Rules are
+        // matched by exact `SwiftTunnel - Roblox <exe> {In,Out}` name so we
+        // never touch unrelated firewall rules.
+        Self::remove_swifttunnel_rules_by_prefix();
 
         // 1. Find all Roblox executables and add firewall allow rules
         let executables = find_roblox_executables();
@@ -327,5 +337,35 @@ mod tests {
         let mut fixer = FirewallFixer::new();
         let result = fixer.restore();
         assert!(result.is_ok());
+    }
+
+    /// Negative test (per global CLAUDE.md failure-mode rules): the generic
+    /// UWP Store host `Windows10Universal.exe` must not be in our firewall
+    /// rule list. It is shared across unrelated Microsoft Store apps and
+    /// CLAUDE.md explicitly marks UWP Roblox as not tunnel-eligible.
+    #[test]
+    fn windows10universal_is_not_a_roblox_executable_target() {
+        assert!(
+            !ROBLOX_EXECUTABLES.contains(&"Windows10Universal.exe"),
+            "Windows10Universal.exe is a generic Store host shared with other Store apps; \
+             firewall rules keyed to it would scope to Mail, Weather, etc."
+        );
+    }
+
+    #[test]
+    fn roblox_executables_list_only_targets_real_player_binaries() {
+        for exe in &ROBLOX_EXECUTABLES {
+            assert!(
+                exe.starts_with("Roblox"),
+                "unexpected firewall target {exe}: must be a Roblox-prefixed exe"
+            );
+        }
+    }
+
+    #[test]
+    fn rule_name_prefix_is_stable() {
+        // Restore depends on this prefix matching what we wrote previously.
+        // Changing the prefix would orphan rules from older app versions.
+        assert_eq!(FIREWALL_RULE_PREFIX, "SwiftTunnel - Roblox");
     }
 }

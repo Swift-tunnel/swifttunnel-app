@@ -8,6 +8,8 @@ use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Threading::*;
 
+const ALL_CORES_AFFINITY_MASK: usize = usize::MAX;
+
 // ntdll.dll functions for low-level system control
 unsafe extern "system" {
     // Sub-millisecond timer resolution (0.5ms)
@@ -29,6 +31,15 @@ const MMCSS_GAMES_KEY: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games";
 const MMCSS_SYSTEM_PROFILE_KEY: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
+// Windows 11 22H2+ scopes `NtSetTimerResolution` / `timeBeginPeriod` to the
+// calling process only. Without this registry override, a 0.5ms resolution
+// request from SwiftTunnel does not propagate to Roblox — the boost becomes
+// effectively a no-op for the game. Setting this key to 1 restores the
+// Windows 10 global-timer behavior. The kernel reads it at boot, so a reboot
+// is required for changes to take effect.
+const GLOBAL_TIMER_RESOLUTION_KEY: &str =
+    r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\kernel";
+const GLOBAL_TIMER_RESOLUTION_VALUE: &str = "GlobalTimerResolutionRequests";
 const BALANCED_POWER_PLAN_GUID: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
 const HIGH_PERFORMANCE_POWER_PLAN_GUID: &str = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
 const ULTIMATE_POWER_PLAN_GUID: &str = "e9a42b02-d5df-448d-aa00-03f14749eb61";
@@ -58,7 +69,9 @@ struct MmcssSnapshot {
 
 pub struct SystemOptimizer {
     original_priority: Option<u32>,
+    original_affinity: Option<usize>,
     timer_resolution_active: bool,
+    global_timer_snapshot: Option<Option<u32>>,
     original_power_plan_guid: Option<Option<String>>,
     game_bar_snapshot: Option<Option<u32>>,
     fullscreen_optimization_snapshot: Option<Option<u32>>,
@@ -72,7 +85,9 @@ impl SystemOptimizer {
     pub fn new() -> Self {
         Self {
             original_priority: None,
+            original_affinity: None,
             timer_resolution_active: false,
+            global_timer_snapshot: None,
             original_power_plan_guid: None,
             game_bar_snapshot: None,
             fullscreen_optimization_snapshot: None,
@@ -81,6 +96,45 @@ impl SystemOptimizer {
             mmcss_snapshot: None,
             swifttunnel_power_plan_imported: false,
         }
+    }
+
+    /// Validate that every requested core index is reachable on this CPU.
+    ///
+    /// Returns the affinity mask on success. Rejects an empty list (no cores
+    /// would mean "no CPU allowed to run the process" — Windows rejects this
+    /// but `SetProcessAffinityMask` returns success on some kernels, leaving
+    /// the process unrunnable).
+    pub(crate) fn validate_cpu_cores(cores: &[usize]) -> Result<usize> {
+        if cores.is_empty() {
+            return Err(anyhow::anyhow!(
+                "CPU affinity requires at least one core; got empty list"
+            ));
+        }
+
+        let max_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(64);
+
+        let max_bit = (std::mem::size_of::<usize>() * 8) - 1;
+        let mut mask: usize = 0;
+        for &core in cores {
+            if core >= max_cores {
+                return Err(anyhow::anyhow!(
+                    "CPU affinity core {} is out of range; system has {} logical core(s)",
+                    core,
+                    max_cores
+                ));
+            }
+            if core > max_bit {
+                return Err(anyhow::anyhow!(
+                    "CPU affinity core {} exceeds usize width ({} bits) on this platform",
+                    core,
+                    max_bit + 1
+                ));
+            }
+            mask |= 1usize << core;
+        }
+        Ok(mask)
     }
 
     fn parse_registry_dword(token: &str) -> Option<u32> {
@@ -604,11 +658,13 @@ impl SystemOptimizer {
         }
     }
 
-    /// Set CPU affinity for Roblox process
+    /// Set CPU affinity for Roblox process. Captures the existing affinity
+    /// mask on first apply so `restore` can undo it cleanly.
     fn set_cpu_affinity(&mut self, process_id: u32, cores: &[usize]) -> Result<()> {
+        let affinity_mask = Self::validate_cpu_cores(cores)?;
         info!(
-            "Setting CPU affinity for PID: {} to cores: {:?}",
-            process_id, cores
+            "Setting CPU affinity for PID: {} to cores: {:?} (mask 0x{:X})",
+            process_id, cores, affinity_mask
         );
 
         unsafe {
@@ -622,10 +678,29 @@ impl SystemOptimizer {
                 return Err(anyhow::anyhow!("Failed to open process"));
             }
 
-            // Calculate affinity mask
-            let mut affinity_mask: usize = 0;
-            for &core in cores {
-                affinity_mask |= 1 << core;
+            // Capture pre-apply mask once per boost cycle so restore returns
+            // the process to its original state, not to "all cores".
+            if self.original_affinity.is_none() {
+                let mut process_mask: usize = 0;
+                let mut system_mask: usize = 0;
+                if GetProcessAffinityMask(handle, &mut process_mask, &mut system_mask).is_ok()
+                    && process_mask != 0
+                {
+                    self.original_affinity = Some(process_mask);
+                } else {
+                    // Fall back to "all cores in the system" if we can't read
+                    // the current mask — better than leaving the process
+                    // pinned forever after disable.
+                    self.original_affinity = Some(if system_mask != 0 {
+                        system_mask
+                    } else {
+                        ALL_CORES_AFFINITY_MASK
+                    });
+                    warn!(
+                        "Could not read original affinity for PID {}; restore will use system mask",
+                        process_id
+                    );
+                }
             }
 
             let result = SetProcessAffinityMask(handle, affinity_mask);
@@ -637,6 +712,53 @@ impl SystemOptimizer {
             } else {
                 Err(anyhow::anyhow!("Failed to set CPU affinity"))
             }
+        }
+    }
+
+    /// Restore CPU affinity to the snapshot taken on first apply.
+    /// Best-effort: a vanished PID is logged, not an error.
+    fn restore_cpu_affinity(&mut self, process_id: u32) {
+        let Some(mask) = self.original_affinity.take() else {
+            return;
+        };
+
+        if process_id == 0 {
+            info!("Skipping CPU affinity restore: no active game process");
+            return;
+        }
+
+        unsafe {
+            let handle = match OpenProcess(
+                PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
+                false,
+                process_id,
+            ) {
+                Ok(h) if !h.is_invalid() => h,
+                Ok(_) => {
+                    info!("CPU affinity restore: PID {} has no handle", process_id);
+                    return;
+                }
+                Err(e) => {
+                    info!(
+                        "CPU affinity restore: PID {} unreachable (likely exited): {}",
+                        process_id, e
+                    );
+                    return;
+                }
+            };
+
+            if let Err(e) = SetProcessAffinityMask(handle, mask) {
+                warn!(
+                    "Failed to restore CPU affinity for PID {} to mask 0x{:X}: {}",
+                    process_id, mask, e
+                );
+            } else {
+                info!(
+                    "Restored CPU affinity for PID {} to mask 0x{:X}",
+                    process_id, mask
+                );
+            }
+            let _ = CloseHandle(handle);
         }
     }
 
@@ -659,14 +781,18 @@ impl SystemOptimizer {
             .output();
 
         match output {
-            Ok(_) => {
+            Ok(result) if result.status.success() => {
                 info!("Game Bar disabled successfully");
                 Ok(())
             }
-            Err(e) => {
-                warn!("Failed to disable Game Bar: {}", e);
-                Ok(()) // Non-critical
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                Err(anyhow::anyhow!(
+                    "Game Bar disable failed: {}",
+                    stderr.trim()
+                ))
             }
+            Err(e) => Err(anyhow::anyhow!("Game Bar disable: reg invoke failed: {}", e)),
         }
     }
 
@@ -674,8 +800,6 @@ impl SystemOptimizer {
     fn disable_fullscreen_optimizations(&self) -> Result<()> {
         info!("Disabling fullscreen optimizations");
 
-        // This would typically be done by modifying the Roblox executable properties
-        // For now, we'll use registry approach
         let output = hidden_command("reg")
             .args([
                 "add",
@@ -691,18 +815,27 @@ impl SystemOptimizer {
             .output();
 
         match output {
-            Ok(_) => {
+            Ok(result) if result.status.success() => {
                 info!("Fullscreen optimizations disabled");
                 Ok(())
             }
-            Err(e) => {
-                warn!("Failed to disable fullscreen optimizations: {}", e);
-                Ok(())
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                Err(anyhow::anyhow!(
+                    "Fullscreen optimization disable failed: {}",
+                    stderr.trim()
+                ))
             }
+            Err(e) => Err(anyhow::anyhow!(
+                "Fullscreen optimization disable: reg invoke failed: {}",
+                e
+            )),
         }
     }
 
-    /// Set Windows power plan
+    /// Set Windows power plan. Returns Err on import or activation failure
+    /// so the caller can surface the failure to the user instead of falsely
+    /// reporting "boost applied".
     fn set_power_plan(&mut self, plan: &PowerPlan) -> Result<()> {
         let guid = Self::power_plan_guid(plan);
 
@@ -710,9 +843,10 @@ impl SystemOptimizer {
 
         if matches!(plan, PowerPlan::SwiftTunnel) {
             if let Err(e) = self.ensure_swifttunnel_power_plan() {
-                warn!("Could not prepare SwiftTunnel power plan: {}", e);
-                warn!("Skipping SwiftTunnel power plan activation because setup did not complete");
-                return Ok(());
+                return Err(anyhow::anyhow!(
+                    "SwiftTunnel power plan import failed: {}",
+                    e
+                ));
             }
         }
 
@@ -721,27 +855,37 @@ impl SystemOptimizer {
             .output();
 
         match output {
-            Ok(result) => {
-                if result.status.success() {
-                    info!("Power plan set successfully");
-                    Ok(())
-                } else {
-                    warn!("Failed to set power plan (may require admin)");
-                    Ok(())
-                }
-            }
-            Err(e) => {
-                warn!("Failed to set power plan: {}", e);
+            Ok(result) if result.status.success() => {
+                info!("Power plan set successfully");
                 Ok(())
             }
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                Err(anyhow::anyhow!(
+                    "powercfg /setactive {} failed (admin may be required): {}",
+                    guid,
+                    stderr.trim()
+                ))
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "powercfg /setactive {} invocation failed: {}",
+                guid,
+                e
+            )),
         }
     }
 
     // ===== TIER 1 (SAFE) BOOSTS =====
 
-    /// Set system timer resolution to 0.5ms for smoother frame pacing
-    /// Uses NtSetTimerResolution for sub-millisecond precision (5000 = 0.5ms in 100ns units)
-    /// Falls back to timeBeginPeriod(1) if NtSetTimerResolution fails
+    /// Set system timer resolution to 0.5ms for smoother frame pacing.
+    /// Uses NtSetTimerResolution for sub-millisecond precision (5000 = 0.5ms
+    /// in 100ns units), with timeBeginPeriod(1) as a fallback.
+    ///
+    /// On Windows 11 22H2+ the timer resolution call is per-process scoped,
+    /// so we also write `GlobalTimerResolutionRequests=1` to restore the
+    /// system-wide behavior that lets Roblox benefit from our request.
+    /// The kernel reads that key only at boot, so the global half of this
+    /// boost takes effect after the next reboot.
     pub fn set_timer_resolution(&mut self, enable: bool) -> Result<()> {
         if enable && !self.timer_resolution_active {
             info!("Setting timer resolution to 0.5ms");
@@ -771,6 +915,11 @@ impl SystemOptimizer {
                     }
                 }
             }
+
+            // Make sure the system-wide override is on so the per-process
+            // resolution we just set is honored for other processes too on
+            // Win11 22H2+. Snapshot the prior value so restore() can revert.
+            self.enable_global_timer_resolution_override();
         } else if !enable && self.timer_resolution_active {
             info!("Restoring default timer resolution");
             unsafe {
@@ -781,8 +930,50 @@ impl SystemOptimizer {
                 let _ = timeEndPeriod(1);
                 self.timer_resolution_active = false;
             }
+            self.restore_global_timer_resolution_override();
         }
         Ok(())
+    }
+
+    fn enable_global_timer_resolution_override(&mut self) {
+        Self::capture_dword_snapshot(
+            &mut self.global_timer_snapshot,
+            GLOBAL_TIMER_RESOLUTION_KEY,
+            GLOBAL_TIMER_RESOLUTION_VALUE,
+        );
+
+        // Skip the write if it's already 1 — avoids an unnecessary reg call
+        // and prevents spurious "needs reboot" telemetry on repeat applies.
+        if Self::query_registry_dword(
+            GLOBAL_TIMER_RESOLUTION_KEY,
+            GLOBAL_TIMER_RESOLUTION_VALUE,
+        ) == Some(1)
+        {
+            return;
+        }
+
+        Self::set_registry_dword(
+            GLOBAL_TIMER_RESOLUTION_KEY,
+            GLOBAL_TIMER_RESOLUTION_VALUE,
+            1,
+        );
+
+        // The kernel reads this key only at boot — log so users grepping for
+        // "why isn't my timer boost working" get a useful breadcrumb.
+        info!(
+            "Wrote {}\\{}=1; reboot required for the global override to take effect on Windows 11 22H2+",
+            GLOBAL_TIMER_RESOLUTION_KEY, GLOBAL_TIMER_RESOLUTION_VALUE
+        );
+    }
+
+    fn restore_global_timer_resolution_override(&mut self) {
+        if let Some(snapshot) = self.global_timer_snapshot.take() {
+            Self::restore_registry_dword(
+                GLOBAL_TIMER_RESOLUTION_KEY,
+                GLOBAL_TIMER_RESOLUTION_VALUE,
+                snapshot,
+            );
+        }
     }
 
     /// Apply MMCSS (Multimedia Class Scheduler Service) gaming profile
@@ -982,6 +1173,9 @@ impl SystemOptimizer {
         if self.timer_resolution_active {
             self.set_timer_resolution(false)?;
         }
+        // Safety net: clean up the global timer override snapshot even if
+        // `timer_resolution_active` was already false (e.g., crash recovery).
+        self.restore_global_timer_resolution_override();
 
         if let Some(priority) = self.original_priority.take() {
             unsafe {
@@ -993,6 +1187,10 @@ impl SystemOptimizer {
                 }
             }
         }
+
+        // Affinity is restored independently of priority because the boost can
+        // be enabled with affinity-only or priority-only configs.
+        self.restore_cpu_affinity(process_id);
 
         if let Some(snapshot) = self.mmcss_snapshot.take() {
             Self::restore_mmcss_snapshot(snapshot);
@@ -1228,5 +1426,69 @@ mod tests {
     fn embedded_swifttunnel_power_plan_resource_is_present() {
         assert!(SWIFTTUNNEL_POWER_PLAN_BYTES.starts_with(b"regf"));
         assert!(SWIFTTUNNEL_POWER_PLAN_BYTES.len() > 1024);
+    }
+
+    #[test]
+    fn validate_cpu_cores_rejects_empty_list() {
+        let err = SystemOptimizer::validate_cpu_cores(&[]).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one core"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_cpu_cores_rejects_core_beyond_available_parallelism() {
+        // Pick a core id well past any realistic machine. This is the negative
+        // test for the prior bug where impossible cores were silently OR'd into
+        // an unrunnable mask.
+        let err = SystemOptimizer::validate_cpu_cores(&[10_000]).unwrap_err();
+        assert!(
+            err.to_string().contains("out of range")
+                || err.to_string().contains("exceeds usize width"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_cpu_cores_builds_correct_mask_for_known_core_zero() {
+        // Every machine has at least core 0.
+        let mask = SystemOptimizer::validate_cpu_cores(&[0]).unwrap();
+        assert_eq!(mask, 0b1);
+    }
+
+    #[test]
+    fn validate_cpu_cores_combines_bits_for_multiple_cores() {
+        if std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            < 2
+        {
+            return; // skip on single-core CI
+        }
+        let mask = SystemOptimizer::validate_cpu_cores(&[0, 1]).unwrap();
+        assert_eq!(mask, 0b11);
+    }
+
+    #[test]
+    fn restore_cpu_affinity_with_no_snapshot_is_noop() {
+        let mut optimizer = SystemOptimizer::new();
+        // No state captured — must not panic and must not contact a process.
+        optimizer.restore_cpu_affinity(0);
+        optimizer.restore_cpu_affinity(u32::MAX);
+        assert!(optimizer.original_affinity.is_none());
+    }
+
+    #[test]
+    fn restore_cpu_affinity_with_dead_pid_clears_snapshot_without_panic() {
+        let mut optimizer = SystemOptimizer::new();
+        optimizer.original_affinity = Some(0b1);
+        // u32::MAX is an unreachable PID; OpenProcess should fail and the
+        // restore path must classify it as "process gone" without panic.
+        optimizer.restore_cpu_affinity(u32::MAX);
+        assert!(
+            optimizer.original_affinity.is_none(),
+            "snapshot should be consumed even when restore can't reach the process"
+        );
     }
 }
