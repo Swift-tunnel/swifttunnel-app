@@ -706,7 +706,7 @@ impl SystemOptimizer {
     }
 
     /// Apply all system optimizations
-    #[deprecated(note = "Use apply_optimizations_checked so verified applied_config is preserved")]
+    #[deprecated(note = "Use apply_optimizations_checked so persisted config is reconciled")]
     pub fn apply_optimizations(
         &mut self,
         config: &SystemOptimizationConfig,
@@ -723,11 +723,12 @@ impl SystemOptimizer {
         Ok(())
     }
 
-    /// Apply system optimizations and return the verified applied state.
+    /// Apply system optimizations and return the config safe to persist.
     ///
-    /// Process-only boosts can only be marked applied after a target process is
-    /// openable. Registry, timer, and power-plan boosts must verify via the
-    /// corresponding Windows readback before the UI persists them as active.
+    /// Process-only boosts with no target process keep the requested setting so
+    /// the next apply while Roblox is running can honor the user's intent.
+    /// Registry, timer, and power-plan boosts must verify via the corresponding
+    /// Windows readback before the UI persists them as active.
     pub fn apply_optimizations_checked(
         &mut self,
         config: &SystemOptimizationConfig,
@@ -745,11 +746,8 @@ impl SystemOptimizer {
 
         if config.set_high_priority {
             if process_id == 0 {
-                applied_config.set_high_priority = false;
-                warnings.push(
-                    "High Priority Mode skipped because no active Roblox process was detected"
-                        .to_string(),
-                );
+                warnings
+                    .push("High Priority Mode is waiting for an active Roblox process".to_string());
             } else if let Err(e) = self.set_process_priority(process_id) {
                 applied_config.set_high_priority = false;
                 warnings.push(format!(
@@ -765,11 +763,7 @@ impl SystemOptimizer {
                 warnings
                     .push("CPU affinity skipped because no CPU cores were selected".to_string());
             } else if process_id == 0 {
-                applied_config.set_cpu_affinity = false;
-                warnings.push(
-                    "CPU affinity skipped because no active Roblox process was detected"
-                        .to_string(),
-                );
+                warnings.push("CPU affinity is waiting for an active Roblox process".to_string());
             } else if let Err(e) = self.set_cpu_affinity(process_id, &config.cpu_cores) {
                 applied_config.set_cpu_affinity = false;
                 warnings.push(format!(
@@ -1441,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_apply_does_not_mark_process_priority_applied_without_pid() {
+    fn checked_apply_preserves_process_priority_request_without_pid() {
         let mut optimizer = SystemOptimizer::new();
         let config = SystemOptimizationConfig {
             set_high_priority: true,
@@ -1450,11 +1444,32 @@ mod tests {
 
         let outcome = optimizer.apply_optimizations_checked(&config, 0);
 
-        assert!(!outcome.applied_config.set_high_priority);
+        assert!(outcome.applied_config.set_high_priority);
         assert!(outcome.warnings.iter().any(|warning| {
-            warning.contains("High Priority Mode skipped")
-                && warning.contains("no active Roblox process")
+            warning.contains("High Priority Mode")
+                && warning.contains("waiting for an active Roblox process")
         }));
+    }
+
+    #[test]
+    fn checked_apply_preserves_cpu_affinity_request_without_pid() {
+        let mut optimizer = SystemOptimizer::new();
+        let config = SystemOptimizationConfig {
+            set_cpu_affinity: true,
+            cpu_cores: vec![0, 1],
+            ..Default::default()
+        };
+
+        let outcome = optimizer.apply_optimizations_checked(&config, 0);
+
+        assert!(outcome.applied_config.set_cpu_affinity);
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("CPU affinity")
+                    && warning.contains("waiting for an active Roblox process"))
+        );
     }
 
     #[test]
