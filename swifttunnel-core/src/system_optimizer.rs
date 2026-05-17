@@ -755,9 +755,8 @@ impl SystemOptimizer {
                     .push("High Priority Mode is waiting for an active Roblox process".to_string());
             } else if let Err(e) = self.set_process_priority(process_id) {
                 applied_config.set_high_priority = false;
-                saved_config.set_high_priority = false;
                 warnings.push(format!(
-                    "High Priority Mode could not be applied to PID {}: {}",
+                    "High Priority Mode could not be applied to PID {}; will retry while enabled: {}",
                     process_id, e
                 ));
             }
@@ -774,9 +773,8 @@ impl SystemOptimizer {
                 warnings.push("CPU affinity is waiting for an active Roblox process".to_string());
             } else if let Err(e) = self.set_cpu_affinity(process_id, &config.cpu_cores) {
                 applied_config.set_cpu_affinity = false;
-                saved_config.set_cpu_affinity = false;
                 warnings.push(format!(
-                    "CPU affinity could not be applied to PID {}: {}",
+                    "CPU affinity could not be applied to PID {}; will retry while enabled: {}",
                     process_id, e
                 ));
             }
@@ -1488,6 +1486,49 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("CPU affinity")
                     && warning.contains("waiting for an active Roblox process"))
+        );
+    }
+
+    #[test]
+    fn checked_apply_preserves_process_priority_request_after_target_failure() {
+        let mut optimizer = SystemOptimizer::new();
+        let config = SystemOptimizationConfig {
+            set_high_priority: true,
+            ..Default::default()
+        };
+
+        let outcome = optimizer.apply_optimizations_checked(&config, u32::MAX);
+
+        assert!(!outcome.applied_config.set_high_priority);
+        assert!(outcome.saved_config.set_high_priority);
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("High Priority Mode")
+                    && warning.contains("will retry while enabled"))
+        );
+    }
+
+    #[test]
+    fn checked_apply_preserves_cpu_affinity_request_after_target_failure() {
+        let mut optimizer = SystemOptimizer::new();
+        let config = SystemOptimizationConfig {
+            set_cpu_affinity: true,
+            cpu_cores: vec![0, 1],
+            ..Default::default()
+        };
+
+        let outcome = optimizer.apply_optimizations_checked(&config, u32::MAX);
+
+        assert!(!outcome.applied_config.set_cpu_affinity);
+        assert!(outcome.saved_config.set_cpu_affinity);
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("CPU affinity")
+                    && warning.contains("will retry while enabled"))
         );
     }
 
