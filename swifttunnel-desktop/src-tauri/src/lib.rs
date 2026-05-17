@@ -301,6 +301,7 @@ fn reapply_saved_roblox_fflags(_state: &AppState) {}
 /// - `HardwareMediaKeyHandling`, `MediaSessionService`: stops a global
 ///   media-key hook for an app that plays no audio.
 /// - `msEdgeBackgroundProcessing`: reduces idle Edge maintenance work.
+#[cfg(windows)]
 fn apply_webview2_resource_tuning() {
     const ENV: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
     if std::env::var_os(ENV).is_some() {
@@ -317,6 +318,10 @@ HardwareMediaKeyHandling,MediaSessionService,msEdgeBackgroundProcessing";
     unsafe { std::env::set_var(ENV, FLAGS) };
     info!("Applied WebView2 resource-tuning flags: {}", FLAGS);
 }
+
+// WebView2 is Windows-only; nothing to tune on other platforms.
+#[cfg(not(windows))]
+fn apply_webview2_resource_tuning() {}
 
 pub fn run() {
     logging::init();

@@ -10,11 +10,16 @@ codegen-units = 1
 # 200-800 KB on top of `"debuginfo"` alone. Crash dumps still resolve via
 # PDB if shipped separately.
 strip = "symbols"
-# `panic = "abort"` removes unwind tables and landing pads from every
-# function (5-10% binary shrink, smaller stack frames). Tauri/our code
-# doesn't rely on `std::panic::catch_unwind` for control flow, so a panic
-# in a command becomes a process abort instead of an Err to JS.
-panic = "abort"
+# panic = "unwind" must stay: swifttunnel-core's VPN packet-reader
+# (parallel_interceptor.rs ~L4086), V3 inbound-receiver (~L4147), and
+# UDP relay sender (udp_relay.rs ~L698) threads each wrap their bodies
+# in std::panic::catch_unwind. The unwind path is the mechanism that
+# surfaces worker panics through `workers_panic_cause` to the connection
+# monitor, which drives Connected → Error and runs graceful disconnect
+# + recover_stale_network_state(). Switching to "abort" would kill the
+# process before cleanup, leaving WFP filters, wintun, and split-tunnel
+# driver state dirty on the user's machine.
+panic = "unwind"
 
 # Faster builds for proc-macro/build-script crates without penalizing runtime
 [profile.release.build-override]
