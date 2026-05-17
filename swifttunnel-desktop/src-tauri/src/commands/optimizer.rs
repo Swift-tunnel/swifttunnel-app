@@ -300,7 +300,7 @@ pub async fn boost_update_config(
                 let mut nb = network_booster.lock();
                 let outcome = nb.reconcile_optimizations_checked(&config.network_settings);
                 applied_config.network_settings = outcome.applied_config;
-                saved_config.network_settings = applied_config.network_settings.clone();
+                saved_config.network_settings = config.network_settings.clone();
                 warn_list.extend(
                     outcome
                         .warnings

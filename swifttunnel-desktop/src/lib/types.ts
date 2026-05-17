@@ -197,7 +197,7 @@ export interface RamCleanResultResponse {
 export interface BoostUpdateResult {
   warnings: string[];
   applied_config: Config;
-  saved_config?: Config;
+  saved_config: Config;
 }
 
 export type OptimizationProfile = "LowEnd" | "Balanced" | "HighEnd" | "Custom";

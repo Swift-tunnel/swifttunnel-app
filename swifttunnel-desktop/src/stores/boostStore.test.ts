@@ -42,10 +42,17 @@ describe("stores/boostStore", () => {
   });
 
   it("updates config without notifications on success", async () => {
-    boostUpdateConfig.mockResolvedValue({ warnings: [] });
+    const saved_config = { profile: "Balanced" };
+    boostUpdateConfig.mockResolvedValue({
+      warnings: [],
+      applied_config: saved_config,
+      saved_config,
+    });
 
     const useBoostStore = await loadStore();
-    await useBoostStore.getState().updateConfig("{\"profile\":\"Balanced\"}");
+    await expect(
+      useBoostStore.getState().updateConfig("{\"profile\":\"Balanced\"}"),
+    ).resolves.toBe(saved_config);
 
     expect(boostUpdateConfig).toHaveBeenCalledTimes(1);
     expect(boostUpdateConfig).toHaveBeenCalledWith("{\"profile\":\"Balanced\"}");
@@ -55,9 +62,11 @@ describe("stores/boostStore", () => {
   });
 
   it("stores warnings separately from fatal config errors", async () => {
+    const saved_config = { profile: "Balanced" };
     boostUpdateConfig.mockResolvedValue({
       warnings: ["Roblox version folder was not found. Launch Roblox once."],
-      applied_config: { profile: "Balanced" },
+      applied_config: saved_config,
+      saved_config,
     });
 
     const useBoostStore = await loadStore();
@@ -318,7 +327,11 @@ describe("stores/boostStore", () => {
         new Promise((resolve) =>
           setTimeout(() => {
             callOrder.push("updateConfig:resolved");
-            resolve({ warnings: [] });
+            resolve({
+              warnings: [],
+              applied_config: { test: true },
+              saved_config: { test: true },
+            });
           }, 50),
         ),
     );
