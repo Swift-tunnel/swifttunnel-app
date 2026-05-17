@@ -66,15 +66,38 @@ struct MmcssSnapshot {
     system_responsiveness: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "value", rename_all = "snake_case")]
+enum RegistryDwordSnapshot {
+    Present(u32),
+    Absent,
+}
+
+impl RegistryDwordSnapshot {
+    fn from_snapshot(snapshot: Option<u32>) -> Self {
+        match snapshot {
+            Some(value) => Self::Present(value),
+            None => Self::Absent,
+        }
+    }
+
+    fn into_snapshot(self) -> Option<u32> {
+        match self {
+            Self::Present(value) => Some(value),
+            Self::Absent => None,
+        }
+    }
+}
+
 /// On-disk snapshot of persistent system settings SwiftTunnel has changed.
 ///
 /// This is intentionally narrow: process priority, process affinity, and timer
 /// requests are process-local and disappear on exit, but
 /// `GlobalTimerResolutionRequests` is an HKLM value that survives crashes.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistentSystemSnapshot {
     #[serde(default)]
-    global_timer_snapshot: Option<Option<u32>>,
+    global_timer_snapshot: Option<RegistryDwordSnapshot>,
 }
 
 const SYSTEM_SNAPSHOT_FILE: &str = "system_optimizer_snapshots.json";
@@ -383,7 +406,9 @@ impl SystemOptimizer {
 
     fn persistent_snapshot(&self) -> PersistentSystemSnapshot {
         PersistentSystemSnapshot {
-            global_timer_snapshot: self.global_timer_snapshot,
+            global_timer_snapshot: self
+                .global_timer_snapshot
+                .map(RegistryDwordSnapshot::from_snapshot),
         }
     }
 
@@ -1324,8 +1349,8 @@ impl SystemOptimizer {
             return;
         };
 
-        if snapshot.global_timer_snapshot.is_some() {
-            self.global_timer_snapshot = snapshot.global_timer_snapshot;
+        if let Some(snapshot) = snapshot.global_timer_snapshot {
+            self.global_timer_snapshot = Some(snapshot.into_snapshot());
             if let Err(e) = self.restore_global_timer_resolution_override() {
                 warn!(
                     "Failed to recover GlobalTimerResolutionRequests from snapshot: {}",
@@ -1876,20 +1901,26 @@ mod tests {
     #[test]
     fn persistent_system_snapshot_preserves_absent_and_present_timer_values() {
         let absent = PersistentSystemSnapshot {
-            global_timer_snapshot: Some(None),
+            global_timer_snapshot: Some(RegistryDwordSnapshot::Absent),
         };
         let absent_json = serde_json::to_string(&absent).unwrap();
         let absent_roundtrip: PersistentSystemSnapshot =
             serde_json::from_str(&absent_json).unwrap();
-        assert_eq!(absent_roundtrip.global_timer_snapshot, Some(None));
+        assert_eq!(
+            absent_roundtrip.global_timer_snapshot,
+            Some(RegistryDwordSnapshot::Absent)
+        );
 
         let present = PersistentSystemSnapshot {
-            global_timer_snapshot: Some(Some(1)),
+            global_timer_snapshot: Some(RegistryDwordSnapshot::Present(1)),
         };
         let present_json = serde_json::to_string(&present).unwrap();
         let present_roundtrip: PersistentSystemSnapshot =
             serde_json::from_str(&present_json).unwrap();
-        assert_eq!(present_roundtrip.global_timer_snapshot, Some(Some(1)));
+        assert_eq!(
+            present_roundtrip.global_timer_snapshot,
+            Some(RegistryDwordSnapshot::Present(1))
+        );
     }
 
     #[test]
