@@ -581,13 +581,18 @@ impl RobloxOptimizer {
         // denied, key locked, etc.). Substring matching English phrases
         // breaks on non-English Windows. Probe the registry instead: if the
         // value is genuinely absent the desired post-state already holds.
-        let still_present = hidden_command("reg")
+        //
+        // Propagate a probe-spawn failure with `?` rather than `unwrap_or`
+        // — silently treating "we couldn't even run `reg query`" as
+        // success would let an admin-required delete report cleared while
+        // the GPU preference is still live (Greptile-flagged regression).
+        let probe = hidden_command("reg")
             .args(["query", key_path, "/v", value_name])
-            .output()
-            .map(|probe| probe.status.success())
-            .unwrap_or(false);
+            .output()?;
 
-        if !still_present {
+        if !probe.status.success() {
+            // `reg query` failed with a clean non-zero exit — the value
+            // is gone, which is the post-state we wanted.
             return Ok(());
         }
 
