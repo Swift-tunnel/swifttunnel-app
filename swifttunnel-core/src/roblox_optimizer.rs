@@ -1,6 +1,7 @@
 use crate::hidden_command;
 use crate::structs::*;
 use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,25 @@ pub struct RobloxOptimizer {
 enum FFlagApplyOutcome {
     Applied,
     SkippedMissingRobloxVersion,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct GpuPreferenceSnapshot {
+    #[serde(default)]
+    values: HashMap<String, Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GpuPreferenceRestoreAction {
+    Restore(String),
+    Delete,
+    LeaveUntouched,
+}
+
+const GPU_PREFERENCE_SNAPSHOT_FILE: &str = "gpu_preference_snapshots.json";
+
+fn gpu_preference_snapshot_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|p| p.join("SwiftTunnel").join(GPU_PREFERENCE_SNAPSHOT_FILE))
 }
 
 impl RobloxOptimizer {
@@ -424,21 +444,28 @@ impl RobloxOptimizer {
     /// When `enable == true`, every `RobloxPlayerBeta.exe` /
     /// `RobloxStudioBeta.exe` discovered under
     /// `%LOCALAPPDATA%\Roblox\Versions\version-*` is registered as
-    /// `GpuPreference=2;` (High performance). When `enable == false`, any
-    /// existing preference values that target those paths are deleted so the
-    /// system reverts to Windows' default GPU selection.
+    /// `GpuPreference=2;` (High performance), after snapshotting any existing
+    /// user value. When `enable == false`, only values tracked in the snapshot
+    /// are restored or deleted; unknown values are left untouched because they
+    /// may be user-owned.
     fn sync_gpu_preference(enable: bool) -> Result<()> {
         let mut targets: Vec<String> = Self::collect_roblox_gpu_executables()
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
 
-        // On the disable path, also pick up GPU-preference entries written
-        // by older Roblox version folders that have since been deleted by
-        // Roblox auto-update. Functionally inert (Windows ignores prefs
-        // for non-existent paths) but they accumulate over update cycles
-        // and clutter diagnostics — Greptile flagged this hygiene gap.
+        // On the disable path, include tracked entries for older Roblox
+        // version folders that may have since been deleted by Roblox
+        // auto-update. Untracked stale rows are observed for diagnostics but
+        // not deleted: without a snapshot they are indistinguishable from a
+        // user-owned Windows graphics preference.
         if !enable {
+            let snapshot = Self::load_gpu_preference_snapshot();
+            for tracked in snapshot.values.keys() {
+                if !targets.contains(tracked) {
+                    targets.push(tracked.clone());
+                }
+            }
             for stale in Self::collect_stale_roblox_gpu_preference_names() {
                 if !targets.contains(&stale) {
                     targets.push(stale);
@@ -454,36 +481,161 @@ impl RobloxOptimizer {
         }
 
         let mut failures: Vec<String> = Vec::new();
-        for path_str in targets {
-            let result = if enable {
-                Self::set_registry_string_value(
+
+        if enable {
+            let mut snapshot = Self::load_gpu_preference_snapshot();
+            for path_str in &targets {
+                if !snapshot.values.contains_key(path_str) {
+                    let original =
+                        Self::query_registry_string_value(Self::USER_GPU_PREFERENCES_KEY, path_str)
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Could not snapshot existing GPU preference for {}: {}",
+                                    path_str,
+                                    e
+                                )
+                            })?;
+                    snapshot.values.insert(path_str.clone(), original);
+                }
+            }
+            Self::persist_gpu_preference_snapshot(&snapshot)?;
+
+            for path_str in targets {
+                if let Err(e) = Self::set_registry_string_value(
                     Self::USER_GPU_PREFERENCES_KEY,
                     &path_str,
                     Self::GPU_PREFERENCE_HIGH_PERFORMANCE,
-                )
-            } else {
-                Self::delete_registry_value(Self::USER_GPU_PREFERENCES_KEY, &path_str)
-            };
+                ) {
+                    warn!("GPU preference apply for {} failed: {}", path_str, e);
+                    failures.push(format!("{}: {}", path_str, e));
+                }
+            }
 
-            if let Err(e) = result {
-                let op = if enable { "apply" } else { "clear" };
-                warn!("GPU preference {} for {} failed: {}", op, path_str, e);
-                failures.push(format!("{}: {}", path_str, e));
+            if failures.is_empty() {
+                return Ok(());
+            }
+
+            return Err(anyhow::anyhow!(
+                "GPU preference apply failed for {} executable(s): {}",
+                failures.len(),
+                failures.join("; ")
+            ));
+        }
+
+        let mut snapshot = Self::load_gpu_preference_snapshot();
+        for path_str in targets {
+            match Self::gpu_preference_restore_action(snapshot.values.get(&path_str)) {
+                GpuPreferenceRestoreAction::Restore(original) => {
+                    if let Err(e) = Self::set_registry_string_value(
+                        Self::USER_GPU_PREFERENCES_KEY,
+                        &path_str,
+                        &original,
+                    ) {
+                        warn!("GPU preference restore for {} failed: {}", path_str, e);
+                        failures.push(format!("{}: {}", path_str, e));
+                    } else {
+                        snapshot.values.remove(&path_str);
+                    }
+                }
+                GpuPreferenceRestoreAction::Delete => {
+                    if let Err(e) =
+                        Self::delete_registry_value(Self::USER_GPU_PREFERENCES_KEY, &path_str)
+                    {
+                        warn!("GPU preference clear for {} failed: {}", path_str, e);
+                        failures.push(format!("{}: {}", path_str, e));
+                    } else {
+                        snapshot.values.remove(&path_str);
+                    }
+                }
+                GpuPreferenceRestoreAction::LeaveUntouched => {
+                    info!(
+                        "Leaving untracked Roblox GPU preference untouched: {}",
+                        path_str
+                    );
+                }
             }
         }
 
+        if let Err(e) = Self::persist_gpu_preference_snapshot(&snapshot) {
+            failures.push(format!("snapshot persistence: {}", e));
+        }
+
         if failures.is_empty() {
-            Ok(())
-        } else {
-            // Surface a single Err so the call site's warnings collector
-            // (and downstream UI) actually fires. Without this the boost
-            // reports "applied" even when every registry write failed.
-            Err(anyhow::anyhow!(
-                "GPU preference {} failed for {} executable(s): {}",
-                if enable { "apply" } else { "clear" },
-                failures.len(),
-                failures.join("; ")
-            ))
+            return Ok(());
+        }
+
+        Err(anyhow::anyhow!(
+            "GPU preference restore failed for {} executable(s): {}",
+            failures.len(),
+            failures.join("; ")
+        ))
+    }
+
+    fn load_gpu_preference_snapshot() -> GpuPreferenceSnapshot {
+        let Some(path) = gpu_preference_snapshot_path() else {
+            return GpuPreferenceSnapshot::default();
+        };
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return GpuPreferenceSnapshot::default();
+            }
+            Err(e) => {
+                warn!("Failed to read Roblox GPU preference snapshot: {}", e);
+                return GpuPreferenceSnapshot::default();
+            }
+        };
+
+        match serde_json::from_str(&content) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                warn!("Failed to parse Roblox GPU preference snapshot: {}", e);
+                GpuPreferenceSnapshot::default()
+            }
+        }
+    }
+
+    fn persist_gpu_preference_snapshot(snapshot: &GpuPreferenceSnapshot) -> Result<()> {
+        let Some(path) = gpu_preference_snapshot_path() else {
+            return if snapshot.values.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "could not resolve config directory for GPU preference snapshot"
+                ))
+            };
+        };
+
+        if snapshot.values.is_empty() {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to remove GPU preference snapshot {}: {}",
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(snapshot)?;
+        fs::write(&path, json)?;
+        Ok(())
+    }
+
+    fn gpu_preference_restore_action(
+        snapshot: Option<&Option<String>>,
+    ) -> GpuPreferenceRestoreAction {
+        match snapshot {
+            Some(Some(original)) => GpuPreferenceRestoreAction::Restore(original.clone()),
+            Some(None) => GpuPreferenceRestoreAction::Delete,
+            None => GpuPreferenceRestoreAction::LeaveUntouched,
         }
     }
 
@@ -551,6 +703,37 @@ impl RobloxOptimizer {
             }
         }
         out
+    }
+
+    fn query_registry_string_value(key_path: &str, value_name: &str) -> Result<Option<String>> {
+        let output = hidden_command("reg")
+            .args(["query", key_path, "/v", value_name])
+            .output()?;
+
+        if !output.status.success() {
+            return Ok(None);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Self::parse_registry_string_value(&stdout, value_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "reg query succeeded for {}\\{} but no REG_SZ row was parsed",
+                key_path,
+                value_name
+            )
+        })
+    }
+
+    fn parse_registry_string_value(reg_query_output: &str, value_name: &str) -> Option<String> {
+        for line in reg_query_output.lines() {
+            let Some((name_part, data)) = line.split_once("    REG_SZ") else {
+                continue;
+            };
+            if name_part.trim().eq_ignore_ascii_case(value_name) {
+                return Some(data.trim().to_string());
+            }
+        }
+        None
     }
 
     fn set_registry_string_value(key_path: &str, value_name: &str, data: &str) -> Result<()> {
@@ -2770,6 +2953,63 @@ HKEY_CURRENT_USER\SOFTWARE\Microsoft\DirectX\UserGpuPreferences
     C:\Program Files\Steam\Steam.exe    REG_SZ    GpuPreference=2;
 "#;
         assert!(RobloxOptimizer::parse_gpu_preference_names(sample).is_empty());
+    }
+
+    #[test]
+    fn gpu_preference_restore_action_restores_snapshot_values() {
+        let original = Some("GpuPreference=1;".to_string());
+        assert_eq!(
+            RobloxOptimizer::gpu_preference_restore_action(Some(&original)),
+            GpuPreferenceRestoreAction::Restore("GpuPreference=1;".to_string())
+        );
+    }
+
+    #[test]
+    fn gpu_preference_restore_action_deletes_only_snapshot_absent_values() {
+        let originally_absent = None;
+        assert_eq!(
+            RobloxOptimizer::gpu_preference_restore_action(Some(&originally_absent)),
+            GpuPreferenceRestoreAction::Delete
+        );
+        assert_eq!(
+            RobloxOptimizer::gpu_preference_restore_action(None),
+            GpuPreferenceRestoreAction::LeaveUntouched
+        );
+    }
+
+    #[test]
+    fn gpu_preference_snapshot_preserves_absent_original_values() {
+        let mut snapshot = GpuPreferenceSnapshot::default();
+        snapshot.values.insert(
+            r"C:\Users\evelyn\AppData\Local\Roblox\Versions\version-aaa111\RobloxPlayerBeta.exe"
+                .to_string(),
+            None,
+        );
+        snapshot.values.insert(
+            r"C:\Users\evelyn\AppData\Local\Roblox\Versions\version-bbb222\RobloxStudioBeta.exe"
+                .to_string(),
+            Some("GpuPreference=1;".to_string()),
+        );
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let roundtrip: GpuPreferenceSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, snapshot);
+    }
+
+    #[test]
+    fn parse_registry_string_value_extracts_path_named_value_data() {
+        let sample = r#"
+HKEY_CURRENT_USER\SOFTWARE\Microsoft\DirectX\UserGpuPreferences
+    C:\Users\evelyn\AppData\Local\Roblox\Versions\version-aaa111\RobloxPlayerBeta.exe    REG_SZ    GpuPreference=1;
+"#;
+
+        assert_eq!(
+            RobloxOptimizer::parse_registry_string_value(
+                sample,
+                r"C:\Users\evelyn\AppData\Local\Roblox\Versions\version-aaa111\RobloxPlayerBeta.exe",
+            ),
+            Some("GpuPreference=1;".to_string())
+        );
     }
 
     #[test]

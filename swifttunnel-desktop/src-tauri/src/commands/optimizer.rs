@@ -182,9 +182,15 @@ pub async fn boost_update_config(
                 if let Err(e) = so.restore(roblox_pid) {
                     warn_list.push(format!("System optimizer restore: {}", e));
                 }
-                if let Err(e) = so.apply_optimizations(&config.system_optimization, roblox_pid) {
-                    warn_list.push(format!("System optimizer: {}", e));
-                }
+                let outcome =
+                    so.apply_optimizations_checked(&config.system_optimization, roblox_pid);
+                applied_config.system_optimization = outcome.applied_config;
+                warn_list.extend(
+                    outcome
+                        .warnings
+                        .into_iter()
+                        .map(|warning| format!("System optimizer: {}", warning)),
+                );
             }
 
             {
