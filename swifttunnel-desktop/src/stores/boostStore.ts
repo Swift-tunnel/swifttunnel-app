@@ -138,7 +138,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
           "Some optimizations could not be applied.",
         );
       }
-      return result.applied_config ?? JSON.parse(configJson);
+      return result.saved_config ?? result.applied_config ?? JSON.parse(configJson);
     } catch (e) {
       const message = String(e);
       set({ error: message, warning: null });

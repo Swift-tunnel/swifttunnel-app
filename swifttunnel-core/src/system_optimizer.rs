@@ -84,6 +84,7 @@ pub struct SystemOptimizer {
 
 pub struct SystemApplyOutcome {
     pub applied_config: SystemOptimizationConfig,
+    pub saved_config: SystemOptimizationConfig,
     pub warnings: Vec<String>,
 }
 
@@ -723,10 +724,12 @@ impl SystemOptimizer {
         Ok(())
     }
 
-    /// Apply system optimizations and return the config safe to persist.
+    /// Apply system optimizations and return verified current state plus the
+    /// config safe to persist.
     ///
-    /// Process-only boosts with no target process keep the requested setting so
-    /// the next apply while Roblox is running can honor the user's intent.
+    /// Process-only boosts with no target process are not currently applied, but
+    /// keep the persisted requested setting so the next apply while Roblox is
+    /// running can honor the user's intent.
     /// Registry, timer, and power-plan boosts must verify via the corresponding
     /// Windows readback before the UI persists them as active.
     pub fn apply_optimizations_checked(
@@ -740,16 +743,19 @@ impl SystemOptimizer {
         );
 
         let mut applied_config = config.clone();
+        let mut saved_config = config.clone();
         let mut warnings = Vec::new();
 
         self.capture_system_state_snapshots(config);
 
         if config.set_high_priority {
             if process_id == 0 {
+                applied_config.set_high_priority = false;
                 warnings
                     .push("High Priority Mode is waiting for an active Roblox process".to_string());
             } else if let Err(e) = self.set_process_priority(process_id) {
                 applied_config.set_high_priority = false;
+                saved_config.set_high_priority = false;
                 warnings.push(format!(
                     "High Priority Mode could not be applied to PID {}: {}",
                     process_id, e
@@ -760,12 +766,15 @@ impl SystemOptimizer {
         if config.set_cpu_affinity {
             if config.cpu_cores.is_empty() {
                 applied_config.set_cpu_affinity = false;
+                saved_config.set_cpu_affinity = false;
                 warnings
                     .push("CPU affinity skipped because no CPU cores were selected".to_string());
             } else if process_id == 0 {
+                applied_config.set_cpu_affinity = false;
                 warnings.push("CPU affinity is waiting for an active Roblox process".to_string());
             } else if let Err(e) = self.set_cpu_affinity(process_id, &config.cpu_cores) {
                 applied_config.set_cpu_affinity = false;
+                saved_config.set_cpu_affinity = false;
                 warnings.push(format!(
                     "CPU affinity could not be applied to PID {}: {}",
                     process_id, e
@@ -776,6 +785,7 @@ impl SystemOptimizer {
         if config.disable_game_bar {
             if let Err(e) = self.disable_game_bar() {
                 applied_config.disable_game_bar = false;
+                saved_config.disable_game_bar = false;
                 warnings.push(format!("Disable Game Bar did not verify: {}", e));
             }
         }
@@ -783,6 +793,7 @@ impl SystemOptimizer {
         if config.disable_fullscreen_optimization {
             if let Err(e) = self.disable_fullscreen_optimizations() {
                 applied_config.disable_fullscreen_optimization = false;
+                saved_config.disable_fullscreen_optimization = false;
                 warnings.push(format!(
                     "Disable fullscreen optimization did not verify: {}",
                     e
@@ -792,7 +803,8 @@ impl SystemOptimizer {
 
         if let Err(e) = self.set_power_plan(&config.power_plan) {
             if let Some(active_power_plan) = Self::active_power_plan() {
-                applied_config.power_plan = active_power_plan;
+                applied_config.power_plan = active_power_plan.clone();
+                saved_config.power_plan = active_power_plan.clone();
                 warnings.push(format!(
                     "Power plan did not verify: {}; active plan read back as {:?}",
                     e, active_power_plan
@@ -800,6 +812,7 @@ impl SystemOptimizer {
             } else {
                 applied_config.power_plan =
                     config.previous_power_plan.unwrap_or(PowerPlan::Balanced);
+                saved_config.power_plan = applied_config.power_plan.clone();
                 warnings.push(format!(
                     "Power plan did not verify and the active plan could not be mapped to a SwiftTunnel option: {}",
                     e
@@ -811,6 +824,7 @@ impl SystemOptimizer {
         if config.timer_resolution_1ms {
             if let Err(e) = self.set_timer_resolution(true) {
                 applied_config.timer_resolution_1ms = false;
+                saved_config.timer_resolution_1ms = false;
                 warnings.push(format!("Timer resolution did not verify: {}", e));
             }
         }
@@ -818,6 +832,7 @@ impl SystemOptimizer {
         if config.mmcss_gaming_profile {
             if let Err(e) = self.apply_mmcss_profile() {
                 applied_config.mmcss_gaming_profile = false;
+                saved_config.mmcss_gaming_profile = false;
                 warnings.push(format!("MMCSS Gaming Profile did not verify: {}", e));
             }
         }
@@ -825,12 +840,14 @@ impl SystemOptimizer {
         if config.game_mode_enabled {
             if let Err(e) = self.enable_game_mode() {
                 applied_config.game_mode_enabled = false;
+                saved_config.game_mode_enabled = false;
                 warnings.push(format!("Windows Game Mode did not verify: {}", e));
             }
         }
 
         SystemApplyOutcome {
             applied_config,
+            saved_config,
             warnings,
         }
     }
@@ -1444,7 +1461,8 @@ mod tests {
 
         let outcome = optimizer.apply_optimizations_checked(&config, 0);
 
-        assert!(outcome.applied_config.set_high_priority);
+        assert!(!outcome.applied_config.set_high_priority);
+        assert!(outcome.saved_config.set_high_priority);
         assert!(outcome.warnings.iter().any(|warning| {
             warning.contains("High Priority Mode")
                 && warning.contains("waiting for an active Roblox process")
@@ -1462,7 +1480,8 @@ mod tests {
 
         let outcome = optimizer.apply_optimizations_checked(&config, 0);
 
-        assert!(outcome.applied_config.set_cpu_affinity);
+        assert!(!outcome.applied_config.set_cpu_affinity);
+        assert!(outcome.saved_config.set_cpu_affinity);
         assert!(
             outcome
                 .warnings
@@ -1484,6 +1503,7 @@ mod tests {
         let outcome = optimizer.apply_optimizations_checked(&config, 1234);
 
         assert!(!outcome.applied_config.set_cpu_affinity);
+        assert!(!outcome.saved_config.set_cpu_affinity);
         assert!(
             outcome
                 .warnings

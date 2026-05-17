@@ -71,6 +71,28 @@ describe("stores/boostStore", () => {
     );
   });
 
+  it("returns saved config when current applied state differs from persisted intent", async () => {
+    const applied_config = {
+      profile: "Balanced",
+      system_optimization: { set_high_priority: false },
+    };
+    const saved_config = {
+      profile: "Balanced",
+      system_optimization: { set_high_priority: true },
+    };
+    boostUpdateConfig.mockResolvedValue({
+      warnings: ["System optimizer: High Priority Mode is waiting for Roblox"],
+      applied_config,
+      saved_config,
+    });
+
+    const useBoostStore = await loadStore();
+    await expect(
+      useBoostStore.getState().updateConfig("{\"profile\":\"Balanced\"}"),
+    ).resolves.toBe(saved_config);
+    expect(useBoostStore.getState().warning).toContain("High Priority Mode");
+  });
+
   it("stores error and notifies when config update fails", async () => {
     boostUpdateConfig.mockRejectedValue(new Error("boom"));
 

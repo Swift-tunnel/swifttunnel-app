@@ -197,6 +197,7 @@ pub async fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, S
 pub struct BoostUpdateResult {
     pub warnings: Vec<String>,
     pub applied_config: swifttunnel_core::structs::Config,
+    pub saved_config: swifttunnel_core::structs::Config,
 }
 
 #[tauri::command]
@@ -216,6 +217,7 @@ pub async fn boost_update_config(
 
     tauri::async_runtime::spawn_blocking(move || {
         let mut applied_config = config.clone();
+        let mut saved_config = config.clone();
 
         let warnings = {
             let mut warn_list = Vec::new();
@@ -232,6 +234,7 @@ pub async fn boost_update_config(
                 let outcome =
                     so.apply_optimizations_checked(&config.system_optimization, roblox_pid);
                 applied_config.system_optimization = outcome.applied_config;
+                saved_config.system_optimization = outcome.saved_config;
                 warn_list.extend(
                     outcome
                         .warnings
@@ -264,6 +267,7 @@ pub async fn boost_update_config(
 
                         if !ram_clean_boost_verified(&result) {
                             applied_config.system_optimization.clear_standby_memory = false;
+                            saved_config.system_optimization.clear_standby_memory = false;
                             let reasons = ram_clean_boost_failure_reasons(&result);
                             warn_list.push(format!(
                                 "System optimizer: RAM clean boost did not verify: {}",
@@ -277,6 +281,7 @@ pub async fn boost_update_config(
                                 .push(format!("System optimizer: RAM clean boost: {}", warning));
                         }
                         applied_config.system_optimization.clear_standby_memory = false;
+                        saved_config.system_optimization.clear_standby_memory = false;
                         warn_list.push(format!("System optimizer: RAM clean boost: {}", e));
                     }
                 }
@@ -285,6 +290,7 @@ pub async fn boost_update_config(
             #[cfg(not(windows))]
             if config.system_optimization.clear_standby_memory {
                 applied_config.system_optimization.clear_standby_memory = false;
+                saved_config.system_optimization.clear_standby_memory = false;
                 warn_list.push(
                     "System optimizer: RAM clean boost is only supported on Windows".to_string(),
                 );
@@ -294,6 +300,7 @@ pub async fn boost_update_config(
                 let mut nb = network_booster.lock();
                 let outcome = nb.reconcile_optimizations_checked(&config.network_settings);
                 applied_config.network_settings = outcome.applied_config;
+                saved_config.network_settings = applied_config.network_settings.clone();
                 warn_list.extend(
                     outcome
                         .warnings
@@ -318,7 +325,7 @@ pub async fn boost_update_config(
 
         {
             let mut s = settings.lock();
-            s.config = applied_config.clone();
+            s.config = saved_config.clone();
             swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
         }
 
@@ -332,6 +339,7 @@ pub async fn boost_update_config(
         Ok(BoostUpdateResult {
             warnings,
             applied_config,
+            saved_config,
         })
     })
     .await
@@ -398,6 +406,7 @@ pub async fn boost_sync_effective_config(
 
         Ok(BoostUpdateResult {
             warnings,
+            saved_config: applied_config.clone(),
             applied_config,
         })
     })
