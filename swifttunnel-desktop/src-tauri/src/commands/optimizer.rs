@@ -131,6 +131,18 @@ fn ram_clean_boost_verified(result: &swifttunnel_core::ram_cleaner::RamCleanResu
     result.modified_flush.success && result.standby_purge.success
 }
 
+fn ram_clean_phase_failure_detail(attempted: bool, skipped_reason: Option<&str>) -> String {
+    if let Some(reason) = skipped_reason {
+        return format!("skipped: {}", reason);
+    }
+
+    if attempted {
+        "attempted but failed without a reported reason".to_string()
+    } else {
+        "failed without a reported reason".to_string()
+    }
+}
+
 fn ram_clean_boost_failure_reasons(
     result: &swifttunnel_core::ram_cleaner::RamCleanResult,
 ) -> Vec<String> {
@@ -139,22 +151,20 @@ fn ram_clean_boost_failure_reasons(
     if !result.modified_flush.success {
         reasons.push(format!(
             "modified flush {}",
-            result
-                .modified_flush
-                .skipped_reason
-                .as_deref()
-                .unwrap_or("failed without a reported reason")
+            ram_clean_phase_failure_detail(
+                result.modified_flush.attempted,
+                result.modified_flush.skipped_reason.as_deref(),
+            )
         ));
     }
 
     if !result.standby_purge.success {
         reasons.push(format!(
             "standby purge {}",
-            result
-                .standby_purge
-                .skipped_reason
-                .as_deref()
-                .unwrap_or("failed without a reported reason")
+            ram_clean_phase_failure_detail(
+                result.standby_purge.attempted,
+                result.standby_purge.skipped_reason.as_deref(),
+            )
         ));
     }
 
@@ -594,6 +604,26 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("standby purge"))
         );
+    }
+
+    #[test]
+    fn ram_clean_failure_reasons_distinguish_attempted_failures_from_skips() {
+        let mut result = ram_clean_result(false, false);
+        result.modified_flush.attempted = true;
+        result.modified_flush.skipped_reason = None;
+        result.standby_purge.attempted = true;
+        result.standby_purge.skipped_reason = None;
+
+        let reasons = ram_clean_boost_failure_reasons(&result);
+
+        assert!(reasons.iter().any(|reason| {
+            reason.contains("modified flush")
+                && reason.contains("attempted but failed without a reported reason")
+        }));
+        assert!(reasons.iter().any(|reason| {
+            reason.contains("standby purge")
+                && reason.contains("attempted but failed without a reported reason")
+        }));
     }
 
     #[test]
