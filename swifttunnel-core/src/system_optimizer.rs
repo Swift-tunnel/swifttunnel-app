@@ -8,8 +8,6 @@ use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Threading::*;
 
-const ALL_CORES_AFFINITY_MASK: usize = usize::MAX;
-
 // ntdll.dll functions for low-level system control
 unsafe extern "system" {
     // Sub-millisecond timer resolution (0.5ms)
@@ -687,17 +685,21 @@ impl SystemOptimizer {
                     && process_mask != 0
                 {
                     self.original_affinity = Some(process_mask);
-                } else {
-                    // Fall back to "all cores in the system" if we can't read
-                    // the current mask — better than leaving the process
-                    // pinned forever after disable.
-                    self.original_affinity = Some(if system_mask != 0 {
-                        system_mask
-                    } else {
-                        ALL_CORES_AFFINITY_MASK
-                    });
+                } else if system_mask != 0 {
+                    // Fall back to the system-wide mask. Windows rejects any
+                    // SetProcessAffinityMask whose bits extend past the
+                    // system mask, so we must never store usize::MAX — that
+                    // restore call would fail and leave Roblox pinned to
+                    // SwiftTunnel's chosen cores. If even system_mask is
+                    // unreadable we skip capturing entirely (per Greptile).
+                    self.original_affinity = Some(system_mask);
                     warn!(
-                        "Could not read original affinity for PID {}; restore will use system mask",
+                        "Could not read original affinity for PID {}; restore will use system mask 0x{:X}",
+                        process_id, system_mask
+                    );
+                } else {
+                    warn!(
+                        "Could not read original or system affinity mask for PID {}; affinity restore is skipped",
                         process_id
                     );
                 }
