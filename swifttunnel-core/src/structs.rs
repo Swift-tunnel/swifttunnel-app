@@ -190,15 +190,11 @@ impl GraphicsQuality {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NetworkConfig {
     pub enable_network_boost: bool,
-    pub prioritize_roblox_traffic: bool,
     // Tier 1 (Safe) Network Boosts
     #[serde(default)]
     pub disable_nagle: bool,
     #[serde(default)]
     pub disable_network_throttling: bool,
-    /// Gaming QoS - Marks Roblox and relay tunnel UDP packets with DSCP EF (46)
-    #[serde(default)]
-    pub gaming_qos: bool,
     /// Firewall Fix - Adds Windows Firewall allow rules for Roblox, flushes DNS, resets Winsock
     #[serde(default)]
     pub firewall_fix: bool,
@@ -208,11 +204,9 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             enable_network_boost: false,
-            prioritize_roblox_traffic: false,
             // Tier 1 network boosts are opt-in by default.
             disable_nagle: false,
             disable_network_throttling: false,
-            gaming_qos: false,
             firewall_fix: false, // Off by default, one-click fix for Roblox launch crashes
         }
     }
@@ -220,11 +214,7 @@ impl Default for NetworkConfig {
 
 impl NetworkConfig {
     fn any_specific_boost_enabled(&self) -> bool {
-        self.prioritize_roblox_traffic
-            || self.disable_nagle
-            || self.disable_network_throttling
-            || self.gaming_qos
-            || self.firewall_fix
+        self.disable_nagle || self.disable_network_throttling || self.firewall_fix
     }
 
     pub fn has_enabled_boosts(&self) -> bool {
@@ -244,6 +234,9 @@ impl<'de> Deserialize<'de> for NetworkConfig {
         #[derive(Default, Deserialize)]
         struct NetworkConfigWire {
             enable_network_boost: Option<bool>,
+            // Removed QoS fields are accepted only so legacy settings with
+            // explicit per-toggle state do not get mistaken for old master-only
+            // configs and have unrelated boosts enabled during migration.
             prioritize_roblox_traffic: Option<bool>,
             disable_nagle: Option<bool>,
             disable_network_throttling: Option<bool>,
@@ -252,18 +245,16 @@ impl<'de> Deserialize<'de> for NetworkConfig {
         }
 
         let wire = NetworkConfigWire::deserialize(deserializer)?;
-        let has_any_specific_field = wire.prioritize_roblox_traffic.is_some()
-            || wire.disable_nagle.is_some()
+        let has_any_specific_field = wire.disable_nagle.is_some()
             || wire.disable_network_throttling.is_some()
-            || wire.gaming_qos.is_some()
-            || wire.firewall_fix.is_some();
+            || wire.firewall_fix.is_some()
+            || wire.prioritize_roblox_traffic.is_some()
+            || wire.gaming_qos.is_some();
 
         let mut config = NetworkConfig {
             enable_network_boost: wire.enable_network_boost.unwrap_or(false),
-            prioritize_roblox_traffic: wire.prioritize_roblox_traffic.unwrap_or(false),
             disable_nagle: wire.disable_nagle.unwrap_or(false),
             disable_network_throttling: wire.disable_network_throttling.unwrap_or(false),
-            gaming_qos: wire.gaming_qos.unwrap_or(false),
             firewall_fix: wire.firewall_fix.unwrap_or(false),
         };
 
@@ -434,16 +425,6 @@ pub mod boost_info {
         requires_admin: true,
     };
 
-    pub const GAMING_QOS: BoostInfo = BoostInfo {
-        id: "gaming_qos",
-        title: "Gaming QoS",
-        short_desc: "Router traffic prioritization",
-        long_desc: "Marks Roblox and SwiftTunnel relay UDP packets with DSCP EF (Expedited Forwarding) priority. If your router supports QoS, gameplay traffic is prioritized over downloads, streaming, and other activity. Safe, no side effects.",
-        impact: "-5-20ms if router honors QoS",
-        risk_level: RiskLevel::Safe,
-        requires_admin: true,
-    };
-
     pub const FIREWALL_FIX: BoostInfo = BoostInfo {
         id: "firewall_fix",
         title: "Roblox Firewall Fix",
@@ -477,13 +458,8 @@ pub mod boost_info {
     }
 
     /// Get all network boost infos
-    pub fn network_boosts() -> [&'static BoostInfo; 4] {
-        [
-            &DISABLE_NAGLE,
-            &NETWORK_THROTTLING,
-            &GAMING_QOS,
-            &FIREWALL_FIX,
-        ]
+    pub fn network_boosts() -> [&'static BoostInfo; 3] {
+        [&DISABLE_NAGLE, &NETWORK_THROTTLING, &FIREWALL_FIX]
     }
 
     /// Get all Roblox boost infos
@@ -573,10 +549,8 @@ mod tests {
     fn test_network_config_default() {
         let cfg = NetworkConfig::default();
         assert!(!cfg.enable_network_boost);
-        assert!(!cfg.prioritize_roblox_traffic);
         assert!(!cfg.disable_nagle);
         assert!(!cfg.disable_network_throttling);
-        assert!(!cfg.gaming_qos);
         assert!(!cfg.firewall_fix);
     }
 
@@ -587,8 +561,6 @@ mod tests {
         assert!(cfg.enable_network_boost);
         assert!(cfg.disable_nagle);
         assert!(cfg.disable_network_throttling);
-        assert!(!cfg.gaming_qos);
-        assert!(!cfg.prioritize_roblox_traffic);
         assert!(!cfg.firewall_fix);
     }
 
@@ -611,6 +583,21 @@ mod tests {
     }
 
     #[test]
+    fn test_network_config_drops_removed_qos_fields_without_inventing_boosts() {
+        let cfg: NetworkConfig = serde_json::from_str(
+            r#"{
+              "enable_network_boost": true,
+              "prioritize_roblox_traffic": true,
+              "gaming_qos": true
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!cfg.enable_network_boost);
+        assert!(!cfg.has_enabled_boosts());
+    }
+
+    #[test]
     fn test_network_config_master_tracks_specific_boosts() {
         let mut cfg = NetworkConfig {
             disable_network_throttling: true,
@@ -622,7 +609,6 @@ mod tests {
         assert!(cfg.enable_network_boost);
         assert!(!cfg.disable_nagle);
         assert!(cfg.disable_network_throttling);
-        assert!(!cfg.gaming_qos);
     }
 
     #[test]
@@ -716,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_network_boosts_count() {
-        assert_eq!(boost_info::network_boosts().len(), 4);
+        assert_eq!(boost_info::network_boosts().len(), 3);
     }
 
     #[test]
@@ -740,10 +726,6 @@ mod tests {
         assert!(
             boost_info::NETWORK_THROTTLING.requires_admin,
             "Network throttling writes to HKLM, must require admin"
-        );
-        assert!(
-            boost_info::GAMING_QOS.requires_admin,
-            "QoS writes to HKLM, must require admin"
         );
         assert!(
             boost_info::FIREWALL_FIX.requires_admin,

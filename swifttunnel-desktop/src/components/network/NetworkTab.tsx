@@ -379,7 +379,7 @@ export function NetworkTab() {
                       ? "Good — minimal latency increase, no impact on gaming."
                       : net.bufferbloatResult.bufferbloat_ms <= 50
                         ? "Fair — noticeable latency increase during heavy use."
-                        : "Poor — significant latency spikes. Consider SQM/QoS on your router."}
+                        : "Poor — significant latency spikes. Consider router queue management."}
                 </p>
               </ResultReveal>
             )

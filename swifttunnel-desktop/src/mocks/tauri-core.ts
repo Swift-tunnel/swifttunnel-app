@@ -30,10 +30,8 @@ const MOCK_SETTINGS: AppSettings = {
     },
     network_settings: {
       enable_network_boost: true,
-      prioritize_roblox_traffic: true,
       disable_nagle: true,
       disable_network_throttling: true,
-      gaming_qos: true,
       firewall_fix: false,
     },
     auto_start_with_roblox: false,

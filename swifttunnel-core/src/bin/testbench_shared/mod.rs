@@ -635,7 +635,6 @@ pub async fn connect_vpn(
         tunnel_apps,
         resolve_custom_relay_server(opts, settings),
         false,
-        settings.config.network_settings.gaming_qos,
         available_servers,
         settings.whitelisted_regions.clone(),
         settings.forced_servers.clone(),

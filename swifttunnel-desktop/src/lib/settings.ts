@@ -28,10 +28,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     },
     network_settings: {
       enable_network_boost: false,
-      prioritize_roblox_traffic: false,
       disable_nagle: false,
       disable_network_throttling: false,
-      gaming_qos: false,
       firewall_fix: false,
     },
     auto_start_with_roblox: false,
@@ -72,8 +70,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enable_api_tunneling: false,
 };
 
+type LegacyNetworkConfig = Partial<NetworkConfig> & {
+  prioritize_roblox_traffic?: boolean;
+  gaming_qos?: boolean;
+};
+
 function isLegacyMasterOnlyNetworkConfig(
-  raw: Partial<NetworkConfig> | undefined,
+  raw: LegacyNetworkConfig | undefined,
 ): boolean {
   return Boolean(
     raw?.enable_network_boost &&
@@ -86,16 +89,17 @@ function isLegacyMasterOnlyNetworkConfig(
 }
 
 export function normalizeNetworkBoostConfig(
-  config: NetworkConfig,
+  config: LegacyNetworkConfig,
   options: { legacyMasterOnly?: boolean } = {},
 ): NetworkConfig {
-  const next = { ...config };
+  const next: NetworkConfig = {
+    enable_network_boost: Boolean(config.enable_network_boost),
+    disable_nagle: Boolean(config.disable_nagle),
+    disable_network_throttling: Boolean(config.disable_network_throttling),
+    firewall_fix: Boolean(config.firewall_fix),
+  };
   const hasSpecificBoost =
-    next.prioritize_roblox_traffic ||
-    next.disable_nagle ||
-    next.disable_network_throttling ||
-    next.gaming_qos ||
-    next.firewall_fix;
+    next.disable_nagle || next.disable_network_throttling || next.firewall_fix;
 
   if (
     options.legacyMasterOnly &&
@@ -107,11 +111,7 @@ export function normalizeNetworkBoostConfig(
   }
 
   next.enable_network_boost =
-    next.prioritize_roblox_traffic ||
-    next.disable_nagle ||
-    next.disable_network_throttling ||
-    next.gaming_qos ||
-    next.firewall_fix;
+    next.disable_nagle || next.disable_network_throttling || next.firewall_fix;
 
   return next;
 }
@@ -119,7 +119,9 @@ export function normalizeNetworkBoostConfig(
 export function mergeAppSettings(
   raw: Partial<AppSettings> | undefined,
 ): AppSettings {
-  const rawNetworkSettings = raw?.config?.network_settings;
+  const rawNetworkSettings = raw?.config?.network_settings as
+    | LegacyNetworkConfig
+    | undefined;
   const settings = {
     ...DEFAULT_SETTINGS,
     ...raw,

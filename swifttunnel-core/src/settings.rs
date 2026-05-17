@@ -523,7 +523,6 @@ mod tests {
         assert!(settings.config.network_settings.enable_network_boost);
         assert!(settings.config.network_settings.disable_nagle);
         assert!(settings.config.network_settings.disable_network_throttling);
-        assert!(!settings.config.network_settings.gaming_qos);
         assert!(!settings.config.network_settings.firewall_fix);
     }
 
@@ -546,7 +545,6 @@ mod tests {
         assert!(!settings.config.network_settings.enable_network_boost);
         assert!(!settings.config.network_settings.disable_nagle);
         assert!(!settings.config.network_settings.disable_network_throttling);
-        assert!(!settings.config.network_settings.gaming_qos);
     }
 
     #[test]

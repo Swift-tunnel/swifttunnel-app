@@ -20,7 +20,6 @@ describe("boost config helpers", () => {
     expect(result.network_settings.enable_network_boost).toBe(true);
     expect(result.network_settings.disable_nagle).toBe(true);
     expect(result.network_settings.disable_network_throttling).toBe(true);
-    expect(result.network_settings.gaming_qos).toBe(true);
     expect(result.auto_start_with_roblox).toBe(false);
   });
 

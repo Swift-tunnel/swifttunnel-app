@@ -72,7 +72,6 @@ export function getPresetConfig(
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
-          gaming_qos: true,
         }),
       };
     case "Balanced":
@@ -101,7 +100,6 @@ export function getPresetConfig(
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
-          gaming_qos: true,
         }),
       };
     case "HighEnd":
@@ -130,7 +128,6 @@ export function getPresetConfig(
           ...current.network_settings,
           disable_nagle: true,
           disable_network_throttling: true,
-          gaming_qos: true,
         }),
       };
     default:

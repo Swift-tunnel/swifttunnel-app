@@ -515,7 +515,7 @@ pub fn run() {
                 tauri::RunEvent::Exit => {
                     disconnect_vpn_on_exit(_app);
                     recover_stale_network_state();
-                    // Restore network booster modifications (registry, MTU, firewall, QoS)
+                    // Restore network booster modifications (registry, MTU, firewall)
                     if let Some(state) = _app.try_state::<crate::state::AppState>() {
                         let roblox_pid = {
                             let mut monitor = state.performance_monitor.lock();
