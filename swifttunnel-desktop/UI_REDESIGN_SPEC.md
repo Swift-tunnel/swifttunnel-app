@@ -148,7 +148,6 @@ Every affordance currently in the UI. The rebuild must preserve every capability
 **Network group**
 - Disable Nagle (bool).
 - Disable Network Throttling (bool).
-- Gaming QoS (bool).
 
 **Process Scheduling group**
 - High-Performance GPU Binding (bool).

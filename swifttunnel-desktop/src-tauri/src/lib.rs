@@ -413,6 +413,8 @@ pub fn run() {
             let app_state = AppState::new(runtime.clone(), launched_from_startup)
                 .expect("Failed to initialize app state");
 
+            app_state.system_optimizer.lock().recover_from_snapshot();
+
             let account_is_banned = runtime.block_on(async {
                 let auth = app_state.auth_manager.lock().await;
                 if matches!(
@@ -555,7 +557,7 @@ pub fn run() {
                 tauri::RunEvent::Exit => {
                     disconnect_vpn_on_exit(_app);
                     recover_stale_network_state();
-                    // Restore network booster modifications (registry, MTU, firewall, QoS)
+                    // Restore network booster modifications (registry, MTU, firewall)
                     if let Some(state) = _app.try_state::<crate::state::AppState>() {
                         let roblox_pid = {
                             let mut monitor = state.performance_monitor.lock();

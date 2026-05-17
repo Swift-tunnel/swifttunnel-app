@@ -977,7 +977,6 @@ impl VpnConnection {
         tunnel_apps: Vec<String>,
         custom_relay_server: Option<String>,
         auto_routing_enabled: bool,
-        relay_qos_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
         forced_servers: std::collections::HashMap<String, String>,
@@ -1116,7 +1115,6 @@ impl VpnConnection {
                     custom_relay_server,
                     forced_for_region,
                     auto_routing_enabled,
-                    relay_qos_enabled,
                     available_servers,
                     relay_candidates,
                     whitelisted_regions,
@@ -1182,7 +1180,6 @@ impl VpnConnection {
         custom_relay_server: Option<String>,
         forced_for_region: Option<String>,
         auto_routing_enabled: bool,
-        relay_qos_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         relay_candidates: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
@@ -1310,20 +1307,18 @@ impl VpnConnection {
             log::info!("V3: PPP/point-to-point default route detected; enabling relay MTU clamp");
         }
 
-        let relay = match super::udp_relay::UdpRelay::new_with_path_context(
-            relay_addr,
-            relay_qos_enabled,
-            relay_path_context,
-        ) {
-            Ok(r) => std::sync::Arc::new(r),
-            Err(e) => {
-                let _ = driver.close();
-                return Err(VpnError::SplitTunnelSetupFailed(format!(
-                    "Failed to create V3 relay: {}",
-                    e
-                )));
-            }
-        };
+        let relay =
+            match super::udp_relay::UdpRelay::new_with_path_context(relay_addr, relay_path_context)
+            {
+                Ok(r) => std::sync::Arc::new(r),
+                Err(e) => {
+                    let _ = driver.close();
+                    return Err(VpnError::SplitTunnelSetupFailed(format!(
+                        "Failed to create V3 relay: {}",
+                        e
+                    )));
+                }
+            };
 
         let mut relay_auth_mode = if custom_relay_server.is_some() {
             "custom_legacy".to_string()

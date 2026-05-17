@@ -326,7 +326,6 @@ export function BoostTab() {
   const netCount = [
     draft.network_settings.disable_nagle,
     draft.network_settings.disable_network_throttling,
-    draft.network_settings.gaming_qos,
   ].filter(Boolean).length;
   const rblxCount = [
     draft.roblox_settings.unlock_fps,
@@ -471,7 +470,10 @@ export function BoostTab() {
 
       {/* ── System + Network side-by-side ── */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <Section title="System" tag={`${sysCount} / ${systemBoostFlags.length} on`}>
+        <Section
+          title="System"
+          tag={`${sysCount} / ${systemBoostFlags.length} on`}
+        >
           <SettingRow
             title="High Priority Mode"
             desc="Boost game process priority (+5-15 FPS)"
@@ -507,7 +509,7 @@ export function BoostTab() {
           />
         </Section>
 
-        <Section title="Network" tag={`${netCount} / 3 on`}>
+        <Section title="Network" tag={`${netCount} / 2 on`}>
           <SettingRow
             title="Disable Nagle's Algorithm"
             desc="Faster packet delivery (-5-15ms)"
@@ -524,14 +526,6 @@ export function BoostTab() {
             onChange={(v) =>
               void applyNetworkOpt({ disable_network_throttling: v })
             }
-            disabled={networkApplying}
-          />
-          <SettingRow
-            title="Gaming QoS"
-            desc="Prioritize game UDP (-5-20ms)"
-            tooltip="QoS marks game UDP packets as high priority so routers handle them before downloads / streaming."
-            enabled={draft.network_settings.gaming_qos}
-            onChange={(v) => void applyNetworkOpt({ gaming_qos: v })}
             disabled={networkApplying}
           />
         </Section>

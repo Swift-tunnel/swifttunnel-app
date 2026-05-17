@@ -182,9 +182,15 @@ pub async fn boost_update_config(
                 if let Err(e) = so.restore(roblox_pid) {
                     warn_list.push(format!("System optimizer restore: {}", e));
                 }
-                if let Err(e) = so.apply_optimizations(&config.system_optimization, roblox_pid) {
-                    warn_list.push(format!("System optimizer: {}", e));
-                }
+                let outcome =
+                    so.apply_optimizations_checked(&config.system_optimization, roblox_pid);
+                applied_config.system_optimization = outcome.applied_config;
+                warn_list.extend(
+                    outcome
+                        .warnings
+                        .into_iter()
+                        .map(|warning| format!("System optimizer: {}", warning)),
+                );
             }
 
             {
@@ -274,19 +280,10 @@ pub async fn boost_sync_effective_config(
                 "Network booster: Disable network throttling was not active on Windows".to_string(),
             );
         }
-        if current_config.network_settings.gaming_qos && !applied_config.network_settings.gaming_qos
-        {
-            warnings.push("Network booster: Gaming QoS was not active on Windows".to_string());
-        }
-
         if applied_config.network_settings.disable_nagle
             != current_config.network_settings.disable_nagle
             || applied_config.network_settings.disable_network_throttling
                 != current_config.network_settings.disable_network_throttling
-            || applied_config.network_settings.gaming_qos
-                != current_config.network_settings.gaming_qos
-            || applied_config.network_settings.prioritize_roblox_traffic
-                != current_config.network_settings.prioritize_roblox_traffic
         {
             let mut s = settings.lock();
             s.config = applied_config.clone();
