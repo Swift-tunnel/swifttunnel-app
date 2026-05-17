@@ -580,22 +580,40 @@ mod tests {
         }
     }
 
-    fn ram_clean_result(modified_success: bool, standby_success: bool) -> RamCleanResult {
+    fn modified_flush(
+        attempted: bool,
+        success: bool,
+        skipped_reason: Option<&str>,
+    ) -> ModifiedFlushResult {
+        ModifiedFlushResult {
+            attempted,
+            success,
+            skipped_reason: skipped_reason.map(str::to_string),
+        }
+    }
+
+    fn standby_purge(
+        attempted: bool,
+        success: bool,
+        skipped_reason: Option<&str>,
+    ) -> StandbyPurgeResult {
+        StandbyPurgeResult {
+            attempted,
+            success,
+            skipped_reason: skipped_reason.map(str::to_string),
+        }
+    }
+
+    fn ram_clean_result(
+        modified_flush: ModifiedFlushResult,
+        standby_purge: StandbyPurgeResult,
+    ) -> RamCleanResult {
         RamCleanResult {
             before: memory_snapshot(),
             after: memory_snapshot(),
             trimmed_count: 0,
-            standby_purge: StandbyPurgeResult {
-                attempted: standby_success,
-                success: standby_success,
-                skipped_reason: (!standby_success).then(|| "Requires Administrator".to_string()),
-            },
-            modified_flush: ModifiedFlushResult {
-                attempted: modified_success,
-                success: modified_success,
-                skipped_reason: (!modified_success)
-                    .then(|| "SeIncreaseQuotaPrivilege unavailable".to_string()),
-            },
+            standby_purge,
+            modified_flush,
             freed_mb: 0,
             standby_freed_mb: Some(0),
             modified_freed_mb: Some(0),
@@ -606,14 +624,26 @@ mod tests {
 
     #[test]
     fn ram_clean_boost_requires_both_memory_list_phases_to_succeed() {
-        assert!(ram_clean_boost_verified(&ram_clean_result(true, true)));
-        assert!(!ram_clean_boost_verified(&ram_clean_result(false, true)));
-        assert!(!ram_clean_boost_verified(&ram_clean_result(true, false)));
+        assert!(ram_clean_boost_verified(&ram_clean_result(
+            modified_flush(true, true, None),
+            standby_purge(true, true, None),
+        )));
+        assert!(!ram_clean_boost_verified(&ram_clean_result(
+            modified_flush(false, false, Some("SeIncreaseQuotaPrivilege unavailable")),
+            standby_purge(true, true, None),
+        )));
+        assert!(!ram_clean_boost_verified(&ram_clean_result(
+            modified_flush(true, true, None),
+            standby_purge(false, false, Some("Requires Administrator")),
+        )));
     }
 
     #[test]
     fn ram_clean_privilege_skip_preserves_saved_intent() {
-        let result = ram_clean_result(false, true);
+        let result = ram_clean_result(
+            modified_flush(false, false, Some("SeIncreaseQuotaPrivilege unavailable")),
+            standby_purge(true, true, None),
+        );
 
         assert!(!ram_clean_boost_verified(&result));
         assert!(!ram_clean_boost_should_depersist(&result));
@@ -621,10 +651,14 @@ mod tests {
 
     #[test]
     fn ram_clean_attempted_phase_failure_depersists_saved_intent() {
-        let mut result = ram_clean_result(false, true);
-        result.modified_flush.attempted = true;
-        result.modified_flush.skipped_reason =
-            Some("NtSetSystemInformation failed (0xC0000001)".to_string());
+        let result = ram_clean_result(
+            modified_flush(
+                true,
+                false,
+                Some("NtSetSystemInformation failed (0xC0000001)"),
+            ),
+            standby_purge(true, true, None),
+        );
 
         assert!(!ram_clean_boost_verified(&result));
         assert!(ram_clean_boost_should_depersist(&result));
@@ -632,7 +666,10 @@ mod tests {
 
     #[test]
     fn ram_clean_failure_reasons_report_failed_memory_list_phases() {
-        let result = ram_clean_result(false, false);
+        let result = ram_clean_result(
+            modified_flush(false, false, Some("SeIncreaseQuotaPrivilege unavailable")),
+            standby_purge(false, false, Some("Requires Administrator")),
+        );
 
         let reasons = ram_clean_boost_failure_reasons(&result);
 
@@ -651,11 +688,10 @@ mod tests {
 
     #[test]
     fn ram_clean_failure_reasons_distinguish_attempted_failures_from_skips() {
-        let mut result = ram_clean_result(false, false);
-        result.modified_flush.attempted = true;
-        result.modified_flush.skipped_reason = None;
-        result.standby_purge.attempted = true;
-        result.standby_purge.skipped_reason = None;
+        let result = ram_clean_result(
+            modified_flush(true, false, None),
+            standby_purge(true, false, None),
+        );
 
         let reasons = ram_clean_boost_failure_reasons(&result);
 
@@ -671,7 +707,10 @@ mod tests {
 
     #[test]
     fn ram_clean_warnings_include_callback_only_messages_and_dedupe_result_messages() {
-        let mut result = ram_clean_result(true, true);
+        let mut result = ram_clean_result(
+            modified_flush(true, true, None),
+            standby_purge(true, true, None),
+        );
         result.warnings = vec![
             "trim failed for browser.exe".to_string(),
             "aggregate warning".to_string(),
