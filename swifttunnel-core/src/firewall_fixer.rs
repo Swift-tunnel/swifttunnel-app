@@ -13,6 +13,13 @@ const ROBLOX_EXECUTABLES: [&str; 3] = [
     "RobloxCrashHandler.exe",
 ];
 
+// Executable names written by earlier SwiftTunnel versions that we now reject.
+// On upgrade these rules are still in the Windows firewall and would keep
+// allowing the named (generic) host process through. The pre-apply cleanup
+// pass explicitly deletes them so the over-scoping bug is closed for users
+// migrating from older builds.
+const LEGACY_FIREWALL_EXECUTABLES: &[&str] = &["Windows10Universal.exe"];
+
 const FIREWALL_RULE_PREFIX: &str = "SwiftTunnel - Roblox";
 
 pub struct FirewallFixer {
@@ -29,7 +36,15 @@ impl FirewallFixer {
     fn remove_swifttunnel_rules_by_prefix() {
         // Delete all known rule names individually via netsh instead of
         // PowerShell Get-NetFirewallRule piping, which triggers AV heuristics.
-        for exe_name in &ROBLOX_EXECUTABLES {
+        //
+        // Iterate the current executable list AND the legacy list so older
+        // installs that wrote rules for Windows10Universal.exe (the shared
+        // Microsoft Store host) have those rules removed on upgrade.
+        let cleanup_targets = ROBLOX_EXECUTABLES
+            .iter()
+            .copied()
+            .chain(LEGACY_FIREWALL_EXECUTABLES.iter().copied());
+        for exe_name in cleanup_targets {
             for (suffix, dir) in [("Out", "out"), ("In", "in")] {
                 let rule_name = format!("{} {} {}", FIREWALL_RULE_PREFIX, exe_name, suffix);
                 let _ = hidden_command("netsh")
@@ -367,5 +382,18 @@ mod tests {
         // Restore depends on this prefix matching what we wrote previously.
         // Changing the prefix would orphan rules from older app versions.
         assert_eq!(FIREWALL_RULE_PREFIX, "SwiftTunnel - Roblox");
+    }
+
+    #[test]
+    fn legacy_firewall_executables_targets_windows10universal() {
+        // Older SwiftTunnel builds wrote firewall rules for
+        // Windows10Universal.exe. Removing it from ROBLOX_EXECUTABLES is not
+        // enough — the rules on the user's box must also be deleted on
+        // upgrade. This test pins the cleanup list so a regression
+        // (dropping the entry, renaming the constant) breaks the build.
+        assert!(
+            LEGACY_FIREWALL_EXECUTABLES.contains(&"Windows10Universal.exe"),
+            "legacy firewall cleanup must keep Windows10Universal.exe so upgrade installs strip it"
+        );
     }
 }

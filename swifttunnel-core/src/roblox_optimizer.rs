@@ -436,6 +436,7 @@ impl RobloxOptimizer {
             return Ok(());
         }
 
+        let mut failures: Vec<String> = Vec::new();
         for path in executables {
             let path_str = path.to_string_lossy().to_string();
             let result = if enable {
@@ -449,15 +450,25 @@ impl RobloxOptimizer {
             };
 
             if let Err(e) = result {
-                warn!(
-                    "GPU preference {} for {} failed: {}",
-                    if enable { "apply" } else { "clear" },
-                    path_str,
-                    e
-                );
+                let op = if enable { "apply" } else { "clear" };
+                warn!("GPU preference {} for {} failed: {}", op, path_str, e);
+                failures.push(format!("{}: {}", path_str, e));
             }
         }
-        Ok(())
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            // Surface a single Err so the call site's warnings collector
+            // (and downstream UI) actually fires. Without this the boost
+            // reports "applied" even when every registry write failed.
+            Err(anyhow::anyhow!(
+                "GPU preference {} failed for {} executable(s): {}",
+                if enable { "apply" } else { "clear" },
+                failures.len(),
+                failures.join("; ")
+            ))
+        }
     }
 
     fn collect_roblox_gpu_executables() -> Vec<PathBuf> {
@@ -497,15 +508,23 @@ impl RobloxOptimizer {
             return Ok(());
         }
 
-        // `reg delete` returns non-zero when the value doesn't exist; treat
-        // that as success because the desired post-state is "value absent".
-        // Anything else (permission denied, key locked) is propagated.
-        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-        if stderr.contains("cannot find") || stderr.contains("unable to find") {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("reg delete failed: {}", stderr.trim()))
+        // `reg delete` returns a non-zero exit code with a localised error
+        // string for both "value missing" and real failures (permission
+        // denied, key locked, etc.). Substring matching English phrases
+        // breaks on non-English Windows. Probe the registry instead: if the
+        // value is genuinely absent the desired post-state already holds.
+        let still_present = hidden_command("reg")
+            .args(["query", key_path, "/v", value_name])
+            .output()
+            .map(|probe| probe.status.success())
+            .unwrap_or(false);
+
+        if !still_present {
+            return Ok(());
         }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(anyhow::anyhow!("reg delete failed: {}", stderr.trim()))
     }
 
     /// Apply XML-level settings (FPS cap, graphics quality, window size).
