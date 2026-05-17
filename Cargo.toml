@@ -4,9 +4,21 @@ resolver = "2"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
-strip = "debuginfo"
+# `strip = "symbols"` removes debuginfo *and* the symbol table, saving
+# 200-800 KB on top of `"debuginfo"` alone. Crash dumps still resolve via
+# PDB if shipped separately.
+strip = "symbols"
+# panic = "unwind" must stay: swifttunnel-core's VPN packet-reader
+# (parallel_interceptor.rs ~L4086), V3 inbound-receiver (~L4147), and
+# UDP relay sender (udp_relay.rs ~L698) threads each wrap their bodies
+# in std::panic::catch_unwind. The unwind path is the mechanism that
+# surfaces worker panics through `workers_panic_cause` to the connection
+# monitor, which drives Connected → Error and runs graceful disconnect
+# + recover_stale_network_state(). Switching to "abort" would kill the
+# process before cleanup, leaving WFP filters, wintun, and split-tunnel
+# driver state dirty on the user's machine.
 panic = "unwind"
 
 # Faster builds for proc-macro/build-script crates without penalizing runtime

@@ -282,8 +282,50 @@ fn reapply_saved_roblox_fflags(state: &AppState) {
 #[cfg(not(windows))]
 fn reapply_saved_roblox_fflags(_state: &AppState) {}
 
+/// Layer SwiftTunnel-specific WebView2 flags on top of wry's defaults via
+/// the official `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` env var. WebView2
+/// merges this with its built-in flag set instead of replacing them, so
+/// we keep wry's `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`
+/// while disabling the additional Edge-only background features below.
+///
+/// We touch the env var only if the user hasn't already set one — an
+/// advanced user or distro packager may have customized it.
+///
+/// Disabled features and why each is safe for a form-only Tauri shell:
+/// - `Translate`, `AutofillServerCommunication`, `OptimizationHints`,
+///   `InterestFeedContentSuggestions`: silent network calls Edge makes by
+///   default; useless for a private desktop UI with our own CSP allowlist.
+/// - `CalculateNativeWinOcclusion`: removes a COM-event hook that contends
+///   on a global Windows lock. We want the webview live in the tray case
+///   anyway, so occlusion throttling is not a feature we benefit from.
+/// - `HardwareMediaKeyHandling`, `MediaSessionService`: stops a global
+///   media-key hook for an app that plays no audio.
+/// - `msEdgeBackgroundProcessing`: reduces idle Edge maintenance work.
+#[cfg(windows)]
+fn apply_webview2_resource_tuning() {
+    const ENV: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+    if std::env::var_os(ENV).is_some() {
+        return;
+    }
+
+    const FLAGS: &str = "--disable-features=Translate,AutofillServerCommunication,\
+OptimizationHints,InterestFeedContentSuggestions,CalculateNativeWinOcclusion,\
+HardwareMediaKeyHandling,MediaSessionService,msEdgeBackgroundProcessing";
+
+    // Safety: we set the env var before any thread that might read it
+    // exists. `tauri::Builder` is constructed after this call and is the
+    // first consumer of `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`.
+    unsafe { std::env::set_var(ENV, FLAGS) };
+    info!("Applied WebView2 resource-tuning flags: {}", FLAGS);
+}
+
+// WebView2 is Windows-only; nothing to tune on other platforms.
+#[cfg(not(windows))]
+fn apply_webview2_resource_tuning() {}
+
 pub fn run() {
     logging::init();
+    apply_webview2_resource_tuning();
     let launched_from_startup = autostart::launched_from_startup_flag();
 
     let mut ctx = tauri::generate_context!();

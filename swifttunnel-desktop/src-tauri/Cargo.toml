@@ -8,7 +8,16 @@ description = "SwiftTunnel desktop app - Tauri v2 frontend"
 
 [dependencies]
 swifttunnel-core = { path = "../../swifttunnel-core" }
-tauri = { version = "2", features = ["tray-icon"] }
+# `default-features = false` drops the non-Windows defaults (`dbus`, `x11`,
+# `webkit2gtk`) and the rarely-used `dynamic-acl` capability codegen. We
+# re-enable only what this Windows-only app actually links against.
+tauri = { version = "2", default-features = false, features = [
+    "wry",
+    "tauri-runtime-wry",
+    "common-controls-v6",
+    "compression",
+    "tray-icon",
+] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
