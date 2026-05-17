@@ -131,6 +131,22 @@ fn ram_clean_boost_verified(result: &swifttunnel_core::ram_cleaner::RamCleanResu
     result.modified_flush.success && result.standby_purge.success
 }
 
+fn ram_clean_phase_should_depersist(attempted: bool, success: bool) -> bool {
+    attempted && !success
+}
+
+fn ram_clean_boost_should_depersist(
+    result: &swifttunnel_core::ram_cleaner::RamCleanResult,
+) -> bool {
+    ram_clean_phase_should_depersist(
+        result.modified_flush.attempted,
+        result.modified_flush.success,
+    ) || ram_clean_phase_should_depersist(
+        result.standby_purge.attempted,
+        result.standby_purge.success,
+    )
+}
+
 fn ram_clean_phase_failure_detail(attempted: bool, skipped_reason: Option<&str>) -> String {
     if let Some(reason) = skipped_reason {
         return format!("skipped: {}", reason);
@@ -277,11 +293,19 @@ pub async fn boost_update_config(
 
                         if !ram_clean_boost_verified(&result) {
                             applied_config.system_optimization.clear_standby_memory = false;
-                            saved_config.system_optimization.clear_standby_memory = false;
+                            let depersist = ram_clean_boost_should_depersist(&result);
+                            if depersist {
+                                saved_config.system_optimization.clear_standby_memory = false;
+                            }
                             let reasons = ram_clean_boost_failure_reasons(&result);
                             warn_list.push(format!(
-                                "System optimizer: RAM clean boost did not verify: {}",
-                                reasons.join("; ")
+                                "System optimizer: RAM clean boost did not fully verify: {}{}",
+                                reasons.join("; "),
+                                if depersist {
+                                    "; setting was disabled"
+                                } else {
+                                    "; setting remains enabled for future retries"
+                                }
                             ));
                         }
                     }
@@ -585,6 +609,25 @@ mod tests {
         assert!(ram_clean_boost_verified(&ram_clean_result(true, true)));
         assert!(!ram_clean_boost_verified(&ram_clean_result(false, true)));
         assert!(!ram_clean_boost_verified(&ram_clean_result(true, false)));
+    }
+
+    #[test]
+    fn ram_clean_privilege_skip_preserves_saved_intent() {
+        let result = ram_clean_result(false, true);
+
+        assert!(!ram_clean_boost_verified(&result));
+        assert!(!ram_clean_boost_should_depersist(&result));
+    }
+
+    #[test]
+    fn ram_clean_attempted_phase_failure_depersists_saved_intent() {
+        let mut result = ram_clean_result(false, true);
+        result.modified_flush.attempted = true;
+        result.modified_flush.skipped_reason =
+            Some("NtSetSystemInformation failed (0xC0000001)".to_string());
+
+        assert!(!ram_clean_boost_verified(&result));
+        assert!(ram_clean_boost_should_depersist(&result));
     }
 
     #[test]
