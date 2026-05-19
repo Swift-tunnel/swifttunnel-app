@@ -364,7 +364,6 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     release_tag: "v1.0.45",
   }),
 
-  system_is_admin: () => ({ is_admin: true }),
   system_check_driver: () => ({
     installed: true,
     version: "3.6.2",

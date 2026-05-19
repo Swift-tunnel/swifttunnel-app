@@ -6,7 +6,7 @@ import type {
 } from "../../lib/types";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
 
-export const SWIFTTUNNEL_POWER_PLAN_FALLBACK: PowerPlan = "HighPerformance";
+const SWIFTTUNNEL_POWER_PLAN_FALLBACK: PowerPlan = "HighPerformance";
 
 export const PROFILES: {
   id: OptimizationProfile;
@@ -194,10 +194,6 @@ export function nextPowerPlanForSwiftTunnelToggle(
   return enabled
     ? "SwiftTunnel"
     : previousNonSwiftTunnelPowerPlan(previousPowerPlan);
-}
-
-export function countActive(...flags: boolean[]): number {
-  return flags.filter(Boolean).length;
 }
 
 export function formatGbFromMb(mb: number): string {

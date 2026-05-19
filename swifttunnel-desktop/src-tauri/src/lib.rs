@@ -384,7 +384,6 @@ pub fn run() {
             commands::updater::updater_check_channel,
             commands::updater::updater_install_channel,
             // System
-            commands::system::system_is_admin,
             commands::system::system_check_driver,
             commands::system::system_install_driver,
             commands::system::system_repair_driver,
@@ -393,7 +392,6 @@ pub fn run() {
             commands::system::system_restart_as_admin,
             commands::system::system_show_notification,
             commands::system::system_launched_from_startup,
-            commands::system::system_cleanup,
             commands::system::system_uninstall,
             commands::system::system_copy_log_to_clipboard,
         ])

@@ -945,18 +945,6 @@ fn install_winpkfilter_driver_from_msi(
 }
 
 #[derive(Serialize)]
-pub struct AdminCheckResponse {
-    pub is_admin: bool,
-}
-
-#[tauri::command]
-pub fn system_is_admin() -> AdminCheckResponse {
-    AdminCheckResponse {
-        is_admin: swifttunnel_core::is_administrator(),
-    }
-}
-
-#[derive(Serialize)]
 pub struct DriverCheckResponse {
     pub installed: bool,
     pub version: Option<String>,
@@ -1568,15 +1556,6 @@ mod tests {
         assert!(script.contains("msiexec.exe"));
         assert!(script.contains("/passive"));
     }
-}
-
-#[tauri::command]
-pub async fn system_cleanup() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        swifttunnel_core::network_booster::cleanup_all_system_state().map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("Cleanup task failed: {}", e))?
 }
 
 /// Stop + start the NDISRD kernel service without reinstalling the driver.

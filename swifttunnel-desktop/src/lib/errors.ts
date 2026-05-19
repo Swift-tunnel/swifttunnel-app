@@ -1,4 +1,4 @@
-export function formatErrorMessage(error: unknown): string {
+function formatErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
   }

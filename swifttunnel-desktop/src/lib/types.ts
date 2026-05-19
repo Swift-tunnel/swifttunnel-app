@@ -175,7 +175,7 @@ export interface StandbyPurgeResult {
   skipped_reason: string | null;
 }
 
-export interface ModifiedFlushResult {
+interface ModifiedFlushResult {
   attempted: boolean;
   success: boolean;
   skipped_reason: string | null;
@@ -205,7 +205,7 @@ export type PowerPlan =
   | "HighPerformance"
   | "Ultimate"
   | "SwiftTunnel";
-export type GraphicsQuality =
+type GraphicsQuality =
   | "Automatic"
   | "Manual"
   | "Level1"
@@ -283,7 +283,7 @@ export interface SpeedResultResponse {
   server: string;
 }
 
-export interface PersistedStabilityResult {
+interface PersistedStabilityResult {
   avg_ping: number;
   min_ping: number;
   max_ping: number;
@@ -296,14 +296,14 @@ export interface PersistedStabilityResult {
   timestamp: string;
 }
 
-export interface PersistedSpeedResult {
+interface PersistedSpeedResult {
   download_mbps: number;
   upload_mbps: number;
   server: string;
   timestamp: string;
 }
 
-export interface NetworkTestResultsCache {
+interface NetworkTestResultsCache {
   last_stability: PersistedStabilityResult | null;
   last_speed: PersistedSpeedResult | null;
 }
@@ -319,7 +319,7 @@ export interface BufferbloatResultResponse {
 
 export type UpdateChannel = "Stable" | "Live";
 
-export interface UpdateSettings {
+interface UpdateSettings {
   auto_check: boolean;
   last_check: number | null;
   dismissed_version?: string | null;
@@ -388,10 +388,6 @@ export interface AppSettings {
 }
 
 // ── System ──
-
-export interface AdminCheckResponse {
-  is_admin: boolean;
-}
 
 export interface DriverCheckResponse {
   installed: boolean;

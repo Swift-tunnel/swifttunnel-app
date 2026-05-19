@@ -1,7 +1,7 @@
 //! Authentication manager - handles login/logout and token management
 
 use super::http_client::{AuthClient, UserProfileResponse};
-use super::oauth_server::{DEFAULT_OAUTH_PORT, OAuthServer, OAuthServerResult};
+use super::oauth_server::OAuthServer;
 use super::storage::SecureStorage;
 use super::types::{
     AuthError, AuthSession, AuthState, OAuthPendingState, SupabaseAuthResponse, UserInfo,
@@ -102,14 +102,6 @@ impl AuthManager {
     /// Check if user is logged in
     pub fn is_logged_in(&self) -> bool {
         matches!(self.get_state(), AuthState::LoggedIn(_))
-    }
-
-    /// Get the current user info if logged in
-    pub fn get_user(&self) -> Option<UserInfo> {
-        match self.get_state() {
-            AuthState::LoggedIn(session) | AuthState::Banned(session) => Some(session.user),
-            _ => None,
-        }
     }
 
     pub fn mark_current_session_banned(&self, reason_suffix: &str) -> Result<(), AuthError> {
@@ -552,19 +544,6 @@ impl AuthManager {
         Ok(())
     }
 
-    /// Cancel an in-flight login attempt regardless of which flow we're in.
-    /// Stops any running OAuth callback server so the next login can rebind
-    /// the localhost port.
-    pub fn cancel_login(&self) {
-        info!("Cancelling login");
-        let was_awaiting_oauth = matches!(*self.state.lock(), AuthState::AwaitingOAuthCallback(_));
-        if was_awaiting_oauth {
-            self.stop_oauth_server();
-        }
-        let mut state = self.state.lock();
-        *state = AuthState::LoggedOut;
-    }
-
     /// Cancel only the OAuth callback wait without touching an already
     /// authenticated session.
     pub fn cancel_oauth(&self) {
@@ -576,14 +555,6 @@ impl AuthManager {
             if matches!(*state, AuthState::AwaitingOAuthCallback(_)) {
                 *state = AuthState::LoggedOut;
             }
-        }
-    }
-
-    /// Clear error state
-    pub fn clear_error(&self) {
-        let mut state = self.state.lock();
-        if matches!(*state, AuthState::Error(_)) {
-            *state = AuthState::LoggedOut;
         }
     }
 
@@ -679,12 +650,6 @@ impl AuthManager {
         } else {
             None
         }
-    }
-
-    /// Get the OAuth server port (if active)
-    pub fn get_oauth_port(&self) -> Option<u16> {
-        let server_guard = self.oauth_server.lock();
-        server_guard.as_ref().map(|s| s.port())
     }
 
     /// Complete OAuth callback - exchange token and verify
@@ -865,19 +830,6 @@ impl AuthManager {
         if let Some(mut server) = server_guard.take() {
             info!("Stopping OAuth server");
             server.stop();
-        }
-    }
-
-    /// Check if currently awaiting OAuth callback
-    pub fn is_awaiting_oauth(&self) -> bool {
-        matches!(self.get_state(), AuthState::AwaitingOAuthCallback(_))
-    }
-
-    /// Get the pending OAuth state if awaiting callback
-    pub fn get_pending_oauth_state(&self) -> Option<String> {
-        match self.get_state() {
-            AuthState::AwaitingOAuthCallback(pending) => Some(pending.state),
-            _ => None,
         }
     }
 }

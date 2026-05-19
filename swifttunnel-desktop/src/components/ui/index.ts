@@ -8,7 +8,6 @@ export { Chip } from "./Chip";
 export { Spinner } from "./Spinner";
 export { EmptyState } from "./EmptyState";
 export { ErrorBanner } from "./ErrorBanner";
-export { StatDisplay } from "./StatDisplay";
 export { Tooltip, InfoIcon } from "./Tooltip";
 export { Slider } from "./Slider";
 export { MetricGrid, MetricCell } from "./MetricGrid";
