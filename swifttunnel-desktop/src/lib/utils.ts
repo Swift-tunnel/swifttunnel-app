@@ -20,14 +20,6 @@ export function getLatencyColor(ms: number | null): string {
   return (LATENCY_TIERS.find((t) => ms < t.max) ?? LATENCY_BAD).color;
 }
 
-export function getLatencyLabel(ms: number | null): {
-  text: string;
-  color: string;
-} {
-  if (ms === null) return LATENCY_NULL;
-  return LATENCY_TIERS.find((t) => ms < t.max) ?? LATENCY_BAD;
-}
-
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;

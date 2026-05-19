@@ -18,7 +18,7 @@
 //! the same AES-GCM blob (the keyring copy is base64-encoded so it can be
 //! passed through the keyring's string API).
 
-use super::types::{AuthError, AuthSession, OAuthPendingState};
+use super::types::{AuthError, AuthSession};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use keyring::Entry;
@@ -31,7 +31,6 @@ use std::path::PathBuf;
 
 const SERVICE_NAME: &str = "SwiftTunnel";
 const SESSION_KEY: &str = "auth_session";
-const OAUTH_STATE_FILE: &str = "oauth_pending.json";
 const AUTH_SESSION_FILE: &str = "auth_session.dat";
 const REFRESH_FAILURES_FILE: &str = "refresh_failures.json";
 const LEGACY_REFRESH_FAILURES_FILE: &str = "refresh_failures.txt";
@@ -562,70 +561,6 @@ impl SecureStorage {
         }
 
         info!("Auth session cleared");
-        Ok(())
-    }
-
-    /// Cheap check: is there a session *file* on disk? May return `true` for
-    /// files that won't actually decrypt — e.g. a file sealed under a
-    /// different Windows user, or a partial write from a crash mid-migration.
-    /// Callers MUST follow up with `load_session` before assuming the user is
-    /// logged in. We accept the false-positive because keyring reads on Windows
-    /// are synchronous RPCs that don't belong on a hot path.
-    pub fn has_session(&self) -> bool {
-        self.session_file_path().exists()
-    }
-
-    /// Get the OAuth state file path
-    fn oauth_state_path(&self) -> PathBuf {
-        self.data_dir.join(OAUTH_STATE_FILE)
-    }
-
-    /// Save OAuth pending state to disk (for deep link callback after app restart)
-    pub fn save_oauth_state(&self, state: &OAuthPendingState) -> Result<(), AuthError> {
-        let path = self.oauth_state_path();
-
-        let json = serde_json::to_string(state).map_err(|e| {
-            AuthError::StorageError(format!("Failed to serialize OAuth state: {}", e))
-        })?;
-
-        std::fs::write(&path, json)
-            .map_err(|e| AuthError::StorageError(format!("Failed to write OAuth state: {}", e)))?;
-
-        info!("Saved OAuth pending state to: {}", path.display());
-        Ok(())
-    }
-
-    /// Load OAuth pending state from disk
-    pub fn load_oauth_state(&self) -> Result<Option<OAuthPendingState>, AuthError> {
-        let path = self.oauth_state_path();
-
-        if !path.exists() {
-            debug!("No OAuth pending state file found");
-            return Ok(None);
-        }
-
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| AuthError::StorageError(format!("Failed to read OAuth state: {}", e)))?;
-
-        let state: OAuthPendingState = serde_json::from_str(&json).map_err(|e| {
-            AuthError::StorageError(format!("Failed to deserialize OAuth state: {}", e))
-        })?;
-
-        info!("Loaded OAuth pending state from disk");
-        Ok(Some(state))
-    }
-
-    /// Clear OAuth pending state from disk
-    pub fn clear_oauth_state(&self) -> Result<(), AuthError> {
-        let path = self.oauth_state_path();
-
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| {
-                AuthError::StorageError(format!("Failed to remove OAuth state: {}", e))
-            })?;
-            info!("Cleared OAuth pending state file");
-        }
-
         Ok(())
     }
 

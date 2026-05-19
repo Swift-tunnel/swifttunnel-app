@@ -15,7 +15,6 @@ mod process_names;
 pub mod ram_cleaner;
 pub mod roblox_optimizer;
 pub mod roblox_proxy;
-pub mod roblox_watcher;
 pub mod settings;
 pub mod structs;
 pub mod system_optimizer;

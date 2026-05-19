@@ -17,7 +17,6 @@ import type {
   StabilityResultResponse,
   SpeedResultResponse,
   BufferbloatResultResponse,
-  AdminCheckResponse,
   DriverCheckResponse,
   BoostUpdateResult,
   NetworkDiagnosticsBundleResponse,
@@ -153,9 +152,6 @@ export const updaterInstallChannel = (
   });
 
 // ── System ──
-
-export const systemIsAdmin = () =>
-  invoke<AdminCheckResponse>("system_is_admin");
 
 export const systemCheckDriver = () =>
   invoke<DriverCheckResponse>("system_check_driver");

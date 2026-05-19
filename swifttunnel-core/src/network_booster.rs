@@ -704,7 +704,7 @@ impl NetworkBooster {
 ///
 /// Does not rely on in-memory snapshots — scans the system for known
 /// SwiftTunnel artifacts and removes them. Used by `--cleanup` (NSIS
-/// uninstaller) and the `system_cleanup` Tauri command.
+/// uninstaller).
 pub fn cleanup_all_system_state() -> Result<()> {
     info!("Running full stateless system cleanup");
 

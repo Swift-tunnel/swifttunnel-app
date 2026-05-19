@@ -1,9 +1,7 @@
 //! HTTP client for SwiftTunnel API
 
 use super::device_identity::desktop_hwid;
-use super::types::{
-    AuthError, ExchangeTokenResponse, RelayTicketResponse, SupabaseAuthResponse, VpnConfig,
-};
+use super::types::{AuthError, ExchangeTokenResponse, RelayTicketResponse, SupabaseAuthResponse};
 use log::{debug, error, info};
 use reqwest::Client;
 use serde::Deserialize;
@@ -184,48 +182,6 @@ impl AuthClient {
             .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))?;
 
         info!("Token refresh successful");
-        Ok(data)
-    }
-
-    /// Fetch VPN configuration for a region
-    pub async fn get_vpn_config(
-        &self,
-        access_token: &str,
-        region: &str,
-    ) -> Result<VpnConfig, AuthError> {
-        let url = format!("{}/api/vpn/generate-config", API_BASE_URL);
-
-        debug!("Fetching VPN config for region {}", region);
-
-        let response = self
-            .add_hwid_header(self.client.post(&url))
-            .header("Authorization", format!("Bearer {}", access_token))
-            .json(&json!({
-                "region": region,
-            }))
-            .send()
-            .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            error!("Get VPN config failed: {} - {}", status, body);
-            if let Some(error) = user_banned_error_from_body(&body) {
-                return Err(error);
-            }
-            return Err(AuthError::ApiError(format!(
-                "Config fetch failed: {} - {}",
-                status, body
-            )));
-        }
-
-        let data: VpnConfig = response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse config: {}", e)))?;
-
-        info!("Got VPN config for region {}", region);
         Ok(data)
     }
 

@@ -29,7 +29,7 @@ Boost: `boost_get_metrics`, `boost_get_system_memory`, `boost_update_config`, `b
 Network tests: `network_start_stability_test`, `network_start_speed_test`, `network_start_bufferbloat_test`
 Settings: `settings_load`, `settings_save`, `settings_generate_network_diagnostics_bundle`
 Updater: `updater_check_channel`, `updater_install_channel`
-System: `system_is_admin`, `system_check_driver`, `system_install_driver`, `system_launched_from_startup`, `system_open_url`, `system_restart_as_admin`, `system_uninstall`
+System: `system_check_driver`, `system_install_driver`, `system_launched_from_startup`, `system_open_url`, `system_restart_as_admin`, `system_uninstall`
 
 ### Supporting libraries (keep)
 - `src/lib/types.ts` — all shared types
@@ -46,12 +46,8 @@ System: `system_is_admin`, `system_check_driver`, `system_install_driver`, `syst
 ## 1 · Delete and rebuild
 
 Rewrite from scratch:
-- `src/components/common/Sidebar.tsx`
-- `src/components/common/SectionHeader.tsx`
-- `src/components/common/Toggle.tsx`
-- `src/components/common/Tooltip.tsx`
 - `src/components/common/Toast.tsx`
-- `src/components/connect/ConnectTab.tsx` + `connect.css`
+- `src/components/connect/ConnectTab.tsx`
 - `src/components/boost/BoostTab.tsx`
 - `src/components/network/NetworkTab.tsx`
 - `src/components/settings/SettingsTab.tsx`
@@ -304,7 +300,6 @@ src/components/ui/
 ├── Dialog.tsx           — for binding-chooser, uninstall confirm
 ├── Chip.tsx             — colored quality/grade pills
 ├── Spinner.tsx          — one size, one style
-├── StatDisplay.tsx      — label + mono value + optional unit + optional color
 ├── MetricGrid.tsx       — 2/3/4 col responsive
 ├── EmptyState.tsx       — icon + title + desc + optional retry
 ├── ErrorBanner.tsx      — inline red banner with optional action
@@ -316,8 +311,7 @@ And a root shell:
 ```
 src/components/shell/
 ├── AppShell.tsx         — sidebar + content region layout
-├── Sidebar.tsx          — tab nav, status chip, user footer
-├── StatusChip.tsx       — connected/disconnected/connecting
+├── Sidebar.tsx          — tab nav, inline status chip, user footer
 ├── DraggableTitleBar.tsx — data-tauri-drag-region spacer
 ├── BindingChooserDialog.tsx
 └── ToastContainer.tsx
@@ -332,7 +326,7 @@ Tabs become compositions of these primitives. No tab should contain raw styled d
 Ship in six merge-safe phases. Each phase leaves the app functional.
 
 1. **Tokens + primitives** — rewrite `globals.css` design tokens + build `src/components/ui/*`. Visual regression expected but app still renders.
-2. **Shell** — Sidebar + AppShell + StatusChip + binding dialog + toasts. Sidebar replaces current sidebar. Tab content remains the old components.
+2. **Shell** — Sidebar + AppShell + binding dialog + toasts. Sidebar replaces current sidebar. Tab content remains the old components.
 3. **Connect tab** — full rewrite. Re-use the `LiveGraph` primitive for the throughput graph. Verify connect → disconnect flow in the running app.
 4. **Boost tab** — full rewrite. Verify draft/apply + admin elevation + Roblox restart gating.
 5. **Network tab** — full rewrite. Verify all 3 tests run.
