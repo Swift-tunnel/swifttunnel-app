@@ -42,7 +42,7 @@
         "componentGroupRefs": ["NsisMigration"]
       }
     },
-    "resources": ["resources/drivers", "resources/swifty.png"],
+    "resources": ["resources/drivers", "resources/tools", "resources/swifty.png"],
     "icon": ["icons/icon.ico"]
   },
   "plugins": {

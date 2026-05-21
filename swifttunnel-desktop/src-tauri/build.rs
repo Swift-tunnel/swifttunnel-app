@@ -146,6 +146,92 @@ fn check_bundled_driver_msis() {
     }
 }
 
+/// Fail release builds if the NVIDIA Profile Inspector helper was not staged.
+///
+/// Ultraboost can apply its Roblox FastFlags without this helper, but the
+/// NVIDIA-only potato graphics profile depends on
+/// `nvidiaProfileInspector.exe`. The release workflow downloads the helper
+/// into resources/tools before Tauri bundles updater artifacts; this guard
+/// catches skipped downloads before users receive an update without the new
+/// payload.
+fn check_bundled_nvidia_profile_inspector() {
+    const NPI_EXE: &str = "resources/tools/nvidiaProfileInspector/nvidiaProfileInspector.exe";
+    const EXPECTED_NPI_EXE_SHA256: &str =
+        "7d5510deeaacb50c88a49bbf1d894dae44c5ce58c00d5a88392346646b14e8f3";
+    const MIN_NPI_BYTES: u64 = 400_000;
+
+    println!("cargo:rerun-if-changed={}", NPI_EXE);
+    let path = std::path::Path::new(NPI_EXE);
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() >= MIN_NPI_BYTES => {
+            let actual_hash = file_sha256_with_powershell(path).unwrap_or_else(|err| {
+                panic!(
+                    "Failed to hash bundled NVIDIA Profile Inspector helper `{}`: {}",
+                    NPI_EXE, err
+                )
+            });
+            if actual_hash != EXPECTED_NPI_EXE_SHA256 {
+                panic!(
+                    "Bundled NVIDIA Profile Inspector helper `{}` failed SHA-256 check: \
+                     expected {}, got {}. Re-run the release workflow's pinned helper download \
+                     step and do not ship an unverified third-party binary.",
+                    NPI_EXE, EXPECTED_NPI_EXE_SHA256, actual_hash
+                );
+            }
+        }
+        Ok(meta) if meta.is_file() => {
+            panic!(
+                "Bundled NVIDIA Profile Inspector helper `{}` is suspiciously small ({} bytes, \
+                 expected >= {}). Re-run the release workflow's helper download step, or fetch \
+                 nvidiaProfileInspector.zip from https://github.com/Orbmu2k/nvidiaProfileInspector/releases",
+                NPI_EXE,
+                meta.len(),
+                MIN_NPI_BYTES
+            );
+        }
+        Ok(_) => {
+            panic!(
+                "Bundled NVIDIA Profile Inspector helper path `{}` exists but is not a file.",
+                NPI_EXE
+            );
+        }
+        Err(err) => {
+            panic!(
+                "Bundled NVIDIA Profile Inspector helper `{}` is missing ({}). The updater must \
+                 ship this helper so existing Ultraboost users receive the NVIDIA potato profile \
+                 without a separate manual install.",
+                NPI_EXE, err
+            );
+        }
+    }
+}
+
+fn file_sha256_with_powershell(path: &std::path::Path) -> Result<String, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize path: {e}"))?;
+    let quoted = powershell_single_quoted(&path.to_string_lossy());
+    let script = format!("(Get-FileHash -LiteralPath '{quoted}' -Algorithm SHA256).Hash.ToLower()");
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|e| format!("failed to run powershell: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Get-FileHash exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase())
+}
+
+fn powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
 fn main() {
     // Only enforce the MSI payload check for Windows release builds.
     // CARGO_CFG_TARGET_OS gates out macOS/Linux hosts; PROFILE gates out
@@ -155,6 +241,7 @@ fn main() {
         && std::env::var("PROFILE").as_deref() == Ok("release")
     {
         check_bundled_driver_msis();
+        check_bundled_nvidia_profile_inspector();
     }
 
     let attrs = tauri_build::Attributes::new()

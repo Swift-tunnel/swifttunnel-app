@@ -139,6 +139,14 @@ fn sync_runtime_assets(app: &tauri::App) {
             ]),
             exe_dir.join("drivers").join("mullvad-split-tunnel.sys"),
         ),
+        (
+            "nvidiaProfileInspector",
+            first_existing(vec![
+                resource_dir.join("tools").join("nvidiaProfileInspector"),
+                resource_dir.join("nvidiaProfileInspector"),
+            ]),
+            exe_dir.join("tools").join("nvidiaProfileInspector"),
+        ),
     ];
 
     for (name, source, destination) in targets {
@@ -269,13 +277,16 @@ fn reapply_saved_roblox_fflags(state: &AppState) {
         return;
     }
 
-    info!("Reapplying saved Roblox FFlags on startup");
+    info!("Reapplying saved Roblox Ultraboost state on startup");
     if let Err(e) = state
         .roblox_optimizer
         .lock()
         .reapply_saved_client_fflags(&roblox_config)
     {
-        warn!("Failed to reapply saved Roblox FFlags on startup: {}", e);
+        warn!(
+            "Failed to reapply saved Roblox Ultraboost state on startup: {}",
+            e
+        );
     }
 }
 

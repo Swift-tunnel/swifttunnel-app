@@ -2,8 +2,10 @@ use crate::hidden_command;
 use crate::structs::*;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
@@ -425,6 +427,12 @@ impl RobloxOptimizer {
             warnings.push(msg);
         }
 
+        if let Err(e) = Self::sync_nvidia_profile(config.ultraboost) {
+            let msg = format!("Could not sync NVIDIA Roblox potato profile: {}", e);
+            warn!("{}", msg);
+            warnings.push(msg);
+        }
+
         info!("Roblox optimizations applied successfully");
         Ok(warnings)
     }
@@ -703,6 +711,425 @@ impl RobloxOptimizer {
             }
         }
         out
+    }
+
+    // NVIDIA Profile Inspector integration used by Ultraboost. This is
+    // deliberately gated to machines that actually report an NVIDIA GPU.
+    const NPI_EXE_NAME: &'static str = "nvidiaProfileInspector.exe";
+    const NPI_RELEASE_TAG: &'static str = "2.4.0.31";
+    const NPI_RELEASE_ZIP_URL: &'static str = "https://github.com/Orbmu2k/nvidiaProfileInspector/releases/download/2.4.0.31/nvidiaProfileInspector.zip";
+    const NPI_RELEASE_ZIP_SHA256: &'static str =
+        "5d692e812a701627edd6d165d0b60175ff4f772c758a7dac869d613e1beb8063";
+    const NPI_EXE_SHA256: &'static str =
+        "7d5510deeaacb50c88a49bbf1d894dae44c5ce58c00d5a88392346646b14e8f3";
+    const NPI_PROFILE_NAME: &'static str = "Roblox";
+    const NPI_ROBLOX_EXE: &'static str = "RobloxPlayerBeta.exe";
+
+    fn sync_nvidia_profile(enable: bool) -> Result<()> {
+        if !Self::has_nvidia_gpu() {
+            info!("Skipping NVIDIA Roblox profile: no NVIDIA GPU detected");
+            return Ok(());
+        }
+
+        if enable && !crate::is_administrator() {
+            return Err(anyhow::anyhow!(
+                "NVIDIA Profile Inspector requires SwiftTunnel to run as administrator"
+            ));
+        }
+
+        let Some(inspector) = Self::resolve_nvidia_profile_inspector(enable)? else {
+            info!("Skipping NVIDIA Roblox profile reset: helper is not installed");
+            return Ok(());
+        };
+
+        let profile_path = Self::write_nvidia_potato_profile(enable)?;
+        let output = std::process::Command::new(&inspector)
+            .arg("-silentImport")
+            .arg(&profile_path)
+            .output()?;
+
+        if output.status.success() {
+            info!(
+                "NVIDIA Roblox potato profile {} via {}",
+                if enable { "applied" } else { "reset" },
+                inspector.display()
+            );
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Err(anyhow::anyhow!(
+                "NVIDIA Profile Inspector exited with {}: {}{}{}",
+                output.status,
+                stderr.trim(),
+                if stderr.trim().is_empty() || stdout.trim().is_empty() {
+                    ""
+                } else {
+                    " / "
+                },
+                stdout.trim()
+            ))
+        }
+    }
+
+    fn has_nvidia_gpu() -> bool {
+        let mut names = Vec::new();
+        if let Some(output) = Self::run_nvidia_smi_query() {
+            names.extend(output.lines().map(str::to_string));
+        }
+        if names.is_empty() {
+            if let Some(output) = Self::run_video_controller_query() {
+                names.extend(output.lines().map(str::to_string));
+            }
+        }
+        Self::parse_has_nvidia_gpu(&names.join("\n"))
+    }
+
+    fn run_nvidia_smi_query() -> Option<String> {
+        let mut candidates = Vec::new();
+        if let Some(root) = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("WINDIR")) {
+            candidates.push(PathBuf::from(root).join("System32").join("nvidia-smi.exe"));
+        }
+        candidates.push(PathBuf::from("nvidia-smi.exe"));
+
+        for candidate in candidates {
+            let output = std::process::Command::new(candidate)
+                .args(["--query-gpu=name", "--format=csv,noheader"])
+                .output();
+            if let Ok(output) = output {
+                if output.status.success() {
+                    return Some(String::from_utf8_lossy(&output.stdout).to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn run_video_controller_query() -> Option<String> {
+        let output = hidden_command("powershell")
+            .args([
+                "-Command",
+                "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+            ])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            None
+        }
+    }
+
+    fn parse_has_nvidia_gpu(output: &str) -> bool {
+        output
+            .lines()
+            .any(|line| line.to_ascii_lowercase().contains("nvidia"))
+    }
+
+    fn resolve_nvidia_profile_inspector(install_if_missing: bool) -> Result<Option<PathBuf>> {
+        if let Some(path) = Self::installed_nvidia_profile_inspector_path()? {
+            return Ok(Some(path));
+        }
+
+        if let Some(staged) = Self::staged_nvidia_profile_inspector_path()? {
+            let target_dir = Self::nvidia_profile_inspector_install_dir()?;
+            Self::copy_directory_contents(
+                staged.parent().ok_or_else(|| {
+                    anyhow::anyhow!("staged NVIDIA Profile Inspector has no parent")
+                })?,
+                &target_dir,
+            )?;
+            let installed = target_dir.join(Self::NPI_EXE_NAME);
+            if installed.is_file() && Self::verify_nvidia_profile_inspector_exe(&installed).is_ok()
+            {
+                return Ok(Some(installed));
+            }
+        }
+
+        if !install_if_missing {
+            return Ok(None);
+        }
+
+        Self::download_nvidia_profile_inspector()?;
+        Self::installed_nvidia_profile_inspector_path()
+    }
+
+    fn installed_nvidia_profile_inspector_path() -> Result<Option<PathBuf>> {
+        let dir = Self::nvidia_profile_inspector_install_dir()?;
+        let exe = dir.join(Self::NPI_EXE_NAME);
+        if !exe.is_file() {
+            return Ok(None);
+        }
+
+        match Self::verify_nvidia_profile_inspector_exe(&exe) {
+            Ok(()) => Ok(Some(exe)),
+            Err(e) => {
+                warn!(
+                    "Ignoring NVIDIA Profile Inspector helper at {}: {}",
+                    exe.display(),
+                    e
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    fn nvidia_profile_inspector_install_dir() -> Result<PathBuf> {
+        dirs::data_local_dir()
+            .map(|path| {
+                path.join("SwiftTunnel")
+                    .join("tools")
+                    .join("nvidiaProfileInspector")
+            })
+            .ok_or_else(|| anyhow::anyhow!("could not resolve local app data directory"))
+    }
+
+    fn staged_nvidia_profile_inspector_path() -> Result<Option<PathBuf>> {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let Some(exe_dir) = exe_dir else {
+            return Ok(None);
+        };
+
+        for path in [
+            exe_dir
+                .join("tools")
+                .join("nvidiaProfileInspector")
+                .join(Self::NPI_EXE_NAME),
+            exe_dir
+                .join("resources")
+                .join("tools")
+                .join("nvidiaProfileInspector")
+                .join(Self::NPI_EXE_NAME),
+            exe_dir
+                .join("nvidiaProfileInspector")
+                .join(Self::NPI_EXE_NAME),
+        ] {
+            if !path.is_file() {
+                continue;
+            }
+            match Self::verify_nvidia_profile_inspector_exe(&path) {
+                Ok(()) => return Ok(Some(path)),
+                Err(e) => warn!(
+                    "Ignoring staged NVIDIA Profile Inspector helper at {}: {}",
+                    path.display(),
+                    e
+                ),
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if source_path.is_dir() {
+                Self::copy_directory_contents(&source_path, &destination_path)?;
+            } else {
+                fs::copy(&source_path, &destination_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn download_nvidia_profile_inspector() -> Result<()> {
+        let install_dir = Self::nvidia_profile_inspector_install_dir()?;
+        let zip_path = install_dir.with_extension("zip");
+        fs::create_dir_all(&install_dir)?;
+        let install_dir_str = Self::escape_powershell_single_quoted(&install_dir.to_string_lossy());
+        let zip_path_str = Self::escape_powershell_single_quoted(&zip_path.to_string_lossy());
+        let url = Self::NPI_RELEASE_ZIP_URL;
+
+        let script = format!(
+            "$ErrorActionPreference='Stop'; \
+             $ProgressPreference='SilentlyContinue'; \
+             $zip='{zip_path_str}'; \
+             Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; \
+             Invoke-WebRequest -Uri '{url}' -OutFile $zip -UseBasicParsing",
+            zip_path_str = zip_path_str,
+            url = url,
+        );
+
+        let output = hidden_command("powershell")
+            .args(["-Command", &script])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "download failed with {}: {}",
+                output.status,
+                stderr.trim()
+            ));
+        }
+
+        Self::verify_file_sha256(
+            &zip_path,
+            Self::NPI_RELEASE_ZIP_SHA256,
+            "NVIDIA Profile Inspector release zip",
+        )?;
+
+        let script = format!(
+            "$ErrorActionPreference='Stop'; \
+             $dest='{install_dir_str}'; \
+             $zip='{zip_path_str}'; \
+             Expand-Archive -LiteralPath $zip -DestinationPath $dest -Force; \
+             Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; \
+             $rootExe = Join-Path $dest '{exe}'; \
+             if (-not (Test-Path -LiteralPath $rootExe)) {{ \
+               $found = Get-ChildItem -Path $dest -Recurse -Filter '{exe}' -File | Select-Object -First 1; \
+               if ($found) {{ Copy-Item -LiteralPath $found.FullName -Destination $rootExe -Force }} \
+             }}; \
+             if (-not (Test-Path -LiteralPath $rootExe)) {{ throw 'nvidiaProfileInspector.exe missing after extraction' }}",
+            install_dir_str = install_dir_str,
+            zip_path_str = zip_path_str,
+            exe = Self::NPI_EXE_NAME
+        );
+
+        let output = hidden_command("powershell")
+            .args(["-Command", &script])
+            .output()?;
+        if output.status.success() {
+            Self::verify_nvidia_profile_inspector_exe(&install_dir.join(Self::NPI_EXE_NAME))?;
+            info!(
+                "Installed NVIDIA Profile Inspector {} helper to {}",
+                Self::NPI_RELEASE_TAG,
+                install_dir.display()
+            );
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow::anyhow!(
+                "extract failed with {}: {}",
+                output.status,
+                stderr.trim()
+            ))
+        }
+    }
+
+    fn verify_nvidia_profile_inspector_exe(path: &Path) -> Result<()> {
+        Self::verify_file_sha256(
+            path,
+            Self::NPI_EXE_SHA256,
+            "NVIDIA Profile Inspector executable",
+        )
+    }
+
+    fn verify_file_sha256(path: &Path, expected: &str, label: &str) -> Result<()> {
+        let actual = Self::sha256_file(path)?;
+        if actual.eq_ignore_ascii_case(expected) {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "{} SHA-256 mismatch for {}: expected {}, got {}",
+                label,
+                path.display(),
+                expected,
+                actual
+            ))
+        }
+    }
+
+    fn sha256_file(path: &Path) -> Result<String> {
+        let mut file = fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn write_nvidia_potato_profile(enable: bool) -> Result<PathBuf> {
+        let dir = dirs::data_local_dir()
+            .map(|path| path.join("SwiftTunnel").join("nvidia-profiles"))
+            .ok_or_else(|| anyhow::anyhow!("could not resolve local app data directory"))?;
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(if enable {
+            "roblox-potato-mode.nip"
+        } else {
+            "roblox-potato-mode-reset.nip"
+        });
+        let xml = Self::nvidia_potato_profile_xml(enable);
+        Self::write_utf16le(&path, &xml)?;
+        Ok(path)
+    }
+
+    fn nvidia_potato_profile_xml(enable: bool) -> String {
+        let settings = if enable {
+            vec![
+                ("Texture Filtering - LOD Bias (DX)", 7_573_135, 120),
+                (
+                    "Texture Filtering - LOD Bias Auto-Adjust (for SGSSAA)",
+                    6_524_559,
+                    0,
+                ),
+                ("Anisotropic Filtering - Mode", 282_245_910, 1),
+                ("Anisotropic Filtering - Setting", 270_426_537, 0),
+                ("Anisotropic Filter - Optimization", 8_703_344, 1),
+                ("Anisotropic Filter - Sample Optimization", 15_151_633, 1),
+                ("Texture Filtering - Negative LOD bias", 1_686_376, 0),
+                ("Texture Filtering - Quality", 13_510_289, 20),
+                ("Texture Filtering - Trilinear Optimization", 3_066_610, 1),
+            ]
+        } else {
+            vec![
+                ("Texture Filtering - LOD Bias (DX)", 7_573_135, 0),
+                (
+                    "Texture Filtering - LOD Bias Auto-Adjust (for SGSSAA)",
+                    6_524_559,
+                    1,
+                ),
+                ("Anisotropic Filtering - Mode", 282_245_910, 0),
+                ("Anisotropic Filtering - Setting", 270_426_537, 1),
+                ("Anisotropic Filter - Optimization", 8_703_344, 0),
+                ("Anisotropic Filter - Sample Optimization", 15_151_633, 0),
+                ("Texture Filtering - Negative LOD bias", 1_686_376, 0),
+                ("Texture Filtering - Quality", 13_510_289, 0),
+                ("Texture Filtering - Trilinear Optimization", 3_066_610, 0),
+            ]
+        };
+
+        let setting_xml = settings
+            .into_iter()
+            .map(|(name, id, value)| {
+                format!(
+                    "      <ProfileSetting>\r\n        <SettingNameInfo>{name}</SettingNameInfo>\r\n        <SettingID>{id}</SettingID>\r\n        <SettingValue>{value}</SettingValue>\r\n        <ValueType>Dword</ValueType>\r\n      </ProfileSetting>"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-16\"?>\r\n<ArrayOfProfile>\r\n  <Profile>\r\n    <ProfileName>{profile}</ProfileName>\r\n    <Executeables>\r\n      <string>{exe}</string>\r\n    </Executeables>\r\n    <Settings>\r\n{settings}\r\n    </Settings>\r\n  </Profile>\r\n</ArrayOfProfile>\r\n",
+            profile = Self::NPI_PROFILE_NAME,
+            exe = Self::NPI_ROBLOX_EXE,
+            settings = setting_xml
+        )
+    }
+
+    fn write_utf16le(path: &Path, content: &str) -> Result<()> {
+        let mut bytes = Vec::with_capacity(2 + content.len() * 2);
+        bytes.extend_from_slice(&[0xFF, 0xFE]);
+        for unit in content.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    fn escape_powershell_single_quoted(value: &str) -> String {
+        value.replace('\'', "''")
     }
 
     fn query_registry_string_value(key_path: &str, value_name: &str) -> Result<Option<String>> {
@@ -1011,6 +1438,13 @@ impl RobloxOptimizer {
             warn!("Could not remove FFlag optimizations during restore: {}", e);
         }
 
+        if let Err(e) = Self::sync_nvidia_profile(false) {
+            warn!(
+                "Could not reset NVIDIA Roblox potato profile during restore: {}",
+                e
+            );
+        }
+
         // Don't set read-only after restore - user is disabling optimizations
         info!("Settings restored successfully");
         Ok(())
@@ -1129,12 +1563,16 @@ impl RobloxOptimizer {
     /// `DFIntDebugFRMQualityLevelOverride` is `1` (lowest) instead of the
     /// prior `4`; Roblox's FRM quality scales 1-21 and community
     /// performance presets use the minimum for maximum FPS.
+    ///
+    /// `FIntDebugForceMSAASamples` is `1` instead of `0` because Roblox's
+    /// client allowlist accepts 1x/2x/4x MSAA samples. A value of `0` can be
+    /// ignored, leaving anti-aliasing at the user's previous/default quality.
     const ULTRABOOST_FFLAGS: &[(&str, &str)] = &[
         ("FFlagHandleAltEnterFullscreenManually", "False"),
         ("FFlagDebugGraphicsPreferD3D11", "True"),
         ("FFlagDebugGraphicsPreferVulkan", "False"),
         ("FFlagDebugGraphicsPreferOpenGL", "False"),
-        ("FIntDebugForceMSAASamples", "0"),
+        ("FIntDebugForceMSAASamples", "1"),
         ("DFFlagTextureQualityOverrideEnabled", "True"),
         ("DFIntTextureQualityOverride", "0"),
         ("DFIntDebugFRMQualityLevelOverride", "1"),
@@ -1742,9 +2180,16 @@ impl RobloxOptimizer {
         self.remove_all_fflags_in_paths(client_settings_paths)
     }
 
-    /// Reapply saved ClientAppSettings FFlags after Roblox creates a new version folder.
+    /// Reapply saved Ultraboost client-side state after Roblox creates a new version folder.
     pub fn reapply_saved_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<()> {
-        self.apply_client_fflags(config).map(|_| ())
+        self.apply_client_fflags(config)?;
+        if let Err(e) = Self::sync_nvidia_profile(config.ultraboost) {
+            warn!(
+                "Could not sync NVIDIA Roblox potato profile on startup reapply: {}",
+                e
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1770,6 +2215,9 @@ impl RobloxOptimizer {
         // Best-effort; missing values are not an error.
         if let Err(e) = Self::sync_gpu_preference(false) {
             warn!("Failed to clear Roblox GPU preference during uninstall: {e}");
+        }
+        if let Err(e) = Self::sync_nvidia_profile(false) {
+            warn!("Failed to clear NVIDIA Roblox profile during uninstall: {e}");
         }
         info!("Roblox optimizer: uninstall cleanup completed");
     }
@@ -2050,9 +2498,18 @@ mod tests {
     }
 
     #[test]
-    fn read_current_settings_errors_if_file_missing() {
-        let opt = optimizer_with_path(PathBuf::from("nonexistent_file.xml"));
+    fn read_current_settings_errors_if_path_is_not_file() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_unreadable_settings_path");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let missing_settings_path = dir.join("missing-settings.xml");
+        fs::create_dir_all(&missing_settings_path).unwrap();
+
+        let opt = optimizer_with_path(missing_settings_path);
         assert!(opt.read_current_settings().is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2545,6 +3002,59 @@ mod tests {
         assert_eq!(
             settings.get("FStringUserOwnedFlag"),
             Some(&serde_json::json!("keep-me"))
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fflag_apply_upgrades_existing_ultraboost_texture_preset() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_upgrade_potato_preset");
+        let _ = fs::remove_dir_all(&dir);
+        let version = dir.join("Roblox").join("Versions").join("version-active");
+        let client_settings = version.join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        fs::write(version.join("RobloxPlayerBeta.exe"), "").unwrap();
+        fs::write(
+            client_settings.join("ClientAppSettings.json"),
+            r#"{
+  "FFlagDebugGraphicsPreferD3D11": "True",
+  "FIntDebugForceMSAASamples": "0",
+  "FStringUserOwnedFlag": "keep-me"
+}"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            ..Default::default()
+        };
+
+        opt.apply_client_fflags_for_local_app_data(&config, &dir)
+            .unwrap();
+
+        let content = fs::read_to_string(client_settings.join("ClientAppSettings.json")).unwrap();
+        let settings: HashMap<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            settings.get("DFFlagTextureQualityOverrideEnabled"),
+            Some(&serde_json::json!("True")),
+            "startup reapply must add the low-texture override for existing Ultraboost users"
+        );
+        assert_eq!(
+            settings.get("DFIntTextureQualityOverride"),
+            Some(&serde_json::json!("0")),
+            "startup reapply must pin Roblox to its lowest texture-quality preset"
+        );
+        assert_eq!(
+            settings.get("FIntDebugForceMSAASamples"),
+            Some(&serde_json::json!("1")),
+            "older Ultraboost installs using the ignored 0x MSAA value must migrate to 1x"
+        );
+        assert_eq!(
+            settings.get("FStringUserOwnedFlag"),
+            Some(&serde_json::json!("keep-me")),
+            "user-owned flags must survive the Ultraboost preset upgrade"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -3046,5 +3556,82 @@ HKEY_CURRENT_USER\SOFTWARE\Microsoft\DirectX\UserGpuPreferences
             unique.len(),
             "Ultraboost FFlags contain duplicate keys"
         );
+    }
+
+    #[test]
+    fn parse_has_nvidia_gpu_detects_nvidia_names() {
+        let sample = "Intel(R) UHD Graphics\r\nNVIDIA GeForce RTX 4060 Laptop GPU\r\n";
+        assert!(RobloxOptimizer::parse_has_nvidia_gpu(sample));
+    }
+
+    #[test]
+    fn parse_has_nvidia_gpu_ignores_non_nvidia_names() {
+        let sample = "AMD Radeon RX 7800 XT\r\nIntel(R) Arc(TM) Graphics\r\n";
+        assert!(!RobloxOptimizer::parse_has_nvidia_gpu(sample));
+    }
+
+    #[test]
+    fn nvidia_potato_profile_xml_enables_roblox_lod_bias() {
+        let xml = RobloxOptimizer::nvidia_potato_profile_xml(true);
+
+        assert!(xml.contains("<ProfileName>Roblox</ProfileName>"));
+        assert!(xml.contains("<string>RobloxPlayerBeta.exe</string>"));
+        assert!(
+            xml.contains("<SettingNameInfo>Texture Filtering - LOD Bias (DX)</SettingNameInfo>")
+        );
+        assert!(xml.contains(
+            "<SettingID>7573135</SettingID>\r\n        <SettingValue>120</SettingValue>"
+        ));
+        assert!(xml.contains(
+            "<SettingID>13510289</SettingID>\r\n        <SettingValue>20</SettingValue>"
+        ));
+    }
+
+    #[test]
+    fn nvidia_potato_profile_xml_resets_lod_bias() {
+        let xml = RobloxOptimizer::nvidia_potato_profile_xml(false);
+
+        assert!(xml.contains("<ProfileName>Roblox</ProfileName>"));
+        assert!(xml.contains("<string>RobloxPlayerBeta.exe</string>"));
+        assert!(
+            xml.contains(
+                "<SettingID>7573135</SettingID>\r\n        <SettingValue>0</SettingValue>"
+            )
+        );
+        assert!(
+            xml.contains(
+                "<SettingID>13510289</SettingID>\r\n        <SettingValue>0</SettingValue>"
+            )
+        );
+    }
+
+    #[test]
+    fn escape_powershell_single_quoted_doubles_quotes() {
+        assert_eq!(
+            RobloxOptimizer::escape_powershell_single_quoted("C:\\Users\\O'Brien\\file.zip"),
+            "C:\\Users\\O''Brien\\file.zip"
+        );
+    }
+
+    #[test]
+    fn npi_release_url_is_pinned() {
+        assert!(RobloxOptimizer::NPI_RELEASE_ZIP_URL.contains(RobloxOptimizer::NPI_RELEASE_TAG));
+        assert!(!RobloxOptimizer::NPI_RELEASE_ZIP_URL.contains("/latest/"));
+    }
+
+    #[test]
+    fn sha256_file_returns_lowercase_hex() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_sha256_file");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payload.bin");
+        fs::write(&path, b"abc").unwrap();
+
+        assert_eq!(
+            RobloxOptimizer::sha256_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

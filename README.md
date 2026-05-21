@@ -53,7 +53,7 @@ Built-in performance optimizations:
 - **FPS Unlocker** — Remove the 60 FPS cap
 - **Network Tweaks** — Optimize TCP/UDP settings, DNS, and adapter config
 - **System Boosts** — Process priority, timer resolution, memory management
-- **Roblox FFlags** — Ultraboost writes every valid Roblox `version-*` folder with curated allowlisted FPS flags, cleans up retired SwiftTunnel flags such as high-DPI sharpness overrides, and re-applies saved flags on startup so Roblox updates do not drop the settings.
+- **Roblox Ultraboost** — writes every valid Roblox `version-*` folder with curated allowlisted FPS flags, cleans up retired SwiftTunnel flags such as high-DPI sharpness overrides, re-applies saved flags on startup so Roblox updates do not drop the settings, and adds a reversible NVIDIA-only Profile Inspector potato graphics profile when an NVIDIA GPU is detected.
 
 ### 🔒 Lightweight & Safe
 - No kernel drivers required for basic operation
