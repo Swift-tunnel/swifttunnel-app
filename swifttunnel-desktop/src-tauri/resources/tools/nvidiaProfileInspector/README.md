@@ -1,5 +1,5 @@
 This directory is populated by the release workflow with the pinned
-`nvidiaProfileInspector.exe` 2.4.0.31 release from upstream NVIDIA Profile
+`nvidiaProfileInspector.exe` v3.0.1.12 release from upstream NVIDIA Profile
 Inspector.
 
 The binary is intentionally not committed to the repository. Tauri bundles this

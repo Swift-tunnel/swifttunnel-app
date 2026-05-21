@@ -430,9 +430,9 @@ jobs:
           # Ultraboost's NVIDIA-only Roblox potato profile is imported through
           # NVIDIA Profile Inspector. Ship the helper in updater/MSI resources
           # so existing Ultraboost users receive it with the app update.
-          $npiTag = "2.4.0.31"
-          $expectedZipSha256 = "5d692e812a701627edd6d165d0b60175ff4f772c758a7dac869d613e1beb8063"
-          $expectedExeSha256 = "7d5510deeaacb50c88a49bbf1d894dae44c5ce58c00d5a88392346646b14e8f3"
+          $npiTag = "v3.0.1.12"
+          $expectedZipSha256 = "494065af4ac3e9ce672c95e51e6b8a5301c208b6fed777ee6bbfe755081ba308"
+          $expectedExeSha256 = "61452518fdd2464313e08589dd6b6e9d00d3fd36c1622e1105884ab1ad7334d4"
           $toolsDir = "swifttunnel-desktop/src-tauri/resources/tools/nvidiaProfileInspector"
           $downloadDir = Join-Path $env:RUNNER_TEMP "nvidiaProfileInspector-download"
           $extractDir = Join-Path $env:RUNNER_TEMP "nvidiaProfileInspector-extract"
@@ -460,7 +460,7 @@ jobs:
             throw "nvidiaProfileInspector.zip did not contain nvidiaProfileInspector.exe"
           }
 
-          Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $toolsDir "nvidiaProfileInspector.exe") -Force
+          Copy-Item -Path (Join-Path $exe.Directory.FullName "*") -Destination $toolsDir -Recurse -Force
 
           $bundledExe = Join-Path $toolsDir "nvidiaProfileInspector.exe"
           $actualExeSha256 = (Get-FileHash -Path $bundledExe -Algorithm SHA256).Hash.ToLower()
@@ -469,7 +469,7 @@ jobs:
           }
 
           $size = (Get-Item $bundledExe).Length
-          if ($size -lt 400000) {
+          if ($size -lt 900000) {
             throw "nvidiaProfileInspector.exe is suspiciously small ($size bytes)"
           }
           Write-Host "Bundled NVIDIA Profile Inspector $npiTag helper ($size bytes, sha256=$actualExeSha256)"

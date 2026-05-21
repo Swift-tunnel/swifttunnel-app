@@ -48,6 +48,14 @@ enum GpuPreferenceRestoreAction {
     LeaveUntouched,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct NvidiaProfileSnapshot {
+    #[serde(default)]
+    applied: bool,
+    #[serde(default)]
+    roblox_profile_xml: Option<String>,
+}
+
 const GPU_PREFERENCE_SNAPSHOT_FILE: &str = "gpu_preference_snapshots.json";
 
 fn gpu_preference_snapshot_path() -> Option<PathBuf> {
@@ -716,16 +724,33 @@ impl RobloxOptimizer {
     // NVIDIA Profile Inspector integration used by Ultraboost. This is
     // deliberately gated to machines that actually report an NVIDIA GPU.
     const NPI_EXE_NAME: &'static str = "nvidiaProfileInspector.exe";
-    const NPI_RELEASE_TAG: &'static str = "2.4.0.31";
-    const NPI_RELEASE_ZIP_URL: &'static str = "https://github.com/Orbmu2k/nvidiaProfileInspector/releases/download/2.4.0.31/nvidiaProfileInspector.zip";
+    const NPI_RELEASE_TAG: &'static str = "v3.0.1.12";
+    const NPI_RELEASE_ZIP_URL: &'static str = "https://github.com/Orbmu2k/nvidiaProfileInspector/releases/download/v3.0.1.12/nvidiaProfileInspector.zip";
     const NPI_RELEASE_ZIP_SHA256: &'static str =
-        "5d692e812a701627edd6d165d0b60175ff4f772c758a7dac869d613e1beb8063";
+        "494065af4ac3e9ce672c95e51e6b8a5301c208b6fed777ee6bbfe755081ba308";
     const NPI_EXE_SHA256: &'static str =
-        "7d5510deeaacb50c88a49bbf1d894dae44c5ce58c00d5a88392346646b14e8f3";
+        "61452518fdd2464313e08589dd6b6e9d00d3fd36c1622e1105884ab1ad7334d4";
+    const NPI_REFERENCE_XML_SHA256: &'static str =
+        "fb19d0ed9a8f1b95caa3675a94f80e2e14ae891c8fe83f164e0bb62513c2bb3f";
+    const NPI_CONFIG_SHA256: &'static str =
+        "051099983b896673909e01a1f631b6652abb88da95c9f06f3efef4be033091fa";
+    const NPI_PDB_SHA256: &'static str =
+        "68ab6fe22594a906e40bb414a76a30106fa1c8d95f778c910f07e194623e7070";
     const NPI_PROFILE_NAME: &'static str = "Roblox";
     const NPI_ROBLOX_EXE: &'static str = "RobloxPlayerBeta.exe";
+    const NPI_IMPORT_TIMEOUT_SECS: u64 = 15;
+    const NPI_EXPORT_TIMEOUT_SECS: u64 = 20;
+    const NVIDIA_PROFILE_SNAPSHOT_FILE: &'static str = "nvidia_profile_snapshot.json";
 
     fn sync_nvidia_profile(enable: bool) -> Result<()> {
+        Self::sync_nvidia_profile_with_policy(enable, true)
+    }
+
+    fn sync_nvidia_profile_startup(enable: bool) -> Result<()> {
+        Self::sync_nvidia_profile_with_policy(enable, false)
+    }
+
+    fn sync_nvidia_profile_with_policy(enable: bool, allow_download: bool) -> Result<()> {
         if !Self::has_nvidia_gpu() {
             info!("Skipping NVIDIA Roblox profile: no NVIDIA GPU detected");
             return Ok(());
@@ -737,29 +762,113 @@ impl RobloxOptimizer {
             ));
         }
 
-        let Some(inspector) = Self::resolve_nvidia_profile_inspector(enable)? else {
-            info!("Skipping NVIDIA Roblox profile reset: helper is not installed");
-            return Ok(());
+        if enable {
+            Self::apply_nvidia_profile(allow_download)
+        } else {
+            Self::reset_nvidia_profile(allow_download)
+        }
+    }
+
+    fn apply_nvidia_profile(allow_download: bool) -> Result<()> {
+        let inspector = Self::resolve_nvidia_profile_inspector(allow_download)?
+            .ok_or_else(|| anyhow::anyhow!("NVIDIA Profile Inspector helper is not installed"))?;
+        let existing_snapshot = Self::read_nvidia_profile_snapshot()?;
+        let had_existing_marker = existing_snapshot.applied;
+        let original_profile_xml = if had_existing_marker {
+            existing_snapshot.roblox_profile_xml
+        } else {
+            Self::capture_nvidia_profile_snapshot(&inspector)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Could not snapshot existing NVIDIA Roblox profile before Ultraboost apply: {}",
+                        e
+                    )
+                })?
+                .roblox_profile_xml
         };
 
-        let profile_path = Self::write_nvidia_potato_profile(enable)?;
-        let output = std::process::Command::new(&inspector)
-            .arg("-silentImport")
-            .arg(&profile_path)
-            .output()?;
+        let snapshot = NvidiaProfileSnapshot {
+            applied: true,
+            roblox_profile_xml: original_profile_xml,
+        };
+        Self::write_nvidia_profile_snapshot(&snapshot)?;
+
+        let profile_path = Self::write_nvidia_potato_profile(true)?;
+        if let Err(e) = Self::run_nvidia_profile_import(&inspector, &profile_path, "apply") {
+            if !had_existing_marker {
+                let _ = Self::clear_nvidia_profile_snapshot();
+            }
+            return Err(e);
+        }
+        info!(
+            "NVIDIA Roblox potato profile applied via {}",
+            inspector.display()
+        );
+        Ok(())
+    }
+
+    fn reset_nvidia_profile(allow_download: bool) -> Result<()> {
+        let snapshot = match Self::read_nvidia_profile_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                warn!(
+                    "NVIDIA profile snapshot is unreadable; falling back to deterministic reset: {}",
+                    e
+                );
+                NvidiaProfileSnapshot {
+                    applied: true,
+                    roblox_profile_xml: None,
+                }
+            }
+        };
+        if !snapshot.applied {
+            info!("Skipping NVIDIA Roblox profile reset: no SwiftTunnel-applied profile marker");
+            return Ok(());
+        }
+
+        let inspector = Self::resolve_nvidia_profile_inspector(allow_download)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "NVIDIA Profile Inspector helper is unavailable; NVIDIA Roblox profile reset remains pending"
+            )
+        })?;
+
+        if let Some(profile_xml) = snapshot.roblox_profile_xml.as_deref() {
+            let restore_path = Self::write_nvidia_profile_restore(profile_xml)?;
+            Self::run_nvidia_profile_import(&inspector, &restore_path, "restore snapshot")?;
+        } else {
+            let reset_path = Self::write_nvidia_potato_profile(false)?;
+            Self::run_nvidia_profile_import(&inspector, &reset_path, "reset")?;
+        }
+
+        Self::clear_nvidia_profile_snapshot()?;
+        info!(
+            "NVIDIA Roblox potato profile reset via {}",
+            inspector.display()
+        );
+        Ok(())
+    }
+
+    fn run_nvidia_profile_import(
+        inspector: &Path,
+        profile_path: &Path,
+        action: &str,
+    ) -> Result<()> {
+        let mut command = std::process::Command::new(inspector);
+        command.arg("-silentImport").arg(profile_path);
+        let output = Self::run_command_with_timeout(
+            command,
+            Self::NPI_IMPORT_TIMEOUT_SECS,
+            "NVIDIA Profile Inspector import",
+        )?;
 
         if output.status.success() {
-            info!(
-                "NVIDIA Roblox potato profile {} via {}",
-                if enable { "applied" } else { "reset" },
-                inspector.display()
-            );
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             Err(anyhow::anyhow!(
-                "NVIDIA Profile Inspector exited with {}: {}{}{}",
+                "NVIDIA Profile Inspector {} exited with {}: {}{}{}",
+                action,
                 output.status,
                 stderr.trim(),
                 if stderr.trim().is_empty() || stdout.trim().is_empty() {
@@ -773,46 +882,19 @@ impl RobloxOptimizer {
     }
 
     fn has_nvidia_gpu() -> bool {
-        let mut names = Vec::new();
-        if let Some(output) = Self::run_nvidia_smi_query() {
-            names.extend(output.lines().map(str::to_string));
-        }
-        if names.is_empty() {
-            if let Some(output) = Self::run_video_controller_query() {
-                names.extend(output.lines().map(str::to_string));
-            }
-        }
-        Self::parse_has_nvidia_gpu(&names.join("\n"))
-    }
-
-    fn run_nvidia_smi_query() -> Option<String> {
-        let mut candidates = Vec::new();
-        if let Some(root) = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("WINDIR")) {
-            candidates.push(PathBuf::from(root).join("System32").join("nvidia-smi.exe"));
-        }
-        candidates.push(PathBuf::from("nvidia-smi.exe"));
-
-        for candidate in candidates {
-            let output = std::process::Command::new(candidate)
-                .args(["--query-gpu=name", "--format=csv,noheader"])
-                .output();
-            if let Ok(output) = output {
-                if output.status.success() {
-                    return Some(String::from_utf8_lossy(&output.stdout).to_string());
-                }
-            }
-        }
-        None
+        let Some(output) = Self::run_video_controller_query() else {
+            return false;
+        };
+        Self::parse_has_nvidia_gpu(&output)
     }
 
     fn run_video_controller_query() -> Option<String> {
-        let output = hidden_command("powershell")
-            .args([
-                "-Command",
-                "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
-            ])
-            .output()
-            .ok()?;
+        let mut command = hidden_command("powershell");
+        command.args([
+            "-Command",
+            "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+        ]);
+        let output = Self::run_command_with_timeout(command, 5, "PowerShell GPU query").ok()?;
         if output.status.success() {
             Some(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
@@ -826,62 +908,8 @@ impl RobloxOptimizer {
             .any(|line| line.to_ascii_lowercase().contains("nvidia"))
     }
 
-    fn resolve_nvidia_profile_inspector(install_if_missing: bool) -> Result<Option<PathBuf>> {
-        if let Some(path) = Self::installed_nvidia_profile_inspector_path()? {
-            return Ok(Some(path));
-        }
-
-        if let Some(staged) = Self::staged_nvidia_profile_inspector_path()? {
-            let target_dir = Self::nvidia_profile_inspector_install_dir()?;
-            Self::copy_directory_contents(
-                staged.parent().ok_or_else(|| {
-                    anyhow::anyhow!("staged NVIDIA Profile Inspector has no parent")
-                })?,
-                &target_dir,
-            )?;
-            let installed = target_dir.join(Self::NPI_EXE_NAME);
-            if installed.is_file() && Self::verify_nvidia_profile_inspector_exe(&installed).is_ok()
-            {
-                return Ok(Some(installed));
-            }
-        }
-
-        if !install_if_missing {
-            return Ok(None);
-        }
-
-        Self::download_nvidia_profile_inspector()?;
-        Self::installed_nvidia_profile_inspector_path()
-    }
-
-    fn installed_nvidia_profile_inspector_path() -> Result<Option<PathBuf>> {
-        let dir = Self::nvidia_profile_inspector_install_dir()?;
-        let exe = dir.join(Self::NPI_EXE_NAME);
-        if !exe.is_file() {
-            return Ok(None);
-        }
-
-        match Self::verify_nvidia_profile_inspector_exe(&exe) {
-            Ok(()) => Ok(Some(exe)),
-            Err(e) => {
-                warn!(
-                    "Ignoring NVIDIA Profile Inspector helper at {}: {}",
-                    exe.display(),
-                    e
-                );
-                Ok(None)
-            }
-        }
-    }
-
-    fn nvidia_profile_inspector_install_dir() -> Result<PathBuf> {
-        dirs::data_local_dir()
-            .map(|path| {
-                path.join("SwiftTunnel")
-                    .join("tools")
-                    .join("nvidiaProfileInspector")
-            })
-            .ok_or_else(|| anyhow::anyhow!("could not resolve local app data directory"))
+    fn resolve_nvidia_profile_inspector(_allow_download: bool) -> Result<Option<PathBuf>> {
+        Self::staged_nvidia_profile_inspector_path()
     }
 
     fn staged_nvidia_profile_inspector_path() -> Result<Option<PathBuf>> {
@@ -909,7 +937,7 @@ impl RobloxOptimizer {
             if !path.is_file() {
                 continue;
             }
-            match Self::verify_nvidia_profile_inspector_exe(&path) {
+            match Self::verify_nvidia_profile_inspector_bundle(&path) {
                 Ok(()) => return Ok(Some(path)),
                 Err(e) => warn!(
                     "Ignoring staged NVIDIA Profile Inspector helper at {}: {}",
@@ -922,101 +950,63 @@ impl RobloxOptimizer {
         Ok(None)
     }
 
-    fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
-        fs::create_dir_all(destination)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let source_path = entry.path();
-            let destination_path = destination.join(entry.file_name());
-            if source_path.is_dir() {
-                Self::copy_directory_contents(&source_path, &destination_path)?;
-            } else {
-                fs::copy(&source_path, &destination_path)?;
-            }
-        }
+    fn verify_nvidia_profile_inspector_bundle(exe_path: &Path) -> Result<()> {
+        Self::verify_file_sha256(
+            exe_path,
+            Self::NPI_EXE_SHA256,
+            "NVIDIA Profile Inspector executable",
+        )?;
+        let dir = exe_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("NVIDIA Profile Inspector executable has no parent"))?;
+        Self::verify_file_sha256(
+            &dir.join("Reference.xml"),
+            Self::NPI_REFERENCE_XML_SHA256,
+            "NVIDIA Profile Inspector Reference.xml",
+        )?;
+        Self::verify_file_sha256(
+            &dir.join("nvidiaProfileInspector.exe.config"),
+            Self::NPI_CONFIG_SHA256,
+            "NVIDIA Profile Inspector config",
+        )?;
+        Self::verify_file_sha256(
+            &dir.join("nvidiaProfileInspector.pdb"),
+            Self::NPI_PDB_SHA256,
+            "NVIDIA Profile Inspector PDB",
+        )?;
+        Self::reject_unexpected_nvidia_profile_inspector_files(dir)?;
         Ok(())
     }
 
-    fn download_nvidia_profile_inspector() -> Result<()> {
-        let install_dir = Self::nvidia_profile_inspector_install_dir()?;
-        let zip_path = install_dir.with_extension("zip");
-        fs::create_dir_all(&install_dir)?;
-        let install_dir_str = Self::escape_powershell_single_quoted(&install_dir.to_string_lossy());
-        let zip_path_str = Self::escape_powershell_single_quoted(&zip_path.to_string_lossy());
-        let url = Self::NPI_RELEASE_ZIP_URL;
+    fn reject_unexpected_nvidia_profile_inspector_files(dir: &Path) -> Result<()> {
+        const ALLOWED: &[&str] = &[
+            "README.md",
+            "Reference.xml",
+            "nvidiaProfileInspector.exe",
+            "nvidiaProfileInspector.exe.config",
+            "nvidiaProfileInspector.pdb",
+        ];
 
-        let script = format!(
-            "$ErrorActionPreference='Stop'; \
-             $ProgressPreference='SilentlyContinue'; \
-             $zip='{zip_path_str}'; \
-             Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; \
-             Invoke-WebRequest -Uri '{url}' -OutFile $zip -UseBasicParsing",
-            zip_path_str = zip_path_str,
-            url = url,
-        );
-
-        let output = hidden_command("powershell")
-            .args(["-Command", &script])
-            .output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!(
-                "download failed with {}: {}",
-                output.status,
-                stderr.trim()
-            ));
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                return Err(anyhow::anyhow!(
+                    "NVIDIA Profile Inspector directory contains a non-UTF-8 entry: {}",
+                    path.display()
+                ));
+            };
+            if !ALLOWED
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
+            {
+                return Err(anyhow::anyhow!(
+                    "NVIDIA Profile Inspector directory contains unexpected file {}; refusing elevated helper execution",
+                    path.display()
+                ));
+            }
         }
-
-        Self::verify_file_sha256(
-            &zip_path,
-            Self::NPI_RELEASE_ZIP_SHA256,
-            "NVIDIA Profile Inspector release zip",
-        )?;
-
-        let script = format!(
-            "$ErrorActionPreference='Stop'; \
-             $dest='{install_dir_str}'; \
-             $zip='{zip_path_str}'; \
-             Expand-Archive -LiteralPath $zip -DestinationPath $dest -Force; \
-             Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; \
-             $rootExe = Join-Path $dest '{exe}'; \
-             if (-not (Test-Path -LiteralPath $rootExe)) {{ \
-               $found = Get-ChildItem -Path $dest -Recurse -Filter '{exe}' -File | Select-Object -First 1; \
-               if ($found) {{ Copy-Item -LiteralPath $found.FullName -Destination $rootExe -Force }} \
-             }}; \
-             if (-not (Test-Path -LiteralPath $rootExe)) {{ throw 'nvidiaProfileInspector.exe missing after extraction' }}",
-            install_dir_str = install_dir_str,
-            zip_path_str = zip_path_str,
-            exe = Self::NPI_EXE_NAME
-        );
-
-        let output = hidden_command("powershell")
-            .args(["-Command", &script])
-            .output()?;
-        if output.status.success() {
-            Self::verify_nvidia_profile_inspector_exe(&install_dir.join(Self::NPI_EXE_NAME))?;
-            info!(
-                "Installed NVIDIA Profile Inspector {} helper to {}",
-                Self::NPI_RELEASE_TAG,
-                install_dir.display()
-            );
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow::anyhow!(
-                "extract failed with {}: {}",
-                output.status,
-                stderr.trim()
-            ))
-        }
-    }
-
-    fn verify_nvidia_profile_inspector_exe(path: &Path) -> Result<()> {
-        Self::verify_file_sha256(
-            path,
-            Self::NPI_EXE_SHA256,
-            "NVIDIA Profile Inspector executable",
-        )
+        Ok(())
     }
 
     fn verify_file_sha256(path: &Path, expected: &str, label: &str) -> Result<()> {
@@ -1050,10 +1040,142 @@ impl RobloxOptimizer {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    fn write_nvidia_potato_profile(enable: bool) -> Result<PathBuf> {
-        let dir = dirs::data_local_dir()
+    fn capture_nvidia_profile_snapshot(inspector: &Path) -> Result<NvidiaProfileSnapshot> {
+        let Some(inspector_dir) = inspector.parent() else {
+            return Ok(NvidiaProfileSnapshot::default());
+        };
+
+        let before = std::time::SystemTime::now();
+        let mut command = std::process::Command::new(inspector);
+        command.arg("-exportCustomized").current_dir(inspector_dir);
+        let output = Self::run_command_with_timeout(
+            command,
+            Self::NPI_EXPORT_TIMEOUT_SECS,
+            "NVIDIA Profile Inspector export",
+        )?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "profile export failed with {}: {}",
+                output.status,
+                stderr.trim()
+            ));
+        }
+
+        let Some(export_path) = Self::latest_npi_export(inspector_dir, before)? else {
+            return Err(anyhow::anyhow!(
+                "NVIDIA Profile Inspector export produced no CustomProfiles_*.nip file"
+            ));
+        };
+        let content = Self::read_text_file_lossy(&export_path)?;
+        let roblox_profile_xml = Self::extract_nvidia_profile_xml(&content, Self::NPI_PROFILE_NAME);
+        let _ = fs::remove_file(export_path);
+        Ok(NvidiaProfileSnapshot {
+            applied: false,
+            roblox_profile_xml,
+        })
+    }
+
+    fn latest_npi_export(dir: &Path, since: std::time::SystemTime) -> Result<Option<PathBuf>> {
+        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("CustomProfiles_") || !name.ends_with(".nip") {
+                continue;
+            }
+            let modified = entry.metadata()?.modified()?;
+            if modified < since {
+                continue;
+            }
+            if newest
+                .as_ref()
+                .map(|(best, _)| modified > *best)
+                .unwrap_or(true)
+            {
+                newest = Some((modified, path));
+            }
+        }
+        Ok(newest.map(|(_, path)| path))
+    }
+
+    fn extract_nvidia_profile_xml(content: &str, profile_name: &str) -> Option<String> {
+        let mut search_from = 0;
+        while let Some(relative_start) = content[search_from..].find("<Profile>") {
+            let start = search_from + relative_start;
+            let Some(relative_end) = content[start..].find("</Profile>") else {
+                break;
+            };
+            let end = start + relative_end + "</Profile>".len();
+            let profile = &content[start..end];
+            if profile.contains(&format!("<ProfileName>{}</ProfileName>", profile_name)) {
+                return Some(profile.to_string());
+            }
+            search_from = end;
+        }
+        None
+    }
+
+    fn nvidia_profile_snapshot_path() -> Result<PathBuf> {
+        dirs::data_local_dir()
+            .map(|path| {
+                path.join("SwiftTunnel")
+                    .join(Self::NVIDIA_PROFILE_SNAPSHOT_FILE)
+            })
+            .ok_or_else(|| anyhow::anyhow!("could not resolve local app data directory"))
+    }
+
+    fn read_nvidia_profile_snapshot() -> Result<NvidiaProfileSnapshot> {
+        let path = Self::nvidia_profile_snapshot_path()?;
+        if !path.exists() {
+            return Ok(NvidiaProfileSnapshot::default());
+        }
+        let content = fs::read_to_string(path)?;
+        serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse NVIDIA profile snapshot: {}", e))
+    }
+
+    fn write_nvidia_profile_snapshot(snapshot: &NvidiaProfileSnapshot) -> Result<()> {
+        let path = Self::nvidia_profile_snapshot_path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(snapshot)?)?;
+        Ok(())
+    }
+
+    fn clear_nvidia_profile_snapshot() -> Result<()> {
+        let path = Self::nvidia_profile_snapshot_path()?;
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn write_nvidia_profile_restore(profile_xml: &str) -> Result<PathBuf> {
+        let dir = Self::nvidia_profile_dir()?;
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("roblox-potato-mode-restore.nip");
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-16\"?>\r\n<ArrayOfProfile>\r\n{}\r\n</ArrayOfProfile>\r\n",
+            profile_xml
+        );
+        Self::write_utf16le(&path, &xml)?;
+        Ok(path)
+    }
+
+    fn nvidia_profile_dir() -> Result<PathBuf> {
+        dirs::data_local_dir()
             .map(|path| path.join("SwiftTunnel").join("nvidia-profiles"))
-            .ok_or_else(|| anyhow::anyhow!("could not resolve local app data directory"))?;
+            .ok_or_else(|| anyhow::anyhow!("could not resolve local app data directory"))
+    }
+
+    fn write_nvidia_potato_profile(enable: bool) -> Result<PathBuf> {
+        let dir = Self::nvidia_profile_dir()?;
         fs::create_dir_all(&dir)?;
         let path = dir.join(if enable {
             "roblox-potato-mode.nip"
@@ -1126,6 +1248,55 @@ impl RobloxOptimizer {
         }
         fs::write(path, bytes)?;
         Ok(())
+    }
+
+    fn read_text_file_lossy(path: &Path) -> Result<String> {
+        let bytes = fs::read(path)?;
+        if bytes.starts_with(&[0xFF, 0xFE]) {
+            let units = bytes[2..]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>();
+            Ok(String::from_utf16_lossy(&units))
+        } else if bytes.starts_with(&[0xFE, 0xFF]) {
+            let units = bytes[2..]
+                .chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>();
+            Ok(String::from_utf16_lossy(&units))
+        } else {
+            Ok(String::from_utf8_lossy(&bytes).to_string())
+        }
+    }
+
+    fn run_command_with_timeout(
+        mut command: std::process::Command,
+        timeout_secs: u64,
+        label: &str,
+    ) -> Result<std::process::Output> {
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn()?;
+        let start = Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        loop {
+            if child.try_wait()?.is_some() {
+                return Ok(child.wait_with_output()?);
+            }
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!(
+                    "{} timed out after {}s",
+                    label,
+                    timeout_secs
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     fn escape_powershell_single_quoted(value: &str) -> String {
@@ -2183,7 +2354,7 @@ impl RobloxOptimizer {
     /// Reapply saved Ultraboost client-side state after Roblox creates a new version folder.
     pub fn reapply_saved_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<()> {
         self.apply_client_fflags(config)?;
-        if let Err(e) = Self::sync_nvidia_profile(config.ultraboost) {
+        if let Err(e) = Self::sync_nvidia_profile_startup(config.ultraboost) {
             warn!(
                 "Could not sync NVIDIA Roblox potato profile on startup reapply: {}",
                 e
@@ -3617,6 +3788,41 @@ HKEY_CURRENT_USER\SOFTWARE\Microsoft\DirectX\UserGpuPreferences
     fn npi_release_url_is_pinned() {
         assert!(RobloxOptimizer::NPI_RELEASE_ZIP_URL.contains(RobloxOptimizer::NPI_RELEASE_TAG));
         assert!(!RobloxOptimizer::NPI_RELEASE_ZIP_URL.contains("/latest/"));
+    }
+
+    #[test]
+    fn extract_nvidia_profile_xml_selects_only_roblox_profile() {
+        let exported = r#"<?xml version="1.0" encoding="utf-16"?>
+<ArrayOfProfile>
+  <Profile>
+    <ProfileName>Other Game</ProfileName>
+    <Settings></Settings>
+  </Profile>
+  <Profile>
+    <ProfileName>Roblox</ProfileName>
+    <Executeables><string>RobloxPlayerBeta.exe</string></Executeables>
+    <Settings><ProfileSetting><SettingID>7573135</SettingID></ProfileSetting></Settings>
+  </Profile>
+</ArrayOfProfile>"#;
+
+        let profile = RobloxOptimizer::extract_nvidia_profile_xml(exported, "Roblox").unwrap();
+        assert!(profile.contains("<ProfileName>Roblox</ProfileName>"));
+        assert!(profile.contains("<SettingID>7573135</SettingID>"));
+        assert!(!profile.contains("Other Game"));
+    }
+
+    #[test]
+    fn nvidia_profile_snapshot_roundtrips_optional_roblox_profile() {
+        let snapshot = NvidiaProfileSnapshot {
+            applied: true,
+            roblox_profile_xml: Some(
+                "<Profile><ProfileName>Roblox</ProfileName></Profile>".to_string(),
+            ),
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let roundtrip: NvidiaProfileSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, snapshot);
     }
 
     #[test]
