@@ -439,11 +439,11 @@ pub mod boost_info {
     pub const ULTRABOOST: BoostInfo = BoostInfo {
         id: "ultraboost",
         title: "Ultraboost",
-        short_desc: "Max performance FFlags",
-        long_desc: "Applies curated Roblox-allowlisted performance FFlags for maximum FPS. Forces D3D11 with minimum texture, render quality, anti-aliasing, sky, and grass settings while avoiding high-DPI sharpness flags that can cost frames.",
+        short_desc: "Max performance Roblox preset",
+        long_desc: "Applies curated Roblox-allowlisted performance FFlags for maximum FPS. Forces D3D11 with minimum texture quality, 1x anti-aliasing, lowest render quality, gray sky, and zero grass distance while avoiding high-DPI sharpness flags that can cost frames. On NVIDIA GPUs, also applies a reversible NVIDIA Profile Inspector texture-filtering profile for extra potato graphics.",
         impact: "Maximum FPS preset",
         risk_level: RiskLevel::Safe,
-        requires_admin: false,
+        requires_admin: true,
     };
 
     /// Get all system boost infos
@@ -752,9 +752,13 @@ mod tests {
             !boost_info::GAME_MODE.requires_admin,
             "Game mode writes to HKCU, no admin needed"
         );
+    }
+
+    #[test]
+    fn test_ultraboost_requires_admin_for_nvidia_profile_import() {
         assert!(
-            !boost_info::ULTRABOOST.requires_admin,
-            "Ultraboost writes to user files, no admin needed"
+            boost_info::ULTRABOOST.requires_admin,
+            "Ultraboost imports an NVIDIA Profile Inspector profile on NVIDIA GPUs"
         );
     }
 }

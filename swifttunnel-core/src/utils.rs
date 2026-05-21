@@ -46,11 +46,30 @@ fn is_powershell_program(program: &str) -> bool {
 
 #[cfg(windows)]
 fn resolve_windows_command_path(program: &str) -> PathBuf {
-    let system_root = std::env::var_os("SystemRoot")
-        .or_else(|| std::env::var_os("WINDIR"))
-        .map(PathBuf::from);
-
+    // Do not trust SystemRoot/WINDIR from the process environment here. The
+    // desktop app runs elevated, so environment-controlled system-tool
+    // resolution would turn `hidden_command("powershell")` into an elevated
+    // PATH/root hijack. Ask kernel32 for the real System32 directory instead
+    // and derive the Windows root from that trusted path.
+    let system_root = trusted_windows_root();
     resolve_windows_command_path_with_root(program, system_root.as_deref())
+}
+
+#[cfg(windows)]
+fn trusted_windows_root() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buffer = [0u16; 260];
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+    if len == 0 || len > buffer.len() {
+        return None;
+    }
+
+    PathBuf::from(OsString::from_wide(&buffer[..len]))
+        .parent()
+        .map(|path| path.to_path_buf())
 }
 
 #[cfg(windows)]

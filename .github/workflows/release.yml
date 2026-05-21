@@ -422,6 +422,58 @@ jobs:
           Expand-WinpkFilterPackage -MsiPath $x64Path -Arch "x64"
           Expand-WinpkFilterPackage -MsiPath $arm64Path -Arch "arm64"
 
+      - name: Prepare bundled NVIDIA Profile Inspector helper
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Ultraboost's NVIDIA-only Roblox potato profile is imported through
+          # NVIDIA Profile Inspector. Ship the helper in updater/MSI resources
+          # so existing Ultraboost users receive it with the app update.
+          $npiTag = "v3.0.1.12"
+          $expectedZipSha256 = "494065af4ac3e9ce672c95e51e6b8a5301c208b6fed777ee6bbfe755081ba308"
+          $expectedExeSha256 = "61452518fdd2464313e08589dd6b6e9d00d3fd36c1622e1105884ab1ad7334d4"
+          $toolsDir = "swifttunnel-desktop/src-tauri/resources/tools/nvidiaProfileInspector"
+          $downloadDir = Join-Path $env:RUNNER_TEMP "nvidiaProfileInspector-download"
+          $extractDir = Join-Path $env:RUNNER_TEMP "nvidiaProfileInspector-extract"
+          Remove-Item -Path $toolsDir -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+
+          gh release download $npiTag --repo Orbmu2k/nvidiaProfileInspector --pattern "nvidiaProfileInspector.zip" --dir $downloadDir --clobber
+          $zipPath = Join-Path $downloadDir "nvidiaProfileInspector.zip"
+          if (-not (Test-Path $zipPath)) {
+            throw "Missing nvidiaProfileInspector.zip after release download"
+          }
+          $actualZipSha256 = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+          if ($actualZipSha256 -ne $expectedZipSha256) {
+            throw "nvidiaProfileInspector.zip failed SHA-256 check: expected $expectedZipSha256, got $actualZipSha256"
+          }
+
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $extractDir -Force
+          $exe = Get-ChildItem -Path $extractDir -Recurse -Filter "nvidiaProfileInspector.exe" -File |
+            Select-Object -First 1
+          if (-not $exe) {
+            throw "nvidiaProfileInspector.zip did not contain nvidiaProfileInspector.exe"
+          }
+
+          Copy-Item -Path (Join-Path $exe.Directory.FullName "*") -Destination $toolsDir -Recurse -Force
+
+          $bundledExe = Join-Path $toolsDir "nvidiaProfileInspector.exe"
+          $actualExeSha256 = (Get-FileHash -Path $bundledExe -Algorithm SHA256).Hash.ToLower()
+          if ($actualExeSha256 -ne $expectedExeSha256) {
+            throw "nvidiaProfileInspector.exe failed SHA-256 check: expected $expectedExeSha256, got $actualExeSha256"
+          }
+
+          $size = (Get-Item $bundledExe).Length
+          if ($size -lt 900000) {
+            throw "nvidiaProfileInspector.exe is suspiciously small ($size bytes)"
+          }
+          Write-Host "Bundled NVIDIA Profile Inspector $npiTag helper ($size bytes, sha256=$actualExeSha256)"
+
       - name: Verify updater signing secrets
         shell: powershell
         env:
