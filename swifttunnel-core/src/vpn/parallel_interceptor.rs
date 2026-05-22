@@ -4752,6 +4752,10 @@ fn forward_tunneled_packet_from_reader(
         relay.relay_health(),
         super::udp_relay::RelayHealthState::Dead
     ) {
+        if auto_routing_must_not_bypass_physical(data, auto_router) {
+            return ReaderTunnelAction::Consumed;
+        }
+
         let event = READER_DIRECT_RELAY_BYPASS.fetch_add(1, Ordering::Relaxed) + 1;
         if event <= 5 || event.is_power_of_two() {
             log::warn!(
@@ -4798,6 +4802,9 @@ fn forward_tunneled_packet_from_reader(
                 );
             }
             if queue_overflow_action(queue_overflow_mode, data) == QueueFullAction::Bypass {
+                if auto_routing_must_not_bypass_physical(data, auto_router) {
+                    return ReaderTunnelAction::Consumed;
+                }
                 return ReaderTunnelAction::BypassPhysical;
             }
         }
@@ -5240,18 +5247,23 @@ fn run_packet_reader(
                         api_tunneling,
                     );
 
-                    // Auto-routing whitelist bypass: if bypass is active, tunnel-eligible packets
-                    // should be passed through to the physical adapter instead.
-                    let auto_routing_bypass =
-                        should_tunnel && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
-
                     if auto_routing_packet_action(data, auto_router.as_ref(), should_tunnel)
                         == AutoRoutingPacketAction::Hold
                     {
                         continue;
                     }
 
+                    // Auto-routing whitelist bypass: compute this after candidate
+                    // evaluation because a fresh unclassified handoff can clear bypass
+                    // to fail closed through SwiftTunnel instead of leaking direct.
+                    let auto_routing_bypass = should_tunnel
+                        && auto_router.as_ref().map_or(false, |r| r.is_bypassed())
+                        && !auto_routing_must_not_bypass_physical(data, auto_router.as_ref());
+
                     if !should_tunnel || auto_routing_bypass {
+                        if auto_routing_must_not_bypass_physical(data, auto_router.as_ref()) {
+                            continue;
+                        }
                         // Batch passthrough (much cheaper than per-packet bypass reinjection).
                         let _ = passthrough_to_adapter.push(&packets[i]);
 
@@ -5312,8 +5324,9 @@ fn run_packet_reader(
                             QueueOverflowMode::from_u8(queue_overflow_mode.load(Ordering::Relaxed));
                         match queue_overflow_action(mode, data) {
                             QueueFullAction::Bypass => {
-                                if auto_routing_packet_action(data, auto_router.as_ref(), false)
-                                    == AutoRoutingPacketAction::Hold
+                                if auto_routing_must_not_bypass_physical(data, auto_router.as_ref())
+                                    || auto_routing_packet_action(data, auto_router.as_ref(), false)
+                                        == AutoRoutingPacketAction::Hold
                                 {
                                     let event =
                                         queue_full_events.fetch_add(1, Ordering::Relaxed) + 1;
@@ -5496,17 +5509,18 @@ fn run_packet_worker(
                 );
             }
 
-            // Auto-routing whitelist bypass: if the current game region is whitelisted,
-            // game packets that would normally be tunneled are passed through to the
-            // real adapter instead. Lock-free AtomicBool check (<1ns overhead).
-            let auto_routing_bypass =
-                should_tunnel && auto_router.as_ref().map_or(false, |r| r.is_bypassed());
-
             if auto_routing_packet_action(&work.data, auto_router.as_ref(), should_tunnel)
                 == AutoRoutingPacketAction::Hold
             {
                 continue;
             }
+
+            // Auto-routing whitelist bypass: compute this after candidate evaluation
+            // because a fresh unclassified handoff can clear bypass to fail closed
+            // through SwiftTunnel instead of leaking direct.
+            let auto_routing_bypass = should_tunnel
+                && auto_router.as_ref().map_or(false, |r| r.is_bypassed())
+                && !auto_routing_must_not_bypass_physical(&work.data, auto_router.as_ref());
 
             if should_tunnel && !auto_routing_bypass {
                 stats.packets_tunneled.fetch_add(1, Ordering::Relaxed);
@@ -5641,7 +5655,12 @@ fn run_packet_worker(
                             if queue_overflow_action(mode, work.data.as_slice())
                                 == QueueFullAction::Bypass
                             {
-                                send_bypass_packet(&driver, &adapters, &work);
+                                if !auto_routing_must_not_bypass_physical(
+                                    work.data.as_slice(),
+                                    auto_router.as_ref(),
+                                ) {
+                                    send_bypass_packet(&driver, &adapters, &work);
+                                }
                             } else if relay_fail <= 10 || relay_fail % 100 == 0 {
                                 log::warn!(
                                     "Worker {}: V3 relay sender backpressure, dropping tunnel packet ({} total)",
@@ -5688,14 +5707,26 @@ fn run_packet_worker(
                 } else {
                     // Either no relay context, or the relay is marked Dead —
                     // forward to the physical adapter (bypass) so the game
-                    // isn't silently drop-forwarded to nowhere.
-                    send_bypass_packet(&driver, &adapters, &work);
+                    // isn't silently drop-forwarded to nowhere. Auto-routing
+                    // fail-closed candidates are the exception: they must not
+                    // leak direct while their region/auth state is unresolved.
+                    if !auto_routing_must_not_bypass_physical(
+                        work.data.as_slice(),
+                        auto_router.as_ref(),
+                    ) {
+                        send_bypass_packet(&driver, &adapters, &work);
+                    }
                 }
             } else {
                 stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
                 stats
                     .bytes_bypassed
                     .fetch_add(packet_len, Ordering::Relaxed);
+
+                if auto_routing_must_not_bypass_physical(work.data.as_slice(), auto_router.as_ref())
+                {
+                    continue;
+                }
 
                 // CRITICAL FIX: Forward bypass packets to adapter
                 // Previously this was missing, causing all non-tunnel traffic to be dropped!
@@ -6619,6 +6650,19 @@ fn auto_routing_candidate_dst_ip(data: &[u8]) -> Option<Ipv4Addr> {
 /// packet to the destination, which catches fragments and queue-overflow races without
 /// starting lookups for unrelated traffic.
 #[inline(always)]
+fn auto_routing_must_not_bypass_physical(
+    data: &[u8],
+    auto_router: Option<&Arc<super::auto_routing::AutoRouter>>,
+) -> bool {
+    let Some(auto_router) = auto_router else {
+        return false;
+    };
+    let Some(dst_ip) = parse_ipv4_dst_ip(data) else {
+        return false;
+    };
+    is_roblox_game_server_ip(dst_ip) && auto_router.must_not_bypass_physical(dst_ip)
+}
+
 fn auto_routing_packet_action(
     data: &[u8],
     auto_router: Option<&Arc<super::auto_routing::AutoRouter>>,
@@ -9974,10 +10018,98 @@ mod tests {
             AutoRoutingPacketAction::Hold
         );
         assert!(router.is_lookup_pending(dst_ip));
-        let (queued_ip, generation, _session_epoch) =
-            rx.try_recv().expect("lookup should be queued");
-        assert_eq!(queued_ip, dst_ip);
-        assert_eq!(generation, 1);
+        let lookup = rx.try_recv().expect("lookup should be queued");
+        assert_eq!(lookup.ip, dst_ip);
+        assert_eq!(lookup.generation, 1);
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_suppresses_fresh_candidate_then_holds_stale_handoff() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        router.set_lookup_channel(tx);
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 210);
+        let active_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let next_ip = Ipv4Addr::new(128, 116, 55, 100);
+        let active_frame = build_ipv4_frame(17, src_ip, active_ip, 53020, 54020);
+        let next_frame = build_ipv4_frame(17, src_ip, next_ip, 53021, 54021);
+
+        assert_eq!(
+            auto_routing_packet_action(&active_frame, Some(&router), true),
+            AutoRoutingPacketAction::Hold
+        );
+        let _ = rx.try_recv().expect("active lookup should be queued");
+        assert!(router.pin_active_game_server(active_ip));
+        router.clear_pending_lookup(active_ip);
+
+        assert_eq!(
+            auto_routing_packet_action(&next_frame, Some(&router), true),
+            AutoRoutingPacketAction::Pass,
+            "fresh active server should suppress route churn without holding packets"
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(next_ip));
+
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert_eq!(
+            auto_routing_packet_action(&next_frame, Some(&router), true),
+            AutoRoutingPacketAction::Hold,
+            "stale active server should allow a real handoff and hold first packets"
+        );
+        let lookup = rx.try_recv().expect("handoff lookup should be queued");
+        assert_eq!(lookup.ip, next_ip);
+        assert!(router.is_lookup_pending(next_ip));
+    }
+
+    #[test]
+    fn test_auto_routing_packet_action_clears_bypass_for_fresh_unclassified_handoff() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
+        router.set_lookup_channel(tx);
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+        router.set_available_servers(vec![
+            (
+                "singapore".to_string(),
+                "54.255.205.216:51821".parse().unwrap(),
+                Some(10),
+            ),
+            (
+                "us-east-nj".to_string(),
+                "198.51.100.10:51821".parse().unwrap(),
+                Some(200),
+            ),
+        ]);
+        router.set_whitelisted_regions(vec!["Singapore".to_string()]);
+        assert!(
+            router
+                .get_best_server_for_region(&crate::geolocation::RobloxRegion::Singapore)
+                .is_none()
+        );
+        assert!(router.is_bypassed());
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 210);
+        let active_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let next_ip = Ipv4Addr::new(128, 116, 55, 100);
+        assert!(router.pin_active_game_server(active_ip));
+
+        let next_frame = build_ipv4_frame(17, src_ip, next_ip, 53021, 54021);
+        assert_eq!(
+            auto_routing_packet_action(&next_frame, Some(&router), true),
+            AutoRoutingPacketAction::Pass,
+            "fresh different game-server candidate should not hold packets"
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(next_ip));
+        assert!(
+            !router.is_bypassed(),
+            "bypass must fail closed until the handoff candidate is classified"
+        );
+        assert!(
+            router.must_not_bypass_physical(next_ip),
+            "unclassified handoff candidates must not use physical bypass under relay backpressure"
+        );
     }
 
     #[test]

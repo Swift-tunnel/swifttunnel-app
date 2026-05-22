@@ -63,7 +63,7 @@ Built-in performance optimizations:
 - Banned accounts are blocked in-app and trigger best-effort cleanup of saved VPN, Roblox, network, and system boosts.
 
 ### 🌍 Auto Region Detection
-Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected and still complete the relay-ticket handshake, drained relays are excluded through `/api/vpn/servers`, stale lookups cannot switch after a newer game-server IP, and live ping-test refreshes keep Auto Route's server choices current while connected.
+Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected and still complete relay-ticket auth, drained relays are excluded through `/api/vpn/servers`, stale lookup results cannot switch after a newer game-server IP or VPN reset, and live ping-test refreshes keep Auto Route's server choices current while connected. During same-session Roblox refreshes/teleports, the current game-server IP stays pinned while traffic is fresh; once it goes quiet, a newly observed game-server IP can be held, resolved, relay-ticket authenticated, and accepted as the active route without reconnecting.
 
 ---
 

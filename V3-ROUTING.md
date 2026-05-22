@@ -110,7 +110,8 @@ pub struct UdpRelay {
 - Initial Auto Route connects to the region with the best measured in-app ping-test latency when latency data exists; otherwise it falls back to the requested/last selected region.
 - If the requested region has a manual server pin, Auto Route starts there and uses the pinned server. Pinned regions are scored by the pinned server's latency, not by another sibling server.
 - The periodic server ping test updates the live auto-router candidate snapshot, so relay switches use the same fresh latency data shown in the UI.
-- After Roblox game-server region detection, the auto-router still targets the matching SwiftTunnel region and picks the lowest-latency relay inside that region, honoring any forced server override.
+- After Roblox game-server region detection, the auto-router targets the matching SwiftTunnel region and picks the lowest-latency relay inside that region, honoring any forced server override.
+- The active game-server IP is kept pinned while traffic to it remains fresh. A different Roblox game-server IP is suppressed during active play to avoid route churn; after the prior server is quiet for a short handoff window, the packet-observed candidate is held, resolved, relay-ticket authenticated when the session is in authenticated relay mode, and only then accepted as the active route. Resolver failures, stale generations/session epochs, auth failures, and rate-limited switch commits release the hold and make the candidate retryable instead of pinning a bad route.
 
 ### Roblox Process Identity
 - Win32 Roblox player/studio executables are matched by exact process stem or known Roblox alias only; broad substring matches are not tunnel signals.

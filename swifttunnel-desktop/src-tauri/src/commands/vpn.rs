@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::events::{SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent};
 use crate::state::AppState;
-use swifttunnel_core::auth::types::AuthError;
+use swifttunnel_core::auth::types::{AuthError, AuthState};
 use swifttunnel_core::settings::AdapterBindingMode;
 use swifttunnel_core::vpn::{
     AdapterBindingPreference, BindingPreferenceSource, BindingPreflightInfo, VpnError,
@@ -409,6 +409,15 @@ pub async fn vpn_connect(
         settings_snapshot.game_process_performance,
         settings_snapshot.enable_api_tunneling,
     );
+    if custom_relay.is_some() {
+        let is_tester = {
+            let auth = state.auth_manager.lock().await;
+            matches!(auth.get_state(), AuthState::LoggedIn(session) if session.user.is_tester)
+        };
+        if !is_tester {
+            return Err("Custom relay servers are only available to tester accounts".to_string());
+        }
+    }
     if custom_relay.is_some() && auto_routing {
         log::info!("Auto-routing disabled for this session because custom_relay_server is set");
         auto_routing = false;

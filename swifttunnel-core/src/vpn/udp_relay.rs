@@ -36,6 +36,7 @@ const PONG_FRAME_LEN: usize = SESSION_ID_LEN + 1 + 4 + 8 + 8;
 const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(1500);
 const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(250);
 const AUTH_HANDSHAKE_ATTEMPTS: usize = 4;
+const AUTH_ACK_INBOX_CAPACITY: usize = 16;
 
 /// Outer path MTU for relay packets (client <-> relay).
 ///
@@ -316,6 +317,7 @@ pub enum RelayAuthAckStatus {
     SidMismatch = 4,
     ServerMismatch = 5,
     AuthDisabled = 6,
+    Replay = 7,
 }
 
 impl RelayAuthAckStatus {
@@ -328,6 +330,7 @@ impl RelayAuthAckStatus {
             4 => Some(Self::SidMismatch),
             5 => Some(Self::ServerMismatch),
             6 => Some(Self::AuthDisabled),
+            7 => Some(Self::Replay),
             _ => None,
         }
     }
@@ -341,6 +344,7 @@ impl RelayAuthAckStatus {
             Self::SidMismatch => "sid_mismatch",
             Self::ServerMismatch => "server_mismatch",
             Self::AuthDisabled => "auth_disabled",
+            Self::Replay => "replay",
         }
     }
 }
@@ -551,6 +555,17 @@ pub struct UdpRelay {
     outbound_pool: Arc<OutboundPool>,
     outbound_tx: channel::Sender<OutboundJob>,
     ping: Arc<PingMetrics>,
+    /// Auth ACKs observed by the inbound receiver thread.
+    ///
+    /// Initial connect authenticates before the inbound receiver starts and can read
+    /// the socket directly. Runtime auto-route switches authenticate while that
+    /// receiver owns the socket, so control ACKs are captured here instead of
+    /// being swallowed as non-packet frames.
+    auth_ack_inbox: parking_lot::Mutex<VecDeque<(SocketAddr, RelayAuthAckStatus)>>,
+    /// Candidate relay currently allowed to send auth ACKs before becoming the
+    /// data-path relay. Runtime auto-route auth uses this so data packets are
+    /// not sent to an unauthenticated relay while the handshake is still pending.
+    pending_auth_relay_addr: parking_lot::Mutex<Option<SocketAddr>>,
     /// Relay health state — shared with connection manager for silent disconnect detection.
     relay_health: Arc<AtomicU8>,
     /// Consecutive keepalives sent without receiving any inbound traffic.
@@ -882,6 +897,10 @@ impl UdpRelay {
             outbound_pool,
             outbound_tx,
             ping,
+            auth_ack_inbox: parking_lot::Mutex::new(VecDeque::with_capacity(
+                AUTH_ACK_INBOX_CAPACITY,
+            )),
+            pending_auth_relay_addr: parking_lot::Mutex::new(None),
             relay_health,
             unanswered_keepalives: AtomicU32::new(0),
             inject_error_streak: AtomicU32::new(0),
@@ -1139,9 +1158,7 @@ impl UdpRelay {
         false
     }
 
-    /// Send relay auth hello frame:
-    /// [session_id:8][0xA1][token_len:2][token_utf8].
-    pub fn send_auth_hello(&self, token: &str) -> Result<()> {
+    fn send_auth_hello_to(&self, relay_addr: SocketAddr, token: &str) -> Result<()> {
         let token_bytes = token.as_bytes();
         if token_bytes.is_empty() || token_bytes.len() > u16::MAX as usize {
             anyhow::bail!(
@@ -1156,17 +1173,92 @@ impl UdpRelay {
         frame.extend_from_slice(&(token_bytes.len() as u16).to_be_bytes());
         frame.extend_from_slice(token_bytes);
 
-        let current_addr = **self.relay_addr.load();
         self.socket
-            .send_to(&frame, current_addr)
+            .send_to(&frame, relay_addr)
             .context("Failed to send relay auth hello")?;
         log::debug!(
             "UDP Relay: Sent auth hello to {} (session {:016x}, token {} bytes)",
-            current_addr,
+            relay_addr,
             self.session_id_u64(),
             token_bytes.len()
         );
         Ok(())
+    }
+
+    /// Send relay auth hello frame:
+    /// [session_id:8][0xA1][token_len:2][token_utf8].
+    pub fn send_auth_hello(&self, token: &str) -> Result<()> {
+        let current_addr = **self.relay_addr.load();
+        self.send_auth_hello_to(current_addr, token)
+    }
+
+    fn parse_auth_ack_frame(&self, frame: &[u8], len: usize) -> Option<RelayAuthAckStatus> {
+        if len < SESSION_ID_LEN + 2 {
+            return None;
+        }
+        if frame[..SESSION_ID_LEN] != self.session_id {
+            return None;
+        }
+        if frame[SESSION_ID_LEN] != AUTH_ACK_FRAME_TYPE {
+            return None;
+        }
+
+        Some(
+            RelayAuthAckStatus::from_u8(frame[SESSION_ID_LEN + 1])
+                .unwrap_or(RelayAuthAckStatus::BadFormat),
+        )
+    }
+
+    fn queue_observed_auth_ack(&self, from: SocketAddr, status: RelayAuthAckStatus) {
+        let mut inbox = self.auth_ack_inbox.lock();
+        if inbox.len() >= AUTH_ACK_INBOX_CAPACITY {
+            inbox.pop_front();
+        }
+        inbox.push_back((from, status));
+    }
+
+    fn clear_queued_auth_acks_for(&self, relay_addr: SocketAddr) {
+        self.auth_ack_inbox
+            .lock()
+            .retain(|(from, _)| *from != relay_addr);
+    }
+
+    fn set_pending_auth_relay(&self, relay_addr: SocketAddr) {
+        *self.pending_auth_relay_addr.lock() = Some(relay_addr);
+    }
+
+    fn clear_pending_auth_relay(&self, relay_addr: SocketAddr) {
+        let mut pending = self.pending_auth_relay_addr.lock();
+        if pending.is_some_and(|addr| addr == relay_addr) {
+            *pending = None;
+        }
+    }
+
+    fn is_pending_auth_relay_source(&self, relay_addr: SocketAddr) -> bool {
+        self.pending_auth_relay_addr
+            .lock()
+            .is_some_and(|pending| pending == relay_addr)
+    }
+
+    fn take_queued_auth_ack_for(&self, relay_addr: SocketAddr) -> Option<RelayAuthAckStatus> {
+        let mut inbox = self.auth_ack_inbox.lock();
+        let pos = inbox.iter().position(|(from, _)| *from == relay_addr)?;
+        inbox.remove(pos).map(|(_, status)| status)
+    }
+
+    fn wait_for_observed_auth_ack(
+        &self,
+        relay_addr: SocketAddr,
+        timeout: Duration,
+    ) -> Option<RelayAuthAckStatus> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Some(status) = self.take_queued_auth_ack_for(relay_addr) {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
     }
 
     fn wait_for_auth_ack_with_timeout(
@@ -1183,19 +1275,9 @@ impl UdpRelay {
                         continue;
                     }
 
-                    if len < SESSION_ID_LEN + 2 {
+                    let Some(status) = self.parse_auth_ack_frame(&recv_buf, len) else {
                         continue;
-                    }
-                    if recv_buf[..SESSION_ID_LEN] != self.session_id {
-                        continue;
-                    }
-                    if recv_buf[SESSION_ID_LEN] != AUTH_ACK_FRAME_TYPE {
-                        continue;
-                    }
-
-                    let status_byte = recv_buf[SESSION_ID_LEN + 1];
-                    let status = RelayAuthAckStatus::from_u8(status_byte)
-                        .unwrap_or(RelayAuthAckStatus::BadFormat);
+                    };
                     return Ok(Some(status));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
@@ -1236,6 +1318,44 @@ impl UdpRelay {
         }
 
         Ok(None)
+    }
+
+    /// Authenticate a candidate relay while the inbound receiver owns socket reads.
+    ///
+    /// Runtime auto-route switches cannot call `recv_from` directly because the
+    /// inbound injector thread is already reading the UDP socket. Instead, the
+    /// receiver records auth ACK control frames in `auth_ack_inbox`, and this
+    /// method waits for one from the candidate relay without making it the live
+    /// data-path relay first.
+    pub fn authenticate_relay_addr_with_observed_ack(
+        &self,
+        relay_addr: SocketAddr,
+        token: &str,
+    ) -> Result<Option<RelayAuthAckStatus>> {
+        self.clear_queued_auth_acks_for(relay_addr);
+        self.set_pending_auth_relay(relay_addr);
+        let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
+        let mut result = Ok(None);
+
+        if let Err(e) = self.send_auth_hello_to(relay_addr, token) {
+            result = Err(e);
+        } else {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                if let Some(status) = self.wait_for_observed_auth_ack(relay_addr, remaining) {
+                    log::info!(
+                        "UDP Relay: Observed auth ack {} from {} for session {:016x}",
+                        status.as_str(),
+                        relay_addr,
+                        self.session_id_u64()
+                    );
+                    result = Ok(Some(status));
+                }
+            }
+        }
+
+        self.clear_pending_auth_relay(relay_addr);
+        result
     }
 
     /// Get the stop flag for external control
@@ -1357,8 +1477,17 @@ impl UdpRelay {
     ) -> Result<Option<&'a [u8]>> {
         match self.socket.recv_from(frame_buffer) {
             Ok((len, from)) => {
-                // Verify it's from our relay server (current or previous during grace period)
+                // Verify it's from our relay server (current or previous during grace period).
+                // A pending runtime auth candidate may send an AUTH_ACK before it becomes
+                // the data-path relay; queue that control frame without accepting data
+                // packets from the candidate yet.
                 if !self.is_expected_relay_source(from) {
+                    if self.is_pending_auth_relay_source(from) {
+                        if let Some(status) = self.parse_auth_ack_frame(frame_buffer, len) {
+                            self.queue_observed_auth_ack(from, status);
+                            return Ok(None);
+                        }
+                    }
                     log::warn!("UDP Relay: Received packet from unexpected source {}", from);
                     return Ok(None);
                 }
@@ -1381,7 +1510,13 @@ impl UdpRelay {
                 // Control frames (auth + ping telemetry) should never reach packet injection.
                 if payload_len >= 1 {
                     match frame_buffer[SESSION_ID_LEN] {
-                        AUTH_HELLO_FRAME_TYPE | AUTH_ACK_FRAME_TYPE | PING_FRAME_TYPE => {
+                        AUTH_ACK_FRAME_TYPE => {
+                            if let Some(status) = self.parse_auth_ack_frame(frame_buffer, len) {
+                                self.queue_observed_auth_ack(from, status);
+                            }
+                            return Ok(None);
+                        }
+                        AUTH_HELLO_FRAME_TYPE | PING_FRAME_TYPE => {
                             return Ok(None);
                         }
                         PONG_FRAME_TYPE => {
@@ -2021,6 +2156,15 @@ mod tests {
     }
 
     #[test]
+    fn test_replay_auth_ack_status_is_recognized() {
+        assert_eq!(
+            RelayAuthAckStatus::from_u8(7),
+            Some(RelayAuthAckStatus::Replay)
+        );
+        assert_eq!(RelayAuthAckStatus::Replay.as_str(), "replay");
+    }
+
+    #[test]
     fn test_session_id_generation() {
         let mut id1 = [0u8; 8];
         let mut id2 = [0u8; 8];
@@ -2395,6 +2539,31 @@ mod tests {
 
         let snap = relay.ping_snapshot();
         assert!(snap.received >= 1);
+    }
+
+    #[test]
+    fn test_pending_auth_ack_is_queued_without_switching_data_path() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        let candidate_relay = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let local_addr = relay_loopback_addr(&relay);
+        let candidate_addr = candidate_relay.local_addr().unwrap();
+        relay.set_pending_auth_relay(candidate_addr);
+
+        let mut frame = [0u8; SESSION_ID_LEN + 2];
+        frame[..SESSION_ID_LEN].copy_from_slice(relay.session_id_bytes());
+        frame[SESSION_ID_LEN] = AUTH_ACK_FRAME_TYPE;
+        frame[SESSION_ID_LEN + 1] = RelayAuthAckStatus::Ok as u8;
+
+        candidate_relay.send_to(&frame, local_addr).unwrap();
+
+        let mut buffer = [0u8; 1600];
+        let result = relay.receive_inbound_payload(&mut buffer).unwrap();
+        assert!(result.is_none());
+        assert_ne!(relay.relay_addr(), candidate_addr);
+        assert_eq!(
+            relay.take_queued_auth_ack_for(candidate_addr),
+            Some(RelayAuthAckStatus::Ok)
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use super::parallel_interceptor::{
 use super::process_performance::{GameProcessPerformanceManager, GameProcessPerformancePolicy};
 use super::process_watcher::{ProcessStartEvent, ProcessWatcher};
 use super::split_tunnel::{SplitTunnelConfig, SplitTunnelDriver};
+use super::udp_relay::{RelayAuthAckStatus, UdpRelay};
 use super::{VpnError, VpnResult};
 use crate::auth::http_client::AuthClient;
 use crate::auth::types::{AuthError, RelayPreflightMode, RelayQueueFullMode, VpnConfig};
@@ -63,12 +64,14 @@ const ETW_CONNECTION_READY_TIMEOUT_MS: u64 = 150;
 const ETW_CONNECTION_READY_POLL_MS: u64 = 5;
 /// Number of ICMP samples to collect per relay candidate when probing.
 const AUTO_ROUTING_PING_SAMPLES: usize = 5;
+const AUTO_ROUTING_RELAY_AUTH_TIMEOUT: Duration = Duration::from_secs(4);
 const CONNECT_FAIL_HANDSHAKE_TIMEOUT: &str = "ST_CONNECT_HANDSHAKE_TIMEOUT";
 const CONNECT_FAIL_CANDIDATE_EXHAUSTED: &str = "ST_CONNECT_CANDIDATE_EXHAUSTED";
 const CONNECT_FAIL_PREFLIGHT_ENFORCED: &str = "ST_CONNECT_PREFLIGHT_ENFORCED";
 const CONNECT_FAIL_AUTH_REQUIRED: &str = "ST_CONNECT_AUTH_REQUIRED";
 const CONNECT_FAIL_POLICY_UNAVAILABLE: &str = "ST_CONNECT_POLICY_UNAVAILABLE";
 const CONNECT_FAIL_REGION_UNAVAILABLE: &str = "ST_CONNECT_REGION_UNAVAILABLE";
+const CONNECT_FAIL_AUTH_REPLAY: &str = "ST_CONNECT_AUTH_REPLAY";
 
 /// Relay UDP port used *only* as a last-resort fallback when the resolved
 /// server list carried no relay candidate (and no custom relay is configured)
@@ -83,6 +86,14 @@ static PREFLIGHT_ENFORCED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static AUTH_REQUIRED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static POLICY_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 static REGION_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
+static AUTH_REPLAY_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeRelayAuthResult {
+    Authenticated,
+    RetryableFailure,
+    Fatal(String),
+}
 
 #[derive(Debug, Clone)]
 struct RelayCandidateAttempt {
@@ -273,7 +284,15 @@ fn select_candidate_after_preflight(
         ));
     }
 
-    let fallback = attempts.first().ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
+    if attempts.iter().all(|attempt| !attempt.policy_known) {
+        return Err(CONNECT_FAIL_POLICY_UNAVAILABLE);
+    }
+
+    let fallback = attempts
+        .iter()
+        .find(|attempt| attempt.policy_known)
+        .or_else(|| attempts.first())
+        .ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
 
     if attempts.iter().any(|attempt| attempt.auth_required) {
         return Err(CONNECT_FAIL_AUTH_REQUIRED);
@@ -689,6 +708,129 @@ fn compute_latency_improvement(
     let best_latency_ms = best_candidate.probed_latency_ms?;
     let current_latency_ms = current_candidate.probed_latency_ms?;
     (current_latency_ms > best_latency_ms).then_some(current_latency_ms - best_latency_ms)
+}
+
+async fn authenticate_auto_routing_relay_switch(
+    access_token: &str,
+    relay: &Arc<UdpRelay>,
+    selected_region: &str,
+    selected_addr: SocketAddr,
+) -> RuntimeRelayAuthResult {
+    if relay.relay_addr() == selected_addr {
+        return RuntimeRelayAuthResult::Authenticated;
+    }
+
+    let session_id_hex = relay.session_id_hex();
+    let auth_client = AuthClient::new();
+    let ticket_result = tokio::time::timeout(
+        AUTO_ROUTING_RELAY_AUTH_TIMEOUT,
+        auth_client.get_relay_ticket(access_token, selected_region, &session_id_hex),
+    )
+    .await;
+    let ticket = match ticket_result {
+        Ok(Ok(ticket)) => ticket,
+        Ok(Err(e)) => {
+            if let Some(reason) = relay_ticket_ban_reason(&e) {
+                log::warn!(
+                    "Auto-routing: relay ticket rejected as banned while switching to '{}' (session {})",
+                    selected_region,
+                    session_id_hex
+                );
+                return RuntimeRelayAuthResult::Fatal(format!(
+                    "Relay ticket rejected because this account is banned: {}",
+                    reason
+                ));
+            } else {
+                log::warn!(
+                    "Auto-routing: relay ticket unavailable for runtime switch to '{}' (session {}, {})",
+                    selected_region,
+                    session_id_hex,
+                    e
+                );
+            }
+            return RuntimeRelayAuthResult::RetryableFailure;
+        }
+        Err(_) => {
+            log::warn!(
+                "Auto-routing: relay ticket timed out for runtime switch to '{}' (session {})",
+                selected_region,
+                session_id_hex
+            );
+            return RuntimeRelayAuthResult::RetryableFailure;
+        }
+    };
+
+    log::info!(
+        "Auto-routing: authenticating relay switch to '{}' at {} (session {}, key_id={})",
+        selected_region,
+        selected_addr,
+        session_id_hex,
+        ticket.key_id
+    );
+
+    let relay_for_auth = Arc::clone(relay);
+    let token = ticket.token;
+    let auth_join = tokio::task::spawn_blocking(move || {
+        relay_for_auth.authenticate_relay_addr_with_observed_ack(selected_addr, &token)
+    });
+    let auth_result = tokio::time::timeout(AUTO_ROUTING_RELAY_AUTH_TIMEOUT, auth_join).await;
+
+    match auth_result {
+        Ok(Ok(Ok(Some(RelayAuthAckStatus::Ok)))) => RuntimeRelayAuthResult::Authenticated,
+        Ok(Ok(Ok(Some(RelayAuthAckStatus::Replay)))) => {
+            log::warn!(
+                "Auto-routing: relay auth replay rejected runtime switch to '{}' (session {})",
+                selected_region,
+                session_id_hex
+            );
+            RuntimeRelayAuthResult::Fatal(
+                "Relay authentication rejected a replayed ticket".to_string(),
+            )
+        }
+        Ok(Ok(Ok(Some(status)))) => {
+            log::warn!(
+                "Auto-routing: relay auth ack '{}' rejected runtime switch to '{}' (session {})",
+                status.as_str(),
+                selected_region,
+                session_id_hex
+            );
+            RuntimeRelayAuthResult::RetryableFailure
+        }
+        Ok(Ok(Ok(None))) => {
+            log::warn!(
+                "Auto-routing: relay auth timed out for runtime switch to '{}' (session {})",
+                selected_region,
+                session_id_hex
+            );
+            RuntimeRelayAuthResult::RetryableFailure
+        }
+        Ok(Ok(Err(e))) => {
+            log::warn!(
+                "Auto-routing: relay auth handshake failed for runtime switch to '{}' (session {}, {})",
+                selected_region,
+                session_id_hex,
+                e
+            );
+            RuntimeRelayAuthResult::RetryableFailure
+        }
+        Ok(Err(e)) => {
+            log::warn!(
+                "Auto-routing: relay auth worker failed for runtime switch to '{}' (session {}, {})",
+                selected_region,
+                session_id_hex,
+                e
+            );
+            RuntimeRelayAuthResult::RetryableFailure
+        }
+        Err(_) => {
+            log::warn!(
+                "Auto-routing: relay auth worker timed out for runtime switch to '{}' (session {})",
+                selected_region,
+                session_id_hex
+            );
+            RuntimeRelayAuthResult::RetryableFailure
+        }
+    }
 }
 
 /// Probe candidate relay servers in parallel using ICMP and return their
@@ -1328,7 +1470,54 @@ impl VpnConnection {
         let mut queue_full_mode = RelayQueueFullMode::Bypass;
 
         if custom_relay_server.is_some() {
-            log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
+            log::warn!(
+                "V3: Custom relay enabled, performing relay-ticket policy check without relay auth handshake"
+            );
+            let auth_client = AuthClient::new();
+            let session_id_hex = relay.session_id_hex();
+            let ticket = match auth_client
+                .get_relay_ticket(access_token, &config.region, &session_id_hex)
+                .await
+            {
+                Ok(ticket) => ticket,
+                Err(e) => {
+                    if let Some(reason) = relay_ticket_ban_reason(&e) {
+                        log::warn!(
+                            "V3: Custom relay ticket rejected because the current account is banned"
+                        );
+                        let _ = driver.close();
+                        return Err(VpnError::UserBanned(reason));
+                    }
+                    log_sampled_connect_event(
+                        &POLICY_UNAVAILABLE_EVENTS,
+                        CONNECT_FAIL_POLICY_UNAVAILABLE,
+                        format!(
+                            "Custom relay policy unavailable for '{}' (session {})",
+                            config.region, session_id_hex
+                        ),
+                    );
+                    let _ = driver.close();
+                    return Err(VpnError::Connection(
+                        "Relay policy unavailable; refusing custom relay connection".to_string(),
+                    ));
+                }
+            };
+            if ticket.auth_required || ticket.preflight_mode() == RelayPreflightMode::Enforce {
+                log_sampled_connect_event(
+                    &AUTH_REQUIRED_EVENTS,
+                    CONNECT_FAIL_AUTH_REQUIRED,
+                    format!(
+                        "Custom relay rejected because authenticated relay policy is required for '{}' (session {})",
+                        config.region, session_id_hex
+                    ),
+                );
+                let _ = driver.close();
+                return Err(VpnError::Connection(
+                    "Relay authentication required; custom relay cannot use legacy mode"
+                        .to_string(),
+                ));
+            }
+            queue_full_mode = ticket.queue_full_mode();
         } else {
             let auth_client = AuthClient::new();
             let session_id_hex = relay.session_id_hex();
@@ -1424,6 +1613,20 @@ impl VpnConnection {
                             candidate_region,
                             session_id_hex
                         );
+                        if status == RelayAuthAckStatus::Replay {
+                            log_sampled_connect_event(
+                                &AUTH_REPLAY_EVENTS,
+                                CONNECT_FAIL_AUTH_REPLAY,
+                                format!(
+                                    "Relay ticket replay rejected for candidate '{}' (session {})",
+                                    candidate_region, session_id_hex
+                                ),
+                            );
+                            let _ = driver.close();
+                            return Err(VpnError::Connection(
+                                "Relay authentication rejected a replayed ticket".to_string(),
+                            ));
+                        }
                         attempt_results.push(RelayCandidateAttempt {
                             region: candidate_region.clone(),
                             addr: *candidate_addr,
@@ -1607,46 +1810,64 @@ impl VpnConnection {
             auto_router.set_forced_servers(forced_servers);
         }
 
+        let runtime_auth_fatal_error = Arc::new(parking_lot::Mutex::new(None::<String>));
+
         // Spawn background task for async ipinfo.io region lookups
         if auto_routing_enabled {
             let (lookup_tx, mut lookup_rx) =
-                tokio::sync::mpsc::unbounded_channel::<(std::net::Ipv4Addr, u64, u64)>();
+                tokio::sync::mpsc::unbounded_channel::<super::auto_routing::AutoRoutingLookup>();
             auto_router.set_lookup_channel(lookup_tx);
 
             let router_for_lookup = Arc::clone(&auto_router);
             let state_for_lookup = Arc::clone(&self.state);
+            let access_token_for_lookup = access_token.to_string();
+            let relay_auth_required_for_lookup = relay_auth_mode == "authenticated";
+            let relay_auth_lock_for_lookup = Arc::new(tokio::sync::Mutex::new(()));
+            let runtime_auth_fatal_for_lookup = Arc::clone(&runtime_auth_fatal_error);
             let lookup_handle = tokio::spawn(async move {
-                while let Some((ip, generation, session_epoch)) = lookup_rx.recv().await {
+                while let Some(mut lookup) = lookup_rx.recv().await {
+                    while let Ok(newer_lookup) = lookup_rx.try_recv() {
+                        log::info!(
+                            "Auto-routing: Draining stale queued lookup for {} (generation {}) in favor of newer generation {}",
+                            lookup.ip,
+                            lookup.generation,
+                            newer_lookup.generation
+                        );
+                        router_for_lookup.release_failed_lookup(lookup.ip);
+                        lookup = newer_lookup;
+                    }
+
+                    let ip = lookup.ip;
+                    let generation = lookup.generation;
+                    let session_epoch = lookup.session_epoch;
                     match crate::geolocation::lookup_game_server_region(ip).await {
                         Some((region, location)) => {
                             if !router_for_lookup.is_current_lookup_session(session_epoch) {
                                 log::info!(
-                                    "Auto-routing: Ignoring stale lookup for {} (generation {}, session {}) after router reset",
+                                    "Auto-routing: Ignoring lookup for {} (generation {}, session {}) after router reset",
                                     ip,
                                     generation,
                                     session_epoch
                                 );
-                                router_for_lookup.clear_pending_lookup(ip);
+                                router_for_lookup.release_ignored_lookup(ip);
                                 continue;
                             }
-                            if !router_for_lookup.should_process_lookup_result(ip) {
+                            if !router_for_lookup.is_current_lookup_generation(generation) {
+                                log::info!(
+                                    "Auto-routing: Ignoring stale lookup for {} (generation {}) after newer lookup",
+                                    ip,
+                                    generation
+                                );
+                                router_for_lookup.release_failed_lookup(ip);
+                                continue;
+                            }
+                            if !router_for_lookup.should_process_lookup_result(lookup) {
                                 log::info!(
                                     "Auto-routing: Ignoring lookup for {} (generation {}) because another game server is active",
                                     ip,
                                     generation
                                 );
-                                router_for_lookup.clear_pending_lookup(ip);
-                                continue;
-                            }
-                            if !router_for_lookup
-                                .pin_active_game_server_for_session(ip, session_epoch)
-                            {
-                                log::info!(
-                                    "Auto-routing: Ignoring lookup for {} (generation {}) after active game server changed",
-                                    ip,
-                                    generation
-                                );
-                                router_for_lookup.clear_pending_lookup(ip);
+                                router_for_lookup.release_ignored_lookup(ip);
                                 continue;
                             }
 
@@ -1659,174 +1880,311 @@ impl VpnConnection {
                             let old_region = router_for_lookup.current_region();
 
                             // Step 1: Resolve relay using cached latency (instant, no probing).
-                            // Switch immediately so packets can be released ASAP.
-                            let step1_switched = if let Some((selected_region, selected_addr)) =
+                            // Switch immediately so packets can be released ASAP, but only after
+                            // the lookup is still current and the observed packet qualified as a
+                            // real handoff. Failed/rate-limited switches stay retryable.
+                            let run_probe_refinement = if let Some((
+                                selected_region,
+                                selected_addr,
+                            )) =
                                 router_for_lookup.get_best_server_for_region(&region)
                             {
-                                // Compute cached latency delta so same-region upgrades are not
-                                // silently rejected by the rate-limiter in commit_switch.
-                                let cached_improvement =
-                                    router_for_lookup.current_relay().and_then(|current| {
-                                        let servers =
-                                            router_for_lookup.available_servers_snapshot();
-                                        compute_cached_latency_improvement(
-                                            &servers,
-                                            selected_addr,
-                                            current.1,
-                                        )
-                                    });
-
-                                if let Some((new_addr, new_region)) = router_for_lookup
-                                    .commit_switch(
-                                        region.clone(),
-                                        selected_region,
-                                        selected_addr,
-                                        cached_improvement,
-                                    )
-                                {
-                                    log::info!(
-                                        "Auto-routing: SWITCHING relay {} -> {} (addr: {}) [cached latency, pre-probe]",
-                                        old_region,
-                                        new_region,
-                                        new_addr
-                                    );
-                                    relay_for_lookup.switch_relay(new_addr);
-                                    state_for_lookup.send_if_modified(|state| {
-                                        if let ConnectionState::Connected {
-                                            ref mut server_region,
-                                            ref mut server_endpoint,
-                                            ..
-                                        } = *state
-                                        {
-                                            *server_region = new_region.clone();
-                                            *server_endpoint = new_addr.to_string();
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    });
-                                    if let Err(e) =
-                                        relay_for_lookup.send_keepalive_burst_async().await
+                                if router_for_lookup.current_relay().is_some_and(|current| {
+                                    current.0 == selected_region && current.1 == selected_addr
+                                }) {
+                                    if router_for_lookup
+                                        .accept_lookup_without_switch(lookup, region.clone())
                                     {
-                                        log::warn!(
-                                            "Auto-routing: Failed to send keepalive burst to new relay: {}",
-                                            e
+                                        log::info!(
+                                            "Auto-routing: Already on selected relay {} for {}",
+                                            selected_region,
+                                            location
                                         );
+                                        router_for_lookup.clear_pending_lookup(ip);
+                                        true
+                                    } else {
+                                        router_for_lookup.release_ignored_lookup(ip);
+                                        continue;
                                     }
-                                    log::info!(
-                                        "Auto-routing: Relay addr is now {}",
-                                        relay_for_lookup.relay_addr()
-                                    );
-                                    crate::notification::show_relay_switch(
-                                        &old_region,
-                                        &new_region,
-                                        &location,
-                                    );
+                                } else {
+                                    // Compute cached latency delta so same-region upgrades are not
+                                    // silently rejected by the rate-limiter in commit_switch.
+                                    let cached_improvement =
+                                        router_for_lookup.current_relay().and_then(|current| {
+                                            let servers =
+                                                router_for_lookup.available_servers_snapshot();
+                                            compute_cached_latency_improvement(
+                                                &servers,
+                                                selected_addr,
+                                                current.1,
+                                            )
+                                        });
+
+                                    let relay_auth_needed = relay_auth_required_for_lookup
+                                        && relay_for_lookup.relay_addr() != selected_addr;
+                                    if relay_auth_needed {
+                                        let _auth_guard = relay_auth_lock_for_lookup.lock().await;
+                                        if !router_for_lookup
+                                            .is_current_lookup_session(session_epoch)
+                                            || !router_for_lookup
+                                                .is_current_lookup_generation(generation)
+                                            || !router_for_lookup
+                                                .should_process_lookup_result(lookup)
+                                        {
+                                            router_for_lookup.release_ignored_lookup(ip);
+                                            continue;
+                                        }
+
+                                        match authenticate_auto_routing_relay_switch(
+                                            &access_token_for_lookup,
+                                            &relay_for_lookup,
+                                            &selected_region,
+                                            selected_addr,
+                                        )
+                                        .await
+                                        {
+                                            RuntimeRelayAuthResult::Authenticated => {}
+                                            RuntimeRelayAuthResult::RetryableFailure => {
+                                                router_for_lookup.release_failed_lookup(ip);
+                                                continue;
+                                            }
+                                            RuntimeRelayAuthResult::Fatal(error_message) => {
+                                                router_for_lookup.release_failed_lookup(ip);
+                                                *runtime_auth_fatal_for_lookup.lock() =
+                                                    Some(error_message);
+                                                relay_for_lookup.stop();
+                                                continue;
+                                            }
+                                        }
+                                    }
+
+                                    if let Some((new_addr, new_region)) = router_for_lookup
+                                        .commit_switch_for_lookup(
+                                            lookup,
+                                            region.clone(),
+                                            selected_region,
+                                            selected_addr,
+                                            cached_improvement,
+                                        )
+                                    {
+                                        log::info!(
+                                            "Auto-routing: SWITCHING relay {} -> {} (addr: {}) [cached latency, pre-probe]",
+                                            old_region,
+                                            new_region,
+                                            new_addr
+                                        );
+                                        if relay_for_lookup.relay_addr() != new_addr {
+                                            relay_for_lookup.switch_relay(new_addr);
+                                        }
+                                        state_for_lookup.send_if_modified(|state| {
+                                            if let ConnectionState::Connected {
+                                                ref mut server_region,
+                                                ref mut server_endpoint,
+                                                ..
+                                            } = *state
+                                            {
+                                                *server_region = new_region.clone();
+                                                *server_endpoint = new_addr.to_string();
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        });
+                                        if let Err(e) =
+                                            relay_for_lookup.send_keepalive_burst_async().await
+                                        {
+                                            log::warn!(
+                                                "Auto-routing: Failed to send keepalive burst to new relay: {}",
+                                                e
+                                            );
+                                        }
+                                        log::info!(
+                                            "Auto-routing: Relay addr is now {}",
+                                            relay_for_lookup.relay_addr()
+                                        );
+                                        crate::notification::show_relay_switch(
+                                            &old_region,
+                                            &new_region,
+                                            &location,
+                                        );
+                                        router_for_lookup.clear_pending_lookup(ip);
+                                        true
+                                    } else {
+                                        log::info!(
+                                            "Auto-routing: Lookup for {} resolved but switch was rejected/rate-limited; leaving retryable after cooldown",
+                                            ip
+                                        );
+                                        router_for_lookup.release_switch_rejected_lookup(ip);
+                                        continue;
+                                    }
                                 }
-                                true
-                            } else {
+                            } else if router_for_lookup.can_accept_lookup_without_switch(&region)
+                                && router_for_lookup
+                                    .accept_lookup_without_switch(lookup, region.clone())
+                            {
                                 log::info!(
-                                    "Auto-routing: No switch needed (already on best region for {})",
+                                    "Auto-routing: No switch needed (already on best region or bypassing for {})",
                                     location
                                 );
+                                router_for_lookup.clear_pending_lookup(ip);
                                 false
+                            } else {
+                                router_for_lookup.release_failed_lookup(ip);
+                                continue;
                             };
 
-                            // Step 2: Release held packets NOW — relay is set to best-known server
-                            // via cached latency. Don't wait for probing.
-                            router_for_lookup.clear_pending_lookup(ip);
-
-                            // Step 3: Deferred probe refinement — packets are already flowing,
-                            // probe candidates in the background and switch if a better one is found.
-                            // Skip when Step 1 returned None (bypass/whitelisted) to avoid
-                            // unexpected relay switches during VPN bypass.
-                            if step1_switched {
+                            // Step 2: Deferred probe refinement — packets are already flowing,
+                            // so probe candidates in a separate task. The lookup receiver must
+                            // stay free to resolve later handoff IPs; otherwise pending packet
+                            // holds can queue behind slow ICMP probing.
+                            if run_probe_refinement {
                                 if let Some(target_region) = region.best_swifttunnel_region() {
                                     let forced_server =
                                         router_for_lookup.forced_server_for_region(target_region);
                                     let available_servers =
                                         router_for_lookup.available_servers_snapshot();
+                                    let router_for_probe = Arc::clone(&router_for_lookup);
+                                    let relay_for_probe = Arc::clone(&relay_for_lookup);
+                                    let state_for_probe = Arc::clone(&state_for_lookup);
+                                    let runtime_auth_fatal_for_probe =
+                                        Arc::clone(&runtime_auth_fatal_for_lookup);
+                                    let relay_auth_lock_for_probe =
+                                        Arc::clone(&relay_auth_lock_for_lookup);
+                                    let access_token_for_probe = access_token_for_lookup.clone();
+                                    let relay_auth_required_for_probe =
+                                        relay_auth_required_for_lookup;
+                                    let region_for_probe = region.clone();
+                                    let location_for_probe = location.clone();
+                                    let target_region = target_region.to_string();
 
-                                    // Always probe in the deferred phase to detect degraded servers,
-                                    // even when all candidates have cached latency from Step 1.
-                                    let ranked_candidates = ranked_relay_candidates_for_region(
-                                        target_region,
-                                        &available_servers,
-                                        forced_server.as_deref(),
-                                        true,
-                                    )
-                                    .await;
+                                    tokio::spawn(async move {
+                                        let ranked_candidates = ranked_relay_candidates_for_region(
+                                            &target_region,
+                                            &available_servers,
+                                            forced_server.as_deref(),
+                                            true,
+                                        )
+                                        .await;
 
-                                    if !router_for_lookup.is_current_lookup_session(session_epoch)
-                                        || !router_for_lookup.is_active_game_server(ip)
-                                    {
-                                        log::info!(
-                                            "Auto-routing: Ignoring probe refinement for {} (generation {}) because it is stale or no longer active",
-                                            ip,
-                                            generation
-                                        );
-                                        continue;
-                                    }
-
-                                    if let Some(best_candidate) = ranked_candidates.first() {
-                                        if let Some(current_relay) =
-                                            router_for_lookup.current_relay()
+                                        if !router_for_probe
+                                            .is_current_lookup_session(session_epoch)
+                                            || !router_for_probe
+                                                .is_current_lookup_generation(generation)
+                                            || !router_for_probe.is_active_game_server(ip)
                                         {
-                                            if best_candidate.region != current_relay.0
-                                                || best_candidate.addr != current_relay.1
+                                            log::info!(
+                                                "Auto-routing: Ignoring probe refinement for {} (generation {}) because it is stale or no longer active",
+                                                ip,
+                                                generation
+                                            );
+                                            return;
+                                        }
+
+                                        if let Some(best_candidate) = ranked_candidates.first() {
+                                            if let Some(current_relay) =
+                                                router_for_probe.current_relay()
                                             {
-                                                let latency_improvement_ms =
-                                                    compute_latency_improvement(
-                                                        &ranked_candidates,
-                                                        &current_relay,
-                                                    );
-                                                if let Some((new_addr, new_region)) =
-                                                    router_for_lookup.commit_switch(
-                                                        region,
-                                                        best_candidate.region.clone(),
-                                                        best_candidate.addr,
-                                                        latency_improvement_ms,
-                                                    )
+                                                if best_candidate.region != current_relay.0
+                                                    || best_candidate.addr != current_relay.1
                                                 {
-                                                    log::info!(
-                                                        "Auto-routing: Probe refinement {} -> {} ({}ms improvement)",
-                                                        current_relay.0,
-                                                        new_region,
-                                                        latency_improvement_ms.unwrap_or(0)
-                                                    );
-                                                    relay_for_lookup.switch_relay(new_addr);
-                                                    state_for_lookup.send_if_modified(|state| {
-                                                        if let ConnectionState::Connected {
-                                                            ref mut server_region,
-                                                            ref mut server_endpoint,
-                                                            ..
-                                                        } = *state
+                                                    let latency_improvement_ms =
+                                                        compute_latency_improvement(
+                                                            &ranked_candidates,
+                                                            &current_relay,
+                                                        );
+                                                    let relay_auth_needed =
+                                                        relay_auth_required_for_probe
+                                                            && relay_for_probe.relay_addr()
+                                                                != best_candidate.addr;
+                                                    if relay_auth_needed {
+                                                        let _auth_guard =
+                                                            relay_auth_lock_for_probe.lock().await;
+                                                        if !router_for_probe
+                                                            .is_current_lookup_session(
+                                                                session_epoch,
+                                                            )
+                                                            || !router_for_probe
+                                                                .is_current_lookup_generation(
+                                                                    generation,
+                                                                )
+                                                            || !router_for_probe
+                                                                .is_active_game_server(ip)
                                                         {
-                                                            *server_region = new_region.clone();
-                                                            *server_endpoint = new_addr.to_string();
-                                                            true
-                                                        } else {
-                                                            false
+                                                            return;
                                                         }
-                                                    });
-                                                    if let Err(e) = relay_for_lookup
-                                                        .send_keepalive_burst_async()
+
+                                                        match authenticate_auto_routing_relay_switch(
+                                                            &access_token_for_probe,
+                                                            &relay_for_probe,
+                                                            &best_candidate.region,
+                                                            best_candidate.addr,
+                                                        )
                                                         .await
+                                                        {
+                                                            RuntimeRelayAuthResult::Authenticated => {}
+                                                            RuntimeRelayAuthResult::RetryableFailure => return,
+                                                            RuntimeRelayAuthResult::Fatal(error_message) => {
+                                                                *runtime_auth_fatal_for_probe.lock() =
+                                                                    Some(error_message);
+                                                                relay_for_probe.stop();
+                                                                return;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if let Some((new_addr, new_region)) =
+                                                        router_for_probe.commit_switch_for_lookup(
+                                                            lookup,
+                                                            region_for_probe,
+                                                            best_candidate.region.clone(),
+                                                            best_candidate.addr,
+                                                            latency_improvement_ms,
+                                                        )
                                                     {
-                                                        log::warn!(
-                                                            "Auto-routing: Failed to send keepalive burst after probe refinement: {}",
-                                                            e
+                                                        log::info!(
+                                                            "Auto-routing: Probe refinement {} -> {} ({}ms improvement)",
+                                                            current_relay.0,
+                                                            new_region,
+                                                            latency_improvement_ms.unwrap_or(0)
+                                                        );
+                                                        if relay_for_probe.relay_addr() != new_addr
+                                                        {
+                                                            relay_for_probe.switch_relay(new_addr);
+                                                        }
+                                                        state_for_probe.send_if_modified(|state| {
+                                                            if let ConnectionState::Connected {
+                                                                ref mut server_region,
+                                                                ref mut server_endpoint,
+                                                                ..
+                                                            } = *state
+                                                            {
+                                                                *server_region = new_region.clone();
+                                                                *server_endpoint =
+                                                                    new_addr.to_string();
+                                                                true
+                                                            } else {
+                                                                false
+                                                            }
+                                                        });
+                                                        if let Err(e) = relay_for_probe
+                                                            .send_keepalive_burst_async()
+                                                            .await
+                                                        {
+                                                            log::warn!(
+                                                                "Auto-routing: Failed to send keepalive burst after probe refinement: {}",
+                                                                e
+                                                            );
+                                                        }
+                                                        crate::notification::show_relay_switch(
+                                                            &current_relay.0,
+                                                            &new_region,
+                                                            &location_for_probe,
                                                         );
                                                     }
-                                                    crate::notification::show_relay_switch(
-                                                        &current_relay.0,
-                                                        &new_region,
-                                                        &location,
-                                                    );
                                                 }
                                             }
                                         }
-                                    }
+                                    });
                                 }
                             }
                         }
@@ -1836,8 +2194,9 @@ impl VpnConnection {
                                 ip
                             );
                             // Release packets even on failure — better to route through
-                            // wrong relay than hold packets forever
-                            router_for_lookup.clear_pending_lookup(ip);
+                            // wrong relay than hold packets forever. Keep the IP retryable
+                            // because resolver/API failures are often transient.
+                            router_for_lookup.release_failed_lookup(ip);
                         }
                     }
                 }
@@ -1973,6 +2332,7 @@ impl VpnConnection {
         let process_performance_for_monitor = self.process_performance_manager.clone();
         let relay_health_monitor = relay_for_health;
         let workers_panic_cause_monitor = workers_panic_cause_for_monitor;
+        let runtime_auth_fatal_for_monitor = runtime_auth_fatal_error;
 
         tokio::spawn(async move {
             log::info!("V3: Process monitor started");
@@ -2153,6 +2513,42 @@ impl VpnConnection {
                         // packet through this NIC, which overrides any NLM
                         // false-positive (captive portals, virtual adapters,
                         // hidden-SSID corp networks). See `watchdog_tick`.
+                        let runtime_auth_error = runtime_auth_fatal_for_monitor.lock().take();
+                        if let Some(error_message) = runtime_auth_error {
+                            let transitioned = state_handle.send_if_modified(|state| {
+                                if matches!(*state, ConnectionState::Connected { .. }) {
+                                    log::error!(
+                                        "V3: runtime relay auth fatal error — transitioning Connected → Error"
+                                    );
+                                    *state = ConnectionState::Error(error_message.clone());
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+
+                            if transitioned {
+                                {
+                                    let mut driver_guard = driver.lock().await;
+                                    if let Err(e) = driver_guard.close() {
+                                        log::warn!(
+                                            "V3: runtime relay auth cleanup — driver.close() returned {}",
+                                            e
+                                        );
+                                    }
+                                }
+                                super::wfp_block::cleanup();
+                                if let Some(ref auto_router) = auto_router_for_monitor {
+                                    auto_router.reset();
+                                }
+                                if let Some(ref manager) = process_performance_for_monitor {
+                                    let mut guard = manager.lock().await;
+                                    guard.cleanup_all("runtime_relay_auth_failure");
+                                }
+                                break;
+                            }
+                        }
+
                         if watchdog_armed {
                             let probe = super::local_connectivity::probe();
                             let relay_health_now = relay_health_monitor.relay_health();
@@ -3984,7 +4380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_candidate_after_preflight_all_unknown_policy_allows_marked_fallback() {
+    fn test_select_candidate_after_preflight_all_unknown_policy_rejects_fallback() {
         let attempts = vec![RelayCandidateAttempt {
             region: "germany-01".to_string(),
             addr: parse_addr("10.0.0.1:51821"),
@@ -3995,16 +4391,9 @@ mod tests {
             queue_full_mode: RelayQueueFullMode::Bypass,
         }];
 
-        let selected = select_candidate_after_preflight(&attempts)
-            .expect("unknown policy alone should not block legacy fallback");
-        assert_eq!(
-            selected,
-            (
-                "germany-01".to_string(),
-                parse_addr("10.0.0.1:51821"),
-                RelayQueueFullMode::Bypass
-            )
-        );
+        let error = select_candidate_after_preflight(&attempts)
+            .expect_err("unknown policy must fail closed instead of entering legacy fallback");
+        assert_eq!(error, CONNECT_FAIL_POLICY_UNAVAILABLE);
     }
 
     #[test]

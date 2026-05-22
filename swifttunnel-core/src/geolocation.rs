@@ -179,7 +179,7 @@ pub fn is_roblox_game_server_ip(ip: Ipv4Addr) -> bool {
 }
 
 /// Roblox game server region detected from IP address
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RobloxRegion {
     Singapore,
     Tokyo,
