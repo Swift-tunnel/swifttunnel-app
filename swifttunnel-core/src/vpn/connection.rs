@@ -291,7 +291,6 @@ fn select_candidate_after_preflight(
     let fallback = attempts
         .iter()
         .find(|attempt| attempt.policy_known)
-        .or_else(|| attempts.first())
         .ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
 
     if attempts.iter().any(|attempt| attempt.auth_required) {
@@ -776,7 +775,9 @@ async fn authenticate_auto_routing_relay_switch(
     let auth_result = tokio::time::timeout(AUTO_ROUTING_RELAY_AUTH_TIMEOUT, auth_join).await;
 
     match auth_result {
-        Ok(Ok(Ok(Some(RelayAuthAckStatus::Ok)))) => RuntimeRelayAuthResult::Authenticated,
+        Ok(Ok(Ok(Some(RelayAuthAckStatus::Ok | RelayAuthAckStatus::AuthDisabled)))) => {
+            RuntimeRelayAuthResult::Authenticated
+        }
         Ok(Ok(Ok(Some(RelayAuthAckStatus::Replay)))) => {
             log::warn!(
                 "Auto-routing: relay auth replay rejected runtime switch to '{}' (session {})",
@@ -1833,7 +1834,7 @@ impl VpnConnection {
                             lookup.generation,
                             newer_lookup.generation
                         );
-                        router_for_lookup.release_failed_lookup(lookup.ip);
+                        router_for_lookup.release_ignored_lookup(lookup.ip);
                         lookup = newer_lookup;
                     }
 
