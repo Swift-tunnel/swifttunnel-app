@@ -70,6 +70,7 @@ Inbound (Relay → Client):
    - When Auto Route is enabled, the initial region is chosen from the in-app ping-test latency cache when available.
 2. Configure split tunnel (ndisapi)
 3. Create UDP relay connection
+   - On Windows, SwiftTunnel marks the relay UDP socket with DSCP EF (46) best-effort so latency-sensitive game packets can stay in low-latency queues on networks that honor DSCP.
 4. Connected
 
 **V3 skips:**
@@ -105,6 +106,11 @@ pub struct UdpRelay {
 - `forward_outbound(payload)` - Add session ID and send to relay
 - `receive_inbound(buffer)` - Receive from relay and strip session ID
 - `send_keepalive()` - Maintain NAT binding
+
+### Relay Traffic QoS
+- The removed Gaming QoS boost must stay removed: do not restore broad Windows QoS policies for Roblox executables or `Windows10Universal.exe`.
+- The client may mark only SwiftTunnel relay UDP traffic with DSCP EF (46). It does this socket-scoped in `udp_relay.rs`; when latency network throttling boost is enabled, `network_booster.rs` also installs a process+UDP-scoped SwiftTunnel QoS policy and restores the global QoS registry values from snapshots on cleanup.
+- Relay ports are still taken from the server-list API. QoS policy matching intentionally avoids hardcoding a relay port; the actual relay socket is marked directly.
 
 ### Auto Route Selection
 - Initial Auto Route connects to the region with the best measured in-app ping-test latency when latency data exists; otherwise it falls back to the requested/last selected region.
