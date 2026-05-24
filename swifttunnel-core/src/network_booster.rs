@@ -18,6 +18,17 @@ const REMOVED_QOS_POLICY_NAMES: &[&str] = &[
     "SwiftTunnel_QoS_Relay_swifttunnel-desktop",
     "SwiftTunnel_QoS_Windows10Universal",
 ];
+// Replacement for the removed Gaming QoS boost: scope DSCP marking to
+// SwiftTunnel's relay UDP traffic only. Do not reintroduce Roblox executable or
+// Windows10Universal policies; intercepted game packets leave Windows through
+// SwiftTunnel's relay UDP socket.
+const RELAY_QOS_EXECUTABLES: &[&str] = &["SwiftTunnel.exe", "swifttunnel-desktop.exe"];
+const RELAY_QOS_POLICY_PREFIX: &str = "SwiftTunnel_RelaySocketQoS_";
+// Relay ports come from the server-list API; keep the policy process+UDP scoped
+// instead of hardcoding a port here. The socket-level IP_TOS mark still applies
+// to the exact relay socket used for the session.
+const RELAY_QOS_REMOTE_PORT: &str = "*";
+const RELAY_QOS_DSCP_VALUE: &str = "46";
 const NETWORK_SYSTEM_PROFILE_KEY: &str =
     r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
 const REG_VALUE_TCP_ACK_FREQUENCY: &str = "TcpAckFrequency";
@@ -125,6 +136,21 @@ impl NetworkBooster {
         let mut warnings = Vec::new();
 
         Self::cleanup_removed_qos_policies();
+
+        let relay_qos_requested = Self::relay_qos_requested(&requested_config);
+        if relay_qos_requested {
+            if let Err(e) = self.enable_relay_socket_qos_policy() {
+                if let Err(cleanup_error) = self.remove_relay_socket_qos_policy() {
+                    warnings.push(format!(
+                        "Enable relay DSCP policy cleanup after failure: {}",
+                        cleanup_error
+                    ));
+                }
+                warnings.push(format!("Enable relay DSCP policy: {}", e));
+            }
+        } else if let Err(e) = self.remove_relay_socket_qos_policy() {
+            warnings.push(format!("Remove relay DSCP policy: {}", e));
+        }
 
         // Tier 1 (Safe) Network Boosts
         if requested_config.disable_nagle {
@@ -396,10 +422,7 @@ impl NetworkBooster {
 
     fn cleanup_removed_qos_policies() {
         for policy_name in REMOVED_QOS_POLICY_NAMES {
-            let policy_path = format!(
-                r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
-                policy_name
-            );
+            let policy_path = Self::qos_policy_path(policy_name);
             let _ = hidden_command("reg")
                 .args(["delete", &policy_path, "/f"])
                 .output();
@@ -408,6 +431,111 @@ impl NetworkBooster {
         if let Err(e) = Self::remove_legacy_roblox_priority_policy() {
             warn!("Removed QoS policy cleanup failed: {}", e);
         }
+    }
+
+    fn qos_policy_path(policy_name: &str) -> String {
+        format!(
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\{}",
+            policy_name
+        )
+    }
+
+    fn relay_qos_policy_name(exe: &str) -> String {
+        format!(
+            "{}{}",
+            RELAY_QOS_POLICY_PREFIX,
+            exe.trim_end_matches(".exe")
+        )
+    }
+
+    fn cleanup_relay_socket_qos_policies() {
+        for exe in RELAY_QOS_EXECUTABLES {
+            let policy_name = Self::relay_qos_policy_name(exe);
+            let policy_path = Self::qos_policy_path(&policy_name);
+            let _ = hidden_command("reg")
+                .args(["delete", &policy_path, "/f"])
+                .output();
+        }
+    }
+
+    fn set_registry_string(key_path: &str, value_name: &str, value: &str) -> Result<()> {
+        let output = hidden_command("reg")
+            .args([
+                "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value, "/f",
+            ])
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => Ok(()),
+            Ok(_) => Err(anyhow::anyhow!(
+                "failed to set {}\\{} to {}",
+                key_path,
+                value_name,
+                value
+            )),
+            Err(e) => Err(anyhow::anyhow!(
+                "failed to set {}\\{} to {}: {}",
+                key_path,
+                value_name,
+                value,
+                e
+            )),
+        }
+    }
+
+    fn write_relay_qos_policy(policy_name: &str, exe: &str) -> Result<()> {
+        let policy_path = Self::qos_policy_path(policy_name);
+        for (value_name, value) in [
+            ("Version", "1.0"),
+            ("Application Name", exe),
+            ("Protocol", "UDP"),
+            ("DSCP Value", RELAY_QOS_DSCP_VALUE),
+            ("Throttle Rate", "-1"),
+            ("Local Port", "*"),
+            ("Local IP", "*"),
+            ("Local IP Prefix Length", "*"),
+            ("Remote Port", RELAY_QOS_REMOTE_PORT),
+            ("Remote IP", "*"),
+            ("Remote IP Prefix Length", "*"),
+        ] {
+            Self::set_registry_string(&policy_path, value_name, value)?;
+        }
+        Ok(())
+    }
+
+    fn relay_qos_requested(config: &NetworkConfig) -> bool {
+        config.disable_network_throttling
+    }
+
+    fn enable_relay_socket_qos_policy(&mut self) -> Result<()> {
+        info!("Enabling relay-scoped DSCP EF policy for SwiftTunnel UDP traffic");
+
+        if self.qos_registry_snapshot.is_none() {
+            self.qos_registry_snapshot = Some(QosRegistrySnapshot {
+                do_not_use_nla: Self::query_registry_dword(TCPIP_QOS_KEY, REG_VALUE_DO_NOT_USE_NLA),
+                disable_user_tos_setting: Self::query_registry_dword(
+                    TCPIP_PARAMETERS_KEY,
+                    REG_VALUE_DISABLE_USER_TOS_SETTING,
+                ),
+            });
+        }
+
+        // Make Windows policy/user TOS marking deterministic on all network profiles,
+        // then scope the DSCP policy to only SwiftTunnel's relay UDP endpoint.
+        Self::set_registry_dword(TCPIP_QOS_KEY, REG_VALUE_DO_NOT_USE_NLA, 1)?;
+        Self::set_registry_dword(TCPIP_PARAMETERS_KEY, REG_VALUE_DISABLE_USER_TOS_SETTING, 0)?;
+
+        for exe in RELAY_QOS_EXECUTABLES {
+            let policy_name = Self::relay_qos_policy_name(exe);
+            Self::write_relay_qos_policy(&policy_name, exe)?;
+        }
+
+        Ok(())
+    }
+
+    fn remove_relay_socket_qos_policy(&mut self) -> Result<()> {
+        Self::cleanup_relay_socket_qos_policies();
+        self.restore_qos_registry_snapshot()
     }
 
     fn powershell_single_quote(value: &str) -> String {
@@ -578,7 +706,7 @@ impl NetworkBooster {
         Ok(())
     }
 
-    fn restore_removed_qos_registry_snapshot(&mut self) -> Result<()> {
+    fn restore_qos_registry_snapshot(&mut self) -> Result<()> {
         let Some(snapshot) = self.qos_registry_snapshot.clone() else {
             return Ok(());
         };
@@ -612,8 +740,8 @@ impl NetworkBooster {
         }
 
         Self::cleanup_removed_qos_policies();
-        if let Err(e) = self.restore_removed_qos_registry_snapshot() {
-            errors.push(format!("removed QoS registry snapshot restore: {}", e));
+        if let Err(e) = self.remove_relay_socket_qos_policy() {
+            errors.push(format!("relay DSCP policy restore: {}", e));
         }
 
         // Remove firewall rules
@@ -716,11 +844,13 @@ pub fn cleanup_all_system_state() -> Result<()> {
         warn!("Cleanup: failed to remove hosts overrides: {e}");
     }
 
-    // 2. Delete removed SwiftTunnel QoS policies from older releases.
+    // 2. Delete SwiftTunnel QoS policies from older releases and the current
+    // relay-scoped DSCP policy.
     NetworkBooster::cleanup_removed_qos_policies();
+    NetworkBooster::cleanup_relay_socket_qos_policies();
 
     info!(
-        "Cleanup: leaving global TCP registry values untouched unless a persisted SwiftTunnel snapshot restored them"
+        "Cleanup: leaving global TCP/QoS registry values untouched unless a persisted SwiftTunnel snapshot restored them"
     );
 
     // 3. Remove firewall rules.
@@ -933,5 +1063,29 @@ mod tests {
             REMOVED_QOS_POLICY_NAMES.contains(&"SwiftTunnel_QoS_Relay_swifttunnel-desktop"),
             "removed QoS cleanup list must strip the former relay policy"
         );
+    }
+
+    #[test]
+    fn relay_qos_policy_is_relay_scoped_and_not_legacy_cleanup() {
+        for exe in RELAY_QOS_EXECUTABLES {
+            let policy_name = NetworkBooster::relay_qos_policy_name(exe);
+            assert!(policy_name.starts_with(RELAY_QOS_POLICY_PREFIX));
+            assert!(
+                !REMOVED_QOS_POLICY_NAMES.contains(&policy_name.as_str()),
+                "current relay DSCP policy must not be deleted by removed-policy cleanup"
+            );
+        }
+        assert_eq!(RELAY_QOS_REMOTE_PORT, "*");
+        assert_eq!(RELAY_QOS_DSCP_VALUE, "46");
+        assert!(NetworkBooster::relay_qos_requested(&NetworkConfig {
+            disable_network_throttling: true,
+            ..Default::default()
+        }));
+        assert!(!NetworkBooster::relay_qos_requested(&NetworkConfig {
+            disable_nagle: true,
+            ..Default::default()
+        }));
+        assert!(!RELAY_QOS_EXECUTABLES.contains(&"Windows10Universal.exe"));
+        assert!(!RELAY_QOS_EXECUTABLES.contains(&"RobloxPlayerBeta.exe"));
     }
 }

@@ -108,6 +108,8 @@ Starts on the lowest-latency region from the in-app ping test, then resolves det
 
 SwiftTunnel intercepts game traffic at the network layer. Only packets from your game are optimized and routed through our servers. DNS normally stays on the local connection; when Roblox Route Assist is enabled, SwiftTunnel also repairs exact Roblox launch/API hostnames with temporary hosts-file entries resolved over HTTPS DNS and routes Roblox login/API HTTP(S), including browser-owned Roblox auth traffic and the temporary CDN IPs resolved for those bootstrap hostnames, through the selected relay. Route Assist TCP routing is handshake-gated so SwiftTunnel can clamp relay-owned flows before large HTTPS packets are exchanged; non-Roblox browser traffic and already-established TCP connections still bypass SwiftTunnel.
 
+On Windows, the V3 relay client marks SwiftTunnel relay UDP traffic with DSCP EF (46) best-effort for lower jitter on networks that honor DSCP. When latency network throttling boost is enabled, SwiftTunnel also installs the Windows QoS policy needed for deterministic DSCP handling, scoped to SwiftTunnel's relay socket/process; the old broad Gaming QoS policies for Roblox executables and the generic Microsoft Store `Windows10Universal.exe` host stay removed.
+
 Roblox detection covers the standard Win32 player/studio executables by exact process stem or known Roblox alias only. Microsoft Store/UWP Roblox is intentionally not tunnel-eligible because it runs under the generic `Windows10Universal.exe` host used by unrelated Store apps.
 
 

@@ -100,6 +100,15 @@ const OUTBOUND_DATA_MAX_QUEUE_AGE_MS: u64 = 250;
 /// long enough to build a multi-second data backlog.
 const SEND_TIMEOUT: Duration = Duration::from_millis(5);
 
+/// DSCP Expedited Forwarding for relay UDP packets.
+///
+/// Keep this socket-scoped: the old Gaming QoS boost created broad Windows QoS
+/// policies for Roblox executables. Intercepted game packets leave the client as
+/// SwiftTunnel relay UDP traffic, so marking this socket preserves low-latency
+/// queueing without tagging unrelated app traffic.
+const RELAY_DSCP_EF: i32 = 46;
+const RELAY_DSCP_EF_TOS_BYTE: i32 = RELAY_DSCP_EF << 2;
+
 /// Control-plane ping for RTT/jitter telemetry (optional).
 const PING_INTERVAL: Duration = Duration::from_millis(50); // 20Hz
 const PING_IDLE_THRESHOLD: Duration = Duration::from_secs(2);
@@ -623,6 +632,22 @@ impl UdpRelay {
                 );
                 if result != 0 {
                     log::warn!("UDP Relay: Failed to set SO_SNDBUF to 256KB, using default");
+                }
+
+                // Windows only honors user-set IP_TOS when DisableUserTOSSetting=0.
+                // The latency network boost sets that registry value and also installs
+                // a SwiftTunnel-only QoS policy; without it, this socket mark may be
+                // accepted by Winsock but stripped before packets leave the host.
+                let tos = RELAY_DSCP_EF_TOS_BYTE;
+                let tos_bytes = std::slice::from_raw_parts(&tos as *const i32 as *const u8, 4);
+                let result = windows::Win32::Networking::WinSock::setsockopt(
+                    sock,
+                    windows::Win32::Networking::WinSock::IPPROTO_IP.0,
+                    windows::Win32::Networking::WinSock::IP_TOS,
+                    Some(tos_bytes),
+                );
+                if result != 0 {
+                    log::warn!("UDP Relay: Failed to set IP_TOS DSCP EF; continuing");
                 }
             }
         }
@@ -2261,6 +2286,13 @@ mod tests {
         );
         // Unreachable streak must never have been touched by non-repairable errors.
         assert_eq!(unreachable.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn relay_dscp_ef_tos_byte_keeps_ecn_bits_clear() {
+        assert_eq!(RELAY_DSCP_EF, 46);
+        assert_eq!(RELAY_DSCP_EF_TOS_BYTE, 184);
+        assert_eq!(RELAY_DSCP_EF_TOS_BYTE & 0b11, 0);
     }
 
     #[test]
