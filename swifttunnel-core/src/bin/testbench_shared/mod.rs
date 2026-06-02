@@ -37,6 +37,7 @@ pub struct CommonCliOptions {
     pub https_get_url: Option<String>,
     pub custom_relay_server: Option<String>,
     pub enable_api_tunneling: bool,
+    pub enable_country_ban: bool,
     pub skip_manual_process_register: bool,
 }
 
@@ -96,6 +97,7 @@ pub fn parse_common_cli_options(args: &[String]) -> Result<CommonCliOptions, Str
             "--https-get-url" => opts.https_get_url = Some(next(flag, &mut idx)?),
             "--custom-relay" => opts.custom_relay_server = Some(next(flag, &mut idx)?),
             "--enable-api-tunneling" => opts.enable_api_tunneling = true,
+            "--enable-country-ban" => opts.enable_country_ban = true,
             "--skip-manual-process-register" => opts.skip_manual_process_register = true,
             "--help" | "-h" => return Err("help".to_string()),
             other => return Err(format!("Unknown argument: {}", other)),
@@ -145,6 +147,12 @@ pub fn resolve_enable_api_tunneling(opts: &CommonCliOptions, settings: &AppSetti
     opts.enable_api_tunneling
         || parse_env_flag("SWIFTTUNNEL_TEST_ENABLE_API_TUNNELING")
         || settings.enable_api_tunneling
+}
+
+pub fn resolve_enable_country_ban(opts: &CommonCliOptions, settings: &AppSettings) -> bool {
+    opts.enable_country_ban
+        || parse_env_flag("SWIFTTUNNEL_TEST_ENABLE_COUNTRY_BAN")
+        || settings.enable_country_ban
 }
 
 pub fn resolve_binding_preference(
@@ -641,6 +649,7 @@ pub async fn connect_vpn(
         binding_preference,
         settings.game_process_performance,
         resolve_enable_api_tunneling(opts, settings),
+        resolve_enable_country_ban(opts, settings),
     )
     .await
     .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))

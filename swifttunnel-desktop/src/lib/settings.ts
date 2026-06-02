@@ -68,6 +68,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     unbind_cpu0: false,
   },
   enable_api_tunneling: false,
+  enable_country_ban: false,
 };
 
 type LegacyNetworkConfig = Partial<NetworkConfig> & {

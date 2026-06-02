@@ -173,13 +173,19 @@ pub struct AppSettings {
     #[serde(default)]
     pub game_process_performance: GameProcessPerformanceSettings,
 
-    /// Route Roblox TCP/HTTPS traffic through the relay to bypass ISP blocking.
+    /// Route Roblox-owned TCP/HTTPS traffic through the relay.
     ///
-    /// When enabled, TCP packets from tunnel apps and browser-owned Roblox
-    /// login/API HTTP(S) flows are forwarded through the V3 relay alongside
-    /// UDP game traffic. Off by default.
+    /// When enabled, TCP packets from tunnel apps are forwarded through the V3
+    /// relay alongside UDP game traffic. Browser-owned Roblox traffic is never
+    /// routed by Route Assist. Off by default.
     #[serde(default)]
     pub enable_api_tunneling: bool,
+    /// Run the scoped GoodbyeDPI helper for Roblox country-level DPI blocks.
+    ///
+    /// When enabled, GoodbyeDPI applies to Roblox hostnames for both browser and
+    /// Roblox app traffic. This does not route browser traffic through the relay.
+    #[serde(default)]
+    pub enable_country_ban: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -271,6 +277,7 @@ impl Default for AppSettings {
             adapter_binding_mode: AdapterBindingMode::SmartAuto,
             game_process_performance: GameProcessPerformanceSettings::default(),
             enable_api_tunneling: false,
+            enable_country_ban: false,
         }
     }
 }
@@ -604,15 +611,18 @@ mod tests {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!loaded.enable_api_tunneling);
+        assert!(!loaded.enable_country_ban);
     }
 
     #[test]
-    fn test_settings_api_tunneling_roundtrip() {
+    fn test_settings_route_assist_and_country_ban_roundtrip() {
         let mut settings = AppSettings::default();
         settings.enable_api_tunneling = true;
+        settings.enable_country_ban = true;
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
         assert!(loaded.enable_api_tunneling);
+        assert!(loaded.enable_country_ban);
     }
 
     #[test]

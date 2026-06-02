@@ -6678,62 +6678,24 @@ fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool 
     process_name_matches_any_tunnel_app(&name_lower, &snapshot.tunnel_apps)
 }
 
-fn process_name_stem_lower(name: &str) -> String {
-    let file_name = name.rsplit(['\\', '/']).next().unwrap_or(name).trim();
-    let lower = file_name.to_ascii_lowercase();
-    lower
-        .strip_suffix(".exe")
-        .unwrap_or(lower.as_str())
-        .to_string()
-}
-
-fn process_name_in_browser_http_scope(name: &str) -> bool {
-    matches!(
-        process_name_stem_lower(name).as_str(),
-        "arc"
-            | "brave"
-            | "brave-browser"
-            | "chrome"
-            | "chromium"
-            | "chromium-browser"
-            | "firefox"
-            | "msedge"
-            | "opera"
-            | "opera-browser"
-            | "opera_gx"
-            | "operagx"
-            | "vivaldi"
-    )
-}
-
-fn tcp_owner_scope_match<P>(
-    pid: u32,
-    snapshot: &ProcessSnapshot,
-    process_name_lookup: &P,
-) -> (bool, bool)
+fn tcp_owner_scope_match<P>(pid: u32, snapshot: &ProcessSnapshot, process_name_lookup: &P) -> bool
 where
     P: Fn(u32) -> Option<String>,
 {
     if snapshot.is_tunnel_pid_public(pid) {
-        return (true, false);
+        return true;
     }
 
     if let Some(name) = snapshot.pid_names.get(&pid) {
-        return (
-            process_name_in_tunnel_scope(name, snapshot),
-            process_name_in_browser_http_scope(name),
-        );
+        return process_name_in_tunnel_scope(name, snapshot);
     }
 
     let name = process_name_lookup(pid);
     let Some(name) = name.as_deref() else {
-        return (false, false);
+        return false;
     };
 
-    (
-        process_name_in_tunnel_scope(name, snapshot),
-        process_name_in_browser_http_scope(name),
-    )
+    process_name_in_tunnel_scope(name, snapshot)
 }
 
 /// Debug counters for inline cache diagnostics
@@ -7012,12 +6974,8 @@ where
         // couldn't identify the source process. This catches first packets sent
         // before the UDP table is populated (0.5-2ms race window).
         //
-        // TCP speculation is allowed only when API tunneling is enabled and a
-        // tunnel process is already known. This catches first SYNs for Roblox
-        // API/teleport flows before the owner table publishes the source port.
-        // Browser-owned HTTP(S) is allowed only for Roblox destinations so
-        // login/account flows can share the selected relay without tunneling
-        // unrelated browser traffic.
+        // TCP relay seeding is strictly process-owned. Only captured SYNs from
+        // configured tunnel processes may become relay-owned flows.
         let has_tunnel_scope = !snapshot.tunnel_pids.is_empty() || !snapshot.tunnel_apps.is_empty();
         let can_speculate_tcp_api = protocol == Protocol::Tcp && api_tunneling && has_tunnel_scope;
         let is_tcp_api_bootstrap_syn =
@@ -7032,28 +6990,19 @@ where
         } else {
             None
         };
-        let (tcp_api_bootstrap_owned_by_tunnel, tcp_api_bootstrap_owned_by_browser) =
-            if is_tcp_api_bootstrap_syn && snapshot_tunnel_hit {
-                (true, false)
-            } else {
-                tcp_api_bootstrap_owner
-                    .map(|pid| tcp_owner_scope_match(pid, snapshot, &process_name_lookup))
-                    .unwrap_or((false, false))
-            };
-        let tcp_api_bootstrap_owned_by_browser_route_assist =
-            tcp_api_bootstrap_owned_by_browser && is_route_assist_http_dst;
-        let tcp_api_bootstrap_known_unrelated = tcp_api_bootstrap_owner
-            .map(|_| {
-                !tcp_api_bootstrap_owned_by_tunnel
-                    && !tcp_api_bootstrap_owned_by_browser_route_assist
-            })
-            .unwrap_or(false);
+        let tcp_api_bootstrap_owned_by_tunnel = if is_tcp_api_bootstrap_syn && snapshot_tunnel_hit {
+            true
+        } else {
+            tcp_api_bootstrap_owner
+                .map(|pid| tcp_owner_scope_match(pid, snapshot, &process_name_lookup))
+                .unwrap_or(false)
+        };
         let tcp_api_bootstrap_allowed =
-            is_tcp_api_bootstrap_syn && !tcp_api_bootstrap_known_unrelated;
+            is_tcp_api_bootstrap_syn && tcp_api_bootstrap_owned_by_tunnel;
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
         } else {
-            is_route_assist_http_dst && is_tcp_initial_syn && !tcp_api_bootstrap_known_unrelated
+            tcp_api_bootstrap_allowed
         };
         if is_game_dst || tcp_api_bootstrap_allowed {
             // Log speculative tunneling for debugging (first 20 times only)
@@ -7070,7 +7019,7 @@ where
                 });
                 if spec_count < 20 {
                     log::info!(
-                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (Roblox destination or active bootstrap repair IP, initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={}, owner_is_browser_route_assist={})",
+                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={}, route_assist_http_dst={})",
                         src_ip,
                         src_port,
                         dst_ip,
@@ -7078,7 +7027,7 @@ where
                         is_tcp_initial_syn,
                         tcp_api_bootstrap_owner,
                         tcp_api_bootstrap_owned_by_tunnel,
-                        tcp_api_bootstrap_owned_by_browser_route_assist
+                        is_route_assist_http_dst
                     );
                 }
             } else {
@@ -11008,9 +10957,8 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_speculates_when_tunnel_process_is_active() {
-        // First SYNs for Roblox API/teleport TCP flows can arrive before the
-        // Windows owner table publishes their source port. If a tunnel process
-        // is already active, allow destination-guarded TCP speculation.
+        // Route Assist seeds TCP only after the structured owner lookup ties
+        // the SYN back to a configured tunnel process.
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40001;
@@ -11170,7 +11118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_owner_not_published_yet() {
+    fn test_tcp_api_tunneling_does_not_bootstrap_asset_syn_when_owner_not_published_yet() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40006;
@@ -11193,18 +11141,18 @@ mod tests {
         let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
 
-        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
             &frame,
             &snapshot,
             &mut inline_cache,
             true,
             |_ip, _port| None,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.is_empty());
     }
 
     #[test]
-    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_app_scope_exists_without_pid() {
+    fn test_tcp_api_tunneling_does_not_bootstrap_asset_syn_when_app_scope_exists_without_pid() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40007;
@@ -11226,14 +11174,14 @@ mod tests {
         let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
 
-        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
             &frame,
             &snapshot,
             &mut inline_cache,
             true,
             |_ip, _port| None,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.is_empty());
     }
 
     #[test]
@@ -11335,20 +11283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_browser_http_scope_matches_exact_browser_stems() {
-        assert!(process_name_in_browser_http_scope(
-            "C:\\Program Files\\Google\\Chrome\\Application\\Chrome.exe"
-        ));
-        assert!(process_name_in_browser_http_scope(
-            "C:\\Browsers\\chromium-browser.exe"
-        ));
-        assert!(process_name_in_browser_http_scope("opera-browser.exe"));
-        assert!(!process_name_in_browser_http_scope("chrome_helper.exe"));
-        assert!(!process_name_in_browser_http_scope("Discord.exe"));
-    }
-
-    #[test]
-    fn test_tcp_api_tunneling_allows_browser_owned_roblox_http_syn() {
+    fn test_tcp_api_tunneling_does_not_allow_browser_owned_roblox_http_syn() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
         let src_port = 40010;
@@ -11374,7 +11309,7 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(
-            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &frame,
                 &snapshot,
                 &mut inline_cache,
@@ -11398,7 +11333,7 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.is_empty());
     }
 
     #[test]
@@ -11563,7 +11498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_allows_browser_owned_active_bootstrap_http_syn() {
+    fn test_tcp_api_tunneling_does_not_allow_browser_owned_active_bootstrap_http_syn() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
 
@@ -11594,7 +11529,7 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(
-            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &frame,
                 &snapshot,
                 &mut inline_cache,
@@ -11615,7 +11550,7 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.is_empty());
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }

@@ -847,6 +847,8 @@ pub struct VpnConnection {
     process_performance_manager: Option<Arc<Mutex<GameProcessPerformanceManager>>>,
     /// Tracks whether this connection wrote the temporary Roblox bootstrap hosts repair.
     bootstrap_dns_repair_applied: bool,
+    /// Scoped GoodbyeDPI helper for Bypass country bans Roblox traffic.
+    goodbye_dpi_guard: Option<crate::roblox_proxy::goodbyedpi::GoodbyeDpiGuard>,
 }
 
 impl VpnConnection {
@@ -862,6 +864,7 @@ impl VpnConnection {
             auto_lookup_handle: None,
             process_performance_manager: None,
             bootstrap_dns_repair_applied: false,
+            goodbye_dpi_guard: None,
         }
     }
 
@@ -983,6 +986,7 @@ impl VpnConnection {
         binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
+        enable_country_ban: bool,
     ) -> VpnResult<()> {
         let prior_was_error = {
             let state = self.state.borrow();
@@ -1086,6 +1090,28 @@ impl VpnConnection {
         // V3 doesn't need a virtual adapter
         self.set_state(ConnectionState::ConfiguringSplitTunnel)
             .await;
+
+        if enable_country_ban {
+            match crate::roblox_proxy::goodbyedpi::start_for_roblox() {
+                Ok(Some(guard)) => {
+                    self.goodbye_dpi_guard = Some(guard);
+                    log::info!(
+                        "V3: Started Bypass country bans GoodbyeDPI helper for Roblox traffic"
+                    );
+                }
+                Ok(None) => {
+                    log::warn!(
+                        "V3: Bypass country bans helper unavailable; Roblox traffic will continue without GoodbyeDPI"
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "V3: Bypass country bans helper startup failed; continuing without GoodbyeDPI: {}",
+                        e
+                    );
+                }
+            }
+        }
 
         if enable_api_tunneling && !tunnel_apps.is_empty() {
             match crate::roblox_proxy::hosts::apply_bootstrap_overrides().await {
@@ -2448,6 +2474,10 @@ impl VpnConnection {
         // Cleanup WFP block filters
         super::wfp_block::cleanup();
 
+        if let Some(mut guard) = self.goodbye_dpi_guard.take() {
+            guard.stop();
+        }
+
         if self.bootstrap_dns_repair_applied {
             match crate::roblox_proxy::hosts::remove_overrides_async().await {
                 Ok(()) => {
@@ -2651,6 +2681,10 @@ impl Drop for VpnConnection {
         // Stop ETW watcher
         if let Some(mut watcher) = self.etw_watcher.take() {
             watcher.stop();
+        }
+
+        if let Some(mut guard) = self.goodbye_dpi_guard.take() {
+            guard.stop();
         }
 
         if let Some(manager) = self.process_performance_manager.take() {

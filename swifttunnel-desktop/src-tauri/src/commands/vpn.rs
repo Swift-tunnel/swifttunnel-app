@@ -397,6 +397,7 @@ pub async fn vpn_connect(
         forced_servers,
         game_process_performance,
         enable_api_tunneling,
+        enable_country_ban,
     ) = (
         if settings_snapshot.custom_relay_server.is_empty() {
             None
@@ -408,6 +409,7 @@ pub async fn vpn_connect(
         settings_snapshot.forced_servers.clone(),
         settings_snapshot.game_process_performance,
         settings_snapshot.enable_api_tunneling,
+        settings_snapshot.enable_country_ban,
     );
     if custom_relay.is_some() && auto_routing {
         log::info!("Auto-routing disabled for this session because custom_relay_server is set");
@@ -465,6 +467,7 @@ pub async fn vpn_connect(
             binding_preference,
             game_process_performance,
             enable_api_tunneling,
+            enable_country_ban,
         ),
     )
     .await;

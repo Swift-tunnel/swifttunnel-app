@@ -147,6 +147,14 @@ fn sync_runtime_assets(app: &tauri::App) {
             ]),
             exe_dir.join("tools").join("nvidiaProfileInspector"),
         ),
+        (
+            "goodbyedpi",
+            first_existing(vec![
+                resource_dir.join("tools").join("goodbyedpi"),
+                resource_dir.join("goodbyedpi"),
+            ]),
+            exe_dir.join("tools").join("goodbyedpi"),
+        ),
     ];
 
     for (name, source, destination) in targets {
