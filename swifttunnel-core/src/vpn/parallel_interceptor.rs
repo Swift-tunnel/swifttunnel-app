@@ -6998,7 +6998,7 @@ where
                 .unwrap_or(false)
         };
         let tcp_api_bootstrap_allowed =
-            is_tcp_api_bootstrap_syn && tcp_api_bootstrap_owned_by_tunnel;
+            is_route_assist_http_dst && tcp_api_bootstrap_owned_by_tunnel;
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
         } else {
@@ -11079,11 +11079,16 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_bootstraps_asset_syn_when_tunnel_process_is_active() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
         let src_port = 40002;
         let dst_port = 80;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11115,6 +11120,8 @@ mod tests {
             },
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -11186,11 +11193,16 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_bootstraps_asset_syn_when_owner_pid_name_matches_app_scope() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40008;
         let dst_port = 80;
         let tunnel_pid = 8580;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11231,6 +11243,8 @@ mod tests {
             )
         );
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -11388,11 +11402,16 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_allows_tunnel_owned_http_syn_for_mss_clamp() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40018;
         let dst_port = 443;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11433,6 +11452,60 @@ mod tests {
             )
         );
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_rejects_tunnel_owned_unrelated_http_syn() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let unrelated_ip = Ipv4Addr::new(93, 184, 216, 34);
+        let src_port = 40020;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, unrelated_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(tunnel_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == tunnel_pid {
+                        Some("RobloxPlayerBeta.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.is_empty());
     }
 
     #[test]

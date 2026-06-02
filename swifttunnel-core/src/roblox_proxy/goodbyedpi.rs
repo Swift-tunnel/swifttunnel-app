@@ -16,6 +16,7 @@ const GOODBYEDPI_EXE_NAME: &str = "goodbyedpi.exe";
 const HOSTLIST_NAME: &str = "roblox-hostlist.txt";
 
 #[derive(Debug)]
+#[must_use = "dropping GoodbyeDpiGuard stops the GoodbyeDPI subprocess immediately"]
 pub struct GoodbyeDpiGuard {
     child: Child,
     exe_path: PathBuf,
