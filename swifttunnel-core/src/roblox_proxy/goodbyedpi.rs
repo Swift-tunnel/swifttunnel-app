@@ -38,25 +38,49 @@ impl GoodbyeDpiGuard {
                     self.exe_path.display()
                 );
             }
-            Ok(None) => {
-                if let Err(e) = self.child.kill() {
+            Ok(None) => match self.child.kill() {
+                Ok(()) => {
+                    if let Err(e) = self.child.wait() {
+                        warn!(
+                            "Failed to wait for GoodbyeDPI process {} cleanup: {}",
+                            self.child.id(),
+                            e
+                        );
+                    } else {
+                        info!("Stopped GoodbyeDPI helper ({})", self.exe_path.display());
+                    }
+                }
+                Err(e) => {
                     warn!(
                         "Failed to stop GoodbyeDPI process {} ({}): {}",
                         self.child.id(),
                         self.exe_path.display(),
                         e
                     );
+                    match self.child.try_wait() {
+                        Ok(Some(status)) => {
+                            info!(
+                                "GoodbyeDPI exited during cleanup race (status: {}, exe: {})",
+                                status,
+                                self.exe_path.display()
+                            );
+                        }
+                        Ok(None) => {
+                            warn!(
+                                "Skipping blocking wait for GoodbyeDPI process {} after kill failure",
+                                self.child.id()
+                            );
+                        }
+                        Err(wait_err) => {
+                            warn!(
+                                "Failed to re-check GoodbyeDPI process {} after kill failure: {}",
+                                self.child.id(),
+                                wait_err
+                            );
+                        }
+                    }
                 }
-                if let Err(e) = self.child.wait() {
-                    warn!(
-                        "Failed to wait for GoodbyeDPI process {} cleanup: {}",
-                        self.child.id(),
-                        e
-                    );
-                } else {
-                    info!("Stopped GoodbyeDPI helper ({})", self.exe_path.display());
-                }
-            }
+            },
             Err(e) => {
                 warn!(
                     "Failed to inspect GoodbyeDPI process {} during cleanup: {}",
@@ -66,16 +90,12 @@ impl GoodbyeDpiGuard {
             }
         }
 
-        match fs::remove_file(&self.hostlist_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                warn!(
-                    "Failed to remove GoodbyeDPI Roblox hostlist {}: {}",
-                    self.hostlist_path.display(),
-                    e
-                );
-            }
+        if let Err(e) = remove_hostlist_file(&self.hostlist_path) {
+            warn!(
+                "Failed to remove GoodbyeDPI Roblox hostlist {}: {}",
+                self.hostlist_path.display(),
+                e
+            );
         }
     }
 }
@@ -110,13 +130,23 @@ pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
         command.current_dir(dir);
     }
 
-    let child = command.spawn().map_err(|e| {
-        format!(
-            "Failed to start GoodbyeDPI helper {} with hostlist {}: {e}",
-            exe_path.display(),
-            hostlist_path.display()
-        )
-    })?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            if let Err(cleanup_err) = remove_hostlist_file(&hostlist_path) {
+                warn!(
+                    "Failed to remove GoodbyeDPI hostlist after spawn failure {}: {}",
+                    hostlist_path.display(),
+                    cleanup_err
+                );
+            }
+            return Err(format!(
+                "Failed to start GoodbyeDPI helper {} with hostlist {}: {e}",
+                exe_path.display(),
+                hostlist_path.display()
+            ));
+        }
+    };
 
     info!(
         "Started GoodbyeDPI helper pid={} exe={} hostlist={}",
@@ -169,6 +199,14 @@ fn goodbyedpi_data_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join("SwiftTunnel")
         .join("goodbyedpi")
+}
+
+fn remove_hostlist_file(path: &Path) -> Result<(), std::io::Error> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 pub(crate) fn build_goodbyedpi_args(hostlist_path: &Path) -> Vec<String> {
@@ -288,5 +326,13 @@ mod tests {
         assert!(paths.contains(&PathBuf::from(
             "C:/Program Files/SwiftTunnel/tools/goodbyedpi/x86_64/goodbyedpi.exe"
         )));
+    }
+
+    #[test]
+    fn remove_hostlist_file_ignores_missing_file() {
+        let path = std::env::temp_dir().join("swifttunnel-missing-goodbyedpi-hostlist.txt");
+        let _ = fs::remove_file(&path);
+
+        assert!(remove_hostlist_file(&path).is_ok());
     }
 }
