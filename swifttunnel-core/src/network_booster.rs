@@ -844,6 +844,11 @@ pub fn cleanup_all_system_state() -> Result<()> {
         warn!("Cleanup: failed to remove hosts overrides: {e}");
     }
 
+    // 1b. Stop SwiftTunnel's scoped GoodbyeDPI helper and remove its runtime hostlist.
+    if let Err(e) = crate::roblox_proxy::goodbyedpi::cleanup_for_uninstall() {
+        warn!("Cleanup: GoodbyeDPI cleanup failed (non-fatal): {e}");
+    }
+
     // 2. Delete SwiftTunnel QoS policies from older releases and the current
     // relay-scoped DSCP policy.
     NetworkBooster::cleanup_removed_qos_policies();
