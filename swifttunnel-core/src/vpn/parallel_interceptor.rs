@@ -10681,6 +10681,38 @@ mod tests {
     }
 
     #[test]
+    fn test_disable_ipv6_probe_true_installs_firewall_block() {
+        delete_ipv6_marker();
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
+        interceptor.physical_adapter_if_index = Some(42);
+
+        let runner_calls = std::cell::Cell::new(0);
+        interceptor
+            .disable_ipv6_with_runner_and_probe(
+                |_, _| {
+                    runner_calls.set(runner_calls.get() + 1);
+                    CommandRunOutput {
+                        success: true,
+                        timed_out: false,
+                        exit_code: Some(0),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }
+                },
+                |if_index| {
+                    assert_eq!(if_index, 42);
+                    Some(true)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(runner_calls.get(), 2);
+        assert!(interceptor.ipv6_was_disabled);
+        delete_ipv6_marker();
+    }
+
+    #[test]
     fn test_disable_ipv6_probe_unknown_still_attempts_firewall_block() {
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
