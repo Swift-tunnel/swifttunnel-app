@@ -3808,7 +3808,6 @@ impl ParallelInterceptor {
                         friendly_name,
                         if_index
                     );
-                    self.ipv6_was_disabled = false;
                     return Ok(());
                 }
                 None => {
@@ -10656,6 +10655,28 @@ mod tests {
 
         assert_eq!(runner_calls.get(), 0);
         assert!(!interceptor.ipv6_was_disabled);
+        delete_ipv6_marker();
+    }
+
+    #[test]
+    fn test_disable_ipv6_skip_preserves_existing_restore_state() {
+        delete_ipv6_marker();
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
+        interceptor.physical_adapter_if_index = Some(42);
+        interceptor.ipv6_was_disabled = true;
+
+        interceptor
+            .disable_ipv6_with_runner_and_probe(
+                |_, _| panic!("runner should not be called"),
+                |if_index| {
+                    assert_eq!(if_index, 42);
+                    Some(false)
+                },
+            )
+            .unwrap();
+
+        assert!(interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
     }
 
