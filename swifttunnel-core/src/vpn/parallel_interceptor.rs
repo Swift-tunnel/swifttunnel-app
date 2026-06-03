@@ -58,8 +58,8 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    IPV6_BLOCK_REMOTE_IPS, IPV6_BLOCK_RULE_NAME, delete_ipv6_marker, restore_ipv6_from_marker,
-    write_ipv6_marker_firewall,
+    IPV6_BLOCK_REMOTE_IPS, IPV6_BLOCK_RULE_NAME, delete_ipv6_marker, has_ipv6_binding_native,
+    restore_ipv6_from_marker, write_ipv6_marker_firewall,
 };
 use super::process_cache::{DNS_PORT, LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
@@ -3757,6 +3757,18 @@ impl ParallelInterceptor {
     where
         F: Fn(&[&str], u64) -> CommandRunOutput,
     {
+        self.disable_ipv6_with_runner_and_probe(runner, has_ipv6_binding_native)
+    }
+
+    fn disable_ipv6_with_runner_and_probe<F, P>(
+        &mut self,
+        runner: F,
+        ipv6_probe: P,
+    ) -> VpnResult<()>
+    where
+        F: Fn(&[&str], u64) -> CommandRunOutput,
+        P: Fn(u32) -> Option<bool>,
+    {
         let friendly_name = match &self.physical_adapter_friendly_name {
             Some(name) => name.clone(),
             None => {
@@ -3779,6 +3791,34 @@ impl ParallelInterceptor {
                 "IPv6-only network: SwiftTunnel needs IPv4 connectivity to tunnel game traffic."
                     .to_string(),
             ));
+        }
+
+        if let Some(if_index) = self.physical_adapter_if_index {
+            match ipv6_probe(if_index) {
+                Some(true) => {
+                    log::debug!(
+                        "Selected adapter {} (if_index={}) has IPv6; installing block rule",
+                        friendly_name,
+                        if_index
+                    );
+                }
+                Some(false) => {
+                    log::info!(
+                        "Skipping IPv6 firewall block on {} (if_index={}): selected adapter has no IPv6 address/binding",
+                        friendly_name,
+                        if_index
+                    );
+                    self.ipv6_was_disabled = false;
+                    return Ok(());
+                }
+                None => {
+                    log::debug!(
+                        "Could not determine IPv6 state for {} (if_index={}); falling back to firewall block",
+                        friendly_name,
+                        if_index
+                    );
+                }
+            }
         }
 
         let firewall_interface_type =
@@ -10585,6 +10625,73 @@ mod tests {
         assert!(args.contains(&format!("remoteip={IPV6_BLOCK_REMOTE_IPS}")));
         assert!(args.contains(&"interfacetype=lan".to_string()));
         assert!(!args.contains(&"remoteip=::/0".to_string()));
+    }
+
+    #[test]
+    fn test_disable_ipv6_skips_firewall_when_selected_adapter_has_no_ipv6() {
+        delete_ipv6_marker();
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
+        interceptor.physical_adapter_if_index = Some(42);
+
+        let runner_calls = std::cell::Cell::new(0);
+        interceptor
+            .disable_ipv6_with_runner_and_probe(
+                |_, _| {
+                    runner_calls.set(runner_calls.get() + 1);
+                    CommandRunOutput {
+                        success: false,
+                        timed_out: false,
+                        exit_code: Some(1),
+                        stdout: String::new(),
+                        stderr: "runner should not be called".to_string(),
+                    }
+                },
+                |if_index| {
+                    assert_eq!(if_index, 42);
+                    Some(false)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(runner_calls.get(), 0);
+        assert!(!interceptor.ipv6_was_disabled);
+        delete_ipv6_marker();
+    }
+
+    #[test]
+    fn test_disable_ipv6_probe_unknown_still_attempts_firewall_block() {
+        delete_ipv6_marker();
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
+        interceptor.physical_adapter_if_index = Some(42);
+
+        let runner_calls = std::cell::Cell::new(0);
+        let error = interceptor
+            .disable_ipv6_with_runner_and_probe(
+                |_, _| {
+                    runner_calls.set(runner_calls.get() + 1);
+                    CommandRunOutput {
+                        success: false,
+                        timed_out: false,
+                        exit_code: Some(1),
+                        stdout: String::new(),
+                        stderr:
+                            "The following command was not found: advfirewall firewall add rule."
+                                .to_string(),
+                    }
+                },
+                |if_index| {
+                    assert_eq!(if_index, 42);
+                    None
+                },
+            )
+            .expect_err("unknown IPv6 probe must not skip the firewall block");
+
+        assert_eq!(runner_calls.get(), 2);
+        assert!(error.to_string().contains("IPv6 block firewall rule"));
+        assert!(interceptor.ipv6_was_disabled);
+        delete_ipv6_marker();
     }
 
     #[test]
