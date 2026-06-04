@@ -467,7 +467,7 @@ export function SettingsTab() {
           label="Roblox Route Assist"
           desc="Use when bypassing a network ban or to improve region-matching odds"
           tooltip={
-            <Tooltip content="Routes Roblox-owned login/API HTTP(S) through the relay.">
+            <Tooltip content="Routes Roblox login/API HTTP(S), including browser-owned Roblox auth traffic, through the relay. Non-Roblox browser traffic still bypasses SwiftTunnel.">
               <span className="inline-flex">
                 <InfoIcon />
               </span>
@@ -478,24 +478,6 @@ export function SettingsTab() {
             enabled={settings.enable_api_tunneling}
             ariaLabel="Roblox Route Assist"
             onChange={(v) => set({ enable_api_tunneling: v })}
-          />
-        </Row>
-
-        <Row
-          label="Bypass country bans"
-          desc="Use when Roblox is blocked by country-level DPI"
-          tooltip={
-            <Tooltip content="Starts the scoped GoodbyeDPI helper for Roblox hostnames. It applies to both browser and Roblox app traffic.">
-              <span className="inline-flex">
-                <InfoIcon />
-              </span>
-            </Tooltip>
-          }
-        >
-          <Toggle
-            enabled={settings.enable_country_ban}
-            ariaLabel="Bypass country bans"
-            onChange={(v) => set({ enable_country_ban: v })}
           />
         </Row>
 

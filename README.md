@@ -40,10 +40,7 @@
 Only game traffic is optimized through SwiftTunnel. Discord, Spotify, Chrome — everything else uses your normal internet. No bandwidth wasted.
 
 ### 🧭 Roblox Route Assist
-Optional Roblox-owned login/API HTTP(S) routing helps users bypass network issues and gives Roblox a better chance of placing sessions near the SwiftTunnel region they picked. TCP relay flows are routed only when SwiftTunnel captures a configured tunnel process's HTTPS handshake, so existing Roblox connections are not moved into the relay halfway through.
-
-### 🌐 Bypass country bans
-When Roblox is blocked by country-level DPI, SwiftTunnel can start a scoped GoodbyeDPI helper with a narrow Roblox hostlist. This applies to both browser launch/login traffic and the Roblox app.
+Optional Roblox login/API HTTP(S) routing helps users bypass network bans and gives Roblox a better chance of placing sessions near the SwiftTunnel region they picked. Browser traffic is still scoped to Roblox destinations only; unrelated websites keep using the normal connection. TCP flows are routed only when SwiftTunnel captures the Roblox/bootstrap HTTPS handshake, so existing browser or Roblox connections are not moved into the relay halfway through.
 
 ### ⚡ Low Latency Gaming Servers
 27 gaming-optimized relays across 12 gaming regions. Each relay runs:
@@ -109,9 +106,7 @@ Starts on the lowest-latency region from the in-app ping test, then resolves det
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-SwiftTunnel intercepts game traffic at the network layer. Only packets from your game are optimized and routed through our servers. DNS normally stays on the local connection; when Roblox Route Assist is enabled, SwiftTunnel also repairs exact Roblox launch/API hostnames with temporary hosts-file entries resolved over HTTPS DNS and routes Roblox-owned login/API HTTP(S) through the selected relay. Already-established TCP connections still bypass SwiftTunnel.
-
-When Bypass country bans is enabled, the scoped GoodbyeDPI helper applies to Roblox hostnames for both browser and app traffic without changing relay ownership.
+SwiftTunnel intercepts game traffic at the network layer. Only packets from your game are optimized and routed through our servers. DNS normally stays on the local connection; when Roblox Route Assist is enabled, SwiftTunnel also repairs exact Roblox launch/API hostnames with temporary hosts-file entries resolved over HTTPS DNS and routes Roblox login/API HTTP(S), including browser-owned Roblox auth traffic and the temporary CDN IPs resolved for those bootstrap hostnames, through the selected relay. Route Assist TCP routing is handshake-gated so SwiftTunnel can clamp relay-owned flows before large HTTPS packets are exchanged; non-Roblox browser traffic and already-established TCP connections still bypass SwiftTunnel.
 
 On Windows, the V3 relay client marks SwiftTunnel relay UDP traffic with DSCP EF (46) best-effort for lower jitter on networks that honor DSCP. When latency network throttling boost is enabled, SwiftTunnel also installs the Windows QoS policy needed for deterministic DSCP handling, scoped to SwiftTunnel's relay socket/process; the old broad Gaming QoS policies for Roblox executables and the generic Microsoft Store `Windows10Universal.exe` host stay removed.
 

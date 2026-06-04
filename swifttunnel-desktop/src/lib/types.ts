@@ -385,7 +385,6 @@ export interface AppSettings {
   adapter_binding_mode: "smart_auto" | "manual";
   game_process_performance: GameProcessPerformanceSettings;
   enable_api_tunneling: boolean;
-  enable_country_ban: boolean;
 }
 
 // ── System ──
