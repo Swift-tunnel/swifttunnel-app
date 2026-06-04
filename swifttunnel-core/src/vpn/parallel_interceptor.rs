@@ -6775,14 +6775,11 @@ fn process_name_in_browser_http_scope(name: &str) -> bool {
         process_name_stem_lower(name).as_str(),
         "arc"
             | "brave"
-            | "brave-browser"
             | "chrome"
             | "chromium"
-            | "chromium-browser"
             | "firefox"
             | "msedge"
             | "opera"
-            | "opera-browser"
             | "opera_gx"
             | "operagx"
             | "vivaldi"
@@ -7133,6 +7130,8 @@ where
             .unwrap_or(false);
         let tcp_api_bootstrap_owner_missing =
             is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && tcp_api_bootstrap_owner.is_none();
+        // Known tunnel-owned TCP bootstraps keep v2.1.8's relay/MSS-clamp behavior.
+        // Owner-missing SYNs are only repairable for Roblox or active bootstrap IPs.
         let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
             && !tcp_api_bootstrap_known_unrelated
             && (!tcp_api_bootstrap_owner_missing || is_route_assist_http_dst);
@@ -11668,9 +11667,9 @@ mod tests {
             "C:\\Program Files\\Google\\Chrome\\Application\\Chrome.exe"
         ));
         assert!(process_name_in_browser_http_scope(
-            "C:\\Browsers\\chromium-browser.exe"
+            "C:\\Browsers\\chromium.exe"
         ));
-        assert!(process_name_in_browser_http_scope("opera-browser.exe"));
+        assert!(process_name_in_browser_http_scope("opera.exe"));
         assert!(!process_name_in_browser_http_scope("chrome_helper.exe"));
         assert!(!process_name_in_browser_http_scope("Discord.exe"));
     }
