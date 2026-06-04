@@ -4740,15 +4740,25 @@ fn forwardable_tunnel_ip_packet(data: &[u8]) -> Option<&[u8]> {
         return None;
     }
 
-    let Some(total_len) = ipv4_total_len(ip_packet, ihl) else {
-        let required_len = u16::from_be_bytes([ip_packet[2], ip_packet[3]]) as usize;
+    let Some(total_len) = ipv4_declared_total_len(ip_packet) else {
+        return None;
+    };
+    if total_len < ihl {
+        log_tunnel_forwarding_drop_sampled(
+            "malformed IPv4 total length is smaller than header length",
+            total_len,
+            ihl,
+        );
+        return None;
+    }
+    if ip_packet.len() < total_len {
         log_tunnel_forwarding_drop_sampled(
             "captured IPv4 payload is shorter than its total length",
             ip_packet.len(),
-            required_len,
+            total_len,
         );
         return None;
-    };
+    }
 
     if total_len > MAX_PACKET_SIZE {
         log_tunnel_forwarding_drop_sampled(
@@ -7669,12 +7679,21 @@ fn ipv4_total_len(packet: &[u8], ihl: usize) -> Option<usize> {
         return None;
     }
 
-    let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    let total_len = ipv4_declared_total_len(packet)?;
     if total_len < ihl || packet.len() < total_len {
         return None;
     }
 
     Some(total_len)
+}
+
+#[inline(always)]
+fn ipv4_declared_total_len(packet: &[u8]) -> Option<usize> {
+    if packet.len() < 4 {
+        return None;
+    }
+
+    Some(u16::from_be_bytes([packet[2], packet[3]]) as usize)
 }
 
 #[inline(always)]
@@ -8255,6 +8274,21 @@ mod tests {
         );
         let ip_start = 14;
         frame[ip_start + 2..ip_start + 4].copy_from_slice(&60u16.to_be_bytes());
+
+        assert!(forwardable_tunnel_ip_packet(&frame).is_none());
+    }
+
+    #[test]
+    fn test_forwardable_tunnel_ip_packet_rejects_total_len_smaller_than_header() {
+        let mut frame = build_ipv4_tcp_frame_with_flags(
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(128, 116, 50, 100),
+            40021,
+            443,
+            0x02,
+        );
+        let ip_start = 14;
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&16u16.to_be_bytes());
 
         assert!(forwardable_tunnel_ip_packet(&frame).is_none());
     }
