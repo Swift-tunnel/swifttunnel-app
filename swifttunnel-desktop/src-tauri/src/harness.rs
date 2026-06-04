@@ -465,6 +465,7 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
         binding_preference,
         game_process_performance,
         enable_api_tunneling,
+        enable_country_ban,
     ) = {
         let mut settings = state.settings.lock();
         apply_adapter_override(&mut settings, cli);
@@ -494,6 +495,7 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
             binding_preference,
             snapshot.game_process_performance,
             cli.enable_api_tunneling || snapshot.enable_api_tunneling,
+            snapshot.enable_country_ban,
         )
     };
 
@@ -524,6 +526,7 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
             binding_preference,
             game_process_performance,
             enable_api_tunneling,
+            enable_country_ban,
         )
         .await
         .map_err(|err| swifttunnel_core::vpn::user_friendly_error(&err))?;

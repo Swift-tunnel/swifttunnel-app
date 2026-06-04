@@ -7,4 +7,5 @@
 //! entries from older local-proxy builds.
 
 pub mod hosts;
+pub mod goodbyedpi;
 pub(crate) mod legacy_goodbyedpi;
