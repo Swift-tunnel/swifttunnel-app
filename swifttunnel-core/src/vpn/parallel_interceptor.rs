@@ -7131,8 +7131,11 @@ where
                     && !tcp_api_bootstrap_owned_by_browser_route_assist
             })
             .unwrap_or(false);
-        let tcp_api_bootstrap_allowed =
-            is_tcp_api_bootstrap_syn && !tcp_api_bootstrap_known_unrelated;
+        let tcp_api_bootstrap_owner_missing =
+            is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && tcp_api_bootstrap_owner.is_none();
+        let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
+            && !tcp_api_bootstrap_known_unrelated
+            && (!tcp_api_bootstrap_owner_missing || is_route_assist_http_dst);
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
         } else {
@@ -7153,7 +7156,7 @@ where
                 });
                 if spec_count < 20 {
                     log::info!(
-                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (Roblox destination or active bootstrap repair IP, initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={}, owner_is_browser_route_assist={})",
+                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={}, owner_is_browser_route_assist={}, route_assist_http_dst={}, owner_missing={})",
                         src_ip,
                         src_port,
                         dst_ip,
@@ -7161,7 +7164,9 @@ where
                         is_tcp_initial_syn,
                         tcp_api_bootstrap_owner,
                         tcp_api_bootstrap_owned_by_tunnel,
-                        tcp_api_bootstrap_owned_by_browser_route_assist
+                        tcp_api_bootstrap_owned_by_browser_route_assist,
+                        is_route_assist_http_dst,
+                        tcp_api_bootstrap_owner_missing
                     );
                 }
             } else {
@@ -11445,12 +11450,17 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_owner_not_published_yet() {
+    fn test_tcp_api_tunneling_bootstraps_active_asset_syn_when_owner_not_published_yet() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40006;
         let dst_port = 80;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11476,14 +11486,55 @@ mod tests {
             |_ip, _port| None,
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
-    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_app_scope_exists_without_pid() {
+    fn test_tcp_api_tunneling_does_not_bootstrap_unknown_owner_non_roblox_http_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let unrelated_ip = Ipv4Addr::new(93, 184, 216, 34);
+        let src_port = 40020;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, unrelated_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |_ip, _port| None,
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_bootstraps_active_asset_syn_when_app_scope_exists_without_pid() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40007;
         let dst_port = 80;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11509,6 +11560,8 @@ mod tests {
             |_ip, _port| None,
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
