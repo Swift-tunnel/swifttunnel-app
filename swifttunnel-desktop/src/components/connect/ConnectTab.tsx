@@ -202,11 +202,6 @@ export function ConnectTab() {
     saveDebounced();
   }
 
-  function setCountryBan(enabled: boolean) {
-    update({ enable_country_ban: enabled });
-    saveDebounced();
-  }
-
   const canConnect =
     isIdle &&
     (settings.auto_routing_enabled || Boolean(settings.selected_region));
@@ -416,11 +411,6 @@ export function ConnectTab() {
         enabled={settings.enable_api_tunneling}
         disabled={isConnected || isTransitioning}
         onChange={setRouteAssist}
-      />
-      <CountryBanPanel
-        enabled={settings.enable_country_ban}
-        disabled={isConnected || isTransitioning}
-        onChange={setCountryBan}
       />
 
       {/* ── Throughput (connected) ── */}
@@ -704,7 +694,7 @@ function RouteAssistPanel({
           >
             Roblox Route Assist
           </h3>
-          <Tooltip content="Routes Roblox-owned login/API HTTP(S) through the selected relay.">
+          <Tooltip content="Routes Roblox login/API HTTP(S) through the selected relay, including browser-owned Roblox auth traffic. Non-Roblox browser traffic still bypasses SwiftTunnel.">
             <span className="inline-flex">
               <InfoIcon />
             </span>
@@ -723,92 +713,13 @@ function RouteAssistPanel({
           )}
         </div>
         <p className="mt-1 max-w-[640px] text-[11.5px] leading-snug text-text-muted">
-          Use this for Roblox-owned TCP/API relay routing and region placement.
+          Use this when bypassing a network ban, or to increase the chance Roblox places you near your tunneled region.
         </p>
       </div>
       <Toggle
         enabled={enabled}
         disabled={disabled}
         ariaLabel="Roblox Route Assist"
-        onChange={onChange}
-      />
-    </section>
-  );
-}
-
-function CountryBanPanel({
-  enabled,
-  disabled,
-  onChange,
-}: {
-  enabled: boolean;
-  disabled: boolean;
-  onChange: (enabled: boolean) => void;
-}) {
-  return (
-    <section
-      className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] px-4 py-3 transition-colors"
-      style={{
-        backgroundColor: enabled
-          ? "var(--color-accent-primary-soft-8)"
-          : "var(--color-bg-card)",
-        border: `1px solid ${
-          enabled
-            ? "var(--color-accent-primary-soft-20)"
-            : "var(--color-border-subtle)"
-        }`,
-        boxShadow: enabled
-          ? "inset 0 1px 0 rgba(255,255,255,0.04)"
-          : "inset 0 1px 0 rgba(255,255,255,0.025)",
-      }}
-    >
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke={enabled ? "var(--color-text-primary)" : "var(--color-text-muted)"}
-            strokeWidth="1.85"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M12 3v18" />
-            <path d="M5 7h10a4 4 0 0 1 0 8H5" />
-          </svg>
-          <h3
-            className="text-[12.5px] font-semibold text-text-primary"
-            style={{ letterSpacing: "-0.005em" }}
-          >
-            Bypass country bans
-          </h3>
-          <Tooltip content="Starts the scoped GoodbyeDPI helper for Roblox hostnames. It applies to both browser and Roblox app traffic.">
-            <span className="inline-flex">
-              <InfoIcon />
-            </span>
-          </Tooltip>
-          {enabled && (
-            <span
-              className="pill-base"
-              style={{
-                backgroundColor: "var(--color-bg-base)",
-                color: "var(--color-text-primary)",
-                border: "1px solid var(--color-border-default)",
-              }}
-            >
-              ON
-            </span>
-          )}
-        </div>
-        <p className="mt-1 max-w-[640px] text-[11.5px] leading-snug text-text-muted">
-          Use this when Roblox is blocked by country-level DPI. Applies to browser launch/login and the Roblox app.
-        </p>
-      </div>
-      <Toggle
-        enabled={enabled}
-        disabled={disabled}
-        ariaLabel="Bypass country bans"
         onChange={onChange}
       />
     </section>

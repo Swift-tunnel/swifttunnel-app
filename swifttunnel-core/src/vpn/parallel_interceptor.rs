@@ -699,28 +699,25 @@ static READER_DIRECT_RELAY_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_BYPASS: AtomicU64 = AtomicU64::new(0);
 
-/// Counter for tunneled packets that exceeded `MAX_PACKET_SIZE` and were
-/// truncated before forwarding to the relay. This can happen because we
-/// no longer disable LSO/TSO on the physical adapter (see comment in
-/// `start()`); the NIC may hand us a TCP super-segment up to 64KB. For
-/// Roblox traffic this is expected to be effectively zero (UDP for game
-/// data, small TCP for API), but we sample-log occurrences so unexpected
-/// truncation in the field is observable instead of silent.
-static TUNNEL_TRUNCATED_SUPER_SEGMENTS: AtomicU64 = AtomicU64::new(0);
+/// Counter for tunneled packets that could not be forwarded intact. This can
+/// happen when the captured IPv4 payload is incomplete or larger than the
+/// fixed relay/work-item buffers. We drop instead of truncating because a
+/// shortened packet can carry an IPv4 total length/checksum that no longer
+/// matches the actual bytes forwarded into the relay or NDIS.
+static TUNNEL_FORWARDING_DROPS: AtomicU64 = AtomicU64::new(0);
 
-/// Sample-log a tunneled-packet truncation so that frequent truncation
-/// doesn't spam stlog, but rare/first-time occurrences are visible.
+/// Sample-log a tunneled-packet forwarding drop so frequent drops don't spam
+/// stlog, but rare/first-time occurrences are visible.
 /// Logs the first 5 events and then on each power-of-two boundary
 /// (matching the `log_sampled_connect_event` cadence in connection.rs).
-fn log_super_segment_truncation_sampled(actual_len: usize) {
-    let event = TUNNEL_TRUNCATED_SUPER_SEGMENTS.fetch_add(1, Ordering::Relaxed) + 1;
+fn log_tunnel_forwarding_drop_sampled(reason: &str, observed_len: usize, required_len: usize) {
+    let event = TUNNEL_FORWARDING_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
     if event <= 5 || event.is_power_of_two() {
         log::warn!(
-            "Tunneled packet truncated: {} byte super-segment clamped to \
-             MAX_PACKET_SIZE={} (TCP super-segment via NIC LSO; tunnel \
-             correctness for this stream may degrade until OS reduces \
-             segment size). Event #{}",
-            actual_len,
+            "Tunneled packet dropped before forwarding: {} (observed_len={}, required_len={}, MAX_PACKET_SIZE={}). Event #{}",
+            reason,
+            observed_len,
+            required_len,
             MAX_PACKET_SIZE,
             event
         );
@@ -3998,14 +3995,14 @@ impl ParallelInterceptor {
         // motivated the disable.
         //
         // What this means for tunneled traffic: super-segments larger than
-        // MAX_PACKET_SIZE (1600 bytes, see top of file) will be truncated
-        // in the forwarding path. In practice this does not affect Roblox:
-        // game traffic is UDP (which has no segmentation offload) and the
-        // TCP tunneling we do is for small Roblox API/bootstrap calls
-        // whose payloads are well under the MTU. If a future use case
-        // tunnels large TCP transfers and runs into super-segment
-        // truncation, the right fix is a larger forwarding buffer or
-        // software segmentation in the forward path — not bringing this
+        // MAX_PACKET_SIZE (1600 bytes, see top of file) are dropped instead
+        // of truncated in the forwarding path. In practice this should be
+        // rare for Roblox: game traffic is UDP (which has no segmentation
+        // offload) and the TCP tunneling we do is for small Roblox
+        // API/bootstrap calls whose payloads are normally well under the
+        // MTU. If a future use case tunnels large TCP transfers and runs
+        // into repeated drops, the right fix is a larger forwarding buffer
+        // or software segmentation in the forward path, not bringing this
         // disable back.
         //
         // Existing on-disk TSO markers from older builds are still
@@ -4731,6 +4728,83 @@ enum ReaderTunnelAction {
     BypassPhysical,
 }
 
+fn forwardable_tunnel_ip_packet(data: &[u8]) -> Option<&[u8]> {
+    let ip_start = parse_ipv4_header_offset(data)?;
+    let ip_packet = &data[ip_start..];
+    if ip_packet.len() < 20 {
+        return None;
+    }
+
+    let ihl = ((ip_packet[0] & 0x0F) as usize) * 4;
+    if ihl < 20 || ip_packet.len() < ihl {
+        return None;
+    }
+
+    let Some(total_len) = ipv4_declared_total_len(ip_packet) else {
+        return None;
+    };
+    if total_len < ihl {
+        log_tunnel_forwarding_drop_sampled(
+            "malformed IPv4 total length is smaller than header length",
+            total_len,
+            ihl,
+        );
+        return None;
+    }
+    if ip_packet.len() < total_len {
+        log_tunnel_forwarding_drop_sampled(
+            "captured IPv4 payload is shorter than its total length",
+            ip_packet.len(),
+            total_len,
+        );
+        return None;
+    }
+
+    if total_len > MAX_PACKET_SIZE {
+        log_tunnel_forwarding_drop_sampled(
+            "IPv4 payload exceeds forwarding buffer",
+            total_len,
+            MAX_PACKET_SIZE,
+        );
+        return None;
+    }
+
+    Some(&ip_packet[..total_len])
+}
+
+fn packet_work_data_for_tunnel(data: &[u8]) -> Option<ArrayVec<u8, MAX_PACKET_SIZE>> {
+    if data.len() > MAX_PACKET_SIZE {
+        log_tunnel_forwarding_drop_sampled(
+            "Ethernet frame exceeds worker buffer",
+            data.len(),
+            MAX_PACKET_SIZE,
+        );
+        return None;
+    }
+
+    let mut packet_data: ArrayVec<u8, MAX_PACKET_SIZE> = ArrayVec::new();
+    packet_data
+        .try_extend_from_slice(data)
+        .expect("worker packet data length is checked before copy");
+
+    Some(packet_data)
+}
+
+fn bounded_intermediate_buffer_data(packet: &ndisapi::IntermediateBuffer) -> Option<&[u8]> {
+    let len = packet.get_length() as usize;
+    let max_len = packet.buffer.0.len();
+    if len > max_len {
+        log_tunnel_forwarding_drop_sampled(
+            "driver reported packet length beyond IntermediateBuffer capacity",
+            len,
+            max_len,
+        );
+        return None;
+    }
+
+    Some(&packet.buffer.0[..len])
+}
+
 /// Forward an already-classified V3 packet from the reader thread.
 ///
 /// This removes the previous reader -> worker channel hop for the common V3
@@ -4753,36 +4827,33 @@ fn forward_tunneled_packet_from_reader(
         .fetch_add(packet_len, Ordering::Relaxed);
     throughput.add_tx(packet_len);
 
-    let ip_start = match parse_ipv4_header_offset(data) {
-        Some(offset) => offset,
+    let ip_packet = match forwardable_tunnel_ip_packet(data) {
+        Some(packet) => packet,
         None => return ReaderTunnelAction::Consumed,
     };
-    let ip_packet = &data[ip_start..];
 
-    if ip_packet.len() >= 20 {
-        let dst_ip = Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
-        if is_roblox_game_server_ip(dst_ip) {
-            if let Some(auto_router) = auto_router {
-                if auto_router.is_lookup_pending(dst_ip) {
-                    return ReaderTunnelAction::Consumed;
+    let dst_ip = Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
+    if is_roblox_game_server_ip(dst_ip) {
+        if let Some(auto_router) = auto_router {
+            if auto_router.is_lookup_pending(dst_ip) {
+                return ReaderTunnelAction::Consumed;
+            }
+        }
+    }
+
+    if auto_routing_candidate_dst_ip(data) == Some(dst_ip) {
+        if let Some(mut servers) = detected_game_servers.try_write() {
+            if servers.len() < MAX_DETECTED_GAME_SERVERS || servers.contains(&dst_ip) {
+                if servers.insert(dst_ip) {
+                    log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
                 }
             }
         }
 
-        if auto_routing_candidate_dst_ip(data) == Some(dst_ip) {
-            if let Some(mut servers) = detected_game_servers.try_write() {
-                if servers.len() < MAX_DETECTED_GAME_SERVERS || servers.contains(&dst_ip) {
-                    if servers.insert(dst_ip) {
-                        log::info!("Game server detected: {} (tunneled by SwiftTunnel)", dst_ip);
-                    }
-                }
-            }
-
-            if let Some(auto_router) = auto_router {
-                auto_router.evaluate_game_server(dst_ip);
-                if auto_router.is_lookup_pending(dst_ip) {
-                    return ReaderTunnelAction::Consumed;
-                }
+        if let Some(auto_router) = auto_router {
+            auto_router.evaluate_game_server(dst_ip);
+            if auto_router.is_lookup_pending(dst_ip) {
+                return ReaderTunnelAction::Consumed;
             }
         }
     }
@@ -4801,21 +4872,14 @@ fn forward_tunneled_packet_from_reader(
         return ReaderTunnelAction::BypassPhysical;
     }
 
-    let forward_result = if ip_packet.len() >= 20 {
-        PACKET_BUFFER.with(|buf| {
-            let mut fix_buf = buf.borrow_mut();
-            if ip_packet.len() > MAX_PACKET_SIZE {
-                log_super_segment_truncation_sampled(ip_packet.len());
-            }
-            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
-            fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
-            clamp_tcp_mss_for_relay(&mut fix_buf[..pkt_len], relay.max_inner_packet_len());
-            fix_packet_checksums(&mut fix_buf[..pkt_len]);
-            relay.forward_outbound_fast(&fix_buf[..pkt_len])
-        })
-    } else {
-        relay.forward_outbound_fast(ip_packet)
-    };
+    let forward_result = PACKET_BUFFER.with(|buf| {
+        let mut fix_buf = buf.borrow_mut();
+        let pkt_len = ip_packet.len();
+        fix_buf[..pkt_len].copy_from_slice(ip_packet);
+        clamp_tcp_mss_for_relay(&mut fix_buf[..pkt_len], relay.max_inner_packet_len());
+        fix_packet_checksums(&mut fix_buf[..pkt_len]);
+        relay.forward_outbound_fast(&fix_buf[..pkt_len])
+    });
 
     match forward_result {
         Ok(super::udp_relay::RelaySendOutcome::Enqueued(sent)) => {
@@ -5263,7 +5327,9 @@ fn run_packet_reader(
         for i in 0..packets_read {
             let direction_flags = packets[i].get_device_flags();
             let is_outbound = direction_flags == DirectionFlags::PACKET_FLAG_ON_SEND;
-            let data = packets[i].get_data();
+            let Some(data) = bounded_intermediate_buffer_data(&packets[i]) else {
+                continue;
+            };
 
             if is_outbound {
                 // Select worker for UDP/TCP packets. For non-initial UDP fragments with very
@@ -5328,14 +5394,11 @@ fn run_packet_reader(
                         }
                     }
 
-                    // Tunnel packet: dispatch to worker. (Copy only when tunneling.)
-                    // Use ArrayVec for stack allocation - avoids heap alloc per packet
-                    let mut packet_data: ArrayVec<u8, MAX_PACKET_SIZE> = ArrayVec::new();
-                    if data.len() > MAX_PACKET_SIZE {
-                        log_super_segment_truncation_sampled(data.len());
-                    }
-                    let copy_len = data.len().min(MAX_PACKET_SIZE);
-                    packet_data.try_extend_from_slice(&data[..copy_len]).ok();
+                    // Tunnel packet: dispatch to worker. Copy only complete
+                    // frames; never truncate and then reinject or relay.
+                    let Some(packet_data) = packet_work_data_for_tunnel(data) else {
+                        continue;
+                    };
 
                     let work = PacketWork {
                         data: packet_data,
@@ -5554,39 +5617,36 @@ fn run_packet_worker(
                     .fetch_add(packet_len, Ordering::Relaxed);
                 throughput.add_tx(packet_len);
 
-                // Extract IP packet from Ethernet frame
-                let ip_start = match parse_ipv4_header_offset(&work.data) {
-                    Some(offset) => offset,
+                // Extract a complete IP packet from the Ethernet frame. If
+                // capture handed us an incomplete oversized/offloaded packet,
+                // drop it and let the flow retry instead of truncating.
+                let ip_packet = match forwardable_tunnel_ip_packet(&work.data) {
+                    Some(packet) => packet,
                     None => continue,
                 };
-                let ip_packet = &work.data[ip_start..];
 
                 // === GAME SERVER DETECTION (Bloxstrap-style) ===
                 // Track Roblox game server IPs for notifications
                 // STABILITY FIX (v1.0.8): Use try_write() to avoid blocking in hot path
                 // If lock is contended, skip recording this packet (not critical)
-                if ip_packet.len() >= 20 {
-                    let dst_ip =
-                        Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
-                    if is_roblox_game_server_ip(dst_ip) {
-                        // Non-blocking write - skip if lock contended (prevents freeze)
-                        if let Some(mut servers) = detected_game_servers.try_write() {
-                            // Cap the set so long sessions teleporting across many
-                            // game instances don't grow memory without bound.
-                            if servers.len() < MAX_DETECTED_GAME_SERVERS
-                                || servers.contains(&dst_ip)
-                            {
-                                if servers.insert(dst_ip) {
-                                    log::info!(
-                                        "Game server detected: {} (tunneled by SwiftTunnel)",
-                                        dst_ip
-                                    );
-                                }
+                let dst_ip =
+                    Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
+                if is_roblox_game_server_ip(dst_ip) {
+                    // Non-blocking write - skip if lock contended (prevents freeze)
+                    if let Some(mut servers) = detected_game_servers.try_write() {
+                        // Cap the set so long sessions teleporting across many
+                        // game instances don't grow memory without bound.
+                        if servers.len() < MAX_DETECTED_GAME_SERVERS || servers.contains(&dst_ip) {
+                            if servers.insert(dst_ip) {
+                                log::info!(
+                                    "Game server detected: {} (tunneled by SwiftTunnel)",
+                                    dst_ip
+                                );
                             }
                         }
-
-                        // Auto-routing was evaluated before any bypass path could run.
                     }
+
+                    // Auto-routing was evaluated before any bypass path could run.
                 }
 
                 // === PACKET HOLD: Drop packets while auto-routing lookup is pending ===
@@ -5594,17 +5654,13 @@ fn run_packet_worker(
                 // until the ipinfo.io lookup completes and the relay switches. This
                 // prevents the game server from seeing traffic from the old relay IP,
                 // which causes Roblox Error 2/277. RakNet will retransmit the held packets.
-                if ip_packet.len() >= 20 {
-                    let dst_ip =
-                        Ipv4Addr::new(ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]);
-                    // Only Roblox game server IPs participate in auto-routing lookups.
-                    // Avoid taking the pending-lookups lock for non-Roblox traffic.
-                    if is_roblox_game_server_ip(dst_ip) {
-                        if let Some(ref auto_router) = auto_router {
-                            if auto_router.is_lookup_pending(dst_ip) {
-                                // Skip this packet — RakNet will retransmit after relay switch
-                                continue;
-                            }
+                // Only Roblox game server IPs participate in auto-routing lookups.
+                // Avoid taking the pending-lookups lock for non-Roblox traffic.
+                if is_roblox_game_server_ip(dst_ip) {
+                    if let Some(ref auto_router) = auto_router {
+                        if auto_router.is_lookup_pending(dst_ip) {
+                            // Skip this packet - RakNet will retransmit after relay switch
+                            continue;
                         }
                     }
                 }
@@ -5642,24 +5698,17 @@ fn run_packet_worker(
                         );
                     }
 
-                    let forward_result = if ip_packet.len() >= 20 {
-                        PACKET_BUFFER.with(|buf| {
-                            let mut fix_buf = buf.borrow_mut();
-                            if ip_packet.len() > MAX_PACKET_SIZE {
-                                log_super_segment_truncation_sampled(ip_packet.len());
-                            }
-                            let pkt_len = ip_packet.len().min(MAX_PACKET_SIZE);
-                            fix_buf[..pkt_len].copy_from_slice(&ip_packet[..pkt_len]);
-                            clamp_tcp_mss_for_relay(
-                                &mut fix_buf[..pkt_len],
-                                relay.max_inner_packet_len(),
-                            );
-                            fix_packet_checksums(&mut fix_buf[..pkt_len]);
-                            relay.forward_outbound(&fix_buf[..pkt_len])
-                        })
-                    } else {
-                        relay.forward_outbound(ip_packet)
-                    };
+                    let forward_result = PACKET_BUFFER.with(|buf| {
+                        let mut fix_buf = buf.borrow_mut();
+                        let pkt_len = ip_packet.len();
+                        fix_buf[..pkt_len].copy_from_slice(ip_packet);
+                        clamp_tcp_mss_for_relay(
+                            &mut fix_buf[..pkt_len],
+                            relay.max_inner_packet_len(),
+                        );
+                        fix_packet_checksums(&mut fix_buf[..pkt_len]);
+                        relay.forward_outbound(&fix_buf[..pkt_len])
+                    });
 
                     match forward_result {
                         Ok(super::udp_relay::RelaySendOutcome::Enqueued(sent)) => {
@@ -6717,24 +6766,59 @@ fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool 
     process_name_matches_any_tunnel_app(&name_lower, &snapshot.tunnel_apps)
 }
 
-fn tcp_owner_scope_match<P>(pid: u32, snapshot: &ProcessSnapshot, process_name_lookup: &P) -> bool
+fn process_name_stem_lower(name: &str) -> String {
+    let file_name = name.rsplit(['\\', '/']).next().unwrap_or(name).trim();
+    let lower = file_name.to_ascii_lowercase();
+    lower
+        .strip_suffix(".exe")
+        .unwrap_or(lower.as_str())
+        .to_string()
+}
+
+fn process_name_in_browser_http_scope(name: &str) -> bool {
+    matches!(
+        process_name_stem_lower(name).as_str(),
+        "arc"
+            | "brave"
+            | "chrome"
+            | "chromium"
+            | "firefox"
+            | "msedge"
+            | "opera"
+            | "opera_gx"
+            | "operagx"
+            | "vivaldi"
+    )
+}
+
+fn tcp_owner_scope_match<P>(
+    pid: u32,
+    snapshot: &ProcessSnapshot,
+    process_name_lookup: &P,
+) -> (bool, bool)
 where
     P: Fn(u32) -> Option<String>,
 {
     if snapshot.is_tunnel_pid_public(pid) {
-        return true;
+        return (true, false);
     }
 
     if let Some(name) = snapshot.pid_names.get(&pid) {
-        return process_name_in_tunnel_scope(name, snapshot);
+        return (
+            process_name_in_tunnel_scope(name, snapshot),
+            process_name_in_browser_http_scope(name),
+        );
     }
 
     let name = process_name_lookup(pid);
     let Some(name) = name.as_deref() else {
-        return false;
+        return (false, false);
     };
 
-    process_name_in_tunnel_scope(name, snapshot)
+    (
+        process_name_in_tunnel_scope(name, snapshot),
+        process_name_in_browser_http_scope(name),
+    )
 }
 
 /// Debug counters for inline cache diagnostics
@@ -7013,8 +7097,12 @@ where
         // couldn't identify the source process. This catches first packets sent
         // before the UDP table is populated (0.5-2ms race window).
         //
-        // TCP relay seeding is strictly process-owned. Only captured SYNs from
-        // configured tunnel processes may become relay-owned flows.
+        // TCP speculation is allowed only when API tunneling is enabled and a
+        // tunnel process is already known. This catches first SYNs for Roblox
+        // API/teleport flows before the owner table publishes the source port.
+        // Browser-owned HTTP(S) is allowed only for Roblox destinations so
+        // login/account flows can share the selected relay without tunneling
+        // unrelated browser traffic.
         let has_tunnel_scope = !snapshot.tunnel_pids.is_empty() || !snapshot.tunnel_apps.is_empty();
         let can_speculate_tcp_api = protocol == Protocol::Tcp && api_tunneling && has_tunnel_scope;
         let is_tcp_api_bootstrap_syn =
@@ -7024,31 +7112,38 @@ where
             && matches!(dst_port, 80 | 443)
             && (super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
                 || crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip));
-        let tcp_api_bootstrap_published_port =
-            is_tcp_api_bootstrap_syn && snapshot.explicit_tunnel_tcp_ports.contains(&src_port);
-        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn
-            && !snapshot_tunnel_hit
-            && !tcp_api_bootstrap_published_port
-        {
+        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit {
             tcp_owner_lookup(src_ip, src_port)
         } else {
             None
         };
-        let tcp_api_bootstrap_owned_by_tunnel = if is_tcp_api_bootstrap_syn
-            && (snapshot_tunnel_hit || tcp_api_bootstrap_published_port)
-        {
-            true
-        } else {
-            tcp_api_bootstrap_owner
-                .map(|pid| tcp_owner_scope_match(pid, snapshot, &process_name_lookup))
-                .unwrap_or(false)
-        };
-        let tcp_api_bootstrap_allowed =
-            is_route_assist_http_dst && tcp_api_bootstrap_owned_by_tunnel;
+        let (tcp_api_bootstrap_owned_by_tunnel, tcp_api_bootstrap_owned_by_browser) =
+            if is_tcp_api_bootstrap_syn && snapshot_tunnel_hit {
+                (true, false)
+            } else {
+                tcp_api_bootstrap_owner
+                    .map(|pid| tcp_owner_scope_match(pid, snapshot, &process_name_lookup))
+                    .unwrap_or((false, false))
+            };
+        let tcp_api_bootstrap_owned_by_browser_route_assist =
+            tcp_api_bootstrap_owned_by_browser && is_route_assist_http_dst;
+        let tcp_api_bootstrap_known_unrelated = tcp_api_bootstrap_owner
+            .map(|_| {
+                !tcp_api_bootstrap_owned_by_tunnel
+                    && !tcp_api_bootstrap_owned_by_browser_route_assist
+            })
+            .unwrap_or(false);
+        let tcp_api_bootstrap_owner_missing =
+            is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && tcp_api_bootstrap_owner.is_none();
+        // Known tunnel-owned TCP bootstraps keep v2.1.8's relay/MSS-clamp behavior.
+        // Owner-missing SYNs are only repairable for Roblox or active bootstrap IPs.
+        let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
+            && !tcp_api_bootstrap_known_unrelated
+            && (!tcp_api_bootstrap_owner_missing || is_route_assist_http_dst);
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
         } else {
-            tcp_api_bootstrap_allowed
+            is_route_assist_http_dst && is_tcp_initial_syn && !tcp_api_bootstrap_known_unrelated
         };
         if is_game_dst || tcp_api_bootstrap_allowed {
             // Log speculative tunneling for debugging (first 20 times only)
@@ -7065,7 +7160,7 @@ where
                 });
                 if spec_count < 20 {
                     log::info!(
-                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={}, route_assist_http_dst={}, published_port={})",
+                        "TCP API SPECULATIVE TUNNEL: {}:{} -> {}:{} (initial_syn={}, bootstrap_owner={:?}, owner_is_tunnel={}, owner_is_browser_route_assist={}, route_assist_http_dst={}, owner_missing={})",
                         src_ip,
                         src_port,
                         dst_ip,
@@ -7073,8 +7168,9 @@ where
                         is_tcp_initial_syn,
                         tcp_api_bootstrap_owner,
                         tcp_api_bootstrap_owned_by_tunnel,
+                        tcp_api_bootstrap_owned_by_browser_route_assist,
                         is_route_assist_http_dst,
-                        tcp_api_bootstrap_published_port
+                        tcp_api_bootstrap_owner_missing
                     );
                 }
             } else {
@@ -7578,12 +7674,21 @@ fn ipv4_total_len(packet: &[u8], ihl: usize) -> Option<usize> {
         return None;
     }
 
-    let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    let total_len = ipv4_declared_total_len(packet)?;
     if total_len < ihl || packet.len() < total_len {
         return None;
     }
 
     Some(total_len)
+}
+
+#[inline(always)]
+fn ipv4_declared_total_len(packet: &[u8]) -> Option<usize> {
+    if packet.len() < 4 {
+        return None;
+    }
+
+    Some(u16::from_be_bytes([packet[2], packet[3]]) as usize)
 }
 
 #[inline(always)]
@@ -8110,6 +8215,92 @@ mod tests {
         frame[transport_start + 13] = flags;
 
         frame
+    }
+
+    #[test]
+    fn test_packet_work_data_for_tunnel_copies_complete_frame() {
+        let frame = build_ipv4_tcp_frame_with_flags(
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(128, 116, 50, 100),
+            40000,
+            443,
+            0x02,
+        );
+
+        let packet_data = packet_work_data_for_tunnel(&frame).expect("frame should fit");
+
+        assert_eq!(packet_data.as_slice(), frame.as_slice());
+    }
+
+    #[test]
+    fn test_packet_work_data_for_tunnel_rejects_oversized_frame() {
+        let frame = vec![0u8; MAX_PACKET_SIZE + 1];
+
+        assert!(packet_work_data_for_tunnel(&frame).is_none());
+    }
+
+    #[test]
+    fn test_forwardable_tunnel_ip_packet_returns_declared_ipv4_len() {
+        let mut frame = build_ipv4_tcp_frame_with_flags(
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(128, 116, 50, 100),
+            40001,
+            443,
+            0x02,
+        );
+        let ip_start = 14;
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&40u16.to_be_bytes());
+        frame.extend_from_slice(&[0xAA; 12]);
+
+        let ip_packet =
+            forwardable_tunnel_ip_packet(&frame).expect("complete packet should forward");
+
+        assert_eq!(ip_packet.len(), 40);
+    }
+
+    #[test]
+    fn test_forwardable_tunnel_ip_packet_rejects_incomplete_ipv4_payload() {
+        let mut frame = build_ipv4_tcp_frame_with_flags(
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(128, 116, 50, 100),
+            40002,
+            443,
+            0x02,
+        );
+        let ip_start = 14;
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&60u16.to_be_bytes());
+
+        assert!(forwardable_tunnel_ip_packet(&frame).is_none());
+    }
+
+    #[test]
+    fn test_forwardable_tunnel_ip_packet_rejects_total_len_smaller_than_header() {
+        let mut frame = build_ipv4_tcp_frame_with_flags(
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(128, 116, 50, 100),
+            40021,
+            443,
+            0x02,
+        );
+        let ip_start = 14;
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&16u16.to_be_bytes());
+
+        assert!(forwardable_tunnel_ip_packet(&frame).is_none());
+    }
+
+    #[test]
+    fn test_forwardable_tunnel_ip_packet_rejects_payload_larger_than_buffer() {
+        let ip_total_len = MAX_PACKET_SIZE + 1;
+        let mut frame = vec![0u8; 14 + ip_total_len];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        let ip_start = 14;
+        frame[ip_start] = 0x45;
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
+        frame[ip_start + 9] = 6;
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&[10, 0, 0, 2]);
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&[128, 116, 50, 100]);
+
+        assert!(forwardable_tunnel_ip_packet(&frame).is_none());
     }
 
     fn build_vlan_ipv4_frame(
@@ -11125,8 +11316,9 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_speculates_when_tunnel_process_is_active() {
-        // Route Assist seeds TCP only after the structured owner lookup ties
-        // the SYN back to a configured tunnel process.
+        // First SYNs for Roblox API/teleport TCP flows can arrive before the
+        // Windows owner table publishes their source port. If a tunnel process
+        // is already active, allow destination-guarded TCP speculation.
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40001;
@@ -11247,16 +11439,11 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_bootstraps_asset_syn_when_tunnel_process_is_active() {
-        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
-
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
         let src_port = 40002;
         let dst_port = 80;
         let tunnel_pid = 1234;
-
-        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11288,17 +11475,20 @@ mod tests {
             },
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
-
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
-    fn test_tcp_api_tunneling_does_not_bootstrap_asset_syn_when_owner_not_published_yet() {
+    fn test_tcp_api_tunneling_bootstraps_active_asset_syn_when_owner_not_published_yet() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40006;
         let dst_port = 80;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11316,6 +11506,42 @@ mod tests {
         let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
 
+        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |_ip, _port| None,
+        ));
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_bootstrap_unknown_owner_non_roblox_http_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let unrelated_ip = Ipv4Addr::new(93, 184, 216, 34);
+        let src_port = 40020;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, unrelated_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
         assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
             &frame,
             &snapshot,
@@ -11327,11 +11553,16 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_does_not_bootstrap_asset_syn_when_app_scope_exists_without_pid() {
+    fn test_tcp_api_tunneling_bootstraps_active_asset_syn_when_app_scope_exists_without_pid() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40007;
         let dst_port = 80;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11349,28 +11580,25 @@ mod tests {
         let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
 
-        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+        assert!(should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
             &frame,
             &snapshot,
             &mut inline_cache,
             true,
             |_ip, _port| None,
         ));
-        assert!(inline_cache.is_empty());
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
     fn test_tcp_api_tunneling_bootstraps_asset_syn_when_owner_pid_name_matches_app_scope() {
-        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
-
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40008;
         let dst_port = 80;
         let tunnel_pid = 8580;
-
-        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11411,8 +11639,6 @@ mod tests {
             )
         );
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
-
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -11465,7 +11691,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_does_not_allow_browser_owned_roblox_http_syn() {
+    fn test_browser_http_scope_matches_exact_browser_stems() {
+        assert!(process_name_in_browser_http_scope(
+            "C:\\Program Files\\Google\\Chrome\\Application\\Chrome.exe"
+        ));
+        assert!(process_name_in_browser_http_scope(
+            "C:\\Browsers\\chromium.exe"
+        ));
+        assert!(process_name_in_browser_http_scope("opera.exe"));
+        assert!(!process_name_in_browser_http_scope("chrome_helper.exe"));
+        assert!(!process_name_in_browser_http_scope("Discord.exe"));
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_allows_browser_owned_roblox_http_syn() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
         let src_port = 40010;
@@ -11491,7 +11730,7 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(
-            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &frame,
                 &snapshot,
                 &mut inline_cache,
@@ -11515,7 +11754,7 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.is_empty());
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
     }
 
     #[test]
@@ -11570,16 +11809,11 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_allows_tunnel_owned_http_syn_for_mss_clamp() {
-        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
-
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40018;
         let dst_port = 443;
         let tunnel_pid = 1234;
-
-        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11620,96 +11854,6 @@ mod tests {
             )
         );
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
-
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
-    }
-
-    #[test]
-    fn test_tcp_api_tunneling_rejects_tunnel_owned_unrelated_http_syn() {
-        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
-
-        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
-        let unrelated_ip = Ipv4Addr::new(93, 184, 216, 34);
-        let src_port = 40020;
-        let dst_port = 443;
-        let tunnel_pid = 1234;
-
-        let snapshot = ProcessSnapshot {
-            connections: HashMap::new(),
-            pid_names: HashMap::new(),
-            tunnel_apps: HashSet::new(),
-            tunnel_pids: [tunnel_pid].into_iter().collect(),
-            explicit_tunnel_udp_ports: HashSet::new(),
-            explicit_tunnel_tcp_ports: HashSet::new(),
-            tunnel_udp_ports: HashSet::new(),
-            tunnel_tcp_ports: HashSet::new(),
-            version: 0,
-            created_at: std::time::Instant::now(),
-        };
-
-        let frame = build_ipv4_tcp_frame_with_flags(src_ip, unrelated_ip, src_port, dst_port, 0x02);
-        let mut inline_cache: InlineCache = HashMap::new();
-
-        assert!(
-            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
-                &frame,
-                &snapshot,
-                &mut inline_cache,
-                true,
-                |ip, port| {
-                    if ip == src_ip && port == src_port {
-                        Some(tunnel_pid)
-                    } else {
-                        None
-                    }
-                },
-                |pid| {
-                    if pid == tunnel_pid {
-                        Some("RobloxPlayerBeta.exe".to_string())
-                    } else {
-                        None
-                    }
-                },
-            )
-        );
-        assert!(inline_cache.is_empty());
-    }
-
-    #[test]
-    fn test_tcp_api_tunneling_rejects_published_port_to_unrelated_http_syn() {
-        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
-
-        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
-        let unrelated_ip = Ipv4Addr::new(93, 184, 216, 34);
-        let src_port = 40021;
-        let dst_port = 443;
-
-        let snapshot = ProcessSnapshot {
-            connections: HashMap::new(),
-            pid_names: HashMap::new(),
-            tunnel_apps: ["robloxplayerbeta.exe".to_string()].into_iter().collect(),
-            tunnel_pids: HashSet::new(),
-            explicit_tunnel_udp_ports: HashSet::new(),
-            explicit_tunnel_tcp_ports: [src_port].into_iter().collect(),
-            tunnel_udp_ports: HashSet::new(),
-            tunnel_tcp_ports: [src_port].into_iter().collect(),
-            version: 0,
-            created_at: std::time::Instant::now(),
-        };
-
-        let frame = build_ipv4_tcp_frame_with_flags(src_ip, unrelated_ip, src_port, dst_port, 0x02);
-        let mut inline_cache: InlineCache = HashMap::new();
-
-        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
-            &frame,
-            &snapshot,
-            &mut inline_cache,
-            true,
-            |_ip, _port| None,
-        ));
-        assert!(inline_cache.is_empty());
     }
 
     #[test]
@@ -11775,7 +11919,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_does_not_allow_browser_owned_active_bootstrap_http_syn() {
+    fn test_tcp_api_tunneling_allows_browser_owned_active_bootstrap_http_syn() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
 
@@ -11806,7 +11950,7 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(
-            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &frame,
                 &snapshot,
                 &mut inline_cache,
@@ -11827,7 +11971,7 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.is_empty());
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }

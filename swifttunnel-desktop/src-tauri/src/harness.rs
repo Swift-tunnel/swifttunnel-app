@@ -33,7 +33,6 @@ struct HarnessCli {
     password: Option<String>,
     custom_relay_server: Option<String>,
     enable_api_tunneling: bool,
-    enable_country_ban: bool,
     connect: bool,
     connect_wait_ms: u64,
     game_presets: Vec<String>,
@@ -466,7 +465,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
         binding_preference,
         game_process_performance,
         enable_api_tunneling,
-        enable_country_ban,
     ) = {
         let mut settings = state.settings.lock();
         apply_adapter_override(&mut settings, cli);
@@ -496,7 +494,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
             binding_preference,
             snapshot.game_process_performance,
             cli.enable_api_tunneling || snapshot.enable_api_tunneling,
-            cli.enable_country_ban || snapshot.enable_country_ban,
         )
     };
 
@@ -527,7 +524,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
             binding_preference,
             game_process_performance,
             enable_api_tunneling,
-            enable_country_ban,
         )
         .await
         .map_err(|err| swifttunnel_core::vpn::user_friendly_error(&err))?;
@@ -721,7 +717,6 @@ fn parse_cli(raw_args: &[String]) -> Result<HarnessCli, ParseOutcome> {
             "--password" => cli.password = Some(next(flag, &mut idx)?),
             "--custom-relay" => cli.custom_relay_server = Some(next(flag, &mut idx)?),
             "--enable-api-tunneling" => cli.enable_api_tunneling = true,
-            "--enable-country-ban" => cli.enable_country_ban = true,
             "--connect" => cli.connect = true,
             "--connect-wait-ms" => {
                 let value = next(flag, &mut idx)?;
