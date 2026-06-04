@@ -4783,14 +4783,9 @@ fn packet_work_data_for_tunnel(data: &[u8]) -> Option<ArrayVec<u8, MAX_PACKET_SI
     }
 
     let mut packet_data: ArrayVec<u8, MAX_PACKET_SIZE> = ArrayVec::new();
-    if packet_data.try_extend_from_slice(data).is_err() {
-        log_tunnel_forwarding_drop_sampled(
-            "failed to copy Ethernet frame into worker buffer",
-            data.len(),
-            MAX_PACKET_SIZE,
-        );
-        return None;
-    }
+    packet_data
+        .try_extend_from_slice(data)
+        .expect("worker packet data length is checked before copy");
 
     Some(packet_data)
 }
