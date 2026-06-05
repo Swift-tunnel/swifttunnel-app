@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
@@ -20,10 +20,6 @@ static DRIVER_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-#[cfg(windows)]
-const RUN_KEY_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-#[cfg(windows)]
-const RUN_VALUE_NAME: &str = "SwiftTunnel";
 
 #[cfg(windows)]
 fn program_data_swifttunnel_dir() -> PathBuf {
@@ -692,18 +688,6 @@ fn build_restart_as_admin_script(exe_path: &str, current_pid: u32) -> String {
         "$ErrorActionPreference='Stop'; \
          $inner='{escaped_inner}'; \
          Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-Command',$inner) | Out-Null"
-    )
-}
-
-#[cfg(windows)]
-fn build_restart_app_script(exe_path: &str, current_pid: u32) -> String {
-    let escaped_exe = exe_path.replace('\'', "''");
-
-    format!(
-        "$ErrorActionPreference='Stop'; \
-         $pidToWait={current_pid}; \
-         while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 200 }}; \
-         Start-Process -FilePath '{escaped_exe}'"
     )
 }
 
@@ -1595,187 +1579,6 @@ pub async fn system_cleanup() -> Result<(), String> {
     .map_err(|e| format!("Cleanup task failed: {}", e))?
 }
 
-#[derive(Serialize)]
-pub struct NetworkRepairStepResponse {
-    pub name: String,
-    pub command: String,
-    pub success: bool,
-    pub output: String,
-}
-
-#[derive(Serialize)]
-pub struct NetworkRepairResponse {
-    pub steps: Vec<NetworkRepairStepResponse>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StartupRegistrationSnapshot {
-    pub exists: bool,
-    pub value: Option<String>,
-}
-
-#[cfg(windows)]
-fn read_startup_registration() -> Result<StartupRegistrationSnapshot, String> {
-    use std::io::ErrorKind;
-    use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let run_key = match hkcu.open_subkey(RUN_KEY_PATH) {
-        Ok(key) => key,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            return Ok(StartupRegistrationSnapshot {
-                exists: false,
-                value: None,
-            });
-        }
-        Err(e) => return Err(format!("Failed to open startup registry key: {e}")),
-    };
-
-    match run_key.get_value::<String, _>(RUN_VALUE_NAME) {
-        Ok(value) => Ok(StartupRegistrationSnapshot {
-            exists: true,
-            value: Some(value),
-        }),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(StartupRegistrationSnapshot {
-            exists: false,
-            value: None,
-        }),
-        Err(e) => Err(format!("Failed to read startup registry value: {e}")),
-    }
-}
-
-#[tauri::command]
-pub async fn system_get_startup_registration() -> Result<StartupRegistrationSnapshot, String> {
-    #[cfg(windows)]
-    {
-        tauri::async_runtime::spawn_blocking(read_startup_registration)
-            .await
-            .map_err(|e| format!("Startup snapshot task failed: {e}"))?
-    }
-
-    #[cfg(not(windows))]
-    {
-        Ok(StartupRegistrationSnapshot {
-            exists: false,
-            value: None,
-        })
-    }
-}
-
-#[tauri::command]
-pub async fn system_restore_startup_registration(
-    snapshot: StartupRegistrationSnapshot,
-) -> Result<StartupRegistrationSnapshot, String> {
-    #[cfg(windows)]
-    {
-        tauri::async_runtime::spawn_blocking(move || {
-            use std::io::ErrorKind;
-            use winreg::RegKey;
-            use winreg::enums::HKEY_CURRENT_USER;
-
-            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-            let (run_key, _) = hkcu
-                .create_subkey(RUN_KEY_PATH)
-                .map_err(|e| format!("Failed to open startup registry key: {e}"))?;
-
-            if snapshot.exists {
-                let value = snapshot.value.clone().unwrap_or_default();
-                run_key
-                    .set_value(RUN_VALUE_NAME, &value)
-                    .map_err(|e| format!("Failed to restore startup registry value: {e}"))?;
-            } else if let Err(e) = run_key.delete_value(RUN_VALUE_NAME) {
-                if e.kind() != ErrorKind::NotFound {
-                    return Err(format!("Failed to remove startup registry value: {e}"));
-                }
-            }
-
-            read_startup_registration()
-        })
-        .await
-        .map_err(|e| format!("Startup restore task failed: {e}"))?
-    }
-
-    #[cfg(not(windows))]
-    {
-        Ok(snapshot)
-    }
-}
-
-#[cfg(windows)]
-fn run_network_repair_step(name: &str, program: &str, args: &[&str]) -> NetworkRepairStepResponse {
-    let command = if args.is_empty() {
-        program.to_string()
-    } else {
-        format!("{} {}", program, args.join(" "))
-    };
-
-    match swifttunnel_core::hidden_command(program)
-        .args(args)
-        .output()
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let combined = if stderr.is_empty() {
-                stdout
-            } else if stdout.is_empty() {
-                stderr
-            } else {
-                format!("{stdout}\n{stderr}")
-            };
-            NetworkRepairStepResponse {
-                name: name.to_string(),
-                command,
-                success: output.status.success(),
-                output: truncate_repair_output(&combined),
-            }
-        }
-        Err(e) => NetworkRepairStepResponse {
-            name: name.to_string(),
-            command,
-            success: false,
-            output: format!("Failed to run command: {e}"),
-        },
-    }
-}
-
-#[cfg(windows)]
-fn truncate_repair_output(value: &str) -> String {
-    const LIMIT: usize = 1200;
-    if value.chars().count() <= LIMIT {
-        return value.to_string();
-    }
-    let truncated = value.chars().take(LIMIT).collect::<String>();
-    format!("{truncated}... [truncated]")
-}
-
-#[tauri::command]
-pub async fn system_repair_network_caches() -> Result<NetworkRepairResponse, String> {
-    #[cfg(windows)]
-    {
-        tauri::async_runtime::spawn_blocking(|| {
-            let steps = vec![
-                run_network_repair_step("Flush DNS cache", "ipconfig", &["/flushdns"]),
-                run_network_repair_step(
-                    "Clear ARP cache",
-                    "netsh",
-                    &["interface", "ip", "delete", "arpcache"],
-                ),
-                run_network_repair_step("Reload NetBIOS cache", "nbtstat", &["-R"]),
-            ];
-            Ok(NetworkRepairResponse { steps })
-        })
-        .await
-        .map_err(|e| format!("Network repair task failed: {}", e))?
-    }
-
-    #[cfg(not(windows))]
-    {
-        Err("Network cache repair is only supported on Windows".to_string())
-    }
-}
-
 /// Stop + start the NDISRD kernel service without reinstalling the driver.
 ///
 /// Intended for the "wedged NDIS state" case: driver is installed, service
@@ -1972,44 +1775,6 @@ pub async fn system_restart_as_admin(app: tauri::AppHandle) -> Result<(), String
     {
         let _ = app;
         Err("Administrator restart is only supported on Windows".to_string())
-    }
-}
-
-#[tauri::command]
-pub async fn system_restart_app(app: tauri::AppHandle) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        let exe_path =
-            std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {}", e))?;
-        let exe = exe_path.to_string_lossy().to_string();
-        let script = build_restart_app_script(&exe, std::process::id());
-
-        // Spawn the relaunch helper DETACHED — never await it. The PowerShell
-        // script waits for this app's PID to die before starting a new
-        // instance, so blocking on its completion (e.g. via .output()) would
-        // deadlock: the helper waits for us, we wait for the helper, both
-        // hang forever. Spawn-and-forget, then exit so the helper can finish.
-        tauri::async_runtime::spawn_blocking(move || {
-            swifttunnel_core::hidden_command("powershell")
-                .args(["-NoProfile", "-Command", &script])
-                .spawn()
-                .map_err(|e| format!("Failed to launch restart helper: {}", e))
-        })
-        .await
-        .map_err(|e| format!("Restart task failed: {}", e))??;
-
-        // Give the helper a moment to start polling for our PID, then exit.
-        // 250 ms is well below any user-visible delay but enough headroom for
-        // the PowerShell host to be live before we vanish.
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        app.exit(0);
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = app;
-        Err("App restart is only supported on Windows".to_string())
     }
 }
 

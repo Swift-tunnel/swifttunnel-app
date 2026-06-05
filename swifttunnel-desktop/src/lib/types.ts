@@ -465,4 +465,4 @@ export interface UpdaterProgressEvent {
 
 // ── Tabs ──
 
-export type TabId = "connect" | "boost" | "network" | "repair" | "settings";
+export type TabId = "connect" | "boost" | "network" | "settings";

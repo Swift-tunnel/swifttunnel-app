@@ -11,7 +11,6 @@ import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
 import { BoostTab } from "./components/boost/BoostTab";
 import { NetworkTab } from "./components/network/NetworkTab";
-import { RepairTab } from "./components/repair/RepairTab";
 import { SettingsTab } from "./components/settings/SettingsTab";
 import { useAuthStore } from "./stores/authStore";
 import { useSettingsStore } from "./stores/settingsStore";
@@ -39,8 +38,6 @@ function tabComponent(tab: TabId) {
       return <BoostTab />;
     case "network":
       return <NetworkTab />;
-    case "repair":
-      return <RepairTab />;
     case "settings":
       return <SettingsTab />;
     default:
@@ -67,71 +64,33 @@ function App() {
   useEffect(() => {
     let disposed = false;
 
-    // Show the window in parallel with bootstrap — never let window-show block
-    // the bootstrap, and never let bootstrap block window-show.
-    const showWindowEarly = async () => {
-      try {
-        const fromStartup = await systemLaunchedFromStartup();
-        if (!fromStartup && !disposed) {
-          await getCurrentWindow().show();
-        }
-      } catch {
-        if (!disposed) {
-          try {
-            await getCurrentWindow().show();
-          } catch {}
-        }
-      }
-    };
-
-    // Hard safety net: if the bootstrap somehow never completes the auth
-    // fetch (e.g. wedged IPC bridge after an upgrade), force-clear the
-    // loading spinner after 8s so the user sees the login screen instead
-    // of an infinite black screen.
-    const spinnerSafetyTimer = window.setTimeout(() => {
-      if (disposed) return;
-      const auth = useAuthStore.getState();
-      if (auth.isLoading) {
-        useAuthStore.setState({
-          isLoading: false,
-          error:
-            "Could not reach the SwiftTunnel backend. Try restarting the app or running Repair.",
-        });
-      }
-    }, 8000);
-
     const init = async () => {
-      void showWindowEarly();
+      await runAppBootstrap({
+        initEventListeners,
+        fetchAuth,
+        loadSettings,
+        fetchServers,
+        fetchSystemInfo,
+        fetchVpnState,
+        refreshAuthProfile,
+        getSettings: () => useSettingsStore.getState().settings,
+        getAuthState: () => useAuthStore.getState().state,
+        getVpnState: () => useVpnStore.getState().state,
+        connectVpn,
+        checkForUpdates,
+      });
 
-      try {
-        await runAppBootstrap({
-          initEventListeners,
-          fetchAuth,
-          loadSettings,
-          fetchServers,
-          fetchSystemInfo,
-          fetchVpnState,
-          refreshAuthProfile,
-          getSettings: () => useSettingsStore.getState().settings,
-          getAuthState: () => useAuthStore.getState().state,
-          getVpnState: () => useVpnStore.getState().state,
-          connectVpn,
-          checkForUpdates,
-        });
-      } catch (error) {
-        reportError("App bootstrap threw", error, {
-          dedupeKey: "app-bootstrap-init",
-        });
-        // Last-resort: make sure isLoading clears so the UI is usable.
-        if (!disposed && useAuthStore.getState().isLoading) {
-          try {
-            await fetchAuth();
-          } catch {
-            useAuthStore.setState({ isLoading: false });
+      if (!disposed) {
+        try {
+          const fromStartup = await systemLaunchedFromStartup();
+          if (!fromStartup && !disposed) {
+            await getCurrentWindow().show();
+          }
+        } catch {
+          if (!disposed) {
+            await getCurrentWindow().show();
           }
         }
-      } finally {
-        window.clearTimeout(spinnerSafetyTimer);
       }
 
       if (disposed) {
@@ -143,7 +102,6 @@ function App() {
 
     return () => {
       disposed = true;
-      window.clearTimeout(spinnerSafetyTimer);
       void cleanupEventListeners();
     };
   }, [
@@ -332,8 +290,7 @@ function App() {
         "1": "connect",
         "2": "boost",
         "3": "network",
-        "4": "repair",
-        "5": "settings",
+        "4": "settings",
       };
       const tab = map[event.key];
       if (!tab) return;

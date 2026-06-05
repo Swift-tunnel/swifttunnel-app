@@ -6,6 +6,6 @@
 //! repair for launch/API endpoints and also removes stale
 //! entries from older local-proxy builds.
 
-pub mod goodbyedpi;
 pub mod hosts;
+pub mod goodbyedpi;
 pub(crate) mod legacy_goodbyedpi;

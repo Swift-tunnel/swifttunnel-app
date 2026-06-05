@@ -1118,9 +1118,7 @@ impl VpnConnection {
             match crate::roblox_proxy::goodbyedpi::start_for_roblox() {
                 Ok(Some(guard)) => {
                     self.goodbye_dpi_guard = Some(guard);
-                    log::info!(
-                        "V3: Started Bypass country bans GoodbyeDPI helper for Roblox traffic"
-                    );
+                    log::info!("V3: Started Bypass country bans GoodbyeDPI helper for Roblox traffic");
                 }
                 Ok(None) => {
                     let message =

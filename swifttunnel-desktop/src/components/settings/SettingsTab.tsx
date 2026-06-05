@@ -17,6 +17,8 @@ import {
   Dialog,
 } from "../ui";
 import {
+  settingsGenerateNetworkDiagnosticsBundle,
+  systemCopyLogToClipboard,
   systemOpenUrl,
   systemUninstall,
   vpnListNetworkAdapters,
@@ -52,6 +54,12 @@ export function SettingsTab() {
 
   const addToast = useToastStore((s) => s.addToast);
 
+  const [isGeneratingDiagnostics, setIsGeneratingDiagnostics] = useState(false);
+  const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [isCopyingLog, setIsCopyingLog] = useState(false);
+  const [copyLogPath, setCopyLogPath] = useState<string | null>(null);
+  const [copyLogError, setCopyLogError] = useState<string | null>(null);
   const [networkAdapters, setNetworkAdapters] = useState<
     NetworkAdapterInfo[] | null
   >(null);
@@ -144,6 +152,47 @@ export function SettingsTab() {
     }, 3000);
     return () => clearInterval(id);
   }, [fetchVpnDiagnostics, vpnState]);
+
+  async function generateDiagnosticsBundle() {
+    setIsGeneratingDiagnostics(true);
+    setDiagnosticsError(null);
+
+    try {
+      const response = await settingsGenerateNetworkDiagnosticsBundle();
+      setDiagnosticsPath(response.file_path);
+      addToast({ type: "success", message: "Diagnostics bundle generated" });
+
+      try {
+        await systemOpenUrl(response.folder_path);
+      } catch (openError) {
+        setDiagnosticsError(
+          `Bundle generated, but failed to open folder: ${String(openError)}`,
+        );
+      }
+    } catch (e) {
+      setDiagnosticsError(String(e));
+    } finally {
+      setIsGeneratingDiagnostics(false);
+    }
+  }
+
+  async function copyLogToClipboard() {
+    setIsCopyingLog(true);
+    setCopyLogError(null);
+
+    try {
+      const response = await systemCopyLogToClipboard();
+      setCopyLogPath(response.file_path);
+      addToast({
+        type: "success",
+        message: "Log file copied — paste it into Discord or email to share with support.",
+      });
+    } catch (e) {
+      setCopyLogError(String(e));
+    } finally {
+      setIsCopyingLog(false);
+    }
+  }
 
   const sortedAdapters = (networkAdapters || []).slice().sort((a, b) => {
     if (a.is_default_route !== b.is_default_route)
@@ -699,6 +748,62 @@ export function SettingsTab() {
           </Row>
         </Section>
       )}
+
+      {/* Support */}
+      <Section title="Support">
+        <Row
+          label="Network diagnostics"
+          desc="Generate a support-ready bundle with ISP, routing, and split tunnel info"
+        >
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void generateDiagnosticsBundle()}
+            disabled={isGeneratingDiagnostics}
+            loading={isGeneratingDiagnostics}
+          >
+            {isGeneratingDiagnostics ? "Generating" : "Generate"}
+          </Button>
+        </Row>
+        {diagnosticsPath && (
+          <div className="px-4 pb-3 text-[11px] text-text-muted">
+            Saved to:{" "}
+            <span className="break-all font-mono text-[10.5px] text-text-secondary">
+              {diagnosticsPath}
+            </span>
+          </div>
+        )}
+        {diagnosticsError && (
+          <div className="px-4 pb-3 text-[11px] text-status-error">
+            {diagnosticsError}
+          </div>
+        )}
+        <Row
+          label="Copy Log File"
+          desc="Puts the SwiftTunnel log file on your clipboard — paste into Discord/email to share with support"
+        >
+          <button
+            onClick={() => void copyLogToClipboard()}
+            disabled={isCopyingLog}
+            className="rounded-[var(--radius-button)] border border-border-subtle px-3 py-1.5 text-xs text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
+          >
+            {isCopyingLog ? "Copying..." : "Copy"}
+          </button>
+        </Row>
+        {copyLogPath && (
+          <div className="px-4 pb-3 text-xs text-text-muted">
+            Copied:{" "}
+            <span className="break-all font-mono text-[11px] text-text-secondary">
+              {copyLogPath}
+            </span>
+          </div>
+        )}
+        {copyLogError && (
+          <div className="px-4 pb-3 text-xs text-status-error">
+            {copyLogError}
+          </div>
+        )}
+      </Section>
 
       {/* About */}
       <Section title="About">

@@ -402,13 +402,9 @@ pub fn run() {
             commands::system::system_reset_driver,
             commands::system::system_open_url,
             commands::system::system_restart_as_admin,
-            commands::system::system_restart_app,
             commands::system::system_show_notification,
             commands::system::system_launched_from_startup,
             commands::system::system_cleanup,
-            commands::system::system_repair_network_caches,
-            commands::system::system_get_startup_registration,
-            commands::system::system_restore_startup_registration,
             commands::system::system_uninstall,
             commands::system::system_copy_log_to_clipboard,
         ])
