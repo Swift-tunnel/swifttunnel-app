@@ -22,7 +22,7 @@ import {
   vpnListNetworkAdapters,
 } from "../../lib/commands";
 import type { DiagnosticsResponse, DriverCheckResponse } from "../../lib/types";
-import { Button, InfoIcon, Row, SectionHeader, Spinner, Tooltip } from "../ui";
+import { Button, InfoIcon, Row, SectionHeader, Tooltip } from "../ui";
 import type { StartupRegistrationSnapshot } from "../../lib/commands";
 
 const LAST_REPAIR_STORAGE_KEY = "swifttunnel.lastRepairResult.v1";
@@ -195,13 +195,10 @@ export function RepairTab() {
     const issue = selectedIssue;
     const startedAt = Date.now();
     setRunning(true);
-    setReport(issue, {
-      ...DEFAULT_REPORT,
-      status: "running",
-      summary: `Running ${selectedMeta.label.toLowerCase()} repair...`,
-      nextStep: "Keep SwiftTunnel open while this finishes.",
-      ranAt: Date.now(),
-    });
+    // Intentionally do NOT overwrite the report with a "running" placeholder.
+    // The Run button itself shows the running state — the diagnostics card
+    // below keeps showing the previous result until the new one lands so
+    // there is only ever one loading indicator on screen.
 
     try {
       const report = await runRepairForIssue(issue);
@@ -220,7 +217,33 @@ export function RepairTab() {
       setTab("repair");
       await saveSettings();
       await waitForMinimumDuration(Date.now(), 650);
-      await systemRestartApp();
+      // The backend exits the process inside system_restart_app, so this
+      // promise normally never resolves (the renderer is killed). Race it
+      // against a 5s deadline so a wedged restart helper cannot lock the
+      // UI on "Running repair..." forever — if we are still here after 5s,
+      // surface the error and fall through to the finally that clears
+      // setRunning so the user regains control.
+      try {
+        await Promise.race([
+          systemRestartApp(),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("Restart timed out after 5s")),
+              5000,
+            ),
+          ),
+        ]);
+      } catch {
+        // Repair itself succeeded — only the restart failed. Tell the user
+        // to restart manually, but DO NOT re-throw: that would fall into
+        // the outer catch and overwrite the successful repair report with
+        // "Repair failed".
+        addToast({
+          type: "warning",
+          message:
+            "Repair finished but the app could not restart automatically. Close and reopen SwiftTunnel to apply.",
+        });
+      }
     } catch (error) {
       await waitForMinimumDuration(startedAt, MIN_REPAIR_VISIBLE_MS);
       const report: RepairReport = {
@@ -805,11 +828,6 @@ export function RepairTab() {
                   </option>
                 ))}
               </select>
-              {running && (
-                <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">
-                  <Spinner size={13} color="var(--color-accent-primary)" />
-                </span>
-              )}
             </div>
             <Button
               variant="primary"
@@ -836,14 +854,7 @@ export function RepairTab() {
             </Button>
           </div>
           <div className="mt-2 flex items-center gap-2 text-[11px] text-text-muted">
-              {running && (
-                <Spinner size={11} color="var(--color-accent-primary)" />
-              )}
-              <span className="min-w-0">
-                {running
-                  ? `Running ${selectedMeta.label.toLowerCase()}...`
-                  : selectedMeta.desc}
-              </span>
+            <span className="min-w-0">{selectedMeta.desc}</span>
           </div>
         </div>
 
@@ -877,9 +888,7 @@ export function RepairTab() {
           <div className="grid grid-cols-2 gap-x-4 gap-y-2 px-3 pb-3 text-[10.5px]">
             <RepairItem
               label="Status"
-              value={
-                running ? "Running repair..." : statusLabel(selectedReport.status)
-              }
+              value={statusLabel(selectedReport.status)}
             />
             <RepairItem
               label="Last run"

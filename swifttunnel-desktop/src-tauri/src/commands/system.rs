@@ -1984,26 +1984,24 @@ pub async fn system_restart_app(app: tauri::AppHandle) -> Result<(), String> {
         let exe = exe_path.to_string_lossy().to_string();
         let script = build_restart_app_script(&exe, std::process::id());
 
-        let output = tauri::async_runtime::spawn_blocking(move || {
+        // Spawn the relaunch helper DETACHED — never await it. The PowerShell
+        // script waits for this app's PID to die before starting a new
+        // instance, so blocking on its completion (e.g. via .output()) would
+        // deadlock: the helper waits for us, we wait for the helper, both
+        // hang forever. Spawn-and-forget, then exit so the helper can finish.
+        tauri::async_runtime::spawn_blocking(move || {
             swifttunnel_core::hidden_command("powershell")
                 .args(["-NoProfile", "-Command", &script])
-                .output()
+                .spawn()
                 .map_err(|e| format!("Failed to launch restart helper: {}", e))
         })
         .await
         .map_err(|e| format!("Restart task failed: {}", e))??;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let detail = if !stderr.is_empty() { stderr } else { stdout };
-            return Err(if detail.is_empty() {
-                "Failed to relaunch SwiftTunnel.".to_string()
-            } else {
-                format!("Failed to relaunch SwiftTunnel: {}", detail)
-            });
-        }
-
+        // Give the helper a moment to start polling for our PID, then exit.
+        // 250 ms is well below any user-visible delay but enough headroom for
+        // the PowerShell host to be live before we vanish.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         app.exit(0);
         Ok(())
     }
