@@ -1,5 +1,6 @@
 import type { AppSettings, AuthState, VpnState } from "./types";
 import { shouldAutoReconnectOnLaunch } from "./startup";
+import { reportError } from "./errors";
 
 type AppBootstrapDeps = {
   initEventListeners: () => Promise<void>;
@@ -19,9 +20,24 @@ type AppBootstrapDeps = {
   ) => Promise<void>;
 };
 
+async function safeAwait(label: string, task: () => Promise<void>) {
+  try {
+    await task();
+  } catch (error) {
+    reportError(`Bootstrap step failed: ${label}`, error, {
+      dedupeKey: `bootstrap-${label}`,
+    });
+  }
+}
+
 export async function runAppBootstrap(deps: AppBootstrapDeps) {
-  await deps.initEventListeners();
-  await Promise.all([
+  // Event listeners must not block fetchers — a failed listen() registration
+  // cannot be allowed to keep the spinner stuck forever.
+  await safeAwait("initEventListeners", deps.initEventListeners);
+
+  // allSettled so one failing IPC call cannot abort the others. fetchAuth in
+  // particular MUST run to completion so isLoading flips to false.
+  await Promise.allSettled([
     deps.fetchAuth(),
     deps.loadSettings(),
     deps.fetchServers(),
@@ -31,8 +47,8 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
 
   const authState = deps.getAuthState();
   if (authState === "logged_in") {
-    await deps.refreshAuthProfile();
-    await Promise.all([deps.fetchAuth(), deps.fetchVpnState()]);
+    await safeAwait("refreshAuthProfile", deps.refreshAuthProfile);
+    await Promise.allSettled([deps.fetchAuth(), deps.fetchVpnState()]);
   }
 
   const loadedSettings = deps.getSettings();

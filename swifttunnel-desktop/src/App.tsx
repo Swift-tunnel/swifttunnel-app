@@ -67,34 +67,72 @@ function App() {
   useEffect(() => {
     let disposed = false;
 
-    const init = async () => {
-      if (!disposed) {
-        try {
-          const fromStartup = await systemLaunchedFromStartup();
-          if (!fromStartup && !disposed) {
+    // Show the window in parallel with bootstrap — never let window-show block
+    // the bootstrap, and never let bootstrap block window-show.
+    const showWindowEarly = async () => {
+      try {
+        const fromStartup = await systemLaunchedFromStartup();
+        if (!fromStartup && !disposed) {
+          await getCurrentWindow().show();
+        }
+      } catch {
+        if (!disposed) {
+          try {
             await getCurrentWindow().show();
-          }
-        } catch {
-          if (!disposed) {
-            await getCurrentWindow().show();
-          }
+          } catch {}
         }
       }
+    };
 
-      await runAppBootstrap({
-        initEventListeners,
-        fetchAuth,
-        loadSettings,
-        fetchServers,
-        fetchSystemInfo,
-        fetchVpnState,
-        refreshAuthProfile,
-        getSettings: () => useSettingsStore.getState().settings,
-        getAuthState: () => useAuthStore.getState().state,
-        getVpnState: () => useVpnStore.getState().state,
-        connectVpn,
-        checkForUpdates,
-      });
+    // Hard safety net: if the bootstrap somehow never completes the auth
+    // fetch (e.g. wedged IPC bridge after an upgrade), force-clear the
+    // loading spinner after 8s so the user sees the login screen instead
+    // of an infinite black screen.
+    const spinnerSafetyTimer = window.setTimeout(() => {
+      if (disposed) return;
+      const auth = useAuthStore.getState();
+      if (auth.isLoading) {
+        useAuthStore.setState({
+          isLoading: false,
+          error:
+            "Could not reach the SwiftTunnel backend. Try restarting the app or running Repair.",
+        });
+      }
+    }, 8000);
+
+    const init = async () => {
+      void showWindowEarly();
+
+      try {
+        await runAppBootstrap({
+          initEventListeners,
+          fetchAuth,
+          loadSettings,
+          fetchServers,
+          fetchSystemInfo,
+          fetchVpnState,
+          refreshAuthProfile,
+          getSettings: () => useSettingsStore.getState().settings,
+          getAuthState: () => useAuthStore.getState().state,
+          getVpnState: () => useVpnStore.getState().state,
+          connectVpn,
+          checkForUpdates,
+        });
+      } catch (error) {
+        reportError("App bootstrap threw", error, {
+          dedupeKey: "app-bootstrap-init",
+        });
+        // Last-resort: make sure isLoading clears so the UI is usable.
+        if (!disposed && useAuthStore.getState().isLoading) {
+          try {
+            await fetchAuth();
+          } catch {
+            useAuthStore.setState({ isLoading: false });
+          }
+        }
+      } finally {
+        window.clearTimeout(spinnerSafetyTimer);
+      }
 
       if (disposed) {
         void cleanupEventListeners();
@@ -105,6 +143,7 @@ function App() {
 
     return () => {
       disposed = true;
+      window.clearTimeout(spinnerSafetyTimer);
       void cleanupEventListeners();
     };
   }, [
