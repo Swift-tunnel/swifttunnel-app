@@ -1710,7 +1710,10 @@ fn run_network_repair_step(name: &str, program: &str, args: &[&str]) -> NetworkR
         format!("{} {}", program, args.join(" "))
     };
 
-    match swifttunnel_core::hidden_command(program).args(args).output() {
+    match swifttunnel_core::hidden_command(program)
+        .args(args)
+        .output()
+    {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
