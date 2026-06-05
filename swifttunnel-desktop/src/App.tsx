@@ -11,6 +11,7 @@ import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
 import { BoostTab } from "./components/boost/BoostTab";
 import { NetworkTab } from "./components/network/NetworkTab";
+import { RepairTab } from "./components/repair/RepairTab";
 import { SettingsTab } from "./components/settings/SettingsTab";
 import { useAuthStore } from "./stores/authStore";
 import { useSettingsStore } from "./stores/settingsStore";
@@ -38,6 +39,8 @@ function tabComponent(tab: TabId) {
       return <BoostTab />;
     case "network":
       return <NetworkTab />;
+    case "repair":
+      return <RepairTab />;
     case "settings":
       return <SettingsTab />;
     default:
@@ -65,6 +68,19 @@ function App() {
     let disposed = false;
 
     const init = async () => {
+      if (!disposed) {
+        try {
+          const fromStartup = await systemLaunchedFromStartup();
+          if (!fromStartup && !disposed) {
+            await getCurrentWindow().show();
+          }
+        } catch {
+          if (!disposed) {
+            await getCurrentWindow().show();
+          }
+        }
+      }
+
       await runAppBootstrap({
         initEventListeners,
         fetchAuth,
@@ -79,19 +95,6 @@ function App() {
         connectVpn,
         checkForUpdates,
       });
-
-      if (!disposed) {
-        try {
-          const fromStartup = await systemLaunchedFromStartup();
-          if (!fromStartup && !disposed) {
-            await getCurrentWindow().show();
-          }
-        } catch {
-          if (!disposed) {
-            await getCurrentWindow().show();
-          }
-        }
-      }
 
       if (disposed) {
         void cleanupEventListeners();
@@ -290,7 +293,8 @@ function App() {
         "1": "connect",
         "2": "boost",
         "3": "network",
-        "4": "settings",
+        "4": "repair",
+        "5": "settings",
       };
       const tab = map[event.key];
       if (!tab) return;

@@ -197,6 +197,41 @@ export const systemOpenUrl = (url: string) =>
 export const systemRestartAsAdmin = () =>
   invoke<void>("system_restart_as_admin");
 
+export const systemRestartApp = () =>
+  invoke<void>("system_restart_app");
+
+export const systemCleanup = () =>
+  invoke<void>("system_cleanup");
+
+export interface StartupRegistrationSnapshot {
+  exists: boolean;
+  value: string | null;
+}
+
+export const systemGetStartupRegistration = () =>
+  invoke<StartupRegistrationSnapshot>("system_get_startup_registration");
+
+export const systemRestoreStartupRegistration = (
+  snapshot: StartupRegistrationSnapshot,
+) =>
+  invoke<StartupRegistrationSnapshot>("system_restore_startup_registration", {
+    snapshot,
+  });
+
+export interface NetworkRepairStepResponse {
+  name: string;
+  command: string;
+  success: boolean;
+  output: string;
+}
+
+export interface NetworkRepairResponse {
+  steps: NetworkRepairStepResponse[];
+}
+
+export const systemRepairNetworkCaches = () =>
+  invoke<NetworkRepairResponse>("system_repair_network_caches");
+
 export const systemUninstall = () =>
   invoke<void>("system_uninstall");
 
