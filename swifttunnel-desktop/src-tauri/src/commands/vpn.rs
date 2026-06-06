@@ -4,9 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::events::{
-    COUNTRY_BAN_BYPASS_UNAVAILABLE, SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent,
-};
+use crate::events::{SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent};
 use crate::state::AppState;
 use swifttunnel_core::auth::types::AuthError;
 use swifttunnel_core::settings::AdapterBindingMode;
@@ -399,7 +397,6 @@ pub async fn vpn_connect(
         forced_servers,
         game_process_performance,
         enable_api_tunneling,
-        enable_country_ban,
     ) = (
         if settings_snapshot.custom_relay_server.is_empty() {
             None
@@ -411,7 +408,6 @@ pub async fn vpn_connect(
         settings_snapshot.forced_servers.clone(),
         settings_snapshot.game_process_performance,
         settings_snapshot.enable_api_tunneling,
-        settings_snapshot.enable_country_ban,
     );
     if custom_relay.is_some() && auto_routing {
         log::info!("Auto-routing disabled for this session because custom_relay_server is set");
@@ -469,12 +465,9 @@ pub async fn vpn_connect(
             binding_preference,
             game_process_performance,
             enable_api_tunneling,
-            enable_country_ban,
         ),
     )
     .await;
-
-    let country_ban_bypass_failure = vpn.take_country_ban_bypass_failure();
 
     let mut connect_ban_reason = None;
     let result = match connect_result {
@@ -508,13 +501,6 @@ pub async fn vpn_connect(
         }
     };
 
-    if result.is_ok() && country_ban_bypass_failure.is_some() {
-        log::warn!(
-            "Country ban bypass unavailable after connect: {}",
-            country_ban_bypass_failure.unwrap_or_default()
-        );
-        let _ = app.emit(COUNTRY_BAN_BYPASS_UNAVAILABLE, ());
-    }
     if result.is_ok() {
         // Publish the inner split-tunnel driver handle so polling commands
         // can read throughput/diagnostics/ping without queuing behind the
