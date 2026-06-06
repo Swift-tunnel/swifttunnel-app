@@ -1807,21 +1807,31 @@ pub async fn system_restore_startup_registration(
             use crate::autostart::{RUN_KEY_PATH, RUN_VALUE_NAME};
             use std::io::ErrorKind;
             use winreg::RegKey;
-            use winreg::enums::HKEY_CURRENT_USER;
+            use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-            let (run_key, _) = hkcu
-                .create_subkey(RUN_KEY_PATH)
-                .map_err(|e| format!("Failed to open startup registry key: {e}"))?;
 
             if snapshot.exists {
+                let (run_key, _) = hkcu
+                    .create_subkey(RUN_KEY_PATH)
+                    .map_err(|e| format!("Failed to open startup registry key: {e}"))?;
                 let value = snapshot.value.clone().unwrap_or_default();
                 run_key
                     .set_value(RUN_VALUE_NAME, &value)
                     .map_err(|e| format!("Failed to restore startup registry value: {e}"))?;
-            } else if let Err(e) = run_key.delete_value(RUN_VALUE_NAME) {
-                if e.kind() != ErrorKind::NotFound {
-                    return Err(format!("Failed to remove startup registry value: {e}"));
+            } else {
+                match hkcu.open_subkey_with_flags(RUN_KEY_PATH, KEY_SET_VALUE) {
+                    Ok(run_key) => {
+                        if let Err(e) = run_key.delete_value(RUN_VALUE_NAME) {
+                            if e.kind() != ErrorKind::NotFound {
+                                return Err(format!(
+                                    "Failed to remove startup registry value: {e}"
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == ErrorKind::NotFound => {}
+                    Err(e) => return Err(format!("Failed to open startup registry key: {e}")),
                 }
             }
 

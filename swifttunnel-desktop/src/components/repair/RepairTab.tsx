@@ -465,6 +465,7 @@ function loadSavedRepairResult(): SavedRepairResult | null {
     const parsed = JSON.parse(raw) as Partial<SavedRepairResult>;
     if (!parsed.issue || !parsed.report) return null;
     if (!REPAIR_ISSUES.some((issue) => issue.id === parsed.issue)) return null;
+    if (!Array.isArray(parsed.report.entries)) return null;
     return {
       issue: parsed.issue,
       report: parsed.report,
