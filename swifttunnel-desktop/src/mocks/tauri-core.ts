@@ -70,7 +70,6 @@ const MOCK_SETTINGS: AppSettings = {
     unbind_cpu0: false,
   },
   enable_api_tunneling: false,
-  enable_country_ban: false,
 };
 
 let mockVpnConnected = false;
@@ -385,8 +384,46 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     reboot_required: false,
     recommended_action: "none",
   }),
+  system_cleanup: () => {},
+  system_get_startup_registration: () => ({
+    exists: true,
+    value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",
+  }),
+  system_repair_startup_registration: (args: unknown) => {
+    const enabled =
+      typeof args === "object" &&
+      args !== null &&
+      "enabled" in args &&
+      Boolean((args as { enabled?: boolean }).enabled);
+    return {
+      exists: enabled,
+      value: enabled
+        ? "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup"
+        : null,
+    };
+  },
+  system_restore_startup_registration: (args: unknown) => {
+    if (
+      typeof args === "object" &&
+      args !== null &&
+      "snapshot" in args
+    ) {
+      return (args as { snapshot: unknown }).snapshot;
+    }
+    return { exists: false, value: null };
+  },
+  settings_generate_network_diagnostics_bundle: () => ({
+    file_path:
+      "C:\\Users\\Evelyn\\Desktop\\SwiftTunnel_NetworkDiagnostics_20260606_120000.txt",
+    folder_path: "C:\\Users\\Evelyn\\Desktop",
+  }),
+  system_copy_log_to_clipboard: () => ({
+    file_path: "C:\\Users\\Evelyn\\AppData\\Roaming\\SwiftTunnel\\logs\\swifttunnel.log",
+  }),
   system_open_url: () => {},
   system_restart_as_admin: () => {},
+  system_launched_from_startup: () => false,
+  system_show_notification: () => {},
 };
 
 export async function invoke<T>(cmd: string, _args?: unknown): Promise<T> {

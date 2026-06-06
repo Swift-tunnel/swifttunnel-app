@@ -31,7 +31,6 @@ const RUST_SETTINGS_FIELDS = [
   "adapter_binding_mode",
   "game_process_performance",
   "enable_api_tunneling",
-  "enable_country_ban",
 ];
 
 function extractInterfaceFields(source: string, interfaceName: string): string[] {

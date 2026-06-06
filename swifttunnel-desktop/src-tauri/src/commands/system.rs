@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
@@ -1713,6 +1713,128 @@ pub async fn system_uninstall(
 #[tauri::command]
 pub fn system_launched_from_startup(state: tauri::State<'_, crate::state::AppState>) -> bool {
     state.launched_from_startup
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StartupRegistrationSnapshot {
+    pub exists: bool,
+    pub value: Option<String>,
+}
+
+#[cfg(windows)]
+fn read_startup_registration() -> Result<StartupRegistrationSnapshot, String> {
+    use crate::autostart::{RUN_KEY_PATH, RUN_VALUE_NAME};
+    use std::io::ErrorKind;
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = match hkcu.open_subkey(RUN_KEY_PATH) {
+        Ok(key) => key,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Ok(StartupRegistrationSnapshot {
+                exists: false,
+                value: None,
+            });
+        }
+        Err(e) => return Err(format!("Failed to open startup registry key: {e}")),
+    };
+
+    match run_key.get_value::<String, _>(RUN_VALUE_NAME) {
+        Ok(value) => Ok(StartupRegistrationSnapshot {
+            exists: true,
+            value: Some(value),
+        }),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(StartupRegistrationSnapshot {
+            exists: false,
+            value: None,
+        }),
+        Err(e) => Err(format!("Failed to read startup registry value: {e}")),
+    }
+}
+
+#[tauri::command]
+pub async fn system_get_startup_registration() -> Result<StartupRegistrationSnapshot, String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(read_startup_registration)
+            .await
+            .map_err(|e| format!("Startup snapshot task failed: {e}"))?
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(StartupRegistrationSnapshot {
+            exists: false,
+            value: None,
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn system_repair_startup_registration(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<StartupRegistrationSnapshot, String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::autostart::sync_run_on_startup(&app, enabled)?;
+            read_startup_registration()
+        })
+        .await
+        .map_err(|e| format!("Startup repair task failed: {e}"))?
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        let _ = enabled;
+        Ok(StartupRegistrationSnapshot {
+            exists: false,
+            value: None,
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn system_restore_startup_registration(
+    snapshot: StartupRegistrationSnapshot,
+) -> Result<StartupRegistrationSnapshot, String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            use crate::autostart::{RUN_KEY_PATH, RUN_VALUE_NAME};
+            use std::io::ErrorKind;
+            use winreg::RegKey;
+            use winreg::enums::HKEY_CURRENT_USER;
+
+            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+            let (run_key, _) = hkcu
+                .create_subkey(RUN_KEY_PATH)
+                .map_err(|e| format!("Failed to open startup registry key: {e}"))?;
+
+            if snapshot.exists {
+                let value = snapshot.value.clone().unwrap_or_default();
+                run_key
+                    .set_value(RUN_VALUE_NAME, &value)
+                    .map_err(|e| format!("Failed to restore startup registry value: {e}"))?;
+            } else if let Err(e) = run_key.delete_value(RUN_VALUE_NAME) {
+                if e.kind() != ErrorKind::NotFound {
+                    return Err(format!("Failed to remove startup registry value: {e}"));
+                }
+            }
+
+            read_startup_registration()
+        })
+        .await
+        .map_err(|e| format!("Startup restore task failed: {e}"))?
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(snapshot)
+    }
 }
 
 #[tauri::command]

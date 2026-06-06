@@ -3,8 +3,8 @@ use std::path::Path;
 use tauri::AppHandle;
 
 const STARTUP_FLAG: &str = "--startup";
-const RUN_KEY_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_VALUE_NAME: &str = "SwiftTunnel";
+pub(crate) const RUN_KEY_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+pub(crate) const RUN_VALUE_NAME: &str = "SwiftTunnel";
 
 #[cfg(windows)]
 fn startup_command_for_exe(exe_path: &Path) -> String {

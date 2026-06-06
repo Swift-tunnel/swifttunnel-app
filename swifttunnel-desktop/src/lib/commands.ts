@@ -176,6 +176,9 @@ export const systemInstallDriver = (force = false) =>
 export const systemRepairDriver = () =>
   invoke<DriverCheckResponse>("system_repair_driver");
 
+export const systemCleanup = () =>
+  invoke<void>("system_cleanup");
+
 /**
  * Restart the NDISRD kernel service without reinstalling the driver.
  *
@@ -187,6 +190,26 @@ export const systemRepairDriver = () =>
  */
 export const systemResetDriver = () =>
   invoke<void>("system_reset_driver");
+
+export interface StartupRegistrationSnapshot {
+  exists: boolean;
+  value: string | null;
+}
+
+export const systemGetStartupRegistration = () =>
+  invoke<StartupRegistrationSnapshot>("system_get_startup_registration");
+
+export const systemRepairStartupRegistration = (enabled: boolean) =>
+  invoke<StartupRegistrationSnapshot>("system_repair_startup_registration", {
+    enabled,
+  });
+
+export const systemRestoreStartupRegistration = (
+  snapshot: StartupRegistrationSnapshot,
+) =>
+  invoke<StartupRegistrationSnapshot>("system_restore_startup_registration", {
+    snapshot,
+  });
 
 export const systemLaunchedFromStartup = () =>
   invoke<boolean>("system_launched_from_startup");

@@ -12,7 +12,6 @@ import { useAuthStore } from "../stores/authStore";
 import { useBoostStore } from "../stores/boostStore";
 import { useServerStore } from "../stores/serverStore";
 import { useUpdaterStore } from "../stores/updaterStore";
-import { useToastStore } from "../stores/toastStore";
 
 const EVENT_VPN_STATE_CHANGED = "vpn-state-changed";
 const EVENT_AUTH_STATE_CHANGED = "auth-state-changed";
@@ -22,7 +21,6 @@ const EVENT_RAM_CLEAN_PROGRESS = "ram-clean-progress";
 const EVENT_SERVER_LIST_UPDATED = "server-list-updated";
 const EVENT_UPDATER_PROGRESS = "updater://progress";
 const EVENT_UPDATER_DONE = "updater://done";
-const EVENT_COUNTRY_BAN_BYPASS_UNAVAILABLE = "country-ban-bypass-unavailable";
 
 let unlisteners: UnlistenFn[] = [];
 
@@ -81,14 +79,6 @@ export async function initEventListeners() {
     }),
   );
 
-  unlisteners.push(
-    await listen<void>(EVENT_COUNTRY_BAN_BYPASS_UNAVAILABLE, () => {
-      useToastStore.getState().addToast({
-        type: "warning",
-        message: "Country ban bypass unavailable on this network",
-      });
-    }),
-  );
 }
 
 export async function cleanupEventListeners() {

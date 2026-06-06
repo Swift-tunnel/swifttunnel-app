@@ -13,9 +13,13 @@ import {
   settingsSave,
   settingsGenerateNetworkDiagnosticsBundle,
   systemCopyLogToClipboard,
+  systemCleanup,
+  systemGetStartupRegistration,
   systemRestartAsAdmin,
   systemInstallDriver,
   systemRepairDriver,
+  systemRepairStartupRegistration,
+  systemRestoreStartupRegistration,
   updaterCheckChannel,
   updaterInstallChannel,
   vpnPreflightBinding,
@@ -81,6 +85,40 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(resp);
     await expect(systemRepairDriver()).resolves.toEqual(resp);
     expect(invoke).toHaveBeenCalledWith("system_repair_driver");
+  });
+
+  it("systemCleanup invokes backend", async () => {
+    invoke.mockResolvedValue(undefined);
+    await expect(systemCleanup()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("system_cleanup");
+  });
+
+  it("startup registration commands invoke backend with expected args", async () => {
+    const snapshot = {
+      exists: true,
+      value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",
+    };
+
+    invoke.mockResolvedValueOnce(snapshot);
+    await expect(systemGetStartupRegistration()).resolves.toEqual(snapshot);
+    expect(invoke).toHaveBeenLastCalledWith("system_get_startup_registration");
+
+    invoke.mockResolvedValueOnce(snapshot);
+    await expect(systemRepairStartupRegistration(true)).resolves.toEqual(snapshot);
+    expect(invoke).toHaveBeenLastCalledWith(
+      "system_repair_startup_registration",
+      { enabled: true },
+    );
+
+    invoke.mockResolvedValueOnce({ exists: false, value: null });
+    await expect(systemRestoreStartupRegistration(snapshot)).resolves.toEqual({
+      exists: false,
+      value: null,
+    });
+    expect(invoke).toHaveBeenLastCalledWith(
+      "system_restore_startup_registration",
+      { snapshot },
+    );
   });
 
   it("systemRestartAsAdmin invokes backend with expected args", async () => {
