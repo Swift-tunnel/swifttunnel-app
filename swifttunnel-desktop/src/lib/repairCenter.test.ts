@@ -198,6 +198,23 @@ describe("repair center logic", () => {
     });
   });
 
+  it("reports partial when startup rollback read-back differs from the snapshot", async () => {
+    const deps = makeDeps({
+      systemRestoreStartupRegistration: vi.fn().mockResolvedValue({
+        exists: true,
+        value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",
+      }),
+    });
+
+    const restored = await restoreRepairRollback(deps, {
+      kind: "startup_registration",
+      snapshot: { exists: false, value: null },
+    });
+
+    expect(restored.status).toBe("partial");
+    expect(restored.summary).toContain("differs from the saved snapshot");
+  });
+
   it("returns an error report for stale rollback kinds", async () => {
     const deps = makeDeps();
 

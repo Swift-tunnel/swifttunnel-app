@@ -225,10 +225,15 @@ export async function restoreRepairRollback(
         const restored = await deps.systemRestoreStartupRegistration(
           rollback.snapshot,
         );
+        const restoredMatches = startupSnapshotsEqual(rollback.snapshot, restored);
         return {
-          status: "fixed",
-          summary: "Startup registration restored.",
-          nextStep: "Run startup repair again if the sign-in launch issue returns.",
+          status: restoredMatches ? "fixed" : "partial",
+          summary: restoredMatches
+            ? "Startup registration restored."
+            : "Startup restore completed, but the current registration differs from the saved snapshot.",
+          nextStep: restoredMatches
+            ? "Run startup repair again if the sign-in launch issue returns."
+            : "Copy this result and the log file for support.",
           changed: true,
           reversible: false,
           ranAt: deps.now(),
@@ -236,7 +241,7 @@ export async function restoreRepairRollback(
             {
               label: "Restored startup value",
               value: formatStartupRegistration(restored),
-              tone: "good",
+              tone: restoredMatches ? "good" : "warn",
               mono: true,
             },
           ],
