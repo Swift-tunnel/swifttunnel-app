@@ -436,18 +436,29 @@ async function repairTunnelCleanup(
     }
   }
 
-  await deps.systemCleanup();
+  let cleanupError: unknown = null;
+  try {
+    await deps.systemCleanup();
+  } catch (error) {
+    cleanupError = error;
+  }
   const diagnosticsAfter = await deps.vpnGetDiagnostics().catch(() => null);
   const diagnosticsStillErrored =
     hasTunnelCleanupDiagnosticError(diagnosticsAfter);
-  const status: RepairStatus = diagnosticsStillErrored ? "partial" : "fixed";
+  const status: RepairStatus = cleanupError
+    ? "failed"
+    : diagnosticsStillErrored
+      ? "partial"
+      : "fixed";
 
   return {
     status,
-    summary: diagnosticsStillErrored
+    summary: cleanupError
+      ? "Tunnel cleanup failed."
+      : diagnosticsStillErrored
       ? "Tunnel cleanup completed, but diagnostics still show an error."
       : "Tunnel cleanup completed.",
-    nextStep: diagnosticsStillErrored
+    nextStep: cleanupError || diagnosticsStillErrored
       ? "Copy this result and the log file for support."
       : "Try connecting again. Copy this result for support if the error returns.",
     changed: true,
@@ -457,10 +468,12 @@ async function repairTunnelCleanup(
       repairEntries,
       {
         label: "Cleanup",
-        value: diagnosticsStillErrored
+        value: cleanupError
+          ? String(cleanupError)
+          : diagnosticsStillErrored
           ? "completed; diagnostics still show error"
           : "completed",
-        tone: diagnosticsStillErrored ? "warn" : "good",
+        tone: cleanupError ? "bad" : diagnosticsStillErrored ? "warn" : "good",
       },
       ...diagnosticEntries(diagnosticsAfter),
     ),
@@ -566,8 +579,11 @@ async function checkRelay(deps: RepairCenterDeps): Promise<RepairReport> {
     deps.vpnGetPing().catch(() => null),
   ]);
   const best = latencies
-    .filter((entry) => entry.latency_ms !== null)
-    .sort((a, b) => (a.latency_ms ?? 99999) - (b.latency_ms ?? 99999))
+    .filter(
+      (entry): entry is LatencyEntry & { latency_ms: number } =>
+        entry.latency_ms !== null,
+    )
+    .sort((a, b) => a.latency_ms - b.latency_ms)
     .slice(0, 5);
 
   return {

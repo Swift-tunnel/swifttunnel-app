@@ -178,6 +178,27 @@ describe("repair center logic", () => {
     expect(deps.systemCleanup).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps cleanup context when system cleanup fails", async () => {
+    const deps = makeDeps({
+      systemCleanup: vi.fn().mockRejectedValue(new Error("cleanup denied")),
+      vpnGetDiagnostics: vi
+        .fn()
+        .mockResolvedValueOnce(errorDiagnostics)
+        .mockResolvedValueOnce(errorDiagnostics),
+    });
+
+    const report = await runRepairIssue("tunnel_cleanup", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.entries).toContainEqual({
+      label: "Cleanup",
+      value: "Error: cleanup denied",
+      tone: "bad",
+    });
+  });
+
   it("captures startup rollback and can restore it", async () => {
     const settings = { ...DEFAULT_SETTINGS, run_on_startup: true };
     const deps = makeDeps();
