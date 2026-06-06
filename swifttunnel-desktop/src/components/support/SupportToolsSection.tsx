@@ -1,11 +1,12 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useToastStore } from "../../stores/toastStore";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
   systemCopyLogToClipboard,
   systemOpenUrl,
 } from "../../lib/commands";
-import { Button, InfoIcon, Row, SectionHeader, Tooltip } from "../ui";
+import { Button, InfoIcon, Row, Tooltip } from "../ui";
+import { SupportSection } from "./SupportSection";
 
 export function SupportToolsSection() {
   const addToast = useToastStore((s) => s.addToast);
@@ -58,7 +59,7 @@ export function SupportToolsSection() {
   }
 
   return (
-    <Section
+    <SupportSection
       title="Support"
       tagElement={
         <button
@@ -116,35 +117,7 @@ export function SupportToolsSection() {
       </Row>
       {copyLogPath && <SupportPath label="Copied" value={copyLogPath} />}
       {copyLogError && <SupportError value={copyLogError} />}
-    </Section>
-  );
-}
-
-function Section({
-  title,
-  tagElement,
-  children,
-}: {
-  title: string;
-  tagElement?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section>
-      {tagElement ? (
-        <div className="mb-2.5 flex items-center gap-2">
-          <h3 className="text-[12.5px] font-semibold text-text-primary">
-            {title}
-          </h3>
-          {tagElement}
-        </div>
-      ) : (
-        <SectionHeader label={title} />
-      )}
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
-        {children}
-      </div>
-    </section>
+    </SupportSection>
   );
 }
 

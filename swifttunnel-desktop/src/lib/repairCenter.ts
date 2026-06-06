@@ -242,6 +242,8 @@ export async function restoreRepairRollback(
           ],
         };
       }
+      default:
+        return errorReport(deps, "Unknown rollback kind", rollback.kind);
     }
   } catch (error) {
     return errorReport(deps, "Revert failed", String(error));
@@ -397,8 +399,7 @@ async function repairTunnelCleanup(
   const cleanupNeeded =
     state.state === "error" ||
     state.error !== null ||
-    diagnosticsBefore?.last_validation_result === "error" ||
-    diagnosticsBefore?.binding_stage === "error";
+    hasTunnelCleanupDiagnosticError(diagnosticsBefore);
   const baseEntries: RepairEntry[] = [
     { label: "State", value: state.state },
     {
@@ -432,17 +433,30 @@ async function repairTunnelCleanup(
 
   await deps.systemCleanup();
   const diagnosticsAfter = await deps.vpnGetDiagnostics().catch(() => null);
+  const diagnosticsStillErrored =
+    hasTunnelCleanupDiagnosticError(diagnosticsAfter);
+  const status: RepairStatus = diagnosticsStillErrored ? "partial" : "fixed";
 
   return {
-    status: "fixed",
-    summary: "Tunnel cleanup completed.",
-    nextStep: "Try connecting again. Copy this result for support if the error returns.",
+    status,
+    summary: diagnosticsStillErrored
+      ? "Tunnel cleanup completed, but diagnostics still show an error."
+      : "Tunnel cleanup completed.",
+    nextStep: diagnosticsStillErrored
+      ? "Copy this result and the log file for support."
+      : "Try connecting again. Copy this result for support if the error returns.",
     changed: true,
     reversible: false,
     ranAt: deps.now(),
     entries: baseEntries.concat(
       repairEntries,
-      { label: "Cleanup", value: "completed", tone: "good" },
+      {
+        label: "Cleanup",
+        value: diagnosticsStillErrored
+          ? "completed; diagnostics still show error"
+          : "completed",
+        tone: diagnosticsStillErrored ? "warn" : "good",
+      },
       ...diagnosticEntries(diagnosticsAfter),
     ),
   };
@@ -667,6 +681,15 @@ function diagnosticEntries(
       mono: true,
     },
   ];
+}
+
+function hasTunnelCleanupDiagnosticError(
+  diagnostics: DiagnosticsResponse | null,
+): boolean {
+  return (
+    diagnostics?.last_validation_result === "error" ||
+    diagnostics?.binding_stage === "error"
+  );
 }
 
 function errorReport(

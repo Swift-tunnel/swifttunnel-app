@@ -59,6 +59,12 @@ const healthyDiagnostics: DiagnosticsResponse = {
   packets_bypassed: 20,
 };
 
+const errorDiagnostics: DiagnosticsResponse = {
+  ...healthyDiagnostics,
+  binding_stage: "error",
+  last_validation_result: "error",
+};
+
 function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
   return {
     now: () => 1_800_000_000_000,
@@ -155,6 +161,23 @@ describe("repair center logic", () => {
     expect(deps.systemCleanup).toHaveBeenCalledTimes(1);
   });
 
+  it("reports partial when cleanup leaves structured diagnostic errors", async () => {
+    const deps = makeDeps({
+      vpnGetDiagnostics: vi
+        .fn()
+        .mockResolvedValueOnce(errorDiagnostics)
+        .mockResolvedValueOnce(errorDiagnostics),
+    });
+
+    const report = await runRepairIssue("tunnel_cleanup", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("partial");
+    expect(report.summary).toContain("diagnostics still show an error");
+    expect(deps.systemCleanup).toHaveBeenCalledTimes(1);
+  });
+
   it("captures startup rollback and can restore it", async () => {
     const settings = { ...DEFAULT_SETTINGS, run_on_startup: true };
     const deps = makeDeps();
@@ -173,5 +196,18 @@ describe("repair center logic", () => {
       exists: false,
       value: null,
     });
+  });
+
+  it("returns an error report for stale rollback kinds", async () => {
+    const deps = makeDeps();
+
+    const restored = await restoreRepairRollback(deps, {
+      kind: "legacy_startup_registration",
+      snapshot: { exists: true, value: "legacy" },
+    } as never);
+
+    expect(restored.status).toBe("failed");
+    expect(restored.summary).toBe("Unknown rollback kind");
+    expect(deps.systemRestoreStartupRegistration).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useToastStore } from "../../stores/toastStore";
 import {
@@ -31,6 +31,7 @@ import {
   type RepairReport,
   type RepairStatus,
 } from "../../lib/repairCenter";
+import { SupportSection } from "../support/SupportSection";
 import { SupportToolsSection } from "../support/SupportToolsSection";
 import { Button, SectionHeader } from "../ui";
 
@@ -227,7 +228,7 @@ export function RepairTab() {
         </div>
       </section>
 
-      <Section title={`${selectedMeta.label} result`}>
+      <SupportSection title={`${selectedMeta.label} result`}>
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 text-[11px]">
           <RepairItem label="Status" value={statusLabel(selectedReport.status)} />
           <RepairItem
@@ -268,7 +269,7 @@ export function RepairTab() {
             </div>
           ))}
         </div>
-      </Section>
+      </SupportSection>
 
       <SupportToolsSection />
     </div>
@@ -338,34 +339,6 @@ function IssueButton({
         )}
       </div>
     </button>
-  );
-}
-
-function Section({
-  title,
-  tagElement,
-  children,
-}: {
-  title: string;
-  tagElement?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section>
-      {tagElement ? (
-        <div className="mb-2.5 flex items-center gap-2">
-          <h3 className="text-[12.5px] font-semibold text-text-primary">
-            {title}
-          </h3>
-          {tagElement}
-        </div>
-      ) : (
-        <SectionHeader label={title} />
-      )}
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
-        {children}
-      </div>
-    </section>
   );
 }
 
