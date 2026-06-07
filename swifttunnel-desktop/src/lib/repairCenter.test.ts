@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "./settings";
 import {
+  parseSavedRepairResult,
   restoreRepairRollback,
   runRepairIssue,
   type RepairCenterDeps,
@@ -71,7 +72,7 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
     serverGetLatencies: vi.fn().mockResolvedValue([{ region: "Singapore", latency_ms: 18 }]),
     serverRefresh: vi.fn().mockResolvedValue("ok"),
     systemCheckDriver: vi.fn().mockResolvedValue(readyDriver),
-    systemCleanup: vi.fn().mockResolvedValue(undefined),
+    systemCleanupTunnelState: vi.fn().mockResolvedValue(undefined),
     systemGetStartupRegistration: vi.fn().mockResolvedValue({
       exists: false,
       value: null,
@@ -155,6 +156,47 @@ describe("repair center logic", () => {
     expect(deps.systemRepairDriver).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps driver context when the repair command rejects", async () => {
+    const systemCheckDriver = vi.fn().mockResolvedValue(readyDriver);
+    const deps = makeDeps({
+      systemCheckDriver,
+      systemRepairDriver: vi.fn().mockRejectedValue(new Error("repair crashed")),
+    });
+
+    const report = await runRepairIssue("driver", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("partial");
+    expect(report.summary).toContain("command failed");
+    expect(report.entries).toContainEqual({
+      label: "Repair error",
+      value: "repair crashed",
+      tone: "bad",
+    });
+    expect(systemCheckDriver).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports failed when adapter inventory cannot be read", async () => {
+    const deps = makeDeps({
+      vpnListNetworkAdapters: vi
+        .fn()
+        .mockRejectedValue(new Error("adapter API unavailable")),
+    });
+
+    const report = await runRepairIssue("adapter", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.changed).toBe(false);
+    expect(report.entries).toContainEqual({
+      label: "Adapter inventory",
+      value: "adapter API unavailable",
+      tone: "bad",
+    });
+  });
+
   it("does not cleanup for superficially similar healthy diagnostic text", async () => {
     const deps = makeDeps();
 
@@ -164,16 +206,34 @@ describe("repair center logic", () => {
 
     expect(report.status).toBe("checked");
     expect(deps.vpnDisconnect).not.toHaveBeenCalled();
-    expect(deps.systemCleanup).not.toHaveBeenCalled();
+    expect(deps.systemCleanupTunnelState).not.toHaveBeenCalled();
+  });
+
+  it("does not cleanup when VPN state cannot be read", async () => {
+    const deps = makeDeps({
+      vpnGetState: vi.fn().mockRejectedValue(new Error("state unavailable")),
+      vpnGetDiagnostics: vi.fn().mockResolvedValue(errorDiagnostics),
+    });
+
+    const report = await runRepairIssue("tunnel_cleanup", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.summary).toContain("could not read VPN state");
+    expect(deps.systemCleanupTunnelState).not.toHaveBeenCalled();
   });
 
   it("runs cleanup for structured tunnel error state", async () => {
     const deps = makeDeps({
-      vpnGetState: vi.fn().mockResolvedValue({
-        ...disconnectedState,
-        state: "error",
-        error: "Split tunnel driver not available",
-      }),
+      vpnGetState: vi
+        .fn()
+        .mockResolvedValueOnce({
+          ...disconnectedState,
+          state: "error",
+          error: "Split tunnel driver not available",
+        })
+        .mockResolvedValueOnce(disconnectedState),
     });
 
     const report = await runRepairIssue("tunnel_cleanup", deps, {
@@ -181,7 +241,27 @@ describe("repair center logic", () => {
     });
 
     expect(report.status).toBe("fixed");
-    expect(deps.systemCleanup).toHaveBeenCalledTimes(1);
+    expect(deps.systemCleanupTunnelState).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops cleanup when disconnect fails for an active error state", async () => {
+    const deps = makeDeps({
+      vpnGetState: vi.fn().mockResolvedValue({
+        ...disconnectedState,
+        state: "error",
+        split_tunnel_active: true,
+        error: "reader failed",
+      }),
+      vpnDisconnect: vi.fn().mockRejectedValue(new Error("disconnect denied")),
+    });
+
+    const report = await runRepairIssue("tunnel_cleanup", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.summary).toContain("disconnect failed");
+    expect(deps.systemCleanupTunnelState).not.toHaveBeenCalled();
   });
 
   it("reports partial when cleanup leaves structured diagnostic errors", async () => {
@@ -198,12 +278,48 @@ describe("repair center logic", () => {
 
     expect(report.status).toBe("partial");
     expect(report.summary).toContain("diagnostics still show an error");
-    expect(deps.systemCleanup).toHaveBeenCalledTimes(1);
+    expect(deps.systemCleanupTunnelState).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports partial when cleanup verification cannot read diagnostics", async () => {
+    const deps = makeDeps({
+      vpnGetDiagnostics: vi
+        .fn()
+        .mockResolvedValueOnce(errorDiagnostics)
+        .mockRejectedValueOnce(new Error("diagnostics unavailable")),
+    });
+
+    const report = await runRepairIssue("tunnel_cleanup", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("partial");
+    expect(report.summary).toContain("verification could not finish");
+  });
+
+  it("reports partial when cleanup leaves the driver needing repair", async () => {
+    const deps = makeDeps({
+      systemCheckDriver: vi.fn().mockResolvedValue(missingDriver),
+      vpnGetDiagnostics: vi
+        .fn()
+        .mockResolvedValueOnce(errorDiagnostics)
+        .mockResolvedValueOnce(healthyDiagnostics),
+    });
+
+    const report = await runRepairIssue("tunnel_cleanup", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("partial");
+    expect(report.summary).toContain("driver needs repair");
+    expect(report.nextStep).toContain("driver repair");
   });
 
   it("keeps cleanup context when system cleanup fails", async () => {
     const deps = makeDeps({
-      systemCleanup: vi.fn().mockRejectedValue(new Error("cleanup denied")),
+      systemCleanupTunnelState: vi.fn().mockRejectedValue(
+        new Error("cleanup denied"),
+      ),
       vpnGetDiagnostics: vi
         .fn()
         .mockResolvedValueOnce(errorDiagnostics)
@@ -217,7 +333,7 @@ describe("repair center logic", () => {
     expect(report.status).toBe("failed");
     expect(report.entries).toContainEqual({
       label: "Cleanup",
-      value: "Error: cleanup denied",
+      value: "cleanup denied",
       tone: "bad",
     });
   });
@@ -270,5 +386,67 @@ describe("repair center logic", () => {
     expect(restored.status).toBe("failed");
     expect(restored.summary).toBe("Unknown rollback kind");
     expect(deps.systemRestoreStartupRegistration).not.toHaveBeenCalled();
+  });
+
+  it("parses a valid saved repair result", () => {
+    const parsed = parseSavedRepairResult(
+      JSON.stringify({
+        issue: "driver",
+        report: {
+          status: "checked",
+          summary: "ok",
+          nextStep: "next",
+          changed: false,
+          reversible: false,
+          ranAt: 1_800_000_000_000,
+          entries: [],
+        },
+      }),
+    );
+
+    expect(parsed?.issue).toBe("driver");
+    expect(parsed?.report.status).toBe("checked");
+  });
+
+  it("ignores stale saved repair statuses", () => {
+    const parsed = parseSavedRepairResult(
+      JSON.stringify({
+        issue: "driver",
+        report: {
+          status: "legacy_success",
+          summary: "ok",
+          nextStep: "next",
+          changed: false,
+          reversible: false,
+          ranAt: 1_800_000_000_000,
+          entries: [],
+        },
+      }),
+    );
+
+    expect(parsed).toBeNull();
+  });
+
+  it("ignores stale saved rollback kinds", () => {
+    const parsed = parseSavedRepairResult(
+      JSON.stringify({
+        issue: "startup",
+        report: {
+          status: "failed",
+          summary: "failed",
+          nextStep: "next",
+          changed: true,
+          reversible: true,
+          ranAt: 1_800_000_000_000,
+          entries: [],
+          rollback: {
+            kind: "legacy_startup_registration",
+            snapshot: { exists: true, value: "legacy" },
+          },
+        },
+      }),
+    );
+
+    expect(parsed).toBeNull();
   });
 });
