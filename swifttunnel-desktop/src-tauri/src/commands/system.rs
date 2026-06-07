@@ -1014,6 +1014,25 @@ impl DriverCheckResponse {
         }
     }
 
+    #[cfg(windows)]
+    fn binding_repair_failure(
+        health: swifttunnel_core::vpn::SplitTunnelDriverHealth,
+        reason: String,
+    ) -> Self {
+        Self {
+            installed: health.installed,
+            version: health.version,
+            ready: false,
+            status: "binding_missing".to_string(),
+            message: format!(
+                "Automatic split tunnel driver repair did not restore the WinpkFilter adapter binding.\n\n{}\n\nPlease reboot Windows, then run Repair driver once more. If this keeps happening, reinstall SwiftTunnel.",
+                reason
+            ),
+            reboot_required: true,
+            recommended_action: "reboot".to_string(),
+        }
+    }
+
     #[cfg(not(windows))]
     fn unsupported() -> Self {
         Self {
@@ -1024,6 +1043,52 @@ impl DriverCheckResponse {
             message: "Split tunnel driver is only supported on Windows.".to_string(),
             reboot_required: false,
             recommended_action: "none".to_string(),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn is_winpkfilter_binding_missing_preflight(
+    preflight: &swifttunnel_core::vpn::BindingPreflightInfo,
+) -> bool {
+    let haystack = format!(
+        "{}\n{}\n{}",
+        preflight.status,
+        preflight.reason,
+        preflight.binding_stage.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase();
+
+    preflight.status.eq_ignore_ascii_case("unrecoverable")
+        && (haystack.contains("winpkfilter_binding_missing")
+            || (haystack.contains("nt_ndisrd") && haystack.contains("not bound to adapter")))
+}
+
+#[cfg(windows)]
+fn driver_repair_response_after_binding_preflight(
+    health: swifttunnel_core::vpn::SplitTunnelDriverHealth,
+    preflight: Result<swifttunnel_core::vpn::BindingPreflightInfo, swifttunnel_core::vpn::VpnError>,
+) -> DriverCheckResponse {
+    let health_response = DriverCheckResponse::from_health(health.clone());
+    if !health.ready {
+        return health_response;
+    }
+
+    match preflight {
+        Ok(preflight) if is_winpkfilter_binding_missing_preflight(&preflight) => {
+            DriverCheckResponse::binding_repair_failure(health, preflight.reason)
+        }
+        Ok(preflight) => {
+            log::info!(
+                "Post-repair split tunnel binding preflight status: {} ({})",
+                preflight.status,
+                preflight.binding_stage.as_deref().unwrap_or("unknown")
+            );
+            health_response
+        }
+        Err(e) => {
+            log::warn!("Post-repair split tunnel binding preflight failed: {}", e);
+            health_response
         }
     }
 }
@@ -1123,7 +1188,10 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                     Ok(()) => {
                         current = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
                         if !initial.ready {
-                            return Ok(DriverCheckResponse::from_health(current));
+                            let preflight = swifttunnel_core::vpn::preflight_binding(None);
+                            return Ok(driver_repair_response_after_binding_preflight(
+                                current, preflight,
+                            ));
                         }
                         log::info!(
                             "Driver service reset passed; continuing repair to refresh WinpkFilter adapter bindings"
@@ -1142,7 +1210,10 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
             }
 
             if !initial.ready && current.ready && last_error.is_none() {
-                return Ok(DriverCheckResponse::from_health(current));
+                let preflight = swifttunnel_core::vpn::preflight_binding(None);
+                return Ok(driver_repair_response_after_binding_preflight(
+                    current, preflight,
+                ));
             }
 
             if current.reboot_required || current.recommended_action == DriverRecommendedAction::Reboot {
@@ -1188,8 +1259,10 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                         force_reinstall,
                     ) {
                         Ok(()) => {
-                            return Ok(DriverCheckResponse::from_health(
-                                swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
+                            let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                            let preflight = swifttunnel_core::vpn::preflight_binding(None);
+                            return Ok(driver_repair_response_after_binding_preflight(
+                                health, preflight,
                             ));
                         }
                         Err(e) => {
@@ -1212,8 +1285,10 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                     true,
                 ) {
                     Ok(()) => {
-                        return Ok(DriverCheckResponse::from_health(
-                            swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
+                        let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                        let preflight = swifttunnel_core::vpn::preflight_binding(None);
+                        return Ok(driver_repair_response_after_binding_preflight(
+                            health, preflight,
                         ));
                     }
                     Err(e) => {
@@ -1250,6 +1325,37 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn ready_health() -> swifttunnel_core::vpn::SplitTunnelDriverHealth {
+        swifttunnel_core::vpn::SplitTunnelDriverHealth {
+            installed: true,
+            ready: true,
+            status: swifttunnel_core::vpn::DriverHealthStatus::Ready,
+            message: "Windows Packet Filter driver is ready.".to_string(),
+            version: Some("3.6.2".to_string()),
+            reboot_required: false,
+            recommended_action: swifttunnel_core::vpn::DriverRecommendedAction::None,
+        }
+    }
+
+    fn preflight(
+        status: &str,
+        reason: &str,
+        binding_stage: Option<&str>,
+    ) -> swifttunnel_core::vpn::BindingPreflightInfo {
+        swifttunnel_core::vpn::BindingPreflightInfo {
+            status: status.to_string(),
+            reason: reason.to_string(),
+            network_signature: "test-network".to_string(),
+            route_resolution_source: "test".to_string(),
+            route_resolution_target_ip: None,
+            resolved_if_index: Some(12),
+            recommended_guid: None,
+            cached_override_used: false,
+            binding_stage: binding_stage.map(str::to_string),
+            candidates: Vec::new(),
+        }
+    }
+
     fn unique_temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1271,6 +1377,55 @@ mod tests {
         let actual = fs::canonicalize(actual).expect("canonicalize actual path");
         let expected = fs::canonicalize(expected).expect("canonicalize expected path");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn driver_repair_response_reports_missing_binding_after_ready_health() {
+        let response = driver_repair_response_after_binding_preflight(
+            ready_health(),
+            Ok(preflight(
+                "Unrecoverable",
+                "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'.",
+                Some("winpkfilter_binding_missing"),
+            )),
+        );
+
+        assert!(!response.ready);
+        assert_eq!(response.status, "binding_missing");
+        assert_eq!(response.recommended_action, "reboot");
+        assert!(response.reboot_required);
+        assert!(response.message.contains("did not restore"));
+        assert!(response.message.contains("Ethernet"));
+    }
+
+    #[test]
+    fn driver_repair_response_ignores_unrelated_unrecoverable_preflight() {
+        let response = driver_repair_response_after_binding_preflight(
+            ready_health(),
+            Ok(preflight(
+                "unrecoverable",
+                "SwiftTunnel could not detect the active network adapter.",
+                Some("unrecoverable"),
+            )),
+        );
+
+        assert!(response.ready);
+        assert_eq!(response.status, "ready");
+        assert_eq!(response.recommended_action, "none");
+    }
+
+    #[test]
+    fn driver_repair_response_fails_open_when_post_repair_preflight_errors() {
+        let response = driver_repair_response_after_binding_preflight(
+            ready_health(),
+            Err(swifttunnel_core::vpn::VpnError::Network(
+                "preflight command failed".to_string(),
+            )),
+        );
+
+        assert!(response.ready);
+        assert_eq!(response.status, "ready");
+        assert_eq!(response.recommended_action, "none");
     }
 
     #[test]
