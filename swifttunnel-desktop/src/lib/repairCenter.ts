@@ -310,10 +310,6 @@ async function repairDriver(deps: RepairCenterDeps): Promise<RepairReport> {
     return driverReport(deps, before, "unsupported", "Driver repair is unsupported.", false, admin);
   }
 
-  if (before.ready) {
-    return driverReport(deps, before, "healthy", "Split tunnel driver is healthy.", false, admin);
-  }
-
   if (before.reboot_required || before.recommended_action === "reboot") {
     return driverReport(
       deps,
