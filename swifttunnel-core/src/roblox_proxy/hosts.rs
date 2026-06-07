@@ -34,8 +34,11 @@ static ACTIVE_BOOTSTRAP_IPS: OnceLock<RwLock<HashSet<Ipv4Addr>>> = OnceLock::new
 /// not add bare `roblox.com` or lookalike domains: hosts-file repair is a DNS
 /// bypass for known Roblox bootstrap dependencies, not a wildcard resolver.
 pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
+    "api.roblox.com",
     "clientsettingscdn.roblox.com",
     "clientsettings.roblox.com",
+    "clientsettings.api.roblox.com",
+    "versioncompatibility.api.roblox.com",
     "www.roblox.com",
     "web.roblox.com",
     "apis.roblox.com",
@@ -43,16 +46,28 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     "accountsettings.roblox.com",
     "accountinformation.roblox.com",
     "users.roblox.com",
+    "avatar.roblox.com",
+    "catalog.roblox.com",
+    "inventory.roblox.com",
+    "economy.roblox.com",
     "games.roblox.com",
     "gamejoin.roblox.com",
+    "assetgame.roblox.com",
     "assetdelivery.roblox.com",
     "thumbnails.roblox.com",
     "presence.roblox.com",
     "friends.roblox.com",
     "chat.roblox.com",
+    "chatsite.roblox.com",
     "locale.roblox.com",
+    "setup.roblox.com",
+    "captcha.roblox.com",
     "setup.rbxcdn.com",
     "apis.rbxcdn.com",
+    "js.rbxcdn.com",
+    "static.rbxcdn.com",
+    "cdn.arkoselabs.com",
+    "roblox-api.arkoselabs.com",
 ];
 
 fn hosts_path() -> PathBuf {
@@ -487,18 +502,33 @@ mod tests {
     fn domain_list_contains_launch_entries() {
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"clientsettings.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"clientsettingscdn.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"clientsettings.api.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"versioncompatibility.api.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"www.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"api.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"apis.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"auth.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"avatar.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"catalog.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"inventory.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"economy.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"gamejoin.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"assetgame.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"chatsite.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"setup.rbxcdn.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"js.rbxcdn.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"static.rbxcdn.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"captcha.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"cdn.arkoselabs.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox-api.arkoselabs.com"));
     }
 
     #[test]
     fn domain_list_stays_allowlisted_and_exact() {
-        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 19);
+        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 33);
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
+        assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"arkoselabs.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"evilroblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com.evil.test"));
     }
