@@ -1028,8 +1028,8 @@ impl DriverCheckResponse {
                 "Automatic split tunnel driver repair did not restore the WinpkFilter adapter binding.\n\n{}\n\nPlease reboot Windows, then run Repair driver once more. If this keeps happening, reinstall SwiftTunnel.",
                 reason
             ),
-            reboot_required: false,
-            recommended_action: "reinstall".to_string(),
+            reboot_required: true,
+            recommended_action: "reboot".to_string(),
         }
     }
 
@@ -1059,7 +1059,7 @@ fn is_winpkfilter_binding_missing_preflight(
     )
     .to_ascii_lowercase();
 
-    preflight.status == "unrecoverable"
+    preflight.status.eq_ignore_ascii_case("unrecoverable")
         && (haystack.contains("winpkfilter_binding_missing")
             || (haystack.contains("nt_ndisrd") && haystack.contains("not bound to adapter")))
 }
@@ -1384,7 +1384,7 @@ mod tests {
         let response = driver_repair_response_after_binding_preflight(
             ready_health(),
             Ok(preflight(
-                "unrecoverable",
+                "Unrecoverable",
                 "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'.",
                 Some("winpkfilter_binding_missing"),
             )),
@@ -1392,7 +1392,8 @@ mod tests {
 
         assert!(!response.ready);
         assert_eq!(response.status, "binding_missing");
-        assert_eq!(response.recommended_action, "reinstall");
+        assert_eq!(response.recommended_action, "reboot");
+        assert!(response.reboot_required);
         assert!(response.message.contains("did not restore"));
         assert!(response.message.contains("Ethernet"));
     }
@@ -1405,6 +1406,20 @@ mod tests {
                 "unrecoverable",
                 "SwiftTunnel could not detect the active network adapter.",
                 Some("unrecoverable"),
+            )),
+        );
+
+        assert!(response.ready);
+        assert_eq!(response.status, "ready");
+        assert_eq!(response.recommended_action, "none");
+    }
+
+    #[test]
+    fn driver_repair_response_fails_open_when_post_repair_preflight_errors() {
+        let response = driver_repair_response_after_binding_preflight(
+            ready_health(),
+            Err(swifttunnel_core::vpn::VpnError::Network(
+                "preflight command failed".to_string(),
             )),
         );
 
