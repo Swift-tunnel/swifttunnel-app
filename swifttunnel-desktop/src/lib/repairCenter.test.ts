@@ -106,14 +106,37 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
 }
 
 describe("repair center logic", () => {
-  it("does not run driver repair when structured health is already ready", async () => {
-    const deps = makeDeps();
+  it("runs driver repair even when global health is ready so adapter bindings can be refreshed", async () => {
+    const deps = makeDeps({
+      systemRepairDriver: vi.fn().mockResolvedValue(readyDriver),
+    });
 
     const report = await runRepairIssue("driver", deps, {
       settings: DEFAULT_SETTINGS,
     });
 
-    expect(report.status).toBe("healthy");
+    expect(report.status).toBe("fixed");
+    expect(report.changed).toBe(true);
+    expect(deps.systemRepairDriver).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not run driver repair when Windows requires a reboot first", async () => {
+    const deps = makeDeps({
+      systemCheckDriver: vi.fn().mockResolvedValue({
+        ...readyDriver,
+        ready: false,
+        status: "reboot_required",
+        message: "Reboot required to finish driver installation.",
+        reboot_required: true,
+        recommended_action: "reboot",
+      }),
+    });
+
+    const report = await runRepairIssue("driver", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("needs_reboot");
     expect(deps.systemRepairDriver).not.toHaveBeenCalled();
   });
 
