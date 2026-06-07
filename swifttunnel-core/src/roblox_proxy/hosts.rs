@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn domain_list_stays_allowlisted_and_exact() {
-        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 33);
+        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 34);
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"arkoselabs.com"));
