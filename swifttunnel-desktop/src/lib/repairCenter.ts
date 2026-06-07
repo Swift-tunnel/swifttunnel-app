@@ -7,6 +7,7 @@ import type {
   VpnStateResponse,
 } from "./types";
 import type { StartupRegistrationSnapshot } from "./commands";
+import { formatErrorMessage } from "./errors";
 
 export type RepairIssueId =
   | "driver"
@@ -28,6 +29,17 @@ export type RepairStatus =
   | "needs_reboot"
   | "failed"
   | "unsupported";
+
+const REPAIR_STATUSES: readonly RepairStatus[] = [
+  "not_checked",
+  "healthy",
+  "checked",
+  "fixed",
+  "partial",
+  "needs_reboot",
+  "failed",
+  "unsupported",
+];
 
 export interface RepairIssueDefinition {
   id: RepairIssueId;
@@ -60,6 +72,11 @@ export interface RepairReport {
   rollback?: RepairRollback;
 }
 
+export type SavedRepairResult = {
+  issue: RepairIssueId;
+  report: RepairReport;
+};
+
 export interface RepairContext {
   settings: AppSettings;
 }
@@ -69,7 +86,7 @@ export interface RepairCenterDeps {
   serverGetLatencies: () => Promise<LatencyEntry[]>;
   serverRefresh: () => Promise<string>;
   systemCheckDriver: () => Promise<DriverCheckResponse>;
-  systemCleanup: () => Promise<void>;
+  systemCleanupTunnelState: () => Promise<void>;
   systemGetStartupRegistration: () => Promise<StartupRegistrationSnapshot>;
   systemIsAdmin: () => Promise<{ is_admin: boolean }>;
   systemRepairDriver: () => Promise<DriverCheckResponse>;
@@ -176,6 +193,94 @@ export function makeInitialRepairReports(
   );
 }
 
+export function parseSavedRepairResult(raw: string | null): SavedRepairResult | null {
+  if (!raw) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+
+    const issue = parsed.issue;
+    const report = parsed.report;
+    if (!isRepairIssueId(issue) || !isRepairReport(report)) return null;
+
+    return { issue, report };
+  } catch {
+    return null;
+  }
+}
+
+function isRepairIssueId(value: unknown): value is RepairIssueId {
+  return (
+    typeof value === "string" &&
+    REPAIR_ISSUES.some((issue) => issue.id === value)
+  );
+}
+
+function isRepairReport(value: unknown): value is RepairReport {
+  if (!isRecord(value)) return false;
+  if (!isRepairStatus(value.status)) return false;
+  if (typeof value.summary !== "string") return false;
+  if (typeof value.nextStep !== "string") return false;
+  if (typeof value.changed !== "boolean") return false;
+  if (typeof value.reversible !== "boolean") return false;
+  if (typeof value.ranAt !== "number" || !Number.isFinite(value.ranAt)) {
+    return false;
+  }
+  if (!Array.isArray(value.entries) || !value.entries.every(isRepairEntry)) {
+    return false;
+  }
+  if (
+    value.rollback !== undefined &&
+    !isRepairRollback(value.rollback)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isRepairStatus(value: unknown): value is RepairStatus {
+  return (
+    typeof value === "string" &&
+    REPAIR_STATUSES.includes(value as RepairStatus)
+  );
+}
+
+function isRepairEntry(value: unknown): value is RepairEntry {
+  if (!isRecord(value)) return false;
+  if (typeof value.label !== "string") return false;
+  if (typeof value.value !== "string") return false;
+  if (
+    value.tone !== undefined &&
+    value.tone !== "default" &&
+    value.tone !== "good" &&
+    value.tone !== "warn" &&
+    value.tone !== "bad"
+  ) {
+    return false;
+  }
+  if (value.mono !== undefined && typeof value.mono !== "boolean") {
+    return false;
+  }
+  return true;
+}
+
+function isRepairRollback(value: unknown): value is RepairRollback {
+  if (!isRecord(value)) return false;
+  if (value.kind !== "startup_registration") return false;
+  return isStartupRegistrationSnapshot(value.snapshot);
+}
+
+function isStartupRegistrationSnapshot(
+  value: unknown,
+): value is StartupRegistrationSnapshot {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.exists === "boolean" &&
+    (value.value === null || typeof value.value === "string")
+  );
+}
+
 export async function runRepairIssue(
   issue: RepairIssueId,
   deps: RepairCenterDeps,
@@ -211,7 +316,7 @@ export async function runRepairIssue(
         return await checkInstaller(deps);
     }
   } catch (error) {
-    return errorReport(deps, "Repair failed", String(error));
+    return errorReport(deps, "Repair failed", formatErrorMessage(error));
   }
 }
 
@@ -251,7 +356,7 @@ export async function restoreRepairRollback(
         return errorReport(deps, "Unknown rollback kind", rollback.kind);
     }
   } catch (error) {
-    return errorReport(deps, "Revert failed", String(error));
+    return errorReport(deps, "Revert failed", formatErrorMessage(error));
   }
 }
 
@@ -321,7 +426,20 @@ async function repairDriver(deps: RepairCenterDeps): Promise<RepairReport> {
     );
   }
 
-  const after = await deps.systemRepairDriver();
+  let after: DriverCheckResponse;
+  try {
+    after = await deps.systemRepairDriver();
+  } catch (error) {
+    const [afterCheck] = await Promise.allSettled([deps.systemCheckDriver()]);
+    return driverRepairCommandFailedReport(
+      deps,
+      before,
+      admin,
+      formatErrorMessage(error),
+      commandOutcome(afterCheck),
+    );
+  }
+
   const status = after.ready
     ? "fixed"
     : after.reboot_required
@@ -345,10 +463,32 @@ async function checkAdapterRouting(
   deps: RepairCenterDeps,
   settings: AppSettings,
 ): Promise<RepairReport> {
-  const [adapters, diagnostics] = await Promise.all([
+  const [adaptersResult, diagnosticsResult] = await Promise.allSettled([
     deps.vpnListNetworkAdapters(),
-    deps.vpnGetDiagnostics().catch(() => null),
+    deps.vpnGetDiagnostics(),
   ]);
+  const diagnostics = resultValueOrNull(diagnosticsResult);
+
+  if (adaptersResult.status === "rejected") {
+    return {
+      status: "failed",
+      summary: "Adapter routing check failed.",
+      nextStep: "Copy this result and the log file for support.",
+      changed: false,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [
+        {
+          label: "Adapter inventory",
+          value: formatErrorMessage(adaptersResult.reason),
+          tone: "bad",
+        },
+        ...diagnosticEntriesFromResult(diagnosticsResult),
+      ],
+    };
+  }
+
+  const adapters = adaptersResult.value;
   const selectedAdapter = settings.preferred_physical_adapter_guid
     ? adapters.find((a) => a.guid === settings.preferred_physical_adapter_guid)
     : null;
@@ -385,7 +525,7 @@ async function checkAdapterRouting(
           (settings.preferred_physical_adapter_guid ? "missing" : "auto"),
         tone: manualAdapterMissing ? "bad" : "default",
       },
-      ...diagnosticEntries(diagnostics),
+      ...diagnosticEntriesFromResult(diagnosticsResult, diagnostics),
     ],
   };
 }
@@ -393,13 +533,37 @@ async function checkAdapterRouting(
 async function repairTunnelCleanup(
   deps: RepairCenterDeps,
 ): Promise<RepairReport> {
-  const [state, diagnosticsBefore] = await Promise.all([
+  const [stateResult, diagnosticsBeforeResult] = await Promise.allSettled([
     deps.vpnGetState(),
-    deps.vpnGetDiagnostics().catch(() => null),
+    deps.vpnGetDiagnostics(),
   ]);
+  const diagnosticsBefore = resultValueOrNull(diagnosticsBeforeResult);
+
+  if (stateResult.status === "rejected") {
+    return {
+      status: "failed",
+      summary: "Tunnel cleanup could not read VPN state.",
+      nextStep: "Copy this result and the log file for support.",
+      changed: false,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [
+        {
+          label: "State",
+          value: formatErrorMessage(stateResult.reason),
+          tone: "bad",
+        },
+        ...diagnosticEntriesFromResult(
+          diagnosticsBeforeResult,
+          diagnosticsBefore,
+        ),
+      ],
+    };
+  }
+
+  const state = stateResult.value;
   const cleanupNeeded =
-    state.state === "error" ||
-    state.error !== null ||
+    hasTunnelCleanupStateError(state) ||
     hasTunnelCleanupDiagnosticError(diagnosticsBefore);
   const baseEntries: RepairEntry[] = [
     { label: "State", value: state.state },
@@ -407,7 +571,7 @@ async function repairTunnelCleanup(
       label: "Split tunnel active",
       value: state.split_tunnel_active ? "yes" : "no",
     },
-    ...diagnosticEntries(diagnosticsBefore),
+    ...diagnosticEntriesFromResult(diagnosticsBeforeResult, diagnosticsBefore),
   ];
 
   if (!cleanupNeeded) {
@@ -428,22 +592,53 @@ async function repairTunnelCleanup(
       await deps.vpnDisconnect();
       repairEntries.push({ label: "Disconnect", value: "completed", tone: "good" });
     } catch (error) {
-      repairEntries.push({ label: "Disconnect", value: String(error), tone: "warn" });
+      repairEntries.push({
+        label: "Disconnect",
+        value: formatErrorMessage(error),
+        tone: "bad",
+      });
+      return {
+        status: "failed",
+        summary: "Tunnel cleanup stopped because disconnect failed.",
+        nextStep: "Disconnect manually, then run tunnel cleanup again.",
+        changed: true,
+        reversible: false,
+        ranAt: deps.now(),
+        entries: baseEntries.concat(repairEntries),
+      };
     }
   }
 
   let cleanupError: unknown = null;
   try {
-    await deps.systemCleanup();
+    await deps.systemCleanupTunnelState();
   } catch (error) {
     cleanupError = error;
   }
-  const diagnosticsAfter = await deps.vpnGetDiagnostics().catch(() => null);
+  const [stateAfterResult, diagnosticsAfterResult, driverAfterResult] =
+    await Promise.allSettled([
+      deps.vpnGetState(),
+      deps.vpnGetDiagnostics(),
+      deps.systemCheckDriver(),
+    ]);
+  const stateAfter = resultValueOrNull(stateAfterResult);
+  const diagnosticsAfter = resultValueOrNull(diagnosticsAfterResult);
+  const driverAfter = resultValueOrNull(driverAfterResult);
+  const stateStillErrored =
+    stateAfter !== null && hasTunnelCleanupStateError(stateAfter);
   const diagnosticsStillErrored =
     hasTunnelCleanupDiagnosticError(diagnosticsAfter);
+  const driverNeedsRepair = driverAfter !== null && !driverAfter.ready;
+  const verificationUnavailable =
+    stateAfterResult.status === "rejected" ||
+    diagnosticsAfterResult.status === "rejected" ||
+    driverAfterResult.status === "rejected";
   const status: RepairStatus = cleanupError
     ? "failed"
-    : diagnosticsStillErrored
+    : stateStillErrored ||
+        diagnosticsStillErrored ||
+        driverNeedsRepair ||
+        verificationUnavailable
       ? "partial"
       : "fixed";
 
@@ -451,12 +646,23 @@ async function repairTunnelCleanup(
     status,
     summary: cleanupError
       ? "Tunnel cleanup failed."
+      : stateStillErrored
+      ? "Tunnel cleanup completed, but VPN state still reports an error."
       : diagnosticsStillErrored
       ? "Tunnel cleanup completed, but diagnostics still show an error."
+      : driverNeedsRepair
+      ? "Tunnel cleanup completed, but the split tunnel driver needs repair."
+      : verificationUnavailable
+      ? "Tunnel cleanup completed, but verification could not finish."
       : "Tunnel cleanup completed.",
-    nextStep: cleanupError || diagnosticsStillErrored
-      ? "Copy this result and the log file for support."
-      : "Try connecting again. Copy this result for support if the error returns.",
+    nextStep: driverNeedsRepair
+      ? "Run split tunnel driver repair next, then try connecting again."
+      : cleanupError ||
+          stateStillErrored ||
+          diagnosticsStillErrored ||
+          verificationUnavailable
+        ? "Copy this result and the log file for support."
+        : "Try connecting again. Copy this result for support if the error returns.",
     changed: true,
     reversible: false,
     ranAt: deps.now(),
@@ -465,13 +671,28 @@ async function repairTunnelCleanup(
       {
         label: "Cleanup",
         value: cleanupError
-          ? String(cleanupError)
+          ? formatErrorMessage(cleanupError)
+          : stateStillErrored
+          ? "completed; VPN state still reports error"
           : diagnosticsStillErrored
           ? "completed; diagnostics still show error"
+          : driverNeedsRepair
+          ? "completed; driver needs repair"
+          : verificationUnavailable
+          ? "completed; verification unavailable"
           : "completed",
-        tone: cleanupError ? "bad" : diagnosticsStillErrored ? "warn" : "good",
+        tone: cleanupError || driverNeedsRepair
+          ? "bad"
+          : stateStillErrored || diagnosticsStillErrored || verificationUnavailable
+            ? "warn"
+            : "good",
       },
-      ...diagnosticEntries(diagnosticsAfter),
+      ...prefixEntries("After", stateEntriesFromResult(stateAfterResult, stateAfter)),
+      ...prefixEntries(
+        "After",
+        diagnosticEntriesFromResult(diagnosticsAfterResult, diagnosticsAfter),
+      ),
+      ...prefixEntries("After driver", driverEntriesFromResult(driverAfterResult)),
     ),
   };
 }
@@ -516,7 +737,7 @@ function checkBoostSettings(
     entries: [
       {
         label: "Config",
-        value: JSON.stringify(config),
+        value: formatJsonValue(config),
         mono: true,
       },
     ],
@@ -527,8 +748,58 @@ async function repairStartupRegistration(
   deps: RepairCenterDeps,
   settings: AppSettings,
 ): Promise<RepairReport> {
-  const before = await deps.systemGetStartupRegistration();
-  const after = await deps.systemRepairStartupRegistration(settings.run_on_startup);
+  let before: StartupRegistrationSnapshot;
+  try {
+    before = await deps.systemGetStartupRegistration();
+  } catch (error) {
+    return {
+      status: "failed",
+      summary: "Startup registration repair could not capture a rollback snapshot.",
+      nextStep: "Copy this result and the log file for support.",
+      changed: false,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [
+        {
+          label: "Snapshot",
+          value: formatErrorMessage(error),
+          tone: "bad",
+        },
+      ],
+    };
+  }
+
+  let after: StartupRegistrationSnapshot;
+  try {
+    after = await deps.systemRepairStartupRegistration(settings.run_on_startup);
+  } catch (error) {
+    return {
+      status: "failed",
+      summary: "Startup registration repair failed.",
+      nextStep: "Use Revert to restore the captured startup snapshot, or copy this result for support.",
+      changed: true,
+      reversible: true,
+      rollback: { kind: "startup_registration", snapshot: before },
+      ranAt: deps.now(),
+      entries: [
+        {
+          label: "Run on startup",
+          value: settings.run_on_startup ? "enabled" : "disabled",
+        },
+        {
+          label: "Before",
+          value: formatStartupRegistration(before),
+          mono: true,
+        },
+        {
+          label: "Repair",
+          value: formatErrorMessage(error),
+          tone: "bad",
+        },
+      ],
+    };
+  }
+
   const changed = !startupSnapshotsEqual(before, after);
   const expectedSatisfied = settings.run_on_startup ? after.exists : !after.exists;
 
@@ -620,6 +891,126 @@ async function checkInstaller(deps: RepairCenterDeps): Promise<RepairReport> {
   };
 }
 
+type CommandOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string };
+
+function commandOutcome<T>(
+  result: PromiseSettledResult<T>,
+): CommandOutcome<T> {
+  if (result.status === "fulfilled") {
+    return { ok: true, value: result.value };
+  }
+  return { ok: false, error: formatErrorMessage(result.reason) };
+}
+
+function resultValueOrNull<T>(result: PromiseSettledResult<T>): T | null {
+  return result.status === "fulfilled" ? result.value : null;
+}
+
+function diagnosticEntriesFromResult(
+  result: PromiseSettledResult<DiagnosticsResponse | null>,
+  diagnostics = resultValueOrNull(result),
+): RepairEntry[] {
+  if (result.status === "rejected") {
+    return [
+      {
+        label: "Diagnostics",
+        value: `read failed: ${formatErrorMessage(result.reason)}`,
+        tone: "warn",
+      },
+    ];
+  }
+
+  return diagnosticEntries(diagnostics);
+}
+
+function stateEntriesFromResult(
+  result: PromiseSettledResult<VpnStateResponse>,
+  state = resultValueOrNull(result),
+): RepairEntry[] {
+  if (result.status === "rejected") {
+    return [
+      {
+        label: "State",
+        value: `read failed: ${formatErrorMessage(result.reason)}`,
+        tone: "warn",
+      },
+    ];
+  }
+
+  if (!state) {
+    return [{ label: "State", value: "not available", tone: "warn" }];
+  }
+
+  return [
+    {
+      label: "State",
+      value: state.state,
+      tone: hasTunnelCleanupStateError(state) ? "bad" : "good",
+    },
+    {
+      label: "Error",
+      value: state.error ?? "none",
+      tone: state.error ? "bad" : "default",
+    },
+  ];
+}
+
+function driverEntriesFromResult(
+  result: PromiseSettledResult<DriverCheckResponse>,
+): RepairEntry[] {
+  if (result.status === "rejected") {
+    return [
+      {
+        label: "Check",
+        value: `read failed: ${formatErrorMessage(result.reason)}`,
+        tone: "warn",
+      },
+    ];
+  }
+
+  return driverEntries(result.value);
+}
+
+function driverRepairCommandFailedReport(
+  deps: RepairCenterDeps,
+  before: DriverCheckResponse,
+  admin: { is_admin: boolean },
+  error: string,
+  afterCheck: CommandOutcome<DriverCheckResponse>,
+): RepairReport {
+  const afterReady = afterCheck.ok && afterCheck.value.ready;
+  const afterEntries = afterCheck.ok
+    ? prefixEntries("After", driverEntries(afterCheck.value))
+    : [
+        {
+          label: "After check",
+          value: afterCheck.error,
+          tone: "warn" as const,
+        },
+      ];
+
+  return {
+    status: afterReady ? "partial" : "failed",
+    summary: afterReady
+      ? "Driver repair command failed, but the driver now reports ready."
+      : "Driver repair command failed.",
+    nextStep: afterReady
+      ? "Try connecting once. If the issue continues, copy this result and the log file for support."
+      : "Copy this result and the log file for support.",
+    changed: true,
+    reversible: false,
+    ranAt: deps.now(),
+    entries: [
+      { label: "Admin", value: admin.is_admin ? "elevated" : "standard user" },
+      ...prefixEntries("Before", driverEntries(before)),
+      { label: "Repair error", value: error, tone: "bad" },
+      ...afterEntries,
+    ],
+  };
+}
+
 function driverReport(
   deps: RepairCenterDeps,
   driver: DriverCheckResponse,
@@ -632,11 +1023,7 @@ function driverReport(
   return {
     status,
     summary,
-    nextStep: driver.ready
-      ? "Try connecting again. Copy this result for support if the issue continues."
-      : driver.reboot_required
-        ? "Restart Windows, then run the driver check again."
-        : driver.message || "Copy this result and the log file for support.",
+    nextStep: driverNextStep(driver, status),
     changed,
     reversible: false,
     ranAt: deps.now(),
@@ -646,6 +1033,22 @@ function driverReport(
       ...(before ? prefixEntries("After", driverEntries(driver)) : driverEntries(driver)),
     ],
   };
+}
+
+function driverNextStep(
+  driver: DriverCheckResponse,
+  status: RepairStatus,
+): string {
+  if (status === "unsupported" || driver.status === "unsupported") {
+    return "Split tunnel driver repair is only available on Windows.";
+  }
+  if (driver.ready) {
+    return "Try connecting again. Copy this result for support if the issue continues.";
+  }
+  if (driver.reboot_required) {
+    return "Restart Windows, then run the driver check again.";
+  }
+  return driver.message || "Copy this result and the log file for support.";
 }
 
 function driverEntries(driver: DriverCheckResponse): RepairEntry[] {
@@ -709,6 +1112,10 @@ function hasTunnelCleanupDiagnosticError(
   );
 }
 
+function hasTunnelCleanupStateError(state: VpnStateResponse): boolean {
+  return state.state === "error" || state.error !== null;
+}
+
 function errorReport(
   deps: Pick<RepairCenterDeps, "now">,
   summary: string,
@@ -747,4 +1154,16 @@ function startupSnapshotsEqual(
 function formatStartupRegistration(snapshot: StartupRegistrationSnapshot): string {
   if (!snapshot.exists) return "absent";
   return snapshot.value || "present with empty value";
+}
+
+function formatJsonValue(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "undefined";
+  } catch (error) {
+    return `Could not serialize config: ${formatErrorMessage(error)}`;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

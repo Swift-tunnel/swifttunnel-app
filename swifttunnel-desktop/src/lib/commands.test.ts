@@ -14,6 +14,7 @@ import {
   settingsGenerateNetworkDiagnosticsBundle,
   systemCopyLogToClipboard,
   systemCleanup,
+  systemCleanupTunnelState,
   systemGetStartupRegistration,
   systemRestartAsAdmin,
   systemInstallDriver,
@@ -91,6 +92,12 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(undefined);
     await expect(systemCleanup()).resolves.toBeUndefined();
     expect(invoke).toHaveBeenCalledWith("system_cleanup");
+  });
+
+  it("systemCleanupTunnelState invokes backend", async () => {
+    invoke.mockResolvedValue(undefined);
+    await expect(systemCleanupTunnelState()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith("system_cleanup_tunnel_state");
   });
 
   it("startup registration commands invoke backend with expected args", async () => {

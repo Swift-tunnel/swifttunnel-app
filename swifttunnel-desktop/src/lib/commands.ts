@@ -179,6 +179,9 @@ export const systemRepairDriver = () =>
 export const systemCleanup = () =>
   invoke<void>("system_cleanup");
 
+export const systemCleanupTunnelState = () =>
+  invoke<void>("system_cleanup_tunnel_state");
+
 /**
  * Restart the NDISRD kernel service without reinstalling the driver.
  *

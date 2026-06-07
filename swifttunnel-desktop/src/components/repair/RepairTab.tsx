@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useToastStore } from "../../stores/toastStore";
+import { formatErrorMessage } from "../../lib/errors";
 import {
   serverGetLatencies,
   serverRefresh,
   systemCheckDriver,
-  systemCleanup,
+  systemCleanupTunnelState,
   systemGetStartupRegistration,
   systemIsAdmin,
   systemRepairDriver,
@@ -20,6 +21,7 @@ import {
 import {
   formatRepairForSupport,
   makeInitialRepairReports,
+  parseSavedRepairResult,
   REPAIR_ISSUES,
   restoreRepairRollback,
   runRepairIssue,
@@ -30,6 +32,7 @@ import {
   type RepairIssueId,
   type RepairReport,
   type RepairStatus,
+  type SavedRepairResult,
 } from "../../lib/repairCenter";
 import { SupportSection } from "../support/SupportSection";
 import { SupportToolsSection } from "../support/SupportToolsSection";
@@ -42,7 +45,7 @@ const repairDeps: RepairCenterDeps = {
   serverGetLatencies,
   serverRefresh,
   systemCheckDriver,
-  systemCleanup,
+  systemCleanupTunnelState,
   systemGetStartupRegistration,
   systemIsAdmin,
   systemRepairDriver,
@@ -53,11 +56,6 @@ const repairDeps: RepairCenterDeps = {
   vpnGetPing,
   vpnGetState,
   vpnListNetworkAdapters,
-};
-
-type SavedRepairResult = {
-  issue: RepairIssueId;
-  report: RepairReport;
 };
 
 export function RepairTab() {
@@ -141,7 +139,7 @@ export function RepairTab() {
     } catch (error) {
       addToast({
         type: "error",
-        message: `Could not copy repair details: ${String(error)}`,
+        message: `Could not copy repair details: ${formatErrorMessage(error)}`,
       });
     }
   }
@@ -452,24 +450,20 @@ function statusBorderColor(status: RepairStatus): string {
 }
 
 function saveRepairResult(issue: RepairIssueId, report: RepairReport) {
-  localStorage.setItem(
-    LAST_REPAIR_STORAGE_KEY,
-    JSON.stringify({ issue, report }),
-  );
+  try {
+    localStorage.setItem(
+      LAST_REPAIR_STORAGE_KEY,
+      JSON.stringify({ issue, report }),
+    );
+  } catch {
+    // Non-fatal: repair reporting should still work when storage is blocked.
+  }
 }
 
 function loadSavedRepairResult(): SavedRepairResult | null {
   try {
     const raw = localStorage.getItem(LAST_REPAIR_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<SavedRepairResult>;
-    if (!parsed.issue || !parsed.report) return null;
-    if (!REPAIR_ISSUES.some((issue) => issue.id === parsed.issue)) return null;
-    if (!Array.isArray(parsed.report.entries)) return null;
-    return {
-      issue: parsed.issue,
-      report: parsed.report,
-    };
+    return parseSavedRepairResult(raw);
   } catch {
     return null;
   }

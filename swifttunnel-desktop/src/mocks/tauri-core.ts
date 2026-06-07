@@ -385,6 +385,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     recommended_action: "none",
   }),
   system_cleanup: () => {},
+  system_cleanup_tunnel_state: () => {},
   system_get_startup_registration: () => ({
     exists: true,
     value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",

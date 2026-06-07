@@ -1734,6 +1734,24 @@ pub async fn system_cleanup() -> Result<(), String> {
     .map_err(|e| format!("Cleanup task failed: {}", e))?
 }
 
+/// Cleanup tunnel-specific runtime leftovers without removing install-time
+/// state such as the driver package, startup registration, optimizer settings,
+/// hosts entries, or Roblox settings.
+#[tauri::command]
+pub async fn system_cleanup_tunnel_state() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        log::info!("Running tunnel-state cleanup");
+        swifttunnel_core::vpn::recover_tso_on_startup();
+        swifttunnel_core::vpn::recover_ipv6_on_startup();
+        swifttunnel_core::vpn::wfp_block::cleanup_stale();
+        swifttunnel_core::vpn::wfp_block::cleanup();
+        swifttunnel_core::vpn::SplitTunnelDriver::cleanup_stale_state();
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| format!("Tunnel-state cleanup task failed: {}", e))?
+}
+
 /// Stop + start the NDISRD kernel service without reinstalling the driver.
 ///
 /// Intended for the "wedged NDIS state" case: driver is installed, service

@@ -408,6 +408,7 @@ pub fn run() {
             commands::system::system_show_notification,
             commands::system::system_launched_from_startup,
             commands::system::system_cleanup,
+            commands::system::system_cleanup_tunnel_state,
             commands::system::system_uninstall,
             commands::system::system_copy_log_to_clipboard,
         ])
