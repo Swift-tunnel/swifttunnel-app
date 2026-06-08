@@ -193,20 +193,18 @@ const TWEAKS: &[Tweak] = &[
         }],
     },
     Tweak {
+        // The CEIP scheduled tasks are protected and refuse `schtasks /Change`
+        // even when elevated ("Access is denied"). Use the admin-writable
+        // telemetry policy instead, which actually reduces data collection.
         id: "telemetry_tasks_disable",
         requires_admin: true,
         requires_reboot: false,
-        actions: &[
-            Action::TaskDisable {
-                path: r"\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
-            },
-            Action::TaskDisable {
-                path: r"\Microsoft\Windows\Customer Experience Improvement Program\KernelCeipTask",
-            },
-            Action::TaskDisable {
-                path: r"\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip",
-            },
-        ],
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Windows\DataCollection",
+            name: "AllowTelemetry",
+            value: 0,
+        }],
     },
 ];
 

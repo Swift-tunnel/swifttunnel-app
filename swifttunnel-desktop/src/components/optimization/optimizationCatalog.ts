@@ -160,18 +160,14 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
   },
   {
     id: "telemetry_tasks_disable",
-    name: "Disable Telemetry Tasks",
+    name: "Reduce Windows Telemetry",
     description:
-      "Disables the Customer Experience Improvement Program scheduled tasks that upload Windows telemetry.",
+      "Sets the Windows diagnostic data level to the minimum via Group Policy.",
     category: "Privacy",
     safety: "low",
     requiresAdmin: true,
     requiresReboot: false,
-    changes: [
-      "Scheduled task: CEIP\\Consolidator → Disabled",
-      "Scheduled task: CEIP\\KernelCeipTask → Disabled",
-      "Scheduled task: CEIP\\UsbCeip → Disabled",
-    ],
+    changes: ["HKLM\\...\\DataCollection → AllowTelemetry = 0"],
   },
 ];
 
