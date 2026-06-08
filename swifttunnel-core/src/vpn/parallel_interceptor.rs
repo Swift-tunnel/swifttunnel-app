@@ -7107,9 +7107,12 @@ where
         let can_speculate_tcp_api = protocol == Protocol::Tcp && api_tunneling && has_tunnel_scope;
         let is_tcp_api_bootstrap_syn =
             can_speculate_tcp_api && is_tcp_initial_syn && matches!(dst_port, 80 | 443);
+        let is_direct_only_bootstrap_dst =
+            crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(dst_ip);
         let is_route_assist_http_dst = can_speculate_tcp_api
             && is_tcp_initial_syn
             && matches!(dst_port, 80 | 443)
+            && !is_direct_only_bootstrap_dst
             && (super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
                 || crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip));
         let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit {
@@ -7138,6 +7141,7 @@ where
         // Known tunnel-owned TCP bootstraps keep v2.1.8's relay/MSS-clamp behavior.
         // Owner-missing SYNs are only repairable for Roblox or active bootstrap IPs.
         let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
+            && !is_direct_only_bootstrap_dst
             && !tcp_api_bootstrap_known_unrelated
             && (!tcp_api_bootstrap_owner_missing || is_route_assist_http_dst);
         let is_game_dst = if protocol == Protocol::Udp {
@@ -11972,6 +11976,64 @@ mod tests {
             )
         );
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_keeps_direct_only_bootstrap_roblox_range_direct() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let critical_settings_ip = Ipv4Addr::new(128, 116, 46, 3);
+        let src_port = 40018;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([critical_settings_ip]);
+        crate::roblox_proxy::hosts::set_direct_only_bootstrap_ips_for_test([critical_settings_ip]);
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, critical_settings_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(tunnel_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == tunnel_pid {
+                        Some("RobloxPlayerBeta.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            )
+        );
+        assert!(inline_cache.is_empty());
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }

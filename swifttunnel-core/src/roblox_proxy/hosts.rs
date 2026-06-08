@@ -42,6 +42,17 @@ const REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(1200);
 const ROBLOX_HTTPS_PORT: u16 = 443;
 
 static ACTIVE_BOOTSTRAP_IPS: OnceLock<RwLock<HashSet<Ipv4Addr>>> = OnceLock::new();
+static DIRECT_ONLY_BOOTSTRAP_IPS: OnceLock<RwLock<HashSet<Ipv4Addr>>> = OnceLock::new();
+
+// Keep DNS repair for these launch-critical hosts, but do not publish their IPs
+// to Route Assist. Roblox can fail startup with "Failed to download or apply
+// critical settings" if these bootstrap HTTPS requests are relayed unreliably.
+const DIRECT_ONLY_BOOTSTRAP_DOMAINS: &[&str] = &[
+    "clientsettingscdn.roblox.com",
+    "clientsettings.roblox.com",
+    "clientsettings.api.roblox.com",
+    "versioncompatibility.api.roblox.com",
+];
 
 /// Exact Roblox hostnames repaired when API tunneling is enabled.
 ///
@@ -115,18 +126,27 @@ struct DohJsonAnswer {
 /// Existing SwiftTunnel entries are removed first (idempotent).
 pub async fn apply_bootstrap_overrides() -> Result<(), String> {
     let overrides = resolve_bootstrap_overrides().await?;
-    let active_ips: HashSet<Ipv4Addr> = overrides.iter().map(|entry| entry.ip).collect();
+    let active_ips = route_assist_active_ips_from_overrides(&overrides);
+    let direct_only_ips = direct_only_ips_from_overrides(&overrides);
 
     tokio::task::spawn_blocking(move || write_overrides(&overrides))
         .await
         .map_err(|e| format!("Failed to join hosts repair task: {e}"))??;
 
     set_active_bootstrap_ips(active_ips);
+    set_direct_only_bootstrap_ips(direct_only_ips);
     Ok(())
 }
 
 pub fn is_active_bootstrap_ip(ip: Ipv4Addr) -> bool {
     active_bootstrap_ips()
+        .read()
+        .map(|ips| ips.contains(&ip))
+        .unwrap_or(false)
+}
+
+pub fn is_direct_only_bootstrap_ip(ip: Ipv4Addr) -> bool {
+    direct_only_bootstrap_ips()
         .read()
         .map(|ips| ips.contains(&ip))
         .unwrap_or(false)
@@ -368,7 +388,7 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
 /// Call `remove_overrides_async` from async contexts.
 pub fn remove_overrides() -> Result<(), String> {
     let result = remove_overrides_inner();
-    clear_active_bootstrap_ips();
+    clear_bootstrap_ip_sets();
     result
 }
 
@@ -393,6 +413,10 @@ fn active_bootstrap_ips() -> &'static RwLock<HashSet<Ipv4Addr>> {
     ACTIVE_BOOTSTRAP_IPS.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
+fn direct_only_bootstrap_ips() -> &'static RwLock<HashSet<Ipv4Addr>> {
+    DIRECT_ONLY_BOOTSTRAP_IPS.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
 fn set_active_bootstrap_ips(ips: HashSet<Ipv4Addr>) {
     match active_bootstrap_ips().write() {
         Ok(mut active) => *active = ips,
@@ -400,10 +424,46 @@ fn set_active_bootstrap_ips(ips: HashSet<Ipv4Addr>) {
     }
 }
 
-fn clear_active_bootstrap_ips() {
+fn set_direct_only_bootstrap_ips(ips: HashSet<Ipv4Addr>) {
+    match direct_only_bootstrap_ips().write() {
+        Ok(mut direct_only) => *direct_only = ips,
+        Err(e) => warn!("Failed to publish direct-only Roblox bootstrap IPs: {e}"),
+    }
+}
+
+fn route_assist_active_ips_from_overrides(overrides: &[HostOverride]) -> HashSet<Ipv4Addr> {
+    let direct_only_ips = direct_only_ips_from_overrides(overrides);
+
+    overrides
+        .iter()
+        .filter(|entry| !is_direct_only_bootstrap_domain(&entry.domain))
+        .filter(|entry| !direct_only_ips.contains(&entry.ip))
+        .map(|entry| entry.ip)
+        .collect()
+}
+
+fn direct_only_ips_from_overrides(overrides: &[HostOverride]) -> HashSet<Ipv4Addr> {
+    overrides
+        .iter()
+        .filter(|entry| is_direct_only_bootstrap_domain(&entry.domain))
+        .map(|entry| entry.ip)
+        .collect()
+}
+
+fn is_direct_only_bootstrap_domain(domain: &str) -> bool {
+    DIRECT_ONLY_BOOTSTRAP_DOMAINS
+        .iter()
+        .any(|direct_only| domain.eq_ignore_ascii_case(direct_only))
+}
+
+fn clear_bootstrap_ip_sets() {
     match active_bootstrap_ips().write() {
         Ok(mut active) => active.clear(),
         Err(e) => warn!("Failed to clear Roblox bootstrap route IPs: {e}"),
+    }
+    match direct_only_bootstrap_ips().write() {
+        Ok(mut direct_only) => direct_only.clear(),
+        Err(e) => warn!("Failed to clear direct-only Roblox bootstrap IPs: {e}"),
     }
 }
 
@@ -413,8 +473,13 @@ pub(crate) fn set_active_bootstrap_ips_for_test(ips: impl IntoIterator<Item = Ip
 }
 
 #[cfg(test)]
+pub(crate) fn set_direct_only_bootstrap_ips_for_test(ips: impl IntoIterator<Item = Ipv4Addr>) {
+    set_direct_only_bootstrap_ips(ips.into_iter().collect());
+}
+
+#[cfg(test)]
 pub(crate) fn clear_active_bootstrap_ips_for_test() {
-    clear_active_bootstrap_ips();
+    clear_bootstrap_ip_sets();
 }
 
 /// Remove any SwiftTunnel Roblox Proxy entries without blocking a Tokio worker.
@@ -648,6 +713,51 @@ mod tests {
     }
 
     #[test]
+    fn route_assist_active_ips_exclude_launch_critical_settings_hosts() {
+        let overrides = vec![
+            HostOverride {
+                ip: Ipv4Addr::new(65, 9, 168, 80),
+                domain: "clientsettingscdn.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: Ipv4Addr::new(128, 116, 46, 3),
+                domain: "clientsettings.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: Ipv4Addr::new(128, 116, 121, 3),
+                domain: "www.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: Ipv4Addr::new(23, 61, 202, 142),
+                domain: "setup.rbxcdn.com".to_string(),
+            },
+            HostOverride {
+                ip: Ipv4Addr::new(65, 9, 168, 80),
+                domain: "apis.roblox.com".to_string(),
+            },
+        ];
+
+        let active_ips = route_assist_active_ips_from_overrides(&overrides);
+        let direct_only_ips = direct_only_ips_from_overrides(&overrides);
+
+        assert!(!active_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
+        assert!(!active_ips.contains(&Ipv4Addr::new(128, 116, 46, 3)));
+        assert!(active_ips.contains(&Ipv4Addr::new(128, 116, 121, 3)));
+        assert!(active_ips.contains(&Ipv4Addr::new(23, 61, 202, 142)));
+        assert!(direct_only_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
+        assert!(direct_only_ips.contains(&Ipv4Addr::new(128, 116, 46, 3)));
+        assert!(!direct_only_ips.contains(&Ipv4Addr::new(128, 116, 121, 3)));
+    }
+
+    #[test]
+    fn direct_only_bootstrap_domain_match_is_case_insensitive() {
+        assert!(is_direct_only_bootstrap_domain(
+            "ClientSettingsCDN.Roblox.com"
+        ));
+        assert!(!is_direct_only_bootstrap_domain("www.roblox.com"));
+    }
+
+    #[test]
     fn dedup_and_cap_ips_preserves_order_and_caps() {
         let ips = vec![
             Ipv4Addr::new(1, 1, 1, 1),
@@ -692,7 +802,11 @@ mod tests {
 
     #[tokio::test]
     async fn filter_reachable_ips_empty_input_returns_empty() {
-        assert!(filter_reachable_ips_on_port(Vec::new(), 443).await.is_empty());
+        assert!(
+            filter_reachable_ips_on_port(Vec::new(), 443)
+                .await
+                .is_empty()
+        );
     }
 
     // Live end-to-end check of the real production path: DoH multi-IP resolve ->
@@ -760,10 +874,26 @@ mod tests {
         set_active_bootstrap_ips_for_test([bootstrap_ip]);
 
         assert!(is_active_bootstrap_ip(bootstrap_ip));
+        assert!(!is_direct_only_bootstrap_ip(bootstrap_ip));
         assert!(!is_active_bootstrap_ip(Ipv4Addr::new(65, 9, 168, 81)));
 
         clear_active_bootstrap_ips_for_test();
         assert!(!is_active_bootstrap_ip(bootstrap_ip));
+    }
+
+    #[test]
+    fn direct_only_bootstrap_ips_are_exact_and_clearable() {
+        clear_active_bootstrap_ips_for_test();
+
+        let bootstrap_ip = Ipv4Addr::new(128, 116, 46, 3);
+        set_direct_only_bootstrap_ips_for_test([bootstrap_ip]);
+
+        assert!(is_direct_only_bootstrap_ip(bootstrap_ip));
+        assert!(!is_active_bootstrap_ip(bootstrap_ip));
+        assert!(!is_direct_only_bootstrap_ip(Ipv4Addr::new(128, 116, 46, 4)));
+
+        clear_active_bootstrap_ips_for_test();
+        assert!(!is_direct_only_bootstrap_ip(bootstrap_ip));
     }
 
     #[test]
