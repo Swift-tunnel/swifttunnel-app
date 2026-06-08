@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { BoostTab } from "../boost/BoostTab";
 import { Button } from "../ui";
+import { useBoostStore } from "../../stores/boostStore";
 
 /** Optional bundled override: drop an image at `src/assets/games/<id>.<ext>`
  *  (png/jpg/jpeg/webp) and it wins over the remote `backgroundUrl`. */
@@ -55,7 +56,15 @@ function RobloxGlyph({ size = 56 }: { size?: number }) {
   );
 }
 
-function GameCard({ game, onOptimize }: { game: Game; onOptimize: () => void }) {
+function GameCard({
+  game,
+  running,
+  onOptimize,
+}: {
+  game: Game;
+  running: boolean;
+  onOptimize: () => void;
+}) {
   const [artFailed, setArtFailed] = useState(false);
   const art = artForGame(game);
   const showArt = art && !artFailed;
@@ -101,14 +110,31 @@ function GameCard({ game, onOptimize }: { game: Game; onOptimize: () => void }) 
             <span className="text-[14px] font-semibold text-text-primary">
               {game.name}
             </span>
-            <span
-              className="rounded-[4px] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]"
-              style={{
-                backgroundColor: "var(--color-status-connected-soft-10)",
-                color: "var(--color-status-connected)",
-              }}
-            >
-              Supported
+            <span className="flex items-center gap-1.5">
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{
+                  backgroundColor: running
+                    ? "var(--color-status-connected)"
+                    : "var(--color-text-dimmed)",
+                  boxShadow: running
+                    ? "0 0 6px var(--color-status-connected)"
+                    : "none",
+                  animation: running
+                    ? "status-breath 1.4s ease-in-out infinite"
+                    : "none",
+                }}
+              />
+              <span
+                className="text-[10px] font-medium uppercase tracking-[0.06em]"
+                style={{
+                  color: running
+                    ? "var(--color-status-connected)"
+                    : "var(--color-text-muted)",
+                }}
+              >
+                {running ? "Running" : "Not running"}
+              </span>
             </span>
           </div>
           <p className="mt-1 text-[11.5px] leading-snug text-text-muted">
@@ -131,6 +157,18 @@ function GameCard({ game, onOptimize }: { game: Game; onOptimize: () => void }) 
 
 export function GamesTab() {
   const [optimizing, setOptimizing] = useState<GameId | null>(null);
+  const robloxRunning = useBoostStore((s) => s.robloxRunning);
+  const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
+
+  // Keep the running indicator current while browsing the library.
+  useEffect(() => {
+    void fetchMetrics();
+    const id = setInterval(() => void fetchMetrics(), 3000);
+    return () => clearInterval(id);
+  }, [fetchMetrics]);
+
+  // Only Roblox has live detection today; other games default to not-running.
+  const isGameRunning = (id: GameId) => (id === "roblox" ? robloxRunning : false);
 
   if (optimizing) {
     const game = GAMES.find((g) => g.id === optimizing) ?? GAMES[0];
@@ -181,6 +219,7 @@ export function GamesTab() {
           <GameCard
             key={game.id}
             game={game}
+            running={isGameRunning(game.id)}
             onOptimize={() => setOptimizing(game.id)}
           />
         ))}
