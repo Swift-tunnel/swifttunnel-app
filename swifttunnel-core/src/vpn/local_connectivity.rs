@@ -5,10 +5,13 @@
 //! On Windows we ask `GetNetworkConnectivityHint` — the same NLM signal that
 //! drives the "No internet access" badge in the system tray.
 //!
-//! Minimum supported Windows: 10 build 17763 (1809). The `windows` crate
-//! late-binds these symbols, so older builds return a non-success status
-//! through `status.is_err()` and we degrade gracefully to `Unknown` rather
-//! than failing to load.
+//! Minimum supported Windows: 10 build 17763 (1809). `GetNetworkConnectivityHint`
+//! only exists in `iphlpapi.dll` on Windows 10 build 19041 (2004) and newer.
+//! Calling it through the `windows` crate creates a STATIC import, which makes
+//! the whole EXE fail to load on older builds with "entry point
+//! GetNetworkConnectivityHint could not be located". We therefore resolve it
+//! dynamically at runtime (`LoadLibrary` + `GetProcAddress`); when the symbol is
+//! absent we degrade gracefully to `Unknown` instead of refusing to launch.
 
 /// Authoritative-enough verdict on whether this device can currently reach
 /// the public internet.
@@ -24,8 +27,53 @@ pub enum LocalConnectivity {
 }
 
 #[cfg(windows)]
+type GetNetworkConnectivityHintFn = unsafe extern "system" fn(
+    *mut windows::Win32::Networking::WinSock::NL_NETWORK_CONNECTIVITY_HINT,
+) -> u32;
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn LoadLibraryW(lplibfilename: *const u16) -> isize;
+    fn GetProcAddress(hmodule: isize, lpprocname: *const u8) -> *const std::ffi::c_void;
+}
+
+/// Resolve `GetNetworkConnectivityHint` from `iphlpapi.dll` at runtime, once.
+///
+/// Returns `None` on Windows builds older than 10 2004 (19041) where the symbol
+/// does not exist. Resolving dynamically (instead of importing it statically via
+/// the `windows` crate) is what keeps the EXE loadable on those older builds.
+#[cfg(windows)]
+fn network_connectivity_hint_fn() -> Option<GetNetworkConnectivityHintFn> {
+    static RESOLVED: std::sync::OnceLock<Option<GetNetworkConnectivityHintFn>> =
+        std::sync::OnceLock::new();
+
+    *RESOLVED.get_or_init(|| {
+        let lib_name: Vec<u16> = "iphlpapi.dll"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let module = unsafe { LoadLibraryW(lib_name.as_ptr()) };
+        if module == 0 {
+            return None;
+        }
+
+        let address = unsafe { GetProcAddress(module, b"GetNetworkConnectivityHint\0".as_ptr()) };
+        if address.is_null() {
+            return None;
+        }
+
+        // SAFETY: `GetNetworkConnectivityHint` has the signature
+        // `NETIO_STATUS GetNetworkConnectivityHint(NL_NETWORK_CONNECTIVITY_HINT*)`,
+        // which matches `GetNetworkConnectivityHintFn` (NETIO_STATUS is a u32).
+        Some(unsafe {
+            std::mem::transmute::<*const std::ffi::c_void, GetNetworkConnectivityHintFn>(address)
+        })
+    })
+}
+
+#[cfg(windows)]
 pub fn probe() -> LocalConnectivity {
-    use windows::Win32::NetworkManagement::IpHelper::GetNetworkConnectivityHint;
     use windows::Win32::Networking::WinSock::{
         NL_NETWORK_CONNECTIVITY_HINT, NetworkConnectivityLevelHintConstrainedInternetAccess,
         NetworkConnectivityLevelHintHidden, NetworkConnectivityLevelHintInternetAccess,
@@ -33,10 +81,15 @@ pub fn probe() -> LocalConnectivity {
         NetworkConnectivityLevelHintUnknown,
     };
 
+    // Missing on Windows < 10 2004: degrade to Unknown instead of crashing.
+    let Some(get_hint) = network_connectivity_hint_fn() else {
+        return LocalConnectivity::Unknown;
+    };
+
     let mut hint = NL_NETWORK_CONNECTIVITY_HINT::default();
     // SAFETY: out-pointer write into a stack-allocated, properly-sized struct.
-    let status = unsafe { GetNetworkConnectivityHint(&mut hint) };
-    if status.is_err() {
+    let status = unsafe { get_hint(&mut hint) };
+    if status != 0 {
         return LocalConnectivity::Unknown;
     }
 
