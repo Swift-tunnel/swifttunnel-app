@@ -24,9 +24,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   load: async () => {
     try {
       const settings = mergeAppSettings(await settingsLoad());
+      // Migration: the "Boost" tab was renamed to "Games" (it now hosts the
+      // game library; the boost page lives behind the Roblox card). Map any
+      // persisted "boost" tab onto "games" so old installs land somewhere real.
+      const persistedTab =
+        settings.current_tab === "boost" ? "games" : settings.current_tab;
       set({
         settings,
-        activeTab: (settings.current_tab as TabId) || "connect",
+        activeTab: (persistedTab as TabId) || "connect",
         isLoaded: true,
       });
     } catch (error) {

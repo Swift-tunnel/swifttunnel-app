@@ -3,9 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
-import { systemRestartAsAdmin } from "../../lib/commands";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
-import { notify } from "../../lib/notifications";
 import {
   Toggle,
   SectionHeader,
@@ -13,19 +11,13 @@ import {
   InfoIcon,
   Button,
   Row,
-  Chip,
-  Spinner,
   Slider,
   ErrorBanner,
 } from "../ui";
 import {
   PROFILES,
   configsEqual,
-  deepCleanLabel,
-  formatDeltaMb,
-  formatGbFromMb,
   getPresetConfig,
-  memColor,
   nextPowerPlanForSwiftTunnelToggle,
   parseWindowDimensionInput,
   previousNonSwiftTunnelPowerPlan,
@@ -41,8 +33,6 @@ import type {
   PowerPlan,
   RobloxSettingsConfig,
   SystemOptimizationConfig,
-  SystemMemorySnapshot,
-  RamCleanResultResponse,
 } from "../../lib/types";
 
 const MIN_WINDOW_WIDTH = 800;
@@ -58,12 +48,6 @@ export function BoostTab() {
   const boost = useBoostStore();
   const addToast = useToastStore((s) => s.addToast);
 
-  const [restartAdminState, setRestartAdminState] = useState<
-    "idle" | "restarting" | "error"
-  >("idle");
-  const [restartAdminError, setRestartAdminError] = useState<string | null>(
-    null,
-  );
   const [networkApplying, setNetworkApplying] = useState(false);
 
   const savedConfig = settings.config;
@@ -187,18 +171,6 @@ export function BoostTab() {
     windowValidationError,
     addToast,
   ]);
-
-  const restartAsAdmin = useCallback(async () => {
-    try {
-      setRestartAdminState("restarting");
-      setRestartAdminError(null);
-      await systemRestartAsAdmin();
-    } catch (e) {
-      setRestartAdminState("error");
-      setRestartAdminError(String(e));
-      await notify("Restart canceled", "Could not restart as Administrator.");
-    }
-  }, []);
 
   const restartAndApply = useCallback(async () => {
     if (windowValidationError) return;
@@ -345,20 +317,6 @@ export function BoostTab() {
       {boost.warning && (
         <ErrorBanner tone="warning">{boost.warning}</ErrorBanner>
       )}
-
-      <RamCleanerCard
-        systemMem={boost.systemMem}
-        isCleaning={boost.isCleaningRam}
-        stage={boost.ramCleanStage}
-        trimmedCount={boost.ramCleanTrimmedCount}
-        currentProcess={boost.ramCleanCurrentProcess}
-        result={boost.ramCleanResult}
-        isAdmin={boost.isAdmin}
-        restartState={restartAdminState}
-        restartError={restartAdminError}
-        onRestartAsAdmin={() => void restartAsAdmin()}
-        onClean={() => void boost.cleanRam()}
-      />
 
       {/* ── Profile Selector ── */}
       <section>
@@ -866,279 +824,5 @@ function ResolutionRow({
       </div>
       {error && <p className="mt-2 text-[11px] text-status-error">{error}</p>}
     </div>
-  );
-}
-
-function RamCleanerCard({
-  systemMem,
-  isCleaning,
-  stage,
-  trimmedCount,
-  currentProcess,
-  result,
-  isAdmin,
-  restartState,
-  restartError,
-  onRestartAsAdmin,
-  onClean,
-}: {
-  systemMem: SystemMemorySnapshot | null;
-  isCleaning: boolean;
-  stage: string | null;
-  trimmedCount: number;
-  currentProcess: string | null;
-  result: RamCleanResultResponse | null;
-  isAdmin: boolean;
-  restartState: "idle" | "restarting" | "error";
-  restartError: string | null;
-  onRestartAsAdmin: () => void;
-  onClean: () => void;
-}) {
-  const totalMb = systemMem?.total_mb ?? 0;
-  const usedMb = systemMem?.used_mb ?? 0;
-  const availableMb = systemMem?.available_mb ?? 0;
-  const percent =
-    totalMb > 0 ? Math.max(0, Math.min(100, (usedMb / totalMb) * 100)) : 0;
-  const color = memColor(percent);
-  const showBottom = isCleaning || !isAdmin || result;
-
-  const stateLabel = isCleaning
-    ? "Cleaning"
-    : percent >= 85
-      ? "High usage"
-      : percent >= 70
-        ? "Elevated"
-        : percent > 0
-          ? "Healthy"
-          : "—";
-  const heroLabel = isCleaning ? "Reclaiming" : "System Memory";
-  const showLive = !isCleaning && percent >= 85;
-
-  return (
-    <section className="flex flex-col gap-3">
-      {/* ── Hero ── */}
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card px-5 pt-4 pb-3">
-        <div className="flex items-start justify-between gap-6">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span
-                className="h-2 w-2 rounded-full"
-                style={{
-                  backgroundColor: color,
-                  boxShadow: showLive ? `0 0 6px ${color}` : "none",
-                  animation: isCleaning
-                    ? "status-breath 1.4s ease-in-out infinite"
-                    : "none",
-                }}
-              />
-              <span className="eyebrow">{heroLabel}</span>
-              {showLive && (
-                <span
-                  className="pill-base"
-                  style={{
-                    backgroundColor: `${color}1a`,
-                    color,
-                    border: `1px solid ${color}40`,
-                  }}
-                >
-                  Live
-                </span>
-              )}
-            </div>
-            <div className="mt-2 flex items-baseline gap-2.5">
-              <span
-                className="text-[20px] font-semibold leading-none text-text-primary"
-                style={{ letterSpacing: "-0.02em" }}
-              >
-                {stateLabel}
-              </span>
-              {totalMb > 0 && (
-                <span className="font-mono text-[12px] text-text-muted">
-                  {formatGbFromMb(usedMb)} / {formatGbFromMb(totalMb)} GB
-                </span>
-              )}
-            </div>
-            <div className="mt-3 flex items-baseline gap-1.5">
-              {totalMb > 0 ? (
-                <>
-                  <span
-                    className="lcd-readout text-[28px] font-medium leading-none"
-                    style={{ color: "var(--color-text-primary)" }}
-                  >
-                    {percent.toFixed(0)}
-                  </span>
-                  <span className="text-[12px] text-text-muted">%</span>
-                </>
-              ) : (
-                <span className="text-[12px] text-text-muted">—</span>
-              )}
-            </div>
-          </div>
-          <Button
-            variant="primary"
-            size="lg"
-            onClick={onClean}
-            disabled={isCleaning}
-            loading={isCleaning}
-          >
-            {isCleaning ? "Cleaning" : "Clean RAM"}
-          </Button>
-        </div>
-
-        <div
-          className="mt-4 h-1.5 overflow-hidden rounded-full"
-          style={{ backgroundColor: "rgba(255,255,255,0.04)" }}
-        >
-          <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{
-              width: `${percent}%`,
-              background: `linear-gradient(90deg, ${color}, ${color}cc)`,
-              boxShadow: `0 0 8px ${color}40`,
-            }}
-          />
-        </div>
-      </div>
-
-      {/* ── Memory detail card ── */}
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card">
-        <div className="flex gap-5 px-4 py-3 text-[11px]">
-          <MemStat label="Used" value={`${formatGbFromMb(usedMb)} GB`} />
-          <MemStat label="Total" value={`${formatGbFromMb(totalMb)} GB`} />
-          <MemStat
-            label="Available"
-            value={`${formatGbFromMb(availableMb)} GB`}
-            valueColor={color}
-            bold
-          />
-          {systemMem?.standby_mb != null && (
-            <MemStat
-              label="Standby"
-              value={`${formatGbFromMb(systemMem.standby_mb)} GB`}
-            />
-          )}
-        </div>
-
-        {showBottom && (
-          <div
-            className="space-y-2 border-t px-4 py-3"
-            style={{ borderColor: "var(--color-border-subtle)" }}
-          >
-            {isCleaning && (
-              <div className="flex items-center gap-2 text-[11.5px] text-text-muted">
-                <Spinner size={10} color="var(--color-accent-primary)" />
-                <span>
-                  {stage === "flushing_modified"
-                    ? "Flushing modified pages…"
-                    : stage === "standby_purge"
-                      ? "Purging standby list…"
-                      : stage
-                        ? stage
-                        : "Cleaning…"}
-                  {trimmedCount > 0 ? ` · Trimmed: ${trimmedCount}` : ""}
-                  {currentProcess ? ` · ${currentProcess}` : ""}
-                </span>
-              </div>
-            )}
-            {!isAdmin && (
-              <div className="text-[11.5px] text-text-muted">
-                Deep clean requires Administrator.{" "}
-                <button
-                  type="button"
-                  onClick={onRestartAsAdmin}
-                  disabled={restartState === "restarting"}
-                  className="font-semibold text-accent-secondary hover:underline disabled:opacity-60"
-                >
-                  {restartState === "restarting"
-                    ? "Restarting…"
-                    : "Restart as Admin"}
-                </button>
-                {restartState === "error" && restartError && (
-                  <div className="mt-1 text-[11px] text-status-error">
-                    {restartError}
-                  </div>
-                )}
-              </div>
-            )}
-            {result && (
-              <div
-                className="rounded-[5px] px-3 py-2 text-[11px] text-text-muted"
-                style={{ backgroundColor: "var(--color-bg-elevated)" }}
-              >
-                <div className="flex flex-wrap gap-x-5 gap-y-1">
-                  <ResultPill
-                    label="Freed"
-                    value={formatDeltaMb(result.freed_mb)}
-                  />
-                  {result.standby_freed_mb != null && (
-                    <ResultPill
-                      label="Standby"
-                      value={formatDeltaMb(result.standby_freed_mb)}
-                    />
-                  )}
-                  {result.modified_freed_mb != null && (
-                    <ResultPill
-                      label="Modified"
-                      value={formatDeltaMb(result.modified_freed_mb)}
-                    />
-                  )}
-                  <ResultPill
-                    label="Trimmed"
-                    value={String(result.trimmed_count)}
-                  />
-                  <ResultPill
-                    label="Deep clean"
-                    value={deepCleanLabel(result.standby_purge)}
-                  />
-                </div>
-                {result.warnings.length > 0 && (
-                  <div className="mt-1.5 text-[10.5px] text-status-warning">
-                    <Chip tone="warning" size="xs">
-                      {result.warnings.length} warning
-                      {result.warnings.length !== 1 ? "s" : ""}
-                    </Chip>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function MemStat({
-  label,
-  value,
-  valueColor,
-  bold,
-}: {
-  label: string;
-  value: string;
-  valueColor?: string;
-  bold?: boolean;
-}) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
-        {label}
-      </span>
-      <span
-        className={`font-mono text-[12px] ${bold ? "font-semibold" : ""}`}
-        style={{ color: valueColor || "var(--color-text-primary)" }}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function ResultPill({ label, value }: { label: string; value: string }) {
-  return (
-    <span>
-      {label}{" "}
-      <span className="font-mono font-medium text-text-primary">{value}</span>
-    </span>
   );
 }

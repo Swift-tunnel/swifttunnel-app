@@ -18,6 +18,10 @@ interface TooltipProps {
   }>;
   side?: "top" | "bottom" | "left" | "right";
   delay?: number;
+  /** When true the child renders normally but the tooltip never shows.
+   *  Lets callers keep the Tooltip permanently mounted (avoiding a child
+   *  remount) while suppressing the popup in states where it isn't wanted. */
+  disabled?: boolean;
 }
 
 export function Tooltip({
@@ -25,6 +29,7 @@ export function Tooltip({
   children,
   side = "top",
   delay = 350,
+  disabled = false,
 }: TooltipProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
@@ -38,6 +43,7 @@ export function Tooltip({
   }, []);
 
   function show(el: HTMLElement) {
+    if (disabled) return;
     anchorRef.current = el;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
@@ -83,6 +89,7 @@ export function Tooltip({
       {enhanced}
       {open &&
         pos &&
+        !disabled &&
         createPortal(
           <div
             role="tooltip"

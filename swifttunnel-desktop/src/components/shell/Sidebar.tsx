@@ -3,7 +3,6 @@ import { useAuthStore } from "../../stores/authStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import type { TabId, VpnState } from "../../lib/types";
-import { Tooltip } from "../ui/Tooltip";
 import swiftLogo from "../../assets/swift.png";
 
 declare const __APP_VERSION__: string;
@@ -16,27 +15,33 @@ const TABS: { id: TabId; label: string; shortcut: string; icon: string }[] = [
     icon: "M5 12.55a11 11 0 0 1 14.08 0 M1.42 9a16 16 0 0 1 21.16 0 M8.53 16.11a6 6 0 0 1 6.95 0 M12 20h.01",
   },
   {
-    id: "boost",
-    label: "Boost",
+    id: "optimization",
+    label: "Optimize",
     shortcut: "2",
     icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
   },
   {
+    id: "games",
+    label: "Games",
+    shortcut: "3",
+    icon: "M6 12h4 M8 10v4 M15 13h.01 M18 11h.01 M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.544-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z",
+  },
+  {
     id: "network",
     label: "Diagnostics",
-    shortcut: "3",
+    shortcut: "4",
     icon: "M22 12h-4l-3 9L9 3l-3 9H2",
   },
   {
     id: "repair",
     label: "Repair",
-    shortcut: "4",
+    shortcut: "5",
     icon: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.1 6.1a2.1 2.1 0 0 1-3-3l6.1-6.1a6 6 0 0 1 7.9-7.9l-3.8 3.8z",
   },
   {
     id: "settings",
     label: "Settings",
-    shortcut: "5",
+    shortcut: "6",
     icon: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z",
   },
 ];
@@ -98,19 +103,24 @@ export function Sidebar() {
           className="shrink-0"
           style={{ objectFit: "contain" }}
         />
-        {expanded && (
-          <div className="min-w-0 flex-1 overflow-hidden">
-            <div
-              className="text-[13.5px] font-semibold leading-none text-text-primary"
-              style={{ letterSpacing: "-0.018em" }}
-            >
-              SwiftTunnel
-            </div>
-            <div className="mt-1.5 font-mono text-[9.5px] leading-none tracking-wide text-text-dimmed">
-              v{__APP_VERSION__}
-            </div>
+        <div
+          className="min-w-0 flex-1 overflow-hidden"
+          style={{
+            opacity: expanded ? 1 : 0,
+            transition: "opacity 0.15s ease",
+            pointerEvents: expanded ? "auto" : "none",
+          }}
+        >
+          <div
+            className="whitespace-nowrap text-[13.5px] font-semibold leading-none text-text-primary"
+            style={{ letterSpacing: "-0.018em" }}
+          >
+            SwiftTunnel
           </div>
-        )}
+          <div className="mt-1.5 whitespace-nowrap font-mono text-[9.5px] leading-none tracking-wide text-text-dimmed">
+            v{__APP_VERSION__}
+          </div>
+        </div>
       </div>
 
       <div
@@ -122,7 +132,7 @@ export function Sidebar() {
       <div className="mt-2 flex flex-1 flex-col gap-0.5 px-2">
         {TABS.map((tab) => {
           const isActive = activeTab === tab.id;
-          const button = (
+          return (
             <button
               key={tab.id}
               onClick={() => setTab(tab.id)}
@@ -161,33 +171,21 @@ export function Sidebar() {
               >
                 <path d={tab.icon} />
               </svg>
-              {expanded && (
-                <span
-                  className="flex-1 text-[12.5px] font-medium"
-                  style={{
-                    color: isActive
-                      ? "var(--color-text-primary)"
-                      : "var(--color-text-secondary)",
-                    letterSpacing: "-0.005em",
-                  }}
-                >
-                  {tab.label}
-                </span>
-              )}
+              <span
+                className="flex-1 truncate text-[12.5px] font-medium"
+                style={{
+                  color: isActive
+                    ? "var(--color-text-primary)"
+                    : "var(--color-text-secondary)",
+                  letterSpacing: "-0.005em",
+                  opacity: expanded ? 1 : 0,
+                  transition: "opacity 0.15s ease",
+                  pointerEvents: expanded ? "auto" : "none",
+                }}
+              >
+                {tab.label}
+              </span>
             </button>
-          );
-
-          return expanded ? (
-            button
-          ) : (
-            <Tooltip
-              key={tab.id}
-              content={`${tab.label}  ·  ⌃${tab.shortcut}`}
-              side="right"
-              delay={200}
-            >
-              {button}
-            </Tooltip>
           );
         })}
       </div>
@@ -231,26 +229,31 @@ export function Sidebar() {
               aria-label={`VPN ${vpnState}`}
             />
           </div>
-          {expanded && (
-            <div className="min-w-0 flex-1 leading-none">
-              <div
-                className="truncate text-[12px] font-medium text-text-primary"
-                style={{ letterSpacing: "-0.005em" }}
-              >
-                {userLabel}
-              </div>
-              <div
-                className="mt-1.5 text-[10px] font-medium uppercase leading-none tracking-[0.08em]"
-                style={{
-                  color: isConnected
-                    ? "var(--color-status-connected)"
-                    : "var(--color-text-muted)",
-                }}
-              >
-                {stateLabel(vpnState)}
-              </div>
+          <div
+            className="min-w-0 flex-1 leading-none"
+            style={{
+              opacity: expanded ? 1 : 0,
+              transition: "opacity 0.15s ease",
+              pointerEvents: expanded ? "auto" : "none",
+            }}
+          >
+            <div
+              className="truncate text-[12px] font-medium text-text-primary"
+              style={{ letterSpacing: "-0.005em" }}
+            >
+              {userLabel}
             </div>
-          )}
+            <div
+              className="mt-1.5 truncate text-[10px] font-medium uppercase leading-none tracking-[0.08em]"
+              style={{
+                color: isConnected
+                  ? "var(--color-status-connected)"
+                  : "var(--color-text-muted)",
+              }}
+            >
+              {stateLabel(vpnState)}
+            </div>
+          </div>
         </div>
       </div>
     </nav>

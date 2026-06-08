@@ -9,7 +9,8 @@ import { AppShell } from "./components/shell/AppShell";
 import { LoginScreen } from "./components/auth/LoginScreen";
 import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
-import { BoostTab } from "./components/boost/BoostTab";
+import { OptimizationTab } from "./components/optimization/OptimizationTab";
+import { GamesTab } from "./components/games/GamesTab";
 import { NetworkTab } from "./components/network/NetworkTab";
 import { RepairTab } from "./components/repair/RepairTab";
 import { SettingsTab } from "./components/settings/SettingsTab";
@@ -35,8 +36,10 @@ function tabComponent(tab: TabId) {
   switch (tab) {
     case "connect":
       return <ConnectTab />;
-    case "boost":
-      return <BoostTab />;
+    case "optimization":
+      return <OptimizationTab />;
+    case "games":
+      return <GamesTab />;
     case "network":
       return <NetworkTab />;
     case "repair":
@@ -291,10 +294,11 @@ function App() {
 
       const map: Record<string, TabId> = {
         "1": "connect",
-        "2": "boost",
-        "3": "network",
-        "4": "repair",
-        "5": "settings",
+        "2": "optimization",
+        "3": "games",
+        "4": "network",
+        "5": "repair",
+        "6": "settings",
       };
       const tab = map[event.key];
       if (!tab) return;

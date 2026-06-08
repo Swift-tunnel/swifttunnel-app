@@ -232,3 +232,18 @@ export interface CopyLogFileResponse {
 
 export const systemCopyLogToClipboard = () =>
   invoke<CopyLogFileResponse>("system_copy_log_to_clipboard");
+
+// ── Optimization tab ──
+
+export interface OptimizationApplyResponse {
+  requires_reboot: boolean;
+}
+
+export const optimizationApply = (id: string) =>
+  invoke<OptimizationApplyResponse>("optimization_apply", { id });
+
+export const optimizationRevert = (id: string) =>
+  invoke<OptimizationApplyResponse>("optimization_revert", { id });
+
+export const optimizationGetActive = () =>
+  invoke<string[]>("optimization_get_active");

@@ -6,8 +6,9 @@
   "build": {
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist",
+    "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
-    "removeUnusedCommands": true
+    "removeUnusedCommands": false
   },
   "app": {
     "withGlobalTauri": false,
@@ -26,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost https://*.swifttunnel.net; connect-src 'self' https://*.swifttunnel.net https://*.supabase.co"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost https://*.swifttunnel.net https://*.roblox.com https://*.rbxcdn.com; connect-src 'self' https://*.swifttunnel.net https://*.supabase.co"
     }
   },
   "bundle": {

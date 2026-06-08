@@ -695,6 +695,36 @@ mod tests {
         assert!(filter_reachable_ips_on_port(Vec::new(), 443).await.is_empty());
     }
 
+    // Live end-to-end check of the real production path: DoH multi-IP resolve ->
+    // :443 reachability probe -> reachable-first pin list. Ignored by default
+    // because it hits the public internet; run locally with:
+    //   cargo test -p swifttunnel-core roblox_proxy::hosts::live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "hits the live network; run with --ignored to verify DNS repair"]
+    async fn live_dns_repair_pins_multiple_reachable_ips() {
+        let client = reqwest::Client::builder()
+            .timeout(DNS_REPAIR_TIMEOUT)
+            .build()
+            .unwrap();
+
+        for domain in [
+            "clientsettings.roblox.com",
+            "clientsettingscdn.roblox.com",
+            "www.roblox.com",
+            "setup.rbxcdn.com",
+        ] {
+            match resolve_reachable_domain_ips(&client, domain).await {
+                Ok(ips) => {
+                    println!("{domain} -> {} reachable IP(s): {:?}", ips.len(), ips);
+                    assert!(!ips.is_empty(), "{domain} returned an empty pin list");
+                }
+                Err(e) => {
+                    println!("{domain} -> skipped, falls back to normal DNS: {e}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn build_hosts_block_uses_resolved_public_ips() {
         let overrides = vec![

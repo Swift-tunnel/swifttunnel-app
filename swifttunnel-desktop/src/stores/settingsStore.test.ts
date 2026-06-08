@@ -28,7 +28,7 @@ describe("stores/settingsStore", () => {
       ...DEFAULT_SETTINGS,
       theme: "light",
       config: {},
-      current_tab: "boost",
+      current_tab: "network",
       minimize_to_tray: true,
       game_process_performance: {
         high_performance_gpu_binding: true,
@@ -50,7 +50,7 @@ describe("stores/settingsStore", () => {
     expect(
       useSettingsStore.getState().settings.game_process_performance.unbind_cpu0,
     ).toBe(true);
-    expect(useSettingsStore.getState().activeTab).toBe("boost");
+    expect(useSettingsStore.getState().activeTab).toBe("network");
     expect(
       useSettingsStore.getState().settings.config.roblox_settings.window_width,
     ).toBe(1280);
@@ -61,6 +61,18 @@ describe("stores/settingsStore", () => {
     expect(
       useSettingsStore.getState().settings.config.roblox_settings.unlock_fps,
     ).toBe(false);
+  });
+
+  it("migrates the renamed 'boost' tab onto 'games'", async () => {
+    settingsLoad.mockResolvedValue({
+      ...DEFAULT_SETTINGS,
+      current_tab: "boost",
+    });
+
+    const useSettingsStore = await loadStore();
+    await useSettingsStore.getState().load();
+
+    expect(useSettingsStore.getState().activeTab).toBe("games");
   });
 
   it("migrates legacy master network boost into current per-toggle boosts", async () => {

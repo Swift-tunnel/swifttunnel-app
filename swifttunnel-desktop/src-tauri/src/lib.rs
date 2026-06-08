@@ -411,6 +411,9 @@ pub fn run() {
             commands::system::system_cleanup_tunnel_state,
             commands::system::system_uninstall,
             commands::system::system_copy_log_to_clipboard,
+            commands::optimization::optimization_apply,
+            commands::optimization::optimization_revert,
+            commands::optimization::optimization_get_active,
         ])
         .setup(move |app| {
             info!("SwiftTunnel desktop app starting up");

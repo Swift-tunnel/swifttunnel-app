@@ -10,6 +10,7 @@ pub mod geolocation;
 pub mod network_analyzer;
 pub mod network_booster;
 pub mod notification;
+pub mod optimizations;
 pub mod performance_monitor;
 mod process_names;
 pub mod ram_cleaner;

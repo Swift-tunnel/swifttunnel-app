@@ -40,7 +40,7 @@ const MOCK_SETTINGS: AppSettings = {
   window_state: { x: null, y: null, width: 560, height: 750, maximized: false },
   selected_region: "singapore",
   selected_server: "singapore",
-  current_tab: "boost",
+  current_tab: "connect",
   update_settings: { auto_check: true, last_check: 1739350000, dismissed_version: null },
   update_channel: "Stable",
   minimize_to_tray: true,
