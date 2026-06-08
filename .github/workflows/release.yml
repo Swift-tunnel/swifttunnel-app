@@ -241,7 +241,10 @@ jobs:
           $body = ""
           $manualNotesPath = Join-Path "release-notes" "$($env:TAG).md"
           if (Test-Path $manualNotesPath) {
-            $body = (Get-Content -Raw -Path $manualNotesPath).Trim()
+            # -Encoding UTF8: without it, PowerShell 5.1 reads the UTF-8 notes
+            # file as ANSI and mangles non-ASCII (em dashes -> "â€"") in the
+            # published release body.
+            $body = (Get-Content -Raw -Encoding UTF8 -Path $manualNotesPath).Trim()
           }
 
           if ([string]::IsNullOrWhiteSpace($body)) {
