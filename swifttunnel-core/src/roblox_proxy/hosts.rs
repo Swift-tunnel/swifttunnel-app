@@ -10,7 +10,7 @@ use log::{debug, info, warn};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
@@ -25,6 +25,21 @@ const DNS_REPAIR_RESOLVERS: &[&str] = &[
     "https://1.1.1.1/dns-query",
     "https://8.8.8.8/resolve",
 ];
+
+/// Maximum IPs pinned per Roblox bootstrap domain.
+///
+/// Roblox serves these hostnames from a CDN/anycast pool, so a single edge IP
+/// resolved from a public DoH resolver may be unreachable from the user's ISP
+/// path. Pinning a few verified IPs gives connection fail-over headroom without
+/// bloating the hosts file.
+const MAX_PINNED_IPS_PER_DOMAIN: usize = 3;
+
+/// Per-IP TCP reachability probe timeout. Short so a dead edge is skipped fast;
+/// the whole repair still runs under `DNS_REPAIR_TOTAL_TIMEOUT`.
+const REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(1200);
+
+/// Port used to confirm a resolved Roblox edge actually accepts connections.
+const ROBLOX_HTTPS_PORT: u16 = 443;
 
 static ACTIVE_BOOTSTRAP_IPS: OnceLock<RwLock<HashSet<Ipv4Addr>>> = OnceLock::new();
 
@@ -128,7 +143,7 @@ async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
         .map(|domain| {
             let client = client.clone();
             let domain = *domain;
-            async move { (domain, resolve_domain_ipv4(&client, domain).await) }
+            async move { (domain, resolve_reachable_domain_ips(&client, domain).await) }
         })
         .collect();
 
@@ -143,10 +158,14 @@ async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
 
             result = lookups.next() => {
                 match result {
-                    Some((domain, Ok(ip))) => overrides.push(HostOverride {
-                        ip,
-                        domain: domain.to_string(),
-                    }),
+                    Some((domain, Ok(ips))) => {
+                        for ip in ips {
+                            overrides.push(HostOverride {
+                                ip,
+                                domain: domain.to_string(),
+                            });
+                        }
+                    }
                     Some((_domain, Err(e))) => failures.push(e),
                     None => break,
                 }
@@ -182,7 +201,33 @@ async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
     Ok(overrides)
 }
 
-async fn resolve_domain_ipv4(client: &reqwest::Client, domain: &str) -> Result<Ipv4Addr, String> {
+/// Resolve a domain and keep only the IPs that are actually reachable on :443
+/// from THIS machine, preserving DNS preference order.
+///
+/// Returns `Err` when the domain cannot be resolved at all, or when none of the
+/// resolved IPs are reachable. Callers treat that as "skip pinning this domain"
+/// and fall back to normal system DNS — so we never pin a dead IP, which is what
+/// used to break Roblox bootstrappers (clientsettings.roblox.com timeouts).
+async fn resolve_reachable_domain_ips(
+    client: &reqwest::Client,
+    domain: &str,
+) -> Result<Vec<Ipv4Addr>, String> {
+    let candidates = resolve_domain_ips(client, domain).await?;
+    let reachable = filter_reachable_ips(candidates).await;
+    if reachable.is_empty() {
+        return Err(format!(
+            "{domain} resolved but no IP answered on :{ROBLOX_HTTPS_PORT}"
+        ));
+    }
+    Ok(reachable)
+}
+
+/// Resolve a domain to up to `MAX_PINNED_IPS_PER_DOMAIN` usable public IPv4s via
+/// DNS-over-HTTPS. Returns the first resolver's usable answers (deduped, capped).
+async fn resolve_domain_ips(
+    client: &reqwest::Client,
+    domain: &str,
+) -> Result<Vec<Ipv4Addr>, String> {
     let mut failures = Vec::new();
 
     for resolver in DNS_REPAIR_RESOLVERS {
@@ -214,7 +259,9 @@ async fn resolve_domain_ipv4(client: &reqwest::Client, domain: &str) -> Result<I
         };
 
         match parse_usable_a_records(&body) {
-            Ok(ips) if !ips.is_empty() => return Ok(ips[0]),
+            Ok(ips) if !ips.is_empty() => {
+                return Ok(dedup_and_cap_ips(ips, MAX_PINNED_IPS_PER_DOMAIN));
+            }
             Ok(_) => failures.push(format!("{resolver}: no usable public A records")),
             Err(e) => failures.push(format!("{resolver}: {e}")),
         }
@@ -224,6 +271,67 @@ async fn resolve_domain_ipv4(client: &reqwest::Client, domain: &str) -> Result<I
         "{domain} could not be repaired via DNS-over-HTTPS ({})",
         failures.join("; ")
     ))
+}
+
+/// Deduplicate IPs (preserving first-seen order) and cap the count.
+fn dedup_and_cap_ips(ips: Vec<Ipv4Addr>, cap: usize) -> Vec<Ipv4Addr> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for ip in ips {
+        if seen.insert(ip) {
+            out.push(ip);
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Probe each candidate IP on :443 concurrently and return the reachable ones,
+/// preserving the original (DNS preference) order so the most-preferred
+/// reachable IP is pinned first.
+///
+/// This runs once at connect time, off the packet-forwarding path, so it never
+/// affects tunneling throughput or latency.
+async fn filter_reachable_ips(ips: Vec<Ipv4Addr>) -> Vec<Ipv4Addr> {
+    filter_reachable_ips_on_port(ips, ROBLOX_HTTPS_PORT).await
+}
+
+async fn filter_reachable_ips_on_port(ips: Vec<Ipv4Addr>, port: u16) -> Vec<Ipv4Addr> {
+    if ips.is_empty() {
+        return Vec::new();
+    }
+
+    let mut probes: FuturesUnordered<_> = ips
+        .into_iter()
+        .enumerate()
+        .map(|(idx, ip)| async move { (idx, ip, probe_tcp_reachable(ip, port).await) })
+        .collect();
+
+    let mut reachable: Vec<(usize, Ipv4Addr)> = Vec::new();
+    while let Some((idx, ip, ok)) = probes.next().await {
+        if ok {
+            reachable.push((idx, ip));
+        }
+    }
+
+    reachable.sort_by_key(|(idx, _)| *idx);
+    reachable.into_iter().map(|(_, ip)| ip).collect()
+}
+
+/// Returns `true` if a TCP connection to `ip:port` completes within the probe
+/// timeout. A timeout or refusal means "not reachable from this machine".
+async fn probe_tcp_reachable(ip: Ipv4Addr, port: u16) -> bool {
+    let addr = SocketAddr::from((ip, port));
+    matches!(
+        tokio::time::timeout(
+            REACHABILITY_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await,
+        Ok(Ok(_))
+    )
 }
 
 fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
@@ -537,6 +645,54 @@ mod tests {
     fn domain_list_has_no_duplicates() {
         let unique: std::collections::HashSet<_> = ROBLOX_BOOTSTRAP_DOMAINS.iter().collect();
         assert_eq!(unique.len(), ROBLOX_BOOTSTRAP_DOMAINS.len());
+    }
+
+    #[test]
+    fn dedup_and_cap_ips_preserves_order_and_caps() {
+        let ips = vec![
+            Ipv4Addr::new(1, 1, 1, 1),
+            Ipv4Addr::new(1, 1, 1, 1), // duplicate, dropped
+            Ipv4Addr::new(2, 2, 2, 2),
+            Ipv4Addr::new(3, 3, 3, 3),
+            Ipv4Addr::new(4, 4, 4, 4), // over the cap, dropped
+        ];
+
+        assert_eq!(
+            dedup_and_cap_ips(ips, 3),
+            vec![
+                Ipv4Addr::new(1, 1, 1, 1),
+                Ipv4Addr::new(2, 2, 2, 2),
+                Ipv4Addr::new(3, 3, 3, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn dedup_and_cap_ips_handles_empty_and_small() {
+        assert!(dedup_and_cap_ips(Vec::new(), 3).is_empty());
+
+        let single = vec![Ipv4Addr::new(9, 9, 9, 9)];
+        assert_eq!(dedup_and_cap_ips(single.clone(), 3), single);
+    }
+
+    #[tokio::test]
+    async fn filter_reachable_ips_keeps_only_reachable_and_preserves_order() {
+        // Bind a real listener on loopback so that port is genuinely reachable.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // 127.0.0.2 has nothing listening on `port`, so it must be probed out.
+        // Order: dead IP first, reachable IP second -> result keeps only the
+        // reachable one (proving dead IPs are dropped and order is preserved).
+        let ips = vec![Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 1)];
+        let reachable = filter_reachable_ips_on_port(ips, port).await;
+
+        assert_eq!(reachable, vec![Ipv4Addr::new(127, 0, 0, 1)]);
+    }
+
+    #[tokio::test]
+    async fn filter_reachable_ips_empty_input_returns_empty() {
+        assert!(filter_reachable_ips_on_port(Vec::new(), 443).await.is_empty());
     }
 
     #[test]
