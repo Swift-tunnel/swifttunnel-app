@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 const SNAPSHOT_FILE: &str = "optimization_snapshots.json";
 
@@ -39,13 +40,9 @@ enum Action {
         value: u32,
     },
     /// Stop the service and set it to Disabled.
-    ServiceDisable {
-        name: &'static str,
-    },
+    ServiceDisable { name: &'static str },
     /// Disable a scheduled task.
-    TaskDisable {
-        path: &'static str,
-    },
+    TaskDisable { path: &'static str },
 }
 
 struct Tweak {
@@ -226,6 +223,17 @@ enum ActionSnapshot {
 
 type Snapshots = BTreeMap<String, Vec<ActionSnapshot>>;
 
+static OPTIMIZATION_STATE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn lock_optimization_state() -> Result<MutexGuard<'static, ()>, String> {
+    OPTIMIZATION_STATE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| {
+            "Optimization state lock poisoned; restart SwiftTunnel and try again.".to_string()
+        })
+}
+
 fn snapshot_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("SwiftTunnel").join(SNAPSHOT_FILE))
 }
@@ -254,12 +262,14 @@ fn save_all(map: &Snapshots) -> Result<(), String> {
 
 /// Ids of every tweak that currently has a snapshot (i.e. is applied).
 pub fn active_ids() -> Vec<String> {
+    let _guard = lock_optimization_state().ok();
     load_all().keys().cloned().collect()
 }
 
 /// Apply a tweak. Returns whether a restart is required to finish.
 /// No-op (returns Ok) if the tweak is already applied.
 pub fn apply(id: &str) -> Result<bool, String> {
+    let _guard = lock_optimization_state()?;
     let tweak = find_tweak(id).ok_or_else(|| format!("Unknown optimization: {id}"))?;
 
     let mut snapshots = load_all();
@@ -298,6 +308,7 @@ pub fn apply(id: &str) -> Result<bool, String> {
 /// Revert a tweak from its snapshot. Returns whether a restart is required.
 /// No-op (returns Ok) if the tweak is not currently applied.
 pub fn revert(id: &str) -> Result<bool, String> {
+    let _guard = lock_optimization_state()?;
     let tweak = find_tweak(id).ok_or_else(|| format!("Unknown optimization: {id}"))?;
 
     let mut snapshots = load_all();
@@ -321,14 +332,15 @@ pub fn revert(id: &str) -> Result<bool, String> {
         }
     }
 
-    // Drop the snapshot regardless: restore is best-effort and we should not
-    // leave the tweak stuck "on" if most actions reverted.
-    snapshots.remove(id);
-    save_all(&snapshots)?;
-
     match first_error {
-        Some(e) => Err(format!("Reverted {id} with errors: {e}")),
-        None => Ok(tweak.requires_reboot),
+        Some(e) => Err(format!(
+            "Reverted {id} with errors: {e}. Rollback snapshot was kept so you can retry."
+        )),
+        None => {
+            snapshots.remove(id);
+            save_all(&snapshots)?;
+            Ok(tweak.requires_reboot)
+        }
     }
 }
 
@@ -395,24 +407,33 @@ fn apply_action(action: &Action) -> Result<(), String> {
 #[cfg(windows)]
 fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> {
     match (action, snap) {
-        (Action::RegDword { hive, path, name, .. }, ActionSnapshot::RegDword { value }) => {
-            match value {
-                Some(v) => write_reg_dword(*hive, path, name, *v),
-                None => delete_reg_value(*hive, path, name),
-            }
-        }
-        (Action::RegString { hive, path, name, .. }, ActionSnapshot::RegString { value }) => {
-            match value {
-                Some(v) => write_reg_string(*hive, path, name, v),
-                None => delete_reg_value(*hive, path, name),
-            }
-        }
-        (Action::PowerAc { subgroup, setting, .. }, ActionSnapshot::Power { value }) => {
-            match value {
-                Some(v) => set_power_ac(subgroup, setting, *v),
-                None => Ok(()),
-            }
-        }
+        (
+            Action::RegDword {
+                hive, path, name, ..
+            },
+            ActionSnapshot::RegDword { value },
+        ) => match value {
+            Some(v) => write_reg_dword(*hive, path, name, *v),
+            None => delete_reg_value(*hive, path, name),
+        },
+        (
+            Action::RegString {
+                hive, path, name, ..
+            },
+            ActionSnapshot::RegString { value },
+        ) => match value {
+            Some(v) => write_reg_string(*hive, path, name, v),
+            None => delete_reg_value(*hive, path, name),
+        },
+        (
+            Action::PowerAc {
+                subgroup, setting, ..
+            },
+            ActionSnapshot::Power { value },
+        ) => match value {
+            Some(v) => set_power_ac(subgroup, setting, *v),
+            None => Ok(()),
+        },
         (Action::ServiceDisable { name }, ActionSnapshot::Service { start_type }) => {
             let keyword = match start_type {
                 Some(2) => "auto",

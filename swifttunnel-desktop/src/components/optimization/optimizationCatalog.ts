@@ -100,6 +100,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     requiresReboot: false,
     changes: [
       "HKCU\\...\\GameDVR → AppCaptureEnabled = 0",
+      "HKCU\\...\\GameDVR → AudioCaptureEnabled = 0",
       "HKCU\\System\\GameConfigStore → GameDVR_Enabled = 0",
       "HKCU\\Software\\Microsoft\\GameBar → ShowStartupPanel = 0",
     ],
@@ -170,4 +171,3 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     changes: ["HKLM\\...\\DataCollection → AllowTelemetry = 0"],
   },
 ];
-
