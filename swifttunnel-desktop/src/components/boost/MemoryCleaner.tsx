@@ -22,6 +22,7 @@ export function MemoryCleaner() {
   const result = useBoostStore((s) => s.ramCleanResult);
   const isAdmin = useBoostStore((s) => s.isAdmin);
   const cleanRam = useBoostStore((s) => s.cleanRam);
+  const fetchSystemMemory = useBoostStore((s) => s.fetchSystemMemory);
   const fetchSystemInfo = useBoostStore((s) => s.fetchSystemInfo);
 
   const [restartState, setRestartState] = useState<
@@ -29,10 +30,19 @@ export function MemoryCleaner() {
   >("idle");
   const [restartError, setRestartError] = useState<string | null>(null);
 
-  // Ensure memory stats are present even if the user lands here first.
+  // Admin state (for the deep-clean prompt), once.
   useEffect(() => {
-    if (!systemMem) void fetchSystemInfo();
-  }, [systemMem, fetchSystemInfo]);
+    void fetchSystemInfo();
+  }, [fetchSystemInfo]);
+
+  // Load memory immediately, then poll for a live readout (faster while
+  // cleaning) — same cadence the boost page used.
+  useEffect(() => {
+    void fetchSystemMemory();
+    const intervalMs = isCleaning ? 250 : 1000;
+    const id = setInterval(() => void fetchSystemMemory(), intervalMs);
+    return () => clearInterval(id);
+  }, [fetchSystemMemory, isCleaning]);
 
   async function onRestartAsAdmin() {
     try {
