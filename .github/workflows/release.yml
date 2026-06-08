@@ -707,6 +707,9 @@ jobs:
           gh release upload $env:TAG $manifestPath $signaturePath --repo $env:GITHUB_REPOSITORY --clobber
 
       - name: Announce release in Discord
+        # Cosmetic only: a failed announcement must never mark a successfully
+        # published release as failed.
+        continue-on-error: true
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
