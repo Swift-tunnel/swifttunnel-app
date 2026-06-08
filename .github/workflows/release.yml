@@ -780,4 +780,9 @@ jobs:
           }
 
           $payloadJson = $payload | ConvertTo-Json -Depth 10
-          Invoke-RestMethod -Method Post -Uri $env:DISCORD_RELEASE_WEBHOOK_URL -ContentType "application/json" -Body $payloadJson
+          # PowerShell 5.1's Invoke-RestMethod mis-encodes a string -Body, so
+          # non-ASCII characters in the release notes (em dashes, etc.) get sent
+          # as invalid UTF-8 and Discord rejects the payload with HTTP 400. Send
+          # explicit UTF-8 bytes instead.
+          $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
+          Invoke-RestMethod -Method Post -Uri $env:DISCORD_RELEASE_WEBHOOK_URL -ContentType "application/json; charset=utf-8" -Body $payloadBytes
