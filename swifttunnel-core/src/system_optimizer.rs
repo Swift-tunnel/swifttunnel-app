@@ -618,10 +618,25 @@ impl SystemOptimizer {
             }
             Ok(result) => {
                 let stderr = String::from_utf8_lossy(&result.stderr);
-                Err(anyhow::anyhow!(
-                    "powercfg /import failed for SwiftTunnel power plan: {}",
-                    stderr.trim()
-                ))
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                // The SwiftTunnel plan has a fixed GUID, so "a power scheme with
+                // the specified GUID already exists" just means a previous apply
+                // (or an earlier app session — the in-memory `imported` flag
+                // resets on restart while the Windows plan persists) already
+                // installed it. That's success, not a failure.
+                if format!("{stderr}\n{stdout}")
+                    .to_lowercase()
+                    .contains("already exists")
+                {
+                    self.swifttunnel_power_plan_imported = true;
+                    info!("SwiftTunnel power plan already present; using existing scheme");
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "powercfg /import failed for SwiftTunnel power plan: {}",
+                        stderr.trim()
+                    ))
+                }
             }
             Err(e) => Err(anyhow::anyhow!(
                 "Failed to run powercfg /import for SwiftTunnel power plan: {}",
