@@ -847,6 +847,9 @@ pub struct VpnConnection {
     process_performance_manager: Option<Arc<Mutex<GameProcessPerformanceManager>>>,
     /// Tracks whether this connection wrote the temporary Roblox bootstrap hosts repair.
     bootstrap_dns_repair_applied: bool,
+    /// Scoped GoodbyeDPI helper for Bypass country bans Roblox traffic.
+    goodbye_dpi_guard: Option<crate::roblox_proxy::goodbyedpi::GoodbyeDpiGuard>,
+    country_ban_bypass_failure: Option<String>,
 }
 
 impl VpnConnection {
@@ -862,6 +865,8 @@ impl VpnConnection {
             auto_lookup_handle: None,
             process_performance_manager: None,
             bootstrap_dns_repair_applied: false,
+            goodbye_dpi_guard: None,
+            country_ban_bypass_failure: None,
         }
     }
 
@@ -952,6 +957,10 @@ impl VpnConnection {
         self.auto_router.as_ref()
     }
 
+    pub fn take_country_ban_bypass_failure(&mut self) -> Option<String> {
+        self.country_ban_bypass_failure.take()
+    }
+
     async fn set_state(&self, state: ConnectionState) {
         log::info!("Connection state: {:?}", state);
         // `send_replace` always notifies subscribers, even if the new value
@@ -983,6 +992,7 @@ impl VpnConnection {
         binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
+        enable_country_ban: bool,
     ) -> VpnResult<()> {
         let prior_was_error = {
             let state = self.state.borrow();
@@ -1010,6 +1020,8 @@ impl VpnConnection {
         log::info!("Starting VPN connection to region: {}", region);
         log::info!("Apps to tunnel: {:?}", tunnel_apps);
         self.process_performance_manager = None;
+        self.goodbye_dpi_guard = None;
+        self.country_ban_bypass_failure = None;
 
         log::info!("========================================");
         log::info!("V3 MODE: Lightweight UDP Relay");
@@ -1096,6 +1108,31 @@ impl VpnConnection {
                 Err(e) => {
                     log::warn!(
                         "V3: Roblox bootstrap DNS repair skipped; API tunneling will continue without hosts repair: {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        if enable_country_ban {
+            match crate::roblox_proxy::goodbyedpi::start_for_roblox() {
+                Ok(Some(guard)) => {
+                    self.goodbye_dpi_guard = Some(guard);
+                    log::info!(
+                        "V3: Started Bypass country bans GoodbyeDPI helper for Roblox traffic"
+                    );
+                }
+                Ok(None) => {
+                    let message =
+                        "Bypass country bans helper unavailable; Roblox traffic will continue without GoodbyeDPI"
+                            .to_string();
+                    self.country_ban_bypass_failure = Some(message.clone());
+                    log::warn!("{message}");
+                }
+                Err(e) => {
+                    self.country_ban_bypass_failure = Some(e.clone());
+                    log::warn!(
+                        "V3: Bypass country bans helper startup failed; continuing without GoodbyeDPI: {}",
                         e
                     );
                 }
@@ -2448,6 +2485,10 @@ impl VpnConnection {
         // Cleanup WFP block filters
         super::wfp_block::cleanup();
 
+        if let Some(mut guard) = self.goodbye_dpi_guard.take() {
+            guard.stop();
+        }
+
         if self.bootstrap_dns_repair_applied {
             match crate::roblox_proxy::hosts::remove_overrides_async().await {
                 Ok(()) => {
@@ -2670,6 +2711,10 @@ impl Drop for VpnConnection {
         }
 
         super::wfp_block::cleanup();
+
+        if let Some(mut guard) = self.goodbye_dpi_guard.take() {
+            guard.stop();
+        }
 
         if self.bootstrap_dns_repair_applied {
             if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {

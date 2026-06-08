@@ -180,6 +180,12 @@ pub struct AppSettings {
     /// UDP game traffic. Off by default.
     #[serde(default)]
     pub enable_api_tunneling: bool,
+    /// Run the scoped GoodbyeDPI helper for Roblox country-level DPI blocks.
+    ///
+    /// When enabled, GoodbyeDPI applies to Roblox hostnames for both browser
+    /// and Roblox app traffic. Off by default.
+    #[serde(default)]
+    pub enable_country_ban: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -271,6 +277,7 @@ impl Default for AppSettings {
             adapter_binding_mode: AdapterBindingMode::SmartAuto,
             game_process_performance: GameProcessPerformanceSettings::default(),
             enable_api_tunneling: false,
+            enable_country_ban: false,
         }
     }
 }
@@ -604,28 +611,18 @@ mod tests {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!loaded.enable_api_tunneling);
+        assert!(!loaded.enable_country_ban);
     }
 
     #[test]
     fn test_settings_api_tunneling_roundtrip() {
         let mut settings = AppSettings::default();
         settings.enable_api_tunneling = true;
+        settings.enable_country_ban = true;
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
         assert!(loaded.enable_api_tunneling);
-        assert!(!json.contains("enable_country_ban"));
-    }
-
-    #[test]
-    fn test_settings_ignore_removed_country_ban_field() {
-        let json = r#"{
-            "theme": "dark",
-            "config": {},
-            "optimizations_active": false,
-            "enable_country_ban": true
-        }"#;
-        let loaded: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(!loaded.enable_api_tunneling);
+        assert!(loaded.enable_country_ban);
     }
 
     #[test]

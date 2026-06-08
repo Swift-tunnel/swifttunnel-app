@@ -228,6 +228,108 @@ fn check_bundled_nvidia_profile_inspector() {
     }
 }
 
+/// Fail release builds if the GoodbyeDPI helper payload was not staged.
+///
+/// The country-ban bypass starts `goodbyedpi.exe` with a generated Roblox
+/// hostlist. The executable must ship beside its matching WinDivert files or
+/// the toggle can be enabled but will be unavailable at connect time.
+fn check_bundled_goodbyedpi_helper() {
+    const GOODBYEDPI_FILES: &[(&str, u64, Option<&str>)] = &[
+        (
+            "resources/tools/goodbyedpi/x86/goodbyedpi.exe",
+            10_000,
+            Some("234e7c679c3d36885bb9214fb86e4a555754c8416e2c6773e4832834f73ae686"),
+        ),
+        (
+            "resources/tools/goodbyedpi/x86/WinDivert.dll",
+            10_000,
+            Some("ab3cdd99d4c710821070568995ca4cb58fb4273e9c0516a16e3335218438efcc"),
+        ),
+        (
+            "resources/tools/goodbyedpi/x86/WinDivert32.sys",
+            10_000,
+            Some("b2ef49a10d07df6db483e86516d2dfaaaa2f30f4a93dd152fa85f09f891cd049"),
+        ),
+        (
+            "resources/tools/goodbyedpi/x86/WinDivert64.sys",
+            10_000,
+            Some("53ab28ec00be6e6f8aefa9ee76fc2735e94d7f3f9dbc06eb2b7ac8cd3084a6af"),
+        ),
+        (
+            "resources/tools/goodbyedpi/x86_64/goodbyedpi.exe",
+            10_000,
+            Some("331ac6c1d22ba5a0a217f3f27d0d823051869cafc8b8ef7f2002fa2accebc74e"),
+        ),
+        (
+            "resources/tools/goodbyedpi/x86_64/WinDivert.dll",
+            10_000,
+            Some("a97859785a2df1d4462e7d48d33ccbd89fedd40dac4970f4afd89e63f59ee1ec"),
+        ),
+        (
+            "resources/tools/goodbyedpi/x86_64/WinDivert64.sys",
+            10_000,
+            Some("53ab28ec00be6e6f8aefa9ee76fc2735e94d7f3f9dbc06eb2b7ac8cd3084a6af"),
+        ),
+        (
+            "resources/tools/goodbyedpi/licenses/LICENSE-goodbyedpi.txt",
+            100,
+            None,
+        ),
+        (
+            "resources/tools/goodbyedpi/licenses/LICENSE-windivert.txt",
+            100,
+            None,
+        ),
+    ];
+
+    for (rel, min_bytes, expected_hash) in GOODBYEDPI_FILES {
+        println!("cargo:rerun-if-changed={}", rel);
+        let path = std::path::Path::new(rel);
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() && meta.len() >= *min_bytes => {
+                if let Some(expected_hash) = expected_hash {
+                    let actual_hash = file_sha256_with_powershell(path).unwrap_or_else(|err| {
+                        panic!(
+                            "Failed to hash bundled GoodbyeDPI helper payload `{}`: {}",
+                            rel, err
+                        )
+                    });
+                    if actual_hash != *expected_hash {
+                        panic!(
+                            "Bundled GoodbyeDPI helper payload `{}` failed SHA-256 check: \
+                             expected {}, got {}. Re-run the release workflow's pinned \
+                             GoodbyeDPI download step and do not ship an unverified third-party binary.",
+                            rel, expected_hash, actual_hash
+                        );
+                    }
+                }
+            }
+            Ok(meta) if meta.is_file() => {
+                panic!(
+                    "Bundled GoodbyeDPI helper payload `{}` is suspiciously small ({} bytes, \
+                     expected >= {}). Re-run the release workflow's pinned GoodbyeDPI download step.",
+                    rel,
+                    meta.len(),
+                    min_bytes
+                );
+            }
+            Ok(_) => {
+                panic!(
+                    "Bundled GoodbyeDPI helper payload path `{}` exists but is not a file.",
+                    rel
+                );
+            }
+            Err(err) => {
+                panic!(
+                    "Bundled GoodbyeDPI helper payload `{}` is missing ({}). The updater/MSI must \
+                     ship the complete GoodbyeDPI directory for Bypass country bans to work.",
+                    rel, err
+                );
+            }
+        }
+    }
+}
+
 fn file_sha256_with_powershell(path: &std::path::Path) -> Result<String, String> {
     let path = path
         .canonicalize()
@@ -264,6 +366,7 @@ fn main() {
     {
         check_bundled_driver_msis();
         check_bundled_nvidia_profile_inspector();
+        check_bundled_goodbyedpi_helper();
     }
 
     let attrs = tauri_build::Attributes::new()

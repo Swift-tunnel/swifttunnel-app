@@ -82,10 +82,16 @@ export function BoostTab() {
   const savedGPP = settings.game_process_performance;
   const [draftGPP, setDraftGPP] =
     useState<GameProcessPerformanceSettings>(savedGPP);
+  const savedCountryBan = settings.enable_country_ban;
+  const [draftCountryBan, setDraftCountryBan] = useState(savedCountryBan);
 
   useEffect(() => {
     setDraftGPP(savedGPP);
   }, [savedGPP]);
+
+  useEffect(() => {
+    setDraftCountryBan(savedCountryBan);
+  }, [savedCountryBan]);
 
   useEffect(() => {
     let canceled = false;
@@ -109,7 +115,8 @@ export function BoostTab() {
 
   const hasConfigChanges = !configsEqual(draft, savedConfig);
   const hasGPPChanges = JSON.stringify(draftGPP) !== JSON.stringify(savedGPP);
-  const hasChanges = hasConfigChanges || hasGPPChanges;
+  const hasCountryBanChange = draftCountryBan !== savedCountryBan;
+  const hasChanges = hasConfigChanges || hasGPPChanges || hasCountryBanChange;
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
   const windowWidthError = validateWindowDimension(
@@ -152,6 +159,7 @@ export function BoostTab() {
     updateSettings({
       config: appliedConfig,
       game_process_performance: draftGPP,
+      enable_country_ban: draftCountryBan,
     });
     setDraft(appliedConfig);
     saveSettings();
@@ -164,6 +172,7 @@ export function BoostTab() {
   }, [
     draft,
     draftGPP,
+    draftCountryBan,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -184,6 +193,7 @@ export function BoostTab() {
       updateSettings({
         config: appliedConfig,
         game_process_performance: draftGPP,
+        enable_country_ban: draftCountryBan,
       });
       setDraft(appliedConfig);
       saveSettings();
@@ -193,6 +203,7 @@ export function BoostTab() {
   }, [
     draft,
     draftGPP,
+    draftCountryBan,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -203,7 +214,8 @@ export function BoostTab() {
   const discardChanges = useCallback(() => {
     setDraft(savedConfig);
     setDraftGPP(savedGPP);
-  }, [savedConfig, savedGPP]);
+    setDraftCountryBan(savedCountryBan);
+  }, [savedConfig, savedGPP, savedCountryBan]);
 
   function selectProfile(id: OptimizationProfile) {
     setDraft(getPresetConfig(id, draft));
@@ -302,6 +314,7 @@ export function BoostTab() {
   const rblxCount = [
     draft.roblox_settings.unlock_fps,
     draft.roblox_settings.ultraboost,
+    draftCountryBan,
     draft.roblox_settings.window_fullscreen,
   ].filter(Boolean).length;
   const schedCount = [
@@ -378,7 +391,7 @@ export function BoostTab() {
       </section>
 
       {/* ── Roblox ── */}
-      <Section title="Roblox" tag={`${rblxCount} / 3 on`}>
+      <Section title="Roblox" tag={`${rblxCount} / 4 on`}>
         <SettingRow
           title="Unlock FPS"
           desc="Remove 60 FPS cap"
@@ -396,6 +409,13 @@ export function BoostTab() {
           desc="Curated FPS-focused Roblox FFlags"
           enabled={draft.roblox_settings.ultraboost}
           onChange={(v) => updateRblxOpt({ ultraboost: v })}
+        />
+        <SettingRow
+          title="Bypass Country Bans"
+          desc="Local DPI bypass for Roblox website/login and app"
+          tooltip="Starts SwiftTunnel's scoped GoodbyeDPI helper on the next connect. It is separate from Route Assist and does not route traffic through relays."
+          enabled={draftCountryBan}
+          onChange={setDraftCountryBan}
         />
         <ResolutionRow
           width={draft.roblox_settings.window_width}
