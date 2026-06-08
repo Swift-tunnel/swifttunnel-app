@@ -119,6 +119,7 @@ export function BoostTab() {
   const hasChanges = hasConfigChanges || hasGPPChanges || hasCountryBanChange;
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
+  const [isApplying, setIsApplying] = useState(false);
   const windowWidthError = validateWindowDimension(
     "Width",
     draft.roblox_settings.window_width,
@@ -152,22 +153,27 @@ export function BoostTab() {
 
   const applyChanges = useCallback(async () => {
     if (windowValidationError) return;
-    let appliedConfig = draft;
-    if (hasConfigChanges) {
-      appliedConfig = await boost.updateConfig(JSON.stringify(draft));
-    }
-    updateSettings({
-      config: appliedConfig,
-      game_process_performance: draftGPP,
-      enable_country_ban: draftCountryBan,
-    });
-    setDraft(appliedConfig);
-    saveSettings();
-    const currentWarning = useBoostStore.getState().warning;
-    if (currentWarning) {
-      addToast({ type: "warning", message: "Boost applied with warnings" });
-    } else {
-      addToast({ type: "success", message: "Boost settings applied" });
+    setIsApplying(true);
+    try {
+      let appliedConfig = draft;
+      if (hasConfigChanges) {
+        appliedConfig = await boost.updateConfig(JSON.stringify(draft));
+      }
+      updateSettings({
+        config: appliedConfig,
+        game_process_performance: draftGPP,
+        enable_country_ban: draftCountryBan,
+      });
+      setDraft(appliedConfig);
+      saveSettings();
+      const currentWarning = useBoostStore.getState().warning;
+      if (currentWarning) {
+        addToast({ type: "warning", message: "Boost applied with warnings" });
+      } else {
+        addToast({ type: "success", message: "Boost settings applied" });
+      }
+    } finally {
+      setIsApplying(false);
     }
   }, [
     draft,
@@ -559,7 +565,7 @@ export function BoostTab() {
                   variant="secondary"
                   size="sm"
                   onClick={discardChanges}
-                  disabled={isRestarting}
+                  disabled={isRestarting || isApplying}
                 >
                   Discard
                 </Button>
@@ -580,7 +586,10 @@ export function BoostTab() {
                     variant="primary"
                     size="sm"
                     onClick={applyChanges}
-                    disabled={isRestarting || Boolean(windowValidationError)}
+                    disabled={
+                      isRestarting || isApplying || Boolean(windowValidationError)
+                    }
+                    loading={isApplying}
                   >
                     Apply
                   </Button>
