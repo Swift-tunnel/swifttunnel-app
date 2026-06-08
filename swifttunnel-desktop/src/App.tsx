@@ -70,33 +70,70 @@ function App() {
   useEffect(() => {
     let disposed = false;
 
-    const init = async () => {
-      await runAppBootstrap({
-        initEventListeners,
-        fetchAuth,
-        loadSettings,
-        fetchServers,
-        fetchSystemInfo,
-        fetchVpnState,
-        refreshAuthProfile,
-        getSettings: () => useSettingsStore.getState().settings,
-        getAuthState: () => useAuthStore.getState().state,
-        getVpnState: () => useVpnStore.getState().state,
-        connectVpn,
-        checkForUpdates,
-      });
+    // Show the window ASAP, independent of bootstrap. Bootstrap does several
+    // network calls (auth, servers, profile); waiting for it to finish before
+    // showing made a slow first launch look like nothing happened, so the user
+    // had to launch a second time (single-instance then revealed the already-
+    // running window). Showing early shows the loading spinner immediately.
+    const showWindowEarly = async () => {
+      try {
+        const fromStartup = await systemLaunchedFromStartup();
+        if (!fromStartup && !disposed) {
+          await getCurrentWindow().show();
+        }
+      } catch {
+        if (!disposed) {
+          try {
+            await getCurrentWindow().show();
+          } catch {}
+        }
+      }
+    };
 
-      if (!disposed) {
-        try {
-          const fromStartup = await systemLaunchedFromStartup();
-          if (!fromStartup && !disposed) {
-            await getCurrentWindow().show();
-          }
-        } catch {
-          if (!disposed) {
-            await getCurrentWindow().show();
+    // Safety net: if the auth fetch never clears the spinner (wedged IPC), drop
+    // out of the loading screen after 8s so the window isn't a black void.
+    const spinnerSafetyTimer = window.setTimeout(() => {
+      if (disposed) return;
+      if (useAuthStore.getState().isLoading) {
+        useAuthStore.setState({
+          isLoading: false,
+          error:
+            "Could not reach the SwiftTunnel backend. Try restarting the app or running Repair.",
+        });
+      }
+    }, 8000);
+
+    const init = async () => {
+      void showWindowEarly();
+
+      try {
+        await runAppBootstrap({
+          initEventListeners,
+          fetchAuth,
+          loadSettings,
+          fetchServers,
+          fetchSystemInfo,
+          fetchVpnState,
+          refreshAuthProfile,
+          getSettings: () => useSettingsStore.getState().settings,
+          getAuthState: () => useAuthStore.getState().state,
+          getVpnState: () => useVpnStore.getState().state,
+          connectVpn,
+          checkForUpdates,
+        });
+      } catch (error) {
+        reportError("App bootstrap threw", error, {
+          dedupeKey: "app-bootstrap-init",
+        });
+        if (!disposed && useAuthStore.getState().isLoading) {
+          try {
+            await fetchAuth();
+          } catch {
+            useAuthStore.setState({ isLoading: false });
           }
         }
+      } finally {
+        window.clearTimeout(spinnerSafetyTimer);
       }
 
       if (disposed) {
@@ -108,6 +145,7 @@ function App() {
 
     return () => {
       disposed = true;
+      window.clearTimeout(spinnerSafetyTimer);
       void cleanupEventListeners();
     };
   }, [
