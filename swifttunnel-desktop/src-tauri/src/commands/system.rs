@@ -1023,7 +1023,7 @@ fn parse_windows_service_state(output: &str) -> Option<String> {
     None
 }
 
-#[cfg(windows)]
+#[cfg(any(test, windows))]
 #[derive(Clone, Debug)]
 struct WindowsRepairCommandOutput {
     success: bool,
@@ -1033,7 +1033,7 @@ struct WindowsRepairCommandOutput {
     stderr: String,
 }
 
-#[cfg(windows)]
+#[cfg(any(test, windows))]
 impl WindowsRepairCommandOutput {
     fn summary(&self, command_label: &str) -> String {
         if self.timed_out {
@@ -1149,7 +1149,7 @@ fn probe_windows_firewall() -> WindowsRepairCommandOutput {
 }
 
 #[cfg(windows)]
-fn firewall_backup_path() -> Result<PathBuf, String> {
+fn firewall_backup_path(extension: &str) -> Result<PathBuf, String> {
     let dir = program_data_swifttunnel_dir().join("firewall-backups");
     fs::create_dir_all(&dir).map_err(|e| {
         format!(
@@ -1178,8 +1178,9 @@ fn firewall_backup_path() -> Result<PathBuf, String> {
 
     for _ in 0..8 {
         let path = dir.join(format!(
-            "windows-firewall-before-reset-{}.wfw",
-            random_hex(12)?
+            "windows-firewall-before-reset-{}.{}",
+            random_hex(12)?,
+            extension
         ));
         if !path.exists() {
             return Ok(path);
@@ -1187,6 +1188,65 @@ fn firewall_backup_path() -> Result<PathBuf, String> {
     }
 
     Err("Failed to allocate a unique Windows Firewall backup path".to_string())
+}
+
+#[cfg(windows)]
+fn path_is_non_empty_file(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
+}
+
+#[cfg(any(test, windows))]
+fn firewall_registry_backup_summary(export_summary: &str, reg_export_summary: &str) -> String {
+    format!("export: {export_summary}\nregistry export fallback: {reg_export_summary}")
+}
+
+#[cfg(any(test, windows))]
+fn firewall_backup_failed_message(export_summary: &str, reg_export_summary: &str) -> String {
+    format!(
+        "Windows Firewall repair aborted because policy backup failed: {export_summary}; registry export fallback: {reg_export_summary}"
+    )
+}
+
+#[cfg(windows)]
+fn backup_windows_firewall_policy() -> Result<(String, String), String> {
+    let wfw_backup_path = firewall_backup_path("wfw")?;
+    let wfw_backup_path_string = wfw_backup_path.to_string_lossy().to_string();
+    let export = run_windows_repair_command(
+        "netsh",
+        &["advfirewall", "export", wfw_backup_path_string.as_str()],
+        Duration::from_secs(15),
+    );
+    let export_summary = export.summary("netsh advfirewall export");
+    if export.success && path_is_non_empty_file(&wfw_backup_path) {
+        return Ok((wfw_backup_path_string, format!("export: {export_summary}")));
+    }
+
+    let reg_backup_path = firewall_backup_path("reg")?;
+    let reg_backup_path_string = reg_backup_path.to_string_lossy().to_string();
+    let reg_export = run_windows_repair_command(
+        "reg",
+        &[
+            "export",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy",
+            reg_backup_path_string.as_str(),
+            "/y",
+        ],
+        Duration::from_secs(15),
+    );
+    let reg_export_summary = reg_export.summary("reg export firewall policy");
+    if reg_export.success && path_is_non_empty_file(&reg_backup_path) {
+        return Ok((
+            reg_backup_path_string,
+            firewall_registry_backup_summary(&export_summary, &reg_export_summary),
+        ));
+    }
+
+    Err(firewall_backup_failed_message(
+        &export_summary,
+        &reg_export_summary,
+    ))
 }
 
 #[cfg(windows)]
@@ -1326,20 +1386,8 @@ fn repair_windows_firewall_sync() -> Result<WindowsFirewallRepairResponse, Strin
     }
 
     let mut reset_output_parts = Vec::new();
-    let backup_path = firewall_backup_path()?;
-    let backup_path_string = backup_path.to_string_lossy().to_string();
-    let export = run_windows_repair_command(
-        "netsh",
-        &["advfirewall", "export", backup_path_string.as_str()],
-        Duration::from_secs(15),
-    );
-    let export_summary = export.summary("netsh advfirewall export");
-    reset_output_parts.push(format!("export: {export_summary}"));
-    if !export.success || !backup_path.is_file() {
-        return Err(format!(
-            "Windows Firewall repair aborted because policy backup failed: {export_summary}"
-        ));
-    };
+    let (backup_path_string, backup_summary) = backup_windows_firewall_policy()?;
+    reset_output_parts.push(backup_summary);
 
     let reset =
         run_windows_repair_command("netsh", &["advfirewall", "reset"], Duration::from_secs(15));
@@ -1806,6 +1854,30 @@ SERVICE_NAME: MpsSvc
         assert!(!response.supported);
         assert!(!response.after_available);
         assert!(!response.reset_attempted);
+    }
+
+    #[test]
+    fn firewall_registry_backup_summary_includes_primary_and_fallback_results() {
+        let summary = firewall_registry_backup_summary(
+            "The following command was not found: advfirewall export.",
+            "The operation completed successfully.",
+        );
+
+        assert!(summary.contains("export: The following command was not found"));
+        assert!(summary.contains("registry export fallback: The operation completed successfully"));
+    }
+
+    #[test]
+    fn firewall_backup_failed_message_reports_both_failed_backup_attempts() {
+        let message = firewall_backup_failed_message(
+            "The following command was not found: advfirewall export.",
+            "ERROR: Access is denied.",
+        );
+
+        assert!(message.contains("policy backup failed"));
+        assert!(message.contains("advfirewall export"));
+        assert!(message.contains("registry export fallback"));
+        assert!(message.contains("Access is denied"));
     }
 }
 
