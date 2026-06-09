@@ -121,7 +121,11 @@ jobs:
         run: cargo test -p swifttunnel-desktop -- --nocapture
 
   rust-arm64:
-    name: Rust Check (GitHub Windows ARM64)
+    name: Rust Check (Windows ARM64 native)
+    # Run natively on Windows ARM64. The default host toolchain targets
+    # aarch64-pc-windows-msvc, so there's no cross-compile import-lib pain
+    # (windows-rs resolves its native windows.lib instead of LNK1181) and the
+    # ARM64 tests actually execute instead of only compiling with --no-run.
     runs-on: windows-11-arm
     timeout-minutes: 60
 
@@ -138,7 +142,7 @@ jobs:
           ) | Where-Object { Test-Path $_ }
 
           if ($gitBashPaths.Count -eq 0) {
-            throw 'Git Bash was not found on the GitHub-hosted Windows ARM64 runner.'
+            throw 'Git Bash was not found on the GitHub-hosted Windows runner.'
           }
 
           foreach ($path in $gitBashPaths) {
@@ -151,22 +155,30 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-pc-windows-msvc
+          components: rustfmt
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Check core
-        run: cargo check -p swifttunnel-core --target aarch64-pc-windows-msvc
+        run: cargo check -p swifttunnel-core
 
       - name: Check desktop backend
-        run: cargo check -p swifttunnel-desktop --target aarch64-pc-windows-msvc
+        run: cargo check -p swifttunnel-desktop
 
       - name: Test core
-        run: cargo test -p swifttunnel-core --target aarch64-pc-windows-msvc -- --nocapture
+        run: cargo test -p swifttunnel-core -- --nocapture
 
       - name: Test desktop backend
-        run: cargo test -p swifttunnel-desktop --target aarch64-pc-windows-msvc -- --nocapture
+        run: cargo test -p swifttunnel-desktop -- --nocapture
 
   split-tunnel-testbench-availability:
     name: Split Tunnel Testbench Availability
