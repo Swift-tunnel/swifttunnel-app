@@ -3,6 +3,7 @@ use std::process::Output;
 use tauri::{AppHandle, Manager, State};
 
 use crate::state::AppState;
+use swifttunnel_core::roblox_proxy::goodbyedpi::CountryBanBypassSyncOutcome;
 use swifttunnel_core::settings::AppSettings;
 
 use serde::Serialize;
@@ -58,37 +59,40 @@ pub async fn settings_save(
     let country_ban_bypass = state.country_ban_bypass.clone();
     let app_handle = app.clone();
 
-    let country_ban_outcome = tauri::async_runtime::spawn_blocking(move || {
-        let mut new_settings = settings;
-        new_settings.sanitize_in_place();
-        swifttunnel_core::settings::save_settings(&new_settings)?;
-        let enable_country_ban = new_settings.enable_country_ban;
+    let country_ban_outcome = tauri::async_runtime::spawn_blocking(
+        move || -> Result<CountryBanBypassSyncOutcome, String> {
+            let mut new_settings = settings;
+            new_settings.sanitize_in_place();
+            swifttunnel_core::settings::save_settings(&new_settings)?;
+            let enable_country_ban = new_settings.enable_country_ban;
 
-        {
-            let mut discord = discord_manager.lock();
-            discord.set_enabled(new_settings.enable_discord_rpc);
-        }
+            {
+                let mut discord = discord_manager.lock();
+                discord.set_enabled(new_settings.enable_discord_rpc);
+            }
 
-        let run_on_startup = {
-            let mut s = settings_arc.lock();
-            *s = new_settings;
-            s.run_on_startup
-        };
+            let run_on_startup = {
+                let mut s = settings_arc.lock();
+                *s = new_settings;
+                s.run_on_startup
+            };
 
-        if let Err(e) = crate::autostart::sync_run_on_startup(&app_handle, run_on_startup) {
-            log::warn!(
-                "Failed to sync startup registration after settings save: {}",
-                e
-            );
-        }
+            if let Err(e) = crate::autostart::sync_run_on_startup(&app_handle, run_on_startup) {
+                log::warn!(
+                    "Failed to sync startup registration after settings save: {}",
+                    e
+                );
+            }
 
-        let country_ban_outcome = crate::commands::country_ban::sync_country_ban_bypass_controller(
-            &country_ban_bypass,
-            enable_country_ban,
-        );
+            let country_ban_outcome =
+                crate::commands::country_ban::sync_country_ban_bypass_controller(
+                    &country_ban_bypass,
+                    enable_country_ban,
+                );
 
-        Ok(country_ban_outcome)
-    })
+            Ok(country_ban_outcome)
+        },
+    )
     .await
     .map_err(|e| format!("Settings save task failed: {}", e))??;
 
