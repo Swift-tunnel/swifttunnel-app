@@ -1,12 +1,12 @@
 //! IPv6 leak-prevention crash recovery
 //!
-//! While connected, SwiftTunnel installs a Windows Firewall rule that blocks
-//! outbound IPv6. The marker file records that we did so (and which method we
-//! used) so a startup recovery pass can clean up after a crash without
-//! guessing at adapter state. Old installations used a different method
-//! (`Disable-NetAdapterBinding ms_tcpip6`); we keep the deserialization shape
-//! backwards-compatible so an upgrade across that boundary still recovers
-//! cleanly.
+//! While connected, SwiftTunnel installs a WinpkFilter static drop filter that
+//! blocks outbound public IPv6/NAT64. The marker file records that we did so
+//! (and which method we used) so a startup recovery pass can clean up after a
+//! crash without guessing at adapter state. Old installations used different
+//! methods (`Disable-NetAdapterBinding ms_tcpip6` and a Windows Firewall rule);
+//! we keep the deserialization shape backwards-compatible so an upgrade across
+//! those boundaries still recovers cleanly.
 
 pub const IPV6_BLOCK_RULE_NAME: &str = "SwiftTunnel-Block-IPv6-Outbound";
 pub const IPV6_BLOCK_REMOTE_IPS: &str = "2000::/3,64:ff9b::/96";
@@ -29,10 +29,14 @@ pub enum DisableMethod {
     /// markers that predate the method field.
     #[default]
     BindingDisable,
-    /// Current method: a Windows Firewall outbound block rule named
+    /// Intermediate method: a Windows Firewall outbound block rule named
     /// [`IPV6_BLOCK_RULE_NAME`] that drops public IPv6/NAT64 traffic. No
     /// adapter rebind, no WMI involvement.
     FirewallRule,
+    /// Current method: WinpkFilter static filters drop outbound public
+    /// IPv6/NAT64 traffic on the selected adapter. No Windows Firewall policy
+    /// writes and no adapter rebind.
+    WinpkFilterStaticFilter,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +61,14 @@ impl Ipv6Marker {
             adapter_name,
             originally_enabled: None,
             method: DisableMethod::FirewallRule,
+        }
+    }
+
+    pub(crate) fn for_winpkfilter_static_filter(adapter_name: String) -> Self {
+        Self {
+            adapter_name,
+            originally_enabled: None,
+            method: DisableMethod::WinpkFilterStaticFilter,
         }
     }
 
@@ -92,6 +104,9 @@ impl Ipv6Marker {
         "#,
                 IPV6_BLOCK_RULE_NAME
             ),
+            DisableMethod::WinpkFilterStaticFilter => {
+                "Write-Host 'WinpkFilter IPv6 filters are restored natively'".to_string()
+            }
             DisableMethod::BindingDisable => match self.originally_enabled {
                 Some(false) => {
                     "Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false 2>$null".to_string()
@@ -264,10 +279,18 @@ pub fn write_ipv6_marker(adapter_name: &str) {
 }
 
 /// Write a marker indicating the firewall-rule method was used to block IPv6.
-/// Used by the modern disable path so a crash-recovery pass can run
+/// Kept for legacy callers/markers so crash recovery can still run
 /// `netsh advfirewall firewall delete rule` to clean up.
 pub fn write_ipv6_marker_firewall(adapter_name: &str) {
     let marker = Ipv6Marker::for_firewall_rule(adapter_name.trim().to_string());
+    write_marker(&marker);
+}
+
+/// Write a marker indicating WinpkFilter static filters were used to block
+/// IPv6. Used by the modern disable path so a crash-recovery pass can clear
+/// the driver filter table.
+pub fn write_ipv6_marker_winpkfilter(adapter_name: &str) {
+    let marker = Ipv6Marker::for_winpkfilter_static_filter(adapter_name.trim().to_string());
     write_marker(&marker);
 }
 
@@ -400,9 +423,47 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
     true
 }
 
+#[cfg(target_os = "windows")]
+pub fn reset_winpkfilter_ipv6_block_filters() -> Result<(), String> {
+    let driver = ndisapi::Ndisapi::new("NDISRD")
+        .map_err(|e| format!("Failed to open WinpkFilter driver: {e}"))?;
+    driver
+        .reset_packet_filter_table()
+        .map_err(|e| format!("Failed to reset WinpkFilter static filter table: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn reset_winpkfilter_ipv6_block_filters() -> Result<(), String> {
+    Err("WinpkFilter IPv6 filter cleanup is only available on Windows.".to_string())
+}
+
+fn restore_winpkfilter_static_filter_marker(adapter_name: &str) -> bool {
+    match reset_winpkfilter_ipv6_block_filters() {
+        Ok(()) => {
+            log::info!(
+                "WinpkFilter IPv6 block filters cleared successfully for adapter: {}",
+                adapter_name
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to clear WinpkFilter IPv6 block filters for adapter {}: {}",
+                adapter_name,
+                e
+            );
+            false
+        }
+    }
+}
+
 fn restore_ipv6_for_marker(marker: &Ipv6Marker) -> bool {
     if marker.method() == &DisableMethod::FirewallRule {
         return restore_firewall_rule_marker(marker.adapter_name());
+    }
+    if marker.method() == &DisableMethod::WinpkFilterStaticFilter {
+        return restore_winpkfilter_static_filter_marker(marker.adapter_name());
     }
 
     let script = build_restore_script(marker);
@@ -498,6 +559,16 @@ mod tests {
         assert!(cmd.contains("netsh.exe advfirewall firewall delete rule"));
         assert!(cmd.contains("netsh.exe advfirewall firewall show rule"));
         assert!(cmd.contains("exit 1"));
+    }
+
+    #[test]
+    fn test_winpkfilter_static_filter_marker_round_trips() {
+        let marker = Ipv6Marker::for_winpkfilter_static_filter("Ethernet".to_string());
+        let payload = serde_json::to_vec(&marker).unwrap();
+        let decoded: Ipv6Marker = serde_json::from_slice(&payload).unwrap();
+
+        assert_eq!(decoded.method(), &DisableMethod::WinpkFilterStaticFilter);
+        assert_eq!(decoded.adapter_name(), "Ethernet");
     }
 
     #[test]
