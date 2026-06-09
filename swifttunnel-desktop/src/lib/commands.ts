@@ -19,6 +19,7 @@ import type {
   BufferbloatResultResponse,
   AdminCheckResponse,
   DriverCheckResponse,
+  WindowsFirewallRepairResponse,
   BoostUpdateResult,
   NetworkDiagnosticsBundleResponse,
   UpdaterCheckResponse,
@@ -175,6 +176,9 @@ export const systemInstallDriver = (force = false) =>
 
 export const systemRepairDriver = () =>
   invoke<DriverCheckResponse>("system_repair_driver");
+
+export const systemRepairWindowsFirewall = () =>
+  invoke<WindowsFirewallRepairResponse>("system_repair_windows_firewall");
 
 export const systemCleanup = () =>
   invoke<void>("system_cleanup");

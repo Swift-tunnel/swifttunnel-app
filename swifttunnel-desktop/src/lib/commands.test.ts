@@ -19,6 +19,7 @@ import {
   systemRestartAsAdmin,
   systemInstallDriver,
   systemRepairDriver,
+  systemRepairWindowsFirewall,
   systemRepairStartupRegistration,
   systemRestoreStartupRegistration,
   updaterCheckChannel,
@@ -86,6 +87,27 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(resp);
     await expect(systemRepairDriver()).resolves.toEqual(resp);
     expect(invoke).toHaveBeenCalledWith("system_repair_driver");
+  });
+
+  it("systemRepairWindowsFirewall invokes backend", async () => {
+    const resp = {
+      supported: true,
+      is_admin: true,
+      before_available: false,
+      after_available: true,
+      reset_attempted: true,
+      reset_succeeded: true,
+      reboot_recommended: false,
+      backup_path: "C:\\ProgramData\\SwiftTunnel\\firewall-backups\\before.wfw",
+      message: "Windows Firewall policy reset repaired advfirewall commands.",
+      probe_before: "The following command was not found: advfirewall.",
+      probe_after: "Domain Profile Settings",
+      reset_output: "Ok.",
+      services: [],
+    };
+    invoke.mockResolvedValue(resp);
+    await expect(systemRepairWindowsFirewall()).resolves.toEqual(resp);
+    expect(invoke).toHaveBeenCalledWith("system_repair_windows_firewall");
   });
 
   it("systemCleanup invokes backend", async () => {

@@ -10,6 +10,7 @@ import type {
   DiagnosticsResponse,
   DriverCheckResponse,
   VpnStateResponse,
+  WindowsFirewallRepairResponse,
 } from "./types";
 
 const readyDriver: DriverCheckResponse = {
@@ -66,6 +67,39 @@ const errorDiagnostics: DiagnosticsResponse = {
   last_validation_result: "error",
 };
 
+const healthyFirewall: WindowsFirewallRepairResponse = {
+  supported: true,
+  is_admin: true,
+  before_available: true,
+  after_available: true,
+  reset_attempted: false,
+  reset_succeeded: false,
+  reboot_recommended: false,
+  backup_path: null,
+  message: "Windows Firewall already accepts advfirewall commands.",
+  probe_before: "Domain Profile Settings",
+  probe_after: "not needed",
+  reset_output: null,
+  services: [
+    {
+      name: "BFE",
+      display_name: "Base Filtering Engine",
+      state: "RUNNING",
+      start_attempted: false,
+      start_succeeded: false,
+      message: "service already running",
+    },
+    {
+      name: "MpsSvc",
+      display_name: "Windows Defender Firewall",
+      state: "RUNNING",
+      start_attempted: false,
+      start_succeeded: false,
+      message: "service already running",
+    },
+  ],
+};
+
 function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
   return {
     now: () => 1_800_000_000_000,
@@ -79,6 +113,7 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
     }),
     systemIsAdmin: vi.fn().mockResolvedValue({ is_admin: true }),
     systemRepairDriver: vi.fn().mockResolvedValue(readyDriver),
+    systemRepairWindowsFirewall: vi.fn().mockResolvedValue(healthyFirewall),
     systemRepairStartupRegistration: vi.fn().mockResolvedValue({
       exists: true,
       value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",
@@ -334,6 +369,74 @@ describe("repair center logic", () => {
     expect(report.entries).toContainEqual({
       label: "Cleanup",
       value: "cleanup denied",
+      tone: "bad",
+    });
+  });
+
+  it("repairs Windows Firewall when advfirewall is restored after reset", async () => {
+    const deps = makeDeps({
+      systemRepairWindowsFirewall: vi.fn().mockResolvedValue({
+        ...healthyFirewall,
+        before_available: false,
+        reset_attempted: true,
+        reset_succeeded: true,
+        backup_path:
+          "C:\\ProgramData\\SwiftTunnel\\firewall-backups\\windows-firewall-before-reset.wfw",
+        message: "Windows Firewall policy reset repaired advfirewall commands.",
+        probe_before:
+          "The following command was not found: advfirewall firewall add rule.",
+        probe_after: "Domain Profile Settings",
+        reset_output: "Ok.",
+      }),
+    });
+
+    const report = await runRepairIssue("windows_firewall", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("fixed");
+    expect(report.changed).toBe(true);
+    expect(report.nextStep).toContain("Try connecting again");
+    expect(report.entries).toContainEqual({
+      label: "Reset",
+      value: "completed",
+      tone: "good",
+    });
+    expect(report.entries).toContainEqual({
+      label: "After advfirewall",
+      value: "available",
+      tone: "good",
+    });
+  });
+
+  it("does not report fixed for a superficially similar unrepaired advfirewall error", async () => {
+    const deps = makeDeps({
+      systemRepairWindowsFirewall: vi.fn().mockResolvedValue({
+        ...healthyFirewall,
+        before_available: false,
+        after_available: false,
+        reset_attempted: true,
+        reset_succeeded: false,
+        message: "Windows Firewall repair did not restore advfirewall commands.",
+        probe_before:
+          "The following command was not found: advfirewall firewall add rule.",
+        probe_after:
+          "The following command was not found: advfirewall firewall show rule.",
+        reset_output:
+          "The following command was not found: advfirewall reset export.",
+      }),
+    });
+
+    const report = await runRepairIssue("windows_firewall", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.changed).toBe(true);
+    expect(report.nextStep).toContain("DISM /Online /Cleanup-Image /RestoreHealth");
+    expect(report.entries).toContainEqual({
+      label: "After advfirewall",
+      value: "missing",
       tone: "bad",
     });
   });

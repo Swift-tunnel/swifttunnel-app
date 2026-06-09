@@ -410,6 +410,31 @@ export interface DriverCheckResponse {
     | string;
 }
 
+export interface WindowsFirewallServiceStatus {
+  name: string;
+  display_name: string;
+  state: string;
+  start_attempted: boolean;
+  start_succeeded: boolean;
+  message: string;
+}
+
+export interface WindowsFirewallRepairResponse {
+  supported: boolean;
+  is_admin: boolean;
+  before_available: boolean;
+  after_available: boolean;
+  reset_attempted: boolean;
+  reset_succeeded: boolean;
+  reboot_recommended: boolean;
+  backup_path: string | null;
+  message: string;
+  probe_before: string;
+  probe_after: string;
+  reset_output: string | null;
+  services: WindowsFirewallServiceStatus[];
+}
+
 // ── Events ──
 
 export interface VpnStateEvent {
