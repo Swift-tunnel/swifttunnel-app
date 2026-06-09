@@ -21,6 +21,7 @@ const APP_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/ic
 fn sync_runtime_assets(app: &tauri::App) {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use swifttunnel_core::vpn::winpkfilter::WinpkFilterMsiArch;
 
     fn first_existing(candidates: Vec<PathBuf>) -> Option<PathBuf> {
         candidates.into_iter().find(|p| p.exists())
@@ -105,49 +106,56 @@ fn sync_runtime_assets(app: &tauri::App) {
         }
     };
 
-    let targets: Vec<(&str, Option<PathBuf>, PathBuf)> = vec![
+    let native_arch = swifttunnel_core::vpn::winpkfilter::detect_native_arch();
+    let mut targets: Vec<(&str, Option<PathBuf>, PathBuf)> = vec![{
+        let msi_name = swifttunnel_core::vpn::winpkfilter::native_msi_package().msi_name;
         (
-            "wintun.dll",
+            msi_name,
             first_existing(vec![
-                resource_dir.join("drivers").join("wintun.dll"),
-                resource_dir.join("wintun.dll"),
+                resource_dir.join("drivers").join(msi_name),
+                resource_dir.join(msi_name),
             ]),
-            exe_dir.join("wintun.dll"),
-        ),
-        {
-            let msi_name = swifttunnel_core::vpn::winpkfilter::native_msi_package().msi_name;
+            exe_dir.join("drivers").join(msi_name),
+        )
+    }];
+
+    if native_arch == WinpkFilterMsiArch::Arm64 {
+        log::debug!("Skipping x64-only legacy driver runtime assets on Windows ARM64");
+    } else {
+        targets.extend([
             (
-                msi_name,
+                "wintun.dll",
                 first_existing(vec![
-                    resource_dir.join("drivers").join(msi_name),
-                    resource_dir.join(msi_name),
+                    resource_dir.join("drivers").join("wintun.dll"),
+                    resource_dir.join("wintun.dll"),
                 ]),
-                exe_dir.join("drivers").join(msi_name),
-            )
-        },
-        (
-            "winfw.dll",
-            first_existing(vec![resource_dir.join("drivers").join("winfw.dll")]),
-            exe_dir.join("drivers").join("winfw.dll"),
-        ),
-        (
-            "mullvad-split-tunnel.sys",
-            first_existing(vec![
-                resource_dir
-                    .join("drivers")
-                    .join("mullvad-split-tunnel.sys"),
-            ]),
-            exe_dir.join("drivers").join("mullvad-split-tunnel.sys"),
-        ),
-        (
-            "nvidiaProfileInspector",
-            first_existing(vec![
-                resource_dir.join("tools").join("nvidiaProfileInspector"),
-                resource_dir.join("nvidiaProfileInspector"),
-            ]),
-            exe_dir.join("tools").join("nvidiaProfileInspector"),
-        ),
-    ];
+                exe_dir.join("wintun.dll"),
+            ),
+            (
+                "winfw.dll",
+                first_existing(vec![resource_dir.join("drivers").join("winfw.dll")]),
+                exe_dir.join("drivers").join("winfw.dll"),
+            ),
+            (
+                "mullvad-split-tunnel.sys",
+                first_existing(vec![
+                    resource_dir
+                        .join("drivers")
+                        .join("mullvad-split-tunnel.sys"),
+                ]),
+                exe_dir.join("drivers").join("mullvad-split-tunnel.sys"),
+            ),
+        ]);
+    }
+
+    targets.push((
+        "nvidiaProfileInspector",
+        first_existing(vec![
+            resource_dir.join("tools").join("nvidiaProfileInspector"),
+            resource_dir.join("nvidiaProfileInspector"),
+        ]),
+        exe_dir.join("tools").join("nvidiaProfileInspector"),
+    ));
 
     for (name, source, destination) in targets {
         let Some(source) = source else {

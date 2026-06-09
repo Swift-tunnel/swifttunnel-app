@@ -120,6 +120,66 @@ jobs:
       - name: Test desktop backend
         run: cargo test -p swifttunnel-desktop -- --nocapture
 
+  rust-arm64:
+    name: Rust Check (Windows ARM64 native)
+    # Run natively on Windows ARM64. The default host toolchain targets
+    # aarch64-pc-windows-msvc, so there's no cross-compile import-lib pain
+    # (windows-rs resolves its native windows.lib instead of LNK1181) and the
+    # ARM64 tests actually execute instead of only compiling with --no-run.
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Ensure Git Bash
+        shell: powershell
+        run: |
+          $gitBashPaths = @(
+            'C:\Program Files\Git\bin',
+            'C:\Program Files\Git\usr\bin'
+          ) | Where-Object { Test-Path $_ }
+
+          if ($gitBashPaths.Count -eq 0) {
+            throw 'Git Bash was not found on the GitHub-hosted Windows runner.'
+          }
+
+          foreach ($path in $gitBashPaths) {
+            $path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            $env:Path = "$path;$env:Path"
+          }
+
+          bash --version
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check core
+        run: cargo check -p swifttunnel-core
+
+      - name: Check desktop backend
+        run: cargo check -p swifttunnel-desktop
+
+      - name: Test core
+        run: cargo test -p swifttunnel-core -- --nocapture
+
+      - name: Test desktop backend
+        run: cargo test -p swifttunnel-desktop -- --nocapture
+
   split-tunnel-testbench-availability:
     name: Split Tunnel Testbench Availability
     runs-on: ubuntu-latest
@@ -188,7 +248,11 @@ jobs:
           git clean -ffdx -e target/ -e swifttunnel-desktop/src-tauri/target/
           $bundleDirs = @(
             "target/release/bundle",
-            "swifttunnel-desktop/src-tauri/target/release/bundle"
+            "target/x86_64-pc-windows-msvc/release/bundle",
+            "target/aarch64-pc-windows-msvc/release/bundle",
+            "swifttunnel-desktop/src-tauri/target/release/bundle",
+            "swifttunnel-desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle",
+            "swifttunnel-desktop/src-tauri/target/aarch64-pc-windows-msvc/release/bundle"
           )
           Remove-Item -Path $bundleDirs -Recurse -Force -ErrorAction SilentlyContinue
 

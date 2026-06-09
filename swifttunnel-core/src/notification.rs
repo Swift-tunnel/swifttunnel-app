@@ -6,7 +6,7 @@
 #[cfg(windows)]
 use std::path::Path;
 #[cfg(windows)]
-use winrt_notification::{Duration, IconCrop, Sound, Toast};
+use tauri_winrt_notification::{Duration, IconCrop, Sound, Toast};
 
 /// SwiftTunnel's App User Model ID for Windows notifications.
 /// Only works when the app is installed with a matching Start menu shortcut.

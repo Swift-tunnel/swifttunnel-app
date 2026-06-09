@@ -19,6 +19,13 @@ const ROBLOX_REACHABILITY_TARGET: (&str, u16) = ("www.roblox.com", 443);
 const GOODBYEDPI_MODE_STARTUP_WAIT: Duration = Duration::from_secs(3);
 const ROBLOX_REACHABILITY_TIMEOUT: Duration = Duration::from_millis(1500);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoodbyeDpiNativeArch {
+    X86,
+    X64,
+    Arm64,
+}
+
 #[derive(Debug)]
 #[must_use = "dropping GoodbyeDpiGuard stops the GoodbyeDPI subprocess"]
 pub struct GoodbyeDpiGuard {
@@ -72,6 +79,15 @@ impl Drop for GoodbyeDpiGuard {
 pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
     if !cfg!(windows) {
         debug!("GoodbyeDPI helper skipped: supported only on Windows");
+        return Ok(None);
+    }
+
+    let native_arch = current_goodbyedpi_native_arch();
+    if !bundled_goodbyedpi_supports_arch(native_arch) {
+        warn!(
+            "GoodbyeDPI helper skipped: bundled WinDivert payload is not compatible with {:?}",
+            native_arch
+        );
         return Ok(None);
     }
 
@@ -145,6 +161,23 @@ pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
         "GoodbyeDPI could not make Roblox reachable after trying modes -1 through -9 ({})",
         failures.join("; ")
     ))
+}
+
+fn current_goodbyedpi_native_arch() -> GoodbyeDpiNativeArch {
+    match crate::vpn::winpkfilter::detect_native_arch() {
+        crate::vpn::winpkfilter::WinpkFilterMsiArch::X64 => {
+            if cfg!(all(windows, target_arch = "x86")) {
+                GoodbyeDpiNativeArch::X86
+            } else {
+                GoodbyeDpiNativeArch::X64
+            }
+        }
+        crate::vpn::winpkfilter::WinpkFilterMsiArch::Arm64 => GoodbyeDpiNativeArch::Arm64,
+    }
+}
+
+pub(crate) fn bundled_goodbyedpi_supports_arch(arch: GoodbyeDpiNativeArch) -> bool {
+    matches!(arch, GoodbyeDpiNativeArch::X86 | GoodbyeDpiNativeArch::X64)
 }
 
 fn locate_goodbyedpi_executable() -> Option<PathBuf> {
@@ -379,5 +412,18 @@ mod tests {
         assert!(paths.contains(&PathBuf::from(
             "C:/Program Files/SwiftTunnel/tools/goodbyedpi/x86_64/goodbyedpi.exe"
         )));
+    }
+
+    #[test]
+    fn bundled_goodbyedpi_supports_x86_and_x64_payloads() {
+        assert!(bundled_goodbyedpi_supports_arch(GoodbyeDpiNativeArch::X86));
+        assert!(bundled_goodbyedpi_supports_arch(GoodbyeDpiNativeArch::X64));
+    }
+
+    #[test]
+    fn bundled_goodbyedpi_rejects_arm64_payloads() {
+        assert!(!bundled_goodbyedpi_supports_arch(
+            GoodbyeDpiNativeArch::Arm64
+        ));
     }
 }
