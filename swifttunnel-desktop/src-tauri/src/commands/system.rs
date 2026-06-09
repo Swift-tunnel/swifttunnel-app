@@ -1023,7 +1023,7 @@ fn parse_windows_service_state(output: &str) -> Option<String> {
     None
 }
 
-#[cfg(any(test, windows))]
+#[cfg(windows)]
 #[derive(Clone, Debug)]
 struct WindowsRepairCommandOutput {
     success: bool,
@@ -1033,7 +1033,7 @@ struct WindowsRepairCommandOutput {
     stderr: String,
 }
 
-#[cfg(any(test, windows))]
+#[cfg(windows)]
 impl WindowsRepairCommandOutput {
     fn summary(&self, command_label: &str) -> String {
         if self.timed_out {
