@@ -442,6 +442,25 @@ pub async fn vpn_connect(
         discord.set_connecting(&connect_region);
     }
 
+    if enable_country_ban {
+        let controller = state.country_ban_bypass.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            crate::commands::country_ban::sync_country_ban_bypass_controller(&controller, true)
+        })
+        .await
+        {
+            Ok(outcome) => crate::commands::country_ban::log_and_emit_country_ban_bypass_outcome(
+                &app,
+                "vpn connect",
+                &outcome,
+            ),
+            Err(e) => {
+                log::warn!("Country ban bypass sync task failed before VPN connect: {e}");
+                let _ = app.emit(COUNTRY_BAN_BYPASS_UNAVAILABLE, ());
+            }
+        }
+    }
+
     // Get access token
     let access_token = {
         let auth = state.auth_manager.lock().await;
@@ -469,12 +488,10 @@ pub async fn vpn_connect(
             binding_preference,
             game_process_performance,
             enable_api_tunneling,
-            enable_country_ban,
+            false,
         ),
     )
     .await;
-
-    let country_ban_bypass_failure = vpn.take_country_ban_bypass_failure();
 
     let mut connect_ban_reason = None;
     let result = match connect_result {
@@ -507,13 +524,6 @@ pub async fn vpn_connect(
             Err(message)
         }
     };
-
-    if result.is_ok() {
-        if let Some(reason) = country_ban_bypass_failure {
-            log::warn!("Country ban bypass unavailable after connect: {reason}");
-            let _ = app.emit(COUNTRY_BAN_BYPASS_UNAVAILABLE, ());
-        }
-    }
 
     if result.is_ok() {
         // Publish the inner split-tunnel driver handle so polling commands

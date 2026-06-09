@@ -120,6 +120,9 @@ pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
     if let Err(e) = crate::commands::vpn::disconnect_and_persist(state).await {
         log::warn!("Failed to disconnect VPN after ban detection: {}", e);
     }
+    if crate::commands::country_ban::stop_country_ban_bypass_controller(state) {
+        log::info!("Stopped country ban bypass helper after ban detection");
+    }
 
     let roblox_pid = {
         let mut monitor = state.performance_monitor.lock();

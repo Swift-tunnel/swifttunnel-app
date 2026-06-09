@@ -419,7 +419,7 @@ export function BoostTab() {
         <SettingRow
           title="Bypass Country Bans"
           desc="Local DPI bypass for Roblox website/login and app"
-          tooltip="Starts SwiftTunnel's scoped GoodbyeDPI helper on the next connect. It is separate from Route Assist and does not route traffic through relays."
+          tooltip="Starts SwiftTunnel's scoped GoodbyeDPI helper for Roblox hostnames. It works without connecting the VPN and does not route traffic through relays."
           enabled={draftCountryBan}
           onChange={setDraftCountryBan}
         />

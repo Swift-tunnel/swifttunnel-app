@@ -469,7 +469,13 @@ pub fn run() {
                 reapply_saved_roblox_fflags(&app_state);
             }
 
-            let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
+            let (run_on_startup_enabled, country_ban_enabled) = {
+                let settings = app_state.settings.lock();
+                (
+                    settings.run_on_startup,
+                    !account_is_banned && settings.enable_country_ban,
+                )
+            };
             let vpn_state_rx = app_state.vpn_state_handle.clone();
             app.manage(app_state);
 
@@ -483,6 +489,20 @@ pub fn run() {
 
             if let Err(e) = autostart::sync_run_on_startup(app.handle(), run_on_startup_enabled) {
                 log::warn!("Failed to sync startup registration: {}", e);
+            }
+
+            if country_ban_enabled {
+                let app_handle = app.handle().clone();
+                runtime.spawn(async move {
+                    if let Some(state) = app_handle.try_state::<AppState>() {
+                        commands::country_ban::sync_country_ban_bypass_from_state(
+                            &app_handle,
+                            &state,
+                            "startup",
+                        )
+                        .await;
+                    }
+                });
             }
 
             // Window starts hidden via tauri.conf.json ("visible": false).
@@ -577,6 +597,9 @@ pub fn run() {
                     recover_stale_network_state();
                     // Restore network booster modifications (registry, MTU, firewall)
                     if let Some(state) = _app.try_state::<crate::state::AppState>() {
+                        if commands::country_ban::stop_country_ban_bypass_controller(&state) {
+                            log::info!("Stopped country ban bypass helper on app exit");
+                        }
                         let roblox_pid = {
                             let mut monitor = state.performance_monitor.lock();
                             monitor.get_roblox_pid().unwrap_or(0)

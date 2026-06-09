@@ -55,12 +55,14 @@ pub async fn settings_save(
 ) -> Result<(), String> {
     let settings_arc = state.settings.clone();
     let discord_manager = state.discord_manager.clone();
+    let country_ban_bypass = state.country_ban_bypass.clone();
     let app_handle = app.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let country_ban_outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut new_settings = settings;
         new_settings.sanitize_in_place();
         swifttunnel_core::settings::save_settings(&new_settings)?;
+        let enable_country_ban = new_settings.enable_country_ban;
 
         {
             let mut discord = discord_manager.lock();
@@ -80,10 +82,23 @@ pub async fn settings_save(
             );
         }
 
-        Ok(())
+        let country_ban_outcome = crate::commands::country_ban::sync_country_ban_bypass_controller(
+            &country_ban_bypass,
+            enable_country_ban,
+        );
+
+        Ok(country_ban_outcome)
     })
     .await
-    .map_err(|e| format!("Settings save task failed: {}", e))?
+    .map_err(|e| format!("Settings save task failed: {}", e))??;
+
+    crate::commands::country_ban::log_and_emit_country_ban_bypass_outcome(
+        &app,
+        "settings save",
+        &country_ban_outcome,
+    );
+
+    Ok(())
 }
 
 fn current_timestamp_utc() -> String {

@@ -7,6 +7,7 @@ use swifttunnel_core::discord_rpc::DiscordManager;
 use swifttunnel_core::network_booster::NetworkBooster;
 use swifttunnel_core::performance_monitor::PerformanceMonitor;
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
+use swifttunnel_core::roblox_proxy::goodbyedpi::CountryBanBypassController;
 use swifttunnel_core::settings::AppSettings;
 use swifttunnel_core::system_optimizer::SystemOptimizer;
 use swifttunnel_core::vpn::SplitTunnelDriver;
@@ -44,6 +45,7 @@ pub struct AppState {
     pub system_optimizer: Arc<Mutex<SystemOptimizer>>,
     pub roblox_optimizer: Arc<Mutex<RobloxOptimizer>>,
     pub network_booster: Arc<Mutex<NetworkBooster>>,
+    pub country_ban_bypass: Arc<Mutex<CountryBanBypassController>>,
     pub discord_manager: Arc<Mutex<DiscordManager>>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub launched_from_startup: bool,
@@ -87,6 +89,7 @@ impl AppState {
             system_optimizer: Arc::new(Mutex::new(SystemOptimizer::new())),
             roblox_optimizer: Arc::new(Mutex::new(roblox_optimizer)),
             network_booster: Arc::new(Mutex::new(NetworkBooster::new())),
+            country_ban_bypass: Arc::new(Mutex::new(CountryBanBypassController::new())),
             discord_manager: Arc::new(Mutex::new(DiscordManager::new(enable_discord_rpc))),
             runtime,
             launched_from_startup,

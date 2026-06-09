@@ -69,6 +69,108 @@ impl Drop for GoodbyeDpiGuard {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CountryBanBypassSyncOutcome {
+    Started,
+    AlreadyRunning,
+    Stopped,
+    AlreadyStopped,
+    Unavailable(String),
+    Failed(String),
+}
+
+pub trait CountryBanBypassLauncher {
+    type Guard;
+
+    fn start_for_roblox(&mut self) -> Result<Option<Self::Guard>, String>;
+    fn stop(&mut self, guard: &mut Self::Guard);
+}
+
+#[derive(Debug, Default)]
+pub struct GoodbyeDpiLauncher;
+
+impl CountryBanBypassLauncher for GoodbyeDpiLauncher {
+    type Guard = GoodbyeDpiGuard;
+
+    fn start_for_roblox(&mut self) -> Result<Option<Self::Guard>, String> {
+        start_for_roblox()
+    }
+
+    fn stop(&mut self, guard: &mut Self::Guard) {
+        guard.stop();
+    }
+}
+
+#[derive(Debug)]
+pub struct CountryBanBypassController<L: CountryBanBypassLauncher = GoodbyeDpiLauncher> {
+    launcher: L,
+    guard: Option<L::Guard>,
+}
+
+impl CountryBanBypassController<GoodbyeDpiLauncher> {
+    pub fn new() -> Self {
+        Self {
+            launcher: GoodbyeDpiLauncher,
+            guard: None,
+        }
+    }
+}
+
+impl Default for CountryBanBypassController<GoodbyeDpiLauncher> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<L: CountryBanBypassLauncher> CountryBanBypassController<L> {
+    #[cfg(test)]
+    fn with_launcher(launcher: L) -> Self {
+        Self {
+            launcher,
+            guard: None,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.guard.is_some()
+    }
+
+    pub fn sync(&mut self, enabled: bool) -> CountryBanBypassSyncOutcome {
+        match (enabled, self.guard.is_some()) {
+            (true, true) => CountryBanBypassSyncOutcome::AlreadyRunning,
+            (false, false) => CountryBanBypassSyncOutcome::AlreadyStopped,
+            (false, true) => {
+                self.stop();
+                CountryBanBypassSyncOutcome::Stopped
+            }
+            (true, false) => match self.launcher.start_for_roblox() {
+                Ok(Some(guard)) => {
+                    self.guard = Some(guard);
+                    CountryBanBypassSyncOutcome::Started
+                }
+                Ok(None) => CountryBanBypassSyncOutcome::Unavailable(
+                    "Bypass country bans helper unavailable; Roblox traffic will continue without GoodbyeDPI".to_string(),
+                ),
+                Err(e) => CountryBanBypassSyncOutcome::Failed(e),
+            },
+        }
+    }
+
+    pub fn stop(&mut self) -> bool {
+        let Some(mut guard) = self.guard.take() else {
+            return false;
+        };
+        self.launcher.stop(&mut guard);
+        true
+    }
+}
+
+impl<L: CountryBanBypassLauncher> Drop for CountryBanBypassController<L> {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
     if !cfg!(windows) {
         debug!("GoodbyeDPI helper skipped: supported only on Windows");
@@ -338,6 +440,42 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Debug)]
+    struct FakeGuard;
+
+    #[derive(Debug)]
+    struct FakeLauncher {
+        starts: usize,
+        stops: usize,
+        results: VecDeque<Result<Option<FakeGuard>, String>>,
+    }
+
+    impl FakeLauncher {
+        fn with_results(results: Vec<Result<Option<FakeGuard>, String>>) -> Self {
+            Self {
+                starts: 0,
+                stops: 0,
+                results: VecDeque::from(results),
+            }
+        }
+    }
+
+    impl CountryBanBypassLauncher for FakeLauncher {
+        type Guard = FakeGuard;
+
+        fn start_for_roblox(&mut self) -> Result<Option<Self::Guard>, String> {
+            self.starts += 1;
+            self.results
+                .pop_front()
+                .unwrap_or_else(|| Ok(Some(FakeGuard)))
+        }
+
+        fn stop(&mut self, _guard: &mut Self::Guard) {
+            self.stops += 1;
+        }
+    }
 
     #[test]
     fn goodbyedpi_args_use_requested_mode_and_blacklist() {
@@ -379,5 +517,81 @@ mod tests {
         assert!(paths.contains(&PathBuf::from(
             "C:/Program Files/SwiftTunnel/tools/goodbyedpi/x86_64/goodbyedpi.exe"
         )));
+    }
+
+    #[test]
+    fn controller_starts_once_when_enabled() {
+        let mut controller = CountryBanBypassController::with_launcher(FakeLauncher::with_results(
+            vec![Ok(Some(FakeGuard))],
+        ));
+
+        assert_eq!(controller.sync(true), CountryBanBypassSyncOutcome::Started);
+        assert_eq!(
+            controller.sync(true),
+            CountryBanBypassSyncOutcome::AlreadyRunning
+        );
+        assert!(controller.is_running());
+        assert_eq!(controller.launcher.starts, 1);
+        assert_eq!(controller.launcher.stops, 0);
+    }
+
+    #[test]
+    fn controller_disabled_without_guard_is_noop() {
+        let mut controller = CountryBanBypassController::with_launcher(FakeLauncher::with_results(
+            vec![Ok(Some(FakeGuard))],
+        ));
+
+        assert_eq!(
+            controller.sync(false),
+            CountryBanBypassSyncOutcome::AlreadyStopped
+        );
+        assert!(!controller.is_running());
+        assert_eq!(controller.launcher.starts, 0);
+        assert_eq!(controller.launcher.stops, 0);
+    }
+
+    #[test]
+    fn controller_stops_running_guard_when_disabled() {
+        let mut controller = CountryBanBypassController::with_launcher(FakeLauncher::with_results(
+            vec![Ok(Some(FakeGuard))],
+        ));
+
+        assert_eq!(controller.sync(true), CountryBanBypassSyncOutcome::Started);
+        assert_eq!(controller.sync(false), CountryBanBypassSyncOutcome::Stopped);
+        assert!(!controller.is_running());
+        assert_eq!(controller.launcher.starts, 1);
+        assert_eq!(controller.launcher.stops, 1);
+    }
+
+    #[test]
+    fn controller_unavailable_start_does_not_mark_running_or_retry_in_same_sync() {
+        let mut controller =
+            CountryBanBypassController::with_launcher(FakeLauncher::with_results(vec![Ok(None)]));
+
+        let outcome = controller.sync(true);
+
+        assert!(matches!(
+            outcome,
+            CountryBanBypassSyncOutcome::Unavailable(message)
+                if message.contains("helper unavailable")
+        ));
+        assert!(!controller.is_running());
+        assert_eq!(controller.launcher.starts, 1);
+        assert_eq!(controller.launcher.stops, 0);
+    }
+
+    #[test]
+    fn controller_failed_start_does_not_mark_running() {
+        let mut controller = CountryBanBypassController::with_launcher(FakeLauncher::with_results(
+            vec![Err("spawn failed".to_string())],
+        ));
+
+        assert_eq!(
+            controller.sync(true),
+            CountryBanBypassSyncOutcome::Failed("spawn failed".to_string())
+        );
+        assert!(!controller.is_running());
+        assert_eq!(controller.launcher.starts, 1);
+        assert_eq!(controller.launcher.stops, 0);
     }
 }
