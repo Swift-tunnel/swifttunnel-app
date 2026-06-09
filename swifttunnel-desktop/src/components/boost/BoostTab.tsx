@@ -418,8 +418,8 @@ export function BoostTab() {
         />
         <SettingRow
           title="Bypass Country Bans"
-          desc="Local DPI bypass for Roblox website/login and app"
-          tooltip="Starts SwiftTunnel's scoped GoodbyeDPI helper on the next connect. It is separate from Route Assist and does not route traffic through relays."
+          desc="Turn on if Roblox or a game is blocked in your country"
+          tooltip="Full bypass mode for network-banned regions: routes all Roblox traffic (including the launch-critical settings) through your tunneled relay so the block can't see it, and also runs SwiftTunnel's GoodbyeDPI helper. Implies Route Assist. Use this when Roblox or specific games are blocked in your country."
           enabled={draftCountryBan}
           onChange={setDraftCountryBan}
         />

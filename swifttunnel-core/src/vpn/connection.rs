@@ -994,6 +994,13 @@ impl VpnConnection {
         enable_api_tunneling: bool,
         enable_country_ban: bool,
     ) -> VpnResult<()> {
+        // Bypassing a country ban requires the relay to carry Roblox's web/API
+        // traffic (including the launch-critical bootstrap hosts), so it implies
+        // Route Assist / API tunneling. Without this, a user who enables only
+        // "Bypass Country Bans" gets no relayed bootstrap routing and Roblox
+        // fails to launch behind the block.
+        let enable_api_tunneling = enable_api_tunneling || enable_country_ban;
+
         let prior_was_error = {
             let state = self.state.borrow();
             if state.is_connected() {
