@@ -122,4 +122,6 @@ discord-rich-presence = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
-winrt-notification = "0.5"
+# Maintained fork of winrt-notification; the original 0.5 pulls in windows 0.24,
+# which ships no aarch64 import libraries and fails ARM64 linking (LNK1181).
+tauri-winrt-notification = "0.7"
