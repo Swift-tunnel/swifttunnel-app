@@ -1,9 +1,9 @@
 @import "tailwindcss";
 
-/* SwiftTunnel Design System v9 — Refined Monochrome
- * Direction: Linear/Vercel-grade modern desktop. Strict B&W with
- * status accents preserved. Deliberate spacing scale, tabular numerics,
- * subtle depth via hairlines and a single elevated card tier.
+/* SwiftTunnel Design System v10 — Command Deck
+ * Direction: fixed sectioned sidebar + slim header bar, centered content
+ * column, one atmospheric hero per page. Strict B&W with status accents
+ * preserved. Depth via hairlines, dot-grid texture and radial washes.
  */
 
 @theme {
@@ -63,13 +63,14 @@
   --color-latency-bad: #f25151;
 
   /* — Spacing & sizing — */
-  --spacing-sidebar: 56px;
-  --spacing-sidebar-expanded: 212px;
+  --spacing-sidebar: 224px;
+  --spacing-sidebar-expanded: 224px;
+  --spacing-topbar: 52px;
   --spacing-content: 18px;
   --spacing-card-gap: 10px;
 
   /* — Radii — */
-  --radius-card: 10px;
+  --radius-card: 12px;
   --radius-button: 7px;
   --radius-input: 7px;
   --radius-sm: 4px;
@@ -213,6 +214,154 @@ body {
   );
   z-index: -1;
   pointer-events: none;
+}
+
+/* — Content atmosphere: faint radial wash at the top of the page column — */
+.app-atmosphere {
+  background:
+    radial-gradient(640px 300px at 50% -120px, rgba(255, 255, 255, 0.04), transparent 70%),
+    var(--color-bg-base);
+}
+
+/* — Dot grid texture (fades out radially from the top) — */
+.dot-grid {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.13) 1px, transparent 1px);
+  background-size: 20px 20px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 70% at 50% 0%, black, transparent 78%);
+  mask-image: radial-gradient(ellipse 70% 70% at 50% 0%, black, transparent 78%);
+}
+
+/* — Status ring spinner (connecting arc) — */
+@keyframes ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.ring-spin {
+  animation: ring-spin 1.1s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+/* — Connected ring soft pulse — */
+@keyframes ring-pulse {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.32);
+  }
+}
+.ring-pulse {
+  animation: ring-pulse 2.2s ease-out infinite;
+}
+
+/* — Plasma orb: breathing white-hot core with two counter-rotating,
+ * blurred energy bands. clip-path (not overflow:hidden) — Chromium fails
+ * to clip blurred, composited children with rounded overflow. — */
+.plasma-orb {
+  position: relative;
+  border-radius: 50%;
+  clip-path: circle(closest-side at 50% 50%);
+  isolation: isolate;
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgba(255, 255, 255, 0.08),
+    rgba(0, 0, 0, 0.4) 80%
+  );
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+/* white-hot breathing core */
+.plasma-orb .core {
+  position: absolute;
+  inset: 22%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 50% 50%,
+    #ffffff 0%,
+    currentColor 48%,
+    transparent 72%
+  );
+  filter: blur(2px);
+  mix-blend-mode: screen;
+  animation: core-breathe calc(var(--orb-speed, 6s) * 0.55) ease-in-out
+    infinite;
+}
+
+/* swirling energy bands */
+.plasma-orb .band {
+  position: absolute;
+  inset: -8%;
+  border-radius: 50%;
+  mix-blend-mode: screen;
+}
+.plasma-orb .band-1 {
+  background: conic-gradient(
+    from 20deg,
+    transparent 0deg,
+    currentColor 50deg,
+    rgba(255, 255, 255, 0.85) 80deg,
+    currentColor 110deg,
+    transparent 170deg,
+    currentColor 235deg,
+    transparent 300deg
+  );
+  filter: blur(5px);
+  opacity: 0.85;
+  animation: orb-rotate calc(var(--orb-speed, 6s) * 0.8) linear infinite;
+}
+.plasma-orb .band-2 {
+  inset: 8%;
+  background: conic-gradient(
+    from 200deg,
+    transparent 0deg,
+    rgba(255, 255, 255, 0.9) 40deg,
+    currentColor 90deg,
+    transparent 150deg,
+    currentColor 250deg,
+    transparent 330deg
+  );
+  filter: blur(4px);
+  opacity: 0.75;
+  animation: orb-rotate-rev calc(var(--orb-speed, 6s) * 1.25) linear infinite;
+}
+
+/* glass sheen */
+.plasma-orb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse 55% 36% at 32% 20%,
+    rgba(255, 255, 255, 0.28),
+    transparent 70%
+  );
+  pointer-events: none;
+}
+
+@keyframes orb-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes orb-rotate-rev {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+@keyframes core-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.95;
+  }
+  50% {
+    transform: scale(1.22);
+    opacity: 1;
+  }
 }
 
 /* — Keyframes — */

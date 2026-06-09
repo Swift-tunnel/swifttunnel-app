@@ -196,7 +196,7 @@ export function SettingsTab() {
       case "error":
         return "Update error";
       default:
-        return "Idle";
+        return "Not checked";
     }
   })();
   const updateColor =
@@ -209,36 +209,34 @@ export function SettingsTab() {
           : "var(--color-text-muted)";
 
   return (
-    <div className="flex w-full flex-col gap-4 pb-4">
-      {/* ── Hero ── */}
-      <section
-        className="overflow-hidden rounded-[var(--radius-card)] surface-card"
-        style={{ padding: "20px 22px" }}
-      >
-        <div className="flex items-start justify-between gap-6">
+    <div className="flex w-full flex-col gap-4 pb-6">
+      {/* ── Account hero ── */}
+      <section className="relative overflow-hidden rounded-[var(--radius-card)] surface-card">
+        <div
+          className="dot-grid pointer-events-none absolute inset-x-0 top-0 h-[110px]"
+          style={{ opacity: 0.45 }}
+        />
+
+        <div className="relative flex items-center gap-4 px-6 pb-5 pt-6">
+          <div
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-[17px] font-semibold"
+            style={{
+              background:
+                "linear-gradient(135deg, var(--color-bg-elevated), var(--color-bg-active))",
+              color: "var(--color-text-primary)",
+              border: "1px solid var(--color-border-default)",
+              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
+            }}
+          >
+            {email?.[0]?.toUpperCase() || "?"}
+          </div>
+
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
+            <span className="eyebrow">Signed in as</span>
+            <div className="mt-1.5 flex items-center gap-2">
               <span
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: updateColor }}
-              />
-              <span className="eyebrow">Account</span>
-            </div>
-            <div className="mt-2.5 flex items-center gap-2.5">
-              <div
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[12px] font-semibold"
-                style={{
-                  background:
-                    "linear-gradient(135deg, var(--color-bg-elevated), var(--color-bg-active))",
-                  color: "var(--color-text-primary)",
-                  border: "1px solid var(--color-border-default)",
-                }}
-              >
-                {email?.[0]?.toUpperCase() || "?"}
-              </div>
-              <span
-                className="truncate text-[18px] font-semibold leading-none text-text-primary"
-                style={{ letterSpacing: "-0.02em" }}
+                className="truncate text-[17px] font-semibold leading-none text-text-primary"
+                style={{ letterSpacing: "-0.018em" }}
               >
                 {email || "Unknown"}
               </span>
@@ -248,45 +246,35 @@ export function SettingsTab() {
                 </Chip>
               )}
             </div>
-            <div className="mt-3.5 flex items-center gap-4">
-              <div className="flex items-baseline gap-1">
-                <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-text-dimmed">
-                  Version
-                </span>
-                <span
-                  className="lcd-readout text-[14px] font-medium text-text-primary ml-2"
-                >
-                  v{__APP_VERSION__}
-                </span>
-              </div>
-              <span
-                className="h-3 w-px"
-                style={{ backgroundColor: "var(--color-border-subtle)" }}
-              />
-              <span
-                className="pill-base"
-                style={{
-                  backgroundColor: `${updateColor}1a`,
-                  color: updateColor,
-                  border: `1px solid ${updateColor}30`,
-                }}
-              >
-                {updateLabel}
-              </span>
-            </div>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={logout}
-            style={{
-              color: "var(--color-status-error)",
-              border: "1px solid var(--color-status-error-soft-20)",
-              backgroundColor: "var(--color-status-error-soft-10)",
-            }}
-          >
+
+          <Button variant="destructive" size="sm" onClick={logout}>
             Log out
           </Button>
+        </div>
+
+        {/* Stats strip */}
+        <div
+          className="relative grid grid-cols-3 border-t"
+          style={{ borderColor: "var(--color-border-subtle)" }}
+        >
+          <HeroStat label="Version" value={`v${__APP_VERSION__}`} divider />
+          <HeroStat label="Channel" value={settings.update_channel} divider />
+          <div className="flex flex-col gap-1.5 px-6 py-3.5">
+            <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-text-dimmed">
+              Updates
+            </span>
+            <span
+              className="pill-base self-start"
+              style={{
+                backgroundColor: `${updateColor}1a`,
+                color: updateColor,
+                border: `1px solid ${updateColor}30`,
+              }}
+            >
+              {updateLabel}
+            </span>
+          </div>
         </div>
       </section>
 
@@ -326,6 +314,7 @@ export function SettingsTab() {
 
       {/* Tunnel */}
       <Section title="Tunnel">
+        <div>
         <Row
           label="Adapter selection"
           desc={
@@ -356,7 +345,7 @@ export function SettingsTab() {
         </Row>
 
         {manualAdapterBinding && (
-          <div className="px-4 pb-3">
+          <SubRow>
             <select
               value={settings.preferred_physical_adapter_guid || ""}
               onChange={(e) =>
@@ -365,7 +354,7 @@ export function SettingsTab() {
                 })
               }
               disabled={networkAdaptersLoading}
-              className="w-full rounded-[4px] px-3 py-2 text-[12.5px] outline-none transition-colors disabled:opacity-50"
+              className="w-full rounded-[var(--radius-input)] px-3 py-2 text-[12.5px] outline-none transition-colors disabled:opacity-50"
               style={{
                 backgroundColor: "var(--color-bg-elevated)",
                 border: "1px solid var(--color-border-default)",
@@ -395,25 +384,37 @@ export function SettingsTab() {
                 Selected adapter not found. Choose Auto or another adapter.
               </p>
             )}
-          </div>
+          </SubRow>
         )}
 
         {!manualAdapterBinding && (
-          <div className="px-4 pb-3 text-[11px] text-text-muted">
-            Current:{" "}
-            <span className="font-mono text-text-primary">
-              {vpnDiagnostics?.adapter_name || "Not resolved"}
-            </span>
-            <span className="text-text-dimmed"> · </span>
-            <span className="text-text-primary">{routeSourceLabel}</span>
-          </div>
+          <SubRow>
+            <div className="flex items-center gap-2 text-[11px] text-text-muted">
+              <span
+                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{
+                  backgroundColor: vpnDiagnostics?.adapter_name
+                    ? "var(--color-status-connected)"
+                    : "var(--color-status-inactive)",
+                }}
+              />
+              <span className="font-mono text-text-primary">
+                {vpnDiagnostics?.adapter_name || "Not resolved"}
+              </span>
+              <span className="text-text-dimmed">·</span>
+              <span>{routeSourceLabel}</span>
+            </div>
+          </SubRow>
         )}
 
         {networkAdaptersError && (
-          <div className="px-4 pb-3 text-[11px] text-status-error">
-            Failed to load adapters: {networkAdaptersError}
-          </div>
+          <SubRow>
+            <div className="text-[11px] text-status-error">
+              Failed to load adapters: {networkAdaptersError}
+            </div>
+          </SubRow>
         )}
+        </div>
 
         <Row
           label="Roblox Route Assist"
@@ -433,17 +434,33 @@ export function SettingsTab() {
           />
         </Row>
 
-        <details
-          className="mx-4 mb-3 rounded-[5px]"
-          style={{
-            backgroundColor: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-border-subtle)",
-          }}
-        >
-          <summary className="cursor-pointer px-3 py-2 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-muted">
+        <details className="group/diag">
+          <summary
+            className="flex cursor-pointer items-center gap-2 px-3.5 py-2.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-muted transition-colors hover:text-text-secondary"
+            style={{ listStyle: "none" }}
+          >
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="transition-transform duration-150 group-open/diag:rotate-90"
+            >
+              <path d="M9 18l6-6-6-6" />
+            </svg>
             Adapter diagnostics
           </summary>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 px-3 pb-3 text-[10.5px]">
+          <div
+            className="mx-3.5 mb-3 grid grid-cols-2 gap-x-4 gap-y-2 rounded-[7px] px-3.5 py-3 text-[10.5px]"
+            style={{
+              backgroundColor: "var(--color-bg-elevated)",
+              border: "1px solid var(--color-border-subtle)",
+            }}
+          >
             <DiagItem label="State" value={vpnState} />
             <DiagItem label="Adapter" value={vpnDiagnostics?.adapter_name} />
             <DiagItem
@@ -529,25 +546,53 @@ export function SettingsTab() {
           />
         </Row>
 
-        <div className="px-4 py-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
+        <div className="px-3.5 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2.5">
               <span
-                className="rounded-[3px] px-1.5 py-0.5 font-mono text-[11px] font-semibold"
+                className="shrink-0 rounded-[4px] px-1.5 py-1 font-mono text-[11px] font-semibold leading-none"
                 style={{
                   backgroundColor: "var(--color-bg-elevated)",
                   color: "var(--color-text-primary)",
+                  border: "1px solid var(--color-border-subtle)",
                 }}
               >
                 v{__APP_VERSION__}
               </span>
+              {updaterStatus === "update_available" && (
+                <>
+                  <svg
+                    width="11"
+                    height="11"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="var(--color-text-dimmed)"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="shrink-0"
+                  >
+                    <path d="M5 12h14M12 5l7 7-7 7" />
+                  </svg>
+                  <span
+                    className="shrink-0 rounded-[4px] px-1.5 py-1 font-mono text-[11px] font-semibold leading-none"
+                    style={{
+                      backgroundColor: "var(--color-accent-primary-soft-12)",
+                      color: "var(--color-text-primary)",
+                      border: "1px solid var(--color-accent-primary-soft-20)",
+                    }}
+                  >
+                    v{updaterVersion}
+                  </span>
+                </>
+              )}
               <UpdaterStatusLine
                 status={updaterStatus}
                 version={updaterVersion}
                 error={updaterError}
               />
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {updaterStatus === "update_available" && (
                 <Button
                   variant="primary"
@@ -585,30 +630,6 @@ export function SettingsTab() {
             </div>
           </div>
 
-          {updaterStatus === "update_available" && (
-            <div className="mt-2 flex items-center gap-2 font-mono text-[11px] text-text-muted">
-              <span>v{__APP_VERSION__}</span>
-              <svg
-                width="11"
-                height="11"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M5 12h14M12 5l7 7-7 7" />
-              </svg>
-              <span
-                style={{ color: "var(--color-accent-primary)" }}
-                className="font-semibold"
-              >
-                v{updaterVersion}
-              </span>
-            </div>
-          )}
-
           {updaterStatus === "installing" && (
             <div className="mt-3">
               <div
@@ -628,22 +649,20 @@ export function SettingsTab() {
               </div>
             </div>
           )}
-        </div>
 
-        <div
-          className="border-t px-4 py-2.5 font-mono text-[10.5px] text-text-dimmed"
-          style={{ borderColor: "var(--color-border-subtle)" }}
-        >
-          Last checked:{" "}
-          {updaterLastChecked
-            ? new Date(updaterLastChecked * 1000).toLocaleString()
-            : "Never"}
+          <div className="mt-2.5 font-mono text-[10px] text-text-dimmed">
+            Last checked:{" "}
+            {updaterLastChecked
+              ? new Date(updaterLastChecked * 1000).toLocaleString()
+              : "Never"}
+          </div>
         </div>
       </Section>
 
       {/* Experimental */}
       {isTester && (
         <Section title="Experimental" tag="Tester">
+          <div>
           <Row
             label="Practice mode"
             desc="Add artificial latency for training"
@@ -655,29 +674,32 @@ export function SettingsTab() {
             />
           </Row>
           {settings.experimental_mode && (
-            <div className="flex items-center justify-between px-4 pb-3">
-              <span className="text-[11.5px] text-text-muted">
-                Artificial latency
-              </span>
-              <div className="flex items-center gap-3">
-                <span className="font-mono text-[12px] font-semibold text-accent-secondary">
-                  +{settings.artificial_latency_ms}ms
+            <SubRow>
+              <div className="flex items-center justify-between">
+                <span className="text-[11.5px] text-text-muted">
+                  Artificial latency
                 </span>
-                <div className="w-32">
-                  <Slider
-                    ariaLabel="Artificial latency"
-                    min={0}
-                    max={100}
-                    step={5}
-                    value={settings.artificial_latency_ms}
-                    onChange={(v) =>
-                      setQuietDebounced({ artificial_latency_ms: v })
-                    }
-                  />
+                <div className="flex items-center gap-3">
+                  <span className="lcd-readout text-[12px] font-semibold text-text-primary">
+                    +{settings.artificial_latency_ms}ms
+                  </span>
+                  <div className="w-32">
+                    <Slider
+                      ariaLabel="Artificial latency"
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={settings.artificial_latency_ms}
+                      onChange={(v) =>
+                        setQuietDebounced({ artificial_latency_ms: v })
+                      }
+                    />
+                  </div>
                 </div>
               </div>
-            </div>
+            </SubRow>
           )}
+          </div>
           <Row
             label="Custom relay server"
             desc="Override relay endpoint (host:port)"
@@ -689,7 +711,7 @@ export function SettingsTab() {
                 setQuietDebounced({ custom_relay_server: e.target.value })
               }
               placeholder="auto"
-              className="w-40 rounded-[4px] px-2 py-1.5 font-mono text-[12px] outline-none transition-colors"
+              className="w-40 rounded-[var(--radius-input)] px-2.5 py-1.5 font-mono text-[12px] outline-none transition-colors focus:border-[color:var(--color-border-strong)]"
               style={{
                 backgroundColor: "var(--color-bg-elevated)",
                 border: "1px solid var(--color-border-default)",
@@ -705,14 +727,11 @@ export function SettingsTab() {
 
       {/* About */}
       <Section title="About">
-        <div className="flex items-center justify-between px-4 py-3">
-          <span className="text-[12.5px] text-text-secondary">
-            SwiftTunnel Desktop{" "}
-            <span className="font-mono text-text-dimmed">
-              v{__APP_VERSION__}
-            </span>
-          </span>
-          <div className="flex gap-3">
+        <Row
+          label="SwiftTunnel Desktop"
+          desc={`Version ${__APP_VERSION__}`}
+        >
+          <div className="flex items-center gap-2">
             <LinkButton onClick={() => systemOpenUrl("https://swifttunnel.net")}>
               Website
             </LinkButton>
@@ -722,16 +741,12 @@ export function SettingsTab() {
               Discord
             </LinkButton>
           </div>
-        </div>
-        <div className="flex items-center justify-between px-4 py-3">
-          <div>
-            <div className="text-[13px] font-medium text-text-primary">
-              Uninstall SwiftTunnel
-            </div>
-            <div className="text-[11px] text-text-muted">
-              Remove app and revert all system changes
-            </div>
-          </div>
+        </Row>
+        <div>
+        <Row
+          label="Uninstall SwiftTunnel"
+          desc="Remove app and revert all system changes"
+        >
           <Button
             variant="destructive"
             size="sm"
@@ -741,12 +756,15 @@ export function SettingsTab() {
           >
             {isUninstalling ? "Uninstalling" : "Uninstall"}
           </Button>
-        </div>
+        </Row>
         {uninstallError && (
-          <div className="px-4 pb-3 text-[11px] text-status-error">
-            {uninstallError}
-          </div>
+          <SubRow>
+            <div className="text-[11px] text-status-error">
+              {uninstallError}
+            </div>
+          </SubRow>
         )}
+        </div>
       </Section>
       <Dialog
         open={confirmUninstallOpen}
@@ -820,6 +838,39 @@ function Section({
   );
 }
 
+/** Indented follow-up content that belongs to the row above it. */
+function SubRow({ children }: { children: ReactNode }) {
+  return <div className="px-3.5 pb-3 pt-0.5">{children}</div>;
+}
+
+function HeroStat({
+  label,
+  value,
+  divider,
+}: {
+  label: string;
+  value: string;
+  divider?: boolean;
+}) {
+  return (
+    <div
+      className="flex flex-col gap-1 px-6 py-3.5"
+      style={{
+        borderRight: divider
+          ? "1px solid var(--color-border-subtle)"
+          : undefined,
+      }}
+    >
+      <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-text-dimmed">
+        {label}
+      </span>
+      <span className="lcd-readout text-[15px] font-medium leading-none text-text-primary">
+        {value}
+      </span>
+    </div>
+  );
+}
+
 function DiagItem({
   label,
   value,
@@ -835,7 +886,7 @@ function DiagItem({
         {label}
       </span>
       <span
-        className={`text-text-primary ${mono ? "font-mono text-[10px]" : "text-[11px]"}`}
+        className={`break-all text-text-primary ${mono ? "font-mono text-[10px]" : "text-[11px]"}`}
       >
         {value ?? "n/a"}
       </span>
@@ -853,9 +904,26 @@ function LinkButton({
   return (
     <button
       onClick={onClick}
-      className="text-[11.5px] font-medium text-accent-secondary transition-opacity hover:opacity-80"
+      className="inline-flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5 text-[11.5px] font-medium transition-colors hover:bg-bg-hover"
+      style={{
+        color: "var(--color-text-secondary)",
+        border: "1px solid var(--color-border-subtle)",
+        backgroundColor: "var(--color-bg-elevated)",
+      }}
     >
       {children}
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="var(--color-text-dimmed)"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M7 17L17 7M7 7h10v10" />
+      </svg>
     </button>
   );
 }
@@ -885,7 +953,7 @@ function UpdaterStatusLine({
       : status === "up_to_date"
         ? "You're up to date"
         : status === "update_available"
-          ? `v${version} available`
+          ? "Update available"
           : status === "installing"
             ? `Installing v${version}…`
             : status === "error"
@@ -893,9 +961,13 @@ function UpdaterStatusLine({
               : "Not checked yet";
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex min-w-0 items-center gap-1.5">
       {(status === "checking" || status === "installing") && (
-        <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+        <svg
+          className="h-3 w-3 shrink-0 animate-spin"
+          viewBox="0 0 24 24"
+          fill="none"
+        >
           <circle
             cx="12"
             cy="12"
@@ -917,22 +989,9 @@ function UpdaterStatusLine({
           strokeWidth="2.5"
           strokeLinecap="round"
           strokeLinejoin="round"
+          className="shrink-0"
         >
           <path d="M20 6 9 17l-5-5" />
-        </svg>
-      )}
-      {status === "update_available" && (
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={color}
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M12 19V5M5 12l7-7 7 7" />
         </svg>
       )}
       {status === "error" && (
@@ -945,11 +1004,16 @@ function UpdaterStatusLine({
           strokeWidth="2.5"
           strokeLinecap="round"
           strokeLinejoin="round"
+          className="shrink-0"
         >
           <path d="M18 6 6 18M6 6l12 12" />
         </svg>
       )}
-      <span className="text-[11.5px] font-medium" style={{ color }}>
+      <span
+        className="truncate text-[11.5px] font-medium"
+        style={{ color }}
+        title={status === "error" && error ? error : undefined}
+      >
         {text}
       </span>
     </div>

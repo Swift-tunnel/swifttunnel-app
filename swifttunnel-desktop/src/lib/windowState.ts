@@ -1,7 +1,7 @@
 import type { WindowState } from "./types";
 
-export const MIN_WINDOW_WIDTH = 800;
-export const MIN_WINDOW_HEIGHT = 600;
+export const MIN_WINDOW_WIDTH = 940;
+export const MIN_WINDOW_HEIGHT = 620;
 
 export type MonitorWorkArea = {
   x: number;

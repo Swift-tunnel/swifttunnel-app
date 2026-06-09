@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   SectionHeader,
   Row,
@@ -9,6 +9,15 @@ import {
 } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
 import { useOptimizationStore } from "../../stores/optimizationStore";
+import { useSettingsStore } from "../../stores/settingsStore";
+import { useBoostStore } from "../../stores/boostStore";
+import { useToastStore } from "../../stores/toastStore";
+import {
+  nextPowerPlanForSwiftTunnelToggle,
+  previousNonSwiftTunnelPowerPlan,
+  rememberedPowerPlanForSwiftTunnel,
+} from "../boost/boostConfig";
+import type { Config } from "../../lib/types";
 import {
   OPTIMIZATIONS,
   CATEGORY_ORDER,
@@ -86,6 +95,82 @@ function OptimizationRow({ def }: { def: OptimizationDef }) {
   );
 }
 
+/** SwiftTunnel power plan lives in the boost config (it swaps the active
+ *  Windows power scheme and remembers the previous one), so it applies
+ *  immediately through the boost backend rather than the optimization
+ *  apply/revert commands. */
+function PowerPlanRow() {
+  const config = useSettingsStore((s) => s.settings.config);
+  const updateSettings = useSettingsStore((s) => s.update);
+  const saveSettings = useSettingsStore((s) => s.save);
+  const updateConfig = useBoostStore((s) => s.updateConfig);
+  const addToast = useToastStore((s) => s.addToast);
+  const [busy, setBusy] = useState(false);
+
+  const enabled = config.system_optimization.power_plan === "SwiftTunnel";
+
+  async function toggle(next: boolean) {
+    const current = config.system_optimization.power_plan;
+    const remembered = previousNonSwiftTunnelPowerPlan(
+      next && current !== "SwiftTunnel"
+        ? current
+        : rememberedPowerPlanForSwiftTunnel(
+            current,
+            config.system_optimization.previous_power_plan,
+          ),
+    );
+    const nextConfig: Config = {
+      ...config,
+      system_optimization: {
+        ...config.system_optimization,
+        power_plan: nextPowerPlanForSwiftTunnelToggle(next, remembered),
+        previous_power_plan: remembered,
+      },
+    };
+
+    setBusy(true);
+    try {
+      const applied = await updateConfig(JSON.stringify(nextConfig));
+      updateSettings({ config: applied });
+      void saveSettings();
+      addToast({
+        type: next ? "success" : "info",
+        message: next
+          ? "SwiftTunnel power plan activated"
+          : "Previous power plan restored",
+      });
+    } catch {
+      // updateConfig already surfaces the error through the boost store.
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Row
+      label="SwiftTunnel Power Plan"
+      desc="Custom low-latency Windows power profile"
+      tooltip={
+        <Tooltip content="Imports and activates SwiftTunnel's optimized power plan. Your previous power plan is remembered and restored when you turn this off.">
+          <span className="inline-flex">
+            <InfoIcon />
+          </span>
+        </Tooltip>
+      }
+    >
+      <div className="flex items-center gap-2">
+        {busy && <Spinner size={11} color="var(--color-accent-primary)" />}
+        <Toggle
+          enabled={enabled}
+          disabled={busy}
+          ariaLabel="SwiftTunnel Power Plan"
+          onChange={(next) => void toggle(next)}
+        />
+      </div>
+    </Row>
+  );
+}
+
 function OptimizationGroup({
   category,
   defs,
@@ -100,6 +185,7 @@ function OptimizationGroup({
     <section>
       <SectionHeader label={category} tag={`${activeCount} / ${defs.length} on`} />
       <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
+        {category === "System" && <PowerPlanRow />}
         {defs.map((def) => (
           <OptimizationRow key={def.id} def={def} />
         ))}
@@ -123,17 +209,6 @@ export function OptimizationTab() {
 
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
-      <div className="mb-1">
-        <span className="eyebrow">Optimization</span>
-        <h2 className="mt-3 text-[22px] font-semibold leading-none text-text-primary">
-          Optimize
-        </h2>
-        <p className="mt-2 text-[12.5px] text-text-muted">
-          Reversible Windows tweaks for FPS and latency. Toggle any off to
-          restore your previous settings.
-        </p>
-      </div>
-
       <MemoryCleaner />
 
       {grouped.map((g) => (

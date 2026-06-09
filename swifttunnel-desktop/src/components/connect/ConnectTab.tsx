@@ -16,6 +16,7 @@ import {
   stateLabel,
 } from "./connectState";
 import { LiveGraph, type DataSample } from "./LiveGraph";
+import { StatusRing } from "./StatusRing";
 import { Button, EmptyState, Tooltip, InfoIcon, Toggle } from "../ui";
 import type { ServerRegion } from "../../lib/types";
 
@@ -276,6 +277,16 @@ export function ConnectTab() {
         ? "Auto Route"
         : selectedRegion?.name || "Select a region";
 
+  const heroSubline = isConnected
+    ? connectedServerLabel
+    : isTransitioning
+      ? "Negotiating with relay…"
+      : settings.auto_routing_enabled
+        ? "Fastest relay picked automatically each match"
+        : selectedRegion
+          ? `${selectedRegion.servers.length} ${selectedRegion.servers.length === 1 ? "relay" : "relays"} available`
+          : "Pick a region from the list below";
+
   const heroLatency = isConnected && ping !== null ? ping : cachedLatency;
 
   const buttonLabel = (() => {
@@ -301,17 +312,20 @@ export function ConnectTab() {
 
   return (
     <div className="flex w-full flex-col gap-4 pb-6">
-      {/* ── Hero card ── */}
+      {/* ── Hero: command deck ── */}
       <section
         className={`relative overflow-hidden rounded-[var(--radius-card)] surface-card ${isConnected ? "connected-ambience" : ""}`}
-        style={{
-          padding: "20px 22px",
-        }}
       >
-        <div className="flex items-start justify-between gap-6">
+        <div
+          className="dot-grid pointer-events-none absolute inset-x-0 top-0 h-[140px]"
+          style={{ opacity: 0.55 }}
+        />
+
+        <div className="relative flex items-center gap-5 px-6 pb-5 pt-6">
+          <StatusRing state={vpnState} />
+
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <StatusDot vpnState={vpnState} />
               <span className="eyebrow">{heroEyebrow}</span>
               {isConnected && (
                 <span
@@ -327,60 +341,25 @@ export function ConnectTab() {
               )}
             </div>
 
-            <div className="mt-2.5 flex items-center gap-2.5">
+            <div className="mt-2 flex items-center gap-2.5">
               {heroRegion && (
-                <span className="text-[20px] leading-none">
+                <span className="text-[22px] leading-none">
                   {countryFlag(heroRegion.country_code)}
                 </span>
               )}
               <span
-                className="truncate text-[20px] font-semibold leading-[1.1] text-text-primary"
-                style={{ letterSpacing: "-0.02em" }}
+                className="truncate text-[24px] font-semibold leading-[1.05] text-text-primary"
+                style={{ letterSpacing: "-0.022em" }}
               >
                 {heroRegionName}
               </span>
             </div>
 
-            {isConnected && (
-              <div
-                className="mt-1.5 truncate font-mono text-[11.5px] text-text-muted"
-                title={connectedServerLabel}
-              >
-                {connectedServerLabel}
-              </div>
-            )}
-
-            <div className="mt-4 flex items-center gap-5">
-              <HeroStat
-                label="Latency"
-                value={heroLatency !== null ? String(heroLatency) : "—"}
-                unit="ms"
-                color={
-                  heroLatency !== null
-                    ? getLatencyColor(heroLatency)
-                    : undefined
-                }
-              />
-              {isConnected && (
-                <>
-                  <HeroDivider />
-                  <HeroStat
-                    label="Session"
-                    value={formatElapsed(elapsed)}
-                    mono
-                  />
-                </>
-              )}
-              {isConnected && tunneled.length > 0 && (
-                <>
-                  <HeroDivider />
-                  <HeroStat
-                    label="Routing"
-                    value={`${tunneled.length}`}
-                    unit={tunneled.length === 1 ? "app" : "apps"}
-                  />
-                </>
-              )}
+            <div
+              className={`mt-2 truncate text-[11.5px] ${isConnected ? "font-mono" : ""} text-text-muted`}
+              title={heroSubline}
+            >
+              {heroSubline}
             </div>
           </div>
 
@@ -390,6 +369,7 @@ export function ConnectTab() {
             onClick={handlePrimary}
             disabled={primaryDisabled}
             loading={isConnectBusy}
+            className="min-w-[132px]"
           >
             {buttonLabel}
           </Button>
@@ -398,13 +378,47 @@ export function ConnectTab() {
         {(connectStatus.kind !== "text" ||
           vpnState === "error" ||
           driverSetupState !== "idle") && (
-          <ConnectStatusBanner
-            status={connectStatus}
-            busy={isConnectBusy}
-            onRepair={() => void repairDriver().catch(() => {})}
-            onReset={() => void resetDriver().catch(() => {})}
-          />
+          <div className="relative px-6 pb-4">
+            <ConnectStatusBanner
+              status={connectStatus}
+              busy={isConnectBusy}
+              onRepair={() => void repairDriver().catch(() => {})}
+              onReset={() => void resetDriver().catch(() => {})}
+            />
+          </div>
         )}
+
+        {/* Stats strip */}
+        <div
+          className="relative grid grid-cols-3 border-t"
+          style={{ borderColor: "var(--color-border-subtle)" }}
+        >
+          <HeroStat
+            label="Latency"
+            value={heroLatency !== null ? String(heroLatency) : "—"}
+            unit={heroLatency !== null ? "ms" : undefined}
+            color={
+              heroLatency !== null ? getLatencyColor(heroLatency) : undefined
+            }
+            divider
+          />
+          <HeroStat
+            label="Session"
+            value={isConnected ? formatElapsed(elapsed) : "—"}
+            divider
+          />
+          <HeroStat
+            label="Routing"
+            value={isConnected && tunneled.length > 0 ? String(tunneled.length) : "—"}
+            unit={
+              isConnected && tunneled.length > 0
+                ? tunneled.length === 1
+                  ? "app"
+                  : "apps"
+                : undefined
+            }
+          />
+        </div>
       </section>
 
       <RouteAssistPanel
@@ -412,6 +426,7 @@ export function ConnectTab() {
         disabled={isConnected || isTransitioning}
         onChange={setRouteAssist}
       />
+
       {/* ── Throughput (connected) ── */}
       {isConnected && (
         <motion.section
@@ -573,77 +588,83 @@ export function ConnectTab() {
 
 // ── Sub-components ──
 
-function StatusDot({ vpnState }: { vpnState: string }) {
-  const isConnected = vpnState === "connected";
-  const isError = vpnState === "error";
-  const isTransitioning =
-    !isConnected &&
-    vpnState !== "disconnected" &&
-    !isError;
-
-  const color = isConnected
-    ? "var(--color-status-connected)"
-    : isError
-      ? "var(--color-status-error)"
-      : isTransitioning
-        ? "var(--color-status-warning)"
-        : "var(--color-text-dimmed)";
-
-  return (
-    <span className="relative inline-flex h-2 w-2 items-center justify-center">
-      <span
-        className="absolute inset-0 rounded-full"
-        style={{
-          backgroundColor: color,
-          boxShadow: isConnected ? `0 0 6px ${color}` : "none",
-          animation: isTransitioning
-            ? "status-breath 1.4s ease-in-out infinite"
-            : "none",
-        }}
-      />
-    </span>
-  );
-}
-
 function HeroStat({
   label,
   value,
   unit,
   color,
-  mono,
+  divider,
 }: {
   label: string;
   value: string;
   unit?: string;
   color?: string;
-  mono?: boolean;
+  divider?: boolean;
 }) {
   return (
-    <div className="flex flex-col gap-0.5">
+    <div
+      className="flex flex-col gap-1 px-6 py-3.5"
+      style={{
+        borderRight: divider
+          ? "1px solid var(--color-border-subtle)"
+          : undefined,
+      }}
+    >
       <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-text-dimmed">
         {label}
       </span>
       <div className="flex items-baseline gap-1">
         <span
-          className={`lcd-readout text-[18px] font-medium leading-none ${mono ? "" : ""}`}
+          className="lcd-readout text-[17px] font-medium leading-none"
           style={{ color: color || "var(--color-text-primary)" }}
         >
           {value}
         </span>
-        {unit && (
-          <span className="text-[11px] text-text-muted">{unit}</span>
-        )}
+        {unit && <span className="text-[10.5px] text-text-muted">{unit}</span>}
       </div>
     </div>
   );
 }
 
-function HeroDivider() {
+function LatencyBars({ latency }: { latency: number }) {
+  const color = getLatencyColor(latency);
+  const level = latency < 60 ? 3 : latency < 130 ? 2 : 1;
+  const heights = [5, 8, 11];
+  return (
+    <span className="flex items-end gap-[2px]" aria-hidden>
+      {heights.map((h, i) => (
+        <span
+          key={h}
+          className="w-[3px] rounded-[1px]"
+          style={{
+            height: h,
+            backgroundColor: i < level ? color : "var(--color-bg-active)",
+          }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function IconTile({
+  active,
+  children,
+}: {
+  active?: boolean;
+  children: React.ReactNode;
+}) {
   return (
     <span
-      className="h-7 w-px"
-      style={{ backgroundColor: "var(--color-border-subtle)" }}
-    />
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px]"
+      style={{
+        backgroundColor: active
+          ? "var(--color-accent-primary-soft-12)"
+          : "var(--color-bg-elevated)",
+        border: `1px solid ${active ? "var(--color-accent-primary-soft-20)" : "var(--color-border-subtle)"}`,
+      }}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -661,59 +682,52 @@ function RouteAssistPanel({
       className="flex items-center justify-between gap-4 rounded-[var(--radius-card)] px-4 py-3 transition-colors"
       style={{
         backgroundColor: enabled
-          ? "var(--color-accent-primary-soft-8)"
+          ? "var(--color-accent-primary-soft-6)"
           : "var(--color-bg-card)",
         border: `1px solid ${
           enabled
             ? "var(--color-accent-primary-soft-20)"
             : "var(--color-border-subtle)"
         }`,
-        boxShadow: enabled
-          ? "inset 0 1px 0 rgba(255,255,255,0.04)"
-          : "inset 0 1px 0 rgba(255,255,255,0.025)",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
       }}
     >
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
+      <div className="flex min-w-0 items-center gap-3">
+        <IconTile active={enabled}>
           <svg
             width="13"
             height="13"
             viewBox="0 0 24 24"
             fill="none"
-            stroke={enabled ? "var(--color-text-primary)" : "var(--color-text-muted)"}
+            stroke={
+              enabled ? "var(--color-text-primary)" : "var(--color-text-muted)"
+            }
             strokeWidth="1.85"
             strokeLinecap="round"
             strokeLinejoin="round"
           >
             <path d="M3 12h4l3-9 4 18 3-9h4" />
           </svg>
-          <h3
-            className="text-[12.5px] font-semibold text-text-primary"
-            style={{ letterSpacing: "-0.005em" }}
-          >
-            Roblox Route Assist
-          </h3>
-          <Tooltip content="Routes Roblox login/API HTTP(S) through the selected relay, including browser-owned Roblox auth traffic. Non-Roblox browser traffic still bypasses SwiftTunnel.">
-            <span className="inline-flex">
-              <InfoIcon />
-            </span>
-          </Tooltip>
-          {enabled && (
-            <span
-              className="pill-base"
-              style={{
-                backgroundColor: "var(--color-bg-base)",
-                color: "var(--color-text-primary)",
-                border: "1px solid var(--color-border-default)",
-              }}
+        </IconTile>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h3
+              className="text-[12.5px] font-semibold text-text-primary"
+              style={{ letterSpacing: "-0.005em" }}
             >
-              ON
-            </span>
-          )}
+              Roblox Route Assist
+            </h3>
+            <Tooltip content="Routes Roblox login/API HTTP(S) through the selected relay, including browser-owned Roblox auth traffic. Non-Roblox browser traffic still bypasses SwiftTunnel.">
+              <span className="inline-flex">
+                <InfoIcon />
+              </span>
+            </Tooltip>
+          </div>
+          <p className="mt-0.5 truncate text-[11px] leading-snug text-text-muted">
+            Use when bypassing a network ban, or to land near your tunneled
+            region.
+          </p>
         </div>
-        <p className="mt-1 max-w-[640px] text-[11.5px] leading-snug text-text-muted">
-          Use this when bypassing a network ban, or to increase the chance Roblox places you near your tunneled region.
-        </p>
       </div>
       <Toggle
         enabled={enabled}
@@ -793,7 +807,7 @@ function ConnectStatusBanner({
 
   return (
     <div
-      className="mt-3 flex flex-wrap items-center gap-2 rounded-[6px] px-3 py-2 text-[11.5px]"
+      className="flex flex-wrap items-center gap-2 rounded-[7px] px-3 py-2 text-[11.5px]"
       style={{
         backgroundColor: isError
           ? "var(--color-status-error-soft-10)"
@@ -837,7 +851,7 @@ function AutoRouteRow({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="group relative flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-50"
+      className="group relative flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-50"
       style={{
         backgroundColor: active
           ? "var(--color-accent-primary-soft-8)"
@@ -854,19 +868,11 @@ function AutoRouteRow({
     >
       {active && (
         <span
-          className="absolute left-0 top-1/2 h-5 w-[2px] -translate-y-1/2 rounded-r"
+          className="absolute left-0 top-1/2 h-6 w-[2px] -translate-y-1/2 rounded-r"
           style={{ backgroundColor: "var(--color-accent-primary)" }}
         />
       )}
-      <span
-        className="flex h-7 w-7 items-center justify-center rounded-[6px]"
-        style={{
-          backgroundColor: active
-            ? "var(--color-accent-primary-soft-12)"
-            : "var(--color-bg-elevated)",
-          border: `1px solid ${active ? "var(--color-accent-primary-soft-20)" : "var(--color-border-subtle)"}`,
-        }}
-      >
+      <IconTile active={active}>
         <svg
           width="13"
           height="13"
@@ -882,8 +888,8 @@ function AutoRouteRow({
           <polyline points="21 16 21 21 16 21" />
           <line x1="15" y1="15" x2="21" y2="21" />
         </svg>
-      </span>
-      <div className="flex min-w-0 flex-1 flex-col leading-tight">
+      </IconTile>
+      <div className="flex min-w-0 flex-1 flex-col gap-[3px] leading-tight">
         <div className="flex items-center gap-2">
           <span
             className="text-[12.5px] font-medium text-text-primary"
@@ -897,7 +903,7 @@ function AutoRouteRow({
             </span>
           </Tooltip>
         </div>
-        <span className="text-[11px] text-text-muted">
+        <span className="text-[10.5px] text-text-muted">
           Picks the fastest relay for every match
         </span>
       </div>
@@ -940,7 +946,6 @@ function RegionRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const [hover, setHover] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const latColor = latency !== null ? getLatencyColor(latency) : null;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -956,7 +961,7 @@ function RegionRow({
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      className={`group relative flex h-[38px] items-center gap-3 px-3.5 text-left transition-colors duration-100 ${
+      className={`group relative flex h-[46px] items-center gap-3 px-3.5 text-left transition-colors duration-100 ${
         disabled ? "cursor-not-allowed opacity-50" : ""
       }`}
       style={{
@@ -972,7 +977,7 @@ function RegionRow({
     >
       {selected && (
         <span
-          className="absolute left-0 top-1/2 h-5 w-[2px] -translate-y-1/2 rounded-r"
+          className="absolute left-0 top-1/2 h-6 w-[2px] -translate-y-1/2 rounded-r"
           style={{ backgroundColor: "var(--color-accent-primary)" }}
         />
       )}
@@ -982,52 +987,45 @@ function RegionRow({
         disabled={disabled}
         className="flex min-w-0 flex-1 items-center gap-3 self-stretch text-left disabled:cursor-not-allowed"
       >
-        <span className="text-[15px] leading-none">
-          {countryFlag(region.country_code)}
-        </span>
+        <IconTile active={selected}>
+          <span className="text-[14px] leading-none">
+            {countryFlag(region.country_code)}
+          </span>
+        </IconTile>
 
-        <span
-          className="truncate text-[12.5px] font-medium text-text-primary"
-          style={{ letterSpacing: "-0.005em" }}
-        >
-          {region.name}
-        </span>
-
-        {forcedServer ? (
+        <span className="flex min-w-0 flex-col gap-[3px] leading-tight">
+          <span className="flex items-center gap-2">
+            <span
+              className="truncate text-[12.5px] font-medium text-text-primary"
+              style={{ letterSpacing: "-0.005em" }}
+            >
+              {region.name}
+            </span>
+            {lastUsed && !selected && (
+              <span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
+                Last
+              </span>
+            )}
+          </span>
           <span
-            className="font-mono text-[10px] text-text-secondary"
-            title={`Forced server: ${forcedServer}`}
+            className="truncate font-mono text-[10px] text-text-dimmed"
+            title={forcedServer ? `Pinned server: ${forcedServer}` : undefined}
           >
-            {forcedServer}
+            {forcedServer
+              ? `Pinned · ${forcedServer}`
+              : `${region.servers.length} ${region.servers.length === 1 ? "relay" : "relays"}`}
           </span>
-        ) : (
-          <span className="font-mono text-[10px] text-text-dimmed">
-            {region.servers.length}
-          </span>
-        )}
-
-        {lastUsed && !selected && (
-          <span
-            className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-text-muted"
-          >
-            Last
-          </span>
-        )}
+        </span>
 
         <span className="flex-1" />
       </button>
 
       {/* Fixed-width latency slot — always same position */}
-      <div className="flex w-[64px] shrink-0 items-center justify-end gap-1.5">
-        {latency !== null && latColor ? (
+      <div className="flex w-[76px] shrink-0 items-center justify-end gap-2">
+        {latency !== null ? (
           <>
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{ backgroundColor: latColor }}
-            />
-            <span
-              className="w-[28px] text-right font-mono text-[11.5px] font-medium tabular-nums text-text-primary"
-            >
+            <LatencyBars latency={latency} />
+            <span className="w-[28px] text-right font-mono text-[11.5px] font-medium tabular-nums text-text-primary">
               {latency}
             </span>
             <span className="w-[14px] text-[10px] text-text-muted">ms</span>
@@ -1113,7 +1111,7 @@ function ServerMenu({
       {open && (
         <div
           onClick={(e) => e.stopPropagation()}
-          className="absolute right-0 top-7 z-50 min-w-[140px] overflow-hidden rounded-[6px] surface-elevated"
+          className="absolute right-0 top-7 z-50 min-w-[140px] overflow-hidden rounded-[7px] surface-elevated"
         >
           <ServerMenuItem
             label="Auto"

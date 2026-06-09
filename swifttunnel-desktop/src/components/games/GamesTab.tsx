@@ -204,16 +204,6 @@ export function GamesTab() {
 
   return (
     <div>
-      <div className="mb-5">
-        <span className="eyebrow">Library</span>
-        <h2 className="mt-3 text-[22px] font-semibold leading-none text-text-primary">
-          Games
-        </h2>
-        <p className="mt-2 text-[12.5px] text-text-muted">
-          Pick a game to tune its performance, graphics and latency.
-        </p>
-      </div>
-
       <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,280px))] gap-4">
         {GAMES.map((game) => (
           <GameCard
