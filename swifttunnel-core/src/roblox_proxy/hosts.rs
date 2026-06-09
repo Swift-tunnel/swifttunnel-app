@@ -124,10 +124,15 @@ struct DohJsonAnswer {
 /// Resolve and append Roblox bootstrap overrides to the Windows hosts file.
 ///
 /// Existing SwiftTunnel entries are removed first (idempotent).
-pub async fn apply_bootstrap_overrides() -> Result<(), String> {
+///
+/// `country_ban_bypass`: when the user is bypassing a country ban, the
+/// launch-critical hosts (clientsettings*, versioncompatibility) MUST be routed
+/// through the relay to escape the ISP block — otherwise keeping them "direct"
+/// (the default, which avoids flaky-relay "Failed to apply critical settings")
+/// sends them straight into the block and the game won't launch.
+pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), String> {
     let overrides = resolve_bootstrap_overrides().await?;
-    let active_ips = route_assist_active_ips_from_overrides(&overrides);
-    let direct_only_ips = direct_only_ips_from_overrides(&overrides);
+    let (active_ips, direct_only_ips) = classify_bootstrap_ips(&overrides, country_ban_bypass);
 
     tokio::task::spawn_blocking(move || write_overrides(&overrides))
         .await
@@ -136,6 +141,26 @@ pub async fn apply_bootstrap_overrides() -> Result<(), String> {
     set_active_bootstrap_ips(active_ips);
     set_direct_only_bootstrap_ips(direct_only_ips);
     Ok(())
+}
+
+/// Split resolved overrides into (route-assist active, direct-only) IP sets.
+///
+/// When bypassing a country ban, nothing is direct-only — every bootstrap IP
+/// (including the launch-critical hosts) is routed through Route Assist so it
+/// can escape the block. Otherwise the launch-critical hosts stay direct.
+fn classify_bootstrap_ips(
+    overrides: &[HostOverride],
+    country_ban_bypass: bool,
+) -> (HashSet<Ipv4Addr>, HashSet<Ipv4Addr>) {
+    if country_ban_bypass {
+        let all: HashSet<Ipv4Addr> = overrides.iter().map(|entry| entry.ip).collect();
+        (all, HashSet::new())
+    } else {
+        (
+            route_assist_active_ips_from_overrides(overrides),
+            direct_only_ips_from_overrides(overrides),
+        )
+    }
 }
 
 pub fn is_active_bootstrap_ip(ip: Ipv4Addr) -> bool {
@@ -755,6 +780,32 @@ mod tests {
             "ClientSettingsCDN.Roblox.com"
         ));
         assert!(!is_direct_only_bootstrap_domain("www.roblox.com"));
+    }
+
+    #[test]
+    fn country_bypass_routes_critical_hosts_through_relay() {
+        let critical = HostOverride {
+            ip: Ipv4Addr::new(128, 116, 46, 3),
+            domain: "clientsettings.roblox.com".to_string(),
+        };
+        let normal = HostOverride {
+            ip: Ipv4Addr::new(128, 116, 121, 3),
+            domain: "www.roblox.com".to_string(),
+        };
+        let overrides = vec![critical.clone(), normal.clone()];
+
+        // Default: the launch-critical host stays direct (not on the relay).
+        let (active, direct_only) = classify_bootstrap_ips(&overrides, false);
+        assert!(direct_only.contains(&critical.ip));
+        assert!(!active.contains(&critical.ip));
+        assert!(active.contains(&normal.ip));
+
+        // Bypassing a country ban: nothing is direct-only, and the critical
+        // host now goes through Route Assist so it can escape the block.
+        let (active, direct_only) = classify_bootstrap_ips(&overrides, true);
+        assert!(direct_only.is_empty());
+        assert!(active.contains(&critical.ip));
+        assert!(active.contains(&normal.ip));
     }
 
     #[test]

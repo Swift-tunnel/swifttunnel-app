@@ -1100,7 +1100,7 @@ impl VpnConnection {
             .await;
 
         if enable_api_tunneling && !tunnel_apps.is_empty() {
-            match crate::roblox_proxy::hosts::apply_bootstrap_overrides().await {
+            match crate::roblox_proxy::hosts::apply_bootstrap_overrides(enable_country_ban).await {
                 Ok(()) => {
                     self.bootstrap_dns_repair_applied = true;
                     log::info!("V3: Applied Roblox bootstrap DNS repair for API tunneling");
