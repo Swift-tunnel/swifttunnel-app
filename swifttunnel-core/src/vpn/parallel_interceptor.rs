@@ -58,8 +58,8 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    IPV6_BLOCK_REMOTE_IPS, IPV6_BLOCK_RULE_NAME, delete_ipv6_marker, has_ipv6_binding_native,
-    restore_ipv6_from_marker, write_ipv6_marker_firewall,
+    delete_ipv6_marker, has_ipv6_binding_native, remove_winpkfilter_ipv6_block_filters,
+    restore_ipv6_from_marker, write_ipv6_marker_winpkfilter,
 };
 use super::process_cache::{DNS_PORT, LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
@@ -2000,15 +2000,6 @@ impl ParallelInterceptor {
         }
     }
 
-    fn firewall_interface_type_for_adapter_kind(kind: Option<&str>) -> &'static str {
-        match kind {
-            Some("wifi") => "wireless",
-            Some("ethernet") => "lan",
-            Some("ppp") => "ras",
-            _ => "any",
-        }
-    }
-
     fn get_adapter_details_for_if_index(if_index: u32) -> Option<(String, String, String)> {
         use windows::Win32::NetworkManagement::IpHelper::{
             GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
@@ -3696,85 +3687,73 @@ impl ParallelInterceptor {
         self.tso_was_disabled = false;
     }
 
-    fn build_delete_ipv6_block_rule_args() -> Vec<String> {
-        vec![
-            "advfirewall".to_string(),
-            "firewall".to_string(),
-            "delete".to_string(),
-            "rule".to_string(),
-            format!("name={IPV6_BLOCK_RULE_NAME}"),
-        ]
+    #[cfg(target_os = "windows")]
+    fn install_winpkfilter_ipv6_block_for_adapter(physical_name: &str) -> Result<(), String> {
+        const MAX_ATTEMPTS: u32 = 5;
+        const RETRY_DELAY: Duration = Duration::from_millis(200);
+
+        let driver = ndisapi::Ndisapi::new("NDISRD")
+            .map_err(|e| format!("Failed to open WinpkFilter driver: {e}"))?;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let adapters = driver
+                .get_tcpip_bound_adapters_info()
+                .map_err(|e| format!("Failed to enumerate WinpkFilter adapters: {e}"))?;
+            if let Some(adapter) = adapters
+                .iter()
+                .find(|adapter| adapter.get_name() == physical_name)
+            {
+                let adapter_handle = adapter.get_handle().0 as usize as u64;
+                return super::ipv6_recovery::install_winpkfilter_ipv6_block_filters(
+                    &driver,
+                    adapter_handle,
+                )
+                .map_err(|e| format!("Failed to install WinpkFilter IPv6 block filters: {e}"));
+            }
+
+            if attempt < MAX_ATTEMPTS {
+                std::thread::sleep(RETRY_DELAY);
+            }
+        }
+
+        Err(format!(
+            "WinpkFilter adapter '{physical_name}' was not found during IPv6 setup"
+        ))
     }
 
-    fn build_add_ipv6_block_rule_args(firewall_interface_type: &str) -> Vec<String> {
-        // Block outbound IPv6 via a Windows Firewall rule using `netsh advfirewall`.
-        //
-        // Why not `Disable-NetAdapterBinding -ComponentId ms_tcpip6` (the
-        // pre-2.0.15 approach):
-        //   That cmdlet rebinds the NDIS stack on the adapter, which
-        //   physically takes the link offline and back. On many real-world
-        //   NICs (Realtek, USB-Ethernet dongles, Parallels VirtIO, some Intel
-        //   variants) the relink takes 2-10 seconds and Windows reports the
-        //   connection as dropped — users see "my Ethernet just turned off
-        //   when I clicked Connect." It also routes through WMI, which hangs
-        //   15s+ on slow-WMI systems and was responsible for "Driver
-        //   initialization timed out" errors on first connect.
-        //
-        // Why direct netsh, not PowerShell or `New-NetFirewallRule`:
-        //   PowerShell startup and firewall CIM/WMI providers can hang on
-        //   slow-WMI systems. `netsh advfirewall` is a native binary, returns
-        //   quickly, and doesn't touch the adapter binding.
-        //
-        // The rule blocks public IPv6 plus the well-known NAT64 prefix. It
-        // deliberately leaves loopback, link-local, multicast, and ULA ranges
-        // alone so local IPv6 IPC and LAN discovery are not broken while
-        // SwiftTunnel is connected. `netsh advfirewall` cannot scope by exact
-        // adapter alias, only by interface type; when we know the selected
-        // adapter kind we use that narrower type to avoid touching unrelated
-        // interface classes.
-        vec![
-            "advfirewall".to_string(),
-            "firewall".to_string(),
-            "add".to_string(),
-            "rule".to_string(),
-            format!("name={IPV6_BLOCK_RULE_NAME}"),
-            "dir=out".to_string(),
-            "action=block".to_string(),
-            format!("remoteip={IPV6_BLOCK_REMOTE_IPS}"),
-            format!("interfacetype={firewall_interface_type}"),
-            "profile=any".to_string(),
-        ]
+    #[cfg(not(target_os = "windows"))]
+    fn install_winpkfilter_ipv6_block_for_adapter(_physical_name: &str) -> Result<(), String> {
+        Err("WinpkFilter IPv6 block filters are only available on Windows.".to_string())
     }
 
-    fn run_netsh_with_timeout_capture(args: &[&str], timeout_secs: u64) -> CommandRunOutput {
-        Self::run_command_with_timeout_capture("netsh", args, timeout_secs)
-    }
-
-    fn disable_ipv6_with_runner<F>(&mut self, runner: F) -> VpnResult<()>
+    fn disable_ipv6_with_filter_installer<F>(&mut self, installer: F) -> VpnResult<()>
     where
-        F: Fn(&[&str], u64) -> CommandRunOutput,
+        F: Fn(&str) -> Result<(), String>,
     {
-        self.disable_ipv6_with_runner_and_probe(runner, has_ipv6_binding_native)
+        self.disable_ipv6_with_filter_installer_and_probe(installer, has_ipv6_binding_native)
     }
 
-    fn disable_ipv6_with_runner_and_probe<F, P>(
+    fn disable_ipv6_with_filter_installer_and_probe<F, P>(
         &mut self,
-        runner: F,
+        installer: F,
         ipv6_probe: P,
     ) -> VpnResult<()>
     where
-        F: Fn(&[&str], u64) -> CommandRunOutput,
+        F: Fn(&str) -> Result<(), String>,
         P: Fn(u32) -> Option<bool>,
     {
-        let friendly_name = match &self.physical_adapter_friendly_name {
+        let physical_name = match &self.physical_adapter_name {
             Some(name) => name.clone(),
             None => {
                 log::warn!(
-                    "No physical adapter friendly name available, skipping IPv6 firewall block"
+                    "No physical adapter device name available, skipping WinpkFilter IPv6 block"
                 );
                 return Ok(());
             }
         };
+        let friendly_name = self
+            .physical_adapter_friendly_name
+            .clone()
+            .unwrap_or_else(|| physical_name.clone());
 
         // IPv4-only ISP guard: SwiftTunnel needs an IPv4 default route to work.
         // If there isn't one, blocking IPv6 would leave the user with no
@@ -3794,14 +3773,14 @@ impl ParallelInterceptor {
             match ipv6_probe(if_index) {
                 Some(true) => {
                     log::debug!(
-                        "Selected adapter {} (if_index={}) has IPv6; installing block rule",
+                        "Selected adapter {} (if_index={}) has IPv6; installing WinpkFilter block filters",
                         friendly_name,
                         if_index
                     );
                 }
                 Some(false) => {
                     log::info!(
-                        "Skipping IPv6 firewall block on {} (if_index={}): selected adapter has no IPv6 address/binding",
+                        "Skipping WinpkFilter IPv6 block on {} (if_index={}): selected adapter has no IPv6 address/binding",
                         friendly_name,
                         if_index
                     );
@@ -3809,7 +3788,7 @@ impl ParallelInterceptor {
                 }
                 None => {
                     log::debug!(
-                        "Could not determine IPv6 state for {} (if_index={}); falling back to firewall block",
+                        "Could not determine IPv6 state for {} (if_index={}); falling back to WinpkFilter block filters",
                         friendly_name,
                         if_index
                     );
@@ -3817,72 +3796,50 @@ impl ParallelInterceptor {
             }
         }
 
-        let firewall_interface_type =
-            Self::firewall_interface_type_for_adapter_kind(self.physical_adapter_kind.as_deref());
-
         log::info!(
-            "Blocking public IPv6 via firewall rule (adapter: {}, interface_type: {}, SwiftTunnel is IPv4-only)",
-            friendly_name,
-            firewall_interface_type
+            "Blocking public IPv6 via WinpkFilter static filters (adapter: {}, SwiftTunnel is IPv4-only)",
+            friendly_name
         );
 
-        // Write the marker BEFORE the netsh add. If we crash between add and
-        // marker write, the rule lingers across reboots and the user has no
-        // way to clean it up other than rerunning SwiftTunnel — which we
-        // accept, because the marker-then-add ordering would have the inverse
-        // race (marker exists but no rule, restore is a no-op, normal). The
-        // current ordering means recovery always over-cleans, never
-        // under-cleans.
-        write_ipv6_marker_firewall(&friendly_name);
+        // Write the marker before installing the driver filters. If SwiftTunnel
+        // crashes after the filter table is loaded, startup recovery can remove
+        // our entries. The inverse race (marker without filters) is harmless
+        // because removal only touches entries matching SwiftTunnel's filter
+        // signature. Stale entries from a previous session are replaced by the
+        // install merge itself.
+        write_ipv6_marker_winpkfilter(&friendly_name);
         self.ipv6_was_disabled = true;
 
-        // netsh.exe completes in ~50-100ms. 5s is generous slack for very
-        // loaded systems; if it actually times out at 5s, something is
-        // seriously wrong with the host's firewall service.
-        let timeout_secs = 5;
-        let delete_args = Self::build_delete_ipv6_block_rule_args();
-        let delete_arg_refs: Vec<&str> = delete_args.iter().map(String::as_str).collect();
-        let _ = runner(&delete_arg_refs, timeout_secs);
-
-        let add_args = Self::build_add_ipv6_block_rule_args(firewall_interface_type);
-        let add_arg_refs: Vec<&str> = add_args.iter().map(String::as_str).collect();
-        let output = runner(&add_arg_refs, timeout_secs);
-
-        if output.success {
-            log::info!(
-                "Public IPv6 blocked on {} via firewall rule '{}' — game traffic will use IPv4",
-                friendly_name,
-                IPV6_BLOCK_RULE_NAME
-            );
-            return Ok(());
+        match installer(&physical_name) {
+            Ok(()) => {
+                log::info!(
+                    "Public IPv6 blocked on {} via WinpkFilter static filters — game traffic will use IPv4",
+                    friendly_name
+                );
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to install WinpkFilter IPv6 block filters on {}: {}",
+                    friendly_name,
+                    e
+                );
+                if let Err(cleanup_error) = remove_winpkfilter_ipv6_block_filters() {
+                    log::debug!(
+                        "Failed to clean WinpkFilter IPv6 filters after install error: {}",
+                        cleanup_error
+                    );
+                }
+                delete_ipv6_marker();
+                self.ipv6_was_disabled = false;
+                log::warn!(
+                    "Refusing to continue without IPv6 outbound block. IPv6 traffic may bypass VPN."
+                );
+                Err(VpnError::SplitTunnelSetupFailed(format!(
+                    "Failed to install WinpkFilter IPv6 block filters. SwiftTunnel is IPv4-only; leaving IPv6 unblocked could let game traffic bypass the tunnel. Details: {e}"
+                )))
+            }
         }
-
-        let details: String = output
-            .summarize_failure(timeout_secs, "netsh")
-            .chars()
-            .take(240)
-            .collect();
-
-        log::warn!(
-            "Failed to install IPv6 block rule on {} (exit={:?}, timed_out={}): stdout='{}' stderr='{}'",
-            friendly_name,
-            output.exit_code,
-            output.timed_out,
-            output.stdout.trim(),
-            output.stderr.trim()
-        );
-
-        log::warn!(
-            "Refusing to continue without IPv6 outbound block. IPv6 traffic may bypass VPN.{}{}",
-            if details.is_empty() { "" } else { " Details: " },
-            details
-        );
-
-        Err(VpnError::SplitTunnelSetupFailed(format!(
-            "Failed to install IPv6 block firewall rule. SwiftTunnel is IPv4-only; leaving IPv6 unblocked could let game traffic bypass the tunnel.{}{}",
-            if details.is_empty() { "" } else { " Details: " },
-            details
-        )))
     }
 
     /// Block public IPv6 egress while the IPv4-only tunnel is active.
@@ -3894,16 +3851,16 @@ impl ParallelInterceptor {
     /// This is a common cause of "detection works but tunneling fails" - the process is
     /// detected, but its IPv6 traffic bypasses the VPN.
     pub fn disable_ipv6(&mut self) -> VpnResult<()> {
-        self.disable_ipv6_with_runner(Self::run_netsh_with_timeout_capture)
+        self.disable_ipv6_with_filter_installer(Self::install_winpkfilter_ipv6_block_for_adapter)
     }
-
-    /// Restore IPv6 connectivity by removing the outbound block rule.
+    /// Restore IPv6 connectivity by removing the outbound block filters.
     ///
     /// Called when the VPN disconnects. The marker file records which method
-    /// was used to block IPv6 in this session (current code uses a firewall
-    /// rule; legacy markers from older installs used adapter binding). The
-    /// no-marker fallback path also targets the firewall rule because every
-    /// in-progress block this version writes uses that method.
+    /// was used to block IPv6 in this session (current code uses WinpkFilter
+    /// static filters; legacy markers from older installs used adapter binding
+    /// or a Windows Firewall rule). The no-marker fallback also clears
+    /// WinpkFilter static filters because every in-progress block this version
+    /// writes uses that method.
     pub fn enable_ipv6(&mut self) {
         if !self.ipv6_was_disabled {
             return;
@@ -3933,18 +3890,18 @@ impl ParallelInterceptor {
             }
             None => {
                 // No marker found — likely a marker-write race or manual
-                // tampering. Best-effort: try to delete the firewall rule
-                // anyway (idempotent; silently no-ops if absent).
-                let delete_args = Self::build_delete_ipv6_block_rule_args();
-                let delete_arg_refs: Vec<&str> = delete_args.iter().map(String::as_str).collect();
-                if Self::run_netsh_with_timeout_capture(&delete_arg_refs, 5).success {
-                    log::info!("IPv6 block rule removed on {}", friendly_name);
+                // tampering. Best-effort: remove SwiftTunnel's IPv6 drop
+                // entries anyway (idempotent, and entries owned by other
+                // WinpkFilter consumers are preserved).
+                if remove_winpkfilter_ipv6_block_filters().is_ok() {
+                    log::info!(
+                        "WinpkFilter IPv6 block filters removed on {}",
+                        friendly_name
+                    );
                     delete_ipv6_marker();
                 } else {
                     log::warn!(
-                        "Failed to remove IPv6 block rule '{}' — run `netsh advfirewall firewall delete rule name=\"{}\"` manually if connectivity is affected",
-                        IPV6_BLOCK_RULE_NAME,
-                        IPV6_BLOCK_RULE_NAME
+                        "Failed to clear WinpkFilter IPv6 block filters — restart SwiftTunnel to retry cleanup if connectivity is affected"
                     );
                 }
             }
@@ -4009,10 +3966,10 @@ impl ParallelInterceptor {
         // restored on app launch by `tso_recovery::recover_tso_on_startup`,
         // so users upgrading from <=2.0.20 don't end up with LSO stuck off.
 
-        // Disable IPv6 on physical adapter - SwiftTunnel is IPv4-only.
-        // This uses a netsh advfirewall rule (non-link-bouncing); the
-        // historical link-bouncing alternative is documented at
-        // `disable_ipv6_with_runner`.
+        // Disable public IPv6 egress on the physical adapter - SwiftTunnel is
+        // IPv4-only. This uses WinpkFilter static drop filters; the historical
+        // link-bouncing adapter-binding and Windows Firewall alternatives are
+        // documented in `ipv6_recovery`.
         self.disable_ipv6()?;
 
         self.stop_flag.store(false, Ordering::Release);
@@ -10788,58 +10745,32 @@ mod tests {
     fn test_disable_ipv6_skips_when_adapter_name_missing() {
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor
-            .disable_ipv6_with_runner(|_, _| panic!("runner should not be called"))
+            .disable_ipv6_with_filter_installer(|_| panic!("installer should not be called"))
             .unwrap();
         assert!(!interceptor.ipv6_was_disabled);
     }
 
-    #[test]
-    fn test_firewall_interface_type_maps_known_adapter_kinds() {
-        assert_eq!(
-            ParallelInterceptor::firewall_interface_type_for_adapter_kind(Some("ethernet")),
-            "lan"
-        );
-        assert_eq!(
-            ParallelInterceptor::firewall_interface_type_for_adapter_kind(Some("wifi")),
-            "wireless"
-        );
-        assert_eq!(
-            ParallelInterceptor::firewall_interface_type_for_adapter_kind(Some("ppp")),
-            "ras"
-        );
-        assert_eq!(
-            ParallelInterceptor::firewall_interface_type_for_adapter_kind(Some("other")),
-            "any"
-        );
-    }
+    // The IPv6 block filter shape, prefix coverage, and table merge/removal
+    // behavior are tested in `super::ipv6_recovery`, where the filter
+    // builders now live.
 
     #[test]
-    fn test_disable_ipv6_netsh_args_block_public_ipv6_on_interface_type() {
-        let args = ParallelInterceptor::build_add_ipv6_block_rule_args("lan");
-        assert!(args.contains(&format!("remoteip={IPV6_BLOCK_REMOTE_IPS}")));
-        assert!(args.contains(&"interfacetype=lan".to_string()));
-        assert!(!args.contains(&"remoteip=::/0".to_string()));
-    }
-
-    #[test]
-    fn test_disable_ipv6_skips_firewall_when_selected_adapter_has_no_ipv6() {
+    fn test_disable_ipv6_skips_winpkfilter_when_selected_adapter_has_no_ipv6() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         interceptor.physical_adapter_if_index = Some(42);
 
-        let runner_calls = std::cell::Cell::new(0);
+        let installer_calls = std::cell::Cell::new(0);
         interceptor
-            .disable_ipv6_with_runner_and_probe(
-                |_, _| {
-                    runner_calls.set(runner_calls.get() + 1);
-                    CommandRunOutput {
-                        success: false,
-                        timed_out: false,
-                        exit_code: Some(1),
-                        stdout: String::new(),
-                        stderr: "runner should not be called".to_string(),
-                    }
+            .disable_ipv6_with_filter_installer_and_probe(
+                |_| {
+                    installer_calls.set(installer_calls.get() + 1);
+                    Err("installer should not be called".to_string())
                 },
                 |if_index| {
                     assert_eq!(if_index, 42);
@@ -10848,22 +10779,26 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(runner_calls.get(), 0);
+        assert_eq!(installer_calls.get(), 0);
         assert!(!interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
     }
 
     #[test]
     fn test_disable_ipv6_skip_preserves_existing_restore_state() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         interceptor.physical_adapter_if_index = Some(42);
         interceptor.ipv6_was_disabled = true;
 
         interceptor
-            .disable_ipv6_with_runner_and_probe(
-                |_, _| panic!("runner should not be called"),
+            .disable_ipv6_with_filter_installer_and_probe(
+                |_| panic!("installer should not be called"),
                 |if_index| {
                     assert_eq!(if_index, 42);
                     Some(false)
@@ -10876,24 +10811,23 @@ mod tests {
     }
 
     #[test]
-    fn test_disable_ipv6_probe_true_installs_firewall_block() {
+    fn test_disable_ipv6_probe_true_installs_winpkfilter_block() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         interceptor.physical_adapter_if_index = Some(42);
 
-        let runner_calls = std::cell::Cell::new(0);
+        let installer_calls = std::cell::Cell::new(0);
         interceptor
-            .disable_ipv6_with_runner_and_probe(
-                |_, _| {
-                    runner_calls.set(runner_calls.get() + 1);
-                    CommandRunOutput {
-                        success: true,
-                        timed_out: false,
-                        exit_code: Some(0),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    }
+            .disable_ipv6_with_filter_installer_and_probe(
+                |physical_name| {
+                    installer_calls.set(installer_calls.get() + 1);
+                    assert_eq!(physical_name, "\\DEVICE\\{ETHERNET}");
+                    Ok(())
                 },
                 |if_index| {
                     assert_eq!(if_index, 42);
@@ -10902,43 +10836,39 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(runner_calls.get(), 2);
+        assert_eq!(installer_calls.get(), 1);
         assert!(interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
     }
 
     #[test]
-    fn test_disable_ipv6_probe_unknown_still_attempts_firewall_block() {
+    fn test_disable_ipv6_probe_unknown_still_attempts_winpkfilter_block() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         interceptor.physical_adapter_if_index = Some(42);
 
-        let runner_calls = std::cell::Cell::new(0);
+        let installer_calls = std::cell::Cell::new(0);
         let error = interceptor
-            .disable_ipv6_with_runner_and_probe(
-                |_, _| {
-                    runner_calls.set(runner_calls.get() + 1);
-                    CommandRunOutput {
-                        success: false,
-                        timed_out: false,
-                        exit_code: Some(1),
-                        stdout: String::new(),
-                        stderr:
-                            "The following command was not found: advfirewall firewall add rule."
-                                .to_string(),
-                    }
+            .disable_ipv6_with_filter_installer_and_probe(
+                |_| {
+                    installer_calls.set(installer_calls.get() + 1);
+                    Err("WinpkFilter driver rejected static filter table".to_string())
                 },
                 |if_index| {
                     assert_eq!(if_index, 42);
                     None
                 },
             )
-            .expect_err("unknown IPv6 probe must not skip the firewall block");
+            .expect_err("unknown IPv6 probe must not skip the WinpkFilter block");
 
-        assert_eq!(runner_calls.get(), 2);
-        assert!(error.to_string().contains("IPv6 block firewall rule"));
-        assert!(interceptor.ipv6_was_disabled);
+        assert_eq!(installer_calls.get(), 1);
+        assert!(error.to_string().contains("WinpkFilter IPv6 block filters"));
+        assert!(!interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
     }
 
@@ -10966,17 +10896,15 @@ mod tests {
 
     #[test]
     fn test_disable_ipv6_sets_flag_on_success() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         interceptor
-            .disable_ipv6_with_runner(|_, _| CommandRunOutput {
-                success: true,
-                timed_out: false,
-                exit_code: Some(0),
-                stdout: "IPv6 disabled".to_string(),
-                stderr: String::new(),
-            })
+            .disable_ipv6_with_filter_installer(|_| Ok(()))
             .unwrap();
         assert!(interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
@@ -10984,21 +10912,19 @@ mod tests {
 
     #[test]
     fn test_disable_ipv6_failure_preserves_restore_state() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
+        interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         let error = interceptor
-            .disable_ipv6_with_runner(|_, _| CommandRunOutput {
-                success: false,
-                timed_out: false,
-                exit_code: Some(1),
-                stdout: String::new(),
-                stderr: "Access is denied.".to_string(),
-            })
+            .disable_ipv6_with_filter_installer(|_| Err("Access is denied.".to_string()))
             .expect_err("IPv6 block failure must abort connect");
 
-        assert!(error.to_string().contains("IPv6 block firewall rule"));
-        assert!(interceptor.ipv6_was_disabled);
+        assert!(error.to_string().contains("WinpkFilter IPv6 block filters"));
+        assert!(!interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
     }
 
