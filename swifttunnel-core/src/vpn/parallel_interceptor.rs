@@ -58,7 +58,7 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    delete_ipv6_marker, has_ipv6_binding_native, reset_winpkfilter_ipv6_block_filters,
+    delete_ipv6_marker, has_ipv6_binding_native, remove_winpkfilter_ipv6_block_filters,
     restore_ipv6_from_marker, write_ipv6_marker_winpkfilter,
 };
 use super::process_cache::{DNS_PORT, LockFreeProcessCache, ProcessSnapshot};
@@ -66,16 +66,6 @@ use super::process_tracker::{ConnectionKey, Protocol};
 use super::tso_recovery::{delete_tso_marker, restore_tso_from_marker, write_tso_marker};
 use super::{VpnError, VpnResult};
 use crate::geolocation::is_roblox_game_server_ip;
-
-#[cfg(any(test, target_os = "windows"))]
-use ndisapi::{
-    DataLinkLayerFilter, DirectionFlags, FILTER_PACKET_DROP, FilterLayerFlags, IP_SUBNET_V6_TYPE,
-    IPV6, IpAddressV6, IpAddressV6Union, IpSubnetV6, IpV6Filter, IpV6FilterFlags,
-    NetworkLayerFilter, NetworkLayerFilterUnion, StaticFilter, StaticFilterTable,
-    TransportLayerFilter,
-};
-#[cfg(any(test, target_os = "windows"))]
-use windows::Win32::Networking::WinSock::{IN6_ADDR, IN6_ADDR_0};
 
 // ============================================================================
 // ZERO-ALLOCATION BUFFER MANAGEMENT
@@ -88,13 +78,6 @@ const MAX_PACKET_SIZE: usize = 1600;
 /// unbounded; at this cap we stop recording new IPs for the remainder of the
 /// session (existing IPs still re-register harmlessly).
 const MAX_DETECTED_GAME_SERVERS: usize = 10_000;
-
-const IPV6_PUBLIC_NETWORK: [u8; 16] = [0x20, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-const IPV6_PUBLIC_MASK: [u8; 16] = [0xe0, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-const IPV6_NAT64_NETWORK: [u8; 16] = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-const IPV6_NAT64_MASK: [u8; 16] = [
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0,
-];
 
 /// Packet reader rebind budget. Transient NDIS glitches (sleep/resume, WLAN
 /// roam, driver reset, ndisrd.sys handle staleness) can make `read_packets`
@@ -3704,60 +3687,6 @@ impl ParallelInterceptor {
         self.tso_was_disabled = false;
     }
 
-    #[cfg(any(test, target_os = "windows"))]
-    fn in6_addr(bytes: [u8; 16]) -> IN6_ADDR {
-        IN6_ADDR {
-            u: IN6_ADDR_0 { Byte: bytes },
-        }
-    }
-
-    #[cfg(any(test, target_os = "windows"))]
-    fn ipv6_subnet_filter_address(network: [u8; 16], mask: [u8; 16]) -> IpAddressV6 {
-        IpAddressV6::new(
-            IP_SUBNET_V6_TYPE,
-            IpAddressV6Union {
-                ip_subnet: IpSubnetV6::new(Self::in6_addr(network), Self::in6_addr(mask)),
-            },
-        )
-    }
-
-    #[cfg(any(test, target_os = "windows"))]
-    fn build_ipv6_block_filter(
-        physical_handle: windows::Win32::Foundation::HANDLE,
-        network: [u8; 16],
-        mask: [u8; 16],
-    ) -> StaticFilter {
-        StaticFilter::new(
-            physical_handle.0 as usize as u64,
-            DirectionFlags::PACKET_FLAG_ON_SEND,
-            FILTER_PACKET_DROP,
-            FilterLayerFlags::NETWORK_LAYER_VALID,
-            DataLinkLayerFilter::default(),
-            NetworkLayerFilter::new(
-                IPV6,
-                NetworkLayerFilterUnion {
-                    ipv6: IpV6Filter::new(
-                        IpV6FilterFlags::IP_V6_FILTER_DEST_ADDRESS,
-                        IpAddressV6::default(),
-                        Self::ipv6_subnet_filter_address(network, mask),
-                        0,
-                    ),
-                },
-            ),
-            TransportLayerFilter::default(),
-        )
-    }
-
-    #[cfg(any(test, target_os = "windows"))]
-    fn build_ipv6_block_filter_table(
-        physical_handle: windows::Win32::Foundation::HANDLE,
-    ) -> StaticFilterTable<2> {
-        StaticFilterTable::from_filters([
-            Self::build_ipv6_block_filter(physical_handle, IPV6_PUBLIC_NETWORK, IPV6_PUBLIC_MASK),
-            Self::build_ipv6_block_filter(physical_handle, IPV6_NAT64_NETWORK, IPV6_NAT64_MASK),
-        ])
-    }
-
     #[cfg(target_os = "windows")]
     fn install_winpkfilter_ipv6_block_for_adapter(physical_name: &str) -> Result<(), String> {
         const MAX_ATTEMPTS: u32 = 5;
@@ -3773,10 +3702,12 @@ impl ParallelInterceptor {
                 .iter()
                 .find(|adapter| adapter.get_name() == physical_name)
             {
-                let table = Self::build_ipv6_block_filter_table(adapter.get_handle());
-                return driver
-                    .set_packet_filter_table(&table)
-                    .map_err(|e| format!("Failed to install WinpkFilter IPv6 block filters: {e}"));
+                let adapter_handle = adapter.get_handle().0 as usize as u64;
+                return super::ipv6_recovery::install_winpkfilter_ipv6_block_filters(
+                    &driver,
+                    adapter_handle,
+                )
+                .map_err(|e| format!("Failed to install WinpkFilter IPv6 block filters: {e}"));
             }
 
             if attempt < MAX_ATTEMPTS {
@@ -3871,18 +3802,13 @@ impl ParallelInterceptor {
         );
 
         // Write the marker before installing the driver filters. If SwiftTunnel
-        // crashes after the filter table is loaded, startup recovery can reset
-        // it. The inverse race (marker without filters) is harmless because
-        // reset_packet_filter_table is idempotent for our session.
+        // crashes after the filter table is loaded, startup recovery can remove
+        // our entries. The inverse race (marker without filters) is harmless
+        // because removal only touches entries matching SwiftTunnel's filter
+        // signature. Stale entries from a previous session are replaced by the
+        // install merge itself.
         write_ipv6_marker_winpkfilter(&friendly_name);
         self.ipv6_was_disabled = true;
-
-        if let Err(e) = reset_winpkfilter_ipv6_block_filters() {
-            log::debug!(
-                "Pre-clearing WinpkFilter IPv6 filters before install did not complete: {}",
-                e
-            );
-        }
 
         match installer(&physical_name) {
             Ok(()) => {
@@ -3898,7 +3824,7 @@ impl ParallelInterceptor {
                     friendly_name,
                     e
                 );
-                if let Err(cleanup_error) = reset_winpkfilter_ipv6_block_filters() {
+                if let Err(cleanup_error) = remove_winpkfilter_ipv6_block_filters() {
                     log::debug!(
                         "Failed to clean WinpkFilter IPv6 filters after install error: {}",
                         cleanup_error
@@ -3964,12 +3890,12 @@ impl ParallelInterceptor {
             }
             None => {
                 // No marker found — likely a marker-write race or manual
-                // tampering. Best-effort: reset the WinpkFilter static table
-                // anyway (idempotent for the table SwiftTunnel owns while
-                // connected).
-                if reset_winpkfilter_ipv6_block_filters().is_ok() {
+                // tampering. Best-effort: remove SwiftTunnel's IPv6 drop
+                // entries anyway (idempotent, and entries owned by other
+                // WinpkFilter consumers are preserved).
+                if remove_winpkfilter_ipv6_block_filters().is_ok() {
                     log::info!(
-                        "WinpkFilter IPv6 block filters cleared on {}",
+                        "WinpkFilter IPv6 block filters removed on {}",
                         friendly_name
                     );
                     delete_ipv6_marker();
@@ -10824,41 +10750,15 @@ mod tests {
         assert!(!interceptor.ipv6_was_disabled);
     }
 
-    #[test]
-    fn test_winpkfilter_ipv6_block_table_drops_public_and_nat64_ipv6() {
-        let handle = windows::Win32::Foundation::HANDLE(0x1234 as *mut std::ffi::c_void);
-        let table = ParallelInterceptor::build_ipv6_block_filter_table(handle);
-        let table_size = table.table_size;
-        let filters = unsafe { std::ptr::addr_of!(table.static_filters).read_unaligned() };
-
-        assert_eq!(table_size, 2);
-        for filter in filters {
-            let adapter_handle = filter.adapter_handle;
-            let direction_flags = filter.direction_flags;
-            let action = filter.filter_action;
-            let valid_fields = filter.valid_fields;
-            let network_filter = filter.network_filter;
-            let network_selector = network_filter.union_selector;
-            let ipv6_filter = unsafe { network_filter.network_layer.ipv6 };
-            let ipv6_valid_fields = ipv6_filter.valid_fields;
-            let dest_address = ipv6_filter.dest_address;
-            let dest_address_type = dest_address.address_type;
-
-            assert_eq!(adapter_handle, handle.0 as usize as u64);
-            assert_eq!(direction_flags, DirectionFlags::PACKET_FLAG_ON_SEND);
-            assert_eq!(action, FILTER_PACKET_DROP);
-            assert_eq!(valid_fields, FilterLayerFlags::NETWORK_LAYER_VALID);
-            assert_eq!(network_selector, IPV6);
-            assert_eq!(
-                ipv6_valid_fields,
-                IpV6FilterFlags::IP_V6_FILTER_DEST_ADDRESS
-            );
-            assert_eq!(dest_address_type, IP_SUBNET_V6_TYPE);
-        }
-    }
+    // The IPv6 block filter shape, prefix coverage, and table merge/removal
+    // behavior are tested in `super::ipv6_recovery`, where the filter
+    // builders now live.
 
     #[test]
     fn test_disable_ipv6_skips_winpkfilter_when_selected_adapter_has_no_ipv6() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
@@ -10886,6 +10786,9 @@ mod tests {
 
     #[test]
     fn test_disable_ipv6_skip_preserves_existing_restore_state() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
@@ -10909,6 +10812,9 @@ mod tests {
 
     #[test]
     fn test_disable_ipv6_probe_true_installs_winpkfilter_block() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
@@ -10937,6 +10843,9 @@ mod tests {
 
     #[test]
     fn test_disable_ipv6_probe_unknown_still_attempts_winpkfilter_block() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
@@ -10987,6 +10896,9 @@ mod tests {
 
     #[test]
     fn test_disable_ipv6_sets_flag_on_success() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
@@ -11000,6 +10912,9 @@ mod tests {
 
     #[test]
     fn test_disable_ipv6_failure_preserves_restore_state() {
+        let _guard = crate::vpn::ipv6_recovery::IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         delete_ipv6_marker();
         let mut interceptor = ParallelInterceptor::new(Vec::new());
         interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());

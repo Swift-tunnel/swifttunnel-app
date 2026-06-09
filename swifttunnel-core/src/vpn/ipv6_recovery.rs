@@ -15,8 +15,186 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
+use ndisapi::StaticFilterTable;
+#[cfg(any(test, target_os = "windows"))]
+use ndisapi::{
+    DataLinkLayerFilter, DirectionFlags, FILTER_PACKET_DROP, FilterLayerFlags, IP_SUBNET_V6_TYPE,
+    IPV6, IpAddressV6, IpAddressV6Union, IpSubnetV6, IpV6Filter, IpV6FilterFlags,
+    NetworkLayerFilter, NetworkLayerFilterUnion, StaticFilter, TransportLayerFilter,
+};
+#[cfg(any(test, target_os = "windows"))]
+use windows::Win32::Networking::WinSock::{IN6_ADDR, IN6_ADDR_0};
+
+/// Outbound IPv6 destinations dropped while the IPv4-only tunnel is active:
+/// global unicast (2000::/3), the NAT64 well-known prefix (64:ff9b::/96,
+/// RFC 6052), and the NAT64 local-use prefix (64:ff9b:1::/48, RFC 8215).
+/// Network-specific NAT64 prefixes carved out of provider global unicast
+/// space already fall inside 2000::/3.
+#[cfg(any(test, target_os = "windows"))]
+const IPV6_PUBLIC_NETWORK: [u8; 16] = [0x20, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+#[cfg(any(test, target_os = "windows"))]
+const IPV6_PUBLIC_MASK: [u8; 16] = [0xe0, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+#[cfg(any(test, target_os = "windows"))]
+const IPV6_NAT64_NETWORK: [u8; 16] = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+#[cfg(any(test, target_os = "windows"))]
+const IPV6_NAT64_MASK: [u8; 16] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0,
+];
+#[cfg(any(test, target_os = "windows"))]
+const IPV6_NAT64_LOCAL_NETWORK: [u8; 16] = [
+    0x00, 0x64, 0xff, 0x9b, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+#[cfg(any(test, target_os = "windows"))]
+const IPV6_NAT64_LOCAL_MASK: [u8; 16] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+/// The exact destination subnets SwiftTunnel's IPv6 drop filters use. Filter
+/// ownership during merge/cleanup is decided by matching these subnets plus
+/// the full drop-filter shape — never by adapter handle (stale across
+/// reboots) or table position.
+#[cfg(any(test, target_os = "windows"))]
+const SWIFTTUNNEL_IPV6_BLOCK_SUBNETS: [([u8; 16], [u8; 16]); 3] = [
+    (IPV6_PUBLIC_NETWORK, IPV6_PUBLIC_MASK),
+    (IPV6_NAT64_NETWORK, IPV6_NAT64_MASK),
+    (IPV6_NAT64_LOCAL_NETWORK, IPV6_NAT64_LOCAL_MASK),
+];
+
+/// Generous upper bound for reading/merging the driver's static filter table.
+/// SwiftTunnel installs 3 entries; anything near this limit means another
+/// WinpkFilter consumer filled the table.
+#[cfg(target_os = "windows")]
+const STATIC_FILTER_TABLE_CAPACITY: usize = 256;
+
+#[cfg(any(test, target_os = "windows"))]
+fn in6_addr(bytes: [u8; 16]) -> IN6_ADDR {
+    IN6_ADDR {
+        u: IN6_ADDR_0 { Byte: bytes },
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn ipv6_subnet_filter_address(network: [u8; 16], mask: [u8; 16]) -> IpAddressV6 {
+    IpAddressV6::new(
+        IP_SUBNET_V6_TYPE,
+        IpAddressV6Union {
+            ip_subnet: IpSubnetV6::new(in6_addr(network), in6_addr(mask)),
+        },
+    )
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn build_ipv6_block_filter(adapter_handle: u64, network: [u8; 16], mask: [u8; 16]) -> StaticFilter {
+    StaticFilter::new(
+        adapter_handle,
+        DirectionFlags::PACKET_FLAG_ON_SEND,
+        FILTER_PACKET_DROP,
+        FilterLayerFlags::NETWORK_LAYER_VALID,
+        DataLinkLayerFilter::default(),
+        NetworkLayerFilter::new(
+            IPV6,
+            NetworkLayerFilterUnion {
+                ipv6: IpV6Filter::new(
+                    IpV6FilterFlags::IP_V6_FILTER_DEST_ADDRESS,
+                    IpAddressV6::default(),
+                    ipv6_subnet_filter_address(network, mask),
+                    0,
+                ),
+            },
+        ),
+        TransportLayerFilter::default(),
+    )
+}
+
+/// SwiftTunnel's outbound IPv6 drop filters for the selected adapter.
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn swifttunnel_ipv6_block_filters(adapter_handle: u64) -> [StaticFilter; 3] {
+    SWIFTTUNNEL_IPV6_BLOCK_SUBNETS
+        .map(|(network, mask)| build_ipv6_block_filter(adapter_handle, network, mask))
+}
+
+/// Whether a static filter entry is one of SwiftTunnel's IPv6 drop filters.
+///
+/// Matches the full filter shape (outbound, drop, network-layer-only, IPv6
+/// destination subnet equal to one of [`SWIFTTUNNEL_IPV6_BLOCK_SUBNETS`]).
+/// A filter that differs in any of those fields belongs to someone else and
+/// must be preserved.
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn is_swifttunnel_ipv6_block_filter(filter: &StaticFilter) -> bool {
+    // Copy fields out of the packed struct; taking references would be UB.
+    let direction_flags = filter.direction_flags;
+    let filter_action = filter.filter_action;
+    let valid_fields = filter.valid_fields;
+    if direction_flags != DirectionFlags::PACKET_FLAG_ON_SEND
+        || filter_action != FILTER_PACKET_DROP
+        || valid_fields != FilterLayerFlags::NETWORK_LAYER_VALID
+    {
+        return false;
+    }
+
+    let network_filter = filter.network_filter;
+    if network_filter.union_selector != IPV6 {
+        return false;
+    }
+
+    // SAFETY: union_selector == IPV6 guarantees the ipv6 arm is the live one.
+    let ipv6_filter = unsafe { network_filter.network_layer.ipv6 };
+    let ipv6_valid_fields = ipv6_filter.valid_fields;
+    if ipv6_valid_fields != IpV6FilterFlags::IP_V6_FILTER_DEST_ADDRESS {
+        return false;
+    }
+
+    let dest_address = ipv6_filter.dest_address;
+    if dest_address.address_type != IP_SUBNET_V6_TYPE {
+        return false;
+    }
+
+    // SAFETY: address_type == IP_SUBNET_V6_TYPE guarantees the subnet arm.
+    let subnet = unsafe { dest_address.address.ip_subnet };
+    let network = unsafe { subnet.ip.u.Byte };
+    let mask = unsafe { subnet.ip_mask.u.Byte };
+    SWIFTTUNNEL_IPV6_BLOCK_SUBNETS
+        .iter()
+        .any(|(n, m)| network == *n && mask == *m)
+}
+
+/// Split a filter table into (entries to keep, count of SwiftTunnel IPv6
+/// drop entries removed).
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn entries_without_swifttunnel_ipv6_block(
+    entries: Vec<StaticFilter>,
+) -> (Vec<StaticFilter>, usize) {
+    let original = entries.len();
+    let kept: Vec<StaticFilter> = entries
+        .into_iter()
+        .filter(|filter| !is_swifttunnel_ipv6_block_filter(filter))
+        .collect();
+    let removed = original - kept.len();
+    (kept, removed)
+}
+
+/// Merge SwiftTunnel's IPv6 drop filters into an existing table snapshot,
+/// replacing any stale SwiftTunnel entries (e.g. from a previous session)
+/// while preserving everything else.
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn merged_ipv6_block_entries(
+    existing: Vec<StaticFilter>,
+    adapter_handle: u64,
+) -> Vec<StaticFilter> {
+    let (mut entries, _) = entries_without_swifttunnel_ipv6_block(existing);
+    entries.extend(swifttunnel_ipv6_block_filters(adapter_handle));
+    entries
+}
+
 /// Marker file name stored in %LOCALAPPDATA%/SwiftTunnel/
 const IPV6_MARKER_FILE: &str = "ipv6_disabled.marker";
+
+/// Serializes tests (across modules) that touch the shared on-disk IPv6
+/// marker file; without it, parallel test execution makes marker tests delete
+/// each other's state and flake.
+#[cfg(test)]
+pub(crate) static IPV6_MARKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// How SwiftTunnel prevented IPv6 leakage during the session this marker
 /// belongs to.
@@ -423,33 +601,135 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
     true
 }
 
+/// Read the driver's current static filter table as owned entries.
 #[cfg(target_os = "windows")]
-pub fn reset_winpkfilter_ipv6_block_filters() -> Result<(), String> {
+fn read_static_filter_entries(driver: &ndisapi::Ndisapi) -> Result<Vec<StaticFilter>, String> {
+    let size = driver
+        .get_packet_filter_table_size()
+        .map_err(|e| format!("Failed to query WinpkFilter static filter table size: {e}"))?;
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+    if size > STATIC_FILTER_TABLE_CAPACITY {
+        return Err(format!(
+            "WinpkFilter static filter table has {size} entries, more than the supported {STATIC_FILTER_TABLE_CAPACITY}"
+        ));
+    }
+
+    // Boxed: the fixed-capacity table is ~48KB, too big to keep on the stack.
+    let mut table = Box::new(StaticFilterTable::<STATIC_FILTER_TABLE_CAPACITY>::new());
+    driver
+        .get_packet_filter_table(table.as_mut())
+        .map_err(|e| format!("Failed to read WinpkFilter static filter table: {e}"))?;
+
+    let count = (table.table_size as usize).min(STATIC_FILTER_TABLE_CAPACITY);
+    let base = std::ptr::addr_of!(table.static_filters).cast::<StaticFilter>();
+    let mut entries = Vec::with_capacity(count);
+    for i in 0..count {
+        // SAFETY: i < count <= capacity; unaligned read because the table is
+        // repr(C, packed).
+        entries.push(unsafe { base.add(i).read_unaligned() });
+    }
+    Ok(entries)
+}
+
+/// Replace the driver's static filter table with exactly `entries`.
+#[cfg(target_os = "windows")]
+fn set_static_filter_entries(
+    driver: &ndisapi::Ndisapi,
+    entries: &[StaticFilter],
+) -> Result<(), String> {
+    if entries.len() > STATIC_FILTER_TABLE_CAPACITY {
+        return Err(format!(
+            "Refusing to write {} WinpkFilter static filter entries, more than the supported {STATIC_FILTER_TABLE_CAPACITY}",
+            entries.len()
+        ));
+    }
+
+    let mut table = Box::new(StaticFilterTable::<STATIC_FILTER_TABLE_CAPACITY>::new());
+    table.table_size = entries.len() as u32;
+    let base = std::ptr::addr_of_mut!(table.static_filters).cast::<StaticFilter>();
+    for (i, entry) in entries.iter().enumerate() {
+        // SAFETY: i < entries.len() <= capacity; unaligned write because the
+        // table is repr(C, packed).
+        unsafe { base.add(i).write_unaligned(*entry) };
+    }
+    driver
+        .set_packet_filter_table(table.as_ref())
+        .map_err(|e| format!("Failed to write WinpkFilter static filter table: {e}"))
+}
+
+/// Install SwiftTunnel's IPv6 drop filters, preserving any static filter
+/// entries that are not SwiftTunnel's (another WinpkFilter consumer or a
+/// future SwiftTunnel component may own them).
+#[cfg(target_os = "windows")]
+pub(crate) fn install_winpkfilter_ipv6_block_filters(
+    driver: &ndisapi::Ndisapi,
+    adapter_handle: u64,
+) -> Result<(), String> {
+    let existing = read_static_filter_entries(driver)?;
+    let merged = merged_ipv6_block_entries(existing, adapter_handle);
+    let preserved = merged.len() - SWIFTTUNNEL_IPV6_BLOCK_SUBNETS.len();
+    if preserved > 0 {
+        log::info!(
+            "Preserving {preserved} existing WinpkFilter static filter entries alongside the SwiftTunnel IPv6 block"
+        );
+    }
+    set_static_filter_entries(driver, &merged)
+}
+
+/// Remove SwiftTunnel's IPv6 drop filters from the driver's static filter
+/// table, preserving entries owned by anyone else.
+///
+/// Cleanup must never leave IPv6 blocked: if the table cannot be read, this
+/// falls back to a full table reset (the documented crash-recovery posture is
+/// that recovery may over-clean) rather than leaving drop filters installed.
+#[cfg(target_os = "windows")]
+pub fn remove_winpkfilter_ipv6_block_filters() -> Result<(), String> {
     let driver = ndisapi::Ndisapi::new("NDISRD")
         .map_err(|e| format!("Failed to open WinpkFilter driver: {e}"))?;
-    driver
-        .reset_packet_filter_table()
-        .map_err(|e| format!("Failed to reset WinpkFilter static filter table: {e}"))?;
-    Ok(())
+
+    let entries = match read_static_filter_entries(&driver) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!(
+                "Could not read WinpkFilter static filter table ({e}); falling back to a full reset"
+            );
+            return driver
+                .reset_packet_filter_table()
+                .map_err(|e| format!("Failed to reset WinpkFilter static filter table: {e}"));
+        }
+    };
+
+    let (remaining, removed) = entries_without_swifttunnel_ipv6_block(entries);
+    if removed == 0 {
+        return Ok(());
+    }
+    if remaining.is_empty() {
+        return driver
+            .reset_packet_filter_table()
+            .map_err(|e| format!("Failed to reset WinpkFilter static filter table: {e}"));
+    }
+    set_static_filter_entries(&driver, &remaining)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn reset_winpkfilter_ipv6_block_filters() -> Result<(), String> {
+pub fn remove_winpkfilter_ipv6_block_filters() -> Result<(), String> {
     Err("WinpkFilter IPv6 filter cleanup is only available on Windows.".to_string())
 }
 
 fn restore_winpkfilter_static_filter_marker(adapter_name: &str) -> bool {
-    match reset_winpkfilter_ipv6_block_filters() {
+    match remove_winpkfilter_ipv6_block_filters() {
         Ok(()) => {
             log::info!(
-                "WinpkFilter IPv6 block filters cleared successfully for adapter: {}",
+                "WinpkFilter IPv6 block filters removed successfully for adapter: {}",
                 adapter_name
             );
             true
         }
         Err(e) => {
             log::warn!(
-                "Failed to clear WinpkFilter IPv6 block filters for adapter {}: {}",
+                "Failed to remove WinpkFilter IPv6 block filters for adapter {}: {}",
                 adapter_name,
                 e
             );
@@ -533,6 +813,9 @@ mod tests {
 
     #[test]
     fn test_marker_write_read_delete() {
+        let _guard = IPV6_MARKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let test_adapter = "TestAdapter456";
 
         write_ipv6_marker(test_adapter);
@@ -559,6 +842,196 @@ mod tests {
         assert!(cmd.contains("netsh.exe advfirewall firewall delete rule"));
         assert!(cmd.contains("netsh.exe advfirewall firewall show rule"));
         assert!(cmd.contains("exit 1"));
+    }
+
+    fn dest_subnet(filter: &StaticFilter) -> ([u8; 16], [u8; 16]) {
+        let network_filter = filter.network_filter;
+        let union_selector = network_filter.union_selector;
+        assert_eq!(union_selector, IPV6);
+        let ipv6_filter = unsafe { network_filter.network_layer.ipv6 };
+        let dest_address = ipv6_filter.dest_address;
+        let address_type = dest_address.address_type;
+        assert_eq!(address_type, IP_SUBNET_V6_TYPE);
+        let subnet = unsafe { dest_address.address.ip_subnet };
+        (unsafe { subnet.ip.u.Byte }, unsafe {
+            subnet.ip_mask.u.Byte
+        })
+    }
+
+    fn foreign_ipv4_drop_filter() -> StaticFilter {
+        StaticFilter::new(
+            0xAAAA,
+            DirectionFlags::PACKET_FLAG_ON_SEND,
+            FILTER_PACKET_DROP,
+            FilterLayerFlags::NETWORK_LAYER_VALID,
+            DataLinkLayerFilter::default(),
+            NetworkLayerFilter::new(ndisapi::IPV4, NetworkLayerFilterUnion::default()),
+            TransportLayerFilter::default(),
+        )
+    }
+
+    /// Identical shape to SwiftTunnel's drop filters but for a ULA subnet
+    /// (fc00::/7) SwiftTunnel never blocks — must never be claimed as ours.
+    fn foreign_ipv6_ula_drop_filter() -> StaticFilter {
+        let ula_network: [u8; 16] = [0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let ula_mask: [u8; 16] = [0xfe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        build_ipv6_block_filter(0xBBBB, ula_network, ula_mask)
+    }
+
+    #[test]
+    fn test_swifttunnel_ipv6_block_filters_cover_public_and_nat64_prefixes() {
+        let handle = 0x1234u64;
+        let filters = swifttunnel_ipv6_block_filters(handle);
+
+        assert_eq!(filters.len(), 3);
+        let mut subnets = Vec::new();
+        for filter in &filters {
+            let adapter_handle = filter.adapter_handle;
+            let direction_flags = filter.direction_flags;
+            let filter_action = filter.filter_action;
+            let valid_fields = filter.valid_fields;
+            assert_eq!(adapter_handle, handle);
+            assert_eq!(direction_flags, DirectionFlags::PACKET_FLAG_ON_SEND);
+            assert_eq!(filter_action, FILTER_PACKET_DROP);
+            assert_eq!(valid_fields, FilterLayerFlags::NETWORK_LAYER_VALID);
+            let network_filter = filter.network_filter;
+            let ipv6_filter = unsafe { network_filter.network_layer.ipv6 };
+            let ipv6_valid_fields = ipv6_filter.valid_fields;
+            assert_eq!(
+                ipv6_valid_fields,
+                IpV6FilterFlags::IP_V6_FILTER_DEST_ADDRESS
+            );
+            subnets.push(dest_subnet(filter));
+            assert!(is_swifttunnel_ipv6_block_filter(filter));
+        }
+
+        assert_eq!(subnets.len(), SWIFTTUNNEL_IPV6_BLOCK_SUBNETS.len());
+        for expected in SWIFTTUNNEL_IPV6_BLOCK_SUBNETS {
+            assert!(subnets.contains(&expected), "missing subnet {expected:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_swifttunnel_ipv6_block_filter_rejects_similar_foreign_filters() {
+        // Same drop shape, different subnet: NOT ours.
+        assert!(!is_swifttunnel_ipv6_block_filter(
+            &foreign_ipv6_ula_drop_filter()
+        ));
+        // IPv4 drop filter: NOT ours.
+        assert!(!is_swifttunnel_ipv6_block_filter(
+            &foreign_ipv4_drop_filter()
+        ));
+        // Zeroed/default entry: NOT ours.
+        assert!(!is_swifttunnel_ipv6_block_filter(&StaticFilter::default()));
+
+        // Same subnet but inbound direction: NOT ours.
+        let mut inbound = swifttunnel_ipv6_block_filters(0x1234)[0];
+        inbound.direction_flags = DirectionFlags::PACKET_FLAG_ON_RECEIVE;
+        assert!(!is_swifttunnel_ipv6_block_filter(&inbound));
+    }
+
+    #[test]
+    fn test_merged_ipv6_block_entries_preserve_foreign_and_replace_stale_ours() {
+        let stale_ours = swifttunnel_ipv6_block_filters(0x9999)[0];
+        let existing = vec![
+            foreign_ipv4_drop_filter(),
+            stale_ours,
+            foreign_ipv6_ula_drop_filter(),
+        ];
+
+        let merged = merged_ipv6_block_entries(existing, 0x1234);
+
+        // 2 foreign preserved + 3 ours; the stale entry (old adapter handle)
+        // was replaced, not duplicated.
+        assert_eq!(merged.len(), 5);
+        let ours: Vec<&StaticFilter> = merged
+            .iter()
+            .filter(|f| is_swifttunnel_ipv6_block_filter(f))
+            .collect();
+        assert_eq!(ours.len(), 3);
+        for filter in ours {
+            let adapter_handle = filter.adapter_handle;
+            assert_eq!(adapter_handle, 0x1234);
+        }
+        let foreign_handles: Vec<u64> = merged
+            .iter()
+            .filter(|f| !is_swifttunnel_ipv6_block_filter(f))
+            .map(|f| f.adapter_handle)
+            .collect();
+        assert_eq!(foreign_handles, vec![0xAAAA, 0xBBBB]);
+    }
+
+    #[test]
+    fn test_entries_without_swifttunnel_ipv6_block_removes_only_ours() {
+        let mut entries = vec![foreign_ipv4_drop_filter(), foreign_ipv6_ula_drop_filter()];
+        entries.extend(swifttunnel_ipv6_block_filters(0x1234));
+
+        let (kept, removed) = entries_without_swifttunnel_ipv6_block(entries);
+
+        assert_eq!(removed, 3);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|f| !is_swifttunnel_ipv6_block_filter(f)));
+    }
+
+    #[test]
+    fn test_entries_without_swifttunnel_ipv6_block_keeps_foreign_only_table_intact() {
+        let entries = vec![foreign_ipv4_drop_filter(), foreign_ipv6_ula_drop_filter()];
+
+        let (kept, removed) = entries_without_swifttunnel_ipv6_block(entries);
+
+        assert_eq!(removed, 0);
+        assert_eq!(kept.len(), 2);
+    }
+
+    /// Real-driver smoke test for the install → merge → remove cycle.
+    /// Mutates the machine-global WinpkFilter static filter table, so it is
+    /// manual-run only (`cargo test -- --ignored`) on a box with the NDISRD
+    /// driver, e.g. the split tunnel testbench. All driver operations happen
+    /// before the assertions so a failing assertion cannot leave the IPv6
+    /// drop filters installed.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn driver_smoke_install_and_remove_ipv6_block_filters() {
+        let driver = ndisapi::Ndisapi::new("NDISRD").expect("WinpkFilter driver not available");
+        let adapters = driver
+            .get_tcpip_bound_adapters_info()
+            .expect("failed to enumerate adapters");
+        let adapter = adapters.first().expect("no TCP/IP-bound adapters");
+        let adapter_handle = adapter.get_handle().0 as usize as u64;
+
+        let before = read_static_filter_entries(&driver).expect("read before install");
+        let install_result = install_winpkfilter_ipv6_block_filters(&driver, adapter_handle);
+        let with_block = read_static_filter_entries(&driver);
+        let remove_result = remove_winpkfilter_ipv6_block_filters();
+        let after = read_static_filter_entries(&driver);
+
+        install_result.expect("install failed");
+        let with_block = with_block.expect("read after install");
+        remove_result.expect("remove failed");
+        let after = after.expect("read after remove");
+
+        let (foreign_before, _) = entries_without_swifttunnel_ipv6_block(before);
+        let ours_installed = with_block
+            .iter()
+            .filter(|f| is_swifttunnel_ipv6_block_filter(f))
+            .count();
+        assert_eq!(ours_installed, 3, "expected all 3 IPv6 drop filters");
+        assert_eq!(
+            with_block.len(),
+            foreign_before.len() + 3,
+            "install must preserve foreign entries"
+        );
+        let ours_after = after
+            .iter()
+            .filter(|f| is_swifttunnel_ipv6_block_filter(f))
+            .count();
+        assert_eq!(ours_after, 0, "remove must clear all SwiftTunnel entries");
+        assert_eq!(
+            after.len(),
+            foreign_before.len(),
+            "remove must keep foreign entries"
+        );
     }
 
     #[test]
