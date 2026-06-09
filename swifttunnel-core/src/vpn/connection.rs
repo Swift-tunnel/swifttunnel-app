@@ -1066,12 +1066,35 @@ impl VpnConnection {
         enable_api_tunneling: bool,
         enable_country_ban: bool,
     ) -> VpnResult<()> {
-        // Bypassing a country ban requires the relay to carry Roblox's web/API
-        // traffic (including the launch-critical bootstrap hosts), so it implies
-        // Route Assist / API tunneling. Without this, a user who enables only
-        // "Bypass Country Bans" gets no relayed bootstrap routing and Roblox
-        // fails to launch behind the block.
+        // Bypassing a country ban needs the relay for Roblox's web/API
+        // control-plane traffic, so it implies API tunneling (Route Assist).
         let enable_api_tunneling = enable_api_tunneling || enable_country_ban;
+
+        // UDP gameplay always rides the relay. Game servers are discovered at
+        // join time and can't be reachability-probed, so routing UDP direct
+        // would break gameplay wherever the servers are IP-blocked (full-ban
+        // countries). Asset/CDN hosts still auto-split in
+        // apply_bootstrap_overrides: ones reachable directly stay direct (lower
+        // ping), blocked ones fall back to the relay. The udp-tunneling knob
+        // stays wired for a future opt-in low-ping mode.
+        let enable_udp_tunneling = true;
+
+        // While bypassing a country ban, also tunnel third-party Roblox
+        // bootstrappers (Bloxstrap/Froststrap/...). Their launch-time
+        // clientsettings + update fetches otherwise hit the block directly and
+        // time out ("clientsettings.roblox.com:443"). Users who aren't blocked
+        // never enable Bypass, so their strappers stay untunneled.
+        let mut tunnel_apps = tunnel_apps;
+        if enable_country_ban {
+            for strapper in crate::process_names::STRAPPER_PROCESS_NAMES {
+                if !tunnel_apps
+                    .iter()
+                    .any(|app| app.eq_ignore_ascii_case(strapper))
+                {
+                    tunnel_apps.push((*strapper).to_string());
+                }
+            }
+        }
 
         let prior_was_error = {
             let state = self.state.borrow();
@@ -1237,6 +1260,7 @@ impl VpnConnection {
                     binding_preference.clone(),
                     process_performance_settings,
                     enable_api_tunneling,
+                    enable_udp_tunneling,
                 )
                 .await
             {
@@ -1301,6 +1325,7 @@ impl VpnConnection {
         binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
+        enable_udp_tunneling: bool,
     ) -> VpnResult<(Vec<String>, String, String, SocketAddr)> {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
@@ -2009,6 +2034,10 @@ impl VpnConnection {
         if enable_api_tunneling {
             driver.set_api_tunneling_enabled(true);
             log::info!("V3: API tunneling (TCP) enabled");
+        }
+        driver.set_udp_tunneling_enabled(enable_udp_tunneling);
+        if !enable_udp_tunneling {
+            log::info!("V3: UDP gameplay tunneling disabled for TCP-only country-ban bypass");
         }
 
         driver.configure(split_config).map_err(|e| {

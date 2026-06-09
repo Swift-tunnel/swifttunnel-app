@@ -1840,6 +1840,13 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Enable or disable UDP gameplay tunneling (proxy to ParallelInterceptor).
+    pub fn set_udp_tunneling_enabled(&self, enabled: bool) {
+        if let Some(ref interceptor) = self.parallel_interceptor {
+            interceptor.set_udp_tunneling_enabled(enabled);
+        }
+    }
+
     /// Trigger immediate cache refresh (called by ETW when game process detected)
     /// This wakes up the cache refresher from its 2-second sleep
     pub fn trigger_cache_refresh(&self) {

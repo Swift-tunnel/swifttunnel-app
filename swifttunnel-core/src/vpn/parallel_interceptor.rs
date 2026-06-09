@@ -950,6 +950,8 @@ pub struct ParallelInterceptor {
     queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
     /// Whether TCP API tunneling is enabled (tunnel TCP from game processes too).
     api_tunneling_enabled: Arc<AtomicBool>,
+    /// Whether UDP gameplay from tunnel processes should ride the relay.
+    udp_tunneling_enabled: Arc<AtomicBool>,
     /// Sampled event counter for queue-full handling.
     queue_full_events: Arc<AtomicU64>,
     /// Last time we attempted to rebind adapters due to default-route changes.
@@ -1023,6 +1025,7 @@ impl ParallelInterceptor {
                 QueueOverflowMode::Bypass as u8,
             )),
             api_tunneling_enabled: Arc::new(AtomicBool::new(false)),
+            udp_tunneling_enabled: Arc::new(AtomicBool::new(true)),
             queue_full_events: Arc::new(AtomicU64::new(0)),
             last_rebind_at: None,
         }
@@ -1154,6 +1157,15 @@ impl ParallelInterceptor {
     pub fn set_api_tunneling_enabled(&self, enabled: bool) {
         self.api_tunneling_enabled.store(enabled, Ordering::Relaxed);
         log::info!("API tunneling (TCP) set to {}", enabled);
+    }
+
+    /// Enable or disable UDP gameplay tunneling.
+    ///
+    /// Route Assist keeps this enabled. Country-ban bypass can disable it so
+    /// Roblox discovery/login traffic uses the relay while gameplay stays direct.
+    pub fn set_udp_tunneling_enabled(&self, enabled: bool) {
+        self.udp_tunneling_enabled.store(enabled, Ordering::Relaxed);
+        log::info!("UDP gameplay tunneling set to {}", enabled);
     }
 
     /// Check if driver is available
@@ -4094,6 +4106,7 @@ impl ParallelInterceptor {
         let reader_auto_router = self.auto_router.clone();
         let reader_queue_overflow_mode = Arc::clone(&self.queue_overflow_mode);
         let reader_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
+        let reader_udp_tunneling = Arc::clone(&self.udp_tunneling_enabled);
         let reader_queue_full_events = Arc::clone(&self.queue_full_events);
         let physical_name =
             Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
@@ -4130,6 +4143,7 @@ impl ParallelInterceptor {
                     reader_auto_router,
                     reader_queue_overflow_mode,
                     reader_api_tunneling,
+                    reader_udp_tunneling,
                     reader_queue_full_events,
                     reader_stop,
                     num_workers,
@@ -4960,6 +4974,7 @@ fn run_packet_reader(
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
     api_tunneling_enabled: Arc<AtomicBool>,
+    udp_tunneling_enabled: Arc<AtomicBool>,
     queue_full_events: Arc<AtomicU64>,
     stop_flag: Arc<AtomicBool>,
     num_workers: usize,
@@ -5323,8 +5338,9 @@ fn run_packet_reader(
             continue;
         }
 
-        // Load api_tunneling setting once per batch (cheap atomic load).
+        // Load routing settings once per batch (cheap atomic loads).
         let api_tunneling = api_tunneling_enabled.load(Ordering::Relaxed);
+        let udp_tunneling = udp_tunneling_enabled.load(Ordering::Relaxed);
 
         // Refresh process snapshot once per batch (cheap atomic load) so routing decisions
         // track new processes/connection tables without per-packet ArcSwap loads.
@@ -5354,11 +5370,12 @@ fn run_packet_reader(
                     let packet_len = data.len() as u64;
 
                     // Decide routing here to keep bypass traffic out of the workers.
-                    let should_tunnel = should_route_to_vpn_with_inline_cache(
+                    let should_tunnel = should_route_to_vpn_with_routing_flags(
                         data,
                         &snapshot,
                         &mut inline_cache,
                         api_tunneling,
+                        udp_tunneling,
                     );
 
                     // Auto-routing whitelist bypass: if bypass is active, tunnel-eligible packets
@@ -7010,11 +7027,22 @@ fn should_route_to_vpn_with_inline_cache(
     inline_cache: &mut InlineCache,
     api_tunneling: bool,
 ) -> bool {
-    should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+    should_route_to_vpn_with_routing_flags(data, snapshot, inline_cache, api_tunneling, true)
+}
+
+fn should_route_to_vpn_with_routing_flags(
+    data: &[u8],
+    snapshot: &ProcessSnapshot,
+    inline_cache: &mut InlineCache,
+    api_tunneling: bool,
+    udp_tunneling: bool,
+) -> bool {
+    should_route_to_vpn_with_routing_flags_and_tcp_owner_lookup(
         data,
         snapshot,
         inline_cache,
         api_tunneling,
+        udp_tunneling,
         lookup_tcp_owner_pid,
     )
 }
@@ -7029,11 +7057,33 @@ fn should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup<F>(
 where
     F: Fn(Ipv4Addr, u16) -> Option<u32>,
 {
-    should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+    should_route_to_vpn_with_routing_flags_and_tcp_owner_lookup(
         data,
         snapshot,
         inline_cache,
         api_tunneling,
+        true,
+        tcp_owner_lookup,
+    )
+}
+
+fn should_route_to_vpn_with_routing_flags_and_tcp_owner_lookup<F>(
+    data: &[u8],
+    snapshot: &ProcessSnapshot,
+    inline_cache: &mut InlineCache,
+    api_tunneling: bool,
+    udp_tunneling: bool,
+    tcp_owner_lookup: F,
+) -> bool
+where
+    F: Fn(Ipv4Addr, u16) -> Option<u32>,
+{
+    should_route_to_vpn_with_routing_flags_and_tcp_owner_process_lookup(
+        data,
+        snapshot,
+        inline_cache,
+        api_tunneling,
+        udp_tunneling,
         tcp_owner_lookup,
         lookup_process_name_by_pid,
     )
@@ -7044,6 +7094,30 @@ fn should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup<F, P>(
     snapshot: &ProcessSnapshot,
     inline_cache: &mut InlineCache,
     api_tunneling: bool,
+    tcp_owner_lookup: F,
+    process_name_lookup: P,
+) -> bool
+where
+    F: Fn(Ipv4Addr, u16) -> Option<u32>,
+    P: Fn(u32) -> Option<String>,
+{
+    should_route_to_vpn_with_routing_flags_and_tcp_owner_process_lookup(
+        data,
+        snapshot,
+        inline_cache,
+        api_tunneling,
+        true,
+        tcp_owner_lookup,
+        process_name_lookup,
+    )
+}
+
+fn should_route_to_vpn_with_routing_flags_and_tcp_owner_process_lookup<F, P>(
+    data: &[u8],
+    snapshot: &ProcessSnapshot,
+    inline_cache: &mut InlineCache,
+    api_tunneling: bool,
+    udp_tunneling: bool,
     tcp_owner_lookup: F,
     process_name_lookup: P,
 ) -> bool
@@ -7087,7 +7161,8 @@ where
 
     let protocol = match protocol_num {
         6 => Protocol::Tcp,
-        17 => Protocol::Udp,
+        17 if udp_tunneling => Protocol::Udp,
+        17 => return false,
         _ => return false,
     };
 
@@ -13238,6 +13313,54 @@ mod tests {
             "UDP routing must be identical regardless of api_tunneling"
         );
         assert!(result_a, "UDP from tunnel app should always be tunneled");
+    }
+
+    #[test]
+    fn test_country_bypass_can_tunnel_tcp_while_udp_stays_direct() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let udp_src_port = 50000;
+        let tcp_src_port = 50001;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, udp_src_port, Protocol::Udp), pid);
+        connections.insert(ConnectionKey::new(src_ip, tcp_src_port, Protocol::Tcp), pid);
+
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids,
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let udp_frame = build_ipv4_frame(17, src_ip, dst_ip, udp_src_port, 49152);
+        let mut udp_cache: InlineCache = HashMap::new();
+        assert!(!should_route_to_vpn_with_routing_flags(
+            &udp_frame,
+            &snapshot,
+            &mut udp_cache,
+            true,
+            false,
+        ));
+
+        let tcp_syn_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, tcp_src_port, 443, 0x02);
+        let mut tcp_cache: InlineCache = HashMap::new();
+        assert!(should_route_to_vpn_with_routing_flags(
+            &tcp_syn_frame,
+            &snapshot,
+            &mut tcp_cache,
+            true,
+            false,
+        ));
     }
 
     // ------------------------------------------------------------------

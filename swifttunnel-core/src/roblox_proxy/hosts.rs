@@ -67,6 +67,20 @@ const DIRECT_ONLY_BOOTSTRAP_DOMAINS: &[&str] = &[
     "versioncompatibility.api.roblox.com",
 ];
 
+// In country-ban bypass mode, relay the Roblox control-plane hosts that decide
+// discovery/search/login/join, but keep heavy CDN/asset hosts direct whenever
+// their IPs do not overlap relayed hosts.
+const COUNTRY_BAN_DIRECT_DOMAINS: &[&str] = &[
+    "assetgame.roblox.com",
+    "assetdelivery.roblox.com",
+    "thumbnails.roblox.com",
+    "setup.roblox.com",
+    "setup.rbxcdn.com",
+    "apis.rbxcdn.com",
+    "js.rbxcdn.com",
+    "static.rbxcdn.com",
+];
+
 /// Exact Roblox hostnames repaired when API tunneling is enabled.
 ///
 /// This intentionally stays as an allowlist of concrete launch/API names. Do
@@ -138,11 +152,9 @@ struct DohJsonAnswer {
 ///
 /// Existing SwiftTunnel entries are removed first (idempotent).
 ///
-/// `country_ban_bypass`: when the user is bypassing a country ban, the
-/// launch-critical hosts (clientsettings*, versioncompatibility) MUST be routed
-/// through the relay to escape the ISP block — otherwise keeping them "direct"
-/// (the default, which avoids flaky-relay "Failed to apply critical settings")
-/// sends them straight into the block and the game won't launch.
+/// `country_ban_bypass`: relay Roblox control-plane hosts that decide
+/// discovery/search/login/join, while keeping heavy asset/CDN hosts direct
+/// when they do not share an IP with a relayed control-plane host.
 pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), String> {
     let overrides = resolve_bootstrap_overrides().await?;
     let (active_ips, direct_only_ips) = classify_bootstrap_ips(&overrides, country_ban_bypass);
@@ -159,16 +171,15 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
 
 /// Split resolved overrides into (route-assist active, direct-only) IP sets.
 ///
-/// When bypassing a country ban, nothing is direct-only — every bootstrap IP
-/// (including the launch-critical hosts) is routed through Route Assist so it
-/// can escape the block. Otherwise the launch-critical hosts stay direct.
+/// Country-ban bypass relays control-plane hosts and leaves asset/CDN hosts
+/// direct unless a shared IP means relaying is safer. Otherwise the
+/// launch-critical hosts stay direct to avoid flaky-relay startup failures.
 fn classify_bootstrap_ips(
     overrides: &[HostOverride],
     country_ban_bypass: bool,
 ) -> (HashSet<Ipv4Addr>, HashSet<Ipv4Addr>) {
     if country_ban_bypass {
-        let all: HashSet<Ipv4Addr> = overrides.iter().map(|entry| entry.ip).collect();
-        (all, HashSet::new())
+        country_ban_split_ips_from_overrides(overrides)
     } else {
         (
             route_assist_active_ips_from_overrides(overrides),
@@ -598,8 +609,33 @@ fn direct_only_ips_from_overrides(overrides: &[HostOverride]) -> HashSet<Ipv4Add
         .collect()
 }
 
+fn country_ban_split_ips_from_overrides(
+    overrides: &[HostOverride],
+) -> (HashSet<Ipv4Addr>, HashSet<Ipv4Addr>) {
+    let active: HashSet<Ipv4Addr> = overrides
+        .iter()
+        .filter(|entry| !is_country_ban_direct_domain(&entry.domain))
+        .map(|entry| entry.ip)
+        .collect();
+
+    let direct_only = overrides
+        .iter()
+        .filter(|entry| is_country_ban_direct_domain(&entry.domain))
+        .map(|entry| entry.ip)
+        .filter(|ip| !active.contains(ip))
+        .collect();
+
+    (active, direct_only)
+}
+
 fn is_direct_only_bootstrap_domain(domain: &str) -> bool {
     DIRECT_ONLY_BOOTSTRAP_DOMAINS
+        .iter()
+        .any(|direct_only| domain.eq_ignore_ascii_case(direct_only))
+}
+
+fn is_country_ban_direct_domain(domain: &str) -> bool {
+    COUNTRY_BAN_DIRECT_DOMAINS
         .iter()
         .any(|direct_only| domain.eq_ignore_ascii_case(direct_only))
 }
@@ -1041,7 +1077,11 @@ mod tests {
             ip: Ipv4Addr::new(128, 116, 121, 3),
             domain: "www.roblox.com".to_string(),
         };
-        let overrides = vec![critical.clone(), normal.clone()];
+        let asset = HostOverride {
+            ip: Ipv4Addr::new(23, 61, 202, 142),
+            domain: "assetdelivery.roblox.com".to_string(),
+        };
+        let overrides = vec![critical.clone(), normal.clone(), asset.clone()];
 
         // Default: the launch-critical host stays direct (not on the relay).
         let (active, direct_only) = classify_bootstrap_ips(&overrides, false);
@@ -1049,12 +1089,33 @@ mod tests {
         assert!(!active.contains(&critical.ip));
         assert!(active.contains(&normal.ip));
 
-        // Bypassing a country ban: nothing is direct-only, and the critical
-        // host now goes through Route Assist so it can escape the block.
+        // Bypassing a country ban: control-plane hosts go through the relay,
+        // but heavy asset/CDN hosts stay direct.
         let (active, direct_only) = classify_bootstrap_ips(&overrides, true);
-        assert!(direct_only.is_empty());
         assert!(active.contains(&critical.ip));
         assert!(active.contains(&normal.ip));
+        assert!(!active.contains(&asset.ip));
+        assert!(direct_only.contains(&asset.ip));
+    }
+
+    #[test]
+    fn country_bypass_relays_shared_control_and_asset_ips() {
+        let shared_ip = Ipv4Addr::new(128, 116, 121, 3);
+        let overrides = vec![
+            HostOverride {
+                ip: shared_ip,
+                domain: "www.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: shared_ip,
+                domain: "assetdelivery.roblox.com".to_string(),
+            },
+        ];
+
+        let (active, direct_only) = classify_bootstrap_ips(&overrides, true);
+
+        assert!(active.contains(&shared_ip));
+        assert!(!direct_only.contains(&shared_ip));
     }
 
     #[test]

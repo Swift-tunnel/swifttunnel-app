@@ -9,6 +9,22 @@ pub const ROBLOX_PROCESS_NAMES: &[&str] = &[
     "robloxstudiolauncher.exe",
 ];
 
+/// Third-party Roblox bootstrappers ("strappers").
+///
+/// These are tunnelled ONLY while "Bypass Country Bans" is enabled (the
+/// injection happens in `VpnConnection::connect`). Their launch-time
+/// `clientsettings`/update fetches otherwise hit a country block directly and
+/// time out (`clientsettings.roblox.com:443`). They are deliberately kept OUT
+/// of `ROBLOX_PROCESS_NAMES`: routing a non-blocked user's strapper traffic
+/// through the relay would add latency for no reason. Entries must be
+/// lowercase to match the tunnel-app set convention.
+pub const STRAPPER_PROCESS_NAMES: &[&str] = &[
+    "bloxstrap.exe",
+    "fishstrap.exe",
+    "froststrap.exe",
+    "bubblestrap.exe",
+];
+
 fn basename(name: &str) -> &str {
     name.rsplit(['\\', '/']).next().unwrap_or(name)
 }
@@ -154,5 +170,23 @@ mod tests {
             "windows10universal.exe",
             "windows10universal.exe"
         ));
+    }
+
+    #[test]
+    fn strappers_are_lowercase_and_separate_from_core_roblox_processes() {
+        for strapper in STRAPPER_PROCESS_NAMES {
+            assert_eq!(
+                *strapper,
+                strapper.to_ascii_lowercase(),
+                "{strapper} must be lowercase to match the tunnel-app set"
+            );
+            // Strappers are tunnelled only under Bypass; they must NOT be treated
+            // as core Roblox processes (which are always tunnel-eligible and used
+            // for detection/perf monitoring).
+            assert!(
+                !is_roblox_process_name(strapper),
+                "{strapper} must not be a core Roblox process name"
+            );
+        }
     }
 }
