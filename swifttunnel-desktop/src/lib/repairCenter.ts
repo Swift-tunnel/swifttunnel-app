@@ -5,6 +5,7 @@ import type {
   LatencyEntry,
   NetworkAdapterInfo,
   VpnStateResponse,
+  WindowsFirewallRepairResponse,
 } from "./types";
 import type { StartupRegistrationSnapshot } from "./commands";
 import { formatErrorMessage } from "./errors";
@@ -13,6 +14,7 @@ export type RepairIssueId =
   | "driver"
   | "adapter"
   | "tunnel_cleanup"
+  | "windows_firewall"
   | "route_assist"
   | "roblox"
   | "network_booster"
@@ -90,6 +92,7 @@ export interface RepairCenterDeps {
   systemGetStartupRegistration: () => Promise<StartupRegistrationSnapshot>;
   systemIsAdmin: () => Promise<{ is_admin: boolean }>;
   systemRepairDriver: () => Promise<DriverCheckResponse>;
+  systemRepairWindowsFirewall: () => Promise<WindowsFirewallRepairResponse>;
   systemRepairStartupRegistration: (
     enabled: boolean,
   ) => Promise<StartupRegistrationSnapshot>;
@@ -122,6 +125,13 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
     id: "tunnel_cleanup",
     label: "Tunnel cleanup",
     description: "Clears stale tunnel state only when an error state is present.",
+    actionLabel: "Repair",
+    systemChanging: true,
+  },
+  {
+    id: "windows_firewall",
+    label: "Windows Firewall",
+    description: "Repairs the firewall path used for IPv6 leak prevention.",
     actionLabel: "Repair",
     systemChanging: true,
   },
@@ -294,6 +304,8 @@ export async function runRepairIssue(
         return await checkAdapterRouting(deps, context.settings);
       case "tunnel_cleanup":
         return await repairTunnelCleanup(deps);
+      case "windows_firewall":
+        return await repairWindowsFirewall(deps);
       case "route_assist":
         return await checkRouteAssist(deps, context.settings);
       case "roblox":
@@ -697,6 +709,25 @@ async function repairTunnelCleanup(
   };
 }
 
+async function repairWindowsFirewall(
+  deps: RepairCenterDeps,
+): Promise<RepairReport> {
+  const firewall = await deps.systemRepairWindowsFirewall();
+  const changed =
+    firewall.reset_attempted ||
+    firewall.services.some((service) => service.start_attempted);
+
+  return {
+    status: windowsFirewallRepairStatus(firewall),
+    summary: firewall.message,
+    nextStep: windowsFirewallNextStep(firewall),
+    changed,
+    reversible: false,
+    ranAt: deps.now(),
+    entries: windowsFirewallEntries(firewall),
+  };
+}
+
 async function checkRouteAssist(
   deps: RepairCenterDeps,
   settings: AppSettings,
@@ -1068,6 +1099,119 @@ function driverEntries(driver: DriverCheckResponse): RepairEntry[] {
     },
     { label: "Message", value: driver.message },
   ];
+}
+
+function windowsFirewallRepairStatus(
+  firewall: WindowsFirewallRepairResponse,
+): RepairStatus {
+  if (!firewall.supported) return "unsupported";
+  if (firewall.after_available) {
+    return firewall.before_available && !firewall.reset_attempted ? "checked" : "fixed";
+  }
+  if (firewall.reboot_recommended) return "needs_reboot";
+  return "failed";
+}
+
+function windowsFirewallNextStep(
+  firewall: WindowsFirewallRepairResponse,
+): string {
+  if (!firewall.supported) {
+    return "Windows Firewall repair is only available on Windows.";
+  }
+  if (firewall.after_available) {
+    return "Try connecting again. Copy this result for support if the IPv6 block error returns.";
+  }
+  if (!firewall.is_admin) {
+    return "Relaunch SwiftTunnel as Administrator, then run Windows Firewall repair again.";
+  }
+  if (firewall.reboot_recommended) {
+    return "Restart Windows, then run Windows Firewall repair again. If it still fails, run DISM and SFC from an elevated Command Prompt.";
+  }
+  return "Run DISM /Online /Cleanup-Image /RestoreHealth, then sfc /scannow from an elevated Command Prompt. Reboot, then try SwiftTunnel again.";
+}
+
+function windowsFirewallEntries(
+  firewall: WindowsFirewallRepairResponse,
+): RepairEntry[] {
+  const entries: RepairEntry[] = [
+    { label: "Admin", value: firewall.is_admin ? "elevated" : "standard user" },
+    {
+      label: "Before advfirewall",
+      value: firewall.before_available ? "available" : "missing",
+      tone: firewall.before_available ? "good" : "bad",
+    },
+    {
+      label: "After advfirewall",
+      value: firewall.after_available ? "available" : "missing",
+      tone: firewall.after_available ? "good" : "bad",
+    },
+    {
+      label: "Reset",
+      value: firewall.reset_attempted
+        ? firewall.reset_succeeded
+          ? "completed"
+          : "failed"
+        : firewall.before_available
+          ? "not needed"
+          : "not attempted",
+      tone: firewall.reset_attempted
+        ? firewall.reset_succeeded
+          ? "good"
+          : "bad"
+        : firewall.before_available
+          ? "default"
+          : "warn",
+    },
+  ];
+
+  if (firewall.backup_path) {
+    entries.push({
+      label: "Firewall backup",
+      value: firewall.backup_path,
+      tone: "good",
+      mono: true,
+    });
+  }
+
+  for (const service of firewall.services) {
+    entries.push({
+      label: `Service ${service.name}`,
+      value: service.start_attempted
+        ? `${service.state}; start ${service.start_succeeded ? "completed" : "failed"}`
+        : service.state,
+      tone:
+        service.state === "RUNNING"
+          ? "good"
+          : service.start_attempted
+            ? "bad"
+            : "warn",
+    });
+  }
+
+  if (!firewall.after_available) {
+    entries.push({
+      label: "Probe before",
+      value: firewall.probe_before,
+      tone: "bad",
+      mono: true,
+    });
+    entries.push({
+      label: "Probe after",
+      value: firewall.probe_after,
+      tone: "bad",
+      mono: true,
+    });
+    if (firewall.reset_output) {
+      entries.push({
+        label: "Reset output",
+        value: firewall.reset_output,
+        tone: firewall.reset_succeeded ? "warn" : "bad",
+        mono: true,
+      });
+    }
+  }
+
+  return entries;
 }
 
 function diagnosticEntries(

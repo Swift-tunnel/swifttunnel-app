@@ -84,6 +84,8 @@ fn is_system32_program(program: &str) -> bool {
             | "netsh.exe"
             | "powercfg"
             | "powercfg.exe"
+            | "sc"
+            | "sc.exe"
     )
 }
 
@@ -813,11 +815,13 @@ mod tests {
         let pnputil = root.join("System32").join("pnputil.exe");
         let msiexec = root.join("System32").join("msiexec.exe");
         let powercfg = root.join("System32").join("powercfg.exe");
+        let sc = root.join("System32").join("sc.exe");
 
         fs::create_dir_all(pnputil.parent().unwrap()).expect("create System32 dir");
         fs::write(&pnputil, b"").expect("create fake pnputil");
         fs::write(&msiexec, b"").expect("create fake msiexec");
         fs::write(&powercfg, b"").expect("create fake powercfg");
+        fs::write(&sc, b"").expect("create fake sc");
 
         assert_eq!(
             resolve_windows_command_path_with_root("pnputil", Some(root.as_path())),
@@ -830,6 +834,10 @@ mod tests {
         assert_eq!(
             resolve_windows_command_path_with_root("powercfg", Some(root.as_path())),
             powercfg
+        );
+        assert_eq!(
+            resolve_windows_command_path_with_root("sc", Some(root.as_path())),
+            sc
         );
         // Without .exe suffix should also work
         assert_eq!(

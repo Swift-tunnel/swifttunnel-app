@@ -399,6 +399,7 @@ pub fn run() {
             commands::system::system_check_driver,
             commands::system::system_install_driver,
             commands::system::system_repair_driver,
+            commands::system::system_repair_windows_firewall,
             commands::system::system_reset_driver,
             commands::system::system_get_startup_registration,
             commands::system::system_repair_startup_registration,

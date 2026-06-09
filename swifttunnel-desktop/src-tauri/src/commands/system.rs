@@ -956,6 +956,444 @@ pub fn system_is_admin() -> AdminCheckResponse {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct WindowsFirewallServiceStatus {
+    pub name: String,
+    pub display_name: String,
+    pub state: String,
+    pub start_attempted: bool,
+    pub start_succeeded: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WindowsFirewallRepairResponse {
+    pub supported: bool,
+    pub is_admin: bool,
+    pub before_available: bool,
+    pub after_available: bool,
+    pub reset_attempted: bool,
+    pub reset_succeeded: bool,
+    pub reboot_recommended: bool,
+    pub backup_path: Option<String>,
+    pub message: String,
+    pub probe_before: String,
+    pub probe_after: String,
+    pub reset_output: Option<String>,
+    pub services: Vec<WindowsFirewallServiceStatus>,
+}
+
+impl WindowsFirewallRepairResponse {
+    fn unsupported() -> Self {
+        Self {
+            supported: false,
+            is_admin: false,
+            before_available: false,
+            after_available: false,
+            reset_attempted: false,
+            reset_succeeded: false,
+            reboot_recommended: false,
+            backup_path: None,
+            message: "Windows Firewall repair is only available on Windows.".to_string(),
+            probe_before: "not supported".to_string(),
+            probe_after: "not supported".to_string(),
+            reset_output: None,
+            services: Vec::new(),
+        }
+    }
+}
+
+fn parse_windows_service_state(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.to_ascii_uppercase().starts_with("STATE") {
+            continue;
+        }
+
+        let Some((_, rest)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let _state_code = fields.next();
+        if let Some(state) = fields.next() {
+            return Some(state.to_ascii_uppercase());
+        }
+    }
+
+    None
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct WindowsRepairCommandOutput {
+    success: bool,
+    timed_out: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+#[cfg(windows)]
+impl WindowsRepairCommandOutput {
+    fn summary(&self, command_label: &str) -> String {
+        if self.timed_out {
+            return format!("{command_label} timed out.");
+        }
+
+        let stdout = self.stdout.trim();
+        let stderr = self.stderr.trim();
+        let text = match (stdout.is_empty(), stderr.is_empty()) {
+            (false, false) => format!("{stdout}\n{stderr}"),
+            (false, true) => stdout.to_string(),
+            (true, false) => stderr.to_string(),
+            (true, true) => self
+                .exit_code
+                .map(|code| format!("{command_label} exited with code {code}."))
+                .unwrap_or_else(|| format!("{command_label} exited without output.")),
+        };
+
+        compact_repair_text(&text, 600)
+    }
+}
+
+#[cfg(windows)]
+fn compact_repair_text(text: &str, max_chars: usize) -> String {
+    let normalized = text.trim().replace("\r\n", "\n");
+    let mut compacted = normalized.chars().take(max_chars).collect::<String>();
+    if normalized.chars().count() > max_chars {
+        compacted.push_str("...");
+    }
+    compacted
+}
+
+#[cfg(windows)]
+fn run_windows_repair_command(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> WindowsRepairCommandOutput {
+    use std::io::Read;
+
+    fn read_pipe_to_string<R: Read>(pipe: Option<R>) -> String {
+        let mut out = String::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_string(&mut out);
+        }
+        out
+    }
+
+    let mut child = match swifttunnel_core::hidden_command(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            return WindowsRepairCommandOutput {
+                success: false,
+                timed_out: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("Failed to spawn {program}: {e}"),
+            };
+        }
+    };
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return WindowsRepairCommandOutput {
+                    success: status.success(),
+                    timed_out: false,
+                    exit_code: status.code(),
+                    stdout: read_pipe_to_string(child.stdout.take()),
+                    stderr: read_pipe_to_string(child.stderr.take()),
+                };
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return WindowsRepairCommandOutput {
+                        success: false,
+                        timed_out: true,
+                        exit_code: None,
+                        stdout: read_pipe_to_string(child.stdout.take()),
+                        stderr: read_pipe_to_string(child.stderr.take()),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                return WindowsRepairCommandOutput {
+                    success: false,
+                    timed_out: false,
+                    exit_code: None,
+                    stdout: read_pipe_to_string(child.stdout.take()),
+                    stderr: format!("Failed to wait for {program}: {e}"),
+                };
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn probe_windows_firewall() -> WindowsRepairCommandOutput {
+    run_windows_repair_command(
+        "netsh",
+        &["advfirewall", "show", "allprofiles"],
+        Duration::from_secs(8),
+    )
+}
+
+#[cfg(windows)]
+fn firewall_backup_path() -> Result<PathBuf, String> {
+    let dir = program_data_swifttunnel_dir().join("firewall-backups");
+    fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "Failed to create Windows Firewall backup directory {}: {}",
+            dir.display(),
+            e
+        )
+    })?;
+    reject_reparse_point(&program_data_swifttunnel_dir())?;
+    reject_reparse_point(&dir)?;
+    harden_driver_work_dir_acl(&dir)?;
+
+    let probe_path = dir.join(format!("write-probe-{}.tmp", random_hex(8)?));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe_path)
+        .map_err(|e| format!("Windows Firewall backup directory is not writeable: {e}"))?;
+    fs::remove_file(&probe_path).map_err(|e| {
+        format!(
+            "Failed to remove Windows Firewall backup write probe {}: {}",
+            probe_path.display(),
+            e
+        )
+    })?;
+
+    for _ in 0..8 {
+        let path = dir.join(format!(
+            "windows-firewall-before-reset-{}.wfw",
+            random_hex(12)?
+        ));
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err("Failed to allocate a unique Windows Firewall backup path".to_string())
+}
+
+#[cfg(windows)]
+fn query_firewall_service(name: &str, display_name: &str) -> WindowsFirewallServiceStatus {
+    let query = run_windows_repair_command("sc", &["query", name], Duration::from_secs(5));
+    let state = parse_windows_service_state(&format!("{}\n{}", query.stdout, query.stderr))
+        .unwrap_or_else(|| {
+            if query.success {
+                "unknown".to_string()
+            } else {
+                "query_failed".to_string()
+            }
+        });
+
+    WindowsFirewallServiceStatus {
+        name: name.to_string(),
+        display_name: display_name.to_string(),
+        state,
+        start_attempted: false,
+        start_succeeded: false,
+        message: query.summary("sc query"),
+    }
+}
+
+#[cfg(windows)]
+fn repair_firewall_service(name: &str, display_name: &str) -> WindowsFirewallServiceStatus {
+    let mut status = query_firewall_service(name, display_name);
+    if status.state == "RUNNING" {
+        status.message = "service already running".to_string();
+        return status;
+    }
+
+    status.start_attempted = true;
+    let start = run_windows_repair_command("sc", &["start", name], Duration::from_secs(10));
+    let after = poll_firewall_service_running(name, display_name, Duration::from_secs(10));
+    status.state = after.state;
+    status.start_succeeded = status.state == "RUNNING";
+    status.message = if status.start_succeeded {
+        "service started".to_string()
+    } else {
+        format!(
+            "start failed: {}; after query: {}",
+            start.summary("sc start"),
+            after.message
+        )
+    };
+    status
+}
+
+#[cfg(windows)]
+fn poll_firewall_service_running(
+    name: &str,
+    display_name: &str,
+    timeout: Duration,
+) -> WindowsFirewallServiceStatus {
+    let start = std::time::Instant::now();
+    loop {
+        let status = query_firewall_service(name, display_name);
+        if status.state == "RUNNING" || start.elapsed() >= timeout {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(windows)]
+fn repair_windows_firewall_sync() -> Result<WindowsFirewallRepairResponse, String> {
+    let is_admin = swifttunnel_core::is_administrator();
+    let before_probe = probe_windows_firewall();
+    let before_available = before_probe.success;
+
+    if before_available {
+        return Ok(WindowsFirewallRepairResponse {
+            supported: true,
+            is_admin,
+            before_available: true,
+            after_available: true,
+            reset_attempted: false,
+            reset_succeeded: false,
+            reboot_recommended: false,
+            backup_path: None,
+            message: "Windows Firewall already accepts advfirewall commands.".to_string(),
+            probe_before: before_probe.summary("netsh advfirewall show"),
+            probe_after: "not needed".to_string(),
+            reset_output: None,
+            services: vec![
+                query_firewall_service("BFE", "Base Filtering Engine"),
+                query_firewall_service("MpsSvc", "Windows Defender Firewall"),
+            ],
+        });
+    }
+
+    if !is_admin {
+        return Ok(WindowsFirewallRepairResponse {
+            supported: true,
+            is_admin: false,
+            before_available: false,
+            after_available: false,
+            reset_attempted: false,
+            reset_succeeded: false,
+            reboot_recommended: false,
+            backup_path: None,
+            message: "Administrator privileges are required to repair Windows Firewall."
+                .to_string(),
+            probe_before: before_probe.summary("netsh advfirewall show"),
+            probe_after: "not attempted".to_string(),
+            reset_output: None,
+            services: vec![
+                query_firewall_service("BFE", "Base Filtering Engine"),
+                query_firewall_service("MpsSvc", "Windows Defender Firewall"),
+            ],
+        });
+    }
+
+    let services = vec![
+        repair_firewall_service("BFE", "Base Filtering Engine"),
+        repair_firewall_service("MpsSvc", "Windows Defender Firewall"),
+    ];
+
+    let service_probe = probe_windows_firewall();
+    if service_probe.success {
+        return Ok(WindowsFirewallRepairResponse {
+            supported: true,
+            is_admin: true,
+            before_available: false,
+            after_available: true,
+            reset_attempted: false,
+            reset_succeeded: false,
+            reboot_recommended: false,
+            backup_path: None,
+            message: "Windows Firewall services repaired.".to_string(),
+            probe_before: before_probe.summary("netsh advfirewall show"),
+            probe_after: service_probe.summary("netsh advfirewall show"),
+            reset_output: None,
+            services,
+        });
+    }
+
+    let mut reset_output_parts = Vec::new();
+    let backup_path = firewall_backup_path()?;
+    let backup_path_string = backup_path.to_string_lossy().to_string();
+    let export = run_windows_repair_command(
+        "netsh",
+        &["advfirewall", "export", backup_path_string.as_str()],
+        Duration::from_secs(15),
+    );
+    let export_summary = export.summary("netsh advfirewall export");
+    reset_output_parts.push(format!("export: {export_summary}"));
+    if !export.success || !backup_path.is_file() {
+        return Err(format!(
+            "Windows Firewall repair aborted because policy backup failed: {export_summary}"
+        ));
+    };
+
+    let reset =
+        run_windows_repair_command("netsh", &["advfirewall", "reset"], Duration::from_secs(15));
+    reset_output_parts.push(format!(
+        "reset: {}",
+        reset.summary("netsh advfirewall reset")
+    ));
+    let after_probe = probe_windows_firewall();
+    let after_available = after_probe.success;
+    let reset_succeeded = reset.success;
+
+    Ok(WindowsFirewallRepairResponse {
+        supported: true,
+        is_admin: true,
+        before_available: false,
+        after_available,
+        reset_attempted: true,
+        reset_succeeded,
+        reboot_recommended: reset_succeeded && !after_available,
+        backup_path: Some(backup_path_string),
+        message: if after_available {
+            "Windows Firewall policy reset repaired advfirewall commands.".to_string()
+        } else if reset_succeeded {
+            "Windows Firewall reset completed, but advfirewall commands still fail.".to_string()
+        } else {
+            "Windows Firewall repair did not restore advfirewall commands.".to_string()
+        },
+        probe_before: before_probe.summary("netsh advfirewall show"),
+        probe_after: after_probe.summary("netsh advfirewall show"),
+        reset_output: Some(reset_output_parts.join("\n")),
+        services,
+    })
+}
+
+#[tauri::command]
+pub async fn system_repair_windows_firewall() -> Result<WindowsFirewallRepairResponse, String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(|| {
+            let _guard = DRIVER_OPERATION_LOCK
+                .lock()
+                .map_err(|_| "Driver operation lock is poisoned".to_string())?;
+            repair_windows_firewall_sync()
+        })
+        .await
+        .map_err(|e| format!("Windows Firewall repair task failed: {}", e))?
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(WindowsFirewallRepairResponse::unsupported())
+    }
+}
+
 #[derive(Serialize)]
 pub struct DriverCheckResponse {
     pub installed: bool,
@@ -1317,6 +1755,57 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
     {
         let _ = app;
         Ok(DriverCheckResponse::unsupported())
+    }
+}
+
+#[cfg(test)]
+mod windows_firewall_repair_tests {
+    use super::*;
+
+    #[test]
+    fn parse_windows_service_state_reads_running_state() {
+        let output = r#"
+SERVICE_NAME: MpsSvc
+        TYPE               : 20  WIN32_SHARE_PROCESS
+        STATE              : 4  RUNNING
+"#;
+
+        assert_eq!(
+            parse_windows_service_state(output).as_deref(),
+            Some("RUNNING")
+        );
+    }
+
+    #[test]
+    fn parse_windows_service_state_reads_start_pending_state() {
+        let output = r#"
+SERVICE_NAME: MpsSvc
+        TYPE               : 20  WIN32_SHARE_PROCESS
+        STATE              : 2  START_PENDING
+"#;
+
+        assert_eq!(
+            parse_windows_service_state(output).as_deref(),
+            Some("START_PENDING")
+        );
+    }
+
+    #[test]
+    fn parse_windows_service_state_ignores_unrelated_text() {
+        assert_eq!(
+            parse_windows_service_state(
+                "The following command was not found: advfirewall firewall add rule."
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn unsupported_windows_firewall_response_is_not_successful() {
+        let response = WindowsFirewallRepairResponse::unsupported();
+        assert!(!response.supported);
+        assert!(!response.after_available);
+        assert!(!response.reset_attempted);
     }
 }
 
