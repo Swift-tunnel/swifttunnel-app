@@ -15,14 +15,17 @@ import {
   resolveConnectStatus,
   stateLabel,
 } from "./connectState";
-import { LiveGraph, type DataSample } from "./LiveGraph";
+import {
+  LiveGraph,
+  MAX_SAMPLES,
+  SAMPLE_INTERVAL_MS,
+  type DataSample,
+} from "./LiveGraph";
 import { StatusRing } from "./StatusRing";
 import { Button, EmptyState, Tooltip, InfoIcon, Toggle } from "../ui";
 import type { ServerRegion } from "../../lib/types";
 
 type ConnectStatus = ReturnType<typeof resolveConnectStatus>;
-
-const DATA_BUFFER_SIZE = 60;
 
 function formatElapsed(s: number): string {
   const h = Math.floor(s / 3600);
@@ -117,18 +120,25 @@ export function ConnectTab() {
   }, [save]);
 
   useEffect(() => {
-    if (!isConnected) return;
-    const id = setInterval(fetchThroughput, 1000);
-    return () => clearInterval(id);
-  }, [isConnected, fetchThroughput]);
-
-  useEffect(() => {
     if (!isConnected) {
       setDataHistory([]);
       prevBytesRef.current = null;
       return;
     }
-    const id = setInterval(() => {
+    // Fetch and sample in the same tick so each rate is computed from the
+    // bytes that fetch just delivered. Two separate 1s timers used to alias
+    // against each other and produce zero/double-rate spikes in the graph.
+    let cancelled = false;
+    let inFlight = false;
+    const sample = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fetchThroughput();
+      } finally {
+        inFlight = false;
+      }
+      if (cancelled) return;
       const { bytesUp, bytesDown } = useVpnStore.getState();
       const now = Date.now();
       const prev = prevBytesRef.current;
@@ -137,16 +147,19 @@ export function ConnectTab() {
         const up = Math.max(0, ((bytesUp - prev.up) / dtMs) * 1000);
         const down = Math.max(0, ((bytesDown - prev.down) / dtMs) * 1000);
         setDataHistory((h) =>
-          [...h, { t: now, up, down }].slice(-DATA_BUFFER_SIZE),
+          [...h, { t: now, up, down }].slice(-MAX_SAMPLES),
         );
       }
       prevBytesRef.current = { up: bytesUp, down: bytesDown, t: now };
-    }, 1000);
+    };
+    void sample();
+    const id = setInterval(() => void sample(), SAMPLE_INTERVAL_MS);
     return () => {
+      cancelled = true;
       clearInterval(id);
       prevBytesRef.current = null;
     };
-  }, [isConnected]);
+  }, [isConnected, fetchThroughput]);
 
   useEffect(() => {
     if (!isConnected && !isTransitioning) return;

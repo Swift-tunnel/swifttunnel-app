@@ -1,9 +1,26 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 export type DataSample = { t: number; up: number; down: number };
 
-const DISPLAY_SAMPLES = 60;
-const SAMPLE_INTERVAL_MS = 1000;
+/**
+ * Cadence at which ConnectTab pushes new samples. The scroll animation is
+ * time-based, so a late sample degrades gracefully instead of stuttering.
+ */
+export const SAMPLE_INTERVAL_MS = 500;
+
+/** Number of samples kept and displayed (60 × 500ms = a 30s window). */
+export const MAX_SAMPLES = 60;
+
+/** EMA factor per sample (~2s time constant at the 500ms cadence). */
+const EMA_ALPHA = 0.2;
+
+/**
+ * Vertical rescale easing per 60fps frame. The scale snaps outward instantly
+ * when the line would clip, and eases back down smoothly.
+ */
+const Y_LERP_PER_FRAME = 0.08;
+const REFERENCE_FRAME_MS = 1000 / 60;
+const MIN_Y_MAX_BYTES = 8 * 1024;
 
 function formatRate(bytesPerSec: number): string {
   if (bytesPerSec < 1024) return `${Math.round(bytesPerSec)} B/s`;
@@ -12,6 +29,26 @@ function formatRate(bytesPerSec: number): string {
   if (bytesPerSec < 1024 * 1024 * 1024)
     return `${(bytesPerSec / (1024 * 1024)).toFixed(2)} MB/s`;
   return `${(bytesPerSec / (1024 * 1024 * 1024)).toFixed(2)} GB/s`;
+}
+
+/** Catmull-Rom-style smooth line through the given points. */
+function buildLinePath(pts: [number, number][]): string {
+  let line = `M${pts[0][0].toFixed(2)},${pts[0][1].toFixed(2)}`;
+  if (pts.length > 1) {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(0, i - 1)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(pts.length - 1, i + 2)];
+      const t = 0.5;
+      const c1x = p1[0] + ((p2[0] - p0[0]) * t) / 6;
+      const c1y = p1[1] + ((p2[1] - p0[1]) * t) / 6;
+      const c2x = p2[0] - ((p3[0] - p1[0]) * t) / 6;
+      const c2y = p2[1] - ((p3[1] - p1[1]) * t) / 6;
+      line += ` C${c1x.toFixed(2)},${c1y.toFixed(2)} ${c2x.toFixed(2)},${c2y.toFixed(2)} ${p2[0].toFixed(2)},${p2[1].toFixed(2)}`;
+    }
+  }
+  return line;
 }
 
 interface LiveGraphProps {
@@ -35,97 +72,113 @@ export function LiveGraph({
   const PAD_R = 10;
   const plotW = W - PAD_L - PAD_R;
   const plotH = H - PAD_T - PAD_B;
-  const stepWidth = plotW / (DISPLAY_SAMPLES - 1);
+  const stepWidth = plotW / (MAX_SAMPLES - 1);
 
   const scrollRef = useRef<SVGGElement>(null);
-  const prevLengthRef = useRef(samples.length);
+  const lineRef = useRef<SVGPathElement>(null);
+  const areaRef = useRef<SVGPathElement>(null);
+  const tipRef = useRef<SVGGElement>(null);
+  const peakRef = useRef<HTMLSpanElement>(null);
+  const animYMaxRef = useRef(MIN_Y_MAX_BYTES);
+  const peakTextRef = useRef("");
 
   const smoothed = useMemo(() => {
     if (samples.length === 0) return [] as number[];
-    const alpha = 0.35;
     let emaUp = samples[0].up;
     let emaDown = samples[0].down;
     const out: number[] = [];
     for (const s of samples) {
-      emaUp = alpha * s.up + (1 - alpha) * emaUp;
-      emaDown = alpha * s.down + (1 - alpha) * emaDown;
+      emaUp = EMA_ALPHA * s.up + (1 - EMA_ALPHA) * emaUp;
+      emaDown = EMA_ALPHA * s.down + (1 - EMA_ALPHA) * emaDown;
       out.push(emaUp + emaDown);
     }
     return out;
   }, [samples]);
 
-  const { linePath, areaPath, lastPoint, yMax, currentRate } = useMemo(() => {
-    if (smoothed.length === 0) {
-      return {
-        linePath: "",
-        areaPath: "",
-        lastPoint: null as [number, number] | null,
-        yMax: 0,
-        currentRate: 0,
-      };
-    }
-    const rawMax = Math.max(...smoothed);
-    const yMaxFinal = Math.max(rawMax * 1.25, 8 * 1024);
-    const N = smoothed.length;
-    const toX = (i: number) => PAD_L + plotW - (N - 1 - i) * stepWidth;
-    const toY = (v: number) => PAD_T + plotH - (v / yMaxFinal) * plotH;
+  const currentRate = smoothed.length > 0 ? smoothed[smoothed.length - 1] : 0;
 
-    const pts: [number, number][] = smoothed.map((v, i) => [toX(i), toY(v)]);
+  // Latest data for the animation loop, refreshed on every render so the
+  // loop itself never has to be re-created when a sample arrives.
+  const frameData = useRef({ smoothed, lastSampleT: 0 });
+  frameData.current = {
+    smoothed,
+    lastSampleT: samples.length > 0 ? samples[samples.length - 1].t : 0,
+  };
 
-    let line = `M${pts[0][0].toFixed(2)},${pts[0][1].toFixed(2)}`;
-    if (pts.length > 1) {
-      for (let i = 0; i < pts.length - 1; i++) {
-        const p0 = pts[Math.max(0, i - 1)];
-        const p1 = pts[i];
-        const p2 = pts[i + 1];
-        const p3 = pts[Math.min(pts.length - 1, i + 2)];
-        const t = 0.5;
-        const c1x = p1[0] + ((p2[0] - p0[0]) * t) / 6;
-        const c1y = p1[1] + ((p2[1] - p0[1]) * t) / 6;
-        const c2x = p2[0] - ((p3[0] - p1[0]) * t) / 6;
-        const c2y = p2[1] - ((p3[1] - p1[1]) * t) / 6;
-        line += ` C${c1x.toFixed(2)},${c1y.toFixed(2)} ${c2x.toFixed(2)},${c2y.toFixed(2)} ${p2[0].toFixed(2)},${p2[1].toFixed(2)}`;
+  const active = samples.length >= 2;
+
+  useEffect(() => {
+    if (!active) return;
+    let raf = 0;
+    let lastFrame = performance.now();
+
+    const renderFrame = (nowFrame: number) => {
+      const dt = Math.max(0.1, nowFrame - lastFrame);
+      lastFrame = nowFrame;
+      const { smoothed, lastSampleT } = frameData.current;
+
+      if (smoothed.length >= 2) {
+        // Y scale: snap outward so the line never clips, ease back down.
+        const target = Math.max(MIN_Y_MAX_BYTES, Math.max(...smoothed) * 1.25);
+        let yMax = animYMaxRef.current;
+        if (target > yMax) {
+          yMax = target;
+        } else {
+          const f = 1 - Math.pow(1 - Y_LERP_PER_FRAME, dt / REFERENCE_FRAME_MS);
+          yMax += (target - yMax) * f;
+          if (yMax - target < target * 0.001) yMax = target;
+        }
+        animYMaxRef.current = yMax;
+
+        const N = smoothed.length;
+        const toX = (i: number) => PAD_L + plotW - (N - 1 - i) * stepWidth;
+        const toY = (v: number) =>
+          PAD_T + plotH - (Math.min(v, yMax) / yMax) * plotH;
+        const pts: [number, number][] = smoothed.map((v, i) => [
+          toX(i),
+          toY(v),
+        ]);
+
+        const line = buildLinePath(pts);
+        const bottomY = PAD_T + plotH;
+        const rightX = PAD_L + plotW;
+        const area = `${line} L${rightX.toFixed(2)},${bottomY.toFixed(2)} L${pts[0][0].toFixed(2)},${bottomY.toFixed(2)} Z`;
+
+        lineRef.current?.setAttribute("d", line);
+        areaRef.current?.setAttribute("d", area);
+
+        // Time-based scroll: a fresh sample starts one step beyond the right
+        // edge of the plot and slides into view over one sample interval.
+        const phase = Math.min(
+          1,
+          Math.max(0, (Date.now() - lastSampleT) / SAMPLE_INTERVAL_MS),
+        );
+        const offset = (1 - phase) * stepWidth;
+        if (scrollRef.current) {
+          scrollRef.current.style.transform = `translate3d(${offset}px, 0, 0)`;
+        }
+
+        const tip = pts[N - 1];
+        tipRef.current?.setAttribute(
+          "transform",
+          `translate(${tip[0].toFixed(2)}, ${tip[1].toFixed(2)})`,
+        );
+
+        const peakText = `→ ${formatRate(yMax)} peak`;
+        if (peakText !== peakTextRef.current && peakRef.current) {
+          peakTextRef.current = peakText;
+          peakRef.current.textContent = peakText;
+        }
       }
-    }
 
-    const bottomY = PAD_T + plotH;
-    const rightX = PAD_L + plotW;
-    const leftX = pts[0][0];
-    const area = `${line} L${rightX.toFixed(2)},${bottomY.toFixed(2)} L${leftX.toFixed(2)},${bottomY.toFixed(2)} Z`;
-
-    return {
-      linePath: line,
-      areaPath: area,
-      lastPoint: pts[pts.length - 1],
-      yMax: yMaxFinal,
-      currentRate: smoothed[smoothed.length - 1],
+      raf = requestAnimationFrame(renderFrame);
     };
-  }, [smoothed, plotW, plotH, stepWidth]);
 
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const prev = prevLengthRef.current;
-    prevLengthRef.current = samples.length;
-
-    if (samples.length <= 1 || samples.length < prev) {
-      el.style.transition = "none";
-      el.style.transform = "translate3d(0,0,0)";
-      return;
-    }
-    if (samples.length === prev) return;
-
-    el.style.transition = "none";
-    el.style.transform = `translate3d(${stepWidth}px, 0, 0)`;
-
-    const raf = requestAnimationFrame(() => {
-      el.style.transition = `transform ${SAMPLE_INTERVAL_MS}ms linear`;
-      el.style.transform = "translate3d(0, 0, 0)";
-    });
+    raf = requestAnimationFrame(renderFrame);
     return () => cancelAnimationFrame(raf);
-  }, [samples.length, stepWidth]);
+  }, [active, plotW, plotH, stepWidth]);
 
-  if (samples.length < 2) {
+  if (!active) {
     return (
       <div
         className="relative flex flex-col justify-between overflow-hidden rounded-[var(--radius-card)] px-4 py-4"
@@ -250,16 +303,13 @@ export function LiveGraph({
         ))}
 
         <g clipPath="url(#lg-clip)" mask="url(#lg-mask)">
-          <g
-            ref={scrollRef}
-            style={{
-              willChange: "transform",
-              transform: "translate3d(0,0,0)",
-            }}
-          >
-            <path d={areaPath} fill="url(#lg-fill)" />
+          {/* Geometry (path d, tip position, scroll offset) is driven from a
+              requestAnimationFrame loop, not React renders, so the chart
+              scrolls and rescales continuously between samples. */}
+          <g ref={scrollRef} style={{ willChange: "transform" }}>
+            <path ref={areaRef} fill="url(#lg-fill)" />
             <path
-              d={linePath}
+              ref={lineRef}
               fill="none"
               stroke={lineColor}
               strokeWidth="1.75"
@@ -267,45 +317,35 @@ export function LiveGraph({
               strokeLinejoin="round"
               filter="url(#lg-glow)"
             />
-            {lastPoint && (
-              <g>
-                <circle
-                  cx={lastPoint[0]}
-                  cy={lastPoint[1]}
-                  r="4"
-                  fill={fillColor}
-                  opacity="0.3"
-                >
-                  <animate
-                    attributeName="r"
-                    values="4;10;4"
-                    dur="2s"
-                    repeatCount="indefinite"
-                  />
-                  <animate
-                    attributeName="opacity"
-                    values="0.35;0;0.35"
-                    dur="2s"
-                    repeatCount="indefinite"
-                  />
-                </circle>
-                <circle
-                  cx={lastPoint[0]}
-                  cy={lastPoint[1]}
-                  r="2.5"
-                  fill={fillColor}
-                  stroke="var(--color-bg-card)"
-                  strokeWidth="1.5"
+            <g ref={tipRef}>
+              <circle r="4" fill={fillColor} opacity="0.3">
+                <animate
+                  attributeName="r"
+                  values="4;10;4"
+                  dur="2s"
+                  repeatCount="indefinite"
                 />
-              </g>
-            )}
+                <animate
+                  attributeName="opacity"
+                  values="0.35;0;0.35"
+                  dur="2s"
+                  repeatCount="indefinite"
+                />
+              </circle>
+              <circle
+                r="2.5"
+                fill={fillColor}
+                stroke="var(--color-bg-card)"
+                strokeWidth="1.5"
+              />
+            </g>
           </g>
         </g>
       </svg>
 
       <div className="pointer-events-none absolute bottom-1.5 left-3 right-3 flex justify-between font-mono text-[9px] text-text-dimmed">
         <span>0</span>
-        <span>→ {formatRate(yMax)} peak</span>
+        <span ref={peakRef} />
       </div>
     </div>
   );

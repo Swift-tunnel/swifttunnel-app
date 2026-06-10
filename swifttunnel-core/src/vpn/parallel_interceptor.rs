@@ -642,6 +642,16 @@ pub struct ThroughputStats {
     pub bytes_tx: Arc<AtomicU64>,
     /// Bytes received through VPN tunnel
     pub bytes_rx: Arc<AtomicU64>,
+    /// Bytes sent by tunnel-process flows that SwiftTunnel classified but
+    /// passed through to the physical adapter instead of the relay (TCP
+    /// without Route Assist, whitelisted-region auto-routing bypass).
+    ///
+    /// Display/accounting only. Relay health checks must keep reading
+    /// `bytes_tx`/`bytes_rx`, which count relay traffic exclusively.
+    pub bytes_direct_tx: Arc<AtomicU64>,
+    /// Bytes received by tunnel-process flows outside the relay (direct
+    /// inbound counterpart of `bytes_direct_tx`).
+    pub bytes_direct_rx: Arc<AtomicU64>,
     /// Timestamp when stats were started
     pub started_at: std::time::Instant,
 }
@@ -651,6 +661,8 @@ impl Default for ThroughputStats {
         Self {
             bytes_tx: Arc::new(AtomicU64::new(0)),
             bytes_rx: Arc::new(AtomicU64::new(0)),
+            bytes_direct_tx: Arc::new(AtomicU64::new(0)),
+            bytes_direct_rx: Arc::new(AtomicU64::new(0)),
             started_at: std::time::Instant::now(),
         }
     }
@@ -661,6 +673,8 @@ impl ThroughputStats {
     pub fn reset(&self) {
         self.bytes_tx.store(0, Ordering::Relaxed);
         self.bytes_rx.store(0, Ordering::Relaxed);
+        self.bytes_direct_tx.store(0, Ordering::Relaxed);
+        self.bytes_direct_rx.store(0, Ordering::Relaxed);
     }
 
     /// Get current bytes TX
@@ -673,6 +687,16 @@ impl ThroughputStats {
         self.bytes_rx.load(Ordering::Relaxed)
     }
 
+    /// Get current direct (non-relay) bytes TX for tunnel-process flows
+    pub fn get_bytes_direct_tx(&self) -> u64 {
+        self.bytes_direct_tx.load(Ordering::Relaxed)
+    }
+
+    /// Get current direct (non-relay) bytes RX for tunnel-process flows
+    pub fn get_bytes_direct_rx(&self) -> u64 {
+        self.bytes_direct_rx.load(Ordering::Relaxed)
+    }
+
     /// Add to TX counter (called when packet sent through tunnel)
     pub fn add_tx(&self, bytes: u64) {
         self.bytes_tx.fetch_add(bytes, Ordering::Relaxed);
@@ -681,6 +705,16 @@ impl ThroughputStats {
     /// Add to RX counter (called when packet received through tunnel)
     pub fn add_rx(&self, bytes: u64) {
         self.bytes_rx.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Add to direct TX counter (tunnel-process packet bypassed to physical)
+    pub fn add_direct_tx(&self, bytes: u64) {
+        self.bytes_direct_tx.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Add to direct RX counter (inbound packet for a tunnel-process flow)
+    pub fn add_direct_rx(&self, bytes: u64) {
+        self.bytes_direct_rx.fetch_add(bytes, Ordering::Relaxed);
     }
 }
 
@@ -5342,6 +5376,20 @@ fn run_packet_reader(
                         // Batch passthrough (much cheaper than per-packet bypass reinjection).
                         let _ = passthrough_to_adapter.push(&packets[i]);
 
+                        // Throughput accounting for game traffic that is
+                        // handled but deliberately not relayed (TCP without
+                        // Route Assist, whitelisted-region bypass) so the UI
+                        // graph reflects it.
+                        if auto_routing_bypass
+                            || packet_is_tunnel_process_flow(
+                                data,
+                                &snapshot,
+                                FlowAccountingDirection::Outbound,
+                            )
+                        {
+                            throughput.add_direct_tx(packet_len);
+                        }
+
                         // Keep diagnostics accurate (bypass packets won't reach workers anymore).
                         if let Some(stats) = worker_stats.get(worker_id) {
                             stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
@@ -5443,7 +5491,19 @@ fn run_packet_reader(
                     let _ = passthrough_to_adapter.push(&packets[i]);
                 }
             } else {
-                // Inbound - passthrough to MSTCP
+                // Inbound - passthrough to MSTCP.
+                //
+                // No double counting with `bytes_rx`: relayed game packets
+                // arrive encapsulated, addressed to SwiftTunnel's own relay
+                // socket (not a tunnel-process port), and the decapsulated
+                // packets are injected to MSTCP by `run_v3_inbound_receiver`
+                // without re-entering this reader. So a tunnel-process port
+                // match here can only be direct (non-relayed) game traffic,
+                // such as TCP without Route Assist.
+                if packet_is_tunnel_process_flow(data, &snapshot, FlowAccountingDirection::Inbound)
+                {
+                    throughput.add_direct_rx(data.len() as u64);
+                }
                 let _ = passthrough_to_mstcp.push(&packets[i]);
             }
         }
@@ -6872,6 +6932,76 @@ fn tcp_payload(data: &[u8], ip_start: usize, transport_start: usize) -> Option<&
         return None;
     }
     data.get(payload_start..ip_end)
+}
+
+/// Direction of a packet for tunnel-process flow accounting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FlowAccountingDirection {
+    Outbound,
+    Inbound,
+}
+
+/// Check whether a packet belongs to a flow owned by a tunnel process, for
+/// throughput accounting only — never for routing. Outbound packets match on
+/// the source port, inbound packets on the destination port, against the
+/// snapshot's tunnel-owned UDP/TCP port sets.
+///
+/// This lets the UI throughput graph include game traffic that SwiftTunnel
+/// classified but did not relay (TCP without Route Assist, whitelisted-region
+/// bypass), which previously made the graph read zero while the game was
+/// visibly online.
+///
+/// Kept deliberately cheap: it runs on the reader hot path for bypassed and
+/// inbound packets, so it bails out before parsing anything when no tunnel
+/// process owns any ports (game not running).
+fn packet_is_tunnel_process_flow(
+    data: &[u8],
+    snapshot: &ProcessSnapshot,
+    direction: FlowAccountingDirection,
+) -> bool {
+    if snapshot.tunnel_udp_ports.is_empty() && snapshot.tunnel_tcp_ports.is_empty() {
+        return false;
+    }
+
+    let Some(ip_start) = parse_ipv4_header_offset(data) else {
+        return false;
+    };
+    if data.len() < ip_start + 20 {
+        return false;
+    }
+    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
+    if ihl < 20 {
+        return false;
+    }
+
+    // Non-initial fragments carry no transport ports.
+    let fragment_bits = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
+    if (fragment_bits & 0x1FFF) != 0 {
+        return false;
+    }
+
+    let ports = match data[ip_start + 9] {
+        6 => &snapshot.tunnel_tcp_ports,
+        17 => &snapshot.tunnel_udp_ports,
+        _ => return false,
+    };
+    if ports.is_empty() {
+        return false;
+    }
+
+    let transport_start = ip_start + ihl;
+    // The local endpoint is the source port on outbound packets and the
+    // destination port on inbound packets.
+    let local_port_offset = match direction {
+        FlowAccountingDirection::Outbound => transport_start,
+        FlowAccountingDirection::Inbound => transport_start + 2,
+    };
+    let Some(port_bytes) = data.get(local_port_offset..local_port_offset + 2) else {
+        return false;
+    };
+    let local_port = u16::from_be_bytes([port_bytes[0], port_bytes[1]]);
+
+    ports.contains(&local_port)
 }
 
 fn should_route_to_vpn_with_inline_cache(
@@ -9568,6 +9698,172 @@ mod tests {
         let (src, dst) = parse_ports(&packet).unwrap();
         assert_eq!(src, 53400);
         assert_eq!(dst, 54400);
+    }
+
+    fn snapshot_with_tunnel_ports(udp_ports: &[u16], tcp_ports: &[u16]) -> ProcessSnapshot {
+        ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: udp_ports.iter().copied().collect(),
+            tunnel_tcp_ports: tcp_ports.iter().copied().collect(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn test_accounting_outbound_matches_tunnel_tcp_source_port() {
+        let snapshot = snapshot_with_tunnel_ports(&[], &[50123]);
+        let frame = build_ipv4_frame(
+            6,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(128, 116, 50, 100),
+            50123,
+            443,
+        );
+
+        assert!(packet_is_tunnel_process_flow(
+            &frame,
+            &snapshot,
+            FlowAccountingDirection::Outbound,
+        ));
+    }
+
+    #[test]
+    fn test_accounting_outbound_ignores_unrelated_source_port() {
+        let snapshot = snapshot_with_tunnel_ports(&[], &[50123]);
+        let frame = build_ipv4_frame(
+            6,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(128, 116, 50, 100),
+            40000,
+            443,
+        );
+
+        assert!(!packet_is_tunnel_process_flow(
+            &frame,
+            &snapshot,
+            FlowAccountingDirection::Outbound,
+        ));
+    }
+
+    #[test]
+    fn test_accounting_inbound_matches_tunnel_tcp_destination_port() {
+        let snapshot = snapshot_with_tunnel_ports(&[], &[50123]);
+        // Inbound: remote server is the source, local tunnel port is the destination.
+        let frame = build_ipv4_frame(
+            6,
+            Ipv4Addr::new(128, 116, 50, 100),
+            Ipv4Addr::new(192, 168, 1, 100),
+            443,
+            50123,
+        );
+
+        assert!(packet_is_tunnel_process_flow(
+            &frame,
+            &snapshot,
+            FlowAccountingDirection::Inbound,
+        ));
+        assert!(
+            !packet_is_tunnel_process_flow(&frame, &snapshot, FlowAccountingDirection::Outbound),
+            "Inbound frame's source port (443) is not tunnel-owned"
+        );
+    }
+
+    #[test]
+    fn test_accounting_matches_udp_ports_against_udp_set_only() {
+        let snapshot = snapshot_with_tunnel_ports(&[51000], &[]);
+        let udp_frame = build_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(128, 116, 50, 100),
+            51000,
+            64000,
+        );
+        let tcp_frame = build_ipv4_frame(
+            6,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(128, 116, 50, 100),
+            51000,
+            443,
+        );
+
+        assert!(packet_is_tunnel_process_flow(
+            &udp_frame,
+            &snapshot,
+            FlowAccountingDirection::Outbound,
+        ));
+        assert!(
+            !packet_is_tunnel_process_flow(
+                &tcp_frame,
+                &snapshot,
+                FlowAccountingDirection::Outbound,
+            ),
+            "TCP port must not match the UDP tunnel port set"
+        );
+    }
+
+    #[test]
+    fn test_accounting_bails_out_when_no_tunnel_ports() {
+        let snapshot = snapshot_with_tunnel_ports(&[], &[]);
+        let frame = build_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(128, 116, 50, 100),
+            51000,
+            64000,
+        );
+
+        assert!(!packet_is_tunnel_process_flow(
+            &frame,
+            &snapshot,
+            FlowAccountingDirection::Outbound,
+        ));
+    }
+
+    #[test]
+    fn test_accounting_skips_non_initial_fragments() {
+        let snapshot = snapshot_with_tunnel_ports(&[51000], &[]);
+        let mut frame = build_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(128, 116, 50, 100),
+            51000,
+            64000,
+        );
+        // Fragment offset 1 (non-initial): no transport header in this fragment.
+        let ip_start = 14;
+        frame[ip_start + 6..ip_start + 8].copy_from_slice(&0x0001u16.to_be_bytes());
+
+        assert!(!packet_is_tunnel_process_flow(
+            &frame,
+            &snapshot,
+            FlowAccountingDirection::Outbound,
+        ));
+    }
+
+    #[test]
+    fn test_throughput_stats_direct_counters_reset() {
+        let stats = ThroughputStats::default();
+        stats.add_tx(10);
+        stats.add_rx(20);
+        stats.add_direct_tx(30);
+        stats.add_direct_rx(40);
+
+        assert_eq!(stats.get_bytes_tx(), 10);
+        assert_eq!(stats.get_bytes_rx(), 20);
+        assert_eq!(stats.get_bytes_direct_tx(), 30);
+        assert_eq!(stats.get_bytes_direct_rx(), 40);
+
+        stats.reset();
+        assert_eq!(stats.get_bytes_tx(), 0);
+        assert_eq!(stats.get_bytes_rx(), 0);
+        assert_eq!(stats.get_bytes_direct_tx(), 0);
+        assert_eq!(stats.get_bytes_direct_rx(), 0);
     }
 
     #[test]

@@ -76,6 +76,10 @@ const MOCK_SETTINGS: AppSettings = {
 let mockVpnConnected = false;
 let mockSystemMemTotalMb = 16384;
 let mockSystemMemUsedMb = 9800;
+// Cumulative throughput counters, like the real backend's atomic totals.
+let mockBytesUp = 0;
+let mockBytesDown = 0;
+let mockThroughputLastAt = 0;
 
 const handlers: Record<string, (...args: unknown[]) => unknown> = {
   auth_get_state: () => ({
@@ -149,15 +153,31 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     await new Promise((r) => setTimeout(r, 300));
   },
 
-  vpn_get_throughput: () =>
-    mockVpnConnected
-      ? {
-          bytes_up: Math.floor(Math.random() * 500000) + 100000,
-          bytes_down: Math.floor(Math.random() * 2000000) + 500000,
-          packets_tunneled: Math.floor(Math.random() * 10000),
-          packets_bypassed: Math.floor(Math.random() * 50000),
-        }
-      : null,
+  vpn_get_throughput: () => {
+    if (!mockVpnConnected) {
+      mockBytesUp = 0;
+      mockBytesDown = 0;
+      mockThroughputLastAt = 0;
+      return null;
+    }
+    // Accumulate at a wandering rate so the dev graph looks like a live
+    // session instead of random noise.
+    const now = Date.now();
+    const dtSec =
+      mockThroughputLastAt > 0 ? (now - mockThroughputLastAt) / 1000 : 0;
+    mockThroughputLastAt = now;
+    const wave = 0.5 + 0.5 * Math.sin(now / 4000);
+    mockBytesUp += Math.floor(dtSec * (20_000 + 60_000 * wave * Math.random()));
+    mockBytesDown += Math.floor(
+      dtSec * (80_000 + 400_000 * wave * Math.random()),
+    );
+    return {
+      bytes_up: mockBytesUp,
+      bytes_down: mockBytesDown,
+      packets_tunneled: 0,
+      packets_bypassed: 0,
+    };
+  },
 
   vpn_get_ping: () =>
     mockVpnConnected ? 12 + Math.floor(Math.random() * 10) : null,
