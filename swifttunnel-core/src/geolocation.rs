@@ -548,13 +548,35 @@ fn resolve_api_response(
     None
 }
 
+/// Outcome of a game-server region lookup, split so callers can tell a
+/// retryable transport failure apart from a definitive "resolver answered
+/// but cannot classify this IP" (retrying the latter won't help — the
+/// resolver caches its answer).
+#[derive(Debug, Clone, PartialEq)]
+pub enum GameServerRegionLookup {
+    /// Resolver returned a recognized structured region id.
+    Resolved(RobloxRegion, String),
+    /// Resolver answered, but without a usable structured region id.
+    /// Diagnostic-only: not a retry target.
+    NoRegion,
+    /// Transport-level failure (timeout, connection error, non-2xx, bad
+    /// body). Retryable.
+    Failed,
+}
+
 /// Look up a game server IP's region.
 ///
 /// Uses the SwiftTunnel web resolver. The resolver is IPinfo-primary and owns
 /// the provider token/cache/overrides. Auto-routing only receives a region when
 /// the resolver returns a recognized structured region id.
-pub async fn lookup_game_server_region(ip: Ipv4Addr) -> Option<(RobloxRegion, String)> {
-    resolve_api_response(ip, resolve_game_server_region_from_api(ip).await)
+pub async fn lookup_game_server_region(ip: Ipv4Addr) -> GameServerRegionLookup {
+    match resolve_game_server_region_from_api(ip).await {
+        None => GameServerRegionLookup::Failed,
+        Some(response) => match resolve_api_response(ip, Some(response)) {
+            Some((region, location)) => GameServerRegionLookup::Resolved(region, location),
+            None => GameServerRegionLookup::NoRegion,
+        },
+    }
 }
 
 #[cfg(test)]

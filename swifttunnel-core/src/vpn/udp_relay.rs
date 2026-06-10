@@ -432,11 +432,18 @@ pub struct RelayPingSnapshot {
     pub sample_count: usize,
 }
 
+/// RTT readings older than this are not reported: a relay that has stopped
+/// answering pings (switch to an unreachable relay, network drop) must show
+/// up as "no data" in the UI instead of freezing on the last good value.
+const PING_RTT_FRESHNESS_MS: u64 = 5_000;
+
 struct PingMetrics {
     enabled: AtomicBool,
     sent: AtomicU64,
     received: AtomicU64,
     last_rtt_ms: AtomicU64,
+    /// `now_mono_ms()` of the most recent recorded pong. 0 = never.
+    last_rtt_at_ms: AtomicU64,
     samples: parking_lot::Mutex<VecDeque<u32>>,
 }
 
@@ -447,6 +454,7 @@ impl PingMetrics {
             sent: AtomicU64::new(0),
             received: AtomicU64::new(0),
             last_rtt_ms: AtomicU64::new(0),
+            last_rtt_at_ms: AtomicU64::new(0),
             samples: parking_lot::Mutex::new(VecDeque::with_capacity(PING_SAMPLE_WINDOW)),
         }
     }
@@ -454,12 +462,23 @@ impl PingMetrics {
     fn record_rtt_ms(&self, rtt_ms: u32) {
         self.received.fetch_add(1, Ordering::Relaxed);
         self.last_rtt_ms.store(rtt_ms as u64, Ordering::Relaxed);
+        self.last_rtt_at_ms.store(now_mono_ms(), Ordering::Relaxed);
 
         let mut samples = self.samples.lock();
         if samples.len() >= PING_SAMPLE_WINDOW {
             samples.pop_front();
         }
         samples.push_back(rtt_ms);
+    }
+
+    /// Clear all RTT state. Called on relay switch so the old relay's
+    /// readings can never be reported as the new relay's ping.
+    fn reset(&self) {
+        self.last_rtt_ms.store(0, Ordering::Relaxed);
+        self.last_rtt_at_ms.store(0, Ordering::Relaxed);
+        self.sent.store(0, Ordering::Relaxed);
+        self.received.store(0, Ordering::Relaxed);
+        self.samples.lock().clear();
     }
 
     fn snapshot(&self) -> RelayPingSnapshot {
@@ -473,7 +492,10 @@ impl PingMetrics {
             (lost as f32) * 100.0 / (sent as f32)
         };
         let last_rtt_raw = self.last_rtt_ms.load(Ordering::Relaxed);
-        let last_rtt_ms = if last_rtt_raw == 0 {
+        let last_rtt_at = self.last_rtt_at_ms.load(Ordering::Relaxed);
+        let rtt_is_fresh =
+            last_rtt_at != 0 && now_mono_ms().saturating_sub(last_rtt_at) <= PING_RTT_FRESHNESS_MS;
+        let last_rtt_ms = if last_rtt_raw == 0 || !rtt_is_fresh {
             None
         } else {
             Some(last_rtt_raw as u32)
@@ -486,7 +508,9 @@ impl PingMetrics {
         {
             let samples = self.samples.lock();
             sample_count = samples.len();
-            if sample_count > 0 {
+            // Percentiles share the freshness gate: once the relay stops
+            // answering, stale medians are as misleading as a stale last_rtt.
+            if sample_count > 0 && rtt_is_fresh {
                 let mut values: Vec<u32> = samples.iter().copied().collect();
                 values.sort_unstable();
                 let p50_idx = ((values.len() - 1) as f64 * 0.50).floor() as usize;
@@ -519,6 +543,15 @@ pub struct UdpRelay {
     previous_relay_addr: ArcSwap<Option<SocketAddr>>,
     /// When the last relay switch occurred (for grace period calculation)
     switch_time: ArcSwap<Option<Instant>>,
+    /// Relay address currently being pre-authenticated for an auto-route
+    /// switch. While set, AUTH_ACK frames from this address are accepted and
+    /// recorded; all other traffic from it is still rejected so an
+    /// un-switched relay can never inject data packets.
+    pending_auth_addr: ArcSwap<Option<SocketAddr>>,
+    /// Last auth ack observed by the inbound receiver thread, with its source
+    /// address. Mid-session authentication polls this because the inbound
+    /// thread owns socket reads once the session is running.
+    last_auth_ack: parking_lot::Mutex<Option<(SocketAddr, RelayAuthAckStatus)>>,
     /// Unique session ID for this connection
     session_id: [u8; SESSION_ID_LEN],
     /// Stop flag
@@ -875,6 +908,8 @@ impl UdpRelay {
             relay_addr: ArcSwap::from_pointee(relay_addr),
             previous_relay_addr: ArcSwap::from_pointee(None),
             switch_time: ArcSwap::from_pointee(None),
+            pending_auth_addr: ArcSwap::from_pointee(None),
+            last_auth_ack: parking_lot::Mutex::new(None),
             session_id,
             stop_flag,
             packets_sent: AtomicU64::new(0),
@@ -1167,6 +1202,14 @@ impl UdpRelay {
     /// Send relay auth hello frame:
     /// [session_id:8][0xA1][token_len:2][token_utf8].
     pub fn send_auth_hello(&self, token: &str) -> Result<()> {
+        let current_addr = **self.relay_addr.load();
+        self.send_auth_hello_to(token, current_addr)
+    }
+
+    /// Send the auth hello frame to an explicit relay address. Used by the
+    /// pre-switch authentication path, which must authenticate the target
+    /// relay while tunnel data is still flowing to the current one.
+    fn send_auth_hello_to(&self, token: &str, target: SocketAddr) -> Result<()> {
         let token_bytes = token.as_bytes();
         if token_bytes.is_empty() || token_bytes.len() > u16::MAX as usize {
             anyhow::bail!(
@@ -1181,13 +1224,12 @@ impl UdpRelay {
         frame.extend_from_slice(&(token_bytes.len() as u16).to_be_bytes());
         frame.extend_from_slice(token_bytes);
 
-        let current_addr = **self.relay_addr.load();
         self.socket
-            .send_to(&frame, current_addr)
+            .send_to(&frame, target)
             .context("Failed to send relay auth hello")?;
         log::debug!(
             "UDP Relay: Sent auth hello to {} (session {:016x}, token {} bytes)",
-            current_addr,
+            target,
             self.session_id_u64(),
             token_bytes.len()
         );
@@ -1257,6 +1299,76 @@ impl UdpRelay {
                     self.session_id_u64()
                 );
                 return Ok(Some(status));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Authenticate this session with a *different* relay while the session
+    /// is live, without moving any tunnel traffic.
+    ///
+    /// `authenticate_with_ticket` reads the socket directly, which is only
+    /// safe before the inbound receiver thread starts. Mid-session, the
+    /// inbound thread owns all reads, so this variant registers `target` as
+    /// the pending-auth address (the inbound thread then records AUTH_ACKs
+    /// from it) and polls for the recorded ack.
+    ///
+    /// Returns `Ok(None)` on ack timeout. The caller must only call
+    /// `switch_relay(target)` after receiving `Ok(Some(RelayAuthAckStatus::Ok))`.
+    pub async fn authenticate_addr_with_ticket(
+        &self,
+        token: &str,
+        target: SocketAddr,
+    ) -> Result<Option<RelayAuthAckStatus>> {
+        *self.last_auth_ack.lock() = None;
+        self.pending_auth_addr.store(Arc::new(Some(target)));
+
+        let result = self.authenticate_addr_inner(token, target).await;
+
+        // Always clear the pending window so the target cannot keep a
+        // permanent AUTH_ACK acceptance slot if the switch is aborted.
+        self.pending_auth_addr.store(Arc::new(None));
+        *self.last_auth_ack.lock() = None;
+        result
+    }
+
+    async fn authenticate_addr_inner(
+        &self,
+        token: &str,
+        target: SocketAddr,
+    ) -> Result<Option<RelayAuthAckStatus>> {
+        let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
+
+        for attempt in 0..AUTH_HANDSHAKE_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(AUTH_HANDSHAKE_RETRY_DELAY).await;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+
+            self.send_auth_hello_to(token, target)?;
+
+            // Poll the ack recorded by the inbound receiver thread.
+            const POLL_INTERVAL: Duration = Duration::from_millis(25);
+            let attempt_deadline = (Instant::now() + AUTH_HANDSHAKE_RETRY_DELAY).min(deadline);
+            loop {
+                if let Some((from, status)) = *self.last_auth_ack.lock() {
+                    if from == target {
+                        log::info!(
+                            "UDP Relay: Mid-session auth ack {} from {} (session {:016x})",
+                            status.as_str(),
+                            target,
+                            self.session_id_u64()
+                        );
+                        return Ok(Some(status));
+                    }
+                }
+                if Instant::now() >= attempt_deadline {
+                    break;
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
             }
         }
 
@@ -1382,6 +1494,25 @@ impl UdpRelay {
     ) -> Result<Option<&'a [u8]>> {
         match self.socket.recv_from(frame_buffer) {
             Ok((len, from)) => {
+                // A relay being pre-authenticated for an auto-route switch may
+                // only deliver AUTH_ACK frames. Everything else from it is
+                // dropped: until the switch commits it is not a valid source
+                // of tunnel data.
+                if let Some(pending) = **self.pending_auth_addr.load() {
+                    if from == pending {
+                        if len >= SESSION_ID_LEN + 2
+                            && frame_buffer[..SESSION_ID_LEN] == self.session_id
+                            && frame_buffer[SESSION_ID_LEN] == AUTH_ACK_FRAME_TYPE
+                        {
+                            let status =
+                                RelayAuthAckStatus::from_u8(frame_buffer[SESSION_ID_LEN + 1])
+                                    .unwrap_or(RelayAuthAckStatus::BadFormat);
+                            *self.last_auth_ack.lock() = Some((from, status));
+                        }
+                        return Ok(None);
+                    }
+                }
+
                 // Verify it's from our relay server (current or previous during grace period)
                 if !self.is_expected_relay_source(from) {
                     log::warn!("UDP Relay: Received packet from unexpected source {}", from);
@@ -1777,6 +1908,10 @@ impl UdpRelay {
         self.inject_error_streak.store(0, Ordering::Relaxed);
         *self.last_receive_time.lock() = None;
         *self.first_outbound_time.lock() = None;
+        // Reset RTT telemetry: the old relay's readings must never be shown
+        // as the new relay's ping. The UI reports "no data" until the first
+        // pong from the new relay arrives.
+        self.ping.reset();
         log::info!(
             "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
             old_addr,

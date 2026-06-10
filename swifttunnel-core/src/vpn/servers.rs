@@ -31,32 +31,77 @@ pub struct ServerLatency {
 
 /// Measure latency to a relay using ICMP ping. The V3 relay protocol won't
 /// echo unauthenticated UDP probes, so this is the only signal we have.
+///
+/// Uses the native `IcmpSendEcho` API instead of spawning `ping.exe`:
+/// `ping` output is localized ("time=" is "Zeit="/"temps="/"tiempo=" on
+/// non-English Windows), which made text parsing silently return `None` for
+/// every probe outside English locales — disabling the ping test and
+/// auto-routing latency data for those users. The API also avoids one
+/// process spawn per probe.
+///
+/// Blocking (up to the 2s timeout) — call from `spawn_blocking` in async
+/// contexts.
+#[cfg(windows)]
 pub fn measure_latency_icmp(ip: &str) -> Option<u32> {
-    use crate::hidden_command;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
+    };
 
-    // Use Windows ping command with 1 packet and 2 second timeout
-    let output = hidden_command("ping")
-        .args(["-n", "1", "-w", "2000", ip])
-        .output()
-        .ok()?;
+    /// IP_SUCCESS from ipexport.h.
+    const IP_STATUS_SUCCESS: u32 = 0;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    const ICMP_TIMEOUT_MS: u32 = 2000;
+    const PAYLOAD_LEN: usize = 32;
 
-    // Parse "time=XXms" or "time<1ms" from output
-    for line in stdout.lines() {
-        if let Some(time_idx) = line.find("time=") {
-            let rest = &line[time_idx + 5..];
-            if let Some(ms_idx) = rest.find("ms") {
-                let time_str = &rest[..ms_idx];
-                if let Ok(ms) = time_str.parse::<u32>() {
-                    return Some(ms);
-                }
-            }
-        } else if line.contains("time<1ms") {
-            return Some(0);
+    let target: std::net::Ipv4Addr = ip.parse().ok()?;
+    // IcmpSendEcho takes the destination as an in_addr-style u32: the four
+    // octets in memory order, not host byte order.
+    let dest = u32::from_ne_bytes(target.octets());
+
+    let handle = unsafe { IcmpCreateFile() }.ok()?;
+
+    let payload = [0u8; PAYLOAD_LEN];
+    // Reply buffer must hold ICMP_ECHO_REPLY + payload + 8 bytes for an
+    // ICMP error message, per the IcmpSendEcho documentation.
+    let mut reply_buf = vec![0u8; std::mem::size_of::<ICMP_ECHO_REPLY>() + PAYLOAD_LEN + 8];
+
+    let reply_count = unsafe {
+        IcmpSendEcho(
+            handle,
+            dest,
+            payload.as_ptr() as *const core::ffi::c_void,
+            payload.len() as u16,
+            None,
+            reply_buf.as_mut_ptr() as *mut core::ffi::c_void,
+            reply_buf.len() as u32,
+            ICMP_TIMEOUT_MS,
+        )
+    };
+
+    let latency = if reply_count > 0 {
+        // SAFETY: reply_count > 0 guarantees the buffer starts with a valid
+        // ICMP_ECHO_REPLY written by IcmpSendEcho.
+        let reply = unsafe { &*(reply_buf.as_ptr() as *const ICMP_ECHO_REPLY) };
+        if reply.Status == IP_STATUS_SUCCESS {
+            Some(reply.RoundTripTime)
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    unsafe {
+        let _ = IcmpCloseHandle(handle);
     }
 
+    latency
+}
+
+/// Non-Windows stub: latency probing is Windows-only (the app's only
+/// supported platform); development builds on other hosts report no data.
+#[cfg(not(windows))]
+pub fn measure_latency_icmp(_ip: &str) -> Option<u32> {
     None
 }
 
