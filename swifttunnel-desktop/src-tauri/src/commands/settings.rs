@@ -57,7 +57,7 @@ pub async fn settings_save(
     let discord_manager = state.discord_manager.clone();
     let app_handle = app.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
         let mut new_settings = settings;
         new_settings.sanitize_in_place();
         swifttunnel_core::settings::save_settings(&new_settings)?;
@@ -83,7 +83,31 @@ pub async fn settings_save(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Settings save task failed: {}", e))?
+    .map_err(|e| format!("Settings save task failed: {}", e))?;
+    result?;
+
+    // Push auto-routing settings to the live router so changes apply
+    // mid-session instead of waiting for the next connect. Inert when
+    // disconnected (no router) or for custom-relay sessions (no lookup task).
+    let (auto_routing_enabled, whitelisted_regions, forced_servers) = {
+        let s = state.settings.lock();
+        (
+            s.auto_routing_enabled,
+            s.whitelisted_regions.clone(),
+            s.forced_servers.clone(),
+        )
+    };
+    let auto_router = {
+        let vpn = state.vpn_connection.lock().await;
+        vpn.auto_router().cloned()
+    };
+    if let Some(router) = auto_router {
+        router.set_enabled(auto_routing_enabled);
+        router.set_whitelisted_regions(whitelisted_regions);
+        router.set_forced_servers(forced_servers);
+    }
+
+    Ok(())
 }
 
 fn current_timestamp_utc() -> String {

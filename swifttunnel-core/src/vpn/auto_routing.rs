@@ -20,7 +20,23 @@ const MIN_SWITCH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Maximum switches per minute
 const MAX_SWITCHES_PER_MINUTE: u32 = 3;
-const SAME_REGION_UPGRADE_THRESHOLD_MS: u32 = 10;
+pub(crate) const SAME_REGION_UPGRADE_THRESHOLD_MS: u32 = 10;
+
+/// A new game-server IP is only a routing signal when every *other* tracked
+/// game-server IP has been quiet for at least this long. While another
+/// connection is actively sending, the new IP is either a Roblox-owned side
+/// endpoint (not a routing signal) or a connection that will establish
+/// through the current relay — switching the relay after establishment would
+/// change the source IP the game server sees mid-session, which RakNet does
+/// not tolerate.
+const GAME_TRAFFIC_QUIET_HANDOFF: Duration = Duration::from_secs(3);
+
+/// Cap on tracked per-IP last-seen entries (long sessions teleporting across
+/// many instances). At the cap, the stalest entry is evicted.
+const MAX_TRACKED_GAME_TRAFFIC_IPS: usize = 4096;
+
+/// Don't take the game-traffic write lock more often than this per IP.
+const GAME_TRAFFIC_UPDATE_GRANULARITY: Duration = Duration::from_millis(250);
 
 /// Cap on outstanding geolocation lookups. If the lookup backend stalls (API
 /// outage, network down) this keeps the pending set from growing without bound.
@@ -45,12 +61,19 @@ pub struct AutoRouter {
     switches_this_minute: RwLock<(u32, Instant)>,
     /// Game server IPs we've already evaluated this session
     seen_game_servers: RwLock<HashSet<Ipv4Addr>>,
-    /// First structured game-server IP accepted for this VPN session.
+    /// Game-server IP whose lookup currently owns the route.
     ///
-    /// Roblox can contact several Roblox-owned endpoints while a user is already
-    /// playing. Once a real game-server lookup succeeds, later candidate IPs
-    /// must not override that route until disconnect resets the session.
+    /// Roblox can contact several Roblox-owned endpoints while a user is
+    /// already playing; those must not flip the relay mid-game. A new IP may
+    /// take over the pin only via the gone-quiet handoff: when all other
+    /// tracked game traffic has stopped for [`GAME_TRAFFIC_QUIET_HANDOFF`]
+    /// (player left the old server / teleported), the replacement candidate
+    /// is held during resolution and committed like a fresh join.
     active_game_server_ip: RwLock<Option<Ipv4Addr>>,
+    /// Last-seen time per candidate-shaped game-server destination IP.
+    /// Updated from the packet hot path (throttled per IP); drives the
+    /// gone-quiet handoff decision.
+    game_traffic: RwLock<HashMap<Ipv4Addr, Instant>>,
     /// Callback: list of (region_id, relay_addr, cached_latency_ms) for available servers
     available_servers: RwLock<Vec<(String, SocketAddr, Option<u32>)>>,
     /// Log of auto-routing events for UI display
@@ -114,6 +137,7 @@ impl AutoRouter {
             switches_this_minute: RwLock::new((0, Instant::now())),
             seen_game_servers: RwLock::new(HashSet::new()),
             active_game_server_ip: RwLock::new(None),
+            game_traffic: RwLock::new(HashMap::new()),
             available_servers: RwLock::new(Vec::new()),
             event_log: RwLock::new(VecDeque::new()),
             lookup_sender: RwLock::new(None),
@@ -221,6 +245,12 @@ impl AutoRouter {
         self.current_game_region.read().clone()
     }
 
+    /// Record the detected game region without switching relays (used when
+    /// the current relay is already the best match for the region).
+    pub fn record_game_region(&self, region: RobloxRegion) {
+        *self.current_game_region.write() = Some(region);
+    }
+
     /// Get the current SwiftTunnel region
     pub fn current_region(&self) -> String {
         self.current_st_region.read().clone()
@@ -237,18 +267,69 @@ impl AutoRouter {
         events.iter().rev().take(max).cloned().collect()
     }
 
+    /// Record hot-path traffic to a candidate-shaped game-server destination.
+    ///
+    /// Throttled per IP via a read-first check so the write lock is taken at
+    /// most once per [`GAME_TRAFFIC_UPDATE_GRANULARITY`] per IP. Uses
+    /// try-locks: a missed update under contention only coarsens the
+    /// gone-quiet timestamps by one packet interval.
+    fn note_game_traffic(&self, ip: Ipv4Addr) {
+        let now = Instant::now();
+        match self.game_traffic.try_read() {
+            Some(traffic) => {
+                if let Some(last) = traffic.get(&ip) {
+                    if now.duration_since(*last) < GAME_TRAFFIC_UPDATE_GRANULARITY {
+                        return;
+                    }
+                }
+            }
+            None => return,
+        }
+
+        if let Some(mut traffic) = self.game_traffic.try_write() {
+            if traffic.len() >= MAX_TRACKED_GAME_TRAFFIC_IPS && !traffic.contains_key(&ip) {
+                if let Some(stalest) = traffic
+                    .iter()
+                    .min_by_key(|(_, last)| **last)
+                    .map(|(ip, _)| *ip)
+                {
+                    traffic.remove(&stalest);
+                }
+            }
+            traffic.insert(ip, now);
+        }
+    }
+
+    /// True when every tracked game-server IP other than `candidate` has been
+    /// quiet for at least [`GAME_TRAFFIC_QUIET_HANDOFF`].
+    fn other_game_traffic_quiet(&self, candidate: Ipv4Addr) -> bool {
+        let now = Instant::now();
+        let traffic = self.game_traffic.read();
+        !traffic.iter().any(|(ip, last)| {
+            *ip != candidate && now.duration_since(*last) < GAME_TRAFFIC_QUIET_HANDOFF
+        })
+    }
+
     /// Evaluate a detected game server IP and trigger an async region lookup.
     ///
     /// This is called from the packet processing hot path when a new Roblox game server
     /// IP is detected. It must be fast (no blocking). New IPs are sent to a background
-    /// task that performs an ipinfo.io lookup and switches the relay if needed.
+    /// task that performs a region lookup and switches the relay if needed.
+    ///
+    /// A new IP observed while another game-server connection is still actively
+    /// sending is *not* a routing signal (see [`GAME_TRAFFIC_QUIET_HANDOFF`]):
+    /// it is recorded as seen without holding packets or starting a lookup, so
+    /// its connection establishes through the current relay and is never
+    /// switched mid-session.
     ///
     /// Always returns NoAction — the actual relay switch happens asynchronously
-    /// via `handle_region_lookup()` when the ipinfo.io response arrives.
+    /// in the background lookup task when the resolver response arrives.
     pub fn evaluate_game_server(&self, game_server_ip: Ipv4Addr) -> AutoRoutingAction {
         if !self.is_enabled() {
             return AutoRoutingAction::NoAction;
         }
+
+        self.note_game_traffic(game_server_ip);
 
         // Fast path: bail if we've already seen this IP.
         // Use try_read() to avoid blocking the hot path. If contended, retry on a
@@ -268,6 +349,13 @@ impl AutoRouter {
             None => return AutoRoutingAction::NoAction,
         }
 
+        // Gone-quiet gate: while any other game-server IP is actively
+        // sending, this candidate must not start a lookup or hold packets.
+        // Marking it seen (below) is deliberate: its connection establishes
+        // through the current relay, and a later switch would change the
+        // source IP the game server sees mid-session.
+        let deferred = !self.other_game_traffic_quiet(game_server_ip);
+
         // New IP candidate — insert under try_write() for dedupe.
         let is_new_ip = match self.seen_game_servers.try_write() {
             Some(mut seen) => seen.insert(game_server_ip),
@@ -275,6 +363,15 @@ impl AutoRouter {
         };
 
         if !is_new_ip {
+            return AutoRoutingAction::NoAction;
+        }
+
+        if deferred {
+            log::info!(
+                "Auto-routing: New game server {} observed while another connection is active — \
+                 not a routing signal, keeping current relay for it",
+                game_server_ip
+            );
             return AutoRoutingAction::NoAction;
         }
 
@@ -376,11 +473,13 @@ impl AutoRouter {
     /// Whether a completed lookup result is allowed to affect routing.
     ///
     /// Before the first structured lookup succeeds, candidates may resolve in
-    /// channel order. After one IP is accepted, superficially similar Roblox
-    /// traffic cannot flip the relay mid-game.
+    /// channel order. After one IP is accepted, a different IP's result is
+    /// honored only via the gone-quiet handoff: all other game traffic must
+    /// have stopped (player left/teleported), re-checked at processing time
+    /// in case the old connection resumed while the lookup was in flight.
     pub fn should_process_lookup_result(&self, ip: Ipv4Addr) -> bool {
         match *self.active_game_server_ip.read() {
-            Some(active_ip) => active_ip == ip,
+            Some(active_ip) => active_ip == ip || self.other_game_traffic_quiet(ip),
             None => true,
         }
     }
@@ -396,13 +495,31 @@ impl AutoRouter {
     ///
     /// The session check happens while holding the active-IP lock so reset()
     /// cannot clear the pin between a stale lookup's session check and pin.
+    ///
+    /// A different IP replaces the pin only via the gone-quiet handoff
+    /// (re-verified here under the lock): the previous game-server connection
+    /// must have stopped sending, so the replacement is a fresh join whose
+    /// packets are still held — switching the relay for it is safe.
     pub fn pin_active_game_server_for_session(&self, ip: Ipv4Addr, session_epoch: u64) -> bool {
         let mut active = self.active_game_server_ip.write();
         if !self.is_current_lookup_session(session_epoch) {
             return false;
         }
         match *active {
-            Some(active_ip) => active_ip == ip,
+            Some(active_ip) if active_ip == ip => true,
+            Some(active_ip) => {
+                if self.other_game_traffic_quiet(ip) {
+                    log::info!(
+                        "Auto-routing: Game-server handoff {} -> {} (previous connection quiet)",
+                        active_ip,
+                        ip
+                    );
+                    *active = Some(ip);
+                    true
+                } else {
+                    false
+                }
+            }
             None => {
                 *active = Some(ip);
                 log::info!("Auto-routing: Active game server pinned to {}", ip);
@@ -526,6 +643,44 @@ impl AutoRouter {
         }
     }
 
+    /// Non-mutating preview of `record_switch`'s rate-limit decision.
+    ///
+    /// The lookup task calls this before fetching a relay ticket so a switch
+    /// that would be rate-limited doesn't burn a single-use ticket. The
+    /// authoritative check still happens inside `commit_switch`.
+    pub fn switch_allowed_precheck(
+        &self,
+        to_region: &str,
+        new_addr: SocketAddr,
+        latency_improvement_ms: Option<u32>,
+    ) -> bool {
+        let current_region = self.current_st_region.read().clone();
+        let current_addr = *self.current_relay_addr.read();
+        if current_region == to_region && current_addr == Some(new_addr) {
+            return false;
+        }
+
+        let same_region_upgrade = region_family(&current_region) == region_family(to_region)
+            && current_addr != Some(new_addr);
+        let allow_immediate_upgrade = same_region_upgrade
+            && latency_improvement_ms
+                .is_some_and(|delta| delta >= SAME_REGION_UPGRADE_THRESHOLD_MS);
+        if same_region_upgrade && !allow_immediate_upgrade {
+            return false;
+        }
+        if allow_immediate_upgrade {
+            return true;
+        }
+
+        let now = Instant::now();
+        if now.duration_since(*self.last_switch_time.read()) < MIN_SWITCH_INTERVAL {
+            return false;
+        }
+        let window = self.switches_this_minute.read();
+        !(now.duration_since(window.1) <= Duration::from_secs(60)
+            && window.0 >= MAX_SWITCHES_PER_MINUTE)
+    }
+
     /// Record a relay switch, atomically checking rate limits.
     /// Returns true if the switch was recorded, false if rate-limited or already switched.
     fn record_switch(
@@ -640,6 +795,7 @@ impl AutoRouter {
         self.seen_game_servers.write().clear();
         self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
         *self.active_game_server_ip.write() = None;
+        self.game_traffic.write().clear();
         self.pending_lookups.write().clear();
         self.latest_lookup_generation.store(0, Ordering::Release);
         self.pending_any.store(false, Ordering::Release);
@@ -848,23 +1004,124 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// Mark an IP's traffic as last seen `age` ago (test helper for the
+    /// gone-quiet handoff gate).
+    fn backdate_game_traffic(router: &AutoRouter, ip: Ipv4Addr, age: Duration) {
+        let then = Instant::now()
+            .checked_sub(age)
+            .expect("test backdate within Instant range");
+        router.game_traffic.write().insert(ip, then);
+    }
+
     #[test]
     fn test_lookup_generation_tracks_newest_game_server() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
-        router.evaluate_game_server(Ipv4Addr::new(128, 116, 50, 1));
+        let first_ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.evaluate_game_server(first_ip);
         let (_, first_generation, first_session_epoch) = rx.try_recv().expect("first lookup");
         assert!(router.is_current_lookup_generation(first_generation));
         assert!(router.is_current_lookup_session(first_session_epoch));
 
+        // Second candidate only becomes a routing signal once the first IP's
+        // traffic has gone quiet.
+        backdate_game_traffic(&router, first_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
         router.evaluate_game_server(Ipv4Addr::new(128, 116, 55, 1));
         let (_, second_generation, second_session_epoch) = rx.try_recv().expect("second lookup");
         assert!(!router.is_current_lookup_generation(first_generation));
         assert!(router.is_current_lookup_generation(second_generation));
         assert_eq!(first_session_epoch, second_session_epoch);
         assert!(router.is_current_lookup_session(second_session_epoch));
+    }
+
+    #[test]
+    fn test_new_ip_during_active_game_traffic_is_not_a_routing_signal() {
+        // Negative case: a second game-server-range IP observed while the
+        // first connection is still actively sending must not start a lookup,
+        // must not hold packets, and must stay excluded even after the first
+        // connection later goes quiet (its connection already established
+        // through the current relay — a later switch would change the
+        // game-visible source IP mid-session).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let first_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let overlap_ip = Ipv4Addr::new(128, 116, 55, 1);
+
+        router.evaluate_game_server(first_ip);
+        let _ = rx.try_recv().expect("first lookup");
+
+        // first_ip traffic is fresh (just noted) — overlap_ip is deferred.
+        router.evaluate_game_server(overlap_ip);
+        assert!(rx.try_recv().is_err(), "deferred candidate must not enqueue a lookup");
+        assert!(
+            !router.is_lookup_pending(overlap_ip),
+            "deferred candidate must not hold packets"
+        );
+
+        // Even after the first connection goes quiet, the deferred candidate
+        // stays excluded: its session is already flowing through the current
+        // relay.
+        backdate_game_traffic(&router, first_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
+        router.evaluate_game_server(overlap_ip);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_gone_quiet_handoff_replaces_pin_and_allows_new_lookup() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let first_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let teleport_ip = Ipv4Addr::new(128, 116, 55, 1);
+
+        router.evaluate_game_server(first_ip);
+        let (_, _, epoch) = rx.try_recv().expect("first lookup");
+        assert!(router.pin_active_game_server_for_session(first_ip, epoch));
+
+        // Teleport: first connection goes quiet, then the new server appears.
+        backdate_game_traffic(&router, first_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
+        router.evaluate_game_server(teleport_ip);
+        let (received_ip, _, epoch2) = rx.try_recv().expect("handoff lookup must be enqueued");
+        assert_eq!(received_ip, teleport_ip);
+        assert!(router.is_lookup_pending(teleport_ip), "handoff candidate is held");
+
+        assert!(router.should_process_lookup_result(teleport_ip));
+        assert!(router.pin_active_game_server_for_session(teleport_ip, epoch2));
+        assert!(router.is_active_game_server(teleport_ip));
+        assert!(!router.is_active_game_server(first_ip));
+    }
+
+    #[test]
+    fn test_handoff_aborts_if_previous_connection_resumes() {
+        // The quiet check is re-verified at lookup-processing time: if the
+        // previous connection resumes while the handoff lookup is in flight,
+        // the result must be discarded.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let first_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let candidate_ip = Ipv4Addr::new(128, 116, 55, 1);
+
+        router.evaluate_game_server(first_ip);
+        let (_, _, epoch) = rx.try_recv().expect("first lookup");
+        assert!(router.pin_active_game_server_for_session(first_ip, epoch));
+
+        backdate_game_traffic(&router, first_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
+        router.evaluate_game_server(candidate_ip);
+        let (_, _, epoch2) = rx.try_recv().expect("handoff lookup");
+
+        // First connection resumes before the lookup completes.
+        router.note_game_traffic(first_ip);
+
+        assert!(!router.should_process_lookup_result(candidate_ip));
+        assert!(!router.pin_active_game_server_for_session(candidate_ip, epoch2));
+        assert!(router.is_active_game_server(first_ip));
     }
 
     #[test]
@@ -894,9 +1151,14 @@ mod tests {
         assert!(router.should_process_lookup_result(first_ip));
         assert!(router.should_process_lookup_result(later_ip));
         assert!(router.pin_active_game_server(first_ip));
+        // Pinned connection is actively sending.
+        router.note_game_traffic(first_ip);
 
         assert!(router.should_process_lookup_result(first_ip));
-        assert!(!router.should_process_lookup_result(later_ip));
+        assert!(
+            !router.should_process_lookup_result(later_ip),
+            "other lookups must not flip the relay while the pinned game is live"
+        );
         assert!(router.is_active_game_server(first_ip));
         assert!(!router.pin_active_game_server(later_ip));
     }
@@ -911,6 +1173,7 @@ mod tests {
         assert!(router.should_process_lookup_result(retry_ip));
 
         assert!(router.pin_active_game_server(retry_ip));
+        router.note_game_traffic(retry_ip);
         assert!(!router.should_process_lookup_result(failed_ip));
     }
 
@@ -1035,6 +1298,47 @@ mod tests {
 
         assert!(result.is_none());
         assert_eq!(router.current_region(), "singapore-02");
+    }
+
+    #[test]
+    fn test_switch_precheck_matches_commit_decisions() {
+        let router = AutoRouter::new(true, "singapore-02");
+        router.set_current_relay("203.0.113.2:51821".parse().unwrap(), "singapore-02");
+        *router.last_switch_time.write() = Instant::now();
+
+        let same_region_addr: SocketAddr = "54.255.205.216:51821".parse().unwrap();
+        // Same-region upgrade below threshold: blocked.
+        assert!(!router.switch_allowed_precheck(
+            "singapore",
+            same_region_addr,
+            Some(SAME_REGION_UPGRADE_THRESHOLD_MS - 1)
+        ));
+        // Same-region upgrade at threshold: allowed even inside min interval.
+        assert!(router.switch_allowed_precheck(
+            "singapore",
+            same_region_addr,
+            Some(SAME_REGION_UPGRADE_THRESHOLD_MS)
+        ));
+        // Same-region upgrade with unknown improvement: blocked (negative
+        // case — an unmeasurable improvement is not a switch trigger).
+        assert!(!router.switch_allowed_precheck("singapore", same_region_addr, None));
+
+        // Cross-region inside min interval: blocked.
+        let tokyo_addr: SocketAddr = "45.32.253.124:51821".parse().unwrap();
+        assert!(!router.switch_allowed_precheck("tokyo-02", tokyo_addr, Some(25)));
+
+        // Cross-region after min interval: allowed.
+        *router.last_switch_time.write() = Instant::now()
+            .checked_sub(MIN_SWITCH_INTERVAL * 2)
+            .expect("backdate");
+        assert!(router.switch_allowed_precheck("tokyo-02", tokyo_addr, Some(25)));
+
+        // Already on the target: blocked.
+        assert!(!router.switch_allowed_precheck(
+            "singapore-02",
+            "203.0.113.2:51821".parse().unwrap(),
+            Some(100)
+        ));
     }
 
     #[test]

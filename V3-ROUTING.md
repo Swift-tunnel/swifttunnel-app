@@ -115,8 +115,13 @@ pub struct UdpRelay {
 ### Auto Route Selection
 - Initial Auto Route connects to the region with the best measured in-app ping-test latency when latency data exists; otherwise it falls back to the requested/last selected region.
 - If the requested region has a manual server pin, Auto Route starts there and uses the pinned server. Pinned regions are scored by the pinned server's latency, not by another sibling server.
-- The periodic server ping test updates the live auto-router candidate snapshot, so relay switches use the same fresh latency data shown in the UI.
-- After Roblox game-server region detection, the auto-router still targets the matching SwiftTunnel region and picks the lowest-latency relay inside that region, honoring any forced server override.
+- The periodic server ping test updates the live auto-router candidate snapshot, so relay switches use the same fresh latency data shown in the UI. Latency probes use the native `IcmpSendEcho` API (locale-independent), never `ping.exe` text parsing, and always run on blocking threads.
+- After Roblox game-server region detection, the auto-router still targets the matching SwiftTunnel region and picks the lowest-latency relay inside that region (cached latency), honoring any forced server override.
+- Every auto-route relay switch authenticates the target relay first: relay ticket fetch + auth hello + ack `Ok` while the candidate game server's packets are still held. Any ticket/auth failure (one bounded retry for transport failures) leaves the session on its current authenticated relay — never an unauthenticated switch.
+- Relay switches only happen at connection boundaries (first join or gone-quiet handoff) while packets are held. Once a game-server connection is flowing through a relay, it is never switched mid-session: the game server would see the client's source IP change, which Roblox's RakNet drops.
+- Gone-quiet handoff: a new game-server IP becomes a routing signal only when all other tracked game-server traffic has been quiet for ≥3s (player left/teleported — Roblox loading screens provide the gap). A new IP observed while another connection is actively sending is recorded but never re-routed for the rest of the session.
+- Auto Route, whitelisted regions, and forced-server changes apply to the live session on settings save; custom-relay sessions never run the auto-routing lookup task.
+- The relay RTT shown in the UI resets on every relay switch and is freshness-gated (~5s): a relay that stops answering pongs reports "no data" (falling back to ICMP) instead of freezing on the previous relay's reading.
 
 ### Roblox Process Identity
 - Win32 Roblox player/studio executables are matched by exact process stem or known Roblox alias only; broad substring matches are not tunnel signals.

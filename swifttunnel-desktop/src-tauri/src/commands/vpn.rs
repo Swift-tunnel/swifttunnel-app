@@ -455,6 +455,9 @@ pub async fn vpn_connect(
     };
 
     let mut vpn = state.vpn_connection.lock().await;
+    // Auto-routing fetches relay tickets for mid-session switches through
+    // the shared auth manager.
+    vpn.set_auth_manager(state.auth_manager.clone());
     let connect_result = tokio::time::timeout(
         VPN_CONNECT_COMMAND_TIMEOUT,
         vpn.connect(
@@ -918,7 +921,13 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
         }
         tasks.spawn(async move {
             let _ = port; // V3 relays don't echo unauthenticated probes — ICMP is the only signal we have.
-            let latency = swifttunnel_core::vpn::servers::measure_latency_icmp(&ip);
+            // measure_latency_icmp blocks for up to 2s — keep it off the
+            // async runtime's worker threads.
+            let latency = tokio::task::spawn_blocking(move || {
+                swifttunnel_core::vpn::servers::measure_latency_icmp(&ip)
+            })
+            .await
+            .unwrap_or(None);
             (server_id, latency)
         });
     }

@@ -516,6 +516,7 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
 
     {
         let mut vpn = state.vpn_connection.lock().await;
+        vpn.set_auth_manager(state.auth_manager.clone());
         vpn.connect(
             &access_token,
             &requested_region,
