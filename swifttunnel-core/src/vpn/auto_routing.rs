@@ -167,6 +167,12 @@ impl AutoRouter {
     /// Enable or disable auto-routing
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
+        // A whitelist bypass is an auto-routing decision; disabling Auto
+        // Route revokes it so game traffic returns to the relay instead of
+        // continuing direct until disconnect.
+        if !enabled && self.auto_routing_bypassed.swap(false, Ordering::AcqRel) {
+            log::info!("Auto-routing: Clearing whitelist bypass (auto-routing disabled)");
+        }
         log::info!(
             "Auto-routing: {}",
             if enabled { "enabled" } else { "disabled" }
@@ -182,6 +188,23 @@ impl AutoRouter {
     pub fn set_whitelisted_regions(&self, regions: Vec<String>) {
         log::info!("Auto-routing: Whitelisted regions updated: {:?}", regions);
         *self.whitelisted_regions.write() = regions.into_iter().collect();
+        // Revoke an active bypass whose region was just un-whitelisted: the
+        // input behind the off-relay decision is gone, so game traffic must
+        // return to the relay. The reverse — newly whitelisting the current
+        // region — engages only at the next lookup boundary; a bypass is
+        // never silently engaged mid-session.
+        if self.is_bypassed() {
+            let still_whitelisted = self
+                .current_game_region
+                .read()
+                .as_ref()
+                .is_some_and(|region| self.is_region_whitelisted(region));
+            if !still_whitelisted && self.auto_routing_bypassed.swap(false, Ordering::AcqRel) {
+                log::info!(
+                    "Auto-routing: Clearing whitelist bypass (current game region no longer whitelisted)"
+                );
+            }
+        }
     }
 
     /// Set forced servers (region_id -> server_id).
@@ -1298,6 +1321,60 @@ mod tests {
         // Then: non-whitelisted region → bypass cleared
         router.get_best_server_for_region(&RobloxRegion::Tokyo);
         assert!(!router.is_bypassed());
+    }
+
+    #[test]
+    fn test_disable_clears_bypass() {
+        // Disabling Auto Route revokes an active whitelist bypass so game
+        // traffic returns to the relay instead of going direct until
+        // disconnect.
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+        router.set_whitelisted_regions(vec!["US East".to_string()]);
+
+        router.get_best_server_for_region(&RobloxRegion::UsEast);
+        assert!(router.is_bypassed());
+
+        router.set_enabled(false);
+        assert!(!router.is_bypassed(), "disable must revoke the bypass");
+
+        // Re-enabling must not resurrect the bypass on its own — only a new
+        // lookup decision may engage it.
+        router.set_enabled(true);
+        assert!(!router.is_bypassed());
+    }
+
+    #[test]
+    fn test_whitelist_update_revokes_stale_bypass_only() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+        router.set_whitelisted_regions(vec!["US East".to_string()]);
+
+        router.get_best_server_for_region(&RobloxRegion::UsEast);
+        assert!(router.is_bypassed());
+
+        // Whitelist update that keeps the current region must NOT revoke.
+        router.set_whitelisted_regions(vec!["US East".to_string(), "Tokyo".to_string()]);
+        assert!(
+            router.is_bypassed(),
+            "bypass stays while the current region remains whitelisted"
+        );
+
+        // Removing the current region revokes the bypass.
+        router.set_whitelisted_regions(vec!["Tokyo".to_string()]);
+        assert!(
+            !router.is_bypassed(),
+            "un-whitelisting must revoke the bypass"
+        );
+
+        // Re-adding it must not silently re-engage mid-session.
+        router.set_whitelisted_regions(vec!["US East".to_string()]);
+        assert!(
+            !router.is_bypassed(),
+            "bypass only engages at a lookup boundary, never on settings save"
+        );
     }
 
     #[test]
