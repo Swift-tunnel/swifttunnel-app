@@ -40,7 +40,7 @@
 Only game traffic is optimized through SwiftTunnel. Discord, Spotify, Chrome — everything else uses your normal internet. No bandwidth wasted.
 
 ### 🧭 Roblox Route Assist
-Optional Roblox login/API HTTP(S) routing helps users bypass network bans and gives Roblox a better chance of placing sessions near the SwiftTunnel region they picked. Browser traffic is still scoped to Roblox destinations only; unrelated websites keep using the normal connection. TCP flows are routed only when SwiftTunnel captures the Roblox/bootstrap HTTPS handshake, so existing browser or Roblox connections are not moved into the relay halfway through.
+Optional Roblox login/API HTTP(S) routing helps users bypass network bans and gives Roblox a better chance of placing sessions near the SwiftTunnel region they picked. Browser traffic is still scoped to Roblox destinations only; unrelated websites keep using the normal connection. TCP flows are routed only when SwiftTunnel captures the Roblox/bootstrap HTTPS handshake, so existing browser or Roblox connections are not moved into the relay halfway through. The launch-critical Roblox settings hosts (`clientsettings*`, `versioncompatibility`) always stay on the direct connection: their addresses are pinned at connect time with a bounded retry, and if a pin is still missing, SwiftTunnel recognizes those hosts from the TLS SNI of a relayed flow and routes subsequent connections to them directly (country-ban bypass mode deliberately relays them instead).
 
 ### ⚡ Low Latency Gaming Servers
 27 gaming-optimized relays across 12 gaming regions. Each relay runs:

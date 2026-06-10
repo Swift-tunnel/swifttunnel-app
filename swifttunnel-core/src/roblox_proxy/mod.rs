@@ -9,3 +9,4 @@
 pub(crate) mod goodbyedpi;
 pub mod hosts;
 pub(crate) mod legacy_goodbyedpi;
+pub mod tls_sni;

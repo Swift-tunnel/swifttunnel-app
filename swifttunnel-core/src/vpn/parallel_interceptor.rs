@@ -6793,6 +6793,62 @@ struct InlineCacheStats {
 /// For cache misses from the snapshot, this does a GetExtendedTcpTable lookup
 /// and caches the result. This way, only the FIRST packet of a new connection
 /// incurs the syscall overhead - subsequent packets use the inline cache.
+/// The launch-critical Roblox settings hosts must never ride the relay, but
+/// that guard is keyed by the IPs pinned at connect time. When the pin for one
+/// of those hosts failed (DoH outage, slow probe) — or system DNS handed the
+/// bootstrapper a shared CDN edge pinned as active for another Roblox host —
+/// its HTTPS flow still ends up relayed. The TLS ClientHello of that relayed
+/// flow names the real destination: record the IP as direct-only so the
+/// bootstrapper's NEXT connection goes direct. The current flow keeps its
+/// relay route; half-moving an established TCP connection would break it.
+fn maybe_learn_direct_only_destination(
+    data: &[u8],
+    ip_start: usize,
+    transport_start: usize,
+    dst_ip: Ipv4Addr,
+) {
+    let Some(payload) = tcp_payload(data, ip_start, transport_start) else {
+        return;
+    };
+    if !crate::roblox_proxy::tls_sni::looks_like_client_hello(payload) {
+        return;
+    }
+    let Some(server_name) = crate::roblox_proxy::tls_sni::parse_client_hello_sni(payload) else {
+        return;
+    };
+    if crate::roblox_proxy::hosts::learn_direct_only_bootstrap_ip(server_name, dst_ip) {
+        log::info!(
+            "Route Assist: learned launch-critical settings host {server_name} at {dst_ip} \
+             from a relayed flow's SNI; new connections to it will go direct"
+        );
+    }
+}
+
+/// TCP payload of `data` (an Ethernet+IPv4+TCP frame), or `None` when the
+/// frame has no data bytes past the TCP header.
+///
+/// Bounded by the IPv4 total length, not the capture buffer, so Ethernet
+/// trailer/padding bytes can never be misread as TLS payload. A frame whose
+/// declared length is truncated or inconsistent yields `None`.
+fn tcp_payload(data: &[u8], ip_start: usize, transport_start: usize) -> Option<&[u8]> {
+    let total_len =
+        u16::from_be_bytes([*data.get(ip_start + 2)?, *data.get(ip_start + 3)?]) as usize;
+    let ip_end = ip_start.checked_add(total_len)?;
+    if ip_end > data.len() {
+        return None;
+    }
+
+    let header_len = ((*data.get(transport_start + 12)? >> 4) as usize) * 4;
+    if header_len < 20 {
+        return None;
+    }
+    let payload_start = transport_start.checked_add(header_len)?;
+    if payload_start >= ip_end {
+        return None;
+    }
+    data.get(payload_start..ip_end)
+}
+
 fn should_route_to_vpn_with_inline_cache(
     data: &[u8],
     snapshot: &ProcessSnapshot,
@@ -7000,6 +7056,9 @@ where
             };
             let result =
                 super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
+            if result && protocol == Protocol::Tcp && api_tunneling && dst_port == 443 {
+                maybe_learn_direct_only_destination(data, ip_start, transport_start, dst_ip);
+            }
             if evict_after_route {
                 inline_cache.remove(&cache_key);
             }
@@ -8122,9 +8181,10 @@ mod tests {
     // Tests use AHashMap/AHashSet to match the production ProcessSnapshot types
     use ahash::AHashMap as HashMap;
     use ahash::AHashSet as HashSet;
-    use std::sync::Mutex;
 
-    static BOOTSTRAP_ROUTE_IP_TEST_LOCK: Mutex<()> = Mutex::new(());
+    // Shared with hosts.rs tests: every test touching the process-global
+    // bootstrap IP sets must serialize on the same lock, across modules.
+    use crate::roblox_proxy::hosts::BOOTSTRAP_IP_TEST_LOCK as BOOTSTRAP_ROUTE_IP_TEST_LOCK;
 
     fn build_ipv4_frame(
         protocol: u8,
@@ -8175,6 +8235,24 @@ mod tests {
         frame[transport_start + 12] = 0x50;
         frame[transport_start + 13] = flags;
 
+        frame
+    }
+
+    fn build_ipv4_tcp_frame_with_payload(
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        // PSH+ACK data segment with a correct IPv4 total length, as NDIS
+        // delivers it. tcp_payload() trusts that length, so frames built
+        // without it carry no readable payload by design.
+        let mut frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x18);
+        let ip_start = 14;
+        let total_len = (20 + 20 + payload.len()) as u16;
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&total_len.to_be_bytes());
+        frame.extend_from_slice(payload);
         frame
     }
 
@@ -11960,6 +12038,356 @@ mod tests {
             )
         );
         assert!(inline_cache.is_empty());
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_learns_direct_only_ip_from_relayed_client_hello_sni() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        // Unpinned settings-CDN edge: connect-time DNS repair missed it, so it
+        // is in no bootstrap IP set and Route Assist relays the flow.
+        let unpinned_settings_ip = Ipv4Addr::new(65, 9, 168, 100);
+        let src_port = 40021;
+        let retry_src_port = 40022;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+        let owner_lookup = |ip: Ipv4Addr, port: u16| {
+            if ip == src_ip && (port == src_port || port == retry_src_port) {
+                Some(tunnel_pid)
+            } else {
+                None
+            }
+        };
+        let process_lookup = |pid: u32| {
+            if pid == tunnel_pid {
+                Some("RobloxPlayerBeta.exe".to_string())
+            } else {
+                None
+            }
+        };
+
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        // SYN from the Roblox-owned bootstrapper flow gets relayed (the gap).
+        let syn_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, unpinned_settings_ip, src_port, dst_port, 0x02);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &syn_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        // The relayed flow's ClientHello names the launch-critical host. The
+        // in-flight flow keeps its relay route (no half-moved connection)...
+        let client_hello = crate::roblox_proxy::tls_sni::build_client_hello_with_sni(
+            "clientsettingscdn.roblox.com",
+        );
+        let hello_frame = build_ipv4_tcp_frame_with_payload(
+            src_ip,
+            unpinned_settings_ip,
+            src_port,
+            dst_port,
+            &client_hello,
+        );
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &hello_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        // ...but the destination IP is now learned as direct-only, so the
+        // bootstrapper's retry connection stays off the relay.
+        assert!(crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(
+            unpinned_settings_ip
+        ));
+        let retry_syn = build_ipv4_tcp_frame_with_flags(
+            src_ip,
+            unpinned_settings_ip,
+            retry_src_port,
+            dst_port,
+            0x02,
+        );
+        assert!(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &retry_syn,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_learn_direct_only_from_non_direct_only_sni() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let api_ip = Ipv4Addr::new(65, 9, 168, 101);
+        let src_port = 40023;
+        let retry_src_port = 40024;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+        let owner_lookup = |ip: Ipv4Addr, port: u16| {
+            if ip == src_ip && (port == src_port || port == retry_src_port) {
+                Some(tunnel_pid)
+            } else {
+                None
+            }
+        };
+        let process_lookup = |pid: u32| {
+            if pid == tunnel_pid {
+                Some("RobloxPlayerBeta.exe".to_string())
+            } else {
+                None
+            }
+        };
+
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, api_ip, src_port, dst_port, 0x02);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &syn_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        // apis.roblox.com is route-assisted on purpose; its SNI must not
+        // poison the destination IP into the direct-only set.
+        let client_hello =
+            crate::roblox_proxy::tls_sni::build_client_hello_with_sni("apis.roblox.com");
+        let hello_frame =
+            build_ipv4_tcp_frame_with_payload(src_ip, api_ip, src_port, dst_port, &client_hello);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &hello_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        assert!(!crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(
+            api_ip
+        ));
+        let next_syn =
+            build_ipv4_tcp_frame_with_flags(src_ip, api_ip, retry_src_port, dst_port, 0x02);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &next_syn,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_learn_direct_only_from_ethernet_trailer_bytes() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(65, 9, 168, 103);
+        let src_port = 40026;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+        let owner_lookup = |ip: Ipv4Addr, port: u16| {
+            if ip == src_ip && port == src_port {
+                Some(tunnel_pid)
+            } else {
+                None
+            }
+        };
+        let process_lookup = |pid: u32| {
+            if pid == tunnel_pid {
+                Some("RobloxPlayerBeta.exe".to_string())
+            } else {
+                None
+            }
+        };
+
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &syn_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        // A ClientHello that sits entirely PAST the declared IPv4 total length
+        // (a zero-payload ACK followed by trailer/padding bytes) must never be
+        // parsed as payload, even though the bytes themselves are well-formed.
+        let client_hello = crate::roblox_proxy::tls_sni::build_client_hello_with_sni(
+            "clientsettingscdn.roblox.com",
+        );
+        let mut trailer_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x10);
+        let ip_start = 14;
+        trailer_frame[ip_start + 2..ip_start + 4].copy_from_slice(&40u16.to_be_bytes());
+        trailer_frame.extend_from_slice(&client_hello);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &trailer_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        assert!(!crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(
+            dst_ip
+        ));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_does_not_learn_direct_only_from_malformed_tls_payload() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let dst_ip = Ipv4Addr::new(65, 9, 168, 102);
+        let src_port = 40025;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+        let owner_lookup = |ip: Ipv4Addr, port: u16| {
+            if ip == src_ip && port == src_port {
+                Some(tunnel_pid)
+            } else {
+                None
+            }
+        };
+        let process_lookup = |pid: u32| {
+            if pid == tunnel_pid {
+                Some("RobloxPlayerBeta.exe".to_string())
+            } else {
+                None
+            }
+        };
+
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &syn_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        // A handshake-looking but truncated/garbled record must teach nothing.
+        let garbage = [0x16, 0x03, 0x01, 0xFF, 0xFF, 0x01, 0xDE, 0xAD];
+        let garbage_frame =
+            build_ipv4_tcp_frame_with_payload(src_ip, dst_ip, src_port, dst_port, &garbage);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &garbage_frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                owner_lookup,
+                process_lookup,
+            )
+        );
+
+        assert!(!crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(
+            dst_ip
+        ));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
