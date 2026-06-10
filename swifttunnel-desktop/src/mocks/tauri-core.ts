@@ -150,6 +150,13 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
 
   vpn_disconnect: async () => {
     mockVpnConnected = false;
+    // Reset throughput state here, not just in vpn_get_throughput: the UI
+    // stops polling while disconnected, so a stale timestamp would otherwise
+    // attribute the whole disconnected interval to the first post-reconnect
+    // poll and spike the counters.
+    mockBytesUp = 0;
+    mockBytesDown = 0;
+    mockThroughputLastAt = 0;
     await new Promise((r) => setTimeout(r, 300));
   },
 
