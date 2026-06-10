@@ -4066,6 +4066,13 @@ impl ParallelInterceptor {
                 VpnError::SplitTunnel("Physical adapter name not set".to_string())
             })?);
 
+        // Written BEFORE the reader thread can enter tunnel mode, deleted in
+        // stop() only after a verified all-adapter mode reset. If the process
+        // dies anywhere in between (force-kill, crash, OS shutdown), the
+        // marker survives and startup recovery resets the stale tunnel mode
+        // that would otherwise blackhole all traffic on the adapter.
+        super::tunnel_mode_recovery::write_tunnel_mode_marker(physical_name.as_ref());
+
         let reader_panic_cause_flag = Arc::clone(&self.workers_panic_cause);
         self.reader_handle = Some(thread::spawn(move || {
             // Wrap in catch_unwind so we can distinguish graceful shutdown
@@ -4253,6 +4260,24 @@ impl ParallelInterceptor {
 
         // Re-enable IPv6 on physical adapter
         self.enable_ipv6();
+
+        // Final tunnel-mode verification for every exit path (clean reader
+        // join where Drop ran, abandoned reader where the early
+        // cleanup_stale_state contingency above ran, and Drop's own
+        // `set_adapter_mode` silently failing). The marker written in
+        // start() is deleted only when every adapter mode reads back as
+        // default; otherwise it persists so startup recovery retries.
+        let report = super::split_tunnel::SplitTunnelDriver::cleanup_stale_state_checked();
+        if report.fully_clean() {
+            super::tunnel_mode_recovery::delete_tunnel_mode_marker();
+        } else {
+            log::error!(
+                "Adapter mode reset could not be verified on stop (open error: {:?}, errors: {:?}); \
+                 keeping tunnel-mode marker for startup recovery",
+                report.driver_open_error,
+                report.errors
+            );
+        }
     }
 
     /// Re-bind the interceptor to the current active interface if needed.

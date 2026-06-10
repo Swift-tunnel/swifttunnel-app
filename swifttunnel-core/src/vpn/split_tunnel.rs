@@ -244,6 +244,36 @@ impl SplitTunnelDriverHealth {
     }
 }
 
+/// Result of a stale tunnel-mode cleanup pass (see
+/// [`SplitTunnelDriver::cleanup_stale_state_checked`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StaleCleanupReport {
+    /// Set when `\\.\NDISRD` could not be opened. Distinct from `errors`
+    /// because "driver not loaded" can be benign (nothing can be stuck in
+    /// tunnel mode without the kernel filter) — the caller disambiguates via
+    /// [`SplitTunnelDriver::driver_install_evidence`].
+    pub driver_open_error: Option<String>,
+    /// TCP/IP-bound adapters enumerated.
+    pub adapters_total: usize,
+    /// Adapters whose mode flags were non-default before the reset (the
+    /// "stuck in tunnel mode" evidence).
+    pub adapters_were_filtering: usize,
+    /// Adapters whose mode was verified back to default by read-back.
+    pub adapters_reset: usize,
+    /// Per-adapter reset/verification failures and enumeration errors.
+    pub errors: Vec<String>,
+}
+
+impl StaleCleanupReport {
+    /// True only when the driver opened and every adapter mode was verified
+    /// back to default. A driver that failed to open is NOT fully clean —
+    /// callers must combine this with install evidence to decide whether
+    /// that's benign.
+    pub fn fully_clean(&self) -> bool {
+        self.driver_open_error.is_none() && self.errors.is_empty()
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  SPLIT TUNNEL DRIVER (ndisapi-based)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -359,7 +389,7 @@ impl SplitTunnelDriver {
         }
     }
 
-    fn driver_install_evidence() -> bool {
+    pub fn driver_install_evidence() -> bool {
         if Self::get_driver_path().is_some() || Self::driver_service_exists() {
             return true;
         }
@@ -1363,18 +1393,39 @@ impl SplitTunnelDriver {
         Self::ensure_driver_service(DRIVER_SERVICE_START_TIMEOUT)
     }
 
-    /// Cleanup stale state from previous sessions
+    /// Cleanup stale state from previous sessions (logging wrapper around
+    /// [`Self::cleanup_stale_state_checked`] for call sites that don't act on
+    /// the result, e.g. uninstall).
     pub fn cleanup_stale_state() {
+        let _ = Self::cleanup_stale_state_checked();
+    }
+
+    /// Reset every TCP/IP-bound adapter's WinpkFilter mode flags to default
+    /// and verify the reset by reading the mode back.
+    ///
+    /// The primary success condition is the verified read-back, not the set
+    /// call returning Ok: a session that died ungracefully leaves adapters in
+    /// `MSTCP_FLAG_SENT_RECEIVE_TUNNEL`, which blackholes all traffic on the
+    /// adapter, so callers (startup recovery, the network repair command, the
+    /// disconnect path) must be able to trust `fully_clean()` before clearing
+    /// the tunnel-mode marker.
+    pub fn cleanup_stale_state_checked() -> StaleCleanupReport {
         log::info!("Cleaning up stale split tunnel state...");
+        let mut report = StaleCleanupReport::default();
 
         let driver = match ndisapi::Ndisapi::new("NDISRD") {
             Ok(driver) => driver,
             Err(e) => {
+                // Not an adapter-level failure: the device didn't open at all.
+                // The caller decides whether this is benign (driver not
+                // installed → nothing can be stuck) or a repair failure
+                // (install evidence present → keep retrying).
                 log::debug!(
                     "Stale split tunnel cleanup skipped; NDISRD is not available: {}",
                     e
                 );
-                return;
+                report.driver_open_error = Some(e.to_string());
+                return report;
             }
         };
 
@@ -1385,27 +1436,71 @@ impl SplitTunnelDriver {
                     "Stale split tunnel cleanup could not enumerate adapters: {}",
                     e
                 );
-                return;
+                report
+                    .errors
+                    .push(format!("adapter enumeration failed: {}", e));
+                return report;
             }
         };
 
-        let mut reset_count = 0usize;
+        report.adapters_total = adapters.len();
         for adapter in adapters {
             let handle = adapter.get_handle();
+            let name = adapter.get_name();
+
+            // Diagnostic pre-read: lets the repair UI say "N adapter(s) were
+            // stuck in tunnel mode". A pre-read failure is not a cleanup
+            // failure — the set+verify below still decides success.
+            let was_filtering = driver
+                .get_adapter_mode(handle)
+                .map(|mode| !mode.is_empty())
+                .unwrap_or(false);
+            if was_filtering {
+                report.adapters_were_filtering += 1;
+                log::warn!(
+                    "Adapter '{}' was left with WinpkFilter mode flags set (stale tunnel mode); resetting",
+                    name
+                );
+            }
+
             match driver.set_adapter_mode(handle, ndisapi::FilterFlags::default()) {
-                Ok(()) => reset_count += 1,
-                Err(e) => log::warn!(
-                    "Stale split tunnel cleanup could not reset adapter '{}': {}",
-                    adapter.get_name(),
-                    e
-                ),
+                Ok(()) => match driver.get_adapter_mode(handle) {
+                    Ok(mode) if mode.is_empty() => report.adapters_reset += 1,
+                    Ok(mode) => report.errors.push(format!(
+                        "adapter '{}' still reports mode flags {:?} after reset",
+                        name, mode
+                    )),
+                    Err(e) => {
+                        // Verification, not the reset, failed. Treated as an
+                        // error so the marker is kept and recovery retries —
+                        // an unverified reset must not count as success.
+                        report.errors.push(format!(
+                            "adapter '{}' mode could not be verified after reset: {}",
+                            name, e
+                        ));
+                    }
+                },
+                Err(e) => report
+                    .errors
+                    .push(format!("adapter '{}' mode reset failed: {}", name, e)),
             }
         }
 
-        log::info!(
-            "Stale split tunnel cleanup complete (reset {} adapter mode(s))",
-            reset_count
-        );
+        if report.errors.is_empty() {
+            log::info!(
+                "Stale split tunnel cleanup complete ({} adapter(s) verified default, {} had stale filter flags)",
+                report.adapters_reset,
+                report.adapters_were_filtering
+            );
+        } else {
+            log::warn!(
+                "Stale split tunnel cleanup incomplete ({}/{} adapter(s) verified default): {}",
+                report.adapters_reset,
+                report.adapters_total,
+                report.errors.join("; ")
+            );
+        }
+        report
     }
 
     /// Stop and delete the NDISRD driver service from SCM for uninstall.

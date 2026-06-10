@@ -7,10 +7,14 @@ import type {
   VpnStateResponse,
   WindowsFirewallRepairResponse,
 } from "./types";
-import type { StartupRegistrationSnapshot } from "./commands";
+import type {
+  NetworkRepairResponse,
+  StartupRegistrationSnapshot,
+} from "./commands";
 import { formatErrorMessage } from "./errors";
 
 export type RepairIssueId =
+  | "no_internet"
   | "driver"
   | "adapter"
   | "tunnel_cleanup"
@@ -93,6 +97,7 @@ export interface RepairCenterDeps {
   systemIsAdmin: () => Promise<{ is_admin: boolean }>;
   systemRepairDriver: () => Promise<DriverCheckResponse>;
   systemRepairWindowsFirewall: () => Promise<WindowsFirewallRepairResponse>;
+  systemRepairNetwork: () => Promise<NetworkRepairResponse>;
   systemRepairStartupRegistration: (
     enabled: boolean,
   ) => Promise<StartupRegistrationSnapshot>;
@@ -107,6 +112,14 @@ export interface RepairCenterDeps {
 }
 
 export const REPAIR_ISSUES: RepairIssueDefinition[] = [
+  {
+    id: "no_internet",
+    label: "Internet recovery",
+    description:
+      "Fixes no-internet-after-SwiftTunnel: resets stuck packet filter state, removes leftover IPv6/offload changes, and flushes DNS. Safe to run any time while disconnected.",
+    actionLabel: "Repair",
+    systemChanging: true,
+  },
   {
     id: "driver",
     label: "Split tunnel driver",
@@ -298,6 +311,8 @@ export async function runRepairIssue(
 ): Promise<RepairReport> {
   try {
     switch (issue) {
+      case "no_internet":
+        return await repairNoInternet(deps);
       case "driver":
         return await repairDriver(deps);
       case "adapter":
@@ -415,6 +430,92 @@ export function formatRepairForSupport(
   }
 
   return lines.join("\n");
+}
+
+// Unlike tunnel cleanup, this never gates on an error state: the stuck
+// tunnel-mode failure leaves the app looking healthy ("disconnected", no
+// error) while the kernel filter blackholes all traffic. The only
+// precondition is that no session is active.
+async function repairNoInternet(deps: RepairCenterDeps): Promise<RepairReport> {
+  const state = await deps.vpnGetState().catch(() => null);
+  if (state !== null && state.state !== "disconnected" && state.state !== "error") {
+    return {
+      status: "partial",
+      summary: "Internet recovery did not run because SwiftTunnel is connected.",
+      nextStep: "Disconnect SwiftTunnel, then run Internet recovery again.",
+      changed: false,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [{ label: "State", value: state.state, tone: "warn" }],
+    };
+  }
+
+  const repair = await deps.systemRepairNetwork();
+
+  if (!repair.supported) {
+    return {
+      status: "unsupported",
+      summary: "Internet recovery is only available on Windows.",
+      nextStep: "No changes were made.",
+      changed: false,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [],
+    };
+  }
+
+  const status: RepairStatus =
+    repair.overall === "fixed"
+      ? "fixed"
+      : repair.overall === "healthy"
+        ? "healthy"
+        : repair.overall === "partial"
+          ? "partial"
+          : "failed";
+  const changed = repair.steps.some((step) => step.status === "fixed");
+  const failedSteps = repair.steps.filter((step) => step.status === "failed");
+
+  return {
+    status,
+    summary:
+      repair.overall === "healthy"
+        ? "No leftover SwiftTunnel network state was found."
+        : repair.overall === "fixed"
+          ? "Leftover SwiftTunnel network state was found and repaired."
+          : repair.overall === "partial"
+            ? "Some leftover network state was repaired, but not all of it."
+            : "Internet recovery could not repair the leftover network state.",
+    nextStep:
+      repair.overall === "healthy"
+        ? "If the internet is still broken, reboot Windows (this always clears driver filter state), then run this again."
+        : repair.overall === "fixed"
+          ? "Check whether the internet works now. If not, reboot Windows and run this again."
+          : !repair.is_admin
+            ? "Relaunch SwiftTunnel as Administrator, then run Internet recovery again."
+            : failedSteps.some((step) => step.id === "adapter_modes")
+              ? "Run the split tunnel driver repair, then run Internet recovery again. A Windows reboot also clears this state."
+              : "Reboot Windows, then run Internet recovery again. Copy this result for support if it still fails.",
+    changed,
+    reversible: false,
+    ranAt: deps.now(),
+    entries: [
+      {
+        label: "Admin",
+        value: repair.is_admin ? "elevated" : "standard user",
+        tone: repair.is_admin ? "default" : "warn",
+      },
+      ...repair.steps.map((step) => ({
+        label: step.label,
+        value: step.detail,
+        tone:
+          step.status === "failed"
+            ? ("bad" as const)
+            : step.status === "fixed"
+              ? ("good" as const)
+              : ("default" as const),
+      })),
+    ],
+  };
 }
 
 async function repairDriver(deps: RepairCenterDeps): Promise<RepairReport> {

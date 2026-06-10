@@ -186,6 +186,30 @@ export const systemCleanup = () =>
 export const systemCleanupTunnelState = () =>
   invoke<void>("system_cleanup_tunnel_state");
 
+export interface NetworkRepairStep {
+  id: string;
+  label: string;
+  status: "fixed" | "healthy" | "failed" | "skipped";
+  detail: string;
+}
+
+export interface NetworkRepairResponse {
+  supported: boolean;
+  is_admin: boolean;
+  overall: "fixed" | "healthy" | "partial" | "failed";
+  steps: NetworkRepairStep[];
+}
+
+/**
+ * "My internet is broken after SwiftTunnel" recovery. Resets stale WinpkFilter
+ * adapter modes (the total-blackout leftover from a crashed session), removes
+ * leftover IPv6 blocks / offload changes / WFP filters / hosts entries, and
+ * flushes DNS. Runs unconditionally — the stuck-tunnel failure is invisible
+ * to VPN state. The backend refuses while a session is active.
+ */
+export const systemRepairNetwork = () =>
+  invoke<NetworkRepairResponse>("system_repair_network");
+
 /**
  * Restart the NDISRD kernel service without reinstalling the driver.
  *

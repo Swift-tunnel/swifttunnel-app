@@ -312,6 +312,7 @@ async fn run_harness(runtime: Arc<tokio::runtime::Runtime>, cli: &HarnessCli) ->
     };
 
     state.network_booster.lock().recover_from_snapshot();
+    swifttunnel_core::vpn::recover_tunnel_mode_on_startup();
     swifttunnel_core::vpn::recover_tso_on_startup();
     swifttunnel_core::vpn::recover_ipv6_on_startup();
 

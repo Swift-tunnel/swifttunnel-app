@@ -192,8 +192,11 @@ fn recover_stale_network_state() {
     swifttunnel_core::roblox_proxy::hosts::recover_stale();
     // Remove old WFP process-block filters from builds before dynamic WFP sessions.
     swifttunnel_core::vpn::wfp_block::cleanup_stale();
-    // Reset any adapter left in WinpkFilter tunnel mode by a prior forced exit.
-    swifttunnel_core::vpn::SplitTunnelDriver::cleanup_stale_state();
+    // Reset any adapter left in WinpkFilter tunnel mode by a prior forced
+    // exit. Marker-aware: escalates to verified resets with bounded retries
+    // when a previous session died mid-tunnel (the "no internet after
+    // SwiftTunnel" incident class).
+    swifttunnel_core::vpn::recover_tunnel_mode_on_startup();
     // Recover adapter settings if the app crashed while connected.
     swifttunnel_core::vpn::recover_tso_on_startup();
     swifttunnel_core::vpn::recover_ipv6_on_startup();
@@ -418,6 +421,7 @@ pub fn run() {
             commands::system::system_launched_from_startup,
             commands::system::system_cleanup,
             commands::system::system_cleanup_tunnel_state,
+            commands::system::system_repair_network,
             commands::system::system_uninstall,
             commands::system::system_copy_log_to_clipboard,
             commands::optimization::optimization_apply,

@@ -419,6 +419,57 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   }),
   system_cleanup: () => {},
   system_cleanup_tunnel_state: () => {},
+  system_repair_network: () => ({
+    supported: true,
+    is_admin: true,
+    overall: "fixed",
+    steps: [
+      {
+        id: "adapter_modes",
+        label: "Adapter packet filter modes",
+        status: "fixed",
+        detail:
+          "1 adapter(s) were stuck with packet filter flags set (this blocks all traffic) — reset and verified on all 2 adapter(s).",
+      },
+      {
+        id: "tunnel_marker",
+        label: "Crash marker",
+        status: "fixed",
+        detail:
+          "A previous session ended without cleaning up (crash or force-close). Marker cleared after verified reset.",
+      },
+      {
+        id: "ipv6",
+        label: "IPv6 connectivity",
+        status: "healthy",
+        detail: "No IPv6 block marker; verified no SwiftTunnel IPv6 filters remain.",
+      },
+      {
+        id: "tso",
+        label: "Adapter offload settings",
+        status: "healthy",
+        detail: "No offload-settings marker present.",
+      },
+      {
+        id: "wfp",
+        label: "Windows Filtering Platform blocks",
+        status: "healthy",
+        detail: "Stale SwiftTunnel WFP filters cleaned (best-effort).",
+      },
+      {
+        id: "hosts",
+        label: "Hosts file overrides",
+        status: "healthy",
+        detail: "Stale SwiftTunnel hosts entries cleaned (best-effort).",
+      },
+      {
+        id: "dns",
+        label: "DNS cache",
+        status: "healthy",
+        detail: "DNS cache flushed.",
+      },
+    ],
+  }),
   system_get_startup_registration: () => ({
     exists: true,
     value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",

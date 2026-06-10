@@ -2313,6 +2313,337 @@ pub async fn system_cleanup_tunnel_state() -> Result<(), String> {
     .map_err(|e| format!("Tunnel-state cleanup task failed: {}", e))?
 }
 
+#[derive(Serialize, Clone)]
+pub struct NetworkRepairStep {
+    pub id: String,
+    pub label: String,
+    /// "fixed" | "healthy" | "failed" | "skipped"
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct NetworkRepairResponse {
+    pub supported: bool,
+    pub is_admin: bool,
+    /// "fixed" | "healthy" | "partial" | "failed"
+    pub overall: String,
+    pub steps: Vec<NetworkRepairStep>,
+}
+
+#[cfg(windows)]
+fn network_repair_step(
+    id: &str,
+    label: &str,
+    status: &str,
+    detail: impl Into<String>,
+) -> NetworkRepairStep {
+    NetworkRepairStep {
+        id: id.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        detail: detail.into(),
+    }
+}
+
+/// "My internet is broken after SwiftTunnel" repair.
+///
+/// Targets every piece of system state a dead session can leave behind, in
+/// blast-radius order. Unlike tunnel cleanup, this runs unconditionally —
+/// the stuck-tunnel-mode failure is invisible to VPN state (the app restarts
+/// into a clean `disconnected` state while the kernel filter still
+/// blackholes traffic), so gating on an error state would skip exactly the
+/// case this exists for.
+///
+/// Every step runs even if earlier steps fail; per-step results are
+/// reported so support can see which leftover was the culprit.
+#[tauri::command]
+pub async fn system_repair_network(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<NetworkRepairResponse, String> {
+    #[cfg(windows)]
+    {
+        // Refuse while a session is active: the repair resets adapter modes
+        // and removes our static filters, which would sever a live tunnel
+        // mid-session and then report success.
+        let _vpn_guard = state.vpn_connection.lock().await;
+        let conn_state = state.vpn_state_handle.borrow().clone();
+        if !matches!(
+            conn_state,
+            swifttunnel_core::vpn::ConnectionState::Disconnected
+                | swifttunnel_core::vpn::ConnectionState::Error(_)
+        ) {
+            return Err("Disconnect SwiftTunnel before running internet recovery.".to_string());
+        }
+
+        tauri::async_runtime::spawn_blocking(run_network_repair_steps)
+            .await
+            .map_err(|e| format!("Network repair task failed: {}", e))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        Ok(NetworkRepairResponse {
+            supported: false,
+            is_admin: false,
+            overall: "failed".to_string(),
+            steps: Vec::new(),
+        })
+    }
+}
+
+#[cfg(windows)]
+fn run_network_repair_steps() -> NetworkRepairResponse {
+    use swifttunnel_core::vpn::tunnel_mode_recovery;
+    use swifttunnel_core::vpn::{SplitTunnelDriver, ipv6_recovery, tso_recovery};
+
+    let _guard = match DRIVER_OPERATION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return NetworkRepairResponse {
+                supported: true,
+                is_admin: swifttunnel_core::is_administrator(),
+                overall: "failed".to_string(),
+                steps: vec![network_repair_step(
+                    "lock",
+                    "Driver operation lock",
+                    "failed",
+                    "Another driver operation crashed while holding the lock. Restart SwiftTunnel and run recovery again.",
+                )],
+            };
+        }
+    };
+
+    let is_admin = swifttunnel_core::is_administrator();
+    log::info!("Running network repair (internet recovery)");
+    let mut steps: Vec<NetworkRepairStep> = Vec::new();
+
+    // Step 1: adapter tunnel modes — the total-blackout leftover.
+    let marker = tunnel_mode_recovery::read_tunnel_mode_marker();
+    let driver_installed = SplitTunnelDriver::driver_install_evidence();
+    let report = SplitTunnelDriver::cleanup_stale_state_checked();
+    let adapter_step = if let Some(open_error) = &report.driver_open_error {
+        if driver_installed {
+            network_repair_step(
+                "adapter_modes",
+                "Adapter packet filter modes",
+                "failed",
+                format!(
+                    "The split tunnel driver is installed but could not be opened ({}). Run the split tunnel driver repair, then run this again.",
+                    open_error
+                ),
+            )
+        } else {
+            network_repair_step(
+                "adapter_modes",
+                "Adapter packet filter modes",
+                "healthy",
+                "Split tunnel driver is not loaded, so no adapter can be stuck in tunnel mode.",
+            )
+        }
+    } else if !report.errors.is_empty() {
+        network_repair_step(
+            "adapter_modes",
+            "Adapter packet filter modes",
+            "failed",
+            format!(
+                "{}/{} adapter(s) verified default; failures: {}",
+                report.adapters_reset,
+                report.adapters_total,
+                report.errors.join("; ")
+            ),
+        )
+    } else if report.adapters_were_filtering > 0 {
+        network_repair_step(
+            "adapter_modes",
+            "Adapter packet filter modes",
+            "fixed",
+            format!(
+                "{} adapter(s) were stuck with packet filter flags set (this blocks all traffic) — reset and verified on all {} adapter(s).",
+                report.adapters_were_filtering, report.adapters_total
+            ),
+        )
+    } else {
+        network_repair_step(
+            "adapter_modes",
+            "Adapter packet filter modes",
+            "healthy",
+            format!(
+                "All {} adapter(s) already had default packet filter modes.",
+                report.adapters_total
+            ),
+        )
+    };
+    let adapter_modes_clean =
+        report.fully_clean() || (report.driver_open_error.is_some() && !driver_installed);
+    steps.push(adapter_step);
+
+    // Step 2: crash marker bookkeeping (must follow the verified reset).
+    steps.push(if marker.is_some() {
+        if adapter_modes_clean {
+            tunnel_mode_recovery::delete_tunnel_mode_marker();
+            network_repair_step(
+                "tunnel_marker",
+                "Crash marker",
+                "fixed",
+                "A previous session ended without cleaning up (crash or force-close). Marker cleared after verified reset.",
+            )
+        } else {
+            network_repair_step(
+                "tunnel_marker",
+                "Crash marker",
+                "failed",
+                "Crash marker kept because the adapter reset could not be verified; recovery will retry on next launch.",
+            )
+        }
+    } else {
+        network_repair_step("tunnel_marker", "Crash marker", "healthy", "No crash marker present.")
+    });
+
+    // Step 3: IPv6 block leftovers (static filters / legacy binding / firewall rule).
+    steps.push(match ipv6_recovery::restore_ipv6_from_marker() {
+        Some(true) => {
+            ipv6_recovery::delete_ipv6_marker();
+            network_repair_step(
+                "ipv6",
+                "IPv6 connectivity",
+                "fixed",
+                "IPv6 was still blocked from a previous session — restored.",
+            )
+        }
+        Some(false) => network_repair_step(
+            "ipv6",
+            "IPv6 connectivity",
+            "failed",
+            "An IPv6 block from a previous session could not be removed; it will be retried on next launch.",
+        ),
+        None => match ipv6_recovery::remove_winpkfilter_ipv6_block_filters() {
+            Ok(()) => network_repair_step(
+                "ipv6",
+                "IPv6 connectivity",
+                "healthy",
+                "No IPv6 block marker; verified no SwiftTunnel IPv6 filters remain.",
+            ),
+            Err(e) => {
+                if driver_installed {
+                    network_repair_step(
+                        "ipv6",
+                        "IPv6 connectivity",
+                        "failed",
+                        format!("Could not verify the driver filter table: {}", e),
+                    )
+                } else {
+                    network_repair_step(
+                        "ipv6",
+                        "IPv6 connectivity",
+                        "healthy",
+                        "Split tunnel driver is not loaded, so no SwiftTunnel IPv6 filters can be active.",
+                    )
+                }
+            }
+        },
+    });
+
+    // Step 4: TSO/LSO offload leftovers from older builds.
+    steps.push(match tso_recovery::restore_tso_from_marker() {
+        Some(true) => {
+            tso_recovery::delete_tso_marker();
+            network_repair_step(
+                "tso",
+                "Adapter offload settings",
+                "fixed",
+                "Adapter offload settings from a previous session were restored.",
+            )
+        }
+        Some(false) => network_repair_step(
+            "tso",
+            "Adapter offload settings",
+            "failed",
+            "Adapter offload settings could not be restored; recovery will retry on next launch.",
+        ),
+        None => network_repair_step(
+            "tso",
+            "Adapter offload settings",
+            "healthy",
+            "No offload-settings marker present.",
+        ),
+    });
+
+    // Step 5: WFP process-block filters (best-effort, no structured result).
+    swifttunnel_core::vpn::wfp_block::cleanup_stale();
+    swifttunnel_core::vpn::wfp_block::cleanup();
+    steps.push(network_repair_step(
+        "wfp",
+        "Windows Filtering Platform blocks",
+        "healthy",
+        "Stale SwiftTunnel WFP filters cleaned (best-effort).",
+    ));
+
+    // Step 6: hosts-file overrides (best-effort, no structured result).
+    swifttunnel_core::roblox_proxy::hosts::recover_stale();
+    steps.push(network_repair_step(
+        "hosts",
+        "Hosts file overrides",
+        "healthy",
+        "Stale SwiftTunnel hosts entries cleaned (best-effort).",
+    ));
+
+    // Step 7: DNS cache, so fixed connectivity takes effect immediately.
+    steps.push(
+        match swifttunnel_core::hidden_command("ipconfig")
+            .arg("/flushdns")
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                // Routine maintenance, not evidence of a found problem — must
+                // not flip the overall result to "fixed" on a healthy system.
+                network_repair_step("dns", "DNS cache", "healthy", "DNS cache flushed.")
+            }
+            Ok(output) => network_repair_step(
+                "dns",
+                "DNS cache",
+                "failed",
+                format!(
+                    "ipconfig /flushdns exited with {}",
+                    output.status.code().unwrap_or(-1)
+                ),
+            ),
+            Err(e) => network_repair_step(
+                "dns",
+                "DNS cache",
+                "failed",
+                format!("Could not run ipconfig /flushdns: {}", e),
+            ),
+        },
+    );
+
+    let any_failed = steps.iter().any(|s| s.status == "failed");
+    let any_fixed = steps.iter().any(|s| s.status == "fixed");
+    let overall = match (any_failed, any_fixed) {
+        (false, false) => "healthy",
+        (false, true) => "fixed",
+        (true, true) => "partial",
+        (true, false) => "failed",
+    };
+    log::info!(
+        "Network repair finished: overall={}, steps=[{}]",
+        overall,
+        steps
+            .iter()
+            .map(|s| format!("{}={}", s.id, s.status))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    NetworkRepairResponse {
+        supported: true,
+        is_admin,
+        overall: overall.to_string(),
+        steps,
+    }
+}
+
 /// Stop + start the NDISRD kernel service without reinstalling the driver.
 ///
 /// Intended for the "wedged NDIS state" case: driver is installed, service

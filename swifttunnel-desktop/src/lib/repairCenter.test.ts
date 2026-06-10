@@ -12,6 +12,7 @@ import type {
   VpnStateResponse,
   WindowsFirewallRepairResponse,
 } from "./types";
+import type { NetworkRepairResponse } from "./commands";
 
 const readyDriver: DriverCheckResponse = {
   installed: true,
@@ -100,6 +101,32 @@ const healthyFirewall: WindowsFirewallRepairResponse = {
   ],
 };
 
+const healthyNetworkRepair: NetworkRepairResponse = {
+  supported: true,
+  is_admin: true,
+  overall: "healthy",
+  steps: [
+    {
+      id: "adapter_modes",
+      label: "Adapter packet filter modes",
+      status: "healthy",
+      detail: "All 2 adapter(s) already had default packet filter modes.",
+    },
+    {
+      id: "tunnel_marker",
+      label: "Crash marker",
+      status: "healthy",
+      detail: "No crash marker present.",
+    },
+    {
+      id: "dns",
+      label: "DNS cache",
+      status: "healthy",
+      detail: "DNS cache flushed.",
+    },
+  ],
+};
+
 function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
   return {
     now: () => 1_800_000_000_000,
@@ -113,6 +140,7 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
     }),
     systemIsAdmin: vi.fn().mockResolvedValue({ is_admin: true }),
     systemRepairDriver: vi.fn().mockResolvedValue(readyDriver),
+    systemRepairNetwork: vi.fn().mockResolvedValue(healthyNetworkRepair),
     systemRepairWindowsFirewall: vi.fn().mockResolvedValue(healthyFirewall),
     systemRepairStartupRegistration: vi.fn().mockResolvedValue({
       exists: true,
@@ -142,6 +170,83 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
 }
 
 describe("repair center logic", () => {
+  it("runs internet recovery while disconnected even when no error state is present", async () => {
+    const deps = makeDeps({
+      systemRepairNetwork: vi.fn().mockResolvedValue({
+        ...healthyNetworkRepair,
+        overall: "fixed",
+        steps: [
+          {
+            id: "adapter_modes",
+            label: "Adapter packet filter modes",
+            status: "fixed",
+            detail: "1 adapter(s) were stuck — reset and verified.",
+          },
+        ],
+      }),
+    });
+
+    const report = await runRepairIssue("no_internet", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("fixed");
+    expect(report.changed).toBe(true);
+    expect(deps.systemRepairNetwork).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports healthy with no system change when internet recovery finds nothing", async () => {
+    const deps = makeDeps();
+
+    const report = await runRepairIssue("no_internet", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("healthy");
+    expect(report.changed).toBe(false);
+  });
+
+  it("does not run internet recovery while a session is active", async () => {
+    const deps = makeDeps({
+      vpnGetState: vi.fn().mockResolvedValue({
+        ...disconnectedState,
+        state: "connected",
+      }),
+    });
+
+    const report = await runRepairIssue("no_internet", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("partial");
+    expect(report.changed).toBe(false);
+    expect(deps.systemRepairNetwork).not.toHaveBeenCalled();
+  });
+
+  it("points failed adapter-mode recovery at driver repair", async () => {
+    const deps = makeDeps({
+      systemRepairNetwork: vi.fn().mockResolvedValue({
+        ...healthyNetworkRepair,
+        overall: "failed",
+        steps: [
+          {
+            id: "adapter_modes",
+            label: "Adapter packet filter modes",
+            status: "failed",
+            detail: "driver installed but could not be opened",
+          },
+        ],
+      }),
+    });
+
+    const report = await runRepairIssue("no_internet", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("failed");
+    expect(report.nextStep).toContain("split tunnel driver repair");
+  });
+
   it("runs driver repair even when global health is ready so adapter bindings can be refreshed", async () => {
     const deps = makeDeps({
       systemRepairDriver: vi.fn().mockResolvedValue(readyDriver),

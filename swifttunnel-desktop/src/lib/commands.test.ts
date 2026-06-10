@@ -19,6 +19,7 @@ import {
   systemRestartAsAdmin,
   systemInstallDriver,
   systemRepairDriver,
+  systemRepairNetwork,
   systemRepairWindowsFirewall,
   systemRepairStartupRegistration,
   systemRestoreStartupRegistration,
@@ -120,6 +121,25 @@ describe("lib/commands", () => {
     invoke.mockResolvedValue(undefined);
     await expect(systemCleanupTunnelState()).resolves.toBeUndefined();
     expect(invoke).toHaveBeenCalledWith("system_cleanup_tunnel_state");
+  });
+
+  it("systemRepairNetwork invokes backend", async () => {
+    const resp = {
+      supported: true,
+      is_admin: true,
+      overall: "fixed",
+      steps: [
+        {
+          id: "adapter_modes",
+          label: "Adapter packet filter modes",
+          status: "fixed",
+          detail: "1 adapter(s) were stuck — reset and verified.",
+        },
+      ],
+    };
+    invoke.mockResolvedValue(resp);
+    await expect(systemRepairNetwork()).resolves.toEqual(resp);
+    expect(invoke).toHaveBeenCalledWith("system_repair_network");
   });
 
   it("startup registration commands invoke backend with expected args", async () => {

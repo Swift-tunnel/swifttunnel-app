@@ -32,6 +32,7 @@ pub mod routes;
 pub mod servers;
 pub mod split_tunnel;
 pub mod tso_recovery;
+pub mod tunnel_mode_recovery;
 pub mod udp_relay;
 pub mod wfp_block;
 pub mod winpkfilter;
@@ -52,10 +53,11 @@ pub use servers::{
 };
 pub use split_tunnel::{
     DriverHealthStatus, DriverRecommendedAction, GamePreset, SplitTunnelConfig, SplitTunnelDriver,
-    SplitTunnelDriverHealth, get_apps_for_preset_set, get_apps_for_presets,
+    SplitTunnelDriverHealth, StaleCleanupReport, get_apps_for_preset_set, get_apps_for_presets,
     get_tunnel_apps_for_presets,
 };
 pub use tso_recovery::{emergency_tso_restore, recover_tso_on_startup};
+pub use tunnel_mode_recovery::recover_tunnel_mode_on_startup;
 pub use udp_relay::{RelayAuthAckStatus, RelayContext, RelayPingSnapshot, UdpRelay};
 
 /// VPN-related errors
