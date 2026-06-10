@@ -171,8 +171,12 @@ impl AutoRouter {
     /// quick off→on toggle cannot resurrect a lookup gated during the
     /// earlier "on" period. The pinned active game server is kept: its
     /// connection is flowing and must never be re-routed mid-session anyway.
+    ///
+    /// Enabling mid-session quarantines game servers with recent traffic as
+    /// non-signals (their connections are already flowing through the
+    /// current relay); only joins observed after the enable re-route.
     pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Release);
+        let was_enabled = self.enabled.swap(enabled, Ordering::AcqRel);
         if !enabled {
             self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
             // A whitelist bypass is an auto-routing decision; disabling Auto
@@ -180,6 +184,37 @@ impl AutoRouter {
             // of continuing direct until disconnect.
             if self.auto_routing_bypassed.swap(false, Ordering::AcqRel) {
                 log::info!("Auto-routing: Clearing whitelist bypass (auto-routing disabled)");
+            }
+        } else if !was_enabled {
+            // Off→on transition: game servers that were already receiving
+            // traffic while auto-routing was off (traffic is tracked even
+            // when disabled) are flowing sessions, not fresh joins. Mark
+            // them seen so their next packet cannot be mistaken for a join
+            // boundary and trigger a mid-session relay switch; only IPs
+            // whose traffic already went quiet — or genuinely new ones —
+            // are routing signals from here on.
+            let now = Instant::now();
+            let active: Vec<Ipv4Addr> = self
+                .game_traffic
+                .read()
+                .iter()
+                .filter(|(_, last_seen)| {
+                    now.duration_since(**last_seen) < GAME_TRAFFIC_QUIET_HANDOFF
+                })
+                .map(|(ip, _)| *ip)
+                .collect();
+            if !active.is_empty() {
+                let mut seen = self.seen_game_servers.write();
+                let quarantined = active
+                    .into_iter()
+                    .filter(|ip| seen.insert(*ip))
+                    .collect::<Vec<_>>();
+                if !quarantined.is_empty() {
+                    log::info!(
+                        "Auto-routing: Enabled mid-session — flowing game-server connection(s) {:?} are not routing signals",
+                        quarantined
+                    );
+                }
             }
         }
         log::info!(
@@ -357,11 +392,14 @@ impl AutoRouter {
     /// Always returns NoAction — the actual relay switch happens asynchronously
     /// in the background lookup task when the resolver response arrives.
     pub fn evaluate_game_server(&self, game_server_ip: Ipv4Addr) -> AutoRoutingAction {
+        // Track traffic even while disabled: if Auto Route is enabled
+        // mid-session, set_enabled(true) uses this history to tell flowing
+        // connections apart from fresh joins.
+        self.note_game_traffic(game_server_ip);
+
         if !self.is_enabled() {
             return AutoRoutingAction::NoAction;
         }
-
-        self.note_game_traffic(game_server_ip);
 
         // Fast path: bail if we've already seen this IP.
         // Use try_read() to avoid blocking the hot path. If contended, retry on a
@@ -1471,6 +1509,82 @@ mod tests {
                 .is_some()
         );
         assert_eq!(router.current_region(), "us-east-nj");
+    }
+
+    #[test]
+    fn test_enable_mid_session_does_not_reroute_flowing_connection() {
+        // Auto Route off at connect (or toggled off), player already in a
+        // game. Enabling from settings must not mistake the flowing
+        // connection's next packet for a fresh join — that would hold its
+        // packets and commit a mid-session relay switch.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(false, "singapore");
+        router.set_lookup_channel(tx);
+
+        let flowing_ip = Ipv4Addr::new(128, 116, 50, 1);
+        // Traffic observed while disabled: tracked, but no evaluation.
+        router.evaluate_game_server(flowing_ip);
+        assert!(rx.try_recv().is_err(), "disabled router must not enqueue");
+        assert!(!router.is_lookup_pending(flowing_ip));
+
+        router.set_enabled(true);
+
+        // The flowing connection keeps sending: still not a routing signal.
+        router.evaluate_game_server(flowing_ip);
+        assert!(
+            rx.try_recv().is_err(),
+            "flowing connection must not become a routing signal on enable"
+        );
+        assert!(!router.is_lookup_pending(flowing_ip));
+
+        // After the flowing connection goes quiet, a new join is a signal.
+        backdate_game_traffic(&router, flowing_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
+        let new_ip = Ipv4Addr::new(128, 116, 55, 1);
+        router.evaluate_game_server(new_ip);
+        let (received_ip, _, _) = rx.try_recv().expect("fresh join after enable is a signal");
+        assert_eq!(received_ip, new_ip);
+    }
+
+    #[test]
+    fn test_enable_after_traffic_went_quiet_treats_next_join_as_fresh() {
+        // Negative control for the quarantine: traffic that already went
+        // quiet while disabled is NOT quarantined — when the player joins
+        // that server again it is a genuine fresh join and must re-route.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(false, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.evaluate_game_server(ip);
+        backdate_game_traffic(&router, ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
+
+        router.set_enabled(true);
+
+        router.evaluate_game_server(ip);
+        let (received_ip, _, _) = rx
+            .try_recv()
+            .expect("quiet IP is a fresh join after enable");
+        assert_eq!(received_ip, ip);
+        assert!(router.is_lookup_pending(ip));
+    }
+
+    #[test]
+    fn test_redundant_enable_does_not_quarantine() {
+        // Settings saves call set_enabled(true) even when Auto Route was
+        // already on; that must not quarantine anything.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.note_game_traffic(ip);
+        router.set_enabled(true);
+
+        router.evaluate_game_server(ip);
+        assert!(
+            rx.try_recv().is_ok(),
+            "already-enabled save must not quarantine pending candidates"
+        );
     }
 
     #[test]
