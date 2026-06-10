@@ -290,11 +290,16 @@ body {
     infinite;
 }
 
-/* swirling energy bands */
+/* swirling energy bands. Each band carries its own clip-path: the conic
+ * gradient paints the element's full square box, and once the band is
+ * promoted to a compositor layer (animated transform + blur) Chromium
+ * stops honoring the parent's clip — clip-path here applies after the
+ * blur, inside the band's own layer, so no square edge can leak. */
 .plasma-orb .band {
   position: absolute;
   inset: -8%;
   border-radius: 50%;
+  clip-path: circle(closest-side at 50% 50%);
   mix-blend-mode: screen;
 }
 .plasma-orb .band-1 {
