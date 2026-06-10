@@ -179,6 +179,24 @@ impl AutoRouter {
         let was_enabled = self.enabled.swap(enabled, Ordering::AcqRel);
         if !enabled {
             self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
+            // Release every held candidate immediately: their lookups are
+            // dead (epoch bumped above), and the user's disable must not
+            // leave packets dropped while a slow resolver call or auth
+            // retry unwinds in the background. Only the disable branch may
+            // do this — releasing a live lookup's held packets would let
+            // its connection establish on the current relay and then be
+            // switched mid-session when the lookup commits.
+            let released: Vec<Ipv4Addr> = {
+                let mut pending = self.pending_lookups.write();
+                pending.drain().collect()
+            };
+            self.pending_any.store(false, Ordering::Release);
+            if !released.is_empty() {
+                log::info!(
+                    "Auto-routing: Disabled — releasing held packets for {:?} on the current relay",
+                    released
+                );
+            }
             // A whitelist bypass is an auto-routing decision; disabling Auto
             // Route revokes it so game traffic returns to the relay instead
             // of continuing direct until disconnect.
@@ -1509,6 +1527,51 @@ mod tests {
                 .is_some()
         );
         assert_eq!(router.current_region(), "us-east-nj");
+    }
+
+    #[test]
+    fn test_disable_releases_held_lookups_immediately() {
+        // Disabling while a lookup is pending must release the held packets
+        // right away, not when the dead lookup eventually unwinds in the
+        // background task.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.evaluate_game_server(ip);
+        let (_, _, epoch) = rx.try_recv().expect("lookup enqueued");
+        assert!(router.is_lookup_pending(ip), "candidate held during lookup");
+
+        router.set_enabled(false);
+        assert!(
+            !router.is_lookup_pending(ip),
+            "disable must release held packets immediately"
+        );
+        // And the in-flight lookup stays dead: it must not pin or commit.
+        assert!(!router.pin_active_game_server_for_session(ip, epoch));
+        assert!(!router.lookup_commit_allowed(ip, epoch));
+    }
+
+    #[test]
+    fn test_redundant_enable_keeps_live_lookup_held() {
+        // A settings save with Auto Route still on must NOT release a live
+        // lookup's held packets: the candidate would establish through the
+        // current relay and then be switched mid-session at commit.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.evaluate_game_server(ip);
+        let (_, _, epoch) = rx.try_recv().expect("lookup enqueued");
+
+        router.set_enabled(true);
+        assert!(
+            router.is_lookup_pending(ip),
+            "redundant enable must not release a live lookup's hold"
+        );
+        assert!(router.is_current_lookup_session(epoch));
     }
 
     #[test]
