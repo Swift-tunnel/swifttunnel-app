@@ -26,7 +26,11 @@ export function AppShell({ children }: AppShellProps) {
           <TopBar />
           <div
             ref={scrollRef}
-            className="app-atmosphere flex-1 overflow-y-auto"
+            // scrollbar-gutter: stable both-edges reserves the scrollbar's
+            // width on BOTH sides so the centered content stays centered on
+            // Windows (classic 8px scrollbar) as well as macOS (overlay/0px).
+            // Without it, the right-only scrollbar shifts mx-auto content left.
+            className="app-atmosphere flex-1 overflow-y-auto [scrollbar-gutter:stable_both-edges]"
           >
             <div className="mx-auto w-full max-w-[840px] px-6 pb-8 pt-5">
               <motion.div
