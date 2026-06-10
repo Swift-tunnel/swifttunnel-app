@@ -1352,8 +1352,7 @@ impl UdpRelay {
 
             // Poll the ack recorded by the inbound receiver thread.
             const POLL_INTERVAL: Duration = Duration::from_millis(25);
-            let attempt_deadline =
-                (Instant::now() + AUTH_HANDSHAKE_RETRY_DELAY).min(deadline);
+            let attempt_deadline = (Instant::now() + AUTH_HANDSHAKE_RETRY_DELAY).min(deadline);
             loop {
                 if let Some((from, status)) = *self.last_auth_ack.lock() {
                     if from == target {

@@ -63,8 +63,7 @@ pub fn measure_latency_icmp(ip: &str) -> Option<u32> {
     let payload = [0u8; PAYLOAD_LEN];
     // Reply buffer must hold ICMP_ECHO_REPLY + payload + 8 bytes for an
     // ICMP error message, per the IcmpSendEcho documentation.
-    let mut reply_buf =
-        vec![0u8; std::mem::size_of::<ICMP_ECHO_REPLY>() + PAYLOAD_LEN + 8];
+    let mut reply_buf = vec![0u8; std::mem::size_of::<ICMP_ECHO_REPLY>() + PAYLOAD_LEN + 8];
 
     let reply_count = unsafe {
         IcmpSendEcho(

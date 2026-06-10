@@ -812,9 +812,7 @@ async fn authenticate_switch_target(
         .await
     {
         Ok(Some(super::udp_relay::RelayAuthAckStatus::Ok)) => SwitchAuthOutcome::Ok,
-        Ok(Some(status)) => {
-            SwitchAuthOutcome::Rejected(format!("auth ack '{}'", status.as_str()))
-        }
+        Ok(Some(status)) => SwitchAuthOutcome::Rejected(format!("auth ack '{}'", status.as_str())),
         Ok(None) => SwitchAuthOutcome::Retryable("auth ack timeout".to_string()),
         Err(e) => SwitchAuthOutcome::Retryable(format!("auth hello send failed: {}", e)),
     }
@@ -1740,6 +1738,18 @@ impl VpnConnection {
                 use crate::geolocation::GameServerRegionLookup;
 
                 while let Some((ip, generation, session_epoch)) = lookup_rx.recv().await {
+                    // Auto Route may have been disabled (settings save) after
+                    // this lookup was queued — release the held packets on the
+                    // current relay instead of resolving.
+                    if !router_for_lookup.is_enabled() {
+                        log::info!(
+                            "Auto-routing: Dropping queued lookup for {} — auto-routing was disabled",
+                            ip
+                        );
+                        router_for_lookup.clear_pending_lookup(ip);
+                        continue;
+                    }
+
                     // Resolve the region, with one bounded retry for
                     // transport-level failures only. A definitive "resolver
                     // answered but no region" is diagnostic, not retryable.
@@ -1771,6 +1781,17 @@ impl VpnConnection {
                         }
                     };
 
+                    // Re-check after the resolver await: a disable mid-lookup
+                    // must not pin the game server or burn a relay ticket on
+                    // the auth handshake below.
+                    if !router_for_lookup.is_enabled() {
+                        log::info!(
+                            "Auto-routing: Dropping resolved lookup for {} — auto-routing was disabled",
+                            ip
+                        );
+                        router_for_lookup.clear_pending_lookup(ip);
+                        continue;
+                    }
                     if !router_for_lookup.is_current_lookup_session(session_epoch) {
                         log::info!(
                             "Auto-routing: Ignoring stale lookup for {} (generation {}, session {}) after router reset",
@@ -1825,8 +1846,7 @@ impl VpnConnection {
                                     current.1,
                                 )
                             });
-                        let current_addr =
-                            router_for_lookup.current_relay().map(|(_, addr)| addr);
+                        let current_addr = router_for_lookup.current_relay().map(|(_, addr)| addr);
                         let needs_switch = current_addr != Some(selected_addr);
 
                         if needs_switch
@@ -1872,10 +1892,10 @@ impl VpnConnection {
                             }
 
                             // The auth handshake awaited — re-verify this lookup
-                            // still owns the route before committing.
-                            let still_current = router_for_lookup
-                                .is_current_lookup_session(session_epoch)
-                                && router_for_lookup.is_active_game_server(ip);
+                            // still owns the route (and Auto Route wasn't
+                            // disabled meanwhile) before committing.
+                            let still_current =
+                                router_for_lookup.lookup_commit_allowed(ip, session_epoch);
 
                             match auth_result {
                                 SwitchAuthOutcome::Ok if still_current => {
@@ -1925,7 +1945,7 @@ impl VpnConnection {
                                 }
                                 SwitchAuthOutcome::Ok => {
                                     log::info!(
-                                        "Auto-routing: Discarding authenticated switch for {} (lookup no longer current)",
+                                        "Auto-routing: Discarding authenticated switch for {} (lookup no longer current or auto-routing disabled)",
                                         ip
                                     );
                                 }

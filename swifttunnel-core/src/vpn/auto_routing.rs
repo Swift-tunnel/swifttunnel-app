@@ -534,6 +534,17 @@ impl AutoRouter {
             .is_some_and(|active_ip| active_ip == ip)
     }
 
+    /// Final gate before an authenticated switch commits, re-checked after
+    /// every await in the lookup task: the router must still be enabled
+    /// (disabling Auto Route mid-lookup cancels in-flight switches, not just
+    /// future evaluations), the lookup must belong to the current session,
+    /// and its IP must still be the active game server.
+    pub fn lookup_commit_allowed(&self, ip: Ipv4Addr, session_epoch: u64) -> bool {
+        self.is_enabled()
+            && self.is_current_lookup_session(session_epoch)
+            && self.is_active_game_server(ip)
+    }
+
     /// Resolve the best relay server for a game region.
     ///
     /// Returns `None` if:
@@ -1056,7 +1067,10 @@ mod tests {
 
         // first_ip traffic is fresh (just noted) — overlap_ip is deferred.
         router.evaluate_game_server(overlap_ip);
-        assert!(rx.try_recv().is_err(), "deferred candidate must not enqueue a lookup");
+        assert!(
+            rx.try_recv().is_err(),
+            "deferred candidate must not enqueue a lookup"
+        );
         assert!(
             !router.is_lookup_pending(overlap_ip),
             "deferred candidate must not hold packets"
@@ -1088,7 +1102,10 @@ mod tests {
         router.evaluate_game_server(teleport_ip);
         let (received_ip, _, epoch2) = rx.try_recv().expect("handoff lookup must be enqueued");
         assert_eq!(received_ip, teleport_ip);
-        assert!(router.is_lookup_pending(teleport_ip), "handoff candidate is held");
+        assert!(
+            router.is_lookup_pending(teleport_ip),
+            "handoff candidate is held"
+        );
 
         assert!(router.should_process_lookup_result(teleport_ip));
         assert!(router.pin_active_game_server_for_session(teleport_ip, epoch2));
@@ -1140,6 +1157,39 @@ mod tests {
             !router
                 .pin_active_game_server_for_session(Ipv4Addr::new(128, 116, 50, 1), session_epoch)
         );
+    }
+
+    #[test]
+    fn test_disable_mid_lookup_blocks_commit() {
+        // Disabling Auto Route while a lookup is in flight (queued, resolving,
+        // or mid-auth-handshake) must cancel the switch at commit time, and
+        // re-enabling must restore the live gate.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.evaluate_game_server(ip);
+        let (_, _, epoch) = rx.try_recv().expect("lookup enqueued");
+        assert!(router.pin_active_game_server_for_session(ip, epoch));
+        assert!(
+            router.lookup_commit_allowed(ip, epoch),
+            "enabled + current session + active ip must commit"
+        );
+
+        router.set_enabled(false);
+        assert!(
+            !router.lookup_commit_allowed(ip, epoch),
+            "disable mid-lookup must block the commit even though the lookup is otherwise current"
+        );
+
+        router.set_enabled(true);
+        assert!(router.lookup_commit_allowed(ip, epoch));
+
+        // The gate still enforces session/active-ip staleness independently
+        // of the enabled flag.
+        assert!(!router.lookup_commit_allowed(Ipv4Addr::new(128, 116, 55, 1), epoch));
+        assert!(!router.lookup_commit_allowed(ip, epoch + 1));
     }
 
     #[test]
