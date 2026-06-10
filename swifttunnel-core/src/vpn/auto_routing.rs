@@ -164,14 +164,23 @@ impl AutoRouter {
         *self.lookup_sender.write() = None;
     }
 
-    /// Enable or disable auto-routing
+    /// Enable or disable auto-routing.
+    ///
+    /// Disabling permanently invalidates every in-flight lookup (queued,
+    /// resolving, or mid-auth-handshake) by bumping the session epoch, so a
+    /// quick off→on toggle cannot resurrect a lookup gated during the
+    /// earlier "on" period. The pinned active game server is kept: its
+    /// connection is flowing and must never be re-routed mid-session anyway.
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
-        // A whitelist bypass is an auto-routing decision; disabling Auto
-        // Route revokes it so game traffic returns to the relay instead of
-        // continuing direct until disconnect.
-        if !enabled && self.auto_routing_bypassed.swap(false, Ordering::AcqRel) {
-            log::info!("Auto-routing: Clearing whitelist bypass (auto-routing disabled)");
+        if !enabled {
+            self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
+            // A whitelist bypass is an auto-routing decision; disabling Auto
+            // Route revokes it so game traffic returns to the relay instead
+            // of continuing direct until disconnect.
+            if self.auto_routing_bypassed.swap(false, Ordering::AcqRel) {
+                log::info!("Auto-routing: Clearing whitelist bypass (auto-routing disabled)");
+            }
         }
         log::info!(
             "Auto-routing: {}",
@@ -653,15 +662,35 @@ impl AutoRouter {
 
     /// Commit a relay switch after the best server has been selected (called from background task).
     ///
-    /// `selected_region` and `selected_addr` are the result of pinging candidates.
-    /// Returns `Some((addr, region))` if the switch was recorded, `None` if rate-limited.
+    /// `ip`/`session_epoch` identify the lookup this commit belongs to. The
+    /// commit re-runs [`Self::lookup_commit_allowed`] immediately before
+    /// mutating relay state so a disable or reset that landed after the
+    /// caller's earlier gate cannot be overwritten by a stale lookup. The
+    /// check cannot stay locked across `record_switch` (`reset()` acquires
+    /// the routing-state locks in the opposite order), but the lookup task
+    /// is the only committer and `set_enabled(false)` bumps the session
+    /// epoch, so the residual window is a benign last-instant authenticated
+    /// switch, never an unauthenticated or mid-session one.
+    ///
+    /// Returns `Some((addr, region))` if the switch was recorded, `None` if
+    /// rate-limited or no longer allowed.
     pub fn commit_switch(
         &self,
+        ip: Ipv4Addr,
+        session_epoch: u64,
         game_region: RobloxRegion,
         selected_region: String,
         selected_addr: SocketAddr,
         latency_improvement_ms: Option<u32>,
     ) -> Option<(SocketAddr, String)> {
+        if !self.lookup_commit_allowed(ip, session_epoch) {
+            log::info!(
+                "Auto-routing: Commit for {} aborted — lookup no longer owns the route",
+                ip
+            );
+            return None;
+        }
+
         let current_st_region = self.current_st_region.read().clone();
 
         if self.record_switch(
@@ -938,7 +967,9 @@ mod tests {
         assert_eq!(addr, "108.61.7.6:51821".parse::<SocketAddr>().unwrap());
 
         // Commit the switch
-        let result = router.commit_switch(RobloxRegion::UsEast, region, addr, None);
+        let game_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let epoch = pin_for_commit(&router, game_ip);
+        let result = router.commit_switch(game_ip, epoch, RobloxRegion::UsEast, region, addr, None);
         assert!(result.is_some());
         let (addr, region) = result.unwrap();
         assert_eq!(region, "us-east-nj");
@@ -1045,6 +1076,14 @@ mod tests {
             .checked_sub(age)
             .expect("test backdate within Instant range");
         router.game_traffic.write().insert(ip, then);
+    }
+
+    /// Pin `ip` as the active game server and return the current session
+    /// epoch (test helper for `commit_switch`'s revalidation gate).
+    fn pin_for_commit(router: &AutoRouter, ip: Ipv4Addr) -> u64 {
+        let epoch = router.lookup_session_epoch.load(Ordering::Acquire);
+        assert!(router.pin_active_game_server_for_session(ip, epoch));
+        epoch
     }
 
     #[test]
@@ -1206,13 +1245,18 @@ mod tests {
             "disable mid-lookup must block the commit even though the lookup is otherwise current"
         );
 
+        // Disable invalidates the lookup permanently: re-enabling must not
+        // let the pre-disable lookup commit (its epoch is stale).
         router.set_enabled(true);
-        assert!(router.lookup_commit_allowed(ip, epoch));
+        assert!(!router.lookup_commit_allowed(ip, epoch));
 
         // The gate still enforces session/active-ip staleness independently
         // of the enabled flag.
-        assert!(!router.lookup_commit_allowed(Ipv4Addr::new(128, 116, 55, 1), epoch));
-        assert!(!router.lookup_commit_allowed(ip, epoch + 1));
+        let fresh_epoch = router.lookup_session_epoch.load(Ordering::Acquire);
+        assert!(router.pin_active_game_server_for_session(ip, fresh_epoch));
+        assert!(router.lookup_commit_allowed(ip, fresh_epoch));
+        assert!(!router.lookup_commit_allowed(Ipv4Addr::new(128, 116, 55, 1), fresh_epoch));
+        assert!(!router.lookup_commit_allowed(ip, fresh_epoch + 1));
     }
 
     #[test]
@@ -1324,6 +1368,112 @@ mod tests {
     }
 
     #[test]
+    fn test_disable_toggle_invalidates_inflight_lookup() {
+        // Toggling Auto Route off then back on while a lookup is in flight
+        // must permanently kill that lookup: the later gates would otherwise
+        // see the re-enabled value and let a stale switch commit.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.evaluate_game_server(ip);
+        let (_, _, epoch) = rx.try_recv().expect("lookup enqueued");
+
+        router.set_enabled(false);
+        router.set_enabled(true);
+
+        assert!(
+            !router.is_current_lookup_session(epoch),
+            "disable must invalidate the in-flight lookup session"
+        );
+        assert!(!router.pin_active_game_server_for_session(ip, epoch));
+        assert!(!router.lookup_commit_allowed(ip, epoch));
+
+        // A fresh evaluation after re-enable works with the new epoch
+        // (old connection has gone quiet, so the new IP is a routing signal).
+        let new_ip = Ipv4Addr::new(128, 116, 55, 1);
+        backdate_game_traffic(&router, ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
+        router.evaluate_game_server(new_ip);
+        let (_, _, new_epoch) = rx.try_recv().expect("post-reenable lookup enqueued");
+        assert!(router.is_current_lookup_session(new_epoch));
+        assert!(router.pin_active_game_server_for_session(new_ip, new_epoch));
+        assert!(router.lookup_commit_allowed(new_ip, new_epoch));
+    }
+
+    #[test]
+    fn test_commit_switch_revalidates_before_mutating() {
+        let router = AutoRouter::new(true, "singapore");
+        router.set_available_servers(make_servers());
+        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
+
+        let game_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let epoch = pin_for_commit(&router, game_ip);
+        let target: SocketAddr = "108.61.7.6:51821".parse().unwrap();
+
+        // Stale epoch (disable happened after the caller's gate): refused.
+        assert!(
+            router
+                .commit_switch(
+                    game_ip,
+                    epoch + 1,
+                    RobloxRegion::UsEast,
+                    "us-east-nj".to_string(),
+                    target,
+                    None,
+                )
+                .is_none(),
+            "stale session epoch must not commit"
+        );
+        // IP that lost the pin: refused.
+        assert!(
+            router
+                .commit_switch(
+                    Ipv4Addr::new(128, 116, 99, 1),
+                    epoch,
+                    RobloxRegion::UsEast,
+                    "us-east-nj".to_string(),
+                    target,
+                    None,
+                )
+                .is_none(),
+            "an IP that does not own the route must not commit"
+        );
+        // Disabled at commit time: refused, and relay state untouched.
+        router.set_enabled(false);
+        assert!(
+            router
+                .commit_switch(
+                    game_ip,
+                    epoch,
+                    RobloxRegion::UsEast,
+                    "us-east-nj".to_string(),
+                    target,
+                    None,
+                )
+                .is_none()
+        );
+        assert_eq!(router.current_region(), "singapore");
+
+        // Positive control: re-pin under the post-disable epoch and commit.
+        router.set_enabled(true);
+        let fresh_epoch = pin_for_commit(&router, game_ip);
+        assert!(
+            router
+                .commit_switch(
+                    game_ip,
+                    fresh_epoch,
+                    RobloxRegion::UsEast,
+                    "us-east-nj".to_string(),
+                    target,
+                    None,
+                )
+                .is_some()
+        );
+        assert_eq!(router.current_region(), "us-east-nj");
+    }
+
+    #[test]
     fn test_disable_clears_bypass() {
         // Disabling Auto Route revokes an active whitelist bypass so game
         // traffic returns to the relay instead of going direct until
@@ -1399,7 +1549,11 @@ mod tests {
         router.set_current_relay("203.0.113.2:51821".parse().unwrap(), "singapore-02");
         *router.last_switch_time.write() = Instant::now();
 
+        let game_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let epoch = pin_for_commit(&router, game_ip);
         let result = router.commit_switch(
+            game_ip,
+            epoch,
             RobloxRegion::Singapore,
             "singapore".to_string(),
             "54.255.205.216:51821".parse().unwrap(),
@@ -1416,7 +1570,11 @@ mod tests {
         router.set_current_relay("203.0.113.2:51821".parse().unwrap(), "singapore-02");
         *router.last_switch_time.write() = Instant::now();
 
+        let game_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let epoch = pin_for_commit(&router, game_ip);
         let result = router.commit_switch(
+            game_ip,
+            epoch,
             RobloxRegion::Singapore,
             "singapore".to_string(),
             "54.255.205.216:51821".parse().unwrap(),
@@ -1474,7 +1632,11 @@ mod tests {
         router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
         *router.last_switch_time.write() = Instant::now();
 
+        let game_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let epoch = pin_for_commit(&router, game_ip);
         let result = router.commit_switch(
+            game_ip,
+            epoch,
             RobloxRegion::Tokyo,
             "tokyo-02".to_string(),
             "45.32.253.124:51821".parse().unwrap(),

@@ -1901,6 +1901,8 @@ impl VpnConnection {
                                 SwitchAuthOutcome::Ok if still_current => {
                                     if let Some((new_addr, new_region)) = router_for_lookup
                                         .commit_switch(
+                                            ip,
+                                            session_epoch,
                                             region.clone(),
                                             selected_region,
                                             selected_addr,
