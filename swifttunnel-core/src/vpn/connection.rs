@@ -84,6 +84,22 @@ static AUTH_REQUIRED_EVENTS: AtomicU64 = AtomicU64::new(0);
 static POLICY_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 static REGION_UNAVAILABLE_EVENTS: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TunnelRoutingFlags {
+    api_tunneling: bool,
+    udp_tunneling: bool,
+}
+
+fn resolve_tunnel_routing_flags(
+    route_assist_requested: bool,
+    country_ban_bypass_requested: bool,
+) -> TunnelRoutingFlags {
+    TunnelRoutingFlags {
+        api_tunneling: route_assist_requested || country_ban_bypass_requested,
+        udp_tunneling: !country_ban_bypass_requested || route_assist_requested,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RelayCandidateAttempt {
     region: String,
@@ -1068,16 +1084,12 @@ impl VpnConnection {
     ) -> VpnResult<()> {
         // Bypassing a country ban needs the relay for Roblox's web/API
         // control-plane traffic, so it implies API tunneling (Route Assist).
-        let enable_api_tunneling = enable_api_tunneling || enable_country_ban;
-
-        // UDP gameplay always rides the relay. Game servers are discovered at
-        // join time and can't be reachability-probed, so routing UDP direct
-        // would break gameplay wherever the servers are IP-blocked (full-ban
-        // countries). Asset/CDN hosts still auto-split in
-        // apply_bootstrap_overrides: ones reachable directly stay direct (lower
-        // ping), blocked ones fall back to the relay. The udp-tunneling knob
-        // stays wired for a future opt-in low-ping mode.
-        let enable_udp_tunneling = true;
+        // Keep the user's explicit Route Assist choice separately: Bypass-only
+        // users should still play over their direct UDP path, while Bypass +
+        // Route Assist is the full relay fallback for stricter network blocks.
+        let routing_flags = resolve_tunnel_routing_flags(enable_api_tunneling, enable_country_ban);
+        let enable_api_tunneling = routing_flags.api_tunneling;
+        let enable_udp_tunneling = routing_flags.udp_tunneling;
 
         // While bypassing a country ban, also tunnel third-party Roblox
         // bootstrappers (Bloxstrap/Froststrap/...). Their launch-time
@@ -2994,6 +3006,30 @@ mod tests {
         let conn = VpnConnection::new();
         let rx = conn.state_handle();
         assert_eq!(*rx.borrow(), ConnectionState::Disconnected);
+    }
+
+    #[test]
+    fn country_ban_bypass_only_keeps_gameplay_udp_direct() {
+        let flags = resolve_tunnel_routing_flags(false, true);
+
+        assert!(flags.api_tunneling);
+        assert!(!flags.udp_tunneling);
+    }
+
+    #[test]
+    fn country_ban_plus_route_assist_relays_gameplay_udp() {
+        let flags = resolve_tunnel_routing_flags(true, true);
+
+        assert!(flags.api_tunneling);
+        assert!(flags.udp_tunneling);
+    }
+
+    #[test]
+    fn route_assist_without_country_ban_keeps_existing_udp_relay_behavior() {
+        let flags = resolve_tunnel_routing_flags(true, false);
+
+        assert!(flags.api_tunneling);
+        assert!(flags.udp_tunneling);
     }
 
     #[test]

@@ -79,6 +79,14 @@ const COUNTRY_BAN_DIRECT_DOMAINS: &[&str] = &[
     "apis.rbxcdn.com",
     "js.rbxcdn.com",
     "static.rbxcdn.com",
+    "c0.rbxcdn.com",
+    "c1.rbxcdn.com",
+    "c2.rbxcdn.com",
+    "c3.rbxcdn.com",
+    "c4.rbxcdn.com",
+    "c5.rbxcdn.com",
+    "c6.rbxcdn.com",
+    "c7.rbxcdn.com",
 ];
 
 /// Exact Roblox hostnames repaired when API tunneling is enabled.
@@ -119,6 +127,14 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     "apis.rbxcdn.com",
     "js.rbxcdn.com",
     "static.rbxcdn.com",
+    "c0.rbxcdn.com",
+    "c1.rbxcdn.com",
+    "c2.rbxcdn.com",
+    "c3.rbxcdn.com",
+    "c4.rbxcdn.com",
+    "c5.rbxcdn.com",
+    "c6.rbxcdn.com",
+    "c7.rbxcdn.com",
     "cdn.arkoselabs.com",
     "roblox-api.arkoselabs.com",
 ];
@@ -887,6 +903,19 @@ mod tests {
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"setup.rbxcdn.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"js.rbxcdn.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"static.rbxcdn.com"));
+        for raw_cdn_domain in [
+            "c0.rbxcdn.com",
+            "c1.rbxcdn.com",
+            "c2.rbxcdn.com",
+            "c3.rbxcdn.com",
+            "c4.rbxcdn.com",
+            "c5.rbxcdn.com",
+            "c6.rbxcdn.com",
+            "c7.rbxcdn.com",
+        ] {
+            assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&raw_cdn_domain));
+            assert!(is_country_ban_direct_domain(raw_cdn_domain));
+        }
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"captcha.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"cdn.arkoselabs.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox-api.arkoselabs.com"));
@@ -894,7 +923,7 @@ mod tests {
 
     #[test]
     fn domain_list_stays_allowlisted_and_exact() {
-        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 34);
+        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 42);
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"arkoselabs.com"));

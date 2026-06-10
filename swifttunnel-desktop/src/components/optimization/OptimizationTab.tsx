@@ -69,6 +69,35 @@ function changesTooltip(def: OptimizationDef): ReactNode {
   );
 }
 
+const CATEGORY_GROUP_ORDER: OptCategory[] = [
+  "Performance",
+  "Input",
+  "System",
+  "Privacy",
+];
+
+const CATEGORY_GROUP_META: Record<
+  OptCategory,
+  { label: string; description: string }
+> = {
+  Performance: {
+    label: "FPS / Latency",
+    description: "Frame pacing, power, GPU, and game-service tweaks.",
+  },
+  Input: {
+    label: "Input",
+    description: "Mouse and control feel tweaks.",
+  },
+  System: {
+    label: "System",
+    description: "Windows behavior and background workload tweaks.",
+  },
+  Privacy: {
+    label: "Privacy",
+    description: "Telemetry and background data collection tweaks.",
+  },
+};
+
 function OptimizationRow({ def }: { def: OptimizationDef }) {
   const status = useOptimizationStore((s) => s.status[def.id] ?? "inactive");
   const activate = useOptimizationStore((s) => s.activate);
@@ -197,12 +226,22 @@ function OptimizationTierGroup({
   defs: OptimizationDef[];
 }) {
   const statuses = useOptimizationStore((s) => s.status);
-  const activeCount = defs.filter((d) => statuses[d.id] === "active").length;
+  const powerPlanEnabled = useSettingsStore(
+    (s) => s.settings.config.system_optimization.power_plan === "SwiftTunnel",
+  );
   // The SwiftTunnel power plan is a power/performance tweak; surface it at the
   // top of the Intermediate tier (it applies via the boost backend, not the
   // optimization apply/revert commands).
   const includesPowerPlan = tier === "Intermediate";
+  const activeCount =
+    defs.filter((d) => statuses[d.id] === "active").length +
+    (includesPowerPlan && powerPlanEnabled ? 1 : 0);
   const total = defs.length + (includesPowerPlan ? 1 : 0);
+  const groups = CATEGORY_GROUP_ORDER.map((category) => ({
+    category,
+    defs: defs.filter((d) => d.category === category),
+    includesPowerPlan: includesPowerPlan && category === "Performance",
+  })).filter((group) => group.defs.length > 0 || group.includesPowerPlan);
 
   return (
     <section>
@@ -211,13 +250,68 @@ function OptimizationTierGroup({
         tag={`${activeCount} / ${total} on`}
         description={TIER_DESCRIPTION[tier]}
       />
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
+      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card">
+        {groups.map((group) => (
+          <OptimizationCategoryGroup
+            key={group.category}
+            category={group.category}
+            defs={group.defs}
+            includesPowerPlan={group.includesPowerPlan}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OptimizationCategoryGroup({
+  category,
+  defs,
+  includesPowerPlan,
+}: {
+  category: OptCategory;
+  defs: OptimizationDef[];
+  includesPowerPlan: boolean;
+}) {
+  const statuses = useOptimizationStore((s) => s.status);
+  const powerPlanEnabled = useSettingsStore(
+    (s) => s.settings.config.system_optimization.power_plan === "SwiftTunnel",
+  );
+  const meta = CATEGORY_GROUP_META[category];
+  const activeCount =
+    defs.filter((d) => statuses[d.id] === "active").length +
+    (includesPowerPlan && powerPlanEnabled ? 1 : 0);
+  const total = defs.length + (includesPowerPlan ? 1 : 0);
+
+  return (
+    <div className="border-b border-[color:var(--color-border-subtle)] last:border-b-0">
+      <div className="flex items-end justify-between gap-3 px-3.5 pb-2 pt-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h4 className="eyebrow text-text-secondary">{meta.label}</h4>
+            <span
+              className="rounded-[4px] px-1.5 py-[2px] font-mono text-[9.5px] font-medium leading-none"
+              style={{
+                backgroundColor: "var(--color-bg-elevated)",
+                color: "var(--color-text-muted)",
+                border: "1px solid var(--color-border-subtle)",
+              }}
+            >
+              {activeCount} / {total}
+            </span>
+          </div>
+          <p className="mt-1 text-[10.5px] leading-snug text-text-muted">
+            {meta.description}
+          </p>
+        </div>
+      </div>
+      <div className="divide-y divide-[color:var(--color-border-subtle)]">
         {includesPowerPlan && <PowerPlanRow />}
         {defs.map((def) => (
           <OptimizationRow key={def.id} def={def} />
         ))}
       </div>
-    </section>
+    </div>
   );
 }
 

@@ -256,11 +256,23 @@ fn find_tweak(id: &str) -> Option<&'static Tweak> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 enum ActionSnapshot {
-    RegDword { value: Option<u32> },
-    RegString { value: Option<String> },
-    Power { value: Option<u32> },
-    Service { start_type: Option<u32> },
-    Task { was_enabled: bool },
+    RegDword {
+        value: Option<u32>,
+    },
+    RegString {
+        value: Option<String>,
+    },
+    Power {
+        value: Option<u32>,
+    },
+    Service {
+        start_type: Option<u32>,
+        #[serde(default)]
+        was_running: Option<bool>,
+    },
+    Task {
+        was_enabled: bool,
+    },
 }
 
 type Snapshots = BTreeMap<String, Vec<ActionSnapshot>>;
@@ -408,6 +420,7 @@ fn capture_action(action: &Action) -> Result<ActionSnapshot, String> {
         },
         Action::ServiceDisable { name } => ActionSnapshot::Service {
             start_type: read_service_start_type(name),
+            was_running: read_service_running(name),
         },
         Action::TaskDisable { path } => ActionSnapshot::Task {
             was_enabled: read_task_enabled(path).unwrap_or(false),
@@ -476,7 +489,13 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
             Some(v) => set_power_ac(subgroup, setting, *v),
             None => Ok(()),
         },
-        (Action::ServiceDisable { name }, ActionSnapshot::Service { start_type }) => {
+        (
+            Action::ServiceDisable { name },
+            ActionSnapshot::Service {
+                start_type,
+                was_running,
+            },
+        ) => {
             let keyword = match start_type {
                 Some(2) => "auto",
                 Some(3) => "demand",
@@ -484,9 +503,19 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
                 _ => "demand",
             };
             run("sc", &["config", name, "start=", keyword])?;
-            // If it was previously enabled, start it again (best-effort).
-            if matches!(start_type, Some(2) | Some(3)) {
-                let _ = run("sc", &["start", name]);
+            match was_running {
+                Some(true) => {
+                    let _ = run("sc", &["start", name]);
+                }
+                Some(false) => {
+                    let _ = run("sc", &["stop", name]);
+                }
+                None if matches!(start_type, Some(2) | Some(3)) => {
+                    // Backward compatibility for snapshots written before
+                    // runtime service state was captured.
+                    let _ = run("sc", &["start", name]);
+                }
+                None => {}
             }
             Ok(())
         }
@@ -564,6 +593,25 @@ fn read_service_start_type(name: &str) -> Option<u32> {
         &format!(r"SYSTEM\CurrentControlSet\Services\{name}"),
         "Start",
     )
+}
+
+#[cfg(windows)]
+fn read_service_running(name: &str) -> Option<bool> {
+    let out = crate::hidden_command("sc")
+        .args(["query", name])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("STATE") {
+            return Some(line.contains("RUNNING"));
+        }
+    }
+    None
 }
 
 // ── powercfg helpers (Windows) ──────────────────────────────────────────────
@@ -702,5 +750,22 @@ mod tests {
     fn unknown_tweak_errors() {
         assert!(apply("does_not_exist").is_err());
         assert!(revert("does_not_exist").is_err());
+    }
+
+    #[test]
+    fn legacy_service_snapshot_deserializes_without_runtime_state() {
+        let snapshot: ActionSnapshot =
+            serde_json::from_str(r#"{"kind":"Service","start_type":3}"#).unwrap();
+
+        match snapshot {
+            ActionSnapshot::Service {
+                start_type,
+                was_running,
+            } => {
+                assert_eq!(start_type, Some(3));
+                assert_eq!(was_running, None);
+            }
+            _ => panic!("expected service snapshot"),
+        }
     }
 }
