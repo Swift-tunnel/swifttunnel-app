@@ -203,6 +203,48 @@ const TWEAKS: &[Tweak] = &[
             value: 0,
         }],
     },
+    Tweak {
+        // Connected User Experiences and Telemetry service. Stopping it cuts
+        // background telemetry CPU/network. Reversible: revert restores the
+        // prior start type.
+        id: "diagtrack_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::ServiceDisable { name: "DiagTrack" }],
+    },
+    Tweak {
+        // Submenu open delay. Default is 400ms; 0 makes menus feel instant.
+        // Per-user, no admin. Reversible: revert restores the prior string.
+        id: "menu_show_delay_fast",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegString {
+            hive: Hive::Hkcu,
+            path: r"Control Panel\Desktop",
+            name: "MenuShowDelay",
+            value: "0",
+        }],
+    },
+    Tweak {
+        // Xbox background services. Frees the four Xbox/Game-Bar services for
+        // users who don't use Game Pass or the Xbox app. Reversible: revert
+        // restores each service's prior start type.
+        id: "xbox_services_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[
+            Action::ServiceDisable {
+                name: "XblAuthManager",
+            },
+            Action::ServiceDisable {
+                name: "XblGameSave",
+            },
+            Action::ServiceDisable { name: "XboxGipSvc" },
+            Action::ServiceDisable {
+                name: "XboxNetApiSvc",
+            },
+        ],
+    },
 ];
 
 fn find_tweak(id: &str) -> Option<&'static Tweak> {
@@ -646,6 +688,9 @@ mod tests {
             "sysmain_pause",
             "hags_enable",
             "telemetry_tasks_disable",
+            "diagtrack_disable",
+            "menu_show_delay_fast",
+            "xbox_services_disable",
         ];
         for id in expected {
             assert!(find_tweak(id).is_some(), "missing tweak: {id}");

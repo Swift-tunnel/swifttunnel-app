@@ -6,6 +6,7 @@ import {
   Tooltip,
   InfoIcon,
   Spinner,
+  Chip,
 } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
 import { useOptimizationStore } from "../../stores/optimizationStore";
@@ -20,10 +21,21 @@ import {
 import type { Config } from "../../lib/types";
 import {
   OPTIMIZATIONS,
-  CATEGORY_ORDER,
+  TIER_ORDER,
+  TIER_DESCRIPTION,
   type OptimizationDef,
   type OptCategory,
+  type OptTier,
 } from "./optimizationCatalog";
+
+/** Small category chip shown next to each optimization name. */
+function CategoryChip({ category }: { category: OptCategory }) {
+  return (
+    <Chip size="xs" tone={category === "Performance" ? "accent" : "neutral"}>
+      {category}
+    </Chip>
+  );
+}
 
 /** The (i) tooltip: exactly what this optimization changes, plus any
  *  admin/restart requirement. Mirrors the boost page's info affordance. */
@@ -70,11 +82,14 @@ function OptimizationRow({ def }: { def: OptimizationDef }) {
       label={def.name}
       desc={def.description}
       tooltip={
-        <Tooltip content={changesTooltip(def)}>
-          <span className="inline-flex">
-            <InfoIcon />
-          </span>
-        </Tooltip>
+        <span className="flex items-center gap-1.5">
+          <CategoryChip category={def.category} />
+          <Tooltip content={changesTooltip(def)}>
+            <span className="inline-flex">
+              <InfoIcon />
+            </span>
+          </Tooltip>
+        </span>
       }
     >
       <div className="flex items-center gap-2">
@@ -151,11 +166,14 @@ function PowerPlanRow() {
       label="SwiftTunnel Power Plan"
       desc="Custom low-latency Windows power profile"
       tooltip={
-        <Tooltip content="Imports and activates SwiftTunnel's optimized power plan. Your previous power plan is remembered and restored when you turn this off.">
-          <span className="inline-flex">
-            <InfoIcon />
-          </span>
-        </Tooltip>
+        <span className="flex items-center gap-1.5">
+          <CategoryChip category="Performance" />
+          <Tooltip content="Imports and activates SwiftTunnel's optimized power plan. Your previous power plan is remembered and restored when you turn this off.">
+            <span className="inline-flex">
+              <InfoIcon />
+            </span>
+          </Tooltip>
+        </span>
       }
     >
       <div className="flex items-center gap-2">
@@ -171,21 +189,30 @@ function PowerPlanRow() {
   );
 }
 
-function OptimizationGroup({
-  category,
+function OptimizationTierGroup({
+  tier,
   defs,
 }: {
-  category: OptCategory;
+  tier: OptTier;
   defs: OptimizationDef[];
 }) {
   const statuses = useOptimizationStore((s) => s.status);
   const activeCount = defs.filter((d) => statuses[d.id] === "active").length;
+  // The SwiftTunnel power plan is a power/performance tweak; surface it at the
+  // top of the Intermediate tier (it applies via the boost backend, not the
+  // optimization apply/revert commands).
+  const includesPowerPlan = tier === "Intermediate";
+  const total = defs.length + (includesPowerPlan ? 1 : 0);
 
   return (
     <section>
-      <SectionHeader label={category} tag={`${activeCount} / ${defs.length} on`} />
+      <SectionHeader
+        label={tier}
+        tag={`${activeCount} / ${total} on`}
+        description={TIER_DESCRIPTION[tier]}
+      />
       <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
-        {category === "System" && <PowerPlanRow />}
+        {includesPowerPlan && <PowerPlanRow />}
         {defs.map((def) => (
           <OptimizationRow key={def.id} def={def} />
         ))}
@@ -202,9 +229,9 @@ export function OptimizationTab() {
     void loadActive();
   }, [loadActive]);
 
-  const grouped = CATEGORY_ORDER.map((category) => ({
-    category,
-    defs: OPTIMIZATIONS.filter((d) => d.category === category),
+  const grouped = TIER_ORDER.map((tier) => ({
+    tier,
+    defs: OPTIMIZATIONS.filter((d) => d.tier === tier),
   })).filter((g) => g.defs.length > 0);
 
   return (
@@ -212,11 +239,7 @@ export function OptimizationTab() {
       <MemoryCleaner />
 
       {grouped.map((g) => (
-        <OptimizationGroup
-          key={g.category}
-          category={g.category}
-          defs={g.defs}
-        />
+        <OptimizationTierGroup key={g.tier} tier={g.tier} defs={g.defs} />
       ))}
     </div>
   );
