@@ -108,7 +108,12 @@ export function LiveGraph({
   const active = samples.length >= 2;
 
   useEffect(() => {
-    if (!active) return;
+    if (!active) {
+      // Fresh session: don't inherit the previous session's scale.
+      animYMaxRef.current = MIN_Y_MAX_BYTES;
+      peakTextRef.current = "";
+      return;
+    }
     let raf = 0;
     let lastFrame = performance.now();
 
