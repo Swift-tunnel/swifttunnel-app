@@ -267,10 +267,11 @@ pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), Strin
         .disconnect()
         .await
         .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
-    // Clear the published handle whether disconnect succeeded or not — on
+    // Clear the published handles whether disconnect succeeded or not — on
     // failure the driver state is undefined and we'd rather report None to
     // the UI than hand it a stale pointer.
     *state.split_tunnel_handle.write() = None;
+    *state.throughput_stats.write() = None;
     drop(vpn);
 
     {
@@ -522,9 +523,21 @@ pub async fn vpn_connect(
         // Publish the inner split-tunnel driver handle so polling commands
         // can read throughput/diagnostics/ping without queuing behind the
         // outer vpn_connection mutex.
-        *state.split_tunnel_handle.write() = vpn.split_tunnel_handle();
+        let driver_handle = vpn.split_tunnel_handle();
+        // Also publish the interceptor's atomic throughput counters. The
+        // driver mutex can be busy for long stretches (process scans,
+        // auto-routing), so the 1Hz+ throughput poll must not depend on
+        // winning a try_lock against it. Locking here once is fine: connect
+        // has just finished, and this is an async command handler.
+        let throughput = match driver_handle.as_ref() {
+            Some(handle) => handle.lock().await.get_throughput_stats(),
+            None => None,
+        };
+        *state.split_tunnel_handle.write() = driver_handle;
+        *state.throughput_stats.write() = throughput;
     } else {
         *state.split_tunnel_handle.write() = None;
+        *state.throughput_stats.write() = None;
     }
     drop(vpn);
 
@@ -626,19 +639,34 @@ pub struct ThroughputResponse {
 pub async fn vpn_get_throughput(
     state: State<'_, AppState>,
 ) -> Result<Option<ThroughputResponse>, String> {
-    // Bypass the outer vpn_connection mutex by hitting the split-tunnel
-    // driver handle directly. Returns None until connect() finishes wiring it.
-    let driver = state.split_tunnel_handle.read().clone();
-    let stats = match driver {
-        Some(handle) => handle
-            .try_lock()
-            .ok()
-            .and_then(|driver| driver.get_throughput_stats()),
-        None => None,
-    };
+    // Read the throughput counters published at connect time. These are
+    // shared atomics, so this never contends on the driver mutex — the old
+    // try_lock path made the graph read zero whenever the driver was busy.
+    let mut stats = state.throughput_stats.read().clone();
+
+    if stats.is_none() {
+        // Fallback for sessions where the counters were not published (e.g.
+        // the interceptor was rebuilt outside vpn_connect). Opportunistic
+        // try_lock: a miss just means we report None this tick.
+        let driver = state.split_tunnel_handle.read().clone();
+        stats = match driver {
+            Some(handle) => handle
+                .try_lock()
+                .ok()
+                .and_then(|driver| driver.get_throughput_stats()),
+            None => None,
+        };
+        if stats.is_some() {
+            *state.throughput_stats.write() = stats.clone();
+        }
+    }
+
+    // bytes_up/bytes_down are what the UI graphs: total game traffic handled
+    // by SwiftTunnel — relayed bytes plus classified direct flows (TCP
+    // without Route Assist, whitelisted-region bypass).
     Ok(stats.map(|stats| ThroughputResponse {
-        bytes_up: stats.get_bytes_tx(),
-        bytes_down: stats.get_bytes_rx(),
+        bytes_up: stats.get_bytes_tx() + stats.get_bytes_direct_tx(),
+        bytes_down: stats.get_bytes_rx() + stats.get_bytes_direct_rx(),
         packets_tunneled: 0,
         packets_bypassed: 0,
     }))

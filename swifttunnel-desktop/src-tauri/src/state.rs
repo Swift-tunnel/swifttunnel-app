@@ -10,6 +10,7 @@ use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
 use swifttunnel_core::settings::AppSettings;
 use swifttunnel_core::system_optimizer::SystemOptimizer;
 use swifttunnel_core::vpn::SplitTunnelDriver;
+use swifttunnel_core::vpn::ThroughputStats;
 use swifttunnel_core::vpn::connection::{ConnectionState, VpnConnection};
 use swifttunnel_core::vpn::servers::DynamicServerList;
 use tokio::sync::watch;
@@ -36,6 +37,11 @@ pub struct AppState {
     pub vpn_connection: Arc<tokio::sync::Mutex<VpnConnection>>,
     pub vpn_state_handle: watch::Receiver<ConnectionState>,
     pub split_tunnel_handle: Arc<RwLock<Option<Arc<tokio::sync::Mutex<SplitTunnelDriver>>>>>,
+    /// Clone of the interceptor's atomic throughput counters, published on
+    /// connect. Reading these never takes the driver mutex, so the UI's
+    /// throughput poll can't be starved by a busy driver (`try_lock` misses
+    /// used to make the graph read zero on some machines).
+    pub throughput_stats: Arc<RwLock<Option<ThroughputStats>>>,
     pub server_list: Arc<Mutex<DynamicServerList>>,
     /// Map of region_id -> (server_name, latency_ms)
     pub region_latencies: Arc<Mutex<HashMap<String, (String, u32)>>>,
@@ -80,6 +86,7 @@ impl AppState {
             vpn_connection: Arc::new(tokio::sync::Mutex::new(vpn_connection)),
             vpn_state_handle,
             split_tunnel_handle: Arc::new(RwLock::new(None)),
+            throughput_stats: Arc::new(RwLock::new(None)),
             server_list: Arc::new(Mutex::new(DynamicServerList::new_empty())),
             region_latencies: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(Mutex::new(settings)),
