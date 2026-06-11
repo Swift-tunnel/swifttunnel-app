@@ -34,11 +34,14 @@ export function OverlayStatsBar() {
     null,
   );
 
-  // Cover the active monitor.
+  // Click-through by default (CRITICAL: a full-screen window that isn't
+  // click-through captures every click and freezes the whole desktop), then
+  // cover the active monitor.
   useEffect(() => {
     const win = getCurrentWindow();
     void (async () => {
       try {
+        await win.setIgnoreCursorEvents(true);
         const monitor = await currentMonitor();
         if (!monitor) return;
         await win.setSize(
@@ -53,29 +56,44 @@ export function OverlayStatsBar() {
     })();
   }, []);
 
+  // Escape always exits reposition mode (a safety hatch while interactive).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") void emitOverlayEditDone();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const shownRef = useRef(false);
-  const editingRef = useRef(false);
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    void listen<OverlayRenderPayload>(OVERLAY_RENDER_EVENT, (event) => {
+    void listen<OverlayRenderPayload>(OVERLAY_RENDER_EVENT, async (event) => {
       if (disposed) return;
       const p = event.payload;
       setPayload(p);
       if (!p.editing) setDragPos(null);
 
-      // Click-through unless repositioning.
-      if (p.editing !== editingRef.current) {
-        editingRef.current = p.editing;
-        void getCurrentWindow().setIgnoreCursorEvents(!p.editing);
+      const win = getCurrentWindow();
+      // ALWAYS keep click-through synced to editing (idempotent). Interactive
+      // only while repositioning; click-through every other time so the overlay
+      // never captures game/desktop clicks. (Set before show.)
+      try {
+        await win.setIgnoreCursorEvents(!p.editing);
+      } catch {
+        /* ignore */
       }
 
       const wantShown = p.enabled && p.metrics.length > 0;
       if (wantShown !== shownRef.current) {
         shownRef.current = wantShown;
-        const win = getCurrentWindow();
-        if (wantShown) void win.show();
-        else void win.hide();
+        try {
+          if (wantShown) await win.show();
+          else await win.hide();
+        } catch {
+          /* ignore */
+        }
       }
     }).then((u) => {
       if (disposed) u();
