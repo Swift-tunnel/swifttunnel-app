@@ -9,45 +9,53 @@ import {
   type OverlayRenderPayload,
 } from "./overlayBus";
 import { boostCursorPos } from "../../lib/commands";
-import type { OverlayPosition } from "../../lib/types";
-
-function anchorStyle(position: OverlayPosition): React.CSSProperties {
-  const parts = position.split("-");
-  const v = parts[0];
-  const h = parts[1] ?? "center";
-  const m = 22;
-  const style: React.CSSProperties = { position: "absolute" };
-  if (v === "top") style.top = m;
-  else if (v === "bottom") style.bottom = m;
-  else style.top = "50%";
-  if (h === "left") style.left = m;
-  else if (h === "right") style.right = m;
-  else style.left = "50%";
-  style.transform = `translate(${h === "center" ? "-50%" : "0"}, ${v === "center" ? "-50%" : "0"})`;
-  return style;
-}
 
 const IDLE_POLL_MS = 110;
-const DRAG_POLL_MS = 24; // smooth while dragging
-// Slack (px) around the bar so it's easy to land the cursor on it to grab.
+const DRAG_POLL_MS = 16; // smooth window-follow while dragging
+// Slack (CSS px) around the bar so it's easy to land the cursor on it to grab.
 const GRAB_PAD = 8;
+/** CSS px from the monitor edge for the 3x3 anchor presets. */
+const ANCHOR_MARGIN = 22;
+/** After a drop, ignore payloads still carrying the pre-save position. */
+const DROP_GRACE_MS = 2500;
 
+interface MonitorInfo {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  scale: number;
+}
+
+/**
+ * The stats-overlay window root. The window is sized to the BAR itself (not
+ * fullscreen) — this is load-bearing: a fullscreen window that ever becomes
+ * interactive captures every click on the desktop, and one stuck flag froze
+ * the user's whole PC. A bar-sized window can't do that by construction.
+ *
+ * Dragging moves the WINDOW, driven entirely by polling the OS cursor +
+ * left-button state (`boost_cursor_pos`) — never webview mouse events, which
+ * are unreliable on a click-through window whose interactivity flips mid-drag.
+ */
 export function OverlayStatsBar() {
   const [payload, setPayload] = useState<OverlayRenderPayload | null>(null);
-  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
-  const [active, setActive] = useState(false); // cursor over bar / dragging
+  const [active, setActive] = useState(false); // hovered or dragging
 
   const payloadRef = useRef<OverlayRenderPayload | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
-  const monitorRef = useRef({ x: 0, y: 0, scale: 1 });
+  const monitorRef = useRef<MonitorInfo | null>(null);
+  // Window geometry in physical px, tracked from our own setPosition/setSize
+  // calls (nothing else moves this window).
+  const winPosRef = useRef({ x: 0, y: 0 });
+  const winSizeRef = useRef({ w: 0, h: 0 });
   const interactiveRef = useRef(false);
-  // True while the user is interacting (hovering or dragging the bar). Read by
-  // the render listener so a foreground blip can't hide the bar mid-interaction.
   const interactingRef = useRef(false);
-  // Offset (CSS px) of the cursor from the bar's top-left while dragging; null
-  // when not dragging.
+  const shownRef = useRef(false);
+  // Cursor offset from the window's top-left (physical px) while dragging.
   const dragRef = useRef<{ offX: number; offY: number } | null>(null);
   const prevDownRef = useRef(true); // start "down" so a held click can't grab
+  const lastDropRef = useRef<{ x: number; y: number; at: number } | null>(null);
 
   // Toggle window click-through (de-duped). interactive === !ignoreCursorEvents.
   const setInteractive = useCallback(async (interactive: boolean) => {
@@ -60,37 +68,110 @@ export function OverlayStatsBar() {
     }
   }, []);
 
-  // Mount: click-through first (a non-click-through full-screen window captures
-  // every click and freezes the desktop), then cover the active monitor and
-  // cache its geometry for the cursor hit-test.
+  const moveWindow = useCallback((x: number, y: number) => {
+    const xi = Math.round(x);
+    const yi = Math.round(y);
+    if (winPosRef.current.x === xi && winPosRef.current.y === yi) return;
+    winPosRef.current = { x: xi, y: yi };
+    void getCurrentWindow()
+      .setPosition(new PhysicalPosition(xi, yi))
+      .catch(() => {});
+  }, []);
+
+  /** Place the window per config (custom spot or anchor preset). No-op while
+   *  dragging, and right after a drop until the saved position round-trips —
+   *  otherwise a stale payload would snap the bar back to the old spot. */
+  const applyConfiguredPosition = useCallback(() => {
+    const p = payloadRef.current;
+    const m = monitorRef.current;
+    if (!p || !m || dragRef.current) return;
+    const { w, h } = winSizeRef.current;
+    if (w <= 0 || h <= 0) return;
+
+    const drop = lastDropRef.current;
+    if (drop) {
+      const saved =
+        p.customX !== null &&
+        p.customY !== null &&
+        Math.abs(m.x + p.customX - drop.x) < 2 &&
+        Math.abs(m.y + p.customY - drop.y) < 2;
+      if (saved) lastDropRef.current = null;
+      else if (Date.now() - drop.at < DROP_GRACE_MS) return;
+    }
+
+    if (p.customX !== null && p.customY !== null) {
+      moveWindow(m.x + p.customX, m.y + p.customY);
+      return;
+    }
+    const margin = Math.round(ANCHOR_MARGIN * m.scale);
+    const parts = p.position.split("-");
+    const v = parts[0];
+    const hz = parts[1] ?? "center";
+    const x =
+      hz === "left"
+        ? m.x + margin
+        : hz === "right"
+          ? m.x + m.w - w - margin
+          : m.x + Math.round((m.w - w) / 2);
+    const y =
+      v === "top"
+        ? m.y + margin
+        : v === "bottom"
+          ? m.y + m.h - h - margin
+          : m.y + Math.round((m.h - h) / 2);
+    moveWindow(x, y);
+  }, [moveWindow]);
+
+  // Mount: click-through immediately, then cache monitor geometry + where the
+  // window currently sits.
   useEffect(() => {
     const win = getCurrentWindow();
     void (async () => {
       try {
         await win.setIgnoreCursorEvents(true);
         const monitor = await currentMonitor();
-        if (!monitor) return;
-        monitorRef.current = {
-          x: monitor.position.x,
-          y: monitor.position.y,
-          scale: monitor.scaleFactor,
-        };
-        await win.setSize(
-          new PhysicalSize(monitor.size.width, monitor.size.height),
-        );
-        await win.setPosition(
-          new PhysicalPosition(monitor.position.x, monitor.position.y),
-        );
+        if (monitor) {
+          monitorRef.current = {
+            x: monitor.position.x,
+            y: monitor.position.y,
+            w: monitor.size.width,
+            h: monitor.size.height,
+            scale: monitor.scaleFactor,
+          };
+        }
+        const pos = await win.outerPosition();
+        winPosRef.current = { x: pos.x, y: pos.y };
       } catch {
         /* best-effort */
       }
     })();
   }, []);
 
-  // The poll drives EVERYTHING: hover detection, click-through toggling, and the
-  // whole drag - from the global cursor + left-button state read off the OS. It
-  // never relies on the webview receiving mouse events (unreliable on a
-  // click-through window whose interactivity flips underneath the drag).
+  // Keep the window exactly the size of its content (the bar + hint).
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const scale = monitorRef.current?.scale ?? window.devicePixelRatio ?? 1;
+      const r = el.getBoundingClientRect();
+      const w = Math.max(1, Math.ceil(r.width * scale));
+      const h = Math.max(1, Math.ceil(r.height * scale));
+      if (w === winSizeRef.current.w && h === winSizeRef.current.h) return;
+      winSizeRef.current = { w, h };
+      void getCurrentWindow()
+        .setSize(new PhysicalSize(w, h))
+        .catch(() => {});
+      // Size feeds the anchor math (e.g. right-anchored bars).
+      applyConfiguredPosition();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [applyConfiguredPosition]);
+
+  // The poll drives everything: hover detection, click-through toggling, and
+  // the whole drag, from the global cursor + button state. Drag-end runs
+  // unconditionally so a hidden bar or disabled payload can never strand the
+  // window in an interactive state.
   useEffect(() => {
     let disposed = false;
     let timer = 0;
@@ -98,45 +179,50 @@ export function OverlayStatsBar() {
     const tick = async () => {
       if (disposed) return;
       try {
-        const bar = barRef.current;
-        const enabled = payloadRef.current?.enabled ?? false;
+        const m = monitorRef.current;
         let over = false;
 
-        // Only probe the cursor when the bar could be interacted with: shown
-        // (Roblox focused) or already being dragged. Otherwise the bar must not
-        // light up just because the cursor passes a hidden corner.
-        if (bar && (enabled || dragRef.current)) {
-          const r = bar.getBoundingClientRect();
-          const m = monitorRef.current;
+        if (m && (shownRef.current || dragRef.current)) {
           const c = await boostCursorPos();
-          const cx = (c.x - m.x) / m.scale;
-          const cy = (c.y - m.y) / m.scale;
-          over =
-            cx >= r.left - GRAB_PAD &&
-            cx <= r.right + GRAB_PAD &&
-            cy >= r.top - GRAB_PAD &&
-            cy <= r.bottom + GRAB_PAD;
-
           if (dragRef.current) {
-            // Follow the cursor; drop (and save) when the button releases.
             const next = {
-              x: cx - dragRef.current.offX,
-              y: cy - dragRef.current.offY,
+              x: c.x - dragRef.current.offX,
+              y: c.y - dragRef.current.offY,
             };
-            setDragPos(next);
+            moveWindow(next.x, next.y);
+            over = true;
             if (!c.left_down) {
               dragRef.current = null;
-              void emitOverlayPosition(Math.round(next.x), Math.round(next.y));
+              lastDropRef.current = { x: next.x, y: next.y, at: Date.now() };
+              void emitOverlayPosition(
+                Math.round(next.x - m.x),
+                Math.round(next.y - m.y),
+              );
             }
-          } else if (over && c.left_down && !prevDownRef.current) {
-            // Grab: button pressed (rising edge) while over the bar.
-            dragRef.current = { offX: cx - r.left, offY: cy - r.top };
+          } else {
+            const bar = barRef.current;
+            if (bar && shownRef.current) {
+              const cx = (c.x - winPosRef.current.x) / m.scale;
+              const cy = (c.y - winPosRef.current.y) / m.scale;
+              const r = bar.getBoundingClientRect();
+              over =
+                cx >= r.left - GRAB_PAD &&
+                cx <= r.right + GRAB_PAD &&
+                cy >= r.top - GRAB_PAD &&
+                cy <= r.bottom + GRAB_PAD;
+              if (over && c.left_down && !prevDownRef.current) {
+                // Grab on a fresh press while over the bar.
+                dragRef.current = {
+                  offX: c.x - winPosRef.current.x,
+                  offY: c.y - winPosRef.current.y,
+                };
+              }
+            }
+            prevDownRef.current = c.left_down;
           }
-
-          prevDownRef.current = c.left_down;
         } else {
-          // Not probing — assume the button may be down so re-entry needs a
-          // fresh press to grab (no accidental grab from a held game click).
+          // Not probing — require a fresh press after re-entry so a held game
+          // click can't accidentally grab the bar.
           prevDownRef.current = true;
         }
 
@@ -162,10 +248,11 @@ export function OverlayStatsBar() {
       dragRef.current = null;
       void setInteractive(false);
     };
-  }, [setInteractive]);
+  }, [setInteractive, moveWindow]);
 
-  // Render snapshots from the main window.
-  const shownRef = useRef(false);
+  // Render snapshots from the main window. The bar stays MOUNTED regardless of
+  // payload.enabled (visibility is window show/hide only) — unmounting it
+  // mid-interaction is what used to kill drags and strand the window.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
@@ -174,18 +261,17 @@ export function OverlayStatsBar() {
       const p = event.payload;
       payloadRef.current = p;
       setPayload(p);
+      applyConfiguredPosition();
 
       const win = getCurrentWindow();
-      // Never hide while the user is hovering or dragging the bar: a momentary
-      // loss of Roblox foreground (the overlay can't avoid being clicked) must
-      // not yank the bar out from under the cursor and abort the reposition.
+      // Never hide while the user is hovering or dragging the bar.
       const wantShown =
         (p.enabled && p.metrics.length > 0) || interactingRef.current;
       if (wantShown !== shownRef.current) {
         shownRef.current = wantShown;
         if (!wantShown) {
           dragRef.current = null;
-          setDragPos(null);
+          interactingRef.current = false;
           setActive(false);
           await setInteractive(false);
         }
@@ -204,14 +290,14 @@ export function OverlayStatsBar() {
       disposed = true;
       unlisten?.();
     };
-  }, [setInteractive]);
+  }, [setInteractive, applyConfiguredPosition]);
 
-  // Escape: safety hatch - cancel a drag and force click-through.
+  // Escape: best-effort safety hatch — cancel a drag and force click-through.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       dragRef.current = null;
-      setDragPos(null);
+      interactingRef.current = false;
       setActive(false);
       void setInteractive(false);
     };
@@ -219,58 +305,47 @@ export function OverlayStatsBar() {
     return () => window.removeEventListener("keydown", onKey);
   }, [setInteractive]);
 
-  if (!payload || !payload.enabled) {
-    return <div className="h-screen w-screen bg-transparent" />;
-  }
-
-  const posStyle: React.CSSProperties =
-    dragPos !== null
-      ? { position: "absolute", left: dragPos.x, top: dragPos.y }
-      : payload.customX !== null && payload.customY !== null
-        ? { position: "absolute", left: payload.customX, top: payload.customY }
-        : anchorStyle(payload.position);
-
-  const dragging = dragRef.current !== null;
-
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-transparent">
-      <div style={posStyle}>
-        <div
-          ref={barRef}
-          style={{
-            cursor: dragging ? "grabbing" : active ? "grab" : "default",
-            padding: active ? 6 : 0,
-            borderRadius: 10,
-            border: active
-              ? "1px dashed rgba(255,255,255,0.55)"
-              : "1px dashed transparent",
-            background: active ? "rgba(255,255,255,0.06)" : "transparent",
-            transition: "background 120ms, padding 120ms",
-          }}
-        >
-          <OverlayBar
-            metrics={payload.metrics}
-            values={payload.values}
-            size={payload.size}
-            color={payload.color}
-            style={payload.style}
-          />
-        </div>
-
-        {active && (
-          <div className="mt-2 flex justify-center">
-            <span
-              className="rounded px-2 py-1 text-[10px]"
-              style={{
-                background: "rgba(0,0,0,0.72)",
-                color: "rgba(255,255,255,0.85)",
-              }}
-            >
-              Hold &amp; drag to move · Esc to lock
-            </span>
+    <div ref={wrapRef} style={{ display: "inline-block", padding: 8 }}>
+      {payload && (
+        <>
+          <div
+            ref={barRef}
+            style={{
+              cursor: dragRef.current ? "grabbing" : active ? "grab" : "default",
+              borderRadius: 10,
+              padding: 5,
+              border: active
+                ? "1px dashed rgba(255,255,255,0.55)"
+                : "1px dashed transparent",
+              background: active ? "rgba(255,255,255,0.06)" : "transparent",
+              transition: "background 120ms",
+            }}
+          >
+            <OverlayBar
+              metrics={payload.metrics}
+              values={payload.values}
+              size={payload.size}
+              color={payload.color}
+              style={payload.style}
+            />
           </div>
-        )}
-      </div>
+
+          {active && (
+            <div className="mt-2 flex justify-center">
+              <span
+                className="rounded px-2 py-1 text-[10px]"
+                style={{
+                  background: "rgba(0,0,0,0.72)",
+                  color: "rgba(255,255,255,0.85)",
+                }}
+              >
+                Hold &amp; drag to move
+              </span>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

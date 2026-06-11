@@ -104,9 +104,13 @@ export function useOverlayDriver() {
         position: cfg.position,
         customX: cfg.custom_x,
         customY: cfg.custom_y,
-        values: gate
-          ? computeValues(b, sessionStart ? Date.now() - sessionStart : 0)
-          : {},
+        // Compute values whenever the game is running (not just foreground) so
+        // the bar isn't blanked to "--" if it's held visible mid-interaction
+        // across a foreground blip.
+        values:
+          gate || b.robloxRunning
+            ? computeValues(b, sessionStart ? Date.now() - sessionStart : 0)
+            : {},
       }).catch(() => {});
     };
 
