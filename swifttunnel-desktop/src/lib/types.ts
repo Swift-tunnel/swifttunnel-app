@@ -151,6 +151,7 @@ export interface PerformanceMetricsResponse {
   ram_total: number;
   ping: number;
   roblox_running: boolean;
+  roblox_foreground: boolean;
   process_id: number | null;
 }
 

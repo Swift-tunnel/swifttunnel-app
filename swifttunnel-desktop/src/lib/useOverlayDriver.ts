@@ -95,7 +95,10 @@ export function useOverlayDriver() {
       const b = useBoostStore.getState();
       if (b.robloxRunning && !wasRunning) sessionStart = Date.now();
       wasRunning = b.robloxRunning;
-      const gate = b.robloxRunning || editing;
+      // Show only while Roblox is the FOREGROUND window (not just running) so
+      // it never covers the desktop or apps you've alt-tabbed to. Reposition
+      // mode overrides so you can place it without Roblox focused.
+      const gate = b.robloxForeground || editing;
       const cfg = ovRef.current;
       await pushOverlayRender({
         enabled: gate,

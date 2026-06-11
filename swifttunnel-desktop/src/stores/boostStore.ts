@@ -26,6 +26,7 @@ interface BoostStore {
   ramTotal: number;
   ping: number;
   robloxRunning: boolean;
+  robloxForeground: boolean;
   processId: number | null;
 
   // System memory (RAM cleaner)
@@ -66,6 +67,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
   ramTotal: 0,
   ping: 0,
   robloxRunning: false,
+  robloxForeground: false,
   processId: null,
   systemMem: null,
   isCleaningRam: false,
@@ -91,6 +93,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
         ramTotal: m.ram_total,
         ping: m.ping,
         robloxRunning: m.roblox_running,
+        robloxForeground: m.roblox_foreground,
         processId: m.process_id,
       });
     } catch (error) {

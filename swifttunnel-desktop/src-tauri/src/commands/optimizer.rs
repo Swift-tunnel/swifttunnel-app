@@ -12,6 +12,9 @@ pub struct PerformanceMetricsResponse {
     pub ram_total: f64,
     pub ping: u32,
     pub roblox_running: bool,
+    /// True when Roblox is the foreground (active) window. The in-game overlay
+    /// keys off this so it only draws over Roblox, not the desktop/other apps.
+    pub roblox_foreground: bool,
     pub process_id: Option<u32>,
 }
 
@@ -32,6 +35,7 @@ pub async fn boost_get_metrics(
             ram_total: metrics.ram_total,
             ping: metrics.ping,
             roblox_running: metrics.roblox_running,
+            roblox_foreground: swifttunnel_core::performance_monitor::foreground_window_is_roblox(),
             process_id: metrics.process_id,
         }
     })

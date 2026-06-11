@@ -3,6 +3,45 @@ use crate::structs::*;
 use std::time::Duration;
 use sysinfo::{Process, ProcessesToUpdate, System};
 
+/// True when the foreground (focused) window belongs to a Roblox process. Used
+/// to show the in-game overlay only while Roblox is the active window, so it
+/// never draws over the desktop or other apps the user has alt-tabbed to.
+#[cfg(windows)]
+pub fn foreground_window_is_roblox() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return false;
+        }
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        if handle.is_invalid() {
+            return false;
+        }
+        let mut buffer = [0u16; 512];
+        let len = K32GetProcessImageFileNameW(handle, &mut buffer);
+        let _ = CloseHandle(handle);
+        if len == 0 {
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buffer[..len as usize]);
+        is_roblox_process_name(&path)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn foreground_window_is_roblox() -> bool {
+    false
+}
+
 pub struct PerformanceMonitor {
     system: System,
 }
