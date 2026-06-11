@@ -14,8 +14,9 @@ const DEBOUNCE_MS = 20000;
  * and show the in-game overlay.
  *
  * Guards against false fires: the log watcher re-reads the recent join line when
- * Roblox's log rotates on exit, so before cleaning we confirm Roblox is actually
- * running - otherwise closing Roblox would pop the "RAM freed" toast.
+ * Roblox's log rotates on exit, so before cleaning we confirm Roblox is the
+ * FOREGROUND window. (Its process can linger a second or two while closing, so
+ * "running" isn't enough - but the window is gone the instant you close it.)
  */
 export function useAutoRamClean() {
   const autoClean = useSettingsStore(
@@ -40,9 +41,10 @@ export function useAutoRamClean() {
 
       busy = true;
       try {
-        // Confirm Roblox is genuinely running (not a rotate-on-exit re-read).
+        // Confirm Roblox is actually in front (not a rotate-on-exit re-read,
+        // which fires when its window has already closed).
         await fetchMetrics();
-        if (disposed || !useBoostStore.getState().robloxRunning) return;
+        if (disposed || !useBoostStore.getState().robloxForeground) return;
         lastClean = now;
         const result = await boostCleanRam();
         if (!disposed) await showRamOverlay(result.freed_mb);

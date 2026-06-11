@@ -138,7 +138,11 @@ export function OverlayStatsBar() {
       setPayload(p);
 
       const win = getCurrentWindow();
-      const wantShown = p.enabled && p.metrics.length > 0;
+      // Never hide mid-drag: a momentary loss of Roblox foreground (or any
+      // gate blip) must not yank the bar out from under the cursor and abort
+      // the reposition before it saves.
+      const wantShown =
+        (p.enabled && p.metrics.length > 0) || drag.current !== null;
       if (wantShown !== shownRef.current) {
         shownRef.current = wantShown;
         if (!wantShown) {

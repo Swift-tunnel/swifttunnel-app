@@ -65,6 +65,32 @@ pub fn cursor_position() -> (i32, i32) {
     (0, 0)
 }
 
+/// Add `WS_EX_NOACTIVATE` to a window so clicking it never pulls foreground
+/// focus from the app underneath. The in-game overlay needs this: a normal
+/// topmost window activates when clicked (to grab/drag the bar), which knocks
+/// Roblox out of the foreground — and since the overlay only shows while Roblox
+/// IS the foreground window, it would hide itself mid-drag. With NOACTIVATE the
+/// overlay still receives the drag clicks while the game stays focused.
+#[cfg(windows)]
+pub fn set_window_no_activate(hwnd_raw: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
+    };
+
+    if hwnd_raw == 0 {
+        return;
+    }
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, current | (WS_EX_NOACTIVATE.0 as isize));
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_window_no_activate(_hwnd_raw: isize) {}
+
 pub struct PerformanceMonitor {
     system: System,
 }

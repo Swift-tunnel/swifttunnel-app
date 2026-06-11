@@ -469,6 +469,23 @@ pub fn run() {
                 let _ = window.set_icon(APP_ICON.clone());
             }
 
+            // Keep the in-game overlay windows from ever stealing foreground
+            // focus from the game. A normal topmost window activates when
+            // clicked (e.g. to grab/drag the overlay), which knocks Roblox out
+            // of the foreground and makes the overlay's foreground-gated
+            // visibility flicker off mid-drag. WS_EX_NOACTIVATE lets them
+            // receive clicks while the game stays focused.
+            #[cfg(windows)]
+            for label in ["overlay", "overlay-stats"] {
+                if let Some(win) = app.get_webview_window(label) {
+                    if let Ok(hwnd) = win.hwnd() {
+                        swifttunnel_core::performance_monitor::set_window_no_activate(
+                            hwnd.0 as isize,
+                        );
+                    }
+                }
+            }
+
             let runtime =
                 Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
 
