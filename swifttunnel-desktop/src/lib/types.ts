@@ -284,6 +284,8 @@ export interface OverlayConfig {
   style: OverlayStyle;
   color: string;
   position: OverlayPosition;
+  custom_x: number | null;
+  custom_y: number | null;
   hotkey: string;
   monitor_fps_chart: boolean;
   show_max_fps_message: boolean;

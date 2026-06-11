@@ -1,5 +1,6 @@
 import { SectionHeader, Toggle, Chip } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useOverlayEditStore } from "../../stores/overlayEditStore";
 import type {
   Config,
   OverlayConfig,
@@ -33,7 +34,9 @@ export function InGameTab() {
   const config = useSettingsStore((s) => s.settings.config);
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
+  const setEditing = useOverlayEditStore((s) => s.setEditing);
   const ov = config.overlay;
+  const hasCustomPos = ov.custom_x !== null && ov.custom_y !== null;
 
   function patch(p: Partial<OverlayConfig>) {
     const next: Config = { ...config, overlay: { ...ov, ...p } };
@@ -236,7 +239,38 @@ export function InGameTab() {
 
         {/* Position */}
         <section className="surface-card mb-4 rounded-[var(--radius-card)] px-4 py-4">
-          <SectionHeader label="Position" size="sm" />
+          <SectionHeader
+            label="Position"
+            size="sm"
+            description={
+              hasCustomPos
+                ? "Custom position set by dragging. Pick a corner to snap back."
+                : "Pick a corner, or drag it anywhere on screen."
+            }
+            action={
+              <div className="flex items-center gap-1.5">
+                {hasCustomPos && (
+                  <SegBtn
+                    active={false}
+                    onClick={() => patch({ custom_x: null, custom_y: null })}
+                  >
+                    Reset
+                  </SegBtn>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setEditing(true)}
+                  className="rounded-[7px] px-2.5 py-1.5 text-[11px] font-semibold"
+                  style={{
+                    backgroundColor: "var(--color-text-primary)",
+                    color: "var(--color-bg-base)",
+                  }}
+                >
+                  Drag on screen
+                </button>
+              </div>
+            }
+          />
           <div className="flex justify-center">
             <div
               className="rounded-xl p-3"
@@ -248,13 +282,15 @@ export function InGameTab() {
             >
               <div className="grid grid-cols-3 grid-rows-3 gap-1.5" style={{ height: 150 }}>
                 {POSITIONS.flat().map((pos) => {
-                  const active = ov.position === pos;
+                  const active = !hasCustomPos && ov.position === pos;
                   return (
                     <button
                       key={pos}
                       type="button"
                       aria-label={pos}
-                      onClick={() => patch({ position: pos })}
+                      onClick={() =>
+                        patch({ position: pos, custom_x: null, custom_y: null })
+                      }
                       className="flex items-center justify-center rounded-md text-[8px] font-semibold uppercase tracking-wide transition-colors"
                       style={{
                         border: `1px dashed ${active ? "transparent" : "var(--color-border-default)"}`,

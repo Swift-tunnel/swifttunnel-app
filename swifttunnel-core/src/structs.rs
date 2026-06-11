@@ -61,6 +61,12 @@ pub struct OverlayConfig {
     /// One of nine anchors: top-left/top-center/top-right/center-left/center/
     /// center-right/bottom-left/bottom-center/bottom-right.
     pub position: String,
+    /// Free-drag override (CSS px from the monitor's top-left). When set, takes
+    /// precedence over `position` so users can align the bar anywhere.
+    #[serde(default)]
+    pub custom_x: Option<f64>,
+    #[serde(default)]
+    pub custom_y: Option<f64>,
     /// Global toggle hotkey, e.g. "Ctrl+Shift+O".
     pub hotkey: String,
     /// When a game starts: keep an FPS chart for the session.
@@ -85,6 +91,8 @@ impl Default for OverlayConfig {
             style: "straight".into(),
             color: "#fafafa".into(),
             position: "top-left".into(),
+            custom_x: None,
+            custom_y: None,
             hotkey: "Ctrl+Shift+O".into(),
             monitor_fps_chart: false,
             show_max_fps_message: false,

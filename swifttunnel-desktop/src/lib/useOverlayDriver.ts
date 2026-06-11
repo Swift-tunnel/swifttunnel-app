@@ -1,8 +1,15 @@
 import { useEffect, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useBoostStore } from "../stores/boostStore";
 import { useSettingsStore } from "../stores/settingsStore";
-import { pushOverlayRender } from "../components/ingame/overlayBus";
-import type { OverlayConfig, OverlayMetric } from "../lib/types";
+import { useOverlayEditStore } from "../stores/overlayEditStore";
+import {
+  OVERLAY_EDIT_DONE_EVENT,
+  OVERLAY_POSITION_EVENT,
+  pushOverlayRender,
+  type OverlayPositionPayload,
+} from "../components/ingame/overlayBus";
+import type { Config, OverlayConfig, OverlayMetric } from "../lib/types";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -32,7 +39,6 @@ function computeValues(
     playtime: b.robloxRunning ? formatClock(sessionMs) : "00:00:00",
     cpu: `${Math.round(b.cpuUsage)}%`,
     ram: ramPct === null ? "--" : `${ramPct}%`,
-    // Not wired yet (need throughput / sensors / ETW).
     download: "--",
     upload: "--",
     battery: "--",
@@ -45,24 +51,31 @@ function computeValues(
 
 /**
  * Main-window driver for the in-game stats overlay. While enabled, polls metrics
- * and pushes a config+values snapshot to the "overlay-stats" window ~1x/sec.
- * When disabled, pushes one snapshot so that window hides itself.
+ * and pushes a config+values snapshot to the "overlay-stats" window ~1x/sec. The
+ * overlay only shows when a game is running (`robloxRunning`) OR the user is
+ * repositioning it - so it doesn't cover the desktop or other apps. Also handles
+ * drag-to-reposition saves and the "done" signal.
  */
 export function useOverlayDriver() {
   const overlay = useSettingsStore((s) => s.settings.config.overlay);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
+  const editing = useOverlayEditStore((s) => s.editing);
   const ovRef = useRef<OverlayConfig>(overlay);
   ovRef.current = overlay;
 
+  // Push render snapshots.
   useEffect(() => {
     if (!overlay.enabled) {
       void pushOverlayRender({
         enabled: false,
+        editing: false,
         metrics: overlay.metrics,
         size: overlay.size,
         color: overlay.color,
         style: overlay.style,
         position: overlay.position,
+        customX: overlay.custom_x,
+        customY: overlay.custom_y,
         values: {},
       }).catch(() => {});
       return;
@@ -82,16 +95,21 @@ export function useOverlayDriver() {
       const b = useBoostStore.getState();
       if (b.robloxRunning && !wasRunning) sessionStart = Date.now();
       wasRunning = b.robloxRunning;
-      const sessionMs = sessionStart ? Date.now() - sessionStart : 0;
+      const gate = b.robloxRunning || editing;
       const cfg = ovRef.current;
       await pushOverlayRender({
-        enabled: true,
+        enabled: gate,
+        editing,
         metrics: cfg.metrics,
         size: cfg.size,
         color: cfg.color,
         style: cfg.style,
         position: cfg.position,
-        values: computeValues(b, sessionMs),
+        customX: cfg.custom_x,
+        customY: cfg.custom_y,
+        values: gate
+          ? computeValues(b, sessionStart ? Date.now() - sessionStart : 0)
+          : {},
       }).catch(() => {});
     };
 
@@ -101,6 +119,29 @@ export function useOverlayDriver() {
       disposed = true;
       window.clearInterval(id);
     };
-    // Re-run only when enabled flips; live config is read via ovRef each tick.
-  }, [overlay.enabled, fetchMetrics]);
+  }, [overlay.enabled, editing, fetchMetrics]);
+
+  // Reposition results from the overlay window.
+  const updateSettings = useSettingsStore((s) => s.update);
+  const saveSettings = useSettingsStore((s) => s.save);
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    void listen<OverlayPositionPayload>(OVERLAY_POSITION_EVENT, (e) => {
+      const cfg = useSettingsStore.getState().settings.config;
+      const next: Config = {
+        ...cfg,
+        overlay: { ...cfg.overlay, custom_x: e.payload.x, custom_y: e.payload.y },
+      };
+      updateSettings({ config: next });
+      void saveSettings();
+    }).then((u) => (disposed ? u() : unlisteners.push(u)));
+    void listen(OVERLAY_EDIT_DONE_EVENT, () => {
+      useOverlayEditStore.getState().setEditing(false);
+    }).then((u) => (disposed ? u() : unlisteners.push(u)));
+    return () => {
+      disposed = true;
+      unlisteners.forEach((u) => u());
+    };
+  }, [updateSettings, saveSettings]);
 }

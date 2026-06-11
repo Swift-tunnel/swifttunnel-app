@@ -42,6 +42,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
       style: "straight",
       color: "#fafafa",
       position: "top-left",
+      custom_x: null,
+      custom_y: null,
       hotkey: "Ctrl+Shift+O",
       monitor_fps_chart: false,
       show_max_fps_message: false,
