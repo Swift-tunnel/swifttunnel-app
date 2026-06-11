@@ -648,7 +648,10 @@ fn allocate_route_assist_pins(
 
     let mut domains: Vec<&str> = Vec::new();
     for entry in &overrides {
-        if !domains.iter().any(|d| d.eq_ignore_ascii_case(&entry.domain)) {
+        if !domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(&entry.domain))
+        {
             domains.push(&entry.domain);
         }
     }
@@ -1219,10 +1222,7 @@ mod tests {
         let shared_ip = Ipv4Addr::new(65, 9, 168, 95);
         set_active_bootstrap_ips_for_test([shared_ip]);
 
-        assert!(!learn_direct_only_bootstrap_ip(
-            "t3.rbxcdn.com",
-            shared_ip
-        ));
+        assert!(!learn_direct_only_bootstrap_ip("t3.rbxcdn.com", shared_ip));
         assert!(!learn_direct_only_bootstrap_ip(
             "clientsettingscdn.roblox.com",
             shared_ip
