@@ -418,9 +418,9 @@ export function SettingsTab() {
 
         <Row
           label="Roblox Route Assist"
-          desc="Use when bypassing a network ban or to improve region-matching odds"
+          desc="Lands you in game servers near your tunneled region"
           tooltip={
-            <Tooltip content="Routes Roblox login/API HTTP(S), including browser-owned Roblox auth traffic, through the relay. Non-Roblox browser traffic still bypasses SwiftTunnel.">
+            <Tooltip content="Routes Roblox matchmaking/login traffic through the relay so Roblox places you near your tunneled region. For blocked countries, use the Bypass toggles in Optimize instead.">
               <span className="inline-flex">
                 <InfoIcon />
               </span>

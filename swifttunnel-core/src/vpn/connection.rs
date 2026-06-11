@@ -90,13 +90,31 @@ struct TunnelRoutingFlags {
     udp_tunneling: bool,
 }
 
+/// Resolve the per-protocol relay behavior from the three user-facing toggles.
+///
+/// - Route Assist: relay Roblox's control-plane TCP so matchmaking lands the
+///   player in game servers near the tunneled region. Gameplay UDP rides the
+///   relay as usual.
+/// - Full country-ban bypass (whole platform blocked, e.g. Egypt): relay the
+///   control plane AND gameplay UDP — the censor may block Roblox's IP ranges
+///   wholesale, so nothing can be trusted to the direct path. GoodbyeDPI runs
+///   on top; the relay is the fallback when DPI evasion alone isn't enough.
+/// - Partial country-ban bypass (only specific games blocked, e.g. Vietnam):
+///   relay only the control-plane TCP so the banned game appears in
+///   search/discovery and joins succeed, while gameplay UDP stays DIRECT for
+///   the player's real ping. Assets/settings stay direct too.
 fn resolve_tunnel_routing_flags(
     route_assist_requested: bool,
-    country_ban_bypass_requested: bool,
+    full_ban_bypass_requested: bool,
+    partial_ban_bypass_requested: bool,
 ) -> TunnelRoutingFlags {
     TunnelRoutingFlags {
-        api_tunneling: route_assist_requested || country_ban_bypass_requested,
-        udp_tunneling: !country_ban_bypass_requested || route_assist_requested,
+        api_tunneling: route_assist_requested
+            || full_ban_bypass_requested
+            || partial_ban_bypass_requested,
+        udp_tunneling: route_assist_requested
+            || full_ban_bypass_requested
+            || !partial_ban_bypass_requested,
     }
 }
 
@@ -1081,13 +1099,18 @@ impl VpnConnection {
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
         enable_country_ban: bool,
+        enable_partial_country_ban: bool,
     ) -> VpnResult<()> {
-        // Bypassing a country ban needs the relay for Roblox's web/API
-        // control-plane traffic, so it implies API tunneling (Route Assist).
-        // Keep the user's explicit Route Assist choice separately: Bypass-only
-        // users should still play over their direct UDP path, while Bypass +
-        // Route Assist is the full relay fallback for stricter network blocks.
-        let routing_flags = resolve_tunnel_routing_flags(enable_api_tunneling, enable_country_ban);
+        // Both bypass modes need the relay for Roblox's web/API control-plane
+        // traffic, so they imply API tunneling (Route Assist). They differ on
+        // gameplay UDP: full bypass (whole platform blocked) relays it; partial
+        // bypass (specific games blocked, e.g. Vietnam) keeps it direct so the
+        // player keeps their real ping.
+        let routing_flags = resolve_tunnel_routing_flags(
+            enable_api_tunneling,
+            enable_country_ban,
+            enable_partial_country_ban,
+        );
         let enable_api_tunneling = routing_flags.api_tunneling;
         let enable_udp_tunneling = routing_flags.udp_tunneling;
 
@@ -1224,6 +1247,16 @@ impl VpnConnection {
                         "V3: Roblox bootstrap DNS repair skipped; API tunneling will continue without hosts repair: {}",
                         e
                     );
+                    // Under a full country block this is load-bearing: without
+                    // pins, system DNS (often poisoned by the censor) decides
+                    // which IPs Roblox connects to, and even relayed flows then
+                    // go to bogus endpoints (Studio/installer SslConnectFail).
+                    // Surface it so the UI/support can see why bypass degraded.
+                    if enable_country_ban {
+                        self.country_ban_bypass_failure = Some(format!(
+                            "Roblox DNS repair failed (your network may be blocking secure DNS): {e}"
+                        ));
+                    }
                 }
             }
         }
@@ -3009,24 +3042,47 @@ mod tests {
     }
 
     #[test]
-    fn country_ban_bypass_only_keeps_gameplay_udp_direct() {
-        let flags = resolve_tunnel_routing_flags(false, true);
+    fn no_toggles_keeps_plain_vpn_behavior() {
+        let flags = resolve_tunnel_routing_flags(false, false, false);
 
-        assert!(flags.api_tunneling);
-        assert!(!flags.udp_tunneling);
+        assert!(!flags.api_tunneling);
+        assert!(flags.udp_tunneling);
     }
 
     #[test]
-    fn country_ban_plus_route_assist_relays_gameplay_udp() {
-        let flags = resolve_tunnel_routing_flags(true, true);
+    fn full_ban_bypass_relays_control_plane_and_gameplay_udp() {
+        // Egypt-style full block: nothing can be trusted to the direct path,
+        // so full bypass alone relays gameplay UDP too (it used to require
+        // also enabling Route Assist, which confused users).
+        let flags = resolve_tunnel_routing_flags(false, true, false);
 
         assert!(flags.api_tunneling);
         assert!(flags.udp_tunneling);
     }
 
     #[test]
-    fn route_assist_without_country_ban_keeps_existing_udp_relay_behavior() {
-        let flags = resolve_tunnel_routing_flags(true, false);
+    fn partial_ban_bypass_keeps_gameplay_udp_direct_for_real_ping() {
+        // Vietnam-style game ban: relay only the control plane so the banned
+        // game appears and joins; gameplay UDP stays direct = real ping.
+        let flags = resolve_tunnel_routing_flags(false, false, true);
+
+        assert!(flags.api_tunneling);
+        assert!(!flags.udp_tunneling);
+    }
+
+    #[test]
+    fn partial_ban_plus_route_assist_relays_gameplay_udp() {
+        // An explicit Route Assist choice wins: the user asked for region
+        // steering, which only works when gameplay rides the relay.
+        let flags = resolve_tunnel_routing_flags(true, false, true);
+
+        assert!(flags.api_tunneling);
+        assert!(flags.udp_tunneling);
+    }
+
+    #[test]
+    fn route_assist_without_bypass_keeps_existing_udp_relay_behavior() {
+        let flags = resolve_tunnel_routing_flags(true, false, false);
 
         assert!(flags.api_tunneling);
         assert!(flags.udp_tunneling);

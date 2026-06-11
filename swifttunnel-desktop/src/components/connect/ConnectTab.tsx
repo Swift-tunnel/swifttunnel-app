@@ -730,15 +730,14 @@ function RouteAssistPanel({
             >
               Roblox Route Assist
             </h3>
-            <Tooltip content="Routes Roblox login/API HTTP(S) through the selected relay, including browser-owned Roblox auth traffic. Non-Roblox browser traffic still bypasses SwiftTunnel.">
+            <Tooltip content="Routes Roblox matchmaking/login traffic through the selected relay so Roblox places you in game servers near your tunneled region. For blocked countries, use the Bypass toggles in Optimize instead.">
               <span className="inline-flex">
                 <InfoIcon />
               </span>
             </Tooltip>
           </div>
           <p className="mt-0.5 truncate text-[11px] leading-snug text-text-muted">
-            Use when bypassing a network ban, or to land near your tunneled
-            region.
+            Lands you in game servers near your tunneled region.
           </p>
         </div>
       </div>

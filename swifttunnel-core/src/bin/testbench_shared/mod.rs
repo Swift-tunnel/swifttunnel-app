@@ -650,6 +650,7 @@ pub async fn connect_vpn(
         settings.game_process_performance,
         resolve_enable_api_tunneling(opts, settings),
         resolve_enable_country_ban(opts, settings),
+        settings.enable_partial_country_ban,
     )
     .await
     .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))

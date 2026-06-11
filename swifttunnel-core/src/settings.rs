@@ -180,12 +180,25 @@ pub struct AppSettings {
     /// UDP game traffic. Off by default.
     #[serde(default)]
     pub enable_api_tunneling: bool,
-    /// Run the scoped GoodbyeDPI helper for Roblox country-level DPI blocks.
+    /// Bypass a FULL country block (whole platform banned, e.g. Egypt).
     ///
-    /// When enabled, GoodbyeDPI applies to Roblox hostnames for both browser
-    /// and Roblox app traffic. Off by default.
+    /// Runs the scoped GoodbyeDPI helper for Roblox hostnames AND relays the
+    /// Roblox control plane, launch-critical settings hosts, and gameplay UDP —
+    /// the censor may block Roblox's IP ranges wholesale, so nothing is
+    /// trusted to the direct path. Off by default. Mutually exclusive with
+    /// `enable_partial_country_ban`.
     #[serde(default)]
     pub enable_country_ban: bool,
+    /// Bypass a PARTIAL country block (only specific games banned, e.g.
+    /// Vietnam's TSB/JJS bans).
+    ///
+    /// Relays only the Roblox control-plane TCP so banned games appear in
+    /// search/discovery and joins succeed; gameplay UDP stays DIRECT for the
+    /// player's real ping, and assets/settings stay direct too (no slow
+    /// textures, reliable startup). No GoodbyeDPI. Off by default. Mutually
+    /// exclusive with `enable_country_ban`.
+    #[serde(default)]
+    pub enable_partial_country_ban: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,6 +291,7 @@ impl Default for AppSettings {
             game_process_performance: GameProcessPerformanceSettings::default(),
             enable_api_tunneling: false,
             enable_country_ban: false,
+            enable_partial_country_ban: false,
         }
     }
 }
@@ -301,6 +315,13 @@ impl AppSettings {
         // Older releases serialized false as the default even though the app has
         // no user-facing toggle. Keep app-close safe for shared/cafe PCs.
         self.minimize_to_tray = true;
+        // The two bypass modes route gameplay UDP opposite ways; if both are
+        // somehow set (hand-edited file, downgrade/upgrade), full wins - a
+        // fully-blocked user with direct UDP can't play at all, while a
+        // partially-blocked user on the relay merely has higher ping.
+        if self.enable_country_ban && self.enable_partial_country_ban {
+            self.enable_partial_country_ban = false;
+        }
     }
 }
 
@@ -612,6 +633,7 @@ mod tests {
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!loaded.enable_api_tunneling);
         assert!(!loaded.enable_country_ban);
+        assert!(!loaded.enable_partial_country_ban);
     }
 
     #[test]
@@ -619,10 +641,29 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.enable_api_tunneling = true;
         settings.enable_country_ban = true;
+        settings.enable_partial_country_ban = true;
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
         assert!(loaded.enable_api_tunneling);
         assert!(loaded.enable_country_ban);
+        assert!(loaded.enable_partial_country_ban);
+    }
+
+    #[test]
+    fn test_sanitize_full_bypass_wins_over_partial() {
+        let mut settings = AppSettings::default();
+        settings.enable_country_ban = true;
+        settings.enable_partial_country_ban = true;
+        settings.sanitize_in_place();
+        assert!(settings.enable_country_ban);
+        assert!(!settings.enable_partial_country_ban);
+
+        // Partial alone is untouched.
+        let mut settings = AppSettings::default();
+        settings.enable_partial_country_ban = true;
+        settings.sanitize_in_place();
+        assert!(!settings.enable_country_ban);
+        assert!(settings.enable_partial_country_ban);
     }
 
     #[test]

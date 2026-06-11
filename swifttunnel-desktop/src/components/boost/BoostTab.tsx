@@ -58,6 +58,8 @@ export function BoostTab() {
     useState<GameProcessPerformanceSettings>(savedGPP);
   const savedCountryBan = settings.enable_country_ban;
   const [draftCountryBan, setDraftCountryBan] = useState(savedCountryBan);
+  const savedPartialBan = settings.enable_partial_country_ban;
+  const [draftPartialBan, setDraftPartialBan] = useState(savedPartialBan);
 
   useEffect(() => {
     setDraftGPP(savedGPP);
@@ -66,6 +68,20 @@ export function BoostTab() {
   useEffect(() => {
     setDraftCountryBan(savedCountryBan);
   }, [savedCountryBan]);
+
+  useEffect(() => {
+    setDraftPartialBan(savedPartialBan);
+  }, [savedPartialBan]);
+
+  // The two bypass modes route gameplay UDP opposite ways - only one at a time.
+  const chooseFullBan = (v: boolean) => {
+    setDraftCountryBan(v);
+    if (v) setDraftPartialBan(false);
+  };
+  const choosePartialBan = (v: boolean) => {
+    setDraftPartialBan(v);
+    if (v) setDraftCountryBan(false);
+  };
 
   useEffect(() => {
     let canceled = false;
@@ -89,7 +105,8 @@ export function BoostTab() {
 
   const hasConfigChanges = !configsEqual(draft, savedConfig);
   const hasGPPChanges = JSON.stringify(draftGPP) !== JSON.stringify(savedGPP);
-  const hasCountryBanChange = draftCountryBan !== savedCountryBan;
+  const hasCountryBanChange =
+    draftCountryBan !== savedCountryBan || draftPartialBan !== savedPartialBan;
   const hasChanges = hasConfigChanges || hasGPPChanges || hasCountryBanChange;
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
@@ -137,6 +154,7 @@ export function BoostTab() {
         config: appliedConfig,
         game_process_performance: draftGPP,
         enable_country_ban: draftCountryBan,
+        enable_partial_country_ban: draftPartialBan,
       });
       setDraft(appliedConfig);
       saveSettings();
@@ -153,6 +171,7 @@ export function BoostTab() {
     draft,
     draftGPP,
     draftCountryBan,
+    draftPartialBan,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -174,6 +193,7 @@ export function BoostTab() {
         config: appliedConfig,
         game_process_performance: draftGPP,
         enable_country_ban: draftCountryBan,
+        enable_partial_country_ban: draftPartialBan,
       });
       setDraft(appliedConfig);
       saveSettings();
@@ -184,6 +204,7 @@ export function BoostTab() {
     draft,
     draftGPP,
     draftCountryBan,
+    draftPartialBan,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -195,7 +216,8 @@ export function BoostTab() {
     setDraft(savedConfig);
     setDraftGPP(savedGPP);
     setDraftCountryBan(savedCountryBan);
-  }, [savedConfig, savedGPP, savedCountryBan]);
+    setDraftPartialBan(savedPartialBan);
+  }, [savedConfig, savedGPP, savedCountryBan, savedPartialBan]);
 
   function selectProfile(id: OptimizationProfile) {
     setDraft(getPresetConfig(id, draft));
@@ -274,6 +296,7 @@ export function BoostTab() {
     draft.roblox_settings.unlock_fps,
     draft.roblox_settings.ultraboost,
     draftCountryBan,
+    draftPartialBan,
     draft.roblox_settings.window_fullscreen,
   ].filter(Boolean).length;
   const schedCount = [
@@ -350,7 +373,7 @@ export function BoostTab() {
       </section>
 
       {/* ── Roblox ── */}
-      <Section title="Roblox" tag={`${rblxCount} / 4 on`}>
+      <Section title="Roblox" tag={`${rblxCount} / 5 on`}>
         <SettingRow
           title="Unlock FPS"
           desc="Remove 60 FPS cap"
@@ -370,11 +393,18 @@ export function BoostTab() {
           onChange={(v) => updateRblxOpt({ ultraboost: v })}
         />
         <SettingRow
-          title="Bypass Country Bans"
-          desc="Turn on if Roblox or a game is blocked in your country"
-          tooltip="Relays Roblox web/login/join traffic for country blocks. Gameplay UDP stays direct unless Route Assist is on."
+          title="Bypass Country Ban"
+          desc="ALL of Roblox is blocked in your country (e.g. Egypt)"
+          tooltip="Full bypass: DPI evasion (GoodbyeDPI) plus relaying all Roblox traffic - login, settings, and gameplay. Use when the whole platform is banned. Turns off Partial Ban."
           enabled={draftCountryBan}
-          onChange={setDraftCountryBan}
+          onChange={chooseFullBan}
+        />
+        <SettingRow
+          title="Bypass Partial Ban"
+          desc="Only specific games are blocked (e.g. TSB/JJS in Vietnam)"
+          tooltip="Relays only Roblox's search/login/join traffic so banned games appear and join - gameplay and assets stay on your direct connection for real ping and fast loading. Turns off Country Ban."
+          enabled={draftPartialBan}
+          onChange={choosePartialBan}
         />
         <ResolutionRow
           width={draft.roblox_settings.window_width}

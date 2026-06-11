@@ -436,6 +436,7 @@ export interface AppSettings {
   game_process_performance: GameProcessPerformanceSettings;
   enable_api_tunneling: boolean;
   enable_country_ban: boolean;
+  enable_partial_country_ban: boolean;
 }
 
 // ── System ──
