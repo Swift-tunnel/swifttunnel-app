@@ -23,13 +23,24 @@ pub async fn boost_get_metrics(
     state: State<'_, AppState>,
 ) -> Result<PerformanceMetricsResponse, String> {
     let performance_monitor = state.performance_monitor.clone();
+    let fps_monitor = state.fps_monitor.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut monitor = performance_monitor.lock();
         let mut metrics = swifttunnel_core::structs::PerformanceMetrics::default();
         monitor.update_metrics(&mut metrics);
 
+        // Point the ETW present counter at the live Roblox PID (or clear it),
+        // then read presents/sec. This is the real in-game FPS, measured from
+        // outside the process — no injection, anti-cheat safe.
+        fps_monitor.set_target_pid(metrics.process_id.unwrap_or(0));
+        let fps = if metrics.roblox_running {
+            fps_monitor.current_fps() as f32
+        } else {
+            0.0
+        };
+
         PerformanceMetricsResponse {
-            fps: metrics.fps,
+            fps,
             cpu_usage: metrics.cpu_usage,
             ram_usage: metrics.ram_usage,
             ram_total: metrics.ram_total,

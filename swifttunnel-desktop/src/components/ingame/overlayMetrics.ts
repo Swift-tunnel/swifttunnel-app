@@ -4,7 +4,7 @@ export interface OverlayMetricMeta {
   id: OverlayMetric;
   label: string;
   group: "Basic" | "CPU" | "GPU" | "RAM" | "Hard Disk";
-  /** Not wired to live data yet (needs ETW for FPS, sensors for temps). */
+  /** Not wired to live data yet (needs hardware sensors for temps, etc.). */
   soon?: boolean;
   /** Sample value for the preview. */
   sample: string;
@@ -12,7 +12,7 @@ export interface OverlayMetricMeta {
 
 /** All overlay metrics, in selection order. Mirrors the Cortex metric set. */
 export const OVERLAY_METRICS: OverlayMetricMeta[] = [
-  { id: "fps", label: "FPS", group: "Basic", soon: true, sample: "120" },
+  { id: "fps", label: "FPS", group: "Basic", sample: "120" },
   { id: "time", label: "Time", group: "Basic", sample: "16:48:59" },
   { id: "playtime", label: "Play time", group: "Basic", sample: "00:42" },
   { id: "battery", label: "Battery", group: "Basic", soon: true, sample: "87%" },

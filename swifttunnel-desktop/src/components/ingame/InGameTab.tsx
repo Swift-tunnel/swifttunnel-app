@@ -116,7 +116,7 @@ export function InGameTab() {
           <SectionHeader
             label="Metrics"
             tag={`${ov.metrics.length} / ${MAX_OVERLAY_METRICS}`}
-            description="Pick what to display. FPS and temperatures arrive in a later update."
+            description="Pick what to display. Temperatures arrive in a later update."
           />
           <div className="flex flex-col gap-3">
             {OVERLAY_METRIC_GROUPS.map((group) => {

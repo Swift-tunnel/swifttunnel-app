@@ -4,6 +4,7 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use swifttunnel_core::auth::AuthManager;
 use swifttunnel_core::discord_rpc::DiscordManager;
+use swifttunnel_core::fps_monitor::FpsMonitor;
 use swifttunnel_core::network_booster::NetworkBooster;
 use swifttunnel_core::performance_monitor::PerformanceMonitor;
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
@@ -47,6 +48,9 @@ pub struct AppState {
     pub region_latencies: Arc<Mutex<HashMap<String, (String, u32)>>>,
     pub settings: Arc<Mutex<AppSettings>>,
     pub performance_monitor: Arc<Mutex<PerformanceMonitor>>,
+    /// Anti-cheat-safe in-game FPS via ETW DXGI present counting. Long-lived;
+    /// the optimizer points it at the Roblox PID and reads presents/sec.
+    pub fps_monitor: Arc<FpsMonitor>,
     pub system_optimizer: Arc<Mutex<SystemOptimizer>>,
     pub roblox_optimizer: Arc<Mutex<RobloxOptimizer>>,
     pub network_booster: Arc<Mutex<NetworkBooster>>,
@@ -91,6 +95,7 @@ impl AppState {
             region_latencies: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(Mutex::new(settings)),
             performance_monitor: Arc::new(Mutex::new(PerformanceMonitor::new())),
+            fps_monitor: Arc::new(FpsMonitor::start()),
             system_optimizer: Arc::new(Mutex::new(SystemOptimizer::new())),
             roblox_optimizer: Arc::new(Mutex::new(roblox_optimizer)),
             network_booster: Arc::new(Mutex::new(NetworkBooster::new())),
