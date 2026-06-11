@@ -7,6 +7,14 @@ pub const ROBLOX_PROCESS_NAMES: &[&str] = &[
     "robloxstudio.exe",
     "robloxstudiolauncherbeta.exe",
     "robloxstudiolauncher.exe",
+    // First-party installers. These run BEFORE the player/studio binaries exist
+    // and fetch clientsettings/version from clientsettingscdn.roblox.com; in a
+    // blocked country an un-tunnelled installer fails with SslConnectFail
+    // ("Continue installation without flag settings ..."). Tunnel-eligible like
+    // the other Roblox processes - their TCP is direct anyway unless the user
+    // enables Route Assist/Bypass, so non-blocked users are unaffected.
+    "robloxstudioinstaller.exe",
+    "robloxplayerinstaller.exe",
 ];
 
 /// Third-party Roblox bootstrappers ("strappers").
@@ -95,6 +103,8 @@ mod tests {
             "robloxplayer.exe",
             "C:\\Program Files\\Roblox\\RobloxApp.exe",
             "robloxstudiolauncherbeta.exe",
+            "RobloxStudioInstaller.exe",
+            r"C:\Users\me\AppData\Local\Roblox\RobloxStudioInstaller\RobloxStudioInstaller.exe",
         ] {
             assert!(is_roblox_process_name(name), "expected {name} to match");
         }
