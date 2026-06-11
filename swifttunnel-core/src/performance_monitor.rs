@@ -65,6 +65,22 @@ pub fn cursor_position() -> (i32, i32) {
     (0, 0)
 }
 
+/// True while the primary (left) mouse button is physically down. The in-game
+/// overlay drives its drag from this global state (plus the cursor position)
+/// instead of webview mouse events, which are unreliable on a click-through
+/// window whose interactivity toggles underneath the drag.
+#[cfg(windows)]
+pub fn left_mouse_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    // High bit set => key/button is currently down.
+    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(not(windows))]
+pub fn left_mouse_down() -> bool {
+    false
+}
+
 /// Add `WS_EX_NOACTIVATE` to a window so clicking it never pulls foreground
 /// focus from the app underneath. The in-game overlay needs this: a normal
 /// topmost window activates when clicked (to grab/drag the bar), which knocks

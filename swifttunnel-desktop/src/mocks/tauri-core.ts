@@ -279,7 +279,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     process_id: 12480,
   }),
 
-  boost_cursor_pos: () => ({ x: 0, y: 0 }),
+  boost_cursor_pos: () => ({ x: 0, y: 0, left_down: false }),
 
   boost_get_system_memory: () => {
     const total = mockSystemMemTotalMb;

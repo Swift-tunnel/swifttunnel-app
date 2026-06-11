@@ -158,6 +158,7 @@ export interface PerformanceMetricsResponse {
 export interface CursorPosResponse {
   x: number;
   y: number;
+  left_down: boolean;
 }
 
 export interface SystemInfoResponse {

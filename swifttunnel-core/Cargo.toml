@@ -34,6 +34,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Services",
     # GetSystemMetrics for RDP session detection
     "Win32_UI_WindowsAndMessaging",
+    # GetAsyncKeyState (left-button state) for the in-game overlay drag
+    "Win32_UI_Input_KeyboardAndMouse",
     # ShellExecuteW for UAC elevation (auto-elevate on connect)
     "Win32_UI_Shell",
     # ETW (Event Tracing for Windows) for instant process detection

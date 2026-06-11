@@ -58,14 +58,21 @@ pub async fn boost_get_metrics(
 pub struct CursorPosResponse {
     pub x: i32,
     pub y: i32,
+    /// Primary (left) mouse button currently held — drives the overlay drag.
+    pub left_down: bool,
 }
 
-/// Global cursor position (physical screen px) for the in-game overlay's
-/// grab-to-move hit testing. A cheap `GetCursorPos`; safe to poll ~10x/sec.
+/// Global cursor position (physical screen px) + left-button state for the
+/// in-game overlay's grab-to-move. Cheap `GetCursorPos` + `GetAsyncKeyState`;
+/// safe to poll a few dozen times a second while dragging.
 #[tauri::command]
 pub fn boost_cursor_pos() -> CursorPosResponse {
     let (x, y) = swifttunnel_core::performance_monitor::cursor_position();
-    CursorPosResponse { x, y }
+    CursorPosResponse {
+        x,
+        y,
+        left_down: swifttunnel_core::performance_monitor::left_mouse_down(),
+    }
 }
 
 #[derive(Clone, Serialize)]
