@@ -2,9 +2,7 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useBoostStore } from "../stores/boostStore";
 import { useSettingsStore } from "../stores/settingsStore";
-import { useOverlayEditStore } from "../stores/overlayEditStore";
 import {
-  OVERLAY_EDIT_DONE_EVENT,
   OVERLAY_POSITION_EVENT,
   pushOverlayRender,
   type OverlayPositionPayload,
@@ -52,14 +50,13 @@ function computeValues(
 /**
  * Main-window driver for the in-game stats overlay. While enabled, polls metrics
  * and pushes a config+values snapshot to the "overlay-stats" window ~1x/sec. The
- * overlay only shows when a game is running (`robloxRunning`) OR the user is
- * repositioning it - so it doesn't cover the desktop or other apps. Also handles
- * drag-to-reposition saves and the "done" signal.
+ * overlay only shows while Roblox is the foreground window (`robloxForeground`)
+ * so it never covers the desktop or other apps. Repositioning happens on the
+ * overlay itself (grab the bar); this driver just persists the dropped position.
  */
 export function useOverlayDriver() {
   const overlay = useSettingsStore((s) => s.settings.config.overlay);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
-  const editing = useOverlayEditStore((s) => s.editing);
   const ovRef = useRef<OverlayConfig>(overlay);
   ovRef.current = overlay;
 
@@ -68,7 +65,6 @@ export function useOverlayDriver() {
     if (!overlay.enabled) {
       void pushOverlayRender({
         enabled: false,
-        editing: false,
         metrics: overlay.metrics,
         size: overlay.size,
         color: overlay.color,
@@ -96,13 +92,11 @@ export function useOverlayDriver() {
       if (b.robloxRunning && !wasRunning) sessionStart = Date.now();
       wasRunning = b.robloxRunning;
       // Show only while Roblox is the FOREGROUND window (not just running) so
-      // it never covers the desktop or apps you've alt-tabbed to. Reposition
-      // mode overrides so you can place it without Roblox focused.
-      const gate = b.robloxForeground || editing;
+      // it never covers the desktop or apps you've alt-tabbed to.
+      const gate = b.robloxForeground;
       const cfg = ovRef.current;
       await pushOverlayRender({
         enabled: gate,
-        editing,
         metrics: cfg.metrics,
         size: cfg.size,
         color: cfg.color,
@@ -122,14 +116,14 @@ export function useOverlayDriver() {
       disposed = true;
       window.clearInterval(id);
     };
-  }, [overlay.enabled, editing, fetchMetrics]);
+  }, [overlay.enabled, fetchMetrics]);
 
-  // Reposition results from the overlay window.
+  // Persist the position when the user drags the bar on the overlay.
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
   useEffect(() => {
     let disposed = false;
-    const unlisteners: Array<() => void> = [];
+    let unlisten: (() => void) | undefined;
     void listen<OverlayPositionPayload>(OVERLAY_POSITION_EVENT, (e) => {
       const cfg = useSettingsStore.getState().settings.config;
       const next: Config = {
@@ -138,13 +132,10 @@ export function useOverlayDriver() {
       };
       updateSettings({ config: next });
       void saveSettings();
-    }).then((u) => (disposed ? u() : unlisteners.push(u)));
-    void listen(OVERLAY_EDIT_DONE_EVENT, () => {
-      useOverlayEditStore.getState().setEditing(false);
-    }).then((u) => (disposed ? u() : unlisteners.push(u)));
+    }).then((u) => (disposed ? u() : (unlisten = u)));
     return () => {
       disposed = true;
-      unlisteners.forEach((u) => u());
+      unlisten?.();
     };
   }, [updateSettings, saveSettings]);
 }

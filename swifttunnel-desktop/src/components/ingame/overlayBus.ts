@@ -10,14 +10,10 @@ export const OVERLAY_STATS_WINDOW = "overlay-stats";
 export const OVERLAY_RENDER_EVENT = "overlay-render";
 /** overlay -> main: user dragged the bar to (x, y) px from the monitor corner. */
 export const OVERLAY_POSITION_EVENT = "overlay-position";
-/** overlay -> main: user finished repositioning. */
-export const OVERLAY_EDIT_DONE_EVENT = "overlay-edit-done";
 
 /** Snapshot the main window emits to the stats overlay window each tick. */
 export interface OverlayRenderPayload {
   enabled: boolean;
-  /** Reposition mode: interactive + draggable (not click-through). */
-  editing: boolean;
   metrics: OverlayMetric[];
   size: OverlaySize;
   color: string;
@@ -41,8 +37,4 @@ export async function pushOverlayRender(
 
 export async function emitOverlayPosition(x: number, y: number): Promise<void> {
   await emitTo("main", OVERLAY_POSITION_EVENT, { x, y });
-}
-
-export async function emitOverlayEditDone(): Promise<void> {
-  await emitTo("main", OVERLAY_EDIT_DONE_EVENT, {});
 }

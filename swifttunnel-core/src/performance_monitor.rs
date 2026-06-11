@@ -42,6 +42,29 @@ pub fn foreground_window_is_roblox() -> bool {
     false
 }
 
+/// Global cursor position in physical screen pixels. The in-game overlay polls
+/// this so the stats bar can become grabbable only while the cursor is over it
+/// (dropping click-through briefly) without the overlay ever needing focus.
+#[cfg(windows)]
+pub fn cursor_position() -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    unsafe {
+        let mut point = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut point).is_ok() {
+            (point.x, point.y)
+        } else {
+            (0, 0)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn cursor_position() -> (i32, i32) {
+    (0, 0)
+}
+
 pub struct PerformanceMonitor {
     system: System,
 }

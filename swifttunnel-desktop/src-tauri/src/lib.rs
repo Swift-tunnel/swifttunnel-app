@@ -420,6 +420,7 @@ pub fn run() {
             commands::vpn::server_smart_select,
             // Optimizer
             commands::optimizer::boost_get_metrics,
+            commands::optimizer::boost_cursor_pos,
             commands::optimizer::boost_get_system_memory,
             commands::optimizer::boost_update_config,
             commands::optimizer::boost_sync_effective_config,

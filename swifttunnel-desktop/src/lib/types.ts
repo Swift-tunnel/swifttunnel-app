@@ -155,6 +155,11 @@ export interface PerformanceMetricsResponse {
   process_id: number | null;
 }
 
+export interface CursorPosResponse {
+  x: number;
+  y: number;
+}
+
 export interface SystemInfoResponse {
   is_admin: boolean;
   os_version: string;

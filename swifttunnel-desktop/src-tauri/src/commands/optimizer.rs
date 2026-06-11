@@ -43,6 +43,20 @@ pub async fn boost_get_metrics(
     .map_err(|e| format!("Metrics task failed: {}", e))
 }
 
+#[derive(Serialize)]
+pub struct CursorPosResponse {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Global cursor position (physical screen px) for the in-game overlay's
+/// grab-to-move hit testing. A cheap `GetCursorPos`; safe to poll ~10x/sec.
+#[tauri::command]
+pub fn boost_cursor_pos() -> CursorPosResponse {
+    let (x, y) = swifttunnel_core::performance_monitor::cursor_position();
+    CursorPosResponse { x, y }
+}
+
 #[derive(Clone, Serialize)]
 pub struct SystemMemorySnapshotResponse {
     pub total_mb: u64,

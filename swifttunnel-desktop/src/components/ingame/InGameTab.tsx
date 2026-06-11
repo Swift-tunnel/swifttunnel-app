@@ -1,6 +1,5 @@
 import { SectionHeader, Toggle, Chip } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { useOverlayEditStore } from "../../stores/overlayEditStore";
 import type {
   Config,
   OverlayConfig,
@@ -34,7 +33,6 @@ export function InGameTab() {
   const config = useSettingsStore((s) => s.settings.config);
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
-  const setEditing = useOverlayEditStore((s) => s.setEditing);
   const ov = config.overlay;
   const hasCustomPos = ov.custom_x !== null && ov.custom_y !== null;
 
@@ -244,31 +242,18 @@ export function InGameTab() {
             size="sm"
             description={
               hasCustomPos
-                ? "Custom position set by dragging. Pick a corner to snap back."
-                : "Pick a corner, or drag it anywhere on screen."
+                ? "Custom spot set by dragging in-game. Pick a corner to snap back."
+                : "Pick a corner here, or just grab the bar in-game to move it anywhere."
             }
             action={
-              <div className="flex items-center gap-1.5">
-                {hasCustomPos && (
-                  <SegBtn
-                    active={false}
-                    onClick={() => patch({ custom_x: null, custom_y: null })}
-                  >
-                    Reset
-                  </SegBtn>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setEditing(true)}
-                  className="rounded-[7px] px-2.5 py-1.5 text-[11px] font-semibold"
-                  style={{
-                    backgroundColor: "var(--color-text-primary)",
-                    color: "var(--color-bg-base)",
-                  }}
+              hasCustomPos ? (
+                <SegBtn
+                  active={false}
+                  onClick={() => patch({ custom_x: null, custom_y: null })}
                 >
-                  Drag on screen
-                </button>
-              </div>
+                  Reset
+                </SegBtn>
+              ) : undefined
             }
           />
           <div className="flex justify-center">

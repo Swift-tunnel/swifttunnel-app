@@ -275,8 +275,11 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     ram_total: 16384,
     ping: 14 + Math.floor(Math.random() * 8),
     roblox_running: true,
+    roblox_foreground: true,
     process_id: 12480,
   }),
+
+  boost_cursor_pos: () => ({ x: 0, y: 0 }),
 
   boost_get_system_memory: () => {
     const total = mockSystemMemTotalMb;

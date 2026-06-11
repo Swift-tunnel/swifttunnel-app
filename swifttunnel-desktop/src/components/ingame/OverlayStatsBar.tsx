@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { OverlayBar } from "./OverlayBar";
 import {
   OVERLAY_RENDER_EVENT,
-  emitOverlayEditDone,
   emitOverlayPosition,
   type OverlayRenderPayload,
 } from "./overlayBus";
+import { boostCursorPos } from "../../lib/commands";
 import type { OverlayPosition } from "../../lib/types";
 
 function anchorStyle(position: OverlayPosition): React.CSSProperties {
@@ -27,16 +27,37 @@ function anchorStyle(position: OverlayPosition): React.CSSProperties {
   return style;
 }
 
+const POLL_MS = 90;
+// Slack (px) around the bar so it's easy to land the cursor on it to grab.
+const GRAB_PAD = 8;
+
 export function OverlayStatsBar() {
   const [payload, setPayload] = useState<OverlayRenderPayload | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const [active, setActive] = useState(false); // cursor over bar / dragging
+
+  const payloadRef = useRef<OverlayRenderPayload | null>(null);
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const monitorRef = useRef({ x: 0, y: 0, scale: 1 });
+  const interactiveRef = useRef(false);
   const drag = useRef<{ mx: number; my: number; x: number; y: number } | null>(
     null,
   );
 
-  // Click-through by default (CRITICAL: a full-screen window that isn't
-  // click-through captures every click and freezes the whole desktop), then
-  // cover the active monitor.
+  // Toggle window click-through (de-duped). interactive === !ignoreCursorEvents.
+  const setInteractive = useCallback(async (interactive: boolean) => {
+    if (interactiveRef.current === interactive) return;
+    interactiveRef.current = interactive;
+    try {
+      await getCurrentWindow().setIgnoreCursorEvents(!interactive);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // Mount: click-through first (a non-click-through full-screen window captures
+  // every click and freezes the desktop), then cover the active monitor and
+  // cache its geometry for the cursor hit-test.
   useEffect(() => {
     const win = getCurrentWindow();
     void (async () => {
@@ -44,6 +65,11 @@ export function OverlayStatsBar() {
         await win.setIgnoreCursorEvents(true);
         const monitor = await currentMonitor();
         if (!monitor) return;
+        monitorRef.current = {
+          x: monitor.position.x,
+          y: monitor.position.y,
+          scale: monitor.scaleFactor,
+        };
         await win.setSize(
           new PhysicalSize(monitor.size.width, monitor.size.height),
         );
@@ -56,15 +82,51 @@ export function OverlayStatsBar() {
     })();
   }, []);
 
-  // Escape always exits reposition mode (a safety hatch while interactive).
+  // Cursor poll: the bar becomes grabbable (drops click-through) only while the
+  // cursor is over it, then snaps back to click-through - so it never eats game
+  // clicks and can't get stuck capturing input. While dragging it stays
+  // interactive regardless of where the cursor roams.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") void emitOverlayEditDone();
+    let disposed = false;
+    let timer = 0;
+    const tick = async () => {
+      if (disposed) return;
+      try {
+        if (drag.current) {
+          if (!disposed) setActive(true);
+          await setInteractive(true);
+        } else {
+          let over = false;
+          const bar = barRef.current;
+          if (bar && payloadRef.current?.enabled) {
+            const r = bar.getBoundingClientRect();
+            const m = monitorRef.current;
+            const c = await boostCursorPos();
+            const cx = (c.x - m.x) / m.scale;
+            const cy = (c.y - m.y) / m.scale;
+            over =
+              cx >= r.left - GRAB_PAD &&
+              cx <= r.right + GRAB_PAD &&
+              cy >= r.top - GRAB_PAD &&
+              cy <= r.bottom + GRAB_PAD;
+          }
+          if (!disposed) setActive(over);
+          await setInteractive(over);
+        }
+      } catch {
+        /* ignore */
+      }
+      if (!disposed) timer = window.setTimeout(() => void tick(), POLL_MS);
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    void tick();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      void setInteractive(false);
+    };
+  }, [setInteractive]);
 
+  // Render snapshots from the main window.
   const shownRef = useRef(false);
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -72,22 +134,20 @@ export function OverlayStatsBar() {
     void listen<OverlayRenderPayload>(OVERLAY_RENDER_EVENT, async (event) => {
       if (disposed) return;
       const p = event.payload;
+      payloadRef.current = p;
       setPayload(p);
-      if (!p.editing) setDragPos(null);
 
       const win = getCurrentWindow();
-      // ALWAYS keep click-through synced to editing (idempotent). Interactive
-      // only while repositioning; click-through every other time so the overlay
-      // never captures game/desktop clicks. (Set before show.)
-      try {
-        await win.setIgnoreCursorEvents(!p.editing);
-      } catch {
-        /* ignore */
-      }
-
       const wantShown = p.enabled && p.metrics.length > 0;
       if (wantShown !== shownRef.current) {
         shownRef.current = wantShown;
+        if (!wantShown) {
+          // Hiding: abandon any drag and go click-through.
+          drag.current = null;
+          setDragPos(null);
+          setActive(false);
+          await setInteractive(false);
+        }
         try {
           if (wantShown) await win.show();
           else await win.hide();
@@ -103,9 +163,22 @@ export function OverlayStatsBar() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [setInteractive]);
 
-  // Drag handlers (window-level so the cursor can leave the bar).
+  // Escape: safety hatch - cancel a drag and force click-through.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      drag.current = null;
+      setDragPos(null);
+      setActive(false);
+      void setInteractive(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setInteractive]);
+
+  // Drag (window-level so the cursor can leave the bar).
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (!drag.current) return;
@@ -134,7 +207,6 @@ export function OverlayStatsBar() {
     return <div className="h-screen w-screen bg-transparent" />;
   }
 
-  const editing = payload.editing;
   const posStyle: React.CSSProperties =
     dragPos !== null
       ? { position: "absolute", left: dragPos.x, top: dragPos.y }
@@ -142,8 +214,9 @@ export function OverlayStatsBar() {
         ? { position: "absolute", left: payload.customX, top: payload.customY }
         : anchorStyle(payload.position);
 
+  const dragging = drag.current !== null;
+
   const onBarMouseDown = (e: React.MouseEvent) => {
-    if (!editing) return;
     e.preventDefault();
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     drag.current = { mx: e.clientX, my: e.clientY, x: rect.left, y: rect.top };
@@ -154,13 +227,17 @@ export function OverlayStatsBar() {
     <div className="relative h-screen w-screen overflow-hidden bg-transparent">
       <div style={posStyle}>
         <div
+          ref={barRef}
           onMouseDown={onBarMouseDown}
           style={{
-            cursor: editing ? "grab" : "default",
-            padding: editing ? 6 : 0,
+            cursor: dragging ? "grabbing" : active ? "grab" : "default",
+            padding: active ? 6 : 0,
             borderRadius: 10,
-            border: editing ? "1px dashed rgba(255,255,255,0.5)" : "none",
-            background: editing ? "rgba(255,255,255,0.06)" : "transparent",
+            border: active
+              ? "1px dashed rgba(255,255,255,0.55)"
+              : "1px dashed transparent",
+            background: active ? "rgba(255,255,255,0.06)" : "transparent",
+            transition: "background 120ms, padding 120ms",
           }}
         >
           <OverlayBar
@@ -172,25 +249,17 @@ export function OverlayStatsBar() {
           />
         </div>
 
-        {editing && (
-          <div className="mt-2 flex items-center gap-2">
+        {active && (
+          <div className="mt-2 flex justify-center">
             <span
-              className="rounded px-1.5 py-1 text-[10px]"
+              className="rounded px-2 py-1 text-[10px]"
               style={{
-                background: "rgba(0,0,0,0.7)",
-                color: "rgba(255,255,255,0.7)",
+                background: "rgba(0,0,0,0.72)",
+                color: "rgba(255,255,255,0.85)",
               }}
             >
-              Drag to position
+              Drag to move · Esc to lock
             </span>
-            <button
-              type="button"
-              onClick={() => void emitOverlayEditDone()}
-              className="rounded px-2.5 py-1 text-[10.5px] font-semibold"
-              style={{ background: "#f5f5f5", color: "#0a0a0a" }}
-            >
-              Done
-            </button>
           </div>
         )}
       </div>

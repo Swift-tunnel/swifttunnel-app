@@ -11,6 +11,7 @@ import type {
   ServerListResponse,
   LatencyEntry,
   PerformanceMetricsResponse,
+  CursorPosResponse,
   SystemInfoResponse,
   SystemMemorySnapshot,
   RamCleanResultResponse,
@@ -94,6 +95,9 @@ export const serverSmartSelect = (regionId: string) =>
 
 export const boostGetMetrics = () =>
   invoke<PerformanceMetricsResponse>("boost_get_metrics");
+
+export const boostCursorPos = () =>
+  invoke<CursorPosResponse>("boost_cursor_pos");
 
 export const boostGetSystemMemory = () =>
   invoke<SystemMemorySnapshot>("boost_get_system_memory");
