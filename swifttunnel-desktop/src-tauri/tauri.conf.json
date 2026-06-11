@@ -14,6 +14,7 @@
     "withGlobalTauri": false,
     "windows": [
       {
+        "label": "main",
         "title": "SwiftTunnel",
         "width": 1080,
         "height": 720,
@@ -23,6 +24,20 @@
         "center": true,
         "resizable": true,
         "fullscreen": false,
+        "visible": false
+      },
+      {
+        "label": "overlay",
+        "title": "SwiftTunnel Overlay",
+        "width": 340,
+        "height": 132,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "shadow": false,
         "visible": false
       }
     ],

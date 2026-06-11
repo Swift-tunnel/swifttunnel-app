@@ -23,6 +23,7 @@ import { useUpdaterStore } from "./stores/updaterStore";
 import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { runAppBootstrap } from "./lib/appBootstrap";
+import { useAutoRamClean } from "./lib/useAutoRamClean";
 import { reportError } from "./lib/errors";
 import { systemLaunchedFromStartup } from "./lib/commands";
 import {
@@ -66,6 +67,9 @@ function App() {
   const fetchVpnState = useVpnStore((s) => s.fetchState);
   const connectVpn = useVpnStore((s) => s.connect);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+
+  // Auto-clean RAM on game launch + show the in-game overlay (opt-in).
+  useAutoRamClean();
 
   useEffect(() => {
     let disposed = false;

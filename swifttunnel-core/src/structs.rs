@@ -59,6 +59,9 @@ pub struct SystemOptimizationConfig {
     pub mmcss_gaming_profile: bool,
     #[serde(default)]
     pub game_mode_enabled: bool,
+    /// Automatically clean RAM once a game launches.
+    #[serde(default)]
+    pub auto_ram_clean: bool,
 }
 
 fn default_roblox_window_width() -> u32 {
@@ -88,6 +91,7 @@ impl Default for SystemOptimizationConfig {
             timer_resolution_1ms: false,
             mmcss_gaming_profile: false,
             game_mode_enabled: false,
+            auto_ram_clean: false,
         }
     }
 }

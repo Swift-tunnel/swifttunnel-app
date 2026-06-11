@@ -18,6 +18,7 @@ const MOCK_SETTINGS: AppSettings = {
       timer_resolution_1ms: true,
       mmcss_gaming_profile: true,
       game_mode_enabled: true,
+      auto_ram_clean: false,
     },
     roblox_settings: {
       graphics_quality: "Manual",

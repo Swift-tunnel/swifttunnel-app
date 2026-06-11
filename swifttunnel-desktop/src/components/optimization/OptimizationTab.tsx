@@ -315,6 +315,66 @@ function OptimizationCategoryGroup({
   );
 }
 
+/** Auto-clean RAM when a game launches; result shows in the in-game overlay. */
+function AutoRamCleanRow() {
+  const config = useSettingsStore((s) => s.settings.config);
+  const updateSettings = useSettingsStore((s) => s.update);
+  const saveSettings = useSettingsStore((s) => s.save);
+  const updateConfig = useBoostStore((s) => s.updateConfig);
+  const [busy, setBusy] = useState(false);
+
+  const enabled = config.system_optimization.auto_ram_clean;
+
+  async function toggle(next: boolean) {
+    const nextConfig: Config = {
+      ...config,
+      system_optimization: {
+        ...config.system_optimization,
+        auto_ram_clean: next,
+      },
+    };
+    setBusy(true);
+    try {
+      const applied = await updateConfig(JSON.stringify(nextConfig));
+      updateSettings({ config: applied });
+      void saveSettings();
+    } catch {
+      // updateConfig surfaces errors through the boost store.
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="overflow-hidden rounded-[var(--radius-card)] surface-card">
+      <Row
+        label="Auto-clean RAM on game launch"
+        desc="Frees standby memory automatically when a game starts, with an in-game overlay."
+        tooltip={
+          <span className="flex items-center gap-1.5">
+            <CategoryChip category="System" />
+            <Tooltip content="When a game launches, SwiftTunnel trims standby/working-set memory (excluding the game) and shows a 'RAM freed' overlay in the corner of your screen.">
+              <span className="inline-flex">
+                <InfoIcon />
+              </span>
+            </Tooltip>
+          </span>
+        }
+      >
+        <div className="flex items-center gap-2">
+          {busy && <Spinner size={11} color="var(--color-accent-primary)" />}
+          <Toggle
+            enabled={enabled}
+            disabled={busy}
+            ariaLabel="Auto-clean RAM on game launch"
+            onChange={(next) => void toggle(next)}
+          />
+        </div>
+      </Row>
+    </div>
+  );
+}
+
 export function OptimizationTab() {
   const loadActive = useOptimizationStore((s) => s.loadActive);
 
@@ -331,6 +391,7 @@ export function OptimizationTab() {
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
       <MemoryCleaner />
+      <AutoRamCleanRow />
 
       {grouped.map((g) => (
         <OptimizationTierGroup key={g.tier} tier={g.tier} defs={g.defs} />

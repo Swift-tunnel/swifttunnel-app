@@ -230,6 +230,7 @@ export interface SystemOptimizationConfig {
   timer_resolution_1ms: boolean;
   mmcss_gaming_profile: boolean;
   game_mode_enabled: boolean;
+  auto_ram_clean: boolean;
 }
 
 export interface RobloxSettingsConfig {

@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
       timer_resolution_1ms: false,
       mmcss_gaming_profile: false,
       game_mode_enabled: false,
+      auto_ram_clean: false,
     },
     roblox_settings: {
       graphics_quality: "Automatic",
