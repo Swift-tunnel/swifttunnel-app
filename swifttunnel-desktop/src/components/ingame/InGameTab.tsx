@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { SectionHeader, Toggle, Chip } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useBoostStore } from "../../stores/boostStore";
 import type {
   Config,
   OverlayConfig,
@@ -33,6 +35,8 @@ export function InGameTab() {
   const config = useSettingsStore((s) => s.settings.config);
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
+  const updateConfig = useBoostStore((s) => s.updateConfig);
+  const [ramBusy, setRamBusy] = useState(false);
   const ov = config.overlay;
   const hasCustomPos = ov.custom_x !== null && ov.custom_y !== null;
 
@@ -40,6 +44,29 @@ export function InGameTab() {
     const next: Config = { ...config, overlay: { ...ov, ...p } };
     updateSettings({ config: next });
     void saveSettings();
+  }
+
+  // Auto-RAM-clean lives in system_optimization, which the backend applies -
+  // persist it through boost_update_config (same pattern as the Optimize tab)
+  // so a later config sync can't revert the toggle.
+  async function toggleAutoRamClean(next: boolean) {
+    const nextConfig: Config = {
+      ...config,
+      system_optimization: {
+        ...config.system_optimization,
+        auto_ram_clean: next,
+      },
+    };
+    setRamBusy(true);
+    try {
+      const applied = await updateConfig(JSON.stringify(nextConfig));
+      updateSettings({ config: applied });
+      void saveSettings();
+    } catch {
+      // updateConfig surfaces errors through the boost store.
+    } finally {
+      setRamBusy(false);
+    }
   }
 
   function toggleMetric(id: OverlayMetric) {
@@ -297,27 +324,36 @@ export function InGameTab() {
           </div>
         </section>
 
-        {/* When my game starts */}
-        <section className="surface-card overflow-hidden rounded-[var(--radius-card)]">
-          <div className="px-4 pb-1 pt-3">
-            <h4 className="eyebrow text-text-secondary">When my game starts</h4>
-          </div>
-          <div className="divide-y divide-[color:var(--color-border-subtle)]">
-            <ToggleRow
-              label="Monitor FPS and keep a session chart"
-              desc="Records FPS while you play so you can review it after the game."
-              enabled={ov.monitor_fps_chart}
-              onChange={(v) => patch({ monitor_fps_chart: v })}
-            />
-            <ToggleRow
-              label="Show max FPS after playing"
-              desc="A desktop notification with your session's peak FPS when the game closes."
-              enabled={ov.show_max_fps_message}
-              onChange={(v) => patch({ show_max_fps_message: v })}
-            />
-          </div>
-        </section>
       </div>
+
+      {/* When my game starts - independent of the overlay master toggle:
+          auto-RAM-clean (and its toast) works without the stats HUD. */}
+      <section className="surface-card overflow-hidden rounded-[var(--radius-card)]">
+        <div className="px-4 pb-1 pt-3">
+          <h4 className="eyebrow text-text-secondary">When my game starts</h4>
+        </div>
+        <div className="divide-y divide-[color:var(--color-border-subtle)]">
+          <ToggleRow
+            label="Auto-clean RAM on game launch"
+            desc="Frees memory when you join a game and shows a 'RAM freed' overlay."
+            enabled={config.system_optimization.auto_ram_clean}
+            disabled={ramBusy}
+            onChange={(v) => void toggleAutoRamClean(v)}
+          />
+          <ToggleRow
+            label="Monitor FPS and keep a session chart"
+            desc="Records FPS while you play so you can review it after the game."
+            enabled={ov.monitor_fps_chart}
+            onChange={(v) => patch({ monitor_fps_chart: v })}
+          />
+          <ToggleRow
+            label="Show max FPS after playing"
+            desc="A desktop notification with your session's peak FPS when the game closes."
+            enabled={ov.show_max_fps_message}
+            onChange={(v) => patch({ show_max_fps_message: v })}
+          />
+        </div>
+      </section>
     </div>
   );
 }
@@ -351,11 +387,13 @@ function ToggleRow({
   label,
   desc,
   enabled,
+  disabled,
   onChange,
 }: {
   label: string;
   desc: string;
   enabled: boolean;
+  disabled?: boolean;
   onChange: (v: boolean) => void;
 }) {
   return (
@@ -364,7 +402,12 @@ function ToggleRow({
         <div className="text-[12.5px] font-medium text-text-primary">{label}</div>
         <div className="text-[11px] text-text-muted">{desc}</div>
       </div>
-      <Toggle enabled={enabled} ariaLabel={label} onChange={onChange} />
+      <Toggle
+        enabled={enabled}
+        disabled={disabled}
+        ariaLabel={label}
+        onChange={onChange}
+      />
     </div>
   );
 }
