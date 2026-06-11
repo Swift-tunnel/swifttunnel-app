@@ -345,6 +345,38 @@ HardwareMediaKeyHandling,MediaSessionService,msEdgeBackgroundProcessing";
 #[cfg(not(windows))]
 fn apply_webview2_resource_tuning() {}
 
+/// Tail the Roblox log for game-server joins and emit `roblox-game-joined` to
+/// the frontend. The watcher (see `swifttunnel_core::roblox_watcher`) handles
+/// new sessions by switching to the newest log file, so it fires whether Roblox
+/// was already running or launched fresh.
+fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
+    use swifttunnel_core::roblox_watcher::{RobloxEvent, RobloxWatcher};
+    let _ = std::thread::Builder::new()
+        .name("roblox-game-join-watcher".into())
+        .spawn(move || {
+            let mut watcher: Option<RobloxWatcher> = None;
+            loop {
+                if watcher.is_none() {
+                    // `None` until the Roblox logs dir exists; cheap to retry.
+                    watcher = RobloxWatcher::new();
+                }
+                if let Some(ref w) = watcher {
+                    for event in w.poll() {
+                        match event {
+                            RobloxEvent::GameServerDetected { ip } => {
+                                let _ = app.emit(
+                                    events::ROBLOX_GAME_JOINED,
+                                    events::RobloxGameJoinedEvent { ip: ip.to_string() },
+                                );
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+            }
+        });
+}
+
 pub fn run() {
     logging::init();
     apply_webview2_resource_tuning();
@@ -530,6 +562,10 @@ pub fn run() {
                     }
                 }
             });
+
+            // Background: tail Roblox logs for game joins (drives the optional
+            // auto RAM clean + in-game overlay). Lightweight; app-lifetime.
+            spawn_roblox_game_join_watcher(app.handle().clone());
 
             // Spawn background task to refresh auth profile
             let app_handle = app.handle().clone();

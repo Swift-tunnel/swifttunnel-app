@@ -8,6 +8,14 @@ pub const THROUGHPUT_UPDATE: &str = "throughput-update";
 pub const PERFORMANCE_METRICS_UPDATE: &str = "performance-metrics-update";
 pub const RAM_CLEAN_PROGRESS: &str = "ram-clean-progress";
 pub const COUNTRY_BAN_BYPASS_UNAVAILABLE: &str = "country-ban-bypass-unavailable";
+pub const ROBLOX_GAME_JOINED: &str = "roblox-game-joined";
+
+/// Emitted when Roblox joins a game server (parsed from the Roblox log). Drives
+/// the optional auto RAM clean + in-game overlay, and game-aware UI.
+#[derive(Clone, Serialize)]
+pub struct RobloxGameJoinedEvent {
+    pub ip: String,
+}
 
 /// VPN state change event payload
 #[derive(Clone, Serialize)]
