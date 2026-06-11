@@ -15,6 +15,8 @@ interface RamOverlayPayload {
 
 export const RAM_OVERLAY_EVENT = "ram-overlay-show";
 
+const VISIBLE_MS = 5500;
+
 /**
  * Show the overlay toast from the main window: reveal the (hidden) overlay
  * window and emit the freed amount to it. Throws a clear error if the overlay
@@ -32,32 +34,27 @@ export async function showRamOverlay(freedMb: number): Promise<void> {
   await emitTo("overlay", RAM_OVERLAY_EVENT, { freedMb });
 }
 
-const VISIBLE_MS = 4200;
-
 function formatFreed(mb: number): { value: string; unit: string } {
-  const m = Math.max(0, Math.round(mb));
+  const m = Math.max(0, mb);
   if (m >= 1024) return { value: (m / 1024).toFixed(2), unit: "GB" };
-  return { value: String(m), unit: "MB" };
+  return { value: String(Math.round(m)), unit: "MB" };
 }
 
 /**
  * The in-game "RAM freed" toast. Lives in its own transparent, always-on-top,
- * click-through window (label "overlay"). It positions itself at the top-right
- * of the active monitor, shows the window when the main window emits
- * RAM_OVERLAY_EVENT, animates the freed amount, then hides itself.
+ * click-through window (label "overlay"); it matches the SwiftTunnel look
+ * (monochrome, surface-card). Positions itself at the top-right of the active
+ * monitor, shows on RAM_OVERLAY_EVENT, animates the freed amount, then hides.
  */
 export function RamOverlay() {
   const [freedMb, setFreedMb] = useState<number | null>(null);
   const [display, setDisplay] = useState(0);
   const hideTimer = useRef<number | null>(null);
 
-  // One-time window setup: make it click-through so it never eats game input.
   useEffect(() => {
-    const win = getCurrentWindow();
-    void win.setIgnoreCursorEvents(true);
+    void getCurrentWindow().setIgnoreCursorEvents(true);
   }, []);
 
-  // Show + position on demand.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
@@ -68,12 +65,12 @@ export function RamOverlay() {
         const monitor = await currentMonitor();
         if (!monitor) return;
         const size = await win.outerSize();
-        const margin = Math.round(24 * monitor.scaleFactor);
+        const margin = Math.round(28 * monitor.scaleFactor);
         const x = monitor.position.x + monitor.size.width - size.width - margin;
         const y = monitor.position.y + margin;
         await win.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
       } catch {
-        /* positioning is best-effort */
+        /* best-effort */
       }
     };
 
@@ -81,19 +78,16 @@ export function RamOverlay() {
       if (disposed) return;
       const mb = event.payload?.freedMb ?? 0;
       await positionTopRight();
-      const win = getCurrentWindow();
       try {
-        await win.show();
+        await getCurrentWindow().show();
       } catch {
         /* ignore */
       }
       setFreedMb(mb);
-
       if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
       hideTimer.current = window.setTimeout(() => {
         setFreedMb(null);
-        // Let the exit animation play before hiding the OS window.
-        window.setTimeout(() => void getCurrentWindow().hide(), 450);
+        window.setTimeout(() => void getCurrentWindow().hide(), 520);
       }, VISIBLE_MS);
     }).then((u) => {
       if (disposed) u();
@@ -107,17 +101,16 @@ export function RamOverlay() {
     };
   }, []);
 
-  // Count-up the number when a new value arrives.
+  // Count-up when a value arrives.
   useEffect(() => {
     if (freedMb === null) return;
     const target = Math.max(0, freedMb);
     const start = performance.now();
-    const dur = 1100;
+    const dur = 1400;
     let raf = 0;
     const tick = (now: number) => {
       const t = Math.min(1, (now - start) / dur);
-      // easeOutCubic
-      const eased = 1 - Math.pow(1 - t, 3);
+      const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
       setDisplay(target * eased);
       if (t < 1) raf = requestAnimationFrame(tick);
     };
@@ -126,60 +119,63 @@ export function RamOverlay() {
   }, [freedMb]);
 
   const shown = freedMb !== null;
-  const { value, unit } = formatFreed(display);
   const nothing = freedMb !== null && Math.max(0, freedMb) < 40;
+  const { value, unit } = formatFreed(display);
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-transparent">
-      <style>{ringKeyframes}</style>
+      <style>{keyframes}</style>
       <AnimatePresence>
         {shown && (
           <motion.div
             key="ram-toast"
-            initial={{ opacity: 0, x: 40, scale: 0.92 }}
+            initial={{ opacity: 0, x: 36, scale: 0.96 }}
             animate={{ opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, x: 24, scale: 0.96 }}
-            transition={{ type: "spring", stiffness: 420, damping: 30 }}
-            className="flex items-center gap-3 rounded-2xl px-4 py-3"
+            exit={{ opacity: 0, x: 20, scale: 0.97 }}
+            transition={{ type: "spring", stiffness: 360, damping: 32 }}
+            className="relative flex items-center gap-3 overflow-hidden"
             style={{
-              margin: 6,
-              background:
-                "linear-gradient(135deg, rgba(14,18,30,0.94), rgba(9,12,20,0.94))",
-              border: "1px solid rgba(70,140,255,0.35)",
+              margin: 8,
+              padding: "12px 16px 12px 13px",
+              borderRadius: "var(--radius-card)",
+              background: "rgba(20,20,20,0.96)",
+              border: "1px solid rgba(255,255,255,0.10)",
               boxShadow:
-                "0 8px 30px rgba(0,0,0,0.5), 0 0 0 1px rgba(70,140,255,0.10), 0 0 28px rgba(60,130,255,0.28)",
-              backdropFilter: "blur(10px)",
+                "0 10px 34px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.04), 0 0 24px rgba(255,255,255,0.05)",
+              backdropFilter: "blur(12px)",
             }}
           >
-            {/* Animated emblem */}
-            <div className="relative flex h-11 w-11 shrink-0 items-center justify-center">
-              <span style={ringStyle(0)} />
-              <span style={ringStyle(0.6)} />
+            {/* one-shot shimmer sweep */}
+            <span className="ram-shimmer" />
+
+            {/* Emblem */}
+            <div className="relative flex h-10 w-10 shrink-0 items-center justify-center">
+              <span style={ringStyle} />
               <motion.div
-                initial={{ rotate: -25, scale: 0.7 }}
-                animate={{ rotate: 0, scale: 1 }}
-                transition={{ type: "spring", stiffness: 300, damping: 18 }}
-                className="relative flex h-9 w-9 items-center justify-center rounded-xl"
+                initial={{ scale: 0.7, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: "spring", stiffness: 320, damping: 18 }}
+                className="relative flex h-9 w-9 items-center justify-center"
                 style={{
-                  background:
-                    "radial-gradient(circle at 30% 25%, rgba(90,160,255,0.9), rgba(40,90,210,0.85))",
-                  boxShadow: "0 0 16px rgba(70,140,255,0.6)",
+                  borderRadius: 10,
+                  background: "rgba(255,255,255,0.07)",
+                  border: "1px solid rgba(255,255,255,0.12)",
                 }}
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none">
                   <rect
                     x="3.5"
                     y="6.5"
                     width="17"
                     height="11"
                     rx="2"
-                    stroke="white"
-                    strokeWidth="1.6"
+                    stroke="#f5f5f5"
+                    strokeWidth="1.5"
                   />
                   <path
                     d="M7 6.5V4M12 6.5V4M17 6.5V4M7 20v-2.5M12 20v-2.5M17 20v-2.5"
-                    stroke="white"
-                    strokeWidth="1.6"
+                    stroke="#f5f5f5"
+                    strokeWidth="1.5"
                     strokeLinecap="round"
                   />
                 </svg>
@@ -189,35 +185,32 @@ export function RamOverlay() {
             {/* Text */}
             <div className="flex min-w-0 flex-col">
               <span
-                className="text-[10px] font-semibold uppercase tracking-[0.12em]"
-                style={{ color: "rgba(150,185,255,0.9)" }}
+                className="text-[9.5px] font-semibold uppercase tracking-[0.13em]"
+                style={{ color: "var(--color-text-muted)" }}
               >
                 {nothing ? "Memory Optimized" : "RAM Freed"}
               </span>
               {!nothing && (
-                <span className="flex items-baseline gap-1 leading-none">
+                <span className="mt-0.5 flex items-baseline gap-1 leading-none">
                   <span
-                    className="text-[24px] font-bold tabular-nums"
-                    style={{
-                      color: "#eaf1ff",
-                      textShadow: "0 0 18px rgba(80,150,255,0.55)",
-                    }}
+                    className="text-[23px] font-bold tabular-nums"
+                    style={{ color: "var(--color-text-primary)" }}
                   >
                     {value}
                   </span>
                   <span
                     className="text-[12px] font-semibold"
-                    style={{ color: "rgba(150,185,255,0.95)" }}
+                    style={{ color: "var(--color-text-muted)" }}
                   >
                     {unit}
                   </span>
                 </span>
               )}
               <span
-                className="mt-0.5 text-[10.5px]"
-                style={{ color: "rgba(160,175,205,0.75)" }}
+                className="mt-0.5 text-[10px]"
+                style={{ color: "rgba(255,255,255,0.32)" }}
               >
-                {nothing ? "System memory trimmed" : "released by SwiftTunnel"}
+                SwiftTunnel
               </span>
             </div>
           </motion.div>
@@ -227,19 +220,31 @@ export function RamOverlay() {
   );
 }
 
-function ringStyle(delay: number): React.CSSProperties {
-  return {
-    position: "absolute",
-    inset: 0,
-    borderRadius: 14,
-    border: "1.5px solid rgba(90,160,255,0.55)",
-    animation: `swiftRamRing 1.8s ease-out ${delay}s infinite`,
-  };
-}
+const ringStyle: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  borderRadius: 12,
+  border: "1.5px solid rgba(255,255,255,0.35)",
+  animation: "swiftRamRing 2s ease-out 0.15s 2",
+};
 
-const ringKeyframes = `
+const keyframes = `
 @keyframes swiftRamRing {
-  0% { transform: scale(0.7); opacity: 0.7; }
+  0% { transform: scale(0.7); opacity: 0.55; }
   70% { opacity: 0; }
-  100% { transform: scale(1.8); opacity: 0; }
+  100% { transform: scale(1.75); opacity: 0; }
+}
+.ram-shimmer {
+  position: absolute;
+  top: 0; bottom: 0; left: -40%;
+  width: 35%;
+  background: linear-gradient(100deg, transparent, rgba(255,255,255,0.10), transparent);
+  transform: skewX(-18deg);
+  animation: swiftRamShimmer 1.5s ease-out 0.25s 1;
+  pointer-events: none;
+}
+@keyframes swiftRamShimmer {
+  0% { left: -40%; opacity: 0; }
+  25% { opacity: 1; }
+  100% { left: 130%; opacity: 0; }
 }`;
