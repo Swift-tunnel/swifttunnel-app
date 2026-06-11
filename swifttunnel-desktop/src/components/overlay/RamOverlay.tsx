@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
-import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
+import {
+  currentMonitor,
+  getAllWindows,
+  getCurrentWindow,
+} from "@tauri-apps/api/window";
+import { emitTo, listen } from "@tauri-apps/api/event";
 
 /** Payload emitted by the main window after an auto RAM clean. */
 interface RamOverlayPayload {
@@ -10,6 +14,23 @@ interface RamOverlayPayload {
 }
 
 export const RAM_OVERLAY_EVENT = "ram-overlay-show";
+
+/**
+ * Show the overlay toast from the main window: reveal the (hidden) overlay
+ * window and emit the freed amount to it. Throws a clear error if the overlay
+ * window doesn't exist (e.g. SwiftTunnel wasn't fully restarted after the
+ * config that adds it), so callers can surface that instead of failing silently.
+ */
+export async function showRamOverlay(freedMb: number): Promise<void> {
+  const overlay = (await getAllWindows()).find((w) => w.label === "overlay");
+  if (!overlay) {
+    throw new Error(
+      "Overlay window not found - fully quit and reopen SwiftTunnel so the new overlay window loads.",
+    );
+  }
+  await overlay.show();
+  await emitTo("overlay", RAM_OVERLAY_EVENT, { freedMb });
+}
 
 const VISIBLE_MS = 4200;
 

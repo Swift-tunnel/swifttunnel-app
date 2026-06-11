@@ -9,6 +9,7 @@ import {
   Chip,
 } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
+import { showRamOverlay } from "../overlay/RamOverlay";
 import { useOptimizationStore } from "../../stores/optimizationStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
@@ -321,9 +322,25 @@ function AutoRamCleanRow() {
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
   const updateConfig = useBoostStore((s) => s.updateConfig);
+  const addToast = useToastStore((s) => s.addToast);
   const [busy, setBusy] = useState(false);
 
   const enabled = config.system_optimization.auto_ram_clean;
+
+  async function preview() {
+    try {
+      await showRamOverlay(4096);
+      addToast({
+        type: "info",
+        message: "Test overlay sent - check the top-right of your screen.",
+      });
+    } catch (e) {
+      addToast({
+        type: "error",
+        message: e instanceof Error ? e.message : "Could not show the overlay.",
+      });
+    }
+  }
 
   async function toggle(next: boolean) {
     const nextConfig: Config = {
@@ -362,6 +379,17 @@ function AutoRamCleanRow() {
         }
       >
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void preview()}
+            className="rounded-[6px] px-2 py-1 text-[10.5px] font-medium text-text-muted transition-colors hover:text-text-primary"
+            style={{
+              border: "1px solid var(--color-border-subtle)",
+              backgroundColor: "var(--color-bg-elevated)",
+            }}
+          >
+            Preview
+          </button>
           {busy && <Spinner size={11} color="var(--color-accent-primary)" />}
           <Toggle
             enabled={enabled}

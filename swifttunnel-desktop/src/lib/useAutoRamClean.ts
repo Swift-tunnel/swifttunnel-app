@@ -1,19 +1,22 @@
 import { useEffect, useRef } from "react";
-import { emit } from "@tauri-apps/api/event";
 import { useBoostStore } from "../stores/boostStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { boostCleanRam } from "./commands";
-import { RAM_OVERLAY_EVENT } from "../components/overlay/RamOverlay";
+import { showRamOverlay } from "../components/overlay/RamOverlay";
 
 /**
  * When "Auto RAM Clean" is enabled, clean RAM once each time a game launches
  * (robloxRunning false -> true) and surface the result in the always-on-top
- * overlay window. Runs in the main window only; the webview keeps processing
- * metric events even when minimized to tray, so it fires while the user is
- * in-game.
+ * overlay window.
+ *
+ * `robloxRunning` only updates while something polls metrics (BoostTab/GamesTab)
+ * - which it isn't when the user is in-game with the window minimized. So while
+ * the feature is enabled we poll metrics ourselves; the webview keeps running
+ * timers even minimized to tray, so the false->true edge is caught in-game.
  */
 export function useAutoRamClean() {
   const robloxRunning = useBoostStore((s) => s.robloxRunning);
+  const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
   const autoClean = useSettingsStore(
     (s) => s.settings.config.system_optimization.auto_ram_clean,
   );
@@ -21,6 +24,14 @@ export function useAutoRamClean() {
   // startup just because a game was already running.
   const prev = useRef<boolean | undefined>(undefined);
   const busy = useRef(false);
+
+  // Keep robloxRunning fresh in the background while the feature is on.
+  useEffect(() => {
+    if (!autoClean) return;
+    void fetchMetrics();
+    const id = window.setInterval(() => void fetchMetrics(), 2500);
+    return () => window.clearInterval(id);
+  }, [autoClean, fetchMetrics]);
 
   useEffect(() => {
     const was = prev.current;
@@ -34,7 +45,7 @@ export function useAutoRamClean() {
     void (async () => {
       try {
         const result = await boostCleanRam();
-        await emit(RAM_OVERLAY_EVENT, { freedMb: result.freed_mb });
+        await showRamOverlay(result.freed_mb);
       } catch {
         // Auto-clean is best-effort; never surface an error in-game.
       } finally {
