@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window and the in-game overlay window",
-  "windows": ["main", "overlay"],
+  "windows": ["main", "overlay", "overlay-stats"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

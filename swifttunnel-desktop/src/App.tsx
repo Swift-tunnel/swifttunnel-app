@@ -25,6 +25,7 @@ import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { runAppBootstrap } from "./lib/appBootstrap";
 import { useAutoRamClean } from "./lib/useAutoRamClean";
+import { useOverlayDriver } from "./lib/useOverlayDriver";
 import { reportError } from "./lib/errors";
 import { systemLaunchedFromStartup } from "./lib/commands";
 import {
@@ -73,6 +74,8 @@ function App() {
 
   // Auto-clean RAM on game launch + show the in-game overlay (opt-in).
   useAutoRamClean();
+  // Drive the in-game stats overlay window when enabled.
+  useOverlayDriver();
 
   useEffect(() => {
     let disposed = false;

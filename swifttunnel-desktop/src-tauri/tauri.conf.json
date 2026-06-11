@@ -39,6 +39,20 @@
         "focus": false,
         "shadow": false,
         "visible": false
+      },
+      {
+        "label": "overlay-stats",
+        "title": "SwiftTunnel In-Game Overlay",
+        "width": 600,
+        "height": 200,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "shadow": false,
+        "visible": false
       }
     ],
     "security": {
