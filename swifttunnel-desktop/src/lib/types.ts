@@ -250,6 +250,45 @@ export interface NetworkConfig {
   firewall_fix: boolean;
 }
 
+export type OverlayMetric =
+  | "fps"
+  | "time"
+  | "playtime"
+  | "battery"
+  | "upload"
+  | "download"
+  | "cpu"
+  | "cpu_temp"
+  | "gpu"
+  | "gpu_temp"
+  | "ram"
+  | "disk";
+
+export type OverlaySize = "small" | "medium" | "large";
+export type OverlayStyle = "straight" | "layered";
+export type OverlayPosition =
+  | "top-left"
+  | "top-center"
+  | "top-right"
+  | "center-left"
+  | "center"
+  | "center-right"
+  | "bottom-left"
+  | "bottom-center"
+  | "bottom-right";
+
+export interface OverlayConfig {
+  enabled: boolean;
+  metrics: OverlayMetric[];
+  size: OverlaySize;
+  style: OverlayStyle;
+  color: string;
+  position: OverlayPosition;
+  hotkey: string;
+  monitor_fps_chart: boolean;
+  show_max_fps_message: boolean;
+}
+
 export interface Config {
   profile: OptimizationProfile;
   system_optimization: SystemOptimizationConfig;
@@ -257,6 +296,7 @@ export interface Config {
   network_settings: NetworkConfig;
   auto_start_with_roblox: boolean;
   show_overlay: boolean;
+  overlay: OverlayConfig;
 }
 
 // ── Network Tests ──
@@ -495,6 +535,7 @@ export type TabId =
   | "connect"
   | "optimization"
   | "games"
+  | "ingame"
   | "network"
   | "repair"
   | "settings";

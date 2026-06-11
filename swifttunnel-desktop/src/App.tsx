@@ -11,6 +11,7 @@ import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
 import { OptimizationTab } from "./components/optimization/OptimizationTab";
 import { GamesTab } from "./components/games/GamesTab";
+import { InGameTab } from "./components/ingame/InGameTab";
 import { NetworkTab } from "./components/network/NetworkTab";
 import { RepairTab } from "./components/repair/RepairTab";
 import { SettingsTab } from "./components/settings/SettingsTab";
@@ -41,6 +42,8 @@ function tabComponent(tab: TabId) {
       return <OptimizationTab />;
     case "games":
       return <GamesTab />;
+    case "ingame":
+      return <InGameTab />;
     case "network":
       return <NetworkTab />;
     case "repair":
@@ -341,6 +344,7 @@ function App() {
         "4": "network",
         "5": "repair",
         "6": "settings",
+        "7": "ingame",
       };
       const tab = map[event.key];
       if (!tab) return;

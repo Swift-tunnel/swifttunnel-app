@@ -25,6 +25,8 @@ pub struct Config {
     pub network_settings: NetworkConfig,
     pub auto_start_with_roblox: bool,
     pub show_overlay: bool,
+    #[serde(default)]
+    pub overlay: OverlayConfig,
 }
 
 impl Default for Config {
@@ -36,6 +38,56 @@ impl Default for Config {
             network_settings: NetworkConfig::default(),
             auto_start_with_roblox: false,
             show_overlay: true,
+            overlay: OverlayConfig::default(),
+        }
+    }
+}
+
+/// In-game overlay (stats bar) settings, surfaced in the "In-Game Settings" tab.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlayConfig {
+    /// Master on/off for the in-game stats overlay.
+    pub enabled: bool,
+    /// Selected metrics, in display order (max 12). Ids: fps, time, playtime,
+    /// battery, upload, download, cpu, cpu_temp, gpu, gpu_temp, ram, disk.
+    pub metrics: Vec<String>,
+    /// "small" | "medium" | "large".
+    pub size: String,
+    /// "straight" | "layered".
+    pub style: String,
+    /// Hex accent color for the live values.
+    pub color: String,
+    /// One of nine anchors: top-left/top-center/top-right/center-left/center/
+    /// center-right/bottom-left/bottom-center/bottom-right.
+    pub position: String,
+    /// Global toggle hotkey, e.g. "Ctrl+Shift+O".
+    pub hotkey: String,
+    /// When a game starts: keep an FPS chart for the session.
+    pub monitor_fps_chart: bool,
+    /// After a game: show a desktop message with the session's max FPS.
+    pub show_max_fps_message: bool,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            metrics: vec![
+                "fps".into(),
+                "time".into(),
+                "playtime".into(),
+                "cpu".into(),
+                "ram".into(),
+                "download".into(),
+            ],
+            size: "small".into(),
+            style: "straight".into(),
+            color: "#fafafa".into(),
+            position: "top-left".into(),
+            hotkey: "Ctrl+Shift+O".into(),
+            monitor_fps_chart: false,
+            show_max_fps_message: false,
         }
     }
 }
