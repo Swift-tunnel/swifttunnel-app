@@ -7225,6 +7225,17 @@ where
         tcp_flags.is_some_and(|flags| (flags & 0x02) != 0 && (flags & 0x10) == 0);
     let cache_key = (src_ip, src_port, protocol);
 
+    // A launch-critical settings host or asset/CDN host (e.g. *.rbxcdn.com) that
+    // must stay DIRECT. For a known tunnel app, is_likely_game_traffic would
+    // otherwise relay all TCP, so honor the direct set here too — otherwise
+    // Route Assist relays textures/avatar-clothing fetches and they load slowly.
+    // TCP only (UDP gameplay is unaffected). The direct set is built per-mode in
+    // hosts.rs, so this is correct for Route Assist and country-ban bypass alike.
+    // These are deliberately NOT cached as Active below, so the flow is direct
+    // from its SYN and is never half-moved onto the relay mid-connection.
+    let dst_is_direct_tcp = protocol == Protocol::Tcp
+        && crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(dst_ip);
+
     // Phase 1: Check snapshot cache (fast path, O(1))
     //
     // IMPORTANT: This is process-based only. Destination-based speculative tunneling
@@ -7285,7 +7296,8 @@ where
                 false
             };
             let result =
-                super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
+                super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
+                    && !dst_is_direct_tcp;
             if result && protocol == Protocol::Tcp && api_tunneling && dst_port == 443 {
                 maybe_learn_direct_only_destination(data, ip_start, transport_start, dst_ip);
             }
@@ -7332,7 +7344,7 @@ where
     //
     // By only caching true results, we ensure that if a process wasn't found,
     // we keep trying on subsequent packets until it IS found.
-    if is_tunnel_app && inline_cache.len() < 10000 {
+    if is_tunnel_app && !dst_is_direct_tcp && inline_cache.len() < 10000 {
         inline_cache.insert(cache_key, InlineCacheEntry::Active);
     }
 
@@ -7460,8 +7472,12 @@ where
             false
         }
     } else {
-        // Process IS a tunnel app - trust it, tunnel all its game traffic
+        // Process IS a tunnel app - tunnel its game traffic, but keep
+        // launch-critical settings + asset/CDN TCP flows direct (dst_is_direct_tcp).
+        // Those must never ride the relay even for a known tunnel app, or Route
+        // Assist relays textures/avatar clothing and they load slowly.
         super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
+            && !dst_is_direct_tcp
     };
 
     if protocol == Protocol::Udp && more_fragments {

@@ -67,26 +67,17 @@ const DIRECT_ONLY_BOOTSTRAP_DOMAINS: &[&str] = &[
     "versioncompatibility.api.roblox.com",
 ];
 
-// In country-ban bypass mode, relay the Roblox control-plane hosts that decide
-// discovery/search/login/join, but keep heavy CDN/asset hosts direct whenever
-// their IPs do not overlap relayed hosts.
-const COUNTRY_BAN_DIRECT_DOMAINS: &[&str] = &[
+// Heavy Roblox CDN/asset hosts that ride the user's DIRECT path (not the relay)
+// in BOTH Route Assist and country-ban bypass: textures, avatar clothing,
+// thumbnails, cutscene/model payloads. These named roblox.com endpoints are the
+// asset entry points that aren't under rbxcdn; every `*.rbxcdn.com` host also
+// qualifies via `is_asset_direct_domain`, so we don't have to chase each CDN
+// shard name (c#, t#, tr, fts, images, css, ...) forever.
+const ASSET_DIRECT_ROBLOX_DOMAINS: &[&str] = &[
     "assetgame.roblox.com",
     "assetdelivery.roblox.com",
     "thumbnails.roblox.com",
     "setup.roblox.com",
-    "setup.rbxcdn.com",
-    "apis.rbxcdn.com",
-    "js.rbxcdn.com",
-    "static.rbxcdn.com",
-    "c0.rbxcdn.com",
-    "c1.rbxcdn.com",
-    "c2.rbxcdn.com",
-    "c3.rbxcdn.com",
-    "c4.rbxcdn.com",
-    "c5.rbxcdn.com",
-    "c6.rbxcdn.com",
-    "c7.rbxcdn.com",
 ];
 
 /// Exact Roblox hostnames repaired when API tunneling is enabled.
@@ -135,6 +126,23 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     "c5.rbxcdn.com",
     "c6.rbxcdn.com",
     "c7.rbxcdn.com",
+    // Thumbnail/avatar-image and asset-payload CDN edges. assetdelivery returns
+    // payload URLs on fts.rbxcdn.com; thumbnails returns image URLs on
+    // tr/t0-t7.rbxcdn.com. Pinning these keeps cutscene/texture/clothing loads
+    // off the relay under Route Assist (any other *.rbxcdn.com host is still
+    // caught direct at runtime via SNI - see is_asset_direct_domain).
+    "tr.rbxcdn.com",
+    "fts.rbxcdn.com",
+    "t0.rbxcdn.com",
+    "t1.rbxcdn.com",
+    "t2.rbxcdn.com",
+    "t3.rbxcdn.com",
+    "t4.rbxcdn.com",
+    "t5.rbxcdn.com",
+    "t6.rbxcdn.com",
+    "t7.rbxcdn.com",
+    "images.rbxcdn.com",
+    "css.rbxcdn.com",
     "cdn.arkoselabs.com",
     "roblox-api.arkoselabs.com",
 ];
@@ -185,11 +193,13 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
     Ok(())
 }
 
-/// Split resolved overrides into (route-assist active, direct-only) IP sets.
+/// Split resolved overrides into (relayed-active, direct) IP sets.
 ///
-/// Country-ban bypass relays control-plane hosts and leaves asset/CDN hosts
-/// direct unless a shared IP means relaying is safer. Otherwise the
-/// launch-critical hosts stay direct to avoid flaky-relay startup failures.
+/// Both modes keep heavy asset/CDN hosts DIRECT (textures, avatar clothing,
+/// thumbnails, cutscene payloads). They differ on the launch-critical settings
+/// hosts: Route Assist keeps them direct (startup reliability), country-ban
+/// bypass relays them to escape the block. Control-plane (discovery/search/
+/// login/join/region) relays in both.
 fn classify_bootstrap_ips(
     overrides: &[HostOverride],
     country_ban_bypass: bool,
@@ -199,7 +209,7 @@ fn classify_bootstrap_ips(
     } else {
         (
             route_assist_active_ips_from_overrides(overrides),
-            direct_only_ips_from_overrides(overrides),
+            route_assist_direct_ips_from_overrides(overrides),
         )
     }
 }
@@ -218,21 +228,24 @@ pub fn is_direct_only_bootstrap_ip(ip: Ipv4Addr) -> bool {
         .unwrap_or(false)
 }
 
-/// Record that `ip` serves a launch-critical direct-only host, learned from the
-/// TLS SNI of a flow Route Assist had already relayed (because the connect-time
-/// hosts pin for that domain was missing, or system DNS picked a shared CDN
-/// edge that was pinned as active for another Roblox host).
+/// Record that `ip` serves a host that should stay DIRECT under Route Assist —
+/// either a launch-critical settings host or a heavy asset/CDN host (any
+/// `*.rbxcdn.com`) — learned from the TLS SNI of a flow Route Assist had already
+/// relayed (because the connect-time pin was missing, or system DNS handed out a
+/// shard not in our list). This is the "stop chasing CDN shard names" path: any
+/// `*.rbxcdn.com` flow teaches its IP as direct for next time.
 ///
 /// The flow that taught us keeps its current route — half-moving an
 /// established TCP connection would break it. Only NEW connections to `ip` go
-/// direct, which is exactly what a Roblox bootstrapper's retry needs.
+/// direct, which is exactly what a Roblox retry/next-asset-fetch needs.
 ///
 /// Returns `true` only when `ip` was newly recorded. Returns `false` (and
-/// learns nothing) when `server_name` is not one of the exact
-/// `DIRECT_ONLY_BOOTSTRAP_DOMAINS`, or while country-ban bypass is active —
-/// that mode deliberately relays these hosts to escape an ISP block.
+/// learns nothing) when `server_name` is neither a launch-critical settings
+/// host nor an asset/CDN host, or while country-ban bypass is active — that mode
+/// relays settings to escape the block and routes assets by the reachability-
+/// filtered pins instead, so learned-direct must not override it.
 pub fn learn_direct_only_bootstrap_ip(server_name: &str, ip: Ipv4Addr) -> bool {
-    if !is_direct_only_bootstrap_domain(server_name) {
+    if !is_route_assist_direct_domain(server_name) {
         return false;
     }
     if COUNTRY_BAN_BYPASS_ROUTING.load(Ordering::Relaxed) {
@@ -607,20 +620,23 @@ fn set_direct_only_bootstrap_ips(ips: HashSet<Ipv4Addr>) {
 }
 
 fn route_assist_active_ips_from_overrides(overrides: &[HostOverride]) -> HashSet<Ipv4Addr> {
-    let direct_only_ips = direct_only_ips_from_overrides(overrides);
+    let direct_ips = route_assist_direct_ips_from_overrides(overrides);
 
     overrides
         .iter()
-        .filter(|entry| !is_direct_only_bootstrap_domain(&entry.domain))
-        .filter(|entry| !direct_only_ips.contains(&entry.ip))
+        .filter(|entry| !is_route_assist_direct_domain(&entry.domain))
+        .filter(|entry| !direct_ips.contains(&entry.ip))
         .map(|entry| entry.ip)
         .collect()
 }
 
-fn direct_only_ips_from_overrides(overrides: &[HostOverride]) -> HashSet<Ipv4Addr> {
+/// Direct under Route Assist: the launch-critical settings hosts PLUS every
+/// asset/CDN host. Only control-plane hosts relay. Keeping asset/CDN direct is
+/// what fixes textures/avatar-clothing loading slowly with Route Assist on.
+fn route_assist_direct_ips_from_overrides(overrides: &[HostOverride]) -> HashSet<Ipv4Addr> {
     overrides
         .iter()
-        .filter(|entry| is_direct_only_bootstrap_domain(&entry.domain))
+        .filter(|entry| is_route_assist_direct_domain(&entry.domain))
         .map(|entry| entry.ip)
         .collect()
 }
@@ -630,13 +646,13 @@ fn country_ban_split_ips_from_overrides(
 ) -> (HashSet<Ipv4Addr>, HashSet<Ipv4Addr>) {
     let active: HashSet<Ipv4Addr> = overrides
         .iter()
-        .filter(|entry| !is_country_ban_direct_domain(&entry.domain))
+        .filter(|entry| !is_asset_direct_domain(&entry.domain))
         .map(|entry| entry.ip)
         .collect();
 
     let direct_only = overrides
         .iter()
-        .filter(|entry| is_country_ban_direct_domain(&entry.domain))
+        .filter(|entry| is_asset_direct_domain(&entry.domain))
         .map(|entry| entry.ip)
         .filter(|ip| !active.contains(ip))
         .collect();
@@ -650,10 +666,20 @@ fn is_direct_only_bootstrap_domain(domain: &str) -> bool {
         .any(|direct_only| domain.eq_ignore_ascii_case(direct_only))
 }
 
-fn is_country_ban_direct_domain(domain: &str) -> bool {
-    COUNTRY_BAN_DIRECT_DOMAINS
+/// Heavy asset/CDN host kept direct in both modes: any `*.rbxcdn.com` shard, or
+/// one of the named roblox.com asset entry points. The `*.rbxcdn.com` suffix
+/// match means new CDN shard names are covered without editing this list.
+fn is_asset_direct_domain(domain: &str) -> bool {
+    let d = domain.trim_end_matches('.');
+    ASSET_DIRECT_ROBLOX_DOMAINS
         .iter()
-        .any(|direct_only| domain.eq_ignore_ascii_case(direct_only))
+        .any(|asset| d.eq_ignore_ascii_case(asset))
+        || d.to_ascii_lowercase().ends_with(".rbxcdn.com")
+}
+
+/// Direct under Route Assist = launch-critical settings hosts + asset/CDN hosts.
+fn is_route_assist_direct_domain(domain: &str) -> bool {
+    is_direct_only_bootstrap_domain(domain) || is_asset_direct_domain(domain)
 }
 
 fn clear_bootstrap_ip_sets() {
@@ -914,7 +940,7 @@ mod tests {
             "c7.rbxcdn.com",
         ] {
             assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&raw_cdn_domain));
-            assert!(is_country_ban_direct_domain(raw_cdn_domain));
+            assert!(is_asset_direct_domain(raw_cdn_domain));
         }
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"captcha.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"cdn.arkoselabs.com"));
@@ -923,7 +949,7 @@ mod tests {
 
     #[test]
     fn domain_list_stays_allowlisted_and_exact() {
-        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 42);
+        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 54);
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"arkoselabs.com"));
@@ -963,15 +989,20 @@ mod tests {
         ];
 
         let active_ips = route_assist_active_ips_from_overrides(&overrides);
-        let direct_only_ips = direct_only_ips_from_overrides(&overrides);
+        let direct_ips = route_assist_direct_ips_from_overrides(&overrides);
 
+        // Launch-critical settings hosts stay direct.
         assert!(!active_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
         assert!(!active_ips.contains(&Ipv4Addr::new(128, 116, 46, 3)));
+        assert!(direct_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
+        assert!(direct_ips.contains(&Ipv4Addr::new(128, 116, 46, 3)));
+        // Control-plane (www) relays.
         assert!(active_ips.contains(&Ipv4Addr::new(128, 116, 121, 3)));
-        assert!(active_ips.contains(&Ipv4Addr::new(23, 61, 202, 142)));
-        assert!(direct_only_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
-        assert!(direct_only_ips.contains(&Ipv4Addr::new(128, 116, 46, 3)));
-        assert!(!direct_only_ips.contains(&Ipv4Addr::new(128, 116, 121, 3)));
+        assert!(!direct_ips.contains(&Ipv4Addr::new(128, 116, 121, 3)));
+        // Asset/CDN host (setup.rbxcdn.com) now stays DIRECT under Route Assist
+        // too (was previously relayed - the textures/clothing slow-load bug).
+        assert!(!active_ips.contains(&Ipv4Addr::new(23, 61, 202, 142)));
+        assert!(direct_ips.contains(&Ipv4Addr::new(23, 61, 202, 142)));
     }
 
     #[test]
@@ -1112,11 +1143,14 @@ mod tests {
         };
         let overrides = vec![critical.clone(), normal.clone(), asset.clone()];
 
-        // Default: the launch-critical host stays direct (not on the relay).
+        // Default (Route Assist): the launch-critical host AND the asset/CDN
+        // host stay direct; only control-plane (www) relays.
         let (active, direct_only) = classify_bootstrap_ips(&overrides, false);
         assert!(direct_only.contains(&critical.ip));
         assert!(!active.contains(&critical.ip));
         assert!(active.contains(&normal.ip));
+        assert!(direct_only.contains(&asset.ip));
+        assert!(!active.contains(&asset.ip));
 
         // Bypassing a country ban: control-plane hosts go through the relay,
         // but heavy asset/CDN hosts stay direct.
@@ -1145,6 +1179,40 @@ mod tests {
 
         assert!(active.contains(&shared_ip));
         assert!(!direct_only.contains(&shared_ip));
+    }
+
+    #[test]
+    fn asset_direct_domain_matches_rbxcdn_suffix_and_named() {
+        // Any *.rbxcdn.com shard (pinned or not) plus the named asset endpoints
+        // are treated as heavy asset/CDN traffic that should stay direct.
+        for d in [
+            "c3.rbxcdn.com",
+            "tr.rbxcdn.com",
+            "fts.rbxcdn.com",
+            "t5.rbxcdn.com",
+            "images.rbxcdn.com",
+            "css.rbxcdn.com",
+            "c12.rbxcdn.com", // a shard we never pinned - still matches via suffix
+            "AssetDelivery.Roblox.Com",
+            "assetgame.roblox.com",
+            "thumbnails.roblox.com",
+            "setup.roblox.com",
+        ] {
+            assert!(is_asset_direct_domain(d), "{d} should be asset-direct");
+        }
+        // Control-plane hosts and suffix-spoof lookalikes must NOT match.
+        for d in [
+            "www.roblox.com",
+            "auth.roblox.com",
+            "apis.roblox.com",
+            "gamejoin.roblox.com",
+            "clientsettings.roblox.com",
+            "rbxcdn.com",           // bare apex, no leading dot
+            "evilrbxcdn.com",       // not a subdomain
+            "rbxcdn.com.evil.test", // suffix spoof
+        ] {
+            assert!(!is_asset_direct_domain(d), "{d} must NOT be asset-direct");
+        }
     }
 
     #[test]
