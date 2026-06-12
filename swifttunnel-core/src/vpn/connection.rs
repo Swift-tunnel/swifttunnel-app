@@ -1156,6 +1156,11 @@ impl VpnConnection {
 
         log::info!("Starting VPN connection to region: {}", region);
         log::info!("Apps to tunnel: {:?}", tunnel_apps);
+        // Support breadcrumb: internet-cafe diskless PCs behave differently
+        // (RAM cleaning is disabled there; system disk rides the LAN).
+        if crate::diskless::system_is_diskless() {
+            log::info!("Network-booted (diskless) PC detected for this session");
+        }
         self.process_performance_manager = None;
         self.goodbye_dpi_guard = None;
         self.country_ban_bypass_failure = None;

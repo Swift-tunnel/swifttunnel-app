@@ -150,6 +150,40 @@ where
 {
     #[cfg(windows)]
     {
+        // Diskless cafe PCs (CCBoot/gcafe/iSCSI boot) keep the SYSTEM DISK
+        // itself in RAM: trimming working sets and purging the standby list
+        // evicts the OS's own disk cache, every page refetches over the LAN,
+        // and the whole machine freezes. Reported by Vietnamese internet-cafe
+        // users; covers both the manual cleaner and auto-clean on game join.
+        if crate::diskless::system_is_diskless() {
+            let snapshot = windows_impl::get_system_memory_snapshot()?;
+            let reason = "Skipped on this PC: it boots from the network (internet-cafe \
+                          diskless setup), and cleaning would freeze it"
+                .to_string();
+            warn!("RAM clean skipped: diskless/network-booted system");
+            on_progress("done", snapshot, 0, None, Some(reason.clone()));
+            return Ok(RamCleanResult {
+                before: snapshot,
+                after: snapshot,
+                trimmed_count: 0,
+                standby_purge: StandbyPurgeResult {
+                    attempted: false,
+                    success: false,
+                    skipped_reason: Some(reason.clone()),
+                },
+                modified_flush: ModifiedFlushResult {
+                    attempted: false,
+                    success: false,
+                    skipped_reason: Some(reason.clone()),
+                },
+                freed_mb: 0,
+                standby_freed_mb: None,
+                modified_freed_mb: None,
+                duration_ms: 0,
+                warnings: vec![reason],
+            });
+        }
+
         windows_impl::clean_ram(exclude_pids, &mut on_progress)
     }
 

@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod discord_rpc;
+pub mod diskless;
 pub mod firewall_fixer;
 pub mod fps_monitor;
 pub mod geolocation;

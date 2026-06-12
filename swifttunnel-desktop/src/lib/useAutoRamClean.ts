@@ -47,7 +47,9 @@ export function useAutoRamClean() {
         if (disposed || !useBoostStore.getState().robloxForeground) return;
         lastClean = now;
         const result = await boostCleanRam();
-        if (!disposed) await showRamOverlay(result.freed_mb);
+        // No toast when nothing was freed - e.g. diskless internet-cafe PCs,
+        // where the backend deliberately skips cleaning to avoid freezing.
+        if (!disposed && result.freed_mb > 0) await showRamOverlay(result.freed_mb);
       } catch {
         // best-effort; never surface an error in-game
       } finally {
