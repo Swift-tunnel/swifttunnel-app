@@ -20,6 +20,7 @@
 
 pub mod auto_routing;
 pub mod connection;
+pub(crate) mod diskless_passthrough;
 pub mod error_messages;
 pub mod ipv6_recovery;
 pub mod local_connectivity;

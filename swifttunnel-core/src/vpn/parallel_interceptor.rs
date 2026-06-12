@@ -4018,6 +4018,28 @@ impl ParallelInterceptor {
         // documented in `ipv6_recovery`.
         self.disable_ipv6()?;
 
+        // Diskless cafe PCs (CCBoot/gcafe/iSCSI boot): the boot NIC carries
+        // the SYSTEM DISK, and tunnel mode would route disk I/O through the
+        // user-mode pump - a stall there freezes the whole machine. Install
+        // kernel-level PASS filters for the System-owned disk flows so they
+        // never reach user mode. Best-effort: tunneling works without it.
+        #[cfg(target_os = "windows")]
+        if crate::diskless::system_is_diskless() {
+            if let Some(physical_name) = self.physical_adapter_name.clone() {
+                match super::diskless_passthrough::install_for_adapter(&physical_name) {
+                    Ok(0) => log::info!(
+                        "Diskless PC detected but no System disk flows found to protect"
+                    ),
+                    Ok(count) => log::info!(
+                        "Diskless PC: {count} kernel pass filter(s) protect the system disk from interception"
+                    ),
+                    Err(e) => log::warn!(
+                        "Diskless PC: could not install disk-traffic pass filters (continuing): {e}"
+                    ),
+                }
+            }
+        }
+
         self.stop_flag.store(false, Ordering::Release);
         // Reset the panic cause alongside stop_flag. `workers_panic_cause` is
         // written by the reader/inbound-receiver threads on panic or budget
@@ -4308,6 +4330,12 @@ impl ParallelInterceptor {
 
         // Re-enable IPv6 on physical adapter
         self.enable_ipv6();
+
+        // Drop the diskless disk-traffic pass filters installed at start (a
+        // no-op when none were). Stale entries after a crash are harmless -
+        // they only PASS traffic the closed app wouldn't have touched anyway.
+        #[cfg(target_os = "windows")]
+        super::diskless_passthrough::remove_installed();
 
         // Final tunnel-mode verification for every exit path (clean reader
         // join where Drop ran, abandoned reader where the early

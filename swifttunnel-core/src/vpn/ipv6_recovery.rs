@@ -62,10 +62,11 @@ const SWIFTTUNNEL_IPV6_BLOCK_SUBNETS: [([u8; 16], [u8; 16]); 3] = [
 ];
 
 /// Generous upper bound for reading/merging the driver's static filter table.
-/// SwiftTunnel installs 3 entries; anything near this limit means another
-/// WinpkFilter consumer filled the table.
+/// SwiftTunnel installs 3 IPv6 entries (plus diskless pass entries on
+/// network-booted PCs); anything near this limit means another WinpkFilter
+/// consumer filled the table.
 #[cfg(target_os = "windows")]
-const STATIC_FILTER_TABLE_CAPACITY: usize = 256;
+pub(crate) const STATIC_FILTER_TABLE_CAPACITY: usize = 256;
 
 #[cfg(any(test, target_os = "windows"))]
 fn in6_addr(bytes: [u8; 16]) -> IN6_ADDR {
@@ -603,7 +604,9 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
 
 /// Read the driver's current static filter table as owned entries.
 #[cfg(target_os = "windows")]
-fn read_static_filter_entries(driver: &ndisapi::Ndisapi) -> Result<Vec<StaticFilter>, String> {
+pub(crate) fn read_static_filter_entries(
+    driver: &ndisapi::Ndisapi,
+) -> Result<Vec<StaticFilter>, String> {
     let size = driver
         .get_packet_filter_table_size()
         .map_err(|e| format!("Failed to query WinpkFilter static filter table size: {e}"))?;
@@ -635,7 +638,7 @@ fn read_static_filter_entries(driver: &ndisapi::Ndisapi) -> Result<Vec<StaticFil
 
 /// Replace the driver's static filter table with exactly `entries`.
 #[cfg(target_os = "windows")]
-fn set_static_filter_entries(
+pub(crate) fn set_static_filter_entries(
     driver: &ndisapi::Ndisapi,
     entries: &[StaticFilter],
 ) -> Result<(), String> {
