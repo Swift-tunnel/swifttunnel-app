@@ -4027,9 +4027,9 @@ impl ParallelInterceptor {
         if crate::diskless::system_is_diskless() {
             if let Some(physical_name) = self.physical_adapter_name.clone() {
                 match super::diskless_passthrough::install_for_adapter(&physical_name) {
-                    Ok(0) => log::info!(
-                        "Diskless PC detected but no System disk flows found to protect"
-                    ),
+                    Ok(0) => {
+                        log::info!("Diskless PC detected but no System disk flows found to protect")
+                    }
                     Ok(count) => log::info!(
                         "Diskless PC: {count} kernel pass filter(s) protect the system disk from interception"
                     ),

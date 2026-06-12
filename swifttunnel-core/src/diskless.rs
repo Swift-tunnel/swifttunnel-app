@@ -34,9 +34,8 @@ pub fn system_is_diskless() -> bool {
 /// Identity markers of common diskless-boot products as they appear in the
 /// system disk's vendor/product strings (the boot target is presented as a
 /// virtual SCSI disk with a telltale name).
-const DISKLESS_IDENTITY_MARKERS: &[&str] = &[
-    "ccboot", "gcafe", "icafe", "diskless", "vdisk", "netdisk",
-];
+const DISKLESS_IDENTITY_MARKERS: &[&str] =
+    &["ccboot", "gcafe", "icafe", "diskless", "vdisk", "netdisk"];
 
 fn identity_indicates_diskless(identity_lower: &str) -> bool {
     DISKLESS_IDENTITY_MARKERS

@@ -532,11 +532,8 @@ mod tests {
 
     #[test]
     fn build_pass_filters_two_per_flow() {
-        let filters = build_pass_filters(
-            7,
-            &[(Ipv4Addr::new(192, 168, 1, 2), 3260)],
-            &[4011, 1000],
-        );
+        let filters =
+            build_pass_filters(7, &[(Ipv4Addr::new(192, 168, 1, 2), 3260)], &[4011, 1000]);
         assert_eq!(filters.len(), 6);
     }
 }
