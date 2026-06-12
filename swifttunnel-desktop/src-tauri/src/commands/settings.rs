@@ -55,6 +55,7 @@ pub async fn settings_save(
 ) -> Result<(), String> {
     let settings_arc = state.settings.clone();
     let discord_manager = state.discord_manager.clone();
+    let fps_monitor = state.fps_monitor.clone();
     let app_handle = app.clone();
 
     let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
@@ -66,6 +67,10 @@ pub async fn settings_save(
             let mut discord = discord_manager.lock();
             discord.set_enabled(new_settings.enable_discord_rpc);
         }
+
+        // The ETW FPS trace runs only while the in-game overlay wants it
+        // (idempotent and cheap when the state is unchanged).
+        fps_monitor.set_enabled(new_settings.config.overlay.enabled);
 
         let run_on_startup = {
             let mut s = settings_arc.lock();

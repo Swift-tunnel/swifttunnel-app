@@ -82,6 +82,13 @@ impl AppState {
 
         let enable_discord_rpc = settings.enable_discord_rpc;
 
+        // The ETW FPS session is demand-driven (its callback fires for every
+        // present from every process system-wide) - run it only while the
+        // in-game overlay wants FPS. `settings_save` keeps it in sync after
+        // toggles.
+        let fps_monitor = Arc::new(FpsMonitor::new());
+        fps_monitor.set_enabled(settings.config.overlay.enabled);
+
         let vpn_connection = VpnConnection::new();
         let vpn_state_handle = vpn_connection.state_handle();
 
@@ -95,7 +102,7 @@ impl AppState {
             region_latencies: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(Mutex::new(settings)),
             performance_monitor: Arc::new(Mutex::new(PerformanceMonitor::new())),
-            fps_monitor: Arc::new(FpsMonitor::start()),
+            fps_monitor,
             system_optimizer: Arc::new(Mutex::new(SystemOptimizer::new())),
             roblox_optimizer: Arc::new(Mutex::new(roblox_optimizer)),
             network_booster: Arc::new(Mutex::new(NetworkBooster::new())),

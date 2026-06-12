@@ -62,18 +62,71 @@ struct FpsShared {
     stop_flag: AtomicBool,
 }
 
-/// Anti-cheat-safe FPS source. Owns a real-time ETW session (counts DXGI
-/// presents) plus a 1-second sampler that turns the running count into FPS.
-pub struct FpsMonitor {
+/// The live ETW session + sampler threads for one enabled stretch.
+struct FpsRuntime {
     shared: Arc<FpsShared>,
     etw_thread: Option<JoinHandle<()>>,
     sampler_thread: Option<JoinHandle<()>>,
 }
 
+impl FpsRuntime {
+    fn stop(&mut self) {
+        self.shared.stop_flag.store(true, Ordering::SeqCst);
+        // Stopping the session unblocks the blocking `ProcessTrace` call. Skip
+        // when there's no ETW thread (e.g. inert test runtimes) so we don't
+        // fire a stray `ControlTraceW` at an unrelated session.
+        if self.etw_thread.is_some() {
+            stop_existing_session();
+        }
+        if let Some(h) = self.etw_thread.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.sampler_thread.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Anti-cheat-safe FPS source. While enabled it owns a real-time ETW session
+/// (counts DXGI presents) plus a 1-second sampler that turns the running count
+/// into FPS.
+///
+/// DEMAND-DRIVEN: the ETW callback fires for every present from every process
+/// system-wide, which is real overhead on weak machines — so nothing runs
+/// until `set_enabled(true)` (the in-game overlay being on), and disabling the
+/// overlay tears the session down again.
+pub struct FpsMonitor {
+    runtime: std::sync::Mutex<Option<FpsRuntime>>,
+}
+
 impl FpsMonitor {
-    /// Start the ETW session and the FPS sampler. Never fails: if ETW can't
-    /// start (e.g. not elevated) the supervisor retries and FPS stays 0.
-    pub fn start() -> Self {
+    /// An idle monitor: no ETW session, no threads, FPS reads 0.
+    pub fn new() -> Self {
+        Self {
+            runtime: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Start or stop the ETW session + sampler. Idempotent and cheap when the
+    /// state already matches, so callers may invoke it on every settings save.
+    /// Starting never fails: if ETW can't start (e.g. not elevated) the
+    /// supervisor retries and FPS stays 0.
+    pub fn set_enabled(&self, enabled: bool) {
+        let Ok(mut runtime) = self.runtime.lock() else {
+            return;
+        };
+        if enabled == runtime.is_some() {
+            return;
+        }
+
+        if !enabled {
+            if let Some(mut active) = runtime.take() {
+                active.stop();
+                log::info!("FPS monitor stopped (overlay disabled)");
+            }
+            return;
+        }
+
         let shared = Arc::new(FpsShared {
             target_pid: AtomicU32::new(0),
             present_count: AtomicU64::new(0),
@@ -97,48 +150,53 @@ impl FpsMonitor {
                 .ok()
         };
 
-        Self {
+        log::info!("FPS monitor started (overlay enabled)");
+        *runtime = Some(FpsRuntime {
             shared,
             etw_thread,
             sampler_thread,
-        }
+        });
     }
 
     /// Point the monitor at a game process (0 to clear). Switching targets
     /// resets the window so a new game never inherits the old one's count.
+    /// No-op while disabled.
     pub fn set_target_pid(&self, pid: u32) {
-        let prev = self.shared.target_pid.swap(pid, Ordering::Release);
+        let Ok(runtime) = self.runtime.lock() else {
+            return;
+        };
+        let Some(active) = runtime.as_ref() else {
+            return;
+        };
+        let prev = active.shared.target_pid.swap(pid, Ordering::Release);
         if prev != pid {
-            self.shared.present_count.store(0, Ordering::Release);
-            self.shared.current_fps.store(0, Ordering::Release);
+            active.shared.present_count.store(0, Ordering::Release);
+            active.shared.current_fps.store(0, Ordering::Release);
         }
     }
 
-    /// Latest presents-per-second for the target process (0 if none/unknown).
+    /// Latest presents-per-second for the target process (0 if disabled or
+    /// none/unknown).
     pub fn current_fps(&self) -> u32 {
-        self.shared.current_fps.load(Ordering::Acquire)
+        let Ok(runtime) = self.runtime.lock() else {
+            return 0;
+        };
+        runtime
+            .as_ref()
+            .map(|active| active.shared.current_fps.load(Ordering::Acquire))
+            .unwrap_or(0)
     }
+}
 
-    pub fn stop(&mut self) {
-        self.shared.stop_flag.store(true, Ordering::SeqCst);
-        // Stopping the session unblocks the blocking `ProcessTrace` call. Skip
-        // when there's no ETW thread (e.g. inert test monitors) so we don't fire
-        // a stray `ControlTraceW` at an unrelated session.
-        if self.etw_thread.is_some() {
-            stop_existing_session();
-        }
-        if let Some(h) = self.etw_thread.take() {
-            let _ = h.join();
-        }
-        if let Some(h) = self.sampler_thread.take() {
-            let _ = h.join();
-        }
+impl Default for FpsMonitor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Drop for FpsMonitor {
     fn drop(&mut self) {
-        self.stop();
+        self.set_enabled(false);
     }
 }
 
@@ -392,19 +450,31 @@ unsafe extern "system" fn present_event_callback(event_record: *mut EVENT_RECORD
 
 #[cfg(test)]
 impl FpsMonitor {
-    /// A monitor with no ETW session or threads — for unit-testing the target /
-    /// FPS bookkeeping without touching real tracing.
-    fn inert() -> Self {
+    /// A monitor that is "enabled" but has no ETW session or threads — for
+    /// unit-testing the target / FPS bookkeeping without touching real tracing.
+    fn inert_active() -> Self {
         Self {
-            shared: Arc::new(FpsShared {
-                target_pid: AtomicU32::new(0),
-                present_count: AtomicU64::new(0),
-                current_fps: AtomicU32::new(0),
-                stop_flag: AtomicBool::new(true),
-            }),
-            etw_thread: None,
-            sampler_thread: None,
+            runtime: std::sync::Mutex::new(Some(FpsRuntime {
+                shared: Arc::new(FpsShared {
+                    target_pid: AtomicU32::new(0),
+                    present_count: AtomicU64::new(0),
+                    current_fps: AtomicU32::new(0),
+                    stop_flag: AtomicBool::new(true),
+                }),
+                etw_thread: None,
+                sampler_thread: None,
+            })),
         }
+    }
+
+    fn test_shared(&self) -> Arc<FpsShared> {
+        self.runtime
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("test monitor must be active")
+            .shared
+            .clone()
     }
 }
 
@@ -414,31 +484,44 @@ mod tests {
 
     #[test]
     fn switching_target_resets_the_window() {
-        let monitor = FpsMonitor::inert();
+        let monitor = FpsMonitor::inert_active();
+        let shared = monitor.test_shared();
         // Simulate counted presents, then a target switch.
-        monitor.shared.present_count.store(500, Ordering::Release);
-        monitor.shared.current_fps.store(240, Ordering::Release);
+        shared.present_count.store(500, Ordering::Release);
+        shared.current_fps.store(240, Ordering::Release);
         monitor.set_target_pid(4321);
-        assert_eq!(monitor.shared.present_count.load(Ordering::Acquire), 0);
+        assert_eq!(shared.present_count.load(Ordering::Acquire), 0);
         assert_eq!(monitor.current_fps(), 0);
     }
 
     #[test]
     fn same_target_keeps_the_window() {
-        let monitor = FpsMonitor::inert();
+        let monitor = FpsMonitor::inert_active();
+        let shared = monitor.test_shared();
         monitor.set_target_pid(1000);
-        monitor.shared.present_count.store(120, Ordering::Release);
-        monitor.shared.current_fps.store(120, Ordering::Release);
+        shared.present_count.store(120, Ordering::Release);
+        shared.current_fps.store(120, Ordering::Release);
         // Re-pointing at the same PID must not wipe the running count.
         monitor.set_target_pid(1000);
-        assert_eq!(monitor.shared.present_count.load(Ordering::Acquire), 120);
+        assert_eq!(shared.present_count.load(Ordering::Acquire), 120);
         assert_eq!(monitor.current_fps(), 120);
     }
 
     #[test]
     fn no_target_reports_zero_fps() {
-        let monitor = FpsMonitor::inert();
+        let monitor = FpsMonitor::inert_active();
         // Default target is 0 (no game) -> never reports FPS.
+        assert_eq!(monitor.current_fps(), 0);
+    }
+
+    #[test]
+    fn disabled_monitor_is_a_safe_no_op() {
+        let monitor = FpsMonitor::new();
+        // No session, no threads: reads are 0 and writes don't panic.
+        monitor.set_target_pid(1234);
+        assert_eq!(monitor.current_fps(), 0);
+        // Disabling an already-disabled monitor is fine.
+        monitor.set_enabled(false);
         assert_eq!(monitor.current_fps(), 0);
     }
 }

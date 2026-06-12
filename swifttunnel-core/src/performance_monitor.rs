@@ -107,8 +107,15 @@ pub fn set_window_no_activate(hwnd_raw: isize) {
 #[cfg(not(windows))]
 pub fn set_window_no_activate(_hwnd_raw: isize) {}
 
+/// Minimum gap between whole-system process scans while Roblox isn't running.
+/// Metrics are polled every 1-2s by the UI; rescanning every process each tick
+/// is real CPU on weak machines for a "did Roblox start yet?" answer that can
+/// be a few seconds stale.
+const FULL_SCAN_MIN_INTERVAL: Duration = Duration::from_secs(4);
+
 pub struct PerformanceMonitor {
     system: System,
+    last_full_scan: Option<std::time::Instant>,
 }
 
 impl PerformanceMonitor {
@@ -118,7 +125,10 @@ impl PerformanceMonitor {
         system.refresh_memory();
         system.refresh_cpu_all();
 
-        Self { system }
+        Self {
+            system,
+            last_full_scan: Some(std::time::Instant::now()),
+        }
     }
 
     /// Update performance metrics
@@ -141,9 +151,16 @@ impl PerformanceMonitor {
                 metrics.ram_usage = 0.0;
             }
         } else {
-            // No known PID — do full process scan to find Roblox
-            self.system.refresh_processes(ProcessesToUpdate::All, true);
-            if let Some((pid, process)) = self.find_roblox_process() {
+            // No known PID — full process scan to find Roblox, throttled so
+            // 1s metric polling doesn't whole-system-scan every tick.
+            let scan_due = self
+                .last_full_scan
+                .is_none_or(|at| at.elapsed() >= FULL_SCAN_MIN_INTERVAL);
+            if scan_due {
+                self.last_full_scan = Some(std::time::Instant::now());
+                self.system.refresh_processes(ProcessesToUpdate::All, true);
+            }
+            if scan_due && let Some((pid, process)) = self.find_roblox_process() {
                 metrics.roblox_running = true;
                 metrics.process_id = Some(pid);
                 metrics.cpu_usage = process.cpu_usage();
