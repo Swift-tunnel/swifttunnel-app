@@ -8,21 +8,24 @@
 // Tweaks are grouped by TIER (difficulty/trade-off), Hone-style:
 //   Beginner     — safe, reversible, no real downside.
 //   Intermediate — trade a little comfort/feature for more performance.
-// `category` is shown as a small chip on each row.
+//   Expert       — system-wide changes for users who know the trade-off.
+// `category` is shown as a small chip on each card.
 
 export type OptSafety = "safe" | "low" | "caution";
 
 export type OptCategory = "System" | "Performance" | "Input" | "Privacy";
 
-export type OptTier = "Beginner" | "Intermediate";
+export type OptTier = "Beginner" | "Intermediate" | "Expert";
 
 /** Render order + blurb for the grouped tier sections in the Optimization tab. */
-export const TIER_ORDER: OptTier[] = ["Beginner", "Intermediate"];
+export const TIER_ORDER: OptTier[] = ["Beginner", "Intermediate", "Expert"];
 
 export const TIER_DESCRIPTION: Record<OptTier, string> = {
   Beginner: "Safe, fully reversible tweaks anyone can use — small, reliable gains.",
   Intermediate:
     "Trade a little comfort or a feature you may not use for more performance.",
+  Expert:
+    "System-wide changes for users who know exactly what they're trading. All reversible.",
 };
 
 /** Kept for any external references; tab now groups by tier. */
@@ -228,6 +231,112 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
       "Service XblGameSave → Disabled (restored on revert)",
       "Service XboxGipSvc → Disabled (restored on revert)",
       "Service XboxNetApiSvc → Disabled (restored on revert)",
+    ],
+  },
+  {
+    id: "sticky_keys_disable",
+    name: "Disable Sticky Keys Popups",
+    description:
+      "Stops the Sticky/Toggle/Filter Keys prompts from hijacking your game when you tap Shift five times.",
+    tier: "Beginner",
+    category: "Input",
+    safety: "safe",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\Control Panel\\Accessibility\\StickyKeys → Flags = 506",
+      "HKCU\\Control Panel\\Accessibility\\ToggleKeys → Flags = 58",
+      "HKCU\\Control Panel\\Accessibility\\Keyboard Response → Flags = 122",
+    ],
+  },
+  {
+    id: "explorer_compact_mode",
+    name: "Explorer Compact Mode",
+    description:
+      "Reduces the space between files and folders in File Explorer so you see more at once (Windows 11).",
+    tier: "Beginner",
+    category: "System",
+    safety: "safe",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: ["HKCU\\...\\Explorer\\Advanced → UseCompactMode = 1"],
+  },
+  {
+    id: "shortcut_suffix_disable",
+    name: 'Disable "- Shortcut" Suffix',
+    description:
+      "New shortcuts stop getting the '- Shortcut' text appended, keeping names clean. Applies after sign-out.",
+    tier: "Beginner",
+    category: "System",
+    safety: "safe",
+    requiresAdmin: false,
+    requiresReboot: true,
+    changes: ["HKCU\\...\\Explorer → link = 00 00 00 00 (binary)"],
+  },
+  {
+    id: "classic_context_menu_enable",
+    name: "Classic Right-Click Menu (Win 11)",
+    description:
+      "Brings back the full Windows 10 right-click menu without the extra 'Show more options' step. Applies after restart.",
+    tier: "Intermediate",
+    category: "System",
+    safety: "low",
+    requiresAdmin: false,
+    requiresReboot: true,
+    changes: [
+      "HKCU\\Software\\Classes\\CLSID\\{86ca1aa0-...}\\InprocServer32 → (default) = \"\" (key removed on revert)",
+    ],
+  },
+  {
+    id: "storage_sense_disable",
+    name: "Disable Storage Sense",
+    description:
+      "Turns off Windows' automatic background disk cleanup so it never kicks in mid-game. Manual cleanup still works.",
+    tier: "Intermediate",
+    category: "System",
+    safety: "low",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: ["HKCU\\...\\StorageSense\\Parameters\\StoragePolicy → 01 = 0"],
+  },
+
+  // ── Expert ───────────────────────────────────────────────────────────────
+  {
+    id: "notifications_disable",
+    name: "Disable Notifications",
+    description:
+      "Turns off toast notifications system-wide for your user — no popups, sounds, or banners until reverted.",
+    tier: "Expert",
+    category: "System",
+    safety: "caution",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: ["HKCU\\...\\PushNotifications → ToastEnabled = 0"],
+  },
+  {
+    id: "lock_screen_disable",
+    name: "Disable Lock Screen",
+    description:
+      "Skips the lock screen so boot and wake land straight on the sign-in prompt.",
+    tier: "Expert",
+    category: "System",
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: ["HKLM\\...\\Policies\\...\\Personalization → NoLockScreen = 1"],
+  },
+  {
+    id: "lock_screen_blur_disable",
+    name: "Disable Sign-in Blur",
+    description:
+      "Removes the acrylic blur behind the sign-in screen — lighter on weak GPUs at logon.",
+    tier: "Expert",
+    category: "System",
+    safety: "low",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\...\\Policies\\Microsoft\\Windows\\System → DisableAcrylicBackgroundOnLogon = 1",
     ],
   },
 ];

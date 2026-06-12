@@ -33,6 +33,23 @@ enum Action {
         name: &'static str,
         value: &'static str,
     },
+    RegBinary {
+        hive: Hive,
+        path: &'static str,
+        name: &'static str,
+        value: &'static [u8],
+    },
+    /// Create `default_path` and set its DEFAULT value to `value`, capturing
+    /// whether `owned_path` (the topmost key this tweak introduces) already
+    /// existed. Revert deletes the whole `owned_path` tree when we created it.
+    /// Used for shell-extension keys (e.g. the Win11 classic context menu
+    /// CLSID) whose mere EXISTENCE is the switch.
+    RegOwnedKeyDefault {
+        hive: Hive,
+        owned_path: &'static str,
+        default_path: &'static str,
+        value: &'static str,
+    },
     /// Active power scheme AC value (via powercfg aliases, e.g. SUB_PROCESSOR).
     PowerAc {
         subgroup: &'static str,
@@ -245,6 +262,131 @@ const TWEAKS: &[Tweak] = &[
             },
         ],
     },
+    Tweak {
+        // Stop Explorer appending "- Shortcut" to new shortcuts. The `link`
+        // value is REG_BINARY; 00 00 00 00 disables the suffix. Takes effect
+        // after the next sign-in (Explorer reads it at session start).
+        id: "shortcut_suffix_disable",
+        requires_admin: false,
+        requires_reboot: true,
+        actions: &[Action::RegBinary {
+            hive: Hive::Hkcu,
+            path: r"Software\Microsoft\Windows\CurrentVersion\Explorer",
+            name: "link",
+            value: &[0, 0, 0, 0],
+        }],
+    },
+    Tweak {
+        // File Explorer compact mode (Windows 11): tighter row spacing, more
+        // items on screen. Per-user, instant for new windows.
+        id: "explorer_compact_mode",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hkcu,
+            path: r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+            name: "UseCompactMode",
+            value: 1,
+        }],
+    },
+    Tweak {
+        // Disable the accessibility shortcut popups that interrupt games:
+        // Sticky Keys (Shift x5), Toggle Keys (NumLock hold), Filter Keys
+        // (right Shift hold). Flags are the documented "off + no hotkey +
+        // no popup" values; revert restores the previous flags.
+        id: "sticky_keys_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[
+            Action::RegString {
+                hive: Hive::Hkcu,
+                path: r"Control Panel\Accessibility\StickyKeys",
+                name: "Flags",
+                value: "506",
+            },
+            Action::RegString {
+                hive: Hive::Hkcu,
+                path: r"Control Panel\Accessibility\ToggleKeys",
+                name: "Flags",
+                value: "58",
+            },
+            Action::RegString {
+                hive: Hive::Hkcu,
+                path: r"Control Panel\Accessibility\Keyboard Response",
+                name: "Flags",
+                value: "122",
+            },
+        ],
+    },
+    Tweak {
+        // Windows 11 classic (full) right-click menu. The empty InprocServer32
+        // default for this CLSID makes Explorer fall back to the Windows 10
+        // menu. Applies after sign-out/restart; revert deletes the key we
+        // created.
+        id: "classic_context_menu_enable",
+        requires_admin: false,
+        requires_reboot: true,
+        actions: &[Action::RegOwnedKeyDefault {
+            hive: Hive::Hkcu,
+            owned_path: r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}",
+            default_path: r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32",
+            value: "",
+        }],
+    },
+    Tweak {
+        // Storage Sense's automatic background cleanup. Disabling avoids
+        // surprise disk activity mid-game; cleanup can still be run manually
+        // from Windows Settings.
+        id: "storage_sense_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hkcu,
+            path: r"Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy",
+            name: "01",
+            value: 0,
+        }],
+    },
+    Tweak {
+        // Toast notifications system-wide for the current user. Real focus
+        // gain while gaming; popups (and their sounds/animations) stop until
+        // reverted.
+        id: "notifications_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hkcu,
+            path: r"Software\Microsoft\Windows\CurrentVersion\PushNotifications",
+            name: "ToastEnabled",
+            value: 0,
+        }],
+    },
+    Tweak {
+        // Skip the lock screen entirely - boot/wake lands on the sign-in
+        // prompt. Machine-wide policy, hence admin.
+        id: "lock_screen_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Windows\Personalization",
+            name: "NoLockScreen",
+            value: 1,
+        }],
+    },
+    Tweak {
+        // Remove the acrylic blur on the sign-in background - measurably
+        // lighter composition on weak GPUs at logon. Machine-wide policy.
+        id: "lock_screen_blur_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Windows\System",
+            name: "DisableAcrylicBackgroundOnLogon",
+            value: 1,
+        }],
+    },
 ];
 
 fn find_tweak(id: &str) -> Option<&'static Tweak> {
@@ -261,6 +403,13 @@ enum ActionSnapshot {
     },
     RegString {
         value: Option<String>,
+    },
+    RegBinary {
+        value: Option<Vec<u8>>,
+    },
+    /// Whether the owned key already existed before apply.
+    OwnedKey {
+        existed: bool,
     },
     Power {
         value: Option<u32>,
@@ -413,6 +562,16 @@ fn capture_action(action: &Action) -> Result<ActionSnapshot, String> {
         } => ActionSnapshot::RegString {
             value: read_reg_string(*hive, path, name),
         },
+        Action::RegBinary {
+            hive, path, name, ..
+        } => ActionSnapshot::RegBinary {
+            value: read_reg_binary(*hive, path, name),
+        },
+        Action::RegOwnedKeyDefault {
+            hive, owned_path, ..
+        } => ActionSnapshot::OwnedKey {
+            existed: reg_key_exists(*hive, owned_path),
+        },
         Action::PowerAc {
             subgroup, setting, ..
         } => ActionSnapshot::Power {
@@ -443,6 +602,21 @@ fn apply_action(action: &Action) -> Result<(), String> {
             name,
             value,
         } => write_reg_string(*hive, path, name, value),
+        Action::RegBinary {
+            hive,
+            path,
+            name,
+            value,
+        } => write_reg_binary(*hive, path, name, value),
+        Action::RegOwnedKeyDefault {
+            hive,
+            default_path,
+            value,
+            ..
+        } => {
+            // The DEFAULT value is set on the key itself (empty value name).
+            write_reg_string(*hive, default_path, "", value)
+        }
         Action::PowerAc {
             subgroup,
             setting,
@@ -480,6 +654,32 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
             Some(v) => write_reg_string(*hive, path, name, v),
             None => delete_reg_value(*hive, path, name),
         },
+        (
+            Action::RegBinary {
+                hive, path, name, ..
+            },
+            ActionSnapshot::RegBinary { value },
+        ) => match value {
+            Some(v) => write_reg_binary(*hive, path, name, v),
+            None => delete_reg_value(*hive, path, name),
+        },
+        (
+            Action::RegOwnedKeyDefault {
+                hive,
+                owned_path,
+                default_path,
+                ..
+            },
+            ActionSnapshot::OwnedKey { existed },
+        ) => {
+            if *existed {
+                // Someone else introduced the key before us: only clear the
+                // default value we set, leave their tree alone.
+                delete_reg_value(*hive, default_path, "")
+            } else {
+                delete_reg_key_tree(*hive, owned_path)
+            }
+        }
         (
             Action::PowerAc {
                 subgroup, setting, ..
@@ -570,6 +770,40 @@ fn write_reg_string(hive: Hive, path: &str, name: &str, value: &str) -> Result<(
         .map_err(|e| format!("open {path}: {e}"))?;
     key.set_value(name, &value.to_string())
         .map_err(|e| format!("set {name}: {e}"))
+}
+
+#[cfg(windows)]
+fn read_reg_binary(hive: Hive, path: &str, name: &str) -> Option<Vec<u8>> {
+    let key = reg_root(hive).open_subkey(path).ok()?;
+    let value: winreg::RegValue = key.get_raw_value(name).ok()?;
+    Some(value.bytes)
+}
+
+#[cfg(windows)]
+fn write_reg_binary(hive: Hive, path: &str, name: &str, value: &[u8]) -> Result<(), String> {
+    let (key, _) = reg_root(hive)
+        .create_subkey(path)
+        .map_err(|e| format!("open {path}: {e}"))?;
+    let raw = winreg::RegValue {
+        vtype: winreg::enums::RegType::REG_BINARY,
+        bytes: value.to_vec(),
+    };
+    key.set_raw_value(name, &raw)
+        .map_err(|e| format!("set {name}: {e}"))
+}
+
+#[cfg(windows)]
+fn reg_key_exists(hive: Hive, path: &str) -> bool {
+    reg_root(hive).open_subkey(path).is_ok()
+}
+
+#[cfg(windows)]
+fn delete_reg_key_tree(hive: Hive, path: &str) -> Result<(), String> {
+    match reg_root(hive).delete_subkey_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("delete key {path}: {e}")),
+    }
 }
 
 #[cfg(windows)]
@@ -739,6 +973,14 @@ mod tests {
             "diagtrack_disable",
             "menu_show_delay_fast",
             "xbox_services_disable",
+            "shortcut_suffix_disable",
+            "explorer_compact_mode",
+            "sticky_keys_disable",
+            "classic_context_menu_enable",
+            "storage_sense_disable",
+            "notifications_disable",
+            "lock_screen_disable",
+            "lock_screen_blur_disable",
         ];
         for id in expected {
             assert!(find_tweak(id).is_some(), "missing tweak: {id}");
