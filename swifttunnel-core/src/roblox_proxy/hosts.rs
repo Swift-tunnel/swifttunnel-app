@@ -75,11 +75,13 @@ const DIRECT_ONLY_BOOTSTRAP_DOMAINS: &[&str] = &[
 ];
 
 // Heavy Roblox CDN/asset hosts that ride the user's DIRECT path (not the relay)
-// in BOTH Route Assist and country-ban bypass: textures, avatar clothing,
+// under Route Assist and PARTIAL country-ban bypass: textures, avatar clothing,
 // thumbnails, cutscene/model payloads. These named roblox.com endpoints are the
 // asset entry points that aren't under rbxcdn; every `*.rbxcdn.com` host also
 // qualifies via `is_asset_direct_domain`, so we don't have to chase each CDN
-// shard name (c#, t#, tr, fts, images, css, ...) forever.
+// shard name (c#, t#, tr, fts, images, css, ...) forever. FULL country-ban
+// bypass relays these too — in a fully-blocked country the CDN is blocked as
+// well, and "direct" means assets simply never load.
 const ASSET_DIRECT_ROBLOX_DOMAINS: &[&str] = &[
     "assetgame.roblox.com",
     "assetdelivery.roblox.com",
@@ -183,16 +185,16 @@ struct DohJsonAnswer {
 ///
 /// Existing SwiftTunnel entries are removed first (idempotent).
 ///
-/// `country_ban_bypass`: relay Roblox control-plane hosts that decide
-/// discovery/search/login/join, while keeping heavy asset/CDN hosts direct
-/// when they do not share an IP with a relayed control-plane host.
+/// `country_ban_bypass` (FULL bypass): relay every pinned Roblox host —
+/// control plane, settings, and asset/CDN — because in a fully-blocked
+/// country none of them are reachable directly.
 pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), String> {
     let resolved = resolve_bootstrap_overrides().await?;
-    // Both modes keep heavy asset/CDN hosts DIRECT (textures, avatar clothing,
-    // thumbnails, cutscene payloads). They differ on the launch-critical
-    // settings hosts: Route Assist keeps them direct (startup reliability),
-    // country-ban bypass relays them to escape the block. Control-plane
-    // (discovery/search/login/join/region) relays in both.
+    // Route Assist (and PARTIAL bypass, which shares this classification)
+    // keeps heavy asset/CDN hosts and the launch-critical settings hosts
+    // DIRECT for fast textures and reliable startup; only control-plane
+    // (discovery/search/login/join/region) relays. FULL bypass relays
+    // everything.
     let (overrides, active_ips, direct_only_ips) = if country_ban_bypass {
         let (active, direct_only) = country_ban_split_ips_from_overrides(&resolved);
         (resolved, active, direct_only)
@@ -704,23 +706,18 @@ fn allocate_route_assist_pins(
     (kept, active, direct_only)
 }
 
+/// FULL country-ban bypass: relay EVERY pinned Roblox host — control plane,
+/// settings, and asset/CDN alike. This mode exists for countries where the
+/// whole platform is blocked (e.g. Egypt), and there the asset CDN is blocked
+/// too: keeping assets "direct" meant they simply never loaded, so games died
+/// seconds after join ("plays for 20s", "assets don't load"). Bandwidth-
+/// conscious asset splitting belongs to Route Assist and PARTIAL bypass, whose
+/// users can actually reach the CDN directly.
 fn country_ban_split_ips_from_overrides(
     overrides: &[HostOverride],
 ) -> (HashSet<Ipv4Addr>, HashSet<Ipv4Addr>) {
-    let active: HashSet<Ipv4Addr> = overrides
-        .iter()
-        .filter(|entry| !is_asset_direct_domain(&entry.domain))
-        .map(|entry| entry.ip)
-        .collect();
-
-    let direct_only = overrides
-        .iter()
-        .filter(|entry| is_asset_direct_domain(&entry.domain))
-        .map(|entry| entry.ip)
-        .filter(|ip| !active.contains(ip))
-        .collect();
-
-    (active, direct_only)
+    let active: HashSet<Ipv4Addr> = overrides.iter().map(|entry| entry.ip).collect();
+    (active, HashSet::new())
 }
 
 fn is_direct_only_bootstrap_domain(domain: &str) -> bool {
@@ -1309,13 +1306,15 @@ mod tests {
         assert!(direct_only.contains(&asset.ip));
         assert!(!active.contains(&asset.ip));
 
-        // Bypassing a country ban: control-plane hosts go through the relay,
-        // but heavy asset/CDN hosts stay direct.
+        // FULL country-ban bypass: EVERYTHING relays, including asset/CDN
+        // hosts — in a fully-blocked country the CDN is blocked too, and a
+        // "direct" asset host means assets never load (Egypt: games died
+        // ~20s after join).
         let (active, direct_only) = country_ban_split_ips_from_overrides(&overrides);
         assert!(active.contains(&critical.ip));
         assert!(active.contains(&normal.ip));
-        assert!(!active.contains(&asset.ip));
-        assert!(direct_only.contains(&asset.ip));
+        assert!(active.contains(&asset.ip));
+        assert!(direct_only.is_empty());
     }
 
     #[test]
