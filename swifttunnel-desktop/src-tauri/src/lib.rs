@@ -489,48 +489,15 @@ pub fn run() {
             let runtime =
                 Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
 
-            recover_stale_network_state();
-
             let app_state = AppState::new(runtime.clone(), launched_from_startup)
                 .expect("Failed to initialize app state");
 
-            app_state.system_optimizer.lock().recover_from_snapshot();
-
-            let account_is_banned = runtime.block_on(async {
-                let auth = app_state.auth_manager.lock().await;
-                if matches!(
-                    auth.get_state(),
-                    AuthState::LoggedIn(_) | AuthState::Banned(_)
-                ) {
-                    info!("Refreshing user profile before saved boost recovery");
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(8),
-                        auth.refresh_profile(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            warn!("Failed to refresh profile before boost recovery: {}", e);
-                        }
-                        Err(_) => {
-                            warn!("Timed out refreshing profile before boost recovery");
-                        }
-                    }
-                }
-
-                matches!(auth.get_state(), AuthState::Banned(_))
-            });
-
-            if account_is_banned {
-                info!("Stored account is banned; clearing boosts before startup recovery");
-                runtime.block_on(commands::auth::cleanup_banned_session(&app_state));
-            } else {
-                // Recover network booster state from persisted snapshot (crash recovery)
-                app_state.network_booster.lock().recover_from_snapshot();
-                reapply_saved_network_boosts(&app_state);
-                reapply_saved_roblox_fflags(&app_state);
-            }
+            // ALL heavy startup work (stale network recovery, profile refresh,
+            // boost/FFlag reapply) runs in the background task spawned below.
+            // It used to run inline here — but setup blocks the event loop, so
+            // the window could not even appear until it finished, and the
+            // profile refresh alone could hold it for its full 8s network
+            // timeout (the reported "app takes 5-10s to open").
 
             let run_on_startup_enabled = app_state.settings.lock().run_on_startup;
             let vpn_state_rx = app_state.vpn_state_handle.clone();
@@ -585,37 +552,72 @@ pub fn run() {
             // auto RAM clean + in-game overlay). Lightweight; app-lifetime.
             spawn_roblox_game_join_watcher(app.handle().clone());
 
-            // Spawn background task to refresh auth profile
+            // Background startup chain: everything slow that used to block
+            // setup, in the same order it ran before. Runs on the app's own
+            // runtime, so Tauri commands and the UI are never blocked by it.
             let app_handle = app.handle().clone();
             runtime.spawn(async move {
-                if let Some(state) = app_handle.try_state::<AppState>() {
-                    let should_refresh = {
-                        let auth = state.auth_manager.lock().await;
-                        matches!(
-                            auth.get_state(),
-                            AuthState::LoggedIn(_) | AuthState::Banned(_)
-                        )
-                    };
+                // 1. Crash recovery for stale network state (drivers, hosts
+                //    file, adapter modes). vpn_connect waits on the signal so
+                //    a quick connect can't race the reset.
+                let _ = tokio::task::spawn_blocking(recover_stale_network_state).await;
+                let Some(state) = app_handle.try_state::<AppState>() else {
+                    return;
+                };
+                let _ = state.startup_recovery_signal.send(true);
 
-                    if should_refresh {
-                        info!("Refreshing user profile on startup...");
-                        let auth = state.auth_manager.lock().await;
-                        let result = auth.refresh_profile().await;
-                        drop(auth);
+                // 2. Local recovery + Roblox settings sync (file IO, icacls,
+                //    powercfg - cheap for the runtime, too slow for setup).
+                state.sync_roblox_window_settings();
+                state.system_optimizer.lock().recover_from_snapshot();
 
-                        let should_emit_state =
-                            matches!(result, Ok(()) | Err(AuthError::UserBanned(_)));
-                        if let Err(e) = &result {
-                            if !matches!(e, AuthError::UserBanned(_)) {
-                                log::warn!("Failed to refresh profile on startup: {}", e);
-                            }
-                        }
+                // 3. Refresh the profile (bounded) so boost recovery knows
+                //    whether the stored account is banned.
+                let should_refresh = {
+                    let auth = state.auth_manager.lock().await;
+                    matches!(
+                        auth.get_state(),
+                        AuthState::LoggedIn(_) | AuthState::Banned(_)
+                    )
+                };
+                if should_refresh {
+                    info!("Refreshing user profile on startup...");
+                    let auth = state.auth_manager.lock().await;
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        auth.refresh_profile(),
+                    )
+                    .await;
+                    drop(auth);
 
-                        if should_emit_state {
+                    match &result {
+                        Ok(Ok(())) | Ok(Err(AuthError::UserBanned(_))) => {
                             commands::auth::cleanup_banned_session(&state).await;
                             commands::auth::emit_auth_state(&app_handle, &state).await;
                         }
+                        Ok(Err(e)) => {
+                            warn!("Failed to refresh profile on startup: {}", e);
+                        }
+                        Err(_) => {
+                            warn!("Timed out refreshing profile on startup");
+                        }
                     }
+                }
+
+                // 4. Boost recovery, gated on the (possibly refreshed) ban state.
+                let account_is_banned = {
+                    let auth = state.auth_manager.lock().await;
+                    matches!(auth.get_state(), AuthState::Banned(_))
+                };
+                if account_is_banned {
+                    info!("Stored account is banned; clearing boosts after startup recovery");
+                    commands::auth::cleanup_banned_session(&state).await;
+                } else {
+                    // Recover network booster state from persisted snapshot
+                    // (crash recovery), then reapply what the user had on.
+                    state.network_booster.lock().recover_from_snapshot();
+                    reapply_saved_network_boosts(&state);
+                    reapply_saved_roblox_fflags(&state);
                 }
             });
 

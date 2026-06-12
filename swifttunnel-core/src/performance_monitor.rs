@@ -120,14 +120,12 @@ pub struct PerformanceMonitor {
 
 impl PerformanceMonitor {
     pub fn new() -> Self {
-        let mut system = System::new();
-        system.refresh_processes(ProcessesToUpdate::All, true);
-        system.refresh_memory();
-        system.refresh_cpu_all();
-
+        // No eager refresh: construction happens during app startup, where a
+        // whole-system process scan adds launch latency. The first
+        // `update_metrics` call performs the initial scan instead.
         Self {
-            system,
-            last_full_scan: Some(std::time::Instant::now()),
+            system: System::new(),
+            last_full_scan: None,
         }
     }
 

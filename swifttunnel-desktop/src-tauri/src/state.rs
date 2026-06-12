@@ -57,6 +57,12 @@ pub struct AppState {
     pub discord_manager: Arc<Mutex<DiscordManager>>,
     pub runtime: Arc<tokio::runtime::Runtime>,
     pub launched_from_startup: bool,
+    /// Flips to `true` once startup crash-recovery (stale adapter/tunnel-mode
+    /// reset) finishes in the background. `vpn_connect` waits on it so a fast
+    /// click can't start a tunnel mid-reset; everything else ignores it.
+    pub startup_recovery_done: watch::Receiver<bool>,
+    /// Sender side for the setup background task.
+    pub startup_recovery_signal: watch::Sender<bool>,
 }
 
 impl AppState {
@@ -64,21 +70,13 @@ impl AppState {
         runtime: Arc<tokio::runtime::Runtime>,
         launched_from_startup: bool,
     ) -> Result<Self, String> {
+        // Keep this constructor FAST: it runs inside Tauri's setup hook, and
+        // the window cannot even appear until setup returns. Anything slow
+        // (network, child processes, ACL repair, process scans) belongs in
+        // the background startup task in lib.rs.
         let auth_manager = AuthManager::new().map_err(|e| format!("Failed to init auth: {}", e))?;
-        let mut settings = swifttunnel_core::settings::load_settings();
+        let settings = swifttunnel_core::settings::load_settings();
         let roblox_optimizer = RobloxOptimizer::new();
-
-        if let Err(e) = roblox_optimizer.repair_global_basic_settings_permissions() {
-            log::warn!("Failed to repair Roblox settings permissions: {}", e);
-        }
-
-        if let Ok(current) = roblox_optimizer.read_current_settings() {
-            settings.config.roblox_settings.window_fullscreen = current.fullscreen;
-            if let Some((width, height)) = current.window_size {
-                settings.config.roblox_settings.window_width = width;
-                settings.config.roblox_settings.window_height = height;
-            }
-        }
 
         let enable_discord_rpc = settings.enable_discord_rpc;
 
@@ -91,6 +89,7 @@ impl AppState {
 
         let vpn_connection = VpnConnection::new();
         let vpn_state_handle = vpn_connection.state_handle();
+        let (startup_recovery_signal, startup_recovery_done) = watch::channel(false);
 
         Ok(Self {
             auth_manager: Arc::new(tokio::sync::Mutex::new(auth_manager)),
@@ -109,6 +108,27 @@ impl AppState {
             discord_manager: Arc::new(Mutex::new(DiscordManager::new(enable_discord_rpc))),
             runtime,
             launched_from_startup,
+            startup_recovery_done,
+            startup_recovery_signal,
         })
+    }
+
+    /// Sync the Roblox client's on-disk window settings into the in-memory
+    /// config. Moved out of `new()`: it repairs file ACLs (spawns icacls) and
+    /// reads Roblox's settings file, which is too slow for the setup path.
+    pub fn sync_roblox_window_settings(&self) {
+        let optimizer = self.roblox_optimizer.lock();
+        if let Err(e) = optimizer.repair_global_basic_settings_permissions() {
+            log::warn!("Failed to repair Roblox settings permissions: {}", e);
+        }
+        if let Ok(current) = optimizer.read_current_settings() {
+            drop(optimizer);
+            let mut settings = self.settings.lock();
+            settings.config.roblox_settings.window_fullscreen = current.fullscreen;
+            if let Some((width, height)) = current.window_size {
+                settings.config.roblox_settings.window_width = width;
+                settings.config.roblox_settings.window_height = height;
+            }
+        }
     }
 }

@@ -370,6 +370,22 @@ pub async fn vpn_connect(
     region: String,
     game_presets: Vec<String>,
 ) -> Result<(), String> {
+    // Startup crash-recovery (stale adapter/tunnel-mode reset) runs in the
+    // background so launch is instant - but a tunnel must never start while
+    // adapters are mid-reset. Normally done long before anyone can click
+    // Connect; bounded so a wedged recovery can't brick connecting forever.
+    {
+        let mut recovery_done = state.startup_recovery_done.clone();
+        if !*recovery_done.borrow() {
+            log::info!("Connect requested before startup network recovery finished; waiting");
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                recovery_done.wait_for(|done| *done),
+            )
+            .await;
+        }
+    }
+
     // Gather needed data from settings and server list before locking vpn
     let (settings_snapshot, binding_preference, overrides_changed) = {
         let mut settings = state.settings.lock();
