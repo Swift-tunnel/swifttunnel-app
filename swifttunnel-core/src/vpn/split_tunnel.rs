@@ -1354,6 +1354,82 @@ impl SplitTunnelDriver {
         ))
     }
 
+    /// Parse the adapter names from the binding-cleanup script's success output.
+    ///
+    /// The script emits `Disabled WinpkFilter binding on adapters: A, B` when it
+    /// unbinds anything, and a "no enabled bindings" line otherwise. Returns the
+    /// adapter names that were unbound (empty when there was nothing to do).
+    #[cfg(windows)]
+    fn parse_disabled_winpkfilter_adapters(stdout: &str) -> Vec<String> {
+        const PREFIX: &str = "Disabled WinpkFilter binding on adapters: ";
+        stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(PREFIX))
+            .map(|rest| {
+                rest.split(',')
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Disable any leftover `nt_ndisrd` adapter bindings as part of Internet
+    /// recovery.
+    ///
+    /// After a crash or force-close the WinpkFilter LWF can stay bound to one or
+    /// more adapters and silently blackhole all traffic — the "No internet,
+    /// Secured" state users hit until they reconnect SwiftTunnel (or run the
+    /// manual `Disable-NetAdapterBinding -ComponentId nt_ndisrd` fix support has
+    /// been handing out). Unbinding it here self-heals that without a reboot.
+    /// Safe while disconnected: the next connect re-enables the binding on the
+    /// active adapter.
+    ///
+    /// Reuses the uninstall cleanup script (the action is identical) and returns
+    /// the adapters that were actually unbound so the repair can report a result.
+    #[cfg(windows)]
+    pub fn disable_leftover_winpkfilter_bindings() -> Result<Vec<String>, String> {
+        let output = crate::hidden_command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                Self::build_winpkfilter_binding_cleanup_script(),
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run WinpkFilter binding recovery: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        if !output.status.success() {
+            let details = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!(
+                    "PowerShell exited with code {}",
+                    output.status.code().unwrap_or(-1)
+                )
+            };
+            return Err(format!(
+                "Failed to disable leftover WinpkFilter adapter bindings: {}",
+                details
+            ));
+        }
+
+        let disabled = Self::parse_disabled_winpkfilter_adapters(&stdout);
+        if disabled.is_empty() {
+            log::info!("Internet recovery: no leftover WinpkFilter adapter bindings to disable");
+        } else {
+            log::info!(
+                "Internet recovery: disabled leftover WinpkFilter binding on adapter(s): {}",
+                disabled.join(", ")
+            );
+        }
+        Ok(disabled)
+    }
+
     /// Stop the driver service
     pub fn stop_driver_service() -> Result<(), String> {
         use windows::Win32::System::Services::*;
@@ -1879,6 +1955,31 @@ mod tests {
             GamePreset::Roblox
                 .process_names()
                 .contains(&"robloxapp.exe")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parses_disabled_winpkfilter_adapters() {
+        assert_eq!(
+            SplitTunnelDriver::parse_disabled_winpkfilter_adapters(
+                "Disabled WinpkFilter binding on adapters: Ethernet, Wi-Fi"
+            ),
+            vec!["Ethernet".to_string(), "Wi-Fi".to_string()]
+        );
+        // "Nothing to do" output yields no adapters.
+        assert!(
+            SplitTunnelDriver::parse_disabled_winpkfilter_adapters(
+                "No enabled WinpkFilter bindings found during uninstall cleanup."
+            )
+            .is_empty()
+        );
+        // Tolerates surrounding log lines and odd spacing around adapter names.
+        assert_eq!(
+            SplitTunnelDriver::parse_disabled_winpkfilter_adapters(
+                "preamble\r\nDisabled WinpkFilter binding on adapters: Ethernet 2 ,  vEthernet (WSL) \r\n"
+            ),
+            vec!["Ethernet 2".to_string(), "vEthernet (WSL)".to_string()]
         );
     }
 

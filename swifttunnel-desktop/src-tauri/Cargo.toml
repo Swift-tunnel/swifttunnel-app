@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "2.2.6"
+version = "2.5.7"
 default-run = "swifttunnel-desktop"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
@@ -29,7 +29,9 @@ log = "0.4"
 env_logger = "0.11"
 simplelog = "0.12"
 dirs = "5"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# See swifttunnel-core/Cargo.toml: native roots trust the Windows cert store so
+# antivirus/proxy TLS inspection doesn't break the app's HTTPS (login exchange).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 semver = "1.0"
 sha2 = "0.10"
 base64 = "0.22"

@@ -3862,6 +3862,12 @@ impl ParallelInterceptor {
                     "Public IPv6 blocked on {} via WinpkFilter static filters — game traffic will use IPv4",
                     friendly_name
                 );
+                // Make apps fall back to IPv4 *instantly* instead of stalling on
+                // the black-holed IPv6 the drop filters create (the "Connection
+                // Error / half-loaded avatars on IPv6 wifi" reports).
+                if let Some(if_index) = self.physical_adapter_if_index {
+                    Self::steer_ipv6_default_route_off(if_index);
+                }
                 Ok(())
             }
             Err(e) => {
@@ -3887,6 +3893,87 @@ impl ParallelInterceptor {
             }
         }
     }
+
+    /// netsh args to toggle IPv6 router discovery on an interface. `store=active`
+    /// keeps it non-persistent so a reboot fully restores IPv6 even after a crash.
+    #[cfg(windows)]
+    fn ipv6_router_discovery_args(if_index: u32, enabled: bool) -> Vec<String> {
+        vec![
+            "interface".into(),
+            "ipv6".into(),
+            "set".into(),
+            "interface".into(),
+            format!("interface={if_index}"),
+            format!(
+                "routerdiscovery={}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+            "store=active".into(),
+        ]
+    }
+
+    /// netsh args to drop the learned IPv6 default route on an interface.
+    #[cfg(windows)]
+    fn ipv6_delete_default_route_args(if_index: u32) -> Vec<String> {
+        vec![
+            "interface".into(),
+            "ipv6".into(),
+            "delete".into(),
+            "route".into(),
+            "prefix=::/0".into(),
+            format!("interface={if_index}"),
+        ]
+    }
+
+    /// Steer Windows off public IPv6 on the selected adapter WITHOUT touching the
+    /// NIC binding (which bounces the link on many Realtek/Killer/Intel/USB NICs —
+    /// see the LSO/ms_tcpip6 notes below, the "kills my internet on Connect"
+    /// failure mode). Disabling router discovery and dropping the learned default
+    /// route makes apps fall back to IPv4 *instantly* instead of stalling on the
+    /// black-holed IPv6 our drop filters create — the root of the "Connection
+    /// Error / half-loaded avatars on IPv6 wifi" reports. The drop filters stay as
+    /// the leak backstop; this only changes *how fast* apps give up on IPv6.
+    #[cfg(windows)]
+    fn steer_ipv6_default_route_off(if_index: u32) {
+        match crate::hidden_command("netsh")
+            .args(Self::ipv6_router_discovery_args(if_index, false))
+            .output()
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => log::warn!(
+                "netsh routerdiscovery=disabled (if {if_index}) exited {}",
+                o.status.code().unwrap_or(-1)
+            ),
+            Err(e) => log::warn!("netsh routerdiscovery=disabled (if {if_index}) failed: {e}"),
+        }
+        match crate::hidden_command("netsh")
+            .args(Self::ipv6_delete_default_route_args(if_index))
+            .output()
+        {
+            Ok(_) => log::info!(
+                "Steered IPv6 default route off on if_index {if_index}: apps fall back to IPv4 instantly"
+            ),
+            Err(e) => log::warn!("netsh delete ::/0 route (if {if_index}) failed: {e}"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn steer_ipv6_default_route_off(_if_index: u32) {}
+
+    /// Re-enable IPv6 router discovery so the default route is re-learned via RA.
+    #[cfg(windows)]
+    fn restore_ipv6_default_route(if_index: u32) {
+        match crate::hidden_command("netsh")
+            .args(Self::ipv6_router_discovery_args(if_index, true))
+            .output()
+        {
+            Ok(_) => log::info!("Restored IPv6 router discovery on if_index {if_index}"),
+            Err(e) => log::warn!("netsh routerdiscovery=enabled (if {if_index}) failed: {e}"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn restore_ipv6_default_route(_if_index: u32) {}
 
     /// Block public IPv6 egress while the IPv4-only tunnel is active.
     ///
@@ -3951,6 +4038,12 @@ impl ParallelInterceptor {
                     );
                 }
             }
+        }
+
+        // Re-enable IPv6 router discovery so the default route is re-learned (we
+        // steered it off in disable_ipv6 to force instant IPv4 fallback).
+        if let Some(if_index) = self.physical_adapter_if_index {
+            Self::restore_ipv6_default_route(if_index);
         }
 
         self.ipv6_was_disabled = false;
@@ -8459,6 +8552,41 @@ mod tests {
     // Shared with hosts.rs tests: every test touching the process-global
     // bootstrap IP sets must serialize on the same lock, across modules.
     use crate::roblox_proxy::hosts::BOOTSTRAP_IP_TEST_LOCK as BOOTSTRAP_ROUTE_IP_TEST_LOCK;
+
+    #[cfg(windows)]
+    #[test]
+    fn ipv6_route_steer_builds_expected_netsh_commands() {
+        // Disable: stop router discovery (non-persistent) so apps fall back to
+        // IPv4 instantly instead of stalling on black-holed IPv6.
+        assert_eq!(
+            ParallelInterceptor::ipv6_router_discovery_args(12, false),
+            vec![
+                "interface",
+                "ipv6",
+                "set",
+                "interface",
+                "interface=12",
+                "routerdiscovery=disabled",
+                "store=active",
+            ]
+        );
+        // Restore re-enables it so the default route is re-learned via RA.
+        assert_eq!(
+            ParallelInterceptor::ipv6_router_discovery_args(12, true)[5],
+            "routerdiscovery=enabled"
+        );
+        assert_eq!(
+            ParallelInterceptor::ipv6_delete_default_route_args(12),
+            vec![
+                "interface",
+                "ipv6",
+                "delete",
+                "route",
+                "prefix=::/0",
+                "interface=12",
+            ]
+        );
+    }
 
     fn build_ipv4_frame(
         protocol: u8,

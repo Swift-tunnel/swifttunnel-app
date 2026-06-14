@@ -7,17 +7,25 @@
 use log::{debug, info, warn};
 use std::collections::HashSet;
 use std::fs;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const GOODBYEDPI_ENV_PATH: &str = "SWIFTTUNNEL_GOODBYEDPI_PATH";
 const GOODBYEDPI_EXE_NAME: &str = "goodbyedpi.exe";
 const HOSTLIST_NAME: &str = "roblox-hostlist.txt";
-const ROBLOX_REACHABILITY_TARGET: (&str, u16) = ("www.roblox.com", 443);
-const GOODBYEDPI_MODE_STARTUP_WAIT: Duration = Duration::from_secs(3);
-const ROBLOX_REACHABILITY_TIMEOUT: Duration = Duration::from_millis(1500);
+/// HTTPS endpoint used to confirm a GoodbyeDPI mode actually defeats the DPI.
+/// This must be a real TLS request: a bare TCP connect to :443 succeeds even
+/// where the censor RST-injects *after* the TLS ClientHello (Egypt-style SNI
+/// block), so the old TCP-connect probe reported success on a dead path.
+const ROBLOX_REACHABILITY_URL: &str = "https://www.roblox.com/";
+/// Per-mode wait for GoodbyeDPI/WinDivert to attach before probing.
+const GOODBYEDPI_MODE_STARTUP_WAIT: Duration = Duration::from_secs(2);
+/// Overall budget for the whole mode escalation. The relay is the primary
+/// bypass path now, so GoodbyeDPI is a best-effort fallback and must never
+/// stall connect for long (it used to burn up to ~27s trying all 9 modes).
+const GOODBYEDPI_TOTAL_BUDGET: Duration = Duration::from_secs(8);
+const ROBLOX_REACHABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GoodbyeDpiNativeArch {
@@ -76,7 +84,7 @@ impl Drop for GoodbyeDpiGuard {
     }
 }
 
-pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
+pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
     if !cfg!(windows) {
         debug!("GoodbyeDPI helper skipped: supported only on Windows");
         return Ok(None);
@@ -98,8 +106,18 @@ pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
 
     let hostlist_path = write_roblox_hostlist()?;
     let mut failures = Vec::new();
+    let escalation_start = Instant::now();
 
     for mode in 1..=9 {
+        // The relay is the primary bypass now; GoodbyeDPI is a best-effort
+        // fallback and must not stall connect cycling through all 9 modes.
+        if escalation_start.elapsed() >= GOODBYEDPI_TOTAL_BUDGET {
+            failures.push(format!(
+                "mode escalation stopped after exceeding the {}s budget",
+                GOODBYEDPI_TOTAL_BUDGET.as_secs()
+            ));
+            break;
+        }
         let args = build_goodbyedpi_args(mode, &hostlist_path);
         let mut child = match spawn_goodbyedpi(&exe_path, &args) {
             Ok(child) => child,
@@ -117,7 +135,7 @@ pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
             hostlist_path.display()
         );
 
-        std::thread::sleep(GOODBYEDPI_MODE_STARTUP_WAIT);
+        tokio::time::sleep(GOODBYEDPI_MODE_STARTUP_WAIT).await;
 
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -132,7 +150,7 @@ pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
             }
         }
 
-        if roblox_https_reachable() {
+        if roblox_https_reachable().await {
             info!("GoodbyeDPI mode -{} made Roblox HTTPS reachable", mode);
             return Ok(Some(GoodbyeDpiGuard {
                 child,
@@ -143,8 +161,8 @@ pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
         }
 
         failures.push(format!(
-            "-{mode}: {}:{} was not reachable",
-            ROBLOX_REACHABILITY_TARGET.0, ROBLOX_REACHABILITY_TARGET.1
+            "-{mode}: {} was not reachable over HTTPS",
+            ROBLOX_REACHABILITY_URL
         ));
         stop_child_process(&mut child, &exe_path);
     }
@@ -158,7 +176,8 @@ pub fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
     }
 
     Err(format!(
-        "GoodbyeDPI could not make Roblox reachable after trying modes -1 through -9 ({})",
+        "GoodbyeDPI could not confirm a working mode within {}s ({})",
+        GOODBYEDPI_TOTAL_BUDGET.as_secs(),
         failures.join("; ")
     ))
 }
@@ -285,14 +304,23 @@ fn stop_child_process(child: &mut Child, exe_path: &Path) {
     }
 }
 
-fn roblox_https_reachable() -> bool {
-    let Ok(addrs) = ROBLOX_REACHABILITY_TARGET.to_socket_addrs() else {
-        return false;
+async fn roblox_https_reachable() -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(ROBLOX_REACHABILITY_TIMEOUT)
+        .no_proxy()
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            warn!("GoodbyeDPI reachability probe could not build HTTP client: {e}");
+            return false;
+        }
     };
 
-    addrs
-        .take(8)
-        .any(|addr| TcpStream::connect_timeout(&addr, ROBLOX_REACHABILITY_TIMEOUT).is_ok())
+    // Any HTTP response (even an error status) means the TLS handshake completed
+    // through the DPI. An RST/timeout — what Egypt-style SNI blocking does after
+    // the ClientHello — surfaces here as a transport error, not a status code.
+    client.get(ROBLOX_REACHABILITY_URL).send().await.is_ok()
 }
 
 pub(crate) fn build_goodbyedpi_args(mode: u8, hostlist_path: &Path) -> Vec<String> {

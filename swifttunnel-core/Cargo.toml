@@ -66,7 +66,11 @@ thiserror = "1.0"
 dirs = "5.0"
 
 # HTTP client for API calls
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# rustls-tls-native-roots trusts the Windows system certificate store (not just
+# bundled webpki roots) so HTTPS still validates when antivirus/proxy TLS
+# inspection presents a locally-trusted CA — the browser works via the system
+# store, so the app must too, or login fails with "error sending request".
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
 
 # Windows Packet Filter (ndisapi) for packet-level split tunneling
 ndisapi = "0.6"

@@ -2501,6 +2501,36 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
         network_repair_step("tunnel_marker", "Crash marker", "healthy", "No crash marker present.")
     });
 
+    // Step 2b: leftover WinpkFilter (nt_ndisrd) adapter binding. After a crash or
+    // force-close the packet-filter LWF can stay bound to adapters and blackhole
+    // all traffic ("No internet, Secured") until the user reconnects. Unbinding it
+    // here self-heals without a reboot; the next connect re-enables it on the
+    // active adapter. The script is a no-op when nothing is bound, so this is safe
+    // to run every time.
+    steps.push(match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+        Ok(disabled) if disabled.is_empty() => network_repair_step(
+            "winpkfilter_binding",
+            "WinpkFilter adapter binding",
+            "healthy",
+            "No leftover WinpkFilter (nt_ndisrd) adapter bindings were found.",
+        ),
+        Ok(disabled) => network_repair_step(
+            "winpkfilter_binding",
+            "WinpkFilter adapter binding",
+            "fixed",
+            format!(
+                "Disabled a leftover WinpkFilter (nt_ndisrd) binding that blocks all internet after a crash, on adapter(s): {}.",
+                disabled.join(", ")
+            ),
+        ),
+        Err(e) => network_repair_step(
+            "winpkfilter_binding",
+            "WinpkFilter adapter binding",
+            "failed",
+            e,
+        ),
+    });
+
     // Step 3: IPv6 block leftovers (static filters / legacy binding / firewall rule).
     steps.push(match ipv6_recovery::restore_ipv6_from_marker() {
         Some(true) => {

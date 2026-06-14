@@ -395,6 +395,60 @@ impl AutoRouter {
         })
     }
 
+    /// True when `ip`'s last observed packet is older than the gone-quiet
+    /// handoff window (or it has no tracked traffic at all).
+    fn game_server_is_quiet(&self, ip: Ipv4Addr) -> bool {
+        self.game_traffic
+            .read()
+            .get(&ip)
+            .map(|last| Instant::now().duration_since(*last) >= GAME_TRAFFIC_QUIET_HANDOFF)
+            .unwrap_or(true)
+    }
+
+    /// Expire the per-session routing pin when the game server that currently
+    /// owns the route has gone quiet — i.e. the player left that match or closed
+    /// that Roblox instance.
+    ///
+    /// Without this, the next server a player joins frequently first appears
+    /// *within* [`GAME_TRAFFIC_QUIET_HANDOFF`] of the old server's last packet
+    /// (the teleport / relaunch overlap), so `evaluate_game_server` marks it
+    /// `seen` and defers it — and once the old connection goes quiet it is never
+    /// re-evaluated, leaving the relay stuck on the old region until a full
+    /// disconnect ("route only works on first join or leave/rejoin"). Clearing
+    /// the pin and the seen-set here lets the next server route like a fresh
+    /// join. The current relay is kept (we never switch while a game is still
+    /// flowing; this only fires once the pinned game has stopped sending).
+    ///
+    /// Returns `true` when a stale pin was expired.
+    fn maybe_expire_quiet_pin(&self) -> bool {
+        // Cheap pre-check: nothing pinned, nothing to expire.
+        let active = match *self.active_game_server_ip.read() {
+            Some(ip) => ip,
+            None => return false,
+        };
+        if !self.game_server_is_quiet(active) {
+            return false;
+        }
+
+        // Re-check under the write lock so a concurrent handoff/pin can't be
+        // clobbered between the read above and the clear below.
+        let mut active_pin = self.active_game_server_ip.write();
+        match *active_pin {
+            Some(pinned) if pinned == active && self.game_server_is_quiet(pinned) => {
+                *active_pin = None;
+                drop(active_pin);
+                self.seen_game_servers.write().clear();
+                log::info!(
+                    "Auto-routing: Active game server {} went quiet (left match / closed instance) — \
+                     routing reset so the next game re-routes",
+                    active
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Evaluate a detected game server IP and trigger an async region lookup.
     ///
     /// This is called from the packet processing hot path when a new Roblox game server
@@ -428,13 +482,20 @@ impl AutoRouter {
         // on the write path below — the loser bails on `if !is_new_ip` without
         // double-firing the lookup. Cheap by design; do not "fix" with a single
         // upgradeable lock unless you've measured a contention regression.
-        match self.seen_game_servers.try_read() {
-            Some(seen) => {
-                if seen.contains(&game_server_ip) {
-                    return AutoRoutingAction::NoAction;
-                }
-            }
+        let already_seen = match self.seen_game_servers.try_read() {
+            Some(seen) => seen.contains(&game_server_ip),
             None => return AutoRoutingAction::NoAction,
+        };
+        if already_seen {
+            // This IP was already evaluated — usually the flowing game server
+            // itself, or a candidate deferred during a hand-off overlap. If the
+            // server that owns the route has since gone quiet (player left the
+            // match / closed that instance), expire the pin so this IP re-routes
+            // like a fresh join instead of staying stuck on the old relay. If
+            // the route is still live, keep excluding this IP as before.
+            if !self.maybe_expire_quiet_pin() {
+                return AutoRoutingAction::NoAction;
+            }
         }
 
         // Gone-quiet gate: while any other game-server IP is actively
@@ -1229,6 +1290,68 @@ mod tests {
         assert!(router.pin_active_game_server_for_session(teleport_ip, epoch2));
         assert!(router.is_active_game_server(teleport_ip));
         assert!(!router.is_active_game_server(first_ip));
+    }
+
+    #[test]
+    fn quiet_pinned_server_expires_so_next_match_re_routes() {
+        // Regression for "Route Assist only works on first join or leave/rejoin":
+        // a new match whose server appears during the hand-off overlap is deferred
+        // and marked seen; once the old match goes quiet it must re-route, not
+        // stay stuck on the old relay until a full disconnect.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let first_ip = Ipv4Addr::new(128, 116, 50, 1);
+        let new_match_ip = Ipv4Addr::new(128, 116, 55, 1);
+
+        // First match: looked up and pinned as the active game server.
+        router.evaluate_game_server(first_ip);
+        let (_, _, epoch) = rx.try_recv().expect("first lookup");
+        assert!(router.pin_active_game_server_for_session(first_ip, epoch));
+
+        // New match server appears while the first is still fresh (< handoff
+        // window): deferred and marked seen, no lookup.
+        router.evaluate_game_server(new_match_ip);
+        assert!(
+            rx.try_recv().is_err(),
+            "overlap candidate must defer while the first match is live"
+        );
+
+        // Player leaves the first match: its connection goes quiet.
+        backdate_game_traffic(&router, first_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
+
+        // The next packet for the new match must now re-route: the stale pin is
+        // expired and the server is evaluated like a fresh join.
+        router.evaluate_game_server(new_match_ip);
+        let (received_ip, _, _) = rx
+            .try_recv()
+            .expect("new match must enqueue a lookup once the old match goes quiet");
+        assert_eq!(received_ip, new_match_ip);
+        assert!(
+            !router.is_active_game_server(first_ip),
+            "stale pin must be expired"
+        );
+    }
+
+    #[test]
+    fn live_pinned_server_does_not_expire_on_seen_repeat() {
+        // The active game server's own packets keep arriving (it is in `seen`);
+        // they must NOT expire the pin or trigger a re-route while it is live.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let router = AutoRouter::new(true, "singapore");
+        router.set_lookup_channel(tx);
+
+        let ip = Ipv4Addr::new(128, 116, 50, 1);
+        router.evaluate_game_server(ip);
+        let (_, _, epoch) = rx.try_recv().expect("first lookup");
+        assert!(router.pin_active_game_server_for_session(ip, epoch));
+
+        // More packets from the same live server: still seen, still pinned, no
+        // new lookup.
+        router.evaluate_game_server(ip);
+        assert!(rx.try_recv().is_err());
+        assert!(router.is_active_game_server(ip));
     }
 
     #[test]

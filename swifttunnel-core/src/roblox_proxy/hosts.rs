@@ -189,6 +189,21 @@ struct DohJsonAnswer {
 /// control plane, settings, and asset/CDN — because in a fully-blocked
 /// country none of them are reachable directly.
 pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), String> {
+    // Full bypass relays every Roblox host. Lock that routing decision in BEFORE
+    // the fallible DoH resolution below. Under a full block the censor commonly
+    // blocks public DoH too, so resolution can fail — and if it does, we must
+    // still be in country-ban routing. Otherwise the country-ban flag stays
+    // unset, runtime SNI-learning treats the session like Route Assist, and it
+    // demotes clientsettings/asset hosts onto the (censored) direct path
+    // mid-session: they relay once, then get RST'd — the "plays 20s then dies"
+    // report. Setting the flag up front (and clearing any stale direct-only pins
+    // a prior Route Assist/partial session left behind) keeps those hosts on the
+    // relay even when we get zero pins; recognized Roblox/strapper flows relay on
+    // process identity alone, so the pins are an optimization, not a prerequisite.
+    if country_ban_bypass {
+        enter_country_ban_routing();
+    }
+
     let resolved = resolve_bootstrap_overrides().await?;
     // Route Assist (and PARTIAL bypass, which shares this classification)
     // keeps heavy asset/CDN hosts and the launch-critical settings hosts
@@ -210,6 +225,16 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
     set_active_bootstrap_ips(active_ips);
     set_direct_only_bootstrap_ips(direct_only_ips);
     Ok(())
+}
+
+/// Enter full country-ban routing: mark the session as relaying every Roblox
+/// host and drop any stale direct-only pins from a prior Route Assist/partial
+/// session. Idempotent. Kept separate from [`apply_bootstrap_overrides`] so this
+/// routing decision survives a DoH-resolution failure (which returns early) and
+/// is unit-testable without touching the network.
+fn enter_country_ban_routing() {
+    COUNTRY_BAN_BYPASS_ROUTING.store(true, Ordering::Relaxed);
+    set_direct_only_bootstrap_ips(HashSet::new());
 }
 
 pub fn is_active_bootstrap_ip(ip: Ipv4Addr) -> bool {
@@ -1269,6 +1294,33 @@ mod tests {
             "clientsettings.roblox.com",
             ip
         ));
+
+        clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn entering_country_ban_routing_clears_stale_direct_only_pins() {
+        let _guard = BOOTSTRAP_IP_TEST_LOCK.lock().unwrap();
+        clear_active_bootstrap_ips_for_test();
+
+        // A prior Route Assist/partial session pinned clientsettings as
+        // direct-only, and country-ban routing is currently off (e.g. a fresh
+        // full-mode connect whose DoH resolution then fails under the block).
+        let stale = Ipv4Addr::new(10, 11, 12, 13);
+        set_direct_only_bootstrap_ips_for_test([stale]);
+        COUNTRY_BAN_BYPASS_ROUTING.store(false, Ordering::Relaxed);
+        assert!(is_direct_only_bootstrap_ip(stale));
+
+        enter_country_ban_routing();
+
+        assert!(
+            COUNTRY_BAN_BYPASS_ROUTING.load(Ordering::Relaxed),
+            "full bypass must mark country-ban routing even before/without pins"
+        );
+        assert!(
+            !is_direct_only_bootstrap_ip(stale),
+            "stale direct-only pin must be dropped so full bypass keeps clientsettings/assets on the relay"
+        );
 
         clear_active_bootstrap_ips_for_test();
     }

@@ -1129,6 +1129,14 @@ impl VpnConnection {
                     tunnel_apps.push((*strapper).to_string());
                 }
             }
+        } else {
+            // Roblox Studio is a developer tool, not a game client — it never
+            // joins the game servers Route Assist optimizes for, so relaying it
+            // adds nothing and breaks Team Create (its place-sync TCP exceeds the
+            // relay's forward buffer → "connectToTeamCreateSession: no response").
+            // Keep Studio direct unless a country block actually requires relaying
+            // it to reach Roblox at all (the country-ban branch above keeps it).
+            tunnel_apps.retain(|app| !crate::process_names::is_roblox_studio_process_name(app));
         }
 
         let prior_was_error = {
@@ -1267,7 +1275,13 @@ impl VpnConnection {
         }
 
         if enable_country_ban {
-            match crate::roblox_proxy::goodbyedpi::start_for_roblox() {
+            // GoodbyeDPI is now a best-effort, supplementary DPI-evasion layer:
+            // the relay carries Roblox traffic regardless. So if it can't confirm
+            // a working mode (common under aggressive DPI like Egypt's — which is
+            // exactly why we relay), log it but do NOT raise the user-facing
+            // "bypass unavailable" signal. That signal is reserved for failures
+            // that actually break the relay bypass, e.g. the DNS repair above.
+            match crate::roblox_proxy::goodbyedpi::start_for_roblox().await {
                 Ok(Some(guard)) => {
                     self.goodbye_dpi_guard = Some(guard);
                     log::info!(
@@ -1275,16 +1289,13 @@ impl VpnConnection {
                     );
                 }
                 Ok(None) => {
-                    let message =
-                        "Bypass country bans helper unavailable; Roblox traffic will continue without GoodbyeDPI"
-                            .to_string();
-                    self.country_ban_bypass_failure = Some(message.clone());
-                    log::warn!("{message}");
+                    log::info!(
+                        "V3: GoodbyeDPI helper unavailable; relying on the relay for country-ban bypass"
+                    );
                 }
                 Err(e) => {
-                    self.country_ban_bypass_failure = Some(e.clone());
                     log::warn!(
-                        "V3: Bypass country bans helper startup failed; continuing without GoodbyeDPI: {}",
+                        "V3: GoodbyeDPI could not confirm a working mode; relying on the relay for country-ban bypass: {}",
                         e
                     );
                 }

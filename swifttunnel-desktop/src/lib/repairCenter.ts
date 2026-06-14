@@ -116,7 +116,7 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
     id: "no_internet",
     label: "Internet recovery",
     description:
-      "Fixes no-internet-after-SwiftTunnel: resets stuck packet filter state, removes leftover IPv6/offload changes, and flushes DNS. Safe to run any time while disconnected.",
+      "Fixes no-internet-after-SwiftTunnel: resets stuck packet filter state, unbinds a leftover network-filter (nt_ndisrd) driver binding that can blackhole traffic after a crash, removes leftover IPv6/offload changes, and flushes DNS. Safe to run any time while disconnected.",
     actionLabel: "Repair",
     systemChanging: true,
   },
