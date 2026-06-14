@@ -15,10 +15,15 @@ export type OptSafety = "safe" | "low" | "caution";
 
 export type OptCategory = "System" | "Performance" | "Input" | "Privacy";
 
-export type OptTier = "Beginner" | "Intermediate" | "Expert";
+export type OptTier = "Beginner" | "Intermediate" | "Expert" | "Advanced";
 
 /** Render order + blurb for the grouped tier sections in the Optimization tab. */
-export const TIER_ORDER: OptTier[] = ["Beginner", "Intermediate", "Expert"];
+export const TIER_ORDER: OptTier[] = [
+  "Beginner",
+  "Intermediate",
+  "Expert",
+  "Advanced",
+];
 
 export const TIER_DESCRIPTION: Record<OptTier, string> = {
   Beginner: "Safe, fully reversible tweaks anyone can use — small, reliable gains.",
@@ -26,6 +31,8 @@ export const TIER_DESCRIPTION: Record<OptTier, string> = {
     "Trade a little comfort or a feature you may not use for more performance.",
   Expert:
     "System-wide changes for users who know exactly what they're trading. All reversible.",
+  Advanced:
+    "Experimental and risky — these can unlock serious performance but lower security or break features. Only if you understand the trade-off. Still fully reversible.",
 };
 
 /** Kept for any external references; tab now groups by tier. */
@@ -110,6 +117,86 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     ],
   },
   {
+    id: "game_mode_enable",
+    name: "Enable Windows Game Mode",
+    description:
+      "Tells Windows to prioritize the foreground game for CPU/GPU scheduling and hold back background work while you play.",
+    tier: "Beginner",
+    category: "Performance",
+    safety: "safe",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\Software\\Microsoft\\GameBar → AutoGameModeEnabled = 1",
+      "HKCU\\Software\\Microsoft\\GameBar → AllowAutoGameMode = 1",
+    ],
+  },
+  {
+    id: "widgets_disable",
+    name: "Disable Widgets / News & Interests",
+    description:
+      "Turns off the Windows 11 Widgets board (News & Interests), which runs a background process that uses real CPU, RAM, and network. Harmless on Windows 10.",
+    tier: "Beginner",
+    category: "Performance",
+    safety: "safe",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\...\\Dsh → AllowNewsAndInterests = 0",
+      "HKCU\\...\\Explorer\\Advanced → TaskbarDa = 0 (hide the button)",
+    ],
+  },
+  {
+    id: "startup_delay_disable",
+    name: "Remove Startup App Delay",
+    description:
+      "Removes the artificial delay Windows adds before launching your startup apps, so the desktop is usable sooner after boot.",
+    tier: "Beginner",
+    category: "System",
+    safety: "safe",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: ["HKCU\\...\\Explorer\\Serialize → StartupDelayInMSec = 0"],
+  },
+  {
+    id: "action_center_disable",
+    name: "Disable Action Center",
+    description:
+      "Hides the notification center panel and its taskbar icon, trimming a little background work. Notifications themselves are unaffected.",
+    tier: "Beginner",
+    category: "System",
+    safety: "low",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\Software\\Policies\\Microsoft\\Windows\\Explorer → DisableNotificationCenter = 1",
+    ],
+  },
+  {
+    id: "live_tiles_disable",
+    name: "Disable Live Tiles",
+    description:
+      "Stops Start Menu Live Tiles from fetching and animating in the background (Windows 10). Harmless on Windows 11.",
+    tier: "Beginner",
+    category: "System",
+    safety: "safe",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: ["HKCU\\...\\PushNotifications → NoTileApplicationNotification = 1"],
+  },
+  {
+    id: "fax_service_disable",
+    name: "Disable Fax Service",
+    description:
+      "Stops and disables the Windows Fax service, which almost no one uses, freeing a background service. Re-enabled on revert.",
+    tier: "Beginner",
+    category: "System",
+    safety: "low",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: ["Service Fax → stopped and set to Disabled (re-enabled on revert)"],
+  },
+  {
     id: "menu_show_delay_fast",
     name: "Snappier Menus (0ms delay)",
     description:
@@ -149,6 +236,79 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
   },
 
   // ── Intermediate ─────────────────────────────────────────────────────────
+  {
+    id: "foreground_boost_priority",
+    name: "Foreground App Priority Boost",
+    description:
+      "Tunes the Windows scheduler to favor the app you're focused on (your game) with shorter, foreground-boosted time slices. System-wide.",
+    tier: "Intermediate",
+    category: "Performance",
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\...\\PriorityControl → Win32PrioritySeparation = 38 (0x26, default 2)",
+    ],
+  },
+  {
+    id: "windowed_games_optimizations_enable",
+    name: "Optimizations for Windowed Games",
+    description:
+      "Enables the Windows 11 low-latency present path for borderless/windowed games — lower input latency without true fullscreen.",
+    tier: "Intermediate",
+    category: "Performance",
+    safety: "low",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      'HKCU\\...\\DirectX\\UserGpuPreferences → DirectXUserGlobalSettings = "SwapEffectUpgradeEnable=1;"',
+    ],
+  },
+  {
+    id: "windows_ads_suggestions_disable",
+    name: "Disable Windows Ads & Suggestions",
+    description:
+      "Turns off Start Menu suggestions, lock-screen tips/ads, and silent app installs — Windows stops fetching that content in the background.",
+    tier: "Intermediate",
+    category: "Privacy",
+    safety: "low",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\...\\ContentDeliveryManager → SystemPaneSuggestionsEnabled = 0",
+      "HKCU\\...\\ContentDeliveryManager → SubscribedContent-338388/338389/310093Enabled = 0",
+      "HKCU\\...\\ContentDeliveryManager → SilentInstalledAppsEnabled = 0",
+    ],
+  },
+  {
+    id: "search_web_suggestions_disable",
+    name: "Disable Web Search in Start",
+    description:
+      "Makes Start search local-only — no Bing web results or highlights, so it stops hitting the network and returns your apps/files faster.",
+    tier: "Intermediate",
+    category: "System",
+    safety: "low",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\Software\\Policies\\Microsoft\\Windows\\Explorer → DisableSearchBoxSuggestions = 1",
+      "HKCU\\...\\SearchSettings → IsDynamicSearchBoxEnabled = 0",
+    ],
+  },
+  {
+    id: "error_reporting_disable",
+    name: "Disable Windows Error Reporting",
+    description:
+      "Stops and disables the Windows Error Reporting service so crash data isn't collected or uploaded in the background. Re-enabled on revert.",
+    tier: "Intermediate",
+    category: "System",
+    safety: "low",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "Service WerSvc → stopped and set to Disabled (re-enabled on revert)",
+    ],
+  },
   {
     id: "game_bar_dvr_disable",
     name: "Disable Game Bar / DVR Capture",
@@ -302,6 +462,64 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
 
   // ── Expert ───────────────────────────────────────────────────────────────
   {
+    id: "vbs_disable",
+    name: "Disable VBS / Memory Integrity",
+    description:
+      "Turns off Virtualization-Based Security and HVCI (Memory Integrity), which run the OS under a hypervisor and can cost 5–15% FPS in games. Lowers security; reverts on toggle off.",
+    tier: "Expert",
+    category: "Performance",
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: true,
+    changes: [
+      "HKLM\\...\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity → Enabled = 0",
+      "HKLM\\...\\DeviceGuard → EnableVirtualizationBasedSecurity = 0",
+    ],
+  },
+  {
+    id: "onedrive_disable",
+    name: "Disable OneDrive Sync",
+    description:
+      "Disables OneDrive file sync via policy so it can't churn disk/network/CPU in the background while you game. Re-enabled on revert.",
+    tier: "Expert",
+    category: "Performance",
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\OneDrive → DisableFileSyncNGSC = 1",
+    ],
+  },
+  {
+    id: "windows_auto_updates_disable",
+    name: "Disable Automatic Windows Updates",
+    description:
+      "Stops Windows downloading/installing updates automatically so they never interrupt a game or reboot you mid-session. You can still update manually. Re-enabled on revert.",
+    tier: "Expert",
+    category: "System",
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU → NoAutoUpdate = 1",
+    ],
+  },
+  {
+    id: "browser_hardware_accel_disable",
+    name: "Disable Browser GPU Acceleration",
+    description:
+      "Stops Chrome and Edge from using the GPU, freeing graphics power for your game when a browser is open alongside it. Reverts on toggle off.",
+    tier: "Expert",
+    category: "Performance",
+    safety: "low",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SOFTWARE\\Policies\\Google\\Chrome → HardwareAccelerationModeEnabled = 0",
+      "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge → HardwareAccelerationModeEnabled = 0",
+    ],
+  },
+  {
     id: "notifications_disable",
     name: "Disable Notifications",
     description:
@@ -337,6 +555,52 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     requiresReboot: false,
     changes: [
       "HKLM\\...\\Policies\\Microsoft\\Windows\\System → DisableAcrylicBackgroundOnLogon = 1",
+    ],
+  },
+
+  // ── Advanced ─────────────────────────────────────────────────────────────
+  {
+    id: "cpu_mitigations_disable",
+    name: "Disable CPU Security Mitigations",
+    description:
+      "Turns off Spectre/Meltdown and related CPU exploit mitigations, which cost real CPU performance. Significant security trade-off — reverts on toggle off.",
+    tier: "Advanced",
+    category: "Performance",
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: true,
+    changes: [
+      "HKLM\\...\\Memory Management → FeatureSettingsOverride = 1",
+      "HKLM\\...\\Memory Management → FeatureSettingsOverrideMask = 3",
+    ],
+  },
+  {
+    id: "smartscreen_disable",
+    name: "Disable Windows SmartScreen",
+    description:
+      "Turns off the SmartScreen reputation check on app launches and downloads — no lookup overhead or prompts. Lowers protection; reverts on toggle off.",
+    tier: "Advanced",
+    category: "Privacy",
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\System → EnableSmartScreen = 0",
+    ],
+  },
+  {
+    id: "driver_updates_disable",
+    name: "Disable Windows Driver Updates",
+    description:
+      "Stops Windows Update from installing or overwriting your device drivers, so it can't swap a good GPU/audio driver for a generic one. Re-enabled on revert.",
+    tier: "Advanced",
+    category: "System",
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\...\\WindowsUpdate → ExcludeWUDriversInQualityUpdate = 1",
+      "HKLM\\...\\DriverSearching → SearchOrderConfig = 0",
     ],
   },
 ];

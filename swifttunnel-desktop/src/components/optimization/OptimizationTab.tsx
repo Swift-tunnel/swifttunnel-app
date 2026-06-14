@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
 import { showRamOverlay } from "../overlay/RamOverlay";
@@ -362,7 +362,6 @@ function TierCarousel({ tier, cards }: { tier: OptTier; cards: TierCard[] }) {
     (s) => s.settings.config.system_optimization.power_plan === "SwiftTunnel",
   );
   const [page, setPage] = useState(0);
-  const [direction, setDirection] = useState(1);
 
   const pages = useMemo(() => chunk(cards, CARDS_PER_PAGE), [cards]);
   const pageCount = pages.length;
@@ -373,8 +372,9 @@ function TierCarousel({ tier, cards }: { tier: OptTier; cards: TierCard[] }) {
   ).length;
 
   const go = (delta: number) => {
-    setDirection(delta);
-    setPage((p) => Math.max(0, Math.min(pageCount - 1, Math.min(p, pageCount - 1) + delta)));
+    setPage((p) =>
+      Math.max(0, Math.min(pageCount - 1, Math.min(p, pageCount - 1) + delta)),
+    );
   };
 
   return (
@@ -404,31 +404,35 @@ function TierCarousel({ tier, cards }: { tier: OptTier; cards: TierCard[] }) {
         )}
       </div>
 
+      {/* A single track holding every page side-by-side; we slide the whole
+          strip by one viewport per page so it reads as a real carousel rather
+          than the cards snapping to the next set. */}
       <div className="relative overflow-hidden">
-        <AnimatePresence initial={false} custom={direction} mode="popLayout">
-          <motion.div
-            key={current}
-            custom={direction}
-            variants={{
-              enter: (d: number) => ({ x: d * 48, opacity: 0 }),
-              center: { x: 0, opacity: 1 },
-              exit: (d: number) => ({ x: d * -48, opacity: 0 }),
-            }}
-            initial="enter"
-            animate="center"
-            exit="exit"
-            transition={{ duration: 0.22, ease: [0.3, 0.7, 0.3, 1] }}
-            className="grid grid-cols-2 gap-2.5"
-          >
-            {(pages[current] ?? []).map((card) =>
-              card.kind === "power" ? (
-                <PowerPlanCard key={card.key} />
-              ) : (
-                <OptimizationCard key={card.key} def={card.def} />
-              ),
-            )}
-          </motion.div>
-        </AnimatePresence>
+        <motion.div
+          className="flex"
+          style={{ width: `${pageCount * 100}%` }}
+          animate={{ x: `${(-current * 100) / pageCount}%` }}
+          transition={{ duration: 0.34, ease: [0.32, 0.72, 0, 1] }}
+        >
+          {pages.map((pageCards, idx) => (
+            <div
+              key={idx}
+              className="shrink-0"
+              style={{ width: `${100 / pageCount}%` }}
+              aria-hidden={idx !== current}
+            >
+              <div className="grid grid-cols-2 gap-2.5">
+                {pageCards.map((card) =>
+                  card.kind === "power" ? (
+                    <PowerPlanCard key={card.key} />
+                  ) : (
+                    <OptimizationCard key={card.key} def={card.def} />
+                  ),
+                )}
+              </div>
+            </div>
+          ))}
+        </motion.div>
       </div>
     </section>
   );

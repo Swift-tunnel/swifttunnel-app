@@ -1344,6 +1344,43 @@ impl VpnConnection {
             (Vec::new(), false, "legacy_fallback".to_string())
         };
 
+        // Full bypass + a real DNS block (Egypt): local DoH is dead and system DNS
+        // is poisoned, so the pins above may be missing/wrong and the player would
+        // reach poisoned addresses the relay can't forward to ("problem reaching
+        // our servers"). Now that the relay tunnel is up, resolve Roblox's real
+        // IPs *through* the relay (which sits outside the censorship) and merge
+        // them into the pins. Best-effort: an older relay just returns nothing.
+        if enable_country_ban {
+            if let Some(relay) = self
+                .split_tunnel
+                .as_ref()
+                .and_then(|st| st.try_lock().ok().and_then(|d| d.get_relay_context()))
+            {
+                let resolved = relay
+                    .resolve_roblox_hosts(
+                        crate::roblox_proxy::hosts::ROBLOX_BOOTSTRAP_DOMAINS,
+                        std::time::Duration::from_secs(3),
+                    )
+                    .await;
+                if resolved.is_empty() {
+                    log::info!(
+                        "Relay-resolved DNS returned nothing (relay without resolve support, or hosts unresolved)"
+                    );
+                } else {
+                    let count = resolved.len();
+                    match crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved).await
+                    {
+                        Ok(()) => log::info!(
+                            "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay)"
+                        ),
+                        Err(e) => {
+                            log::warn!("Relay-resolved Roblox pins could not be applied: {e}")
+                        }
+                    }
+                }
+            }
+        }
+
         // Step 3: Skip routes - V3 doesn't need them
         // Traffic is intercepted at NDIS layer and forwarded via relay
 

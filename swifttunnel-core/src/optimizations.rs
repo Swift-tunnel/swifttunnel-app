@@ -138,6 +138,285 @@ const TWEAKS: &[Tweak] = &[
         ],
     },
     Tweak {
+        id: "game_mode_enable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\GameBar",
+                name: "AutoGameModeEnabled",
+                value: 1,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\GameBar",
+                name: "AllowAutoGameMode",
+                value: 1,
+            },
+        ],
+    },
+    Tweak {
+        id: "widgets_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\Dsh",
+                name: "AllowNewsAndInterests",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                name: "TaskbarDa",
+                value: 0,
+            },
+        ],
+    },
+    Tweak {
+        id: "startup_delay_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hkcu,
+            path: r"Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize",
+            name: "StartupDelayInMSec",
+            value: 0,
+        }],
+    },
+    Tweak {
+        id: "action_center_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hkcu,
+            path: r"Software\Policies\Microsoft\Windows\Explorer",
+            name: "DisableNotificationCenter",
+            value: 1,
+        }],
+    },
+    Tweak {
+        id: "live_tiles_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hkcu,
+            path: r"Software\Policies\Microsoft\Windows\CurrentVersion\PushNotifications",
+            name: "NoTileApplicationNotification",
+            value: 1,
+        }],
+    },
+    Tweak {
+        id: "fax_service_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::ServiceDisable { name: "Fax" }],
+    },
+    Tweak {
+        id: "foreground_boost_priority",
+        requires_admin: true,
+        requires_reboot: false,
+        // 0x26 = short, variable quantums with a 3x foreground boost — favors the
+        // game you're focused on. Default is 2.
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SYSTEM\CurrentControlSet\Control\PriorityControl",
+            name: "Win32PrioritySeparation",
+            value: 38,
+        }],
+    },
+    Tweak {
+        id: "windowed_games_optimizations_enable",
+        requires_admin: false,
+        requires_reboot: false,
+        // Windows 11 "Optimizations for windowed games" — lower-latency present
+        // path for borderless/windowed games.
+        actions: &[Action::RegString {
+            hive: Hive::Hkcu,
+            path: r"Software\Microsoft\DirectX\UserGpuPreferences",
+            name: "DirectXUserGlobalSettings",
+            value: "SwapEffectUpgradeEnable=1;",
+        }],
+    },
+    Tweak {
+        id: "windows_ads_suggestions_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                name: "SystemPaneSuggestionsEnabled",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                name: "SubscribedContent-338388Enabled",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                name: "SubscribedContent-338389Enabled",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                name: "SubscribedContent-310093Enabled",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                name: "SilentInstalledAppsEnabled",
+                value: 0,
+            },
+        ],
+    },
+    Tweak {
+        id: "search_web_suggestions_disable",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Policies\Microsoft\Windows\Explorer",
+                name: "DisableSearchBoxSuggestions",
+                value: 1,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\SearchSettings",
+                name: "IsDynamicSearchBoxEnabled",
+                value: 0,
+            },
+        ],
+    },
+    Tweak {
+        id: "error_reporting_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::ServiceDisable { name: "WerSvc" }],
+    },
+    Tweak {
+        id: "vbs_disable",
+        requires_admin: true,
+        requires_reboot: true,
+        // VBS + HVCI (Memory Integrity) run the OS under a hypervisor and cost
+        // real FPS in games. Revert restores the prior state (or removes the
+        // values when they did not exist, returning to the platform default).
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
+                name: "Enabled",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Control\DeviceGuard",
+                name: "EnableVirtualizationBasedSecurity",
+                value: 0,
+            },
+        ],
+    },
+    Tweak {
+        id: "onedrive_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Windows\OneDrive",
+            name: "DisableFileSyncNGSC",
+            value: 1,
+        }],
+    },
+    Tweak {
+        id: "windows_auto_updates_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU",
+            name: "NoAutoUpdate",
+            value: 1,
+        }],
+    },
+    Tweak {
+        id: "browser_hardware_accel_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SOFTWARE\Policies\Google\Chrome",
+                name: "HardwareAccelerationModeEnabled",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SOFTWARE\Policies\Microsoft\Edge",
+                name: "HardwareAccelerationModeEnabled",
+                value: 0,
+            },
+        ],
+    },
+    Tweak {
+        id: "cpu_mitigations_disable",
+        requires_admin: true,
+        requires_reboot: true,
+        // Disables Spectre/Meltdown & related CPU mitigations (real CPU cost).
+        // Big security trade-off; revert restores prior state / removes values.
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management",
+                name: "FeatureSettingsOverride",
+                value: 1,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management",
+                name: "FeatureSettingsOverrideMask",
+                value: 3,
+            },
+        ],
+    },
+    Tweak {
+        id: "smartscreen_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Windows\System",
+            name: "EnableSmartScreen",
+            value: 0,
+        }],
+    },
+    Tweak {
+        id: "driver_updates_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate",
+                name: "ExcludeWUDriversInQualityUpdate",
+                value: 1,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching",
+                name: "SearchOrderConfig",
+                value: 0,
+            },
+        ],
+    },
+    Tweak {
         id: "game_bar_dvr_disable",
         requires_admin: false,
         requires_reboot: false,
@@ -964,6 +1243,24 @@ mod tests {
             "visual_effects_performance",
             "transparency_disable",
             "background_apps_disable",
+            "game_mode_enable",
+            "widgets_disable",
+            "startup_delay_disable",
+            "action_center_disable",
+            "live_tiles_disable",
+            "fax_service_disable",
+            "foreground_boost_priority",
+            "windowed_games_optimizations_enable",
+            "windows_ads_suggestions_disable",
+            "search_web_suggestions_disable",
+            "error_reporting_disable",
+            "vbs_disable",
+            "onedrive_disable",
+            "windows_auto_updates_disable",
+            "browser_hardware_accel_disable",
+            "cpu_mitigations_disable",
+            "smartscreen_disable",
+            "driver_updates_disable",
             "game_bar_dvr_disable",
             "power_throttling_disable",
             "core_parking_disable",

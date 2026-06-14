@@ -58,6 +58,13 @@ const ROBLOX_HTTPS_PORT: u16 = 443;
 
 static ACTIVE_BOOTSTRAP_IPS: OnceLock<RwLock<HashSet<Ipv4Addr>>> = OnceLock::new();
 static DIRECT_ONLY_BOOTSTRAP_IPS: OnceLock<RwLock<HashSet<Ipv4Addr>>> = OnceLock::new();
+/// The host overrides currently written to the hosts file, so a later
+/// relay-resolved DNS pass can merge into them instead of clobbering them.
+static LAST_APPLIED_OVERRIDES: OnceLock<RwLock<Vec<HostOverride>>> = OnceLock::new();
+
+fn last_applied_overrides() -> &'static RwLock<Vec<HostOverride>> {
+    LAST_APPLIED_OVERRIDES.get_or_init(|| RwLock::new(Vec::new()))
+}
 
 /// True while the current session deliberately relays the launch-critical
 /// settings hosts (country-ban bypass). Runtime SNI learning must not undo
@@ -217,6 +224,9 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
         allocate_route_assist_pins(resolved)
     };
 
+    if let Ok(mut last) = last_applied_overrides().write() {
+        *last = overrides.clone();
+    }
     tokio::task::spawn_blocking(move || write_overrides(&overrides))
         .await
         .map_err(|e| format!("Failed to join hosts repair task: {e}"))??;
@@ -224,6 +234,57 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
     COUNTRY_BAN_BYPASS_ROUTING.store(country_ban_bypass, Ordering::Relaxed);
     set_active_bootstrap_ips(active_ips);
     set_direct_only_bootstrap_ips(direct_only_ips);
+    Ok(())
+}
+
+/// Merge relay-resolved Roblox IPs into the hosts-file pins and the active
+/// (relayed) IP set. The relay resolves Roblox's real IPs from outside the
+/// censorship, so this is the fallback for full country-ban when local DoH is
+/// blocked/poisoned: without it the player connects to poisoned addresses the
+/// relay can't reach ("problem reaching our servers"). Every merged IP becomes
+/// an active pin — full bypass relays every Roblox host.
+pub async fn apply_relay_resolved_overrides(
+    resolved: std::collections::HashMap<String, Vec<Ipv4Addr>>,
+) -> Result<(), String> {
+    let mut new_entries: Vec<HostOverride> = Vec::new();
+    let mut new_ips: HashSet<Ipv4Addr> = HashSet::new();
+    for (domain, ips) in resolved {
+        for ip in ips.into_iter().take(MAX_PINNED_IPS_PER_DOMAIN) {
+            new_entries.push(HostOverride {
+                ip,
+                domain: domain.clone(),
+            });
+            new_ips.insert(ip);
+        }
+    }
+    if new_entries.is_empty() {
+        return Ok(());
+    }
+
+    // Merge with the pins already written (DoH results), de-duping by (domain, ip).
+    let existing = last_applied_overrides()
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let mut seen: HashSet<(String, Ipv4Addr)> = HashSet::new();
+    let mut merged: Vec<HostOverride> = Vec::with_capacity(existing.len() + new_entries.len());
+    for entry in existing.into_iter().chain(new_entries.into_iter()) {
+        if seen.insert((entry.domain.to_ascii_lowercase(), entry.ip)) {
+            merged.push(entry);
+        }
+    }
+
+    let merged_for_write = merged.clone();
+    tokio::task::spawn_blocking(move || write_overrides(&merged_for_write))
+        .await
+        .map_err(|e| format!("Failed to join relay-resolved hosts write: {e}"))??;
+
+    if let Ok(mut last) = last_applied_overrides().write() {
+        *last = merged;
+    }
+    if let Ok(mut active) = active_bootstrap_ips().write() {
+        active.extend(new_ips);
+    }
     Ok(())
 }
 

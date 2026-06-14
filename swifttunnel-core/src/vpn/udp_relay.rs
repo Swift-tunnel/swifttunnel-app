@@ -29,6 +29,14 @@ const AUTH_ACK_FRAME_TYPE: u8 = 0xA2;
 const PING_FRAME_TYPE: u8 = 0xA3;
 const PONG_FRAME_TYPE: u8 = 0xA4;
 const RTT_REPORT_FRAME_TYPE: u8 = 0xA5;
+// Censorship-resistant Roblox DNS resolve (see swifttunnel-relay). The client
+// asks the relay (outside the censorship) for Roblox's real IPs when local
+// DNS is blocked/poisoned. Optional + backward-compatible: old relays never
+// reply 0xA7, so the caller just falls back to its DoH pins.
+const RESOLVE_REQUEST_FRAME_TYPE: u8 = 0xA6;
+const RESOLVE_RESPONSE_FRAME_TYPE: u8 = 0xA7;
+const RESOLVE_MAX_HOSTS_PER_REQUEST: usize = 16;
+const RESOLVE_MAX_HOSTNAME_LEN: usize = 64;
 const PING_FRAME_LEN: usize = SESSION_ID_LEN + 1 + 4 + 8;
 const PONG_FRAME_LEN: usize = SESSION_ID_LEN + 1 + 4 + 8 + 8;
 // Slightly longer handshake budget improves reliability on congested/PPPoE paths
@@ -552,6 +560,10 @@ pub struct UdpRelay {
     /// address. Mid-session authentication polls this because the inbound
     /// thread owns socket reads once the session is running.
     last_auth_ack: parking_lot::Mutex<Option<(SocketAddr, RelayAuthAckStatus)>>,
+    /// Latest Roblox DNS resolve response (request_id + host→IPs) recorded by the
+    /// inbound receiver thread; polled by `resolve_roblox_hosts` during connect.
+    last_resolve_response:
+        parking_lot::Mutex<Option<(u16, Vec<(String, Vec<std::net::Ipv4Addr>)>)>>,
     /// Unique session ID for this connection
     session_id: [u8; SESSION_ID_LEN],
     /// Stop flag
@@ -609,6 +621,57 @@ pub struct UdpRelay {
     /// Set to true if the sender thread panics. Connection manager polls this so the
     /// state machine can transition to Error instead of silently halting tunneling.
     sender_panicked: Arc<AtomicBool>,
+}
+
+/// Parse a 0xA7 resolve response body: `[request_id_be_u16][answer_count:1]
+/// [(host_len:1, host_utf8, ip_count:1, (ipv4_be:4)*)]*`. Returns the request id
+/// and the resolved host→IPv4 answers. `None` on a malformed frame.
+fn parse_resolve_response(
+    frame: &[u8],
+    len: usize,
+) -> Option<(u16, Vec<(String, Vec<std::net::Ipv4Addr>)>)> {
+    let header = SESSION_ID_LEN + 1; // session id + frame type byte
+    if len < header + 3 {
+        return None;
+    }
+    let request_id = u16::from_be_bytes([frame[header], frame[header + 1]]);
+    let answer_count = frame[header + 2] as usize;
+    let mut answers = Vec::with_capacity(answer_count);
+    let mut off = header + 3;
+    for _ in 0..answer_count {
+        if off >= len {
+            return None;
+        }
+        let hlen = frame[off] as usize;
+        off += 1;
+        if off + hlen > len {
+            return None;
+        }
+        let host = std::str::from_utf8(&frame[off..off + hlen])
+            .ok()?
+            .to_string();
+        off += hlen;
+        if off >= len {
+            return None;
+        }
+        let ip_count = frame[off] as usize;
+        off += 1;
+        if off + ip_count * 4 > len {
+            return None;
+        }
+        let mut ips = Vec::with_capacity(ip_count);
+        for _ in 0..ip_count {
+            ips.push(std::net::Ipv4Addr::new(
+                frame[off],
+                frame[off + 1],
+                frame[off + 2],
+                frame[off + 3],
+            ));
+            off += 4;
+        }
+        answers.push((host, ips));
+    }
+    Some((request_id, answers))
 }
 
 impl UdpRelay {
@@ -910,6 +973,7 @@ impl UdpRelay {
             switch_time: ArcSwap::from_pointee(None),
             pending_auth_addr: ArcSwap::from_pointee(None),
             last_auth_ack: parking_lot::Mutex::new(None),
+            last_resolve_response: parking_lot::Mutex::new(None),
             session_id,
             stop_flag,
             packets_sent: AtomicU64::new(0),
@@ -1590,6 +1654,12 @@ impl UdpRelay {
                             }
                             return Ok(None);
                         }
+                        RESOLVE_RESPONSE_FRAME_TYPE => {
+                            if let Some(parsed) = parse_resolve_response(frame_buffer, len) {
+                                *self.last_resolve_response.lock() = Some(parsed);
+                            }
+                            return Ok(None);
+                        }
                         _ => {}
                     }
                 }
@@ -1606,6 +1676,96 @@ impl UdpRelay {
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Send a Roblox DNS resolve request (0xA6) for up to
+    /// `RESOLVE_MAX_HOSTS_PER_REQUEST` hosts. Best-effort control frame; the reply
+    /// is recorded by the inbound receiver into `last_resolve_response`.
+    fn send_resolve_request(&self, request_id: u16, hosts: &[&str]) -> bool {
+        let current_addr = **self.relay_addr.load();
+        let count = hosts.len().min(RESOLVE_MAX_HOSTS_PER_REQUEST);
+        let mut frame = Vec::with_capacity(8 + count * 24);
+        frame.push(RESOLVE_REQUEST_FRAME_TYPE);
+        frame.extend_from_slice(&request_id.to_be_bytes());
+        frame.push(count as u8);
+        for host in hosts.iter().take(count) {
+            let hb = host.as_bytes();
+            let hlen = hb.len().min(RESOLVE_MAX_HOSTNAME_LEN);
+            frame.push(hlen as u8);
+            frame.extend_from_slice(&hb[..hlen]);
+        }
+        let total_len = SESSION_ID_LEN + frame.len();
+
+        let Some(buf_idx) = self.outbound_pool.try_acquire() else {
+            return false;
+        };
+        unsafe {
+            let pkt = self.outbound_pool.buffer_mut(buf_idx);
+            if pkt.len() < total_len {
+                self.outbound_pool.release(buf_idx);
+                return false;
+            }
+            pkt[..SESSION_ID_LEN].copy_from_slice(&self.session_id);
+            pkt[SESSION_ID_LEN..total_len].copy_from_slice(&frame);
+        }
+        let job = OutboundJob {
+            addr: current_addr,
+            buf_idx,
+            len: total_len,
+            enqueued_at_ms: now_mono_ms(),
+            kind: OutboundJobKind::Control,
+        };
+        if self.outbound_tx.try_send(job).is_err() {
+            self.outbound_pool.release(buf_idx);
+            return false;
+        }
+        true
+    }
+
+    /// Resolve Roblox hostnames through the relay (censorship-resistant lookup
+    /// from outside the censor) when local DNS is blocked/poisoned. Sends in
+    /// batches and collects whatever resolves within `per_batch_timeout`.
+    /// Best-effort: an old relay that doesn't support the resolve frame simply
+    /// returns nothing, and the caller keeps its DoH pins.
+    pub async fn resolve_roblox_hosts(
+        &self,
+        hosts: &[&str],
+        per_batch_timeout: std::time::Duration,
+    ) -> std::collections::HashMap<String, Vec<std::net::Ipv4Addr>> {
+        let mut out: std::collections::HashMap<String, Vec<std::net::Ipv4Addr>> =
+            std::collections::HashMap::new();
+        let mut request_id: u16 = 1;
+        for chunk in hosts.chunks(RESOLVE_MAX_HOSTS_PER_REQUEST) {
+            *self.last_resolve_response.lock() = None;
+            if !self.send_resolve_request(request_id, chunk) {
+                request_id = request_id.wrapping_add(1);
+                continue;
+            }
+            let deadline = Instant::now() + per_batch_timeout;
+            loop {
+                let matched = {
+                    let guard = self.last_resolve_response.lock();
+                    match guard.as_ref() {
+                        Some((rid, answers)) if *rid == request_id => Some(answers.clone()),
+                        _ => None,
+                    }
+                };
+                if let Some(answers) = matched {
+                    for (host, ips) in answers {
+                        if !ips.is_empty() {
+                            out.entry(host).or_default().extend(ips);
+                        }
+                    }
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            request_id = request_id.wrapping_add(1);
+        }
+        out
     }
 
     /// Receive a packet from the relay (inbound: game server -> relay -> game client).
@@ -2150,6 +2310,62 @@ impl RelayContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a 0xA7 response body the way the relay does, for parse round-trips.
+    fn build_resolve_response_frame(
+        session_id: &[u8; SESSION_ID_LEN],
+        request_id: u16,
+        answers: &[(&str, &[std::net::Ipv4Addr])],
+    ) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(session_id);
+        f.push(RESOLVE_RESPONSE_FRAME_TYPE);
+        f.extend_from_slice(&request_id.to_be_bytes());
+        f.push(answers.len() as u8);
+        for (host, ips) in answers {
+            f.push(host.len() as u8);
+            f.extend_from_slice(host.as_bytes());
+            f.push(ips.len() as u8);
+            for ip in *ips {
+                f.extend_from_slice(&ip.octets());
+            }
+        }
+        f
+    }
+
+    #[test]
+    fn parse_resolve_response_round_trips_relay_format() {
+        let sid = [7u8; SESSION_ID_LEN];
+        let a_ips = [
+            std::net::Ipv4Addr::new(128, 116, 50, 1),
+            std::net::Ipv4Addr::new(128, 116, 50, 2),
+        ];
+        let b_ips = [std::net::Ipv4Addr::new(203, 0, 113, 9)];
+        let frame = build_resolve_response_frame(
+            &sid,
+            0x2024,
+            &[
+                ("clientsettings.roblox.com", &a_ips),
+                ("c0.rbxcdn.com", &b_ips),
+            ],
+        );
+        let (rid, answers) = parse_resolve_response(&frame, frame.len()).expect("valid");
+        assert_eq!(rid, 0x2024);
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].0, "clientsettings.roblox.com");
+        assert_eq!(answers[0].1, a_ips.to_vec());
+        assert_eq!(answers[1].0, "c0.rbxcdn.com");
+        assert_eq!(answers[1].1, b_ips.to_vec());
+    }
+
+    #[test]
+    fn parse_resolve_response_rejects_truncated() {
+        let sid = [0u8; SESSION_ID_LEN];
+        let ips = [std::net::Ipv4Addr::new(1, 2, 3, 4)];
+        let frame = build_resolve_response_frame(&sid, 1, &[("clientsettings.roblox.com", &ips)]);
+        let truncated = &frame[..frame.len() - 2];
+        assert!(parse_resolve_response(truncated, truncated.len()).is_none());
+    }
 
     fn relay_loopback_addr(relay: &UdpRelay) -> SocketAddr {
         let local_port = relay
