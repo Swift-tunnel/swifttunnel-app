@@ -461,10 +461,10 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().driverSetupState).toBe("error");
     expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
-      "reinstall",
+      "reboot",
     );
     expect(useVpnStore.getState().driverSetupError).toContain(
-      "Automatic split tunnel driver repair did not restore the WinpkFilter adapter binding.",
+      "restart Windows to finish setting up SwiftTunnel's network filter",
     );
   });
 

@@ -162,6 +162,9 @@ export const updaterInstallChannel = (
 export const systemIsAdmin = () =>
   invoke<AdminCheckResponse>("system_is_admin");
 
+export const systemStartupRecoveryDone = () =>
+  invoke<boolean>("system_startup_recovery_done");
+
 export const systemCheckDriver = () =>
   invoke<DriverCheckResponse>("system_check_driver");
 

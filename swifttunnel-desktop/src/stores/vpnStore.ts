@@ -149,12 +149,12 @@ function bindingRepairFailedStatus(reason: string): DriverCheckResponse {
     installed: true,
     version: null,
     ready: false,
-    status: "binding_missing",
+    status: "reboot_required",
     message:
-      "Automatic split tunnel driver repair did not restore the WinpkFilter adapter binding.\n\n" +
+      "Almost there — restart Windows to finish setting up SwiftTunnel's network filter, then connect again. This is a normal one-time step Windows requires after the driver is installed; SwiftTunnel will work right after the restart.\n\nIf it still won't connect after restarting, reinstall SwiftTunnel.\n\nDetails: " +
       reason,
-    reboot_required: false,
-    recommended_action: "reinstall",
+    reboot_required: true,
+    recommended_action: "reboot",
   };
 }
 

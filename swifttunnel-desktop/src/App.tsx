@@ -1,11 +1,13 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import {
   availableMonitors,
   getCurrentWindow,
   primaryMonitor,
 } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/shell/AppShell";
+import { StartupScreen } from "./components/shell/StartupScreen";
 import { LoginScreen } from "./components/auth/LoginScreen";
 import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
@@ -27,7 +29,10 @@ import { runAppBootstrap } from "./lib/appBootstrap";
 import { useAutoRamClean } from "./lib/useAutoRamClean";
 import { useOverlayDriver } from "./lib/useOverlayDriver";
 import { reportError } from "./lib/errors";
-import { systemLaunchedFromStartup } from "./lib/commands";
+import {
+  systemLaunchedFromStartup,
+  systemStartupRecoveryDone,
+} from "./lib/commands";
 import {
   ensureWindowStateVisible,
   isPersistableWindowSize,
@@ -71,6 +76,11 @@ function App() {
   const fetchVpnState = useVpnStore((s) => s.fetchState);
   const connectVpn = useVpnStore((s) => s.connect);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+
+  // Brief "preparing your connection" screen while the backend self-heals stale
+  // network state at launch (see lib.rs recover_stale_network_state), so users
+  // land on a working connection instead of a leftover-broken one.
+  const [recovering, setRecovering] = useState(true);
 
   // Auto-clean RAM on game launch + show the in-game overlay (opt-in).
   useAutoRamClean();
@@ -168,6 +178,52 @@ function App() {
     connectVpn,
     checkForUpdates,
   ]);
+
+  // Gate the UI behind the startup network self-heal. Keep it on screen at least
+  // briefly (so it doesn't flash) and cap it (so a wedged backend never traps the
+  // user). Query once in case the recovery finished before this listener
+  // registered, and also listen for the completion event.
+  useEffect(() => {
+    let cancelled = false;
+    let minElapsed = false;
+    let recovered = false;
+    const reveal = () => {
+      if (!cancelled && minElapsed && recovered) setRecovering(false);
+    };
+
+    const minTimer = window.setTimeout(() => {
+      minElapsed = true;
+      reveal();
+    }, 1000);
+    const maxTimer = window.setTimeout(() => {
+      if (!cancelled) setRecovering(false);
+    }, 2500);
+
+    void systemStartupRecoveryDone()
+      .then((done) => {
+        if (done) {
+          recovered = true;
+          reveal();
+        }
+      })
+      .catch(() => {});
+
+    let unlisten: (() => void) | undefined;
+    void listen("startup-recovery-complete", () => {
+      recovered = true;
+      reveal();
+    }).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(minTimer);
+      window.clearTimeout(maxTimer);
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isSettingsLoaded) return;
@@ -361,12 +417,13 @@ function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [setTab, saveSettings]);
 
-  if (isLoading) {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-bg-base">
-        <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent-primary border-t-transparent" />
-      </div>
-    );
+  // Stay on the branded screen for the whole warm-up — both the network self-heal
+  // and the initial auth/settings/server pre-fetch (kicked off on mount, so it's
+  // already in flight here) — so the app only reveals once it's ready, instead of
+  // flashing a second bare spinner. The bootstrap's own 8s safety net clears
+  // isLoading if the backend is unreachable, so this can't hang forever.
+  if (recovering || isLoading) {
+    return <StartupScreen />;
   }
 
   if (authState === "banned") {

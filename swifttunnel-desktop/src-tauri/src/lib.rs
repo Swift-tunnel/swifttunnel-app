@@ -200,7 +200,153 @@ fn recover_stale_network_state() {
     // Recover adapter settings if the app crashed while connected.
     swifttunnel_core::vpn::recover_tso_on_startup();
     swifttunnel_core::vpn::recover_ipv6_on_startup();
+    // Heavier remediation, run ONLY when there's real evidence a previous session
+    // left state behind. The check below is all cheap peeks (three marker file
+    // reads + one device-open probe) — no PowerShell, no netsh — so a healthy PC
+    // short-circuits here and the UI reveals immediately. This is what lets the
+    // self-heal "fix everything the Repair tab does" without lagging normal users:
+    // the expensive steps only touch machines that are actually broken.
+    #[cfg(windows)]
+    {
+        use std::time::Duration;
+        use swifttunnel_core::vpn::{
+            SplitTunnelDriver, ipv6_recovery, tso_recovery, tunnel_mode_recovery,
+        };
+
+        // A clean shutdown leaves no markers; their presence means a session died
+        // mid-tunnel. A driver that's installed but won't open is the half-removed
+        // state that blackholes traffic ("No internet, Secured").
+        let marker_present = tunnel_mode_recovery::read_tunnel_mode_marker().is_some()
+            || ipv6_recovery::read_ipv6_marker().is_some()
+            || tso_recovery::read_tso_marker().is_some();
+        let driver_broken =
+            SplitTunnelDriver::driver_install_evidence() && !SplitTunnelDriver::is_available();
+
+        if marker_present || driver_broken {
+            info!(
+                "Startup recovery: leftover network state detected (markers={marker_present}, driver_broken={driver_broken}); running full self-heal"
+            );
+
+            // Unbind any leftover WinpkFilter (nt_ndisrd) adapter binding — the
+            // crashed/half-removed state that blackholes traffic and even breaks
+            // other VPNs, which the driver-level mode reset above can't repair.
+            // No-op when nothing is bound; the next connect re-enables it on the
+            // active adapter.
+            match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+                Ok(disabled) if !disabled.is_empty() => info!(
+                    "Startup recovery: disabled leftover WinpkFilter binding on adapter(s): {}",
+                    disabled.join(", ")
+                ),
+                Ok(_) => {}
+                Err(e) => warn!("Startup recovery: WinpkFilter binding cleanup failed: {e}"),
+            }
+
+            // If the driver is installed but STILL can't be opened after the unbind,
+            // the NDIS state is wedged — the case a simple sweep can't fix and that
+            // historically forced users to reboot or open a ticket. Restart the
+            // kernel service (bounded to 15s) to rebuild its adapter attachments.
+            // Gated on a genuinely-broken driver, so a healthy PC never runs it.
+            let still_broken =
+                SplitTunnelDriver::driver_install_evidence() && !SplitTunnelDriver::is_available();
+            if still_broken && swifttunnel_core::is_administrator() {
+                info!(
+                    "Startup recovery: driver still wedged after unbind — restarting NDISRD service"
+                );
+                if let Err(e) = SplitTunnelDriver::restart_driver_service() {
+                    warn!("Startup recovery: NDISRD service restart failed: {e}");
+                } else if let Err(e) =
+                    SplitTunnelDriver::repair_and_wait_until_available(Duration::from_secs(15))
+                {
+                    warn!("Startup recovery: driver did not come back after restart: {e}");
+                } else {
+                    info!("Startup recovery: NDISRD service restarted and verified available");
+                }
+            }
+        }
+    }
 }
+
+#[cfg(windows)]
+fn run_hidden_command_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    let mut command = swifttunnel_core::hidden_command(program);
+    command.args(args);
+    let mut child = command.spawn()?;
+    let started = std::time::Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            return child.wait_with_output();
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Best-effort background fixes for the most common "it broke when I opened
+/// Roblox" problems that are NOT leftover SwiftTunnel state, so users stop
+/// opening tickets for them:
+///   - a stale DNS cache (Roblox connect/login resolving to dead records)
+///   - a wrong system clock — the single most common cause of Roblox's
+///     "An error was encountered during authentication", because TLS to the
+///     auth servers fails when the clock is off by more than a few minutes
+///
+/// Runs AFTER the UI has been released, so it never delays startup. Everything
+/// here is safe and self-correcting: flushing DNS only drops a cache, and
+/// `w32tm /resync` only pulls the real time from an NTP server — neither can
+/// leave the machine worse off than it was.
+#[cfg(windows)]
+fn run_startup_connectivity_maintenance() {
+    // 1. Flush DNS so Roblox (and the relay) resolve against fresh records.
+    match run_hidden_command_with_timeout(
+        "ipconfig",
+        &["/flushdns"],
+        std::time::Duration::from_secs(4),
+    ) {
+        Ok(o) if o.status.success() => info!("Startup maintenance: DNS cache flushed"),
+        Ok(o) => warn!(
+            "Startup maintenance: ipconfig /flushdns exited with {}",
+            o.status.code().unwrap_or(-1)
+        ),
+        Err(e) => warn!("Startup maintenance: could not flush DNS: {e}"),
+    }
+
+    // 2. Re-sync the system clock. The Windows Time service is set to Manual on
+    //    most home PCs, so start it transiently first, then resync. With no
+    //    internet `w32tm /resync` simply reports "no time data available" — a
+    //    harmless no-op, not an error worth surfacing.
+    let _ = run_hidden_command_with_timeout(
+        "sc",
+        &["start", "w32time"],
+        std::time::Duration::from_secs(4),
+    );
+    match run_hidden_command_with_timeout(
+        "w32tm",
+        &["/resync", "/force"],
+        std::time::Duration::from_secs(6),
+    ) {
+        Ok(o) if o.status.success() => info!("Startup maintenance: system clock re-synced"),
+        Ok(o) => {
+            let detail = String::from_utf8_lossy(&o.stdout);
+            info!(
+                "Startup maintenance: clock resync not applied ({})",
+                detail.trim()
+            );
+        }
+        Err(e) => warn!("Startup maintenance: could not run w32tm /resync: {e}"),
+    }
+}
+
+#[cfg(not(windows))]
+fn run_startup_connectivity_maintenance() {}
 
 fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
@@ -440,6 +586,7 @@ pub fn run() {
             commands::updater::updater_install_channel,
             // System
             commands::system::system_is_admin,
+            commands::system::system_startup_recovery_done,
             commands::system::system_check_driver,
             commands::system::system_install_driver,
             commands::system::system_repair_driver,
@@ -565,6 +712,14 @@ pub fn run() {
                     return;
                 };
                 let _ = state.startup_recovery_signal.send(true);
+                // Let the UI drop its "preparing your connection" screen now that
+                // the network self-heal has run.
+                let _ = app_handle.emit(events::STARTUP_RECOVERY_COMPLETE, ());
+
+                // Routine connectivity maintenance for common Roblox connect/login
+                // issues (stale DNS, wrong clock). Detached + after the UI is
+                // released, so it never delays startup.
+                let _ = tokio::task::spawn_blocking(run_startup_connectivity_maintenance);
 
                 // 2. Local recovery + Roblox settings sync (file IO, icacls,
                 //    powercfg - cheap for the runtime, too slow for setup).

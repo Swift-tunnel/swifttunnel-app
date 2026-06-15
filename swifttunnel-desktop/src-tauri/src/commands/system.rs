@@ -956,6 +956,14 @@ pub fn system_is_admin() -> AdminCheckResponse {
     }
 }
 
+/// Whether the startup network self-heal has finished. The UI queries this on
+/// mount so it never hangs waiting on a `STARTUP_RECOVERY_COMPLETE` event it may
+/// have missed (the recovery can finish before the webview registers a listener).
+#[tauri::command]
+pub fn system_startup_recovery_done(state: tauri::State<'_, crate::state::AppState>) -> bool {
+    *state.startup_recovery_done.borrow()
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct WindowsFirewallServiceStatus {
     pub name: String,
@@ -1511,7 +1519,7 @@ impl DriverCheckResponse {
             ready: false,
             status: "binding_missing".to_string(),
             message: format!(
-                "Automatic split tunnel driver repair did not restore the WinpkFilter adapter binding.\n\n{}\n\nPlease reboot Windows, then run Repair driver once more. If this keeps happening, reinstall SwiftTunnel.",
+                "Almost there — restart Windows to finish setting up SwiftTunnel's network filter, then connect again. This is a normal one-time step Windows requires after the driver is installed; SwiftTunnel will work right after the restart.\n\nIf it still won't connect after restarting, reinstall SwiftTunnel.\n\nDetails: {}",
                 reason
             ),
             reboot_required: true,
@@ -1955,7 +1963,7 @@ mod tests {
         assert_eq!(response.status, "binding_missing");
         assert_eq!(response.recommended_action, "reboot");
         assert!(response.reboot_required);
-        assert!(response.message.contains("did not restore"));
+        assert!(response.message.contains("restart Windows to finish"));
         assert!(response.message.contains("Ethernet"));
     }
 

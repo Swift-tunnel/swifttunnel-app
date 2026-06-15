@@ -10,6 +10,10 @@ export function BindingChooserDialog() {
 
   if (!bindingPreflight) return null;
 
+  const recommendedGuid = bindingPreflight.recommended_guid?.toLowerCase();
+  const isRecommended = (guid: string) =>
+    recommendedGuid !== undefined && guid.toLowerCase() === recommendedGuid;
+
   return (
     <Dialog
       open
@@ -38,17 +42,25 @@ export function BindingChooserDialog() {
       </div>
 
       <div className="flex flex-col gap-2">
-        {bindingPreflight.candidates.map((candidate) => (
-          <CandidateRow
-            key={
-              candidate.guid ||
-              `${candidate.friendly_name}-${candidate.if_index ?? "na"}`
-            }
-            candidate={candidate}
-            recommended={candidate.guid === bindingPreflight.recommended_guid}
-            onChoose={(guid) => void resumeConnectWithAdapter(guid)}
-          />
-        ))}
+        {[...bindingPreflight.candidates]
+          .sort((a, b) => {
+            // Float the recommended physical NIC to the top so it's the first
+            // thing the user sees; on Hyper-V/VM boxes the real one is often
+            // virtual adapters, where the real one is otherwise buried.
+            const rank = (guid: string) => (isRecommended(guid) ? 0 : 1);
+            return rank(a.guid) - rank(b.guid);
+          })
+          .map((candidate) => (
+            <CandidateRow
+              key={
+                candidate.guid ||
+                `${candidate.friendly_name}-${candidate.if_index ?? "na"}`
+              }
+              candidate={candidate}
+              recommended={isRecommended(candidate.guid)}
+              onChoose={(guid) => void resumeConnectWithAdapter(guid)}
+            />
+          ))}
       </div>
     </Dialog>
   );
