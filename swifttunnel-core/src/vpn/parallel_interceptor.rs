@@ -7488,6 +7488,8 @@ where
             can_speculate_tcp_api && is_tcp_initial_syn && matches!(dst_port, 80 | 443);
         let is_direct_only_bootstrap_dst =
             crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(dst_ip);
+        let is_full_country_ban_routing =
+            crate::roblox_proxy::hosts::is_country_ban_bypass_routing_active();
         let is_route_assist_http_dst = can_speculate_tcp_api
             && is_tcp_initial_syn
             && matches!(dst_port, 80 | 443)
@@ -7517,11 +7519,16 @@ where
             .unwrap_or(false);
         let tcp_api_bootstrap_owner_missing =
             is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && tcp_api_bootstrap_owner.is_none();
-        // Known tunnel-owned TCP bootstraps keep v2.1.8's relay/MSS-clamp behavior.
-        // Owner-missing SYNs are only repairable for Roblox or active bootstrap IPs.
+        // Partial/Route Assist must not relay every Roblox-owned HTTPS flow:
+        // chat, avatar, menus, and settings can open new unpinned TCP flows later
+        // and break when dragged through the shared relay. Relay only active
+        // join/control-plane destinations there. Full country-ban bypass keeps
+        // the broad Roblox-process fallback because the whole platform path is
+        // blocked and direct traffic is unusable.
         let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
             && !is_direct_only_bootstrap_dst
             && !tcp_api_bootstrap_known_unrelated
+            && (is_full_country_ban_routing || is_route_assist_http_dst)
             && (!tcp_api_bootstrap_owner_missing || is_route_assist_http_dst);
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
@@ -8096,11 +8103,12 @@ fn clamp_tcp_mss_for_relay(packet: &mut [u8], max_inner_packet_len: usize) -> bo
     const TCP_OPTION_MSS: u8 = 2;
     const TCP_OPTION_MSS_LEN: usize = 4;
     const MAX_IPV4_TCP_HEADER_WITH_OPTIONS: usize = 60;
-    // Relay TCP/API forwarding exits through swifttun0, whose MTU is 1400.
-    // Cap the advertised MSS to the TUN MTU minus a worst-case IPv4+TCP header
-    // so large HTTP asset responses do not depend on PMTU discovery or
-    // fragmentation to make it back through the UDP relay.
-    const RELAY_TUN_SAFE_TCP_MSS: usize = 1340;
+    // Relay TCP/API forwarding is carried inside the client<->relay UDP path,
+    // not only through swifttun0 (MTU 1400). Some ISP/mobile/censored paths have
+    // a lower real MTU than our optimistic probe reports; keeping the outer
+    // datagram under ~1280 avoids silent oversize drops on relayed gamejoin/API
+    // responses.
+    const RELAY_TUN_SAFE_TCP_MSS: usize = 1200;
 
     if packet.len() < 20 || (packet[0] >> 4) != 4 {
         return false;
@@ -10484,7 +10492,7 @@ mod tests {
         assert!(clamp_tcp_mss_for_relay(&mut packet, 1464));
         assert_eq!(
             u16::from_be_bytes([packet[tcp + 22], packet[tcp + 23]]),
-            1340
+            1200
         );
     }
 
@@ -12014,7 +12022,51 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_bootstraps_asset_syn_when_tunnel_process_is_active() {
+    fn test_tcp_api_tunneling_keeps_unpinned_asset_syn_direct_when_not_full_ban() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
+        let src_port = 40002;
+        let dst_port = 80;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |ip, port| {
+                if ip == src_ip && port == src_port {
+                    Some(tunnel_pid)
+                } else {
+                    None
+                }
+            },
+        ));
+        assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_api_tunneling_full_country_ban_relays_unpinned_asset_syn() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(true);
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
         let src_port = 40002;
@@ -12051,6 +12103,8 @@ mod tests {
             },
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -12170,11 +12224,16 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_bootstraps_asset_syn_when_owner_pid_name_matches_app_scope() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40008;
         let dst_port = 80;
         let tunnel_pid = 8580;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([cdn_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -12215,10 +12274,15 @@ mod tests {
             )
         );
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
     fn test_tcp_api_tunneling_does_not_bootstrap_asset_syn_when_owner_pid_name_is_unrelated() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
         let src_port = 40009;
@@ -12386,7 +12450,7 @@ mod tests {
     #[test]
     fn test_tcp_api_tunneling_allows_tunnel_owned_http_syn_for_mss_clamp() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
-        let cdn_ip = Ipv4Addr::new(23, 61, 202, 142);
+        let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
         let src_port = 40018;
         let dst_port = 443;
         let tunnel_pid = 1234;
@@ -12404,7 +12468,8 @@ mod tests {
             created_at: std::time::Instant::now(),
         };
 
-        let frame = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, src_port, dst_port, 0x02);
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_api_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
 
         assert!(
@@ -12611,16 +12676,16 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_learns_direct_only_ip_from_relayed_client_hello_sni() {
+    fn test_tcp_api_tunneling_keeps_unpinned_settings_ip_direct_without_sni_learning() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
 
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
-        // Unpinned settings-CDN edge: connect-time DNS repair missed it, so it
-        // is in no bootstrap IP set and Route Assist relays the flow.
+        // Unpinned settings-CDN edge: connect-time DNS repair missed it. Under
+        // Partial/Route Assist it must stay direct instead of getting relayed
+        // first and maybe breaking the current session.
         let unpinned_settings_ip = Ipv4Addr::new(65, 9, 168, 100);
         let src_port = 40021;
-        let retry_src_port = 40022;
         let dst_port = 443;
         let tunnel_pid = 1234;
 
@@ -12637,7 +12702,7 @@ mod tests {
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
-            if ip == src_ip && (port == src_port || port == retry_src_port) {
+            if ip == src_ip && port == src_port {
                 Some(tunnel_pid)
             } else {
                 None
@@ -12653,11 +12718,10 @@ mod tests {
 
         let mut inline_cache: InlineCache = HashMap::new();
 
-        // SYN from the Roblox-owned bootstrapper flow gets relayed (the gap).
         let syn_frame =
             build_ipv4_tcp_frame_with_flags(src_ip, unpinned_settings_ip, src_port, dst_port, 0x02);
         assert!(
-            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &syn_frame,
                 &snapshot,
                 &mut inline_cache,
@@ -12666,52 +12730,10 @@ mod tests {
                 process_lookup,
             )
         );
-
-        // The relayed flow's ClientHello names the launch-critical host. The
-        // in-flight flow keeps its relay route (no half-moved connection)...
-        let client_hello = crate::roblox_proxy::tls_sni::build_client_hello_with_sni(
-            "clientsettingscdn.roblox.com",
-        );
-        let hello_frame = build_ipv4_tcp_frame_with_payload(
-            src_ip,
-            unpinned_settings_ip,
-            src_port,
-            dst_port,
-            &client_hello,
-        );
-        assert!(
-            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
-                &hello_frame,
-                &snapshot,
-                &mut inline_cache,
-                true,
-                owner_lookup,
-                process_lookup,
-            )
-        );
-
-        // ...but the destination IP is now learned as direct-only, so the
-        // bootstrapper's retry connection stays off the relay.
-        assert!(crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(
+        assert!(inline_cache.is_empty());
+        assert!(!crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(
             unpinned_settings_ip
         ));
-        let retry_syn = build_ipv4_tcp_frame_with_flags(
-            src_ip,
-            unpinned_settings_ip,
-            retry_src_port,
-            dst_port,
-            0x02,
-        );
-        assert!(
-            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
-                &retry_syn,
-                &snapshot,
-                &mut inline_cache,
-                true,
-                owner_lookup,
-                process_lookup,
-            )
-        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -12727,6 +12749,8 @@ mod tests {
         let retry_src_port = 40024;
         let dst_port = 443;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([api_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -12816,6 +12840,8 @@ mod tests {
         let dst_port = 443;
         let tunnel_pid = 1234;
 
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
+
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
             pid_names: HashMap::new(),
@@ -12896,6 +12922,8 @@ mod tests {
         let src_port = 40025;
         let dst_port = 443;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),

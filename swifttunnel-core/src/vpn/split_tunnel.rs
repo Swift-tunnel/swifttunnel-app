@@ -31,8 +31,34 @@ use std::time::{Duration, Instant};
 const DRIVER_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DRIVER_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const DRIVER_READY_TIMEOUT: Duration = Duration::from_secs(20);
+const WINPKFILTER_BINDING_CLEANUP_TIMEOUT: Duration = Duration::from_secs(12);
 const SERVICE_NAME: &str = "NDISRD";
 const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
+
+#[cfg(windows)]
+fn run_hidden_command_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    let mut command = crate::hidden_command(program);
+    command.args(args);
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            return child.wait_with_output();
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  GAME PRESETS
@@ -1316,14 +1342,16 @@ impl SplitTunnelDriver {
     fn disable_winpkfilter_bindings_for_uninstall() -> Result<(), String> {
         log::info!("Disabling WinpkFilter adapter bindings before uninstall");
 
-        let output = crate::hidden_command("powershell")
-            .args([
+        let output = run_hidden_command_with_timeout(
+            "powershell",
+            &[
                 "-NoProfile",
                 "-Command",
                 Self::build_winpkfilter_binding_cleanup_script(),
-            ])
-            .output()
-            .map_err(|e| format!("Failed to run WinpkFilter binding cleanup: {}", e))?;
+            ],
+            WINPKFILTER_BINDING_CLEANUP_TIMEOUT,
+        )
+        .map_err(|e| format!("Failed to run WinpkFilter binding cleanup: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1389,14 +1417,16 @@ impl SplitTunnelDriver {
     /// the adapters that were actually unbound so the repair can report a result.
     #[cfg(windows)]
     pub fn disable_leftover_winpkfilter_bindings() -> Result<Vec<String>, String> {
-        let output = crate::hidden_command("powershell")
-            .args([
+        let output = run_hidden_command_with_timeout(
+            "powershell",
+            &[
                 "-NoProfile",
                 "-Command",
                 Self::build_winpkfilter_binding_cleanup_script(),
-            ])
-            .output()
-            .map_err(|e| format!("Failed to run WinpkFilter binding recovery: {}", e))?;
+            ],
+            WINPKFILTER_BINDING_CLEANUP_TIMEOUT,
+        )
+        .map_err(|e| format!("Failed to run WinpkFilter binding recovery: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

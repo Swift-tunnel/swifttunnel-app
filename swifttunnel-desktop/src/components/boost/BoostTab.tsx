@@ -60,6 +60,7 @@ export function BoostTab() {
   const [draftCountryBan, setDraftCountryBan] = useState(savedCountryBan);
   const savedPartialBan = settings.enable_partial_country_ban;
   const [draftPartialBan, setDraftPartialBan] = useState(savedPartialBan);
+  const savedRouteAssist = settings.enable_api_tunneling;
 
   useEffect(() => {
     setDraftGPP(savedGPP);
@@ -105,8 +106,12 @@ export function BoostTab() {
 
   const hasConfigChanges = !configsEqual(draft, savedConfig);
   const hasGPPChanges = JSON.stringify(draftGPP) !== JSON.stringify(savedGPP);
+  const partialBypassWillDisableRouteAssist =
+    draftPartialBan && savedRouteAssist;
   const hasCountryBanChange =
-    draftCountryBan !== savedCountryBan || draftPartialBan !== savedPartialBan;
+    draftCountryBan !== savedCountryBan ||
+    draftPartialBan !== savedPartialBan ||
+    partialBypassWillDisableRouteAssist;
   const hasChanges = hasConfigChanges || hasGPPChanges || hasCountryBanChange;
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
@@ -155,6 +160,7 @@ export function BoostTab() {
         game_process_performance: draftGPP,
         enable_country_ban: draftCountryBan,
         enable_partial_country_ban: draftPartialBan,
+        enable_api_tunneling: draftPartialBan ? false : savedRouteAssist,
       });
       setDraft(appliedConfig);
       saveSettings();
@@ -172,6 +178,7 @@ export function BoostTab() {
     draftGPP,
     draftCountryBan,
     draftPartialBan,
+    savedRouteAssist,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -194,6 +201,7 @@ export function BoostTab() {
         game_process_performance: draftGPP,
         enable_country_ban: draftCountryBan,
         enable_partial_country_ban: draftPartialBan,
+        enable_api_tunneling: draftPartialBan ? false : savedRouteAssist,
       });
       setDraft(appliedConfig);
       saveSettings();
@@ -205,6 +213,7 @@ export function BoostTab() {
     draftGPP,
     draftCountryBan,
     draftPartialBan,
+    savedRouteAssist,
     hasConfigChanges,
     saveSettings,
     updateSettings,

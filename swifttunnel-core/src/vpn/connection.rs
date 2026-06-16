@@ -102,12 +102,16 @@ struct TunnelRoutingFlags {
 /// - Partial country-ban bypass (only specific games blocked, e.g. Vietnam):
 ///   relay only the control-plane TCP so the banned game appears in
 ///   search/discovery and joins succeed, while gameplay UDP stays DIRECT for
-///   the player's real ping. Assets/settings stay direct too.
+///   the player's real ping. Assets/settings stay direct too. If Route Assist
+///   is also enabled from an older/bad settings state, Partial wins: stacking
+///   both has caused temporary joins followed by Roblox server/menu failures.
 fn resolve_tunnel_routing_flags(
     route_assist_requested: bool,
     full_ban_bypass_requested: bool,
     partial_ban_bypass_requested: bool,
 ) -> TunnelRoutingFlags {
+    let route_assist_requested = route_assist_requested && !partial_ban_bypass_requested;
+
     TunnelRoutingFlags {
         api_tunneling: route_assist_requested
             || full_ban_bypass_requested
@@ -2758,6 +2762,15 @@ impl VpnConnection {
                 log::warn!("Error closing split tunnel: {}", e);
             }
         }
+        #[cfg(windows)]
+        match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+            Ok(disabled) if !disabled.is_empty() => log::info!(
+                "Disconnect cleanup: disabled WinpkFilter binding on adapter(s): {}",
+                disabled.join(", ")
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("Disconnect cleanup: WinpkFilter binding cleanup failed: {e}"),
+        }
         self.split_tunnel = None;
 
         self.config = None;
@@ -3124,13 +3137,14 @@ mod tests {
     }
 
     #[test]
-    fn partial_ban_plus_route_assist_relays_gameplay_udp() {
-        // An explicit Route Assist choice wins: the user asked for region
-        // steering, which only works when gameplay rides the relay.
+    fn partial_ban_plus_route_assist_keeps_gameplay_udp_direct() {
+        // Partial Bypass wins over Route Assist: Vietnam-style users need the
+        // control plane relayed, but stacking gameplay relay causes temporary
+        // joins followed by Roblox server/menu failures.
         let flags = resolve_tunnel_routing_flags(true, false, true);
 
         assert!(flags.api_tunneling);
-        assert!(flags.udp_tunneling);
+        assert!(!flags.udp_tunneling);
     }
 
     #[test]

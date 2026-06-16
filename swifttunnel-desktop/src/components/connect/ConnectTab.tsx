@@ -212,6 +212,11 @@ export function ConnectTab() {
   }
 
   function setRouteAssist(enabled: boolean) {
+    if (enabled && settings.enable_partial_country_ban) {
+      update({ enable_api_tunneling: false });
+      saveDebounced();
+      return;
+    }
     update({ enable_api_tunneling: enabled });
     saveDebounced();
   }
@@ -435,8 +440,13 @@ export function ConnectTab() {
       </section>
 
       <RouteAssistPanel
-        enabled={settings.enable_api_tunneling}
-        disabled={isConnected || isTransitioning}
+        enabled={
+          settings.enable_api_tunneling && !settings.enable_partial_country_ban
+        }
+        disabled={
+          isConnected || isTransitioning || settings.enable_partial_country_ban
+        }
+        partialBypassActive={settings.enable_partial_country_ban}
         onChange={setRouteAssist}
       />
 
@@ -684,10 +694,12 @@ function IconTile({
 function RouteAssistPanel({
   enabled,
   disabled,
+  partialBypassActive,
   onChange,
 }: {
   enabled: boolean;
   disabled: boolean;
+  partialBypassActive: boolean;
   onChange: (enabled: boolean) => void;
 }) {
   return (
@@ -730,14 +742,22 @@ function RouteAssistPanel({
             >
               Roblox Route Assist
             </h3>
-            <Tooltip content="Routes Roblox matchmaking/login traffic through the selected relay so Roblox places you in game servers near your tunneled region. For blocked countries, use the Bypass toggles in Optimize instead.">
+            <Tooltip
+              content={
+                partialBypassActive
+                  ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
+                  : "Routes Roblox matchmaking/login traffic through the selected relay so Roblox places you in game servers near your tunneled region. For blocked countries, use the Bypass toggles in Optimize instead."
+              }
+            >
               <span className="inline-flex">
                 <InfoIcon />
               </span>
             </Tooltip>
           </div>
           <p className="mt-0.5 truncate text-[11px] leading-snug text-text-muted">
-            Lands you in game servers near your tunneled region.
+            {partialBypassActive
+              ? "Disabled while Partial Bypass is active."
+              : "Lands you in game servers near your tunneled region."}
           </p>
         </div>
       </div>

@@ -222,24 +222,25 @@ fn recover_stale_network_state() {
         let driver_broken =
             SplitTunnelDriver::driver_install_evidence() && !SplitTunnelDriver::is_available();
 
+        // Always remove an enabled WinpkFilter adapter binding while SwiftTunnel
+        // is disconnected. Most PCs tolerate the binding sitting enabled, but on
+        // some network stacks it survives reboot/uninstall as "internet only
+        // works after I reconnect SwiftTunnel". This is the same no-op-safe step
+        // used by Repair -> Internet Recovery; connect re-enables it only on the
+        // selected adapter when the tunnel actually starts.
+        match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+            Ok(disabled) if !disabled.is_empty() => info!(
+                "Startup recovery: disabled leftover WinpkFilter binding on adapter(s): {}",
+                disabled.join(", ")
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("Startup recovery: WinpkFilter binding cleanup failed: {e}"),
+        }
+
         if marker_present || driver_broken {
             info!(
                 "Startup recovery: leftover network state detected (markers={marker_present}, driver_broken={driver_broken}); running full self-heal"
             );
-
-            // Unbind any leftover WinpkFilter (nt_ndisrd) adapter binding — the
-            // crashed/half-removed state that blackholes traffic and even breaks
-            // other VPNs, which the driver-level mode reset above can't repair.
-            // No-op when nothing is bound; the next connect re-enables it on the
-            // active adapter.
-            match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
-                Ok(disabled) if !disabled.is_empty() => info!(
-                    "Startup recovery: disabled leftover WinpkFilter binding on adapter(s): {}",
-                    disabled.join(", ")
-                ),
-                Ok(_) => {}
-                Err(e) => warn!("Startup recovery: WinpkFilter binding cleanup failed: {e}"),
-            }
 
             // If the driver is installed but STILL can't be opened after the unbind,
             // the NDIS state is wedged — the case a simple sweep can't fix and that
