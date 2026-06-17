@@ -75,14 +75,34 @@ fn last_applied_overrides() -> &'static RwLock<Vec<HostOverride>> {
 /// that routing decision.
 static COUNTRY_BAN_BYPASS_ROUTING: AtomicBool = AtomicBool::new(false);
 
-// Keep DNS repair for these launch-critical hosts, but do not publish their IPs
-// to Route Assist. Roblox can fail startup with "Failed to download or apply
-// critical settings" if these bootstrap HTTPS requests are relayed unreliably.
+// Launch-critical + sign-in-critical hosts that must stay DIRECT under Route
+// Assist / Partial bypass and are important enough to PIN back into the Windows
+// hosts file (see `allocate_route_assist_pins`), so the OS resolves them to our
+// de-conflicted, reachability-verified direct edge instead of whatever the
+// user's resolver hands out.
+//
+// Why pin these specifically (and not the broad UI/asset set):
+//   - `clientsettings*` / `versioncompatibility`: Roblox fails startup with
+//     "Failed to download or apply critical settings" if these one-shot
+//     bootstrap HTTPS fetches are relayed unreliably.
+//   - `auth.roblox.com`: a fresh sign-in routed out a relay's foreign datacenter
+//     IP trips Roblox's new-location/geo login defenses (FunCaptcha, 2SV,
+//     suspicious-login soft-block). Already-authenticated sessions don't re-auth,
+//     so the breakage is sign-in-only — matching the user reports. Relaying it is
+//     only correct under FULL country-ban bypass (where auth is blocked directly
+//     and a solvable relay-IP challenge beats no login at all); that path does
+//     not call this function.
+//
+// Roblox fronts these on shared anycast edges (128.116.0.0/17, CloudFront), so a
+// user-DNS answer can collide with a relayed control-plane pin; pinning the
+// de-conflicted IP here is what keeps these flows off the relay. FULL bypass
+// relays everything and never reaches `allocate_route_assist_pins`.
 const DIRECT_ONLY_BOOTSTRAP_DOMAINS: &[&str] = &[
     "clientsettingscdn.roblox.com",
     "clientsettings.roblox.com",
     "clientsettings.api.roblox.com",
     "versioncompatibility.api.roblox.com",
+    "auth.roblox.com",
 ];
 
 // Heavy Roblox CDN/asset hosts that ride the user's DIRECT path (not the relay)
@@ -737,12 +757,36 @@ fn set_direct_only_bootstrap_ips(ips: HashSet<Ipv4Addr>) {
 /// both shared and unshared IPs keeps only the unshared ones, so each side
 /// gets its own edge and BOTH behaviors hold.
 ///
-/// Only relayed control-plane entries are returned for hosts-file writing.
-/// Direct entries are deliberately not written: pinning direct Roblox UI,
-/// settings, chat, avatar, and asset hosts to public DoH results can send the
-/// desktop app to stale or wrong CDN/API edges on Vietnam-style networks. The
-/// direct IPs are still published into the direct-only set so the interceptor
-/// can avoid pulling those destinations into the relay when it sees them.
+/// Two classes of pin are written to the hosts file: the relayed control-plane
+/// hosts, AND the launch-critical settings + auth hosts
+/// (`DIRECT_ONLY_BOOTSTRAP_DOMAINS`) at a *de-conflicted* direct IP. The broad
+/// UI/chat/avatar/asset set is deliberately left unwritten: pinning those to
+/// public DoH results can send the app to stale or wrong CDN/API edges on
+/// Vietnam-style networks, and a mis-relayed asset/UI fetch is merely slow.
+///
+/// Why the launch-critical/auth subset MUST be pinned (the v2.5.11 regression
+/// this fixes): when these resolve via the user's own DNS, Roblox's shared
+/// anycast edges (128.116.0.0/17, CloudFront) can hand a *direct* host an IP
+/// that is also a relayed control-plane pin. The interceptor routes per-IP, so
+/// it then relays a flow that must stay direct — sign-in challenged from a
+/// foreign relay IP ("can't sign in"), or "Failed to apply critical settings"
+/// at launch — and `learn_direct_only_bootstrap_ip` is forbidden from rescuing
+/// an active IP, so it stays broken all session. Pinning the de-conflicted IP
+/// makes the OS resolve these to a guaranteed direct-only edge.
+///
+/// De-confliction is load-bearing: a launch-critical/auth entry is only written
+/// when its IP made it into `direct_only` (i.e. is NOT also an active/relay
+/// edge). On a genuinely shared edge (every candidate conflicts) relay still
+/// wins and the host is left to the user's DNS rather than pinned at a relayed
+/// IP. The remaining direct IPs are still published into the direct-only set so
+/// the interceptor avoids pulling those destinations into the relay.
+///
+/// NOTE: `resolve_reachable_domain_ips` only confirms a `:443` TCP connect, not
+/// that the edge serves fresh/correct content — a DNS-poisoned IP that ACKs
+/// :443 would pass. That bounds, but does not eliminate, the stale-edge risk;
+/// it is acceptable here because it is confined to launch-critical hosts that
+/// are otherwise broken, and FULL bypass (the censored case) never reaches this
+/// function.
 ///
 /// For an IP that is still shared after allocation (a domain whose every
 /// candidate conflicts), RELAY wins — the same precedence country-ban mode
@@ -818,9 +862,18 @@ fn allocate_route_assist_pins(
         .filter(|ip| !active.contains(ip))
         .collect();
 
+    // Write the relayed control-plane pins, plus the launch-critical settings +
+    // auth pins at a de-conflicted direct IP (one that survived into
+    // `direct_only`, so never a relayed edge). The broad UI/asset direct set is
+    // left to the user's DNS.
     let writable_overrides = kept
-        .into_iter()
-        .filter(|entry| !is_route_assist_direct_domain(&entry.domain))
+        .iter()
+        .filter(|entry| {
+            !is_route_assist_direct_domain(&entry.domain)
+                || (is_direct_only_bootstrap_domain(&entry.domain)
+                    && direct_only.contains(&entry.ip))
+        })
+        .cloned()
         .collect();
 
     (writable_overrides, active, direct_only)
@@ -1199,19 +1252,29 @@ mod tests {
 
         let (kept, active_ips, direct_ips) = allocate_route_assist_pins(overrides);
 
-        // No shared edges here: relayed control-plane hosts are written to
-        // hosts, but direct hosts are only published in the direct-only set.
-        assert_eq!(kept.len(), 2);
+        // No shared edges here: the relayed control-plane hosts AND the
+        // launch-critical settings hosts are written to the hosts file (the
+        // latter at their de-conflicted direct IP). The broad UI host
+        // (www.roblox.com) and the asset/CDN host (setup.rbxcdn.com) are left
+        // to the user's DNS, but still published in the direct-only set.
+        assert_eq!(kept.len(), 4);
         assert!(
             kept.iter()
                 .any(|entry| entry.domain == "gamejoin.roblox.com")
         );
         assert!(kept.iter().any(|entry| entry.domain == "apis.roblox.com"));
+        // Launch-critical settings hosts ARE re-pinned direct (v2.5.11 fix).
         assert!(
-            !kept
-                .iter()
-                .any(|entry| entry.domain == "clientsettingscdn.roblox.com")
+            kept.iter()
+                .any(|entry| entry.domain == "clientsettingscdn.roblox.com"
+                    && entry.ip == Ipv4Addr::new(65, 9, 168, 80))
         );
+        assert!(
+            kept.iter()
+                .any(|entry| entry.domain == "clientsettings.roblox.com"
+                    && entry.ip == Ipv4Addr::new(128, 116, 46, 3))
+        );
+        // Broad UI + asset hosts stay unwritten (user DNS picks the local edge).
         assert!(!kept.iter().any(|entry| entry.domain == "www.roblox.com"));
         assert!(!kept.iter().any(|entry| entry.domain == "setup.rbxcdn.com"));
         // Launch-critical settings hosts stay direct.
@@ -1263,6 +1326,148 @@ mod tests {
         );
         assert!(active_ips.contains(&shared));
         assert!(!direct_ips.contains(&shared));
+    }
+
+    #[test]
+    fn route_assist_repins_auth_direct_at_deconflicted_ip() {
+        // auth.roblox.com must stay DIRECT under Route Assist: a fresh sign-in
+        // relayed out a foreign relay IP trips Roblox's new-location login
+        // defenses ("can't sign in", while already-signed-in users are fine).
+        // With a private edge it is written to the hosts file (pinned direct)
+        // and published in the direct-only set, never active/relayed.
+        let auth_ip = Ipv4Addr::new(128, 116, 70, 9);
+        let gamejoin_ip = Ipv4Addr::new(128, 116, 121, 4);
+        let overrides = vec![
+            HostOverride {
+                ip: auth_ip,
+                domain: "auth.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: gamejoin_ip,
+                domain: "gamejoin.roblox.com".to_string(),
+            },
+        ];
+
+        let (kept, active_ips, direct_ips) = allocate_route_assist_pins(overrides);
+
+        assert!(
+            kept.iter()
+                .any(|e| e.domain == "auth.roblox.com" && e.ip == auth_ip),
+            "auth.roblox.com should be re-pinned direct in the hosts file"
+        );
+        assert!(direct_ips.contains(&auth_ip));
+        assert!(!active_ips.contains(&auth_ip));
+        // gamejoin still relays.
+        assert!(active_ips.contains(&gamejoin_ip));
+        assert!(kept.iter().any(|e| e.domain == "gamejoin.roblox.com"));
+    }
+
+    #[test]
+    fn route_assist_does_not_repin_launch_critical_on_unavoidably_shared_edge() {
+        // Mandatory negative case (de-confliction): clientsettings.roblox.com
+        // and the relayed gamejoin.roblox.com resolve to the SAME edge with no
+        // alternative. Relay wins (control-plane region steering must not
+        // break), and the settings host is NOT pinned direct at that relayed IP
+        // — pinning it would point a "direct" host at the relay, re-creating the
+        // bug in reverse. The host falls back to the user's DNS instead.
+        let shared = Ipv4Addr::new(128, 116, 99, 7);
+        let overrides = vec![
+            HostOverride {
+                ip: shared,
+                domain: "gamejoin.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: shared,
+                domain: "clientsettings.roblox.com".to_string(),
+            },
+        ];
+
+        let (kept, active_ips, direct_ips) = allocate_route_assist_pins(overrides);
+
+        assert!(active_ips.contains(&shared));
+        assert!(!direct_ips.contains(&shared));
+        assert!(
+            !kept.iter().any(|e| e.domain == "clientsettings.roblox.com"),
+            "a launch-critical host on a genuinely shared edge must not be \
+             pinned direct at a relayed IP"
+        );
+        assert!(
+            kept.iter()
+                .any(|e| e.domain == "gamejoin.roblox.com" && e.ip == shared)
+        );
+    }
+
+    #[test]
+    fn route_assist_repins_settings_at_private_edge_when_shared_one_exists() {
+        // clientsettings shares edge `a` with relayed apis.roblox.com but also
+        // has a private edge `b`. The shared `a` is dropped from both;
+        // clientsettings is pinned direct at `b`, apis relays at its own
+        // private edge `d`. Both behaviors hold.
+        let a = Ipv4Addr::new(65, 9, 168, 80); // shared
+        let b = Ipv4Addr::new(65, 9, 168, 90); // clientsettings private
+        let d = Ipv4Addr::new(65, 9, 168, 100); // apis private
+        let overrides = vec![
+            HostOverride {
+                ip: a,
+                domain: "apis.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: d,
+                domain: "apis.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: a,
+                domain: "clientsettings.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: b,
+                domain: "clientsettings.roblox.com".to_string(),
+            },
+        ];
+
+        let (kept, active_ips, direct_ips) = allocate_route_assist_pins(overrides);
+
+        // Shared edge `a` is pinned for neither class.
+        assert!(!kept.iter().any(|e| e.ip == a));
+        // clientsettings re-pinned direct at its private edge `b`.
+        assert!(
+            kept.iter()
+                .any(|e| e.domain == "clientsettings.roblox.com" && e.ip == b)
+        );
+        assert!(direct_ips.contains(&b));
+        assert!(!active_ips.contains(&b));
+        // apis relays at its private edge `d`.
+        assert!(
+            kept.iter()
+                .any(|e| e.domain == "apis.roblox.com" && e.ip == d)
+        );
+        assert!(active_ips.contains(&d));
+    }
+
+    #[test]
+    fn full_bypass_relays_auth_and_settings() {
+        // Mandatory mode negative: FULL country-ban bypass relays EVERYTHING
+        // (auth + settings included) — they are blocked directly there, so the
+        // relay IS the bypass. This path (country_ban_split_ips_from_overrides)
+        // is untouched by the Route Assist re-pin: nothing is direct-only.
+        let auth_ip = Ipv4Addr::new(128, 116, 70, 9);
+        let settings_ip = Ipv4Addr::new(128, 116, 46, 3);
+        let overrides = vec![
+            HostOverride {
+                ip: auth_ip,
+                domain: "auth.roblox.com".to_string(),
+            },
+            HostOverride {
+                ip: settings_ip,
+                domain: "clientsettings.roblox.com".to_string(),
+            },
+        ];
+
+        let (active, direct_only) = country_ban_split_ips_from_overrides(&overrides);
+
+        assert!(active.contains(&auth_ip));
+        assert!(active.contains(&settings_ip));
+        assert!(direct_only.is_empty());
     }
 
     #[test]
@@ -1342,6 +1547,7 @@ mod tests {
             vec![
                 "clientsettings.api.roblox.com",
                 "versioncompatibility.api.roblox.com",
+                "auth.roblox.com",
             ]
         );
     }
@@ -1481,7 +1687,14 @@ mod tests {
         assert!(is_direct_only_bootstrap_domain(
             "ClientSettingsCDN.Roblox.com"
         ));
+        assert!(is_direct_only_bootstrap_domain("Auth.Roblox.Com"));
         assert!(!is_direct_only_bootstrap_domain("www.roblox.com"));
+        // Exact match only: suffix-spoof / prefix lookalikes must NOT be
+        // treated as launch-critical/auth direct hosts.
+        assert!(!is_direct_only_bootstrap_domain(
+            "auth.roblox.com.evil.test"
+        ));
+        assert!(!is_direct_only_bootstrap_domain("notauth.roblox.com"));
     }
 
     #[test]
