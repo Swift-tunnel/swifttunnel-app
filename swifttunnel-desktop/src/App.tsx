@@ -197,7 +197,7 @@ function App() {
     }, 1000);
     const maxTimer = window.setTimeout(() => {
       if (!cancelled) setRecovering(false);
-    }, 2500);
+    }, 12000);
 
     void systemStartupRecoveryDone()
       .then((done) => {

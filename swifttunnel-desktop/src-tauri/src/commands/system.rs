@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::state::AppState;
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
@@ -964,6 +967,127 @@ pub fn system_startup_recovery_done(state: tauri::State<'_, crate::state::AppSta
     *state.startup_recovery_done.borrow()
 }
 
+#[cfg(windows)]
+enum StartupDriverRepairDecision {
+    Skip,
+    Report(DriverCheckResponse),
+    Repair,
+}
+
+#[cfg(windows)]
+fn startup_driver_repair_decision(
+    binding_preference: Option<swifttunnel_core::vpn::AdapterBindingPreference>,
+) -> Result<StartupDriverRepairDecision, String> {
+    use swifttunnel_core::vpn::DriverRecommendedAction;
+
+    let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+    if health.ready {
+        let preflight = swifttunnel_core::vpn::preflight_binding(binding_preference);
+        return match preflight {
+            Ok(info) if is_winpkfilter_binding_missing_preflight(&info) => {
+                log::info!(
+                    "Startup driver recovery: selected adapter binding is missing; running repair"
+                );
+                Ok(StartupDriverRepairDecision::Repair)
+            }
+            Ok(info) => {
+                log::info!(
+                    "Startup driver recovery: driver ready and binding preflight is {} ({})",
+                    info.status,
+                    info.binding_stage.as_deref().unwrap_or("unknown")
+                );
+                Ok(StartupDriverRepairDecision::Skip)
+            }
+            Err(err) => {
+                log::warn!(
+                    "Startup driver recovery: binding preflight failed while driver is ready: {}",
+                    err
+                );
+                Ok(StartupDriverRepairDecision::Skip)
+            }
+        };
+    }
+
+    if health.reboot_required || health.recommended_action == DriverRecommendedAction::Reboot {
+        log::warn!(
+            "Startup driver recovery: reboot already required before repair: {}",
+            health.message
+        );
+        return Ok(StartupDriverRepairDecision::Report(
+            DriverCheckResponse::from_health(health),
+        ));
+    }
+
+    match health.recommended_action {
+        DriverRecommendedAction::Install
+        | DriverRecommendedAction::ResetService
+        | DriverRecommendedAction::Reinstall => {
+            log::info!(
+                "Startup driver recovery: driver not ready ({}); running repair",
+                health.message
+            );
+            Ok(StartupDriverRepairDecision::Repair)
+        }
+        DriverRecommendedAction::None => {
+            log::warn!(
+                "Startup driver recovery: driver not ready but no repair action was recommended: {}",
+                health.message
+            );
+            Ok(StartupDriverRepairDecision::Skip)
+        }
+        DriverRecommendedAction::Reboot => Ok(StartupDriverRepairDecision::Report(
+            DriverCheckResponse::from_health(health),
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn repair_binding_preference_from_settings(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+) -> Option<swifttunnel_core::vpn::AdapterBindingPreference> {
+    match crate::commands::vpn::current_binding_preference(settings) {
+        Ok(preference) => preference,
+        Err(e) => {
+            log::warn!(
+                "Could not resolve adapter binding preference before driver repair; continuing with default binding: {}",
+                e
+            );
+            None
+        }
+    }
+}
+
+pub(crate) async fn system_startup_repair_driver_if_needed(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<DriverCheckResponse>, String> {
+    #[cfg(windows)]
+    {
+        let binding_preference = {
+            let mut settings = state.settings.lock();
+            repair_binding_preference_from_settings(&mut settings)
+        };
+
+        let decision = tauri::async_runtime::spawn_blocking(move || {
+            startup_driver_repair_decision(binding_preference)
+        })
+        .await
+        .map_err(|e| format!("Startup driver recovery task failed: {}", e))??;
+
+        match decision {
+            StartupDriverRepairDecision::Skip => Ok(None),
+            StartupDriverRepairDecision::Report(response) => Ok(Some(response)),
+            StartupDriverRepairDecision::Repair => system_repair_driver(app, state).await.map(Some),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (app, state);
+        Ok(None)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct WindowsFirewallServiceStatus {
     pub name: String,
@@ -1645,7 +1769,10 @@ pub async fn system_install_driver(
 }
 
 #[tauri::command]
-pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckResponse, String> {
+pub async fn system_repair_driver(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DriverCheckResponse, String> {
     #[cfg(windows)]
     {
         let resource_dir = app.path().resource_dir().ok();
@@ -1655,6 +1782,10 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
         let program_files_dir = PathBuf::from(
             std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
         );
+        let binding_preference = {
+            let mut settings = state.settings.lock();
+            repair_binding_preference_from_settings(&mut settings)
+        };
 
         tauri::async_runtime::spawn_blocking(move || {
             use swifttunnel_core::vpn::DriverRecommendedAction;
@@ -1662,6 +1793,8 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
+            let post_repair_preflight =
+                || swifttunnel_core::vpn::preflight_binding(binding_preference.clone());
             let initial = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
             let is_admin = swifttunnel_core::is_administrator();
             let mut current = initial.clone();
@@ -1682,7 +1815,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                     Ok(()) => {
                         current = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
                         if !initial.ready {
-                            let preflight = swifttunnel_core::vpn::preflight_binding(None);
+                            let preflight = post_repair_preflight();
                             return Ok(driver_repair_response_after_binding_preflight(
                                 current, preflight,
                             ));
@@ -1704,7 +1837,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
             }
 
             if !initial.ready && current.ready && last_error.is_none() {
-                let preflight = swifttunnel_core::vpn::preflight_binding(None);
+                let preflight = post_repair_preflight();
                 return Ok(driver_repair_response_after_binding_preflight(
                     current, preflight,
                 ));
@@ -1754,7 +1887,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                     ) {
                         Ok(()) => {
                             let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
-                            let preflight = swifttunnel_core::vpn::preflight_binding(None);
+                            let preflight = post_repair_preflight();
                             return Ok(driver_repair_response_after_binding_preflight(
                                 health, preflight,
                             ));
@@ -1780,7 +1913,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
                 ) {
                     Ok(()) => {
                         let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
-                        let preflight = swifttunnel_core::vpn::preflight_binding(None);
+                        let preflight = post_repair_preflight();
                         return Ok(driver_repair_response_after_binding_preflight(
                             health, preflight,
                         ));
@@ -1809,7 +1942,7 @@ pub async fn system_repair_driver(app: tauri::AppHandle) -> Result<DriverCheckRe
 
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = (app, state);
         Ok(DriverCheckResponse::unsupported())
     }
 }

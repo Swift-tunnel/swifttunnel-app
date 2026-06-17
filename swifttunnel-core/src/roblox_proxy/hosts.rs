@@ -229,6 +229,11 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
     // UI/social/chat/avatar APIs DIRECT for fast textures and reliable in-game
     // menus; only the region/join control plane relays. FULL bypass relays
     // everything.
+    //
+    // In the Route Assist/Partial case, only relayed control-plane hosts are
+    // written to hosts. Direct hosts still contribute to the direct-only IP set,
+    // but they use the user's normal DNS path so stale SwiftTunnel pins cannot
+    // break Roblox app startup/home loading on Vietnam-style partial blocks.
     let (overrides, active_ips, direct_only_ips) = if country_ban_bypass {
         let (active, direct_only) = country_ban_split_ips_from_overrides(&resolved);
         (resolved, active, direct_only)
@@ -719,8 +724,9 @@ fn set_direct_only_bootstrap_ips(ips: HashSet<Ipv4Addr>) {
 }
 
 /// Allocate Route Assist pins so relayed control-plane hosts and direct hosts
-/// (launch-critical settings + asset/CDN) don't share pinned IPs, then split
-/// the kept pins into (kept overrides, relayed-active IPs, direct-only IPs).
+/// (launch-critical settings + asset/CDN) don't share routing IPs, then split
+/// the kept pins into (hosts-file overrides, relayed-active IPs, direct-only
+/// IPs).
 ///
 /// Roblox fronts many hostnames with shared edges (its own 128.116.x edge and
 /// CloudFront POPs), so `gamejoin.roblox.com` (must relay for region steering
@@ -730,6 +736,13 @@ fn set_direct_only_bootstrap_ips(ips: HashSet<Ipv4Addr>) {
 /// conflict is resolved at pin time: a domain whose candidate list contains
 /// both shared and unshared IPs keeps only the unshared ones, so each side
 /// gets its own edge and BOTH behaviors hold.
+///
+/// Only relayed control-plane entries are returned for hosts-file writing.
+/// Direct entries are deliberately not written: pinning direct Roblox UI,
+/// settings, chat, avatar, and asset hosts to public DoH results can send the
+/// desktop app to stale or wrong CDN/API edges on Vietnam-style networks. The
+/// direct IPs are still published into the direct-only set so the interceptor
+/// can avoid pulling those destinations into the relay when it sees them.
 ///
 /// For an IP that is still shared after allocation (a domain whose every
 /// candidate conflicts), RELAY wins — the same precedence country-ban mode
@@ -805,7 +818,12 @@ fn allocate_route_assist_pins(
         .filter(|ip| !active.contains(ip))
         .collect();
 
-    (kept, active, direct_only)
+    let writable_overrides = kept
+        .into_iter()
+        .filter(|entry| !is_route_assist_direct_domain(&entry.domain))
+        .collect();
+
+    (writable_overrides, active, direct_only)
 }
 
 /// FULL country-ban bypass: relay EVERY pinned Roblox host — control plane,
@@ -1181,8 +1199,21 @@ mod tests {
 
         let (kept, active_ips, direct_ips) = allocate_route_assist_pins(overrides);
 
-        // No shared edges here: everything keeps its pin and its class.
-        assert_eq!(kept.len(), 8);
+        // No shared edges here: relayed control-plane hosts are written to
+        // hosts, but direct hosts are only published in the direct-only set.
+        assert_eq!(kept.len(), 2);
+        assert!(
+            kept.iter()
+                .any(|entry| entry.domain == "gamejoin.roblox.com")
+        );
+        assert!(kept.iter().any(|entry| entry.domain == "apis.roblox.com"));
+        assert!(
+            !kept
+                .iter()
+                .any(|entry| entry.domain == "clientsettingscdn.roblox.com")
+        );
+        assert!(!kept.iter().any(|entry| entry.domain == "www.roblox.com"));
+        assert!(!kept.iter().any(|entry| entry.domain == "setup.rbxcdn.com"));
         // Launch-critical settings hosts stay direct.
         assert!(direct_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
         assert!(direct_ips.contains(&Ipv4Addr::new(128, 116, 46, 3)));
@@ -1225,7 +1256,11 @@ mod tests {
 
         let (kept, active_ips, direct_ips) = allocate_route_assist_pins(overrides);
 
-        assert_eq!(kept.len(), 2);
+        assert_eq!(kept.len(), 1);
+        assert!(
+            kept.iter()
+                .all(|entry| entry.domain == "gamejoin.roblox.com")
+        );
         assert!(active_ips.contains(&shared));
         assert!(!direct_ips.contains(&shared));
     }
@@ -1267,8 +1302,10 @@ mod tests {
                 .any(|entry| entry.domain == "apis.roblox.com" && entry.ip == b)
         );
         assert!(
-            kept.iter()
-                .any(|entry| entry.domain == "t3.rbxcdn.com" && entry.ip == c)
+            !kept
+                .iter()
+                .any(|entry| entry.domain == "t3.rbxcdn.com" && entry.ip == c),
+            "Direct asset pins should not be written to hosts under Route Assist"
         );
         assert!(active_ips.contains(&b));
         assert!(!active_ips.contains(&a));

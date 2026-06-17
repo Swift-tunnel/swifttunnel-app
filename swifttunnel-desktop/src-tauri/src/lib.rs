@@ -712,6 +712,36 @@ pub fn run() {
                 let Some(state) = app_handle.try_state::<AppState>() else {
                     return;
                 };
+                match commands::system::system_startup_repair_driver_if_needed(
+                    app_handle.clone(),
+                    state,
+                )
+                .await
+                {
+                    Ok(Some(driver)) if driver.reboot_required || driver.recommended_action == "reboot" => {
+                        swifttunnel_core::notification::show_notification(
+                            "SwiftTunnel repair needs a restart",
+                            "SwiftTunnel repaired the network driver. Restart Windows once, then open SwiftTunnel again.",
+                        );
+                    }
+                    Ok(Some(driver)) if driver.ready => {
+                        info!("Startup driver recovery repaired the split tunnel driver");
+                    }
+                    Ok(Some(driver)) => {
+                        warn!(
+                            "Startup driver recovery could not fully repair the split tunnel driver: {}",
+                            driver.message
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!("Startup driver recovery skipped after error: {}", e);
+                    }
+                }
+
+                let Some(state) = app_handle.try_state::<AppState>() else {
+                    return;
+                };
                 let _ = state.startup_recovery_signal.send(true);
                 // Let the UI drop its "preparing your connection" screen now that
                 // the network self-heal has run.
