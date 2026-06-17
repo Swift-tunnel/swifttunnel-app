@@ -849,7 +849,7 @@ async fn authenticate_switch_target(
         .authenticate_addr_with_ticket(&ticket.token, target_addr)
         .await
     {
-        Ok(Some(super::udp_relay::RelayAuthAckStatus::Ok)) => SwitchAuthOutcome::Ok,
+        Ok(Some(status)) if status.is_authenticated() => SwitchAuthOutcome::Ok,
         Ok(Some(status)) => SwitchAuthOutcome::Rejected(format!("auth ack '{}'", status.as_str())),
         Ok(None) => SwitchAuthOutcome::Retryable("auth ack timeout".to_string()),
         Err(e) => SwitchAuthOutcome::Retryable(format!("auth hello send failed: {}", e)),
@@ -1628,7 +1628,7 @@ impl VpnConnection {
                 );
 
                 match relay.authenticate_with_ticket(&ticket.token) {
-                    Ok(Some(super::udp_relay::RelayAuthAckStatus::Ok)) => {
+                    Ok(Some(status)) if status.is_authenticated() => {
                         relay_auth_mode = "authenticated".to_string();
                         selected_relay_region = candidate_region.clone();
                         relay_addr = *candidate_addr;

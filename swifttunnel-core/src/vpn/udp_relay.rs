@@ -334,10 +334,10 @@ pub enum RelayAuthAckStatus {
     ServerMismatch = 5,
     AuthDisabled = 6,
     /// The relay rejected this ticket's `jti` as a replay (already seen until
-    /// expiry). Previously coerced to `BadFormat`; modeled explicitly so the
-    /// connect path can distinguish a stale/reused ticket (genuine rejection)
-    /// from its own lost-ack retransmit (the relay already authed the session
-    /// on the first hello — see `authenticate_with_ticket`).
+    /// expiry). Previously coerced to `BadFormat`; modeled explicitly so it can
+    /// be logged distinctly. It is **always a rejection** on the client — never
+    /// coerced to `Ok`. See `authenticate_with_ticket` for why a replay cannot
+    /// be safely treated as lost-OK-ack recovery client-side.
     Replay = 7,
 }
 
@@ -368,23 +368,15 @@ impl RelayAuthAckStatus {
             Self::Replay => "replay",
         }
     }
-}
 
-/// Map a received connect-handshake auth ack to the status handed back to the
-/// caller, given whether we had already put an earlier hello on the wire for
-/// this (single-`jti`) ticket.
-///
-/// Pure so the retransmit/replay policy is unit-testable without a socket. The
-/// only transformation is lost-OK-ack recovery: a `Replay` that follows one of
-/// our own retransmits means the relay already authenticated an earlier hello
-/// (and never evicts an authenticated session on replay), so the session is up
-/// and we report `Ok`. A `Replay` on the very first hello is a stale/reused
-/// ticket and is passed through unchanged as a genuine rejection.
-fn resolve_connect_auth_ack(status: RelayAuthAckStatus, prior_hello: bool) -> RelayAuthAckStatus {
-    if status == RelayAuthAckStatus::Replay && prior_hello {
-        RelayAuthAckStatus::Ok
-    } else {
-        status
+    /// The single source of truth for "did relay auth succeed". ONLY `Ok`
+    /// authenticates the session; every other status — including `Replay` — is
+    /// a rejection the caller must roll back / fail over on. A `Replay` is
+    /// deliberately NOT treated as success: the client cannot tell a stale or
+    /// reused-ticket rejection from its own lost-OK-ack retransmit, so it fails
+    /// closed (see `authenticate_with_ticket`).
+    pub fn is_authenticated(self) -> bool {
+        matches!(self, Self::Ok)
     }
 }
 
@@ -1371,16 +1363,25 @@ impl UdpRelay {
     /// (recovers a dropped hello/ack on a fast-but-lossy link); the final
     /// attempt listens out the remaining budget (recovers a slow, high-RTT ack).
     ///
-    /// Returns `Ok(Some(Ok))` on success, `Ok(Some(rejection))` for a definitive
-    /// rejection, or `Ok(None)` if no ack arrives in budget. A `Replay` ack that
-    /// follows one of OUR OWN retransmits is reported as `Ok`: the relay
-    /// authenticated an earlier hello (and never evicts an authenticated session
-    /// on replay), so only the OK ack was lost. A `Replay` on the very first
-    /// hello is a stale/reused ticket and is returned as-is (a genuine
-    /// rejection the caller must not retry into success).
+    /// Returns `Ok(Some(Ok))` on success, `Ok(Some(rejection))` for any
+    /// non-`Ok` status, or `Ok(None)` if no ack arrives in budget.
+    ///
+    /// A `Replay` ack is returned as-is — a rejection — and is NOT coerced to
+    /// `Ok`. A replay is ambiguous on the client and there is no reliable way
+    /// to disambiguate it here: the ack frame carries no indication of which
+    /// hello it answers, and on a high-RTT/queued-ack link a genuine
+    /// stale/reused-ticket rejection to the FIRST hello can arrive after this
+    /// loop has already retransmitted — so "have we sent a prior hello?" cannot
+    /// distinguish lost-OK-ack recovery from a real rejection. Coercing it to
+    /// `Ok` would let a spent ticket select the relay as authenticated and
+    /// leave the session silently unauthenticated (no rollback/failover), which
+    /// is the very failure this path must prevent. We therefore fail closed:
+    /// the caller rolls back and a reconnect fetches a fresh `jti`. The clean
+    /// recovery for a genuinely lost OK ack is relay-side (re-ack an
+    /// already-authed `jti` with `Ok` instead of `Replay`) — the documented
+    /// follow-up — not a client-side guess.
     pub fn authenticate_with_ticket(&self, token: &str) -> Result<Option<RelayAuthAckStatus>> {
         let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
-        let mut hello_sent = false;
 
         for attempt in 0..AUTH_HANDSHAKE_ATTEMPTS {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1389,8 +1390,6 @@ impl UdpRelay {
             }
 
             self.send_auth_hello(token)?;
-            let prior_hello = hello_sent;
-            hello_sent = true;
 
             // The bug this fixes: attempt 0 used to wait the ENTIRE budget, so
             // the documented 4-attempt retransmit never fired and a single
@@ -1405,14 +1404,12 @@ impl UdpRelay {
             };
 
             if let Some(status) = self.wait_for_auth_ack_with_timeout(attempt_timeout)? {
-                let resolved = resolve_connect_auth_ack(status, prior_hello);
                 log::info!(
-                    "UDP Relay: Auth ack {} (resolved {}) for session {:016x}",
+                    "UDP Relay: Auth ack {} for session {:016x}",
                     status.as_str(),
-                    resolved.as_str(),
                     self.session_id_u64()
                 );
-                return Ok(Some(resolved));
+                return Ok(Some(status));
             }
         }
 
@@ -2381,53 +2378,41 @@ mod tests {
     }
 
     #[test]
-    fn connect_auth_ack_replay_after_retransmit_is_success() {
-        // Positive: a replay ack that follows one of OUR OWN retransmits means
-        // the relay authenticated an earlier hello and only the OK ack was lost.
-        assert_eq!(
-            resolve_connect_auth_ack(RelayAuthAckStatus::Replay, true),
-            RelayAuthAckStatus::Ok
-        );
+    fn only_ok_ack_authenticates() {
+        // Positive: Ok is the one and only status that authenticates a session.
+        assert!(RelayAuthAckStatus::Ok.is_authenticated());
     }
 
     #[test]
-    fn connect_auth_ack_replay_on_first_hello_stays_rejected() {
-        // Mandatory negative: a replay on the VERY FIRST hello (no prior send)
-        // is a stale/reused ticket, NOT lost-ack recovery. It must remain a
-        // rejection so a spent ticket is never retried into a fake success.
-        assert_eq!(
-            resolve_connect_auth_ack(RelayAuthAckStatus::Replay, false),
-            RelayAuthAckStatus::Replay
-        );
+    fn replay_ack_is_never_treated_as_authenticated() {
+        // Mandatory negative (regression guard for the P1): a `Replay` ack must
+        // never count as auth success. The client cannot tell a stale/reused
+        // ticket rejection from its own lost-OK-ack retransmit — on a high-RTT
+        // link a genuine first-hello replay rejection can arrive after we have
+        // already retransmitted — so it MUST fail closed. Coercing it to Ok
+        // would leave a spent-ticket session silently unauthenticated with no
+        // rollback/failover.
+        assert!(!RelayAuthAckStatus::Replay.is_authenticated());
     }
 
     #[test]
-    fn connect_auth_ack_definitive_rejections_unaffected_by_retransmit() {
-        // A retransmit must never launder a bad-ticket verdict into success,
-        // regardless of how many hellos we have sent.
+    fn every_non_ok_ack_is_a_rejection() {
+        // No status other than Ok may authenticate, regardless of retransmits.
         for status in [
+            RelayAuthAckStatus::BadFormat,
             RelayAuthAckStatus::BadSignature,
             RelayAuthAckStatus::Expired,
             RelayAuthAckStatus::SidMismatch,
             RelayAuthAckStatus::ServerMismatch,
-            RelayAuthAckStatus::BadFormat,
             RelayAuthAckStatus::AuthDisabled,
+            RelayAuthAckStatus::Replay,
         ] {
-            assert_eq!(resolve_connect_auth_ack(status, false), status);
-            assert_eq!(resolve_connect_auth_ack(status, true), status);
+            assert!(
+                !status.is_authenticated(),
+                "{} must be a rejection",
+                status.as_str()
+            );
         }
-    }
-
-    #[test]
-    fn connect_auth_ack_ok_passes_through() {
-        assert_eq!(
-            resolve_connect_auth_ack(RelayAuthAckStatus::Ok, false),
-            RelayAuthAckStatus::Ok
-        );
-        assert_eq!(
-            resolve_connect_auth_ack(RelayAuthAckStatus::Ok, true),
-            RelayAuthAckStatus::Ok
-        );
     }
 
     /// Build a 0xA7 response body the way the relay does, for parse round-trips.
