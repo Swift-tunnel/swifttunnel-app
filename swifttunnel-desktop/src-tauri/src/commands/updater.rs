@@ -39,6 +39,7 @@ pub struct UpdaterCheckResponse {
     pub current_version: String,
     pub available_version: Option<String>,
     pub release_tag: Option<String>,
+    pub release_notes: Option<String>,
     pub channel: String,
 }
 
@@ -53,6 +54,8 @@ struct GithubRelease {
     tag_name: String,
     draft: bool,
     prerelease: bool,
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +72,7 @@ struct SelectedRelease {
     tag_name: String,
     version: Version,
     prerelease: bool,
+    release_notes: Option<String>,
 }
 
 #[derive(Debug)]
@@ -169,6 +173,7 @@ fn select_release_for_channel(
                 tag_name: release.tag_name,
                 version,
                 prerelease: release.prerelease,
+                release_notes: release.body,
             })
         })
         .filter(|release| release.version > *current_version)
@@ -518,6 +523,7 @@ pub async fn updater_check_channel(
             current_version: current_version.to_string(),
             available_version: None,
             release_tag: None,
+            release_notes: None,
             channel: channel_name(channel).to_string(),
         });
     };
@@ -528,6 +534,7 @@ pub async fn updater_check_channel(
             current_version: current_version.to_string(),
             available_version: None,
             release_tag: None,
+            release_notes: None,
             channel: channel_name(channel).to_string(),
         });
     };
@@ -543,6 +550,7 @@ pub async fn updater_check_channel(
         current_version: update.current_version,
         available_version: Some(update.version),
         release_tag: Some(prepared.selected_release.tag_name),
+        release_notes: prepared.selected_release.release_notes,
         channel: channel_name(channel).to_string(),
     })
 }
@@ -629,6 +637,7 @@ mod tests {
             tag_name: tag.to_string(),
             draft: false,
             prerelease,
+            body: None,
         }
     }
 
@@ -637,6 +646,7 @@ mod tests {
             tag_name: tag.to_string(),
             draft,
             prerelease,
+            body: None,
         }
     }
 
@@ -645,6 +655,7 @@ mod tests {
             tag_name: tag.to_string(),
             version: Version::parse(version).unwrap(),
             prerelease,
+            release_notes: None,
         }
     }
 

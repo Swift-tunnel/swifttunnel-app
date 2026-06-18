@@ -17,6 +17,7 @@ import { InGameTab } from "./components/ingame/InGameTab";
 import { NetworkTab } from "./components/network/NetworkTab";
 import { RepairTab } from "./components/repair/RepairTab";
 import { SettingsTab } from "./components/settings/SettingsTab";
+import { WhatsNewDialog } from "./components/updater/WhatsNewDialog";
 import { useAuthStore } from "./stores/authStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useServerStore } from "./stores/serverStore";
@@ -434,7 +435,12 @@ function App() {
     return <LoginScreen />;
   }
 
-  return <AppShell>{(tab) => tabComponent(tab as TabId)}</AppShell>;
+  return (
+    <>
+      <AppShell>{(tab) => tabComponent(tab as TabId)}</AppShell>
+      <WhatsNewDialog />
+    </>
+  );
 }
 
 export default App;

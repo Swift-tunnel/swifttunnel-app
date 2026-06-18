@@ -12,7 +12,7 @@ use swifttunnel_core::auth::types::AuthError;
 use swifttunnel_core::settings::AdapterBindingMode;
 use swifttunnel_core::vpn::{
     AdapterBindingPreference, BindingPreferenceSource, BindingPreflightInfo, VpnError,
-    preflight_binding,
+    preflight_binding, preflight_binding_for_connect,
 };
 
 const VPN_CONNECT_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
@@ -176,8 +176,25 @@ pub(crate) fn current_binding_preference(
 pub(crate) fn build_binding_preflight(
     settings: &mut swifttunnel_core::settings::AppSettings,
 ) -> Result<BindingPreflightInfo, String> {
+    build_binding_preflight_with_repair(settings, false)
+}
+
+pub(crate) fn build_connect_binding_preflight(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+) -> Result<BindingPreflightInfo, String> {
+    build_binding_preflight_with_repair(settings, true)
+}
+
+fn build_binding_preflight_with_repair(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+    repair_winpkfilter_binding: bool,
+) -> Result<BindingPreflightInfo, String> {
     let binding_preference = current_binding_preference(settings)?;
-    let preflight = preflight_binding(binding_preference.clone()).map_err(|e| e.to_string())?;
+    let preflight = if repair_winpkfilter_binding {
+        preflight_binding_for_connect(binding_preference.clone()).map_err(|e| e.to_string())?
+    } else {
+        preflight_binding(binding_preference.clone()).map_err(|e| e.to_string())?
+    };
 
     if let Some(preference) = binding_preference {
         if preference.source == BindingPreferenceSource::RememberedAuto
@@ -390,7 +407,7 @@ pub async fn vpn_connect(
     let (settings_snapshot, binding_preference, overrides_changed) = {
         let mut settings = state.settings.lock();
         let previous_overrides = settings.network_binding_overrides.clone();
-        let preflight = build_binding_preflight(&mut settings)?;
+        let preflight = build_connect_binding_preflight(&mut settings)?;
         if preflight.status != "ok" {
             return Err(preflight.reason);
         }

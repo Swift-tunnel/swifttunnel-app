@@ -322,6 +322,13 @@ impl AppSettings {
         if self.enable_country_ban && self.enable_partial_country_ban {
             self.enable_partial_country_ban = false;
         }
+        // Partial bypass already routes the Roblox join/control path and must
+        // keep gameplay UDP direct. Persisting Route Assist alongside it makes
+        // the UI/support reports look contradictory even though the backend lets
+        // Partial win, so normalize the saved state too.
+        if self.enable_partial_country_ban {
+            self.enable_api_tunneling = false;
+        }
     }
 }
 
@@ -663,6 +670,18 @@ mod tests {
         settings.enable_partial_country_ban = true;
         settings.sanitize_in_place();
         assert!(!settings.enable_country_ban);
+        assert!(settings.enable_partial_country_ban);
+    }
+
+    #[test]
+    fn test_sanitize_partial_bypass_disables_route_assist() {
+        let mut settings = AppSettings::default();
+        settings.enable_api_tunneling = true;
+        settings.enable_partial_country_ban = true;
+
+        settings.sanitize_in_place();
+
+        assert!(!settings.enable_api_tunneling);
         assert!(settings.enable_partial_country_ban);
     }
 

@@ -726,6 +726,18 @@ pub fn run() {
                     }
                     Ok(Some(driver)) if driver.ready => {
                         info!("Startup driver recovery repaired the split tunnel driver");
+                        swifttunnel_core::notification::show_notification(
+                            "SwiftTunnel repaired itself",
+                            "SwiftTunnel fixed a startup network issue and will restart once to finish applying it.",
+                        );
+                        if let Err(e) =
+                            commands::system::system_relaunch_after_startup_repair(
+                                app_handle.clone(),
+                            )
+                            .await
+                        {
+                            warn!("Startup driver recovery could not relaunch SwiftTunnel: {e}");
+                        }
                     }
                     Ok(Some(driver)) => {
                         warn!(

@@ -849,7 +849,7 @@ async fn authenticate_switch_target(
         .authenticate_addr_with_ticket(&ticket.token, target_addr)
         .await
     {
-        Ok(Some(super::udp_relay::RelayAuthAckStatus::Ok)) => SwitchAuthOutcome::Ok,
+        Ok(Some(status)) if status.is_authenticated() => SwitchAuthOutcome::Ok,
         Ok(Some(status)) => SwitchAuthOutcome::Rejected(format!("auth ack '{}'", status.as_str())),
         Ok(None) => SwitchAuthOutcome::Retryable("auth ack timeout".to_string()),
         Err(e) => SwitchAuthOutcome::Retryable(format!("auth hello send failed: {}", e)),
@@ -1628,7 +1628,7 @@ impl VpnConnection {
                 );
 
                 match relay.authenticate_with_ticket(&ticket.token) {
-                    Ok(Some(super::udp_relay::RelayAuthAckStatus::Ok)) => {
+                    Ok(Some(status)) if status.is_authenticated() => {
                         relay_auth_mode = "authenticated".to_string();
                         selected_relay_region = candidate_region.clone();
                         relay_addr = *candidate_addr;
@@ -2761,15 +2761,6 @@ impl VpnConnection {
             if let Err(e) = guard.close() {
                 log::warn!("Error closing split tunnel: {}", e);
             }
-        }
-        #[cfg(windows)]
-        match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
-            Ok(disabled) if !disabled.is_empty() => log::info!(
-                "Disconnect cleanup: disabled WinpkFilter binding on adapter(s): {}",
-                disabled.join(", ")
-            ),
-            Ok(_) => {}
-            Err(e) => log::warn!("Disconnect cleanup: WinpkFilter binding cleanup failed: {e}"),
         }
         self.split_tunnel = None;
 

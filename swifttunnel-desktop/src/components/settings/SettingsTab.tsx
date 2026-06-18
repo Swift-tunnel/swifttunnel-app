@@ -83,6 +83,7 @@ export function SettingsTab() {
         return "Not resolved";
     }
   })();
+  const routeAssistDisabledByPartial = settings.enable_partial_country_ban;
 
   function set(partial: Partial<AppSettings>, options?: { toast?: boolean }) {
     update(partial);
@@ -418,9 +419,19 @@ export function SettingsTab() {
 
         <Row
           label="Roblox Route Assist"
-          desc="Lands you in game servers near your tunneled region"
+          desc={
+            routeAssistDisabledByPartial
+              ? "Disabled while Partial Bypass is active"
+              : "Lands you in game servers near your tunneled region"
+          }
           tooltip={
-            <Tooltip content="Routes Roblox matchmaking/login traffic through the relay so Roblox places you near your tunneled region. For blocked countries, use the Bypass toggles in Optimize instead.">
+            <Tooltip
+              content={
+                routeAssistDisabledByPartial
+                  ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
+                  : "Routes Roblox matchmaking/login traffic through the relay so Roblox places you near your tunneled region. For blocked countries, use the Bypass toggles in Optimize instead."
+              }
+            >
               <span className="inline-flex">
                 <InfoIcon />
               </span>
@@ -428,7 +439,10 @@ export function SettingsTab() {
           }
         >
           <Toggle
-            enabled={settings.enable_api_tunneling}
+            enabled={
+              settings.enable_api_tunneling && !routeAssistDisabledByPartial
+            }
+            disabled={routeAssistDisabledByPartial}
             ariaLabel="Roblox Route Assist"
             onChange={(v) => set({ enable_api_tunneling: v })}
           />
@@ -533,7 +547,7 @@ export function SettingsTab() {
         </Row>
         <Row
           label="Auto update"
-          desc="Automatically check and install updates on startup"
+          desc="Automatically check for updates on startup"
         >
           <Toggle
             enabled={settings.update_settings.auto_check}

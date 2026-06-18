@@ -398,6 +398,7 @@ export interface UpdaterCheckResponse {
   current_version: string;
   available_version: string | null;
   release_tag: string | null;
+  release_notes: string | null;
   channel: UpdateChannel;
 }
 

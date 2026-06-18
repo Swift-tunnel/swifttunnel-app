@@ -27,7 +27,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
                 || lc.contains("access denied")
                 || lc.contains("access is denied")
             {
-                "Administrator privileges required.\n\nPlease run SwiftTunnel as Administrator.".to_string()
+                admin_or_access_denied_message(crate::utils::is_administrator())
             } else if lc.contains("no ndis adapter matched the default-route interface index") {
                 "SwiftTunnel couldn't detect your active network adapter for split tunneling.\n\nGo to Settings -> VPN -> Network Adapter, select your Wi-Fi/Ethernet adapter, then reconnect.\n\nThis can happen if another VPN, network bridge, or virtual adapter owns the default route.".to_string()
             } else if lc.contains("winpkfilter_binding_missing")
@@ -124,6 +124,14 @@ pub fn user_friendly_error(error: &VpnError) -> String {
     }
 }
 
+fn admin_or_access_denied_message(is_admin: bool) -> String {
+    if is_admin {
+        "Windows blocked SwiftTunnel's split-tunnel driver access even though SwiftTunnel is elevated.\n\nUse Repair -> Split tunnel driver, then reconnect. If it still fails, restart Windows once so the driver service can reload cleanly.".to_string()
+    } else {
+        "Administrator privileges required.\n\nPlease run SwiftTunnel as Administrator.".to_string()
+    }
+}
+
 /// Simplify a technical message by removing error codes and hex values
 fn simplify_message(msg: &str) -> String {
     // Remove common Windows error code patterns
@@ -189,9 +197,16 @@ mod tests {
 
     #[test]
     fn test_user_friendly_admin_required() {
-        let error = VpnError::SplitTunnelSetupFailed("Access is denied.".to_string());
-        let msg = user_friendly_error(&error);
+        let msg = admin_or_access_denied_message(false);
         assert!(msg.contains("Administrator privileges required"));
+    }
+
+    #[test]
+    fn test_user_friendly_access_denied_while_elevated() {
+        let msg = admin_or_access_denied_message(true);
+        assert!(msg.contains("driver access"));
+        assert!(msg.contains("Repair"));
+        assert!(!msg.contains("Please run SwiftTunnel as Administrator"));
     }
 
     #[test]

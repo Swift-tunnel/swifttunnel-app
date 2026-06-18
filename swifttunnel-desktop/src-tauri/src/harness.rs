@@ -12,7 +12,8 @@ use serde::Serialize;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::commands::vpn::{
-    build_binding_preflight, current_binding_preference, parse_game_presets,
+    build_binding_preflight, build_connect_binding_preflight, current_binding_preference,
+    parse_game_presets,
 };
 use crate::state::AppState;
 use swifttunnel_core::auth::AuthError;
@@ -472,7 +473,7 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
     ) = {
         let mut settings = state.settings.lock();
         apply_adapter_override(&mut settings, cli);
-        let preflight = build_binding_preflight(&mut settings)?;
+        let preflight = build_connect_binding_preflight(&mut settings)?;
         if preflight.status != "ok" {
             return Err(format!(
                 "Binding preflight rejected connect attempt: {}",

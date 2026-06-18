@@ -45,7 +45,7 @@ pub use ipv6_recovery::recover_ipv6_on_startup;
 pub use parallel_interceptor::{
     AdapterBindingPreference, BindingCandidateInfo, BindingPreferenceSource, BindingPreflightInfo,
     NetworkAdapterInfo, ParallelInterceptor, SplitTunnelDiagnostics, ThroughputStats,
-    list_network_adapters, preflight_binding,
+    list_network_adapters, preflight_binding, preflight_binding_for_connect,
 };
 pub use process_cache::{LockFreeProcessCache, ProcessSnapshot};
 pub use process_watcher::{ProcessStartEvent, ProcessWatcher};

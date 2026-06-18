@@ -496,8 +496,22 @@ pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
 pub fn preflight_binding(
     binding_preference: Option<AdapterBindingPreference>,
 ) -> VpnResult<BindingPreflightInfo> {
+    preflight_binding_inner(binding_preference, false)
+}
+
+pub fn preflight_binding_for_connect(
+    binding_preference: Option<AdapterBindingPreference>,
+) -> VpnResult<BindingPreflightInfo> {
+    preflight_binding_inner(binding_preference, true)
+}
+
+fn preflight_binding_inner(
+    binding_preference: Option<AdapterBindingPreference>,
+    repair_winpkfilter_binding: bool,
+) -> VpnResult<BindingPreflightInfo> {
     let mut interceptor = ParallelInterceptor::new(Vec::new());
     interceptor.binding_preference = binding_preference;
+    interceptor.repair_winpkfilter_binding = repair_winpkfilter_binding;
 
     let result = interceptor.find_adapters("SwiftTunnel", 0);
     let status = match (&result, interceptor.last_validation_result.as_str()) {
@@ -916,6 +930,14 @@ pub struct ParallelInterceptor {
     binding_candidates: Vec<BindingCandidateInfo>,
     /// Recommended adapter GUID from the last binding decision, if any.
     recommended_adapter_guid: Option<String>,
+    /// Whether adapter discovery is allowed to enable the WinpkFilter binding.
+    ///
+    /// Read-only preflight must never attach `nt_ndisrd` while disconnected:
+    /// on some Wi-Fi stacks an enabled WinpkFilter LWF with no active reader is
+    /// exactly the "internet only works when SwiftTunnel is on" failure mode.
+    /// Connect and explicit driver repair keep this enabled so they can attach
+    /// the selected adapter right before the tunnel starts.
+    repair_winpkfilter_binding: bool,
     /// VPN adapter index
     vpn_adapter_idx: Option<usize>,
     /// Whether interceptor is active
@@ -1005,6 +1027,7 @@ impl ParallelInterceptor {
             last_validation_result: "not_run".to_string(),
             binding_candidates: Vec::new(),
             recommended_adapter_guid: None,
+            repair_winpkfilter_binding: true,
             vpn_adapter_idx: None,
             active: false,
             worker_stats,
@@ -2451,13 +2474,24 @@ impl ParallelInterceptor {
             log::warn!("Could not determine default route interface - will use name-based scoring");
         }
 
-        let default_route_binding_error = if let Err(err) =
-            Self::ensure_winpkfilter_binding_for_adapter(
-                default_route_if_index,
-                default_route_owner
-                    .as_ref()
-                    .map(|(friendly_name, _, _, _)| friendly_name.as_str()),
-            ) {
+        let validate_binding = || {
+            let adapter_name_hint = default_route_owner
+                .as_ref()
+                .map(|(friendly_name, _, _, _)| friendly_name.as_str());
+            if self.repair_winpkfilter_binding {
+                Self::ensure_winpkfilter_binding_for_adapter(
+                    default_route_if_index,
+                    adapter_name_hint,
+                )
+            } else {
+                Self::check_winpkfilter_binding_for_adapter(
+                    default_route_if_index,
+                    adapter_name_hint,
+                )
+            }
+        };
+
+        let default_route_binding_error = if let Err(err) = validate_binding() {
             log::warn!(
                 "WinpkFilter binding check on default-route adapter failed before enumeration: {}",
                 err
@@ -2781,9 +2815,12 @@ impl ParallelInterceptor {
             BindingStage::Unrecoverable
         };
 
-        let default_route_binding_missing = default_route_binding_error
-            .as_ref()
-            .is_some_and(|err| Self::is_winpkfilter_binding_missing_failure(&err.to_string()));
+        let default_route_binding_missing =
+            default_route_binding_error.as_ref().is_some_and(|err| {
+                let details = err.to_string();
+                Self::is_winpkfilter_binding_missing_failure(&details)
+                    || Self::is_winpkfilter_binding_disabled_failure(&details)
+            });
 
         if selected.is_none() && physical_candidates.is_empty() {
             self.binding_stage = if default_route_binding_missing {
@@ -2792,12 +2829,24 @@ impl ParallelInterceptor {
                 BindingStage::Unrecoverable.as_str().to_string()
             };
             self.binding_reason = if default_route_binding_missing {
-                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. Repair the split tunnel driver, then try again.".to_string()
+                if default_route_binding_error.as_ref().is_some_and(|err| {
+                    Self::is_winpkfilter_binding_disabled_failure(&err.to_string())
+                }) {
+                    "SwiftTunnel found the active network adapter, but the WinpkFilter binding is disabled while disconnected. Connect will enable it automatically.".to_string()
+                } else {
+                    "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. Repair the split tunnel driver, then try again.".to_string()
+                }
             } else {
                 "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.".to_string()
             };
             self.last_validation_result = if default_route_binding_missing {
-                "winpkfilter_binding_missing".to_string()
+                if default_route_binding_error.as_ref().is_some_and(|err| {
+                    Self::is_winpkfilter_binding_disabled_failure(&err.to_string())
+                }) {
+                    "winpkfilter_binding_disabled".to_string()
+                } else {
+                    "winpkfilter_binding_missing".to_string()
+                }
             } else {
                 "no_winpkfilter_bound_adapters".to_string()
             };
@@ -2812,6 +2861,13 @@ impl ParallelInterceptor {
                     .as_ref()
                     .map(|(friendly_name, _, _, _)| friendly_name.as_str())
                     .unwrap_or("active network adapter");
+                if default_route_binding_error.as_ref().is_some_and(|err| {
+                    Self::is_winpkfilter_binding_disabled_failure(&err.to_string())
+                }) {
+                    return Err(VpnError::SplitTunnel(
+                        Self::winpkfilter_binding_disabled_message(adapter_label),
+                    ));
+                }
                 return Err(VpnError::SplitTunnel(
                     Self::winpkfilter_binding_missing_message(adapter_label),
                 ));
@@ -2831,9 +2887,19 @@ impl ParallelInterceptor {
                 .map(|(friendly_name, _, _, _)| friendly_name.as_str())
                 .unwrap_or("active network adapter");
             self.binding_stage = BindingStage::WinpkFilterBindingMissing.as_str().to_string();
-            self.binding_reason =
-                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. Repair the split tunnel driver, then try again.".to_string();
-            self.last_validation_result = "winpkfilter_binding_missing".to_string();
+            let binding_disabled = default_route_binding_error
+                .as_ref()
+                .is_some_and(|err| Self::is_winpkfilter_binding_disabled_failure(&err.to_string()));
+            self.binding_reason = if binding_disabled {
+                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is disabled while disconnected. Connect will enable it automatically.".to_string()
+            } else {
+                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. Repair the split tunnel driver, then try again.".to_string()
+            };
+            self.last_validation_result = if binding_disabled {
+                "winpkfilter_binding_disabled".to_string()
+            } else {
+                "winpkfilter_binding_missing".to_string()
+            };
             self.binding_candidates = physical_candidates
                 .iter()
                 .map(|candidate| {
@@ -3166,9 +3232,10 @@ impl ParallelInterceptor {
         Self::run_powershell_with_timeout_capture(script, timeout_secs).success
     }
 
-    fn build_ensure_winpkfilter_binding_script(
+    fn build_winpkfilter_binding_script(
         if_index: Option<u32>,
         adapter_name_hint: Option<&str>,
+        repair_binding: bool,
     ) -> VpnResult<String> {
         let adapter_label = adapter_name_hint.unwrap_or("selected adapter");
         let adapter_hint_assignment = match adapter_name_hint {
@@ -3178,6 +3245,11 @@ impl ParallelInterceptor {
         let adapter_if_index_assignment = match if_index {
             Some(if_index) => format!("$adapterIfIndex = {if_index}"),
             None => "$adapterIfIndex = $null".to_string(),
+        };
+        let repair_binding_assignment = if repair_binding {
+            "$repairBinding = $true"
+        } else {
+            "$repairBinding = $false"
         };
 
         if if_index.is_none() && adapter_name_hint.is_none() {
@@ -3190,6 +3262,7 @@ impl ParallelInterceptor {
             r#"
             $ErrorActionPreference = 'Stop'
             $adapterLabel = '{}'
+            {}
             {}
             {}
 
@@ -3363,6 +3436,9 @@ impl ParallelInterceptor {
                 Start-NDISRDService
 
                 if (-not $binding.Enabled) {{
+                    if (-not $repairBinding) {{
+                        throw ('winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter ''' + $adapterName + ''' (ifIndex=' + $adapterIfIndex + '). SwiftTunnel will enable it when connecting or when Repair driver is run.')
+                    }}
                     Write-Output ('Enabling WinpkFilter binding on adapter: ' + $adapterName)
                     Enable-WinpkFilterBinding $bindingCandidate
                     Start-Sleep -Seconds 2
@@ -3389,7 +3465,7 @@ impl ParallelInterceptor {
                     $errorText = 'PowerShell command failed without an exception message.'
                 }}
 
-                if ($errorText -like 'winpkfilter_binding_missing:*') {{
+                if ($errorText -like 'winpkfilter_binding_missing:*' -or $errorText -like 'winpkfilter_binding_disabled:*') {{
                     [Console]::Error.WriteLine($errorText)
                 }} else {{
                     [Console]::Error.WriteLine('winpkfilter_binding_validation_failed: adapter ''' + $adapterLabel + ''': ' + $errorText)
@@ -3399,8 +3475,23 @@ impl ParallelInterceptor {
             "#,
             adapter_label.replace('\'', "''"),
             adapter_hint_assignment,
-            adapter_if_index_assignment
+            adapter_if_index_assignment,
+            repair_binding_assignment
         ))
+    }
+
+    fn build_ensure_winpkfilter_binding_script(
+        if_index: Option<u32>,
+        adapter_name_hint: Option<&str>,
+    ) -> VpnResult<String> {
+        Self::build_winpkfilter_binding_script(if_index, adapter_name_hint, true)
+    }
+
+    fn build_check_winpkfilter_binding_script(
+        if_index: Option<u32>,
+        adapter_name_hint: Option<&str>,
+    ) -> VpnResult<String> {
+        Self::build_winpkfilter_binding_script(if_index, adapter_name_hint, false)
     }
 
     fn is_nonfatal_winpkfilter_validation_failure(details: &str) -> bool {
@@ -3421,9 +3512,22 @@ impl ParallelInterceptor {
                     || details.contains("not bound to adapter")))
     }
 
+    fn is_winpkfilter_binding_disabled_failure(details: &str) -> bool {
+        let details = details.to_ascii_lowercase();
+        details.contains("winpkfilter_binding_disabled")
+            || (details.contains("nt_ndisrd") && details.contains("disabled on adapter"))
+    }
+
     fn winpkfilter_binding_missing_message(adapter_label: &str) -> String {
         format!(
             "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter '{}'. Repair the split tunnel driver, then try again.",
+            adapter_label
+        )
+    }
+
+    fn winpkfilter_binding_disabled_message(adapter_label: &str) -> String {
+        format!(
+            "winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter '{}'. SwiftTunnel will enable it when connecting.",
             adapter_label
         )
     }
@@ -3517,6 +3621,61 @@ impl ParallelInterceptor {
         Err(VpnError::SplitTunnel(format!(
             "Failed to ensure WinpkFilter binding on adapter '{}': {}",
             adapter_label, last_details
+        )))
+    }
+
+    fn check_winpkfilter_binding_for_adapter(
+        if_index: Option<u32>,
+        adapter_name_hint: Option<&str>,
+    ) -> VpnResult<()> {
+        let adapter_label = adapter_name_hint.unwrap_or("selected adapter");
+
+        log::info!(
+            "Checking WinpkFilter binding on adapter without enabling it: {}",
+            adapter_label
+        );
+
+        let script = Self::build_check_winpkfilter_binding_script(if_index, adapter_name_hint)?;
+        let output = Self::run_powershell_with_timeout_capture(&script, Self::BINDING_TIMEOUT_SECS);
+        if output.success {
+            let details = output.stdout.trim();
+            if details.is_empty() {
+                log::info!(
+                    "WinpkFilter binding already enabled on adapter '{}'",
+                    adapter_label
+                );
+            } else {
+                log::info!("{}", details);
+            }
+            return Ok(());
+        }
+
+        let details = output.summarize_failure(Self::BINDING_TIMEOUT_SECS, "PowerShell");
+
+        if Self::is_nonfatal_winpkfilter_validation_failure(&details) {
+            log::warn!(
+                "Skipping read-only WinpkFilter binding validation on adapter '{}' because Windows NetAdapter CIM support is unavailable: {}",
+                adapter_label,
+                details
+            );
+            return Ok(());
+        }
+
+        if Self::is_winpkfilter_binding_disabled_failure(&details) {
+            return Err(VpnError::SplitTunnel(
+                Self::winpkfilter_binding_disabled_message(adapter_label),
+            ));
+        }
+
+        if Self::is_winpkfilter_binding_missing_failure(&details) {
+            return Err(VpnError::SplitTunnel(
+                Self::winpkfilter_binding_missing_message(adapter_label),
+            ));
+        }
+
+        Err(VpnError::SplitTunnel(format!(
+            "Failed to check WinpkFilter binding on adapter '{}': {}",
+            adapter_label, details
         )))
     }
 
@@ -7346,16 +7505,26 @@ where
         tcp_flags.is_some_and(|flags| (flags & 0x02) != 0 && (flags & 0x10) == 0);
     let cache_key = (src_ip, src_port, protocol);
 
+    let is_full_country_ban_routing =
+        crate::roblox_proxy::hosts::is_country_ban_bypass_routing_active();
+
     // A launch-critical settings host or asset/CDN host (e.g. *.rbxcdn.com) that
-    // must stay DIRECT. For a known tunnel app, is_likely_game_traffic would
-    // otherwise relay all TCP, so honor the direct set here too — otherwise
-    // Route Assist relays textures/avatar-clothing fetches and they load slowly.
-    // TCP only (UDP gameplay is unaffected). The direct set is built per-mode in
-    // hosts.rs, so this is correct for Route Assist and country-ban bypass alike.
+    // must stay DIRECT under Route Assist / Partial Bypass. For a known tunnel
+    // app, is_likely_game_traffic would otherwise relay all TCP, so honor the
+    // direct set here too; otherwise Route Assist relays textures/avatar-
+    // clothing fetches and they load slowly. FULL Country Ban is deliberately
+    // excluded: in fully blocked countries the direct path is broken, so every
+    // Roblox app TCP flow must be allowed to use the relay.
     // These are deliberately NOT cached as Active below, so the flow is direct
     // from its SYN and is never half-moved onto the relay mid-connection.
     let dst_is_direct_tcp = protocol == Protocol::Tcp
+        && !is_full_country_ban_routing
         && crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(dst_ip);
+    let is_route_assist_control_tcp_dst = protocol == Protocol::Tcp
+        && api_tunneling
+        && matches!(dst_port, 80 | 443)
+        && !dst_is_direct_tcp
+        && crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip);
 
     // Phase 1: Check snapshot cache (fast path, O(1))
     //
@@ -7416,13 +7585,17 @@ where
             } else {
                 false
             };
-            let result =
+            let result = if protocol == Protocol::Tcp && api_tunneling {
+                !dst_is_direct_tcp
+                    && (is_full_country_ban_routing || is_route_assist_control_tcp_dst)
+            } else {
                 super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
-                    && !dst_is_direct_tcp;
+                    && !dst_is_direct_tcp
+            };
             if result && protocol == Protocol::Tcp && api_tunneling && dst_port == 443 {
                 maybe_learn_direct_only_destination(data, ip_start, transport_start, dst_ip);
             }
-            if evict_after_route {
+            if evict_after_route || (protocol == Protocol::Tcp && api_tunneling && !result) {
                 inline_cache.remove(&cache_key);
             }
             if protocol == Protocol::Udp && more_fragments {
@@ -7486,16 +7659,10 @@ where
         let can_speculate_tcp_api = protocol == Protocol::Tcp && api_tunneling && has_tunnel_scope;
         let is_tcp_api_bootstrap_syn =
             can_speculate_tcp_api && is_tcp_initial_syn && matches!(dst_port, 80 | 443);
-        let is_direct_only_bootstrap_dst =
-            crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(dst_ip);
-        let is_full_country_ban_routing =
-            crate::roblox_proxy::hosts::is_country_ban_bypass_routing_active();
         let is_route_assist_http_dst = can_speculate_tcp_api
             && is_tcp_initial_syn
             && matches!(dst_port, 80 | 443)
-            && !is_direct_only_bootstrap_dst
-            && (super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
-                || crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip));
+            && is_route_assist_control_tcp_dst;
         let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit {
             tcp_owner_lookup(src_ip, src_port)
         } else {
@@ -7526,7 +7693,7 @@ where
         // the broad Roblox-process fallback because the whole platform path is
         // blocked and direct traffic is unusable.
         let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
-            && !is_direct_only_bootstrap_dst
+            && !dst_is_direct_tcp
             && !tcp_api_bootstrap_known_unrelated
             && (is_full_country_ban_routing || is_route_assist_http_dst)
             && (!tcp_api_bootstrap_owner_missing || is_route_assist_http_dst);
@@ -7601,11 +7768,19 @@ where
         }
     } else {
         // Process IS a tunnel app - tunnel its game traffic, but keep
-        // launch-critical settings + asset/CDN TCP flows direct (dst_is_direct_tcp).
-        // Those must never ride the relay even for a known tunnel app, or Route
-        // Assist relays textures/avatar clothing and they load slowly.
-        super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
-            && !dst_is_direct_tcp
+        // launch-critical settings + asset/CDN TCP flows direct. Under Route
+        // Assist/Partial Bypass, TCP relay is limited to the pinned
+        // join/control-plane IPs; otherwise first-time avatar/chat/asset flows
+        // can ride the relay before SNI learning catches up and Roblox loads
+        // naked avatars, missing menus, or black screens. Full Country Ban is
+        // the exception: the direct path is blocked, so all Roblox app TCP is
+        // allowed to fall back to the relay.
+        if protocol == Protocol::Tcp && api_tunneling {
+            !dst_is_direct_tcp && (is_full_country_ban_routing || is_route_assist_control_tcp_dst)
+        } else {
+            super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
+                && !dst_is_direct_tcp
+        }
     };
 
     if protocol == Protocol::Udp && more_fragments {
@@ -11638,6 +11813,21 @@ mod tests {
     }
 
     #[test]
+    fn test_build_check_winpkfilter_binding_script_does_not_enable_binding() {
+        let script =
+            ParallelInterceptor::build_check_winpkfilter_binding_script(Some(54), Some("Wi-Fi"))
+                .unwrap();
+
+        assert!(script.contains("$repairBinding = $false"));
+        assert!(script.contains("winpkfilter_binding_disabled"));
+        assert!(script.contains("Enable-NetAdapterBinding -Name $adapter.Name"));
+        assert!(
+            script.contains("if (-not $repairBinding)"),
+            "read-only checks must branch before enabling nt_ndisrd"
+        );
+    }
+
+    #[test]
     fn test_winpkfilter_missing_binding_failure_is_structured() {
         assert!(ParallelInterceptor::is_winpkfilter_binding_missing_failure(
             "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'"
@@ -11648,6 +11838,24 @@ mod tests {
         assert_eq!(
             ParallelInterceptor::winpkfilter_binding_missing_message("Ethernet"),
             "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'. Repair the split tunnel driver, then try again."
+        );
+    }
+
+    #[test]
+    fn test_winpkfilter_disabled_binding_failure_is_structured() {
+        assert!(
+            ParallelInterceptor::is_winpkfilter_binding_disabled_failure(
+                "winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter 'Wi-Fi'"
+            )
+        );
+        assert!(
+            ParallelInterceptor::is_winpkfilter_binding_disabled_failure(
+                "WinpkFilter binding nt_ndisrd is disabled on adapter: Wi-Fi"
+            )
+        );
+        assert_eq!(
+            ParallelInterceptor::winpkfilter_binding_disabled_message("Wi-Fi"),
+            "winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter 'Wi-Fi'. SwiftTunnel will enable it when connecting."
         );
     }
 
@@ -11752,7 +11960,10 @@ mod tests {
     fn test_tcp_tunneled_with_api_tunneling_enabled() {
         // TCP from a Roblox process is handshake-gated when api_tunneling is
         // enabled. Existing connections whose SYN SwiftTunnel missed must not
-        // be pulled into the relay midstream, but captured SYNs should route.
+        // be pulled into the relay midstream, and Route Assist should only
+        // relay pinned join/control-plane destinations.
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
         let src_ip = Ipv4Addr::new(192, 168, 1, 100);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 50000;
@@ -11800,6 +12011,15 @@ mod tests {
         assert!(inline_cache.is_empty());
 
         let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &syn_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(inline_cache.is_empty());
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
         assert!(should_route_to_vpn_with_inline_cache(
             &syn_frame,
             &snapshot,
@@ -11807,6 +12027,52 @@ mod tests {
             true,
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_route_assist_keeps_unpinned_roblox_tcp_direct_for_known_process() {
+        // Regression guard for missing Roblox menus/chat/player icons and slow
+        // textures: Route Assist must not relay arbitrary Roblox-owned TCP
+        // just because the process is Roblox. Only pinned join/API destinations
+        // ride the relay; unpinned CDN/UI TCP stays direct.
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let unpinned_cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
+        let src_port = 50010;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let syn_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, unpinned_cdn_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &syn_frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+        ));
+        assert!(inline_cache.is_empty());
     }
 
     #[test]
@@ -11900,6 +12166,9 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_speculates_when_tunnel_process_is_active() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         // First SYNs for Roblox API/teleport TCP flows can arrive before the
         // Windows owner table publishes their source port. If a tunnel process
         // is already active, allow destination-guarded TCP speculation.
@@ -11908,6 +12177,8 @@ mod tests {
         let src_port = 40001;
         let dst_port = 443;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -11939,15 +12210,22 @@ mod tests {
             },
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
     fn test_tcp_api_tunneling_snapshot_syn_skips_owner_lookup() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40001;
         let dst_port = 443;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         let mut connections = HashMap::new();
         connections.insert(
@@ -11978,6 +12256,8 @@ mod tests {
             |_ip, _port| panic!("snapshot-owned SYN should not call tcp_owner_lookup"),
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -12345,12 +12625,17 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_allows_browser_owned_roblox_http_syn() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
         let src_port = 40010;
         let dst_port = 443;
         let tunnel_pid = 1234;
         let browser_pid = 9002;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([roblox_api_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -12395,6 +12680,8 @@ mod tests {
             )
         );
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -12449,11 +12736,16 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_allows_tunnel_owned_http_syn_for_mss_clamp() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
         let src_port = 40018;
         let dst_port = 443;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([roblox_api_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -12495,15 +12787,22 @@ mod tests {
             )
         );
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
     fn test_tcp_api_tunneling_captured_roblox_syn_allows_follow_on_packet() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let roblox_api_ip = Ipv4Addr::new(128, 116, 50, 3);
         let src_port = 40019;
         let dst_port = 443;
         let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([roblox_api_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -12557,6 +12856,8 @@ mod tests {
                 |_pid| None,
             )
         );
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -12734,6 +13035,65 @@ mod tests {
         assert!(!crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(
             unpinned_settings_ip
         ));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_full_country_ban_relays_even_direct_only_tcp_for_known_process() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(true);
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let direct_only_ip = Ipv4Addr::new(65, 9, 168, 101);
+        let src_port = 40022;
+        let dst_port = 443;
+        let tunnel_pid = 1234;
+
+        crate::roblox_proxy::hosts::set_direct_only_bootstrap_ips_for_test([direct_only_ip]);
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, direct_only_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(tunnel_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == tunnel_pid {
+                        Some("RobloxPlayerBeta.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            ),
+            "Full Country Ban must relay Roblox TCP even when the IP was direct-only in Route Assist"
+        );
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }

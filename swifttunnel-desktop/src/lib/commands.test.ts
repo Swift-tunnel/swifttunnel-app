@@ -41,6 +41,7 @@ describe("lib/commands", () => {
       current_version: "1.0.0",
       available_version: null,
       release_tag: null,
+      release_notes: null,
       channel: "Stable",
     };
     invoke.mockResolvedValue(resp);

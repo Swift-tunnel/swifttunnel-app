@@ -223,6 +223,26 @@ describe("repair center logic", () => {
     expect(deps.systemRepairNetwork).not.toHaveBeenCalled();
   });
 
+  it("reports Route Assist as disabled when Partial Bypass owns routing", async () => {
+    const deps = makeDeps();
+
+    const report = await runRepairIssue("route_assist", deps, {
+      settings: {
+        ...DEFAULT_SETTINGS,
+        enable_api_tunneling: true,
+        enable_partial_country_ban: true,
+      },
+    });
+
+    expect(report.nextStep).toContain("Partial Bypass already routes");
+    expect(report.entries).toContainEqual(
+      expect.objectContaining({
+        label: "Route Assist",
+        value: "disabled by Partial Bypass",
+      }),
+    );
+  });
+
   it("points failed adapter-mode recovery at driver repair", async () => {
     const deps = makeDeps({
       systemRepairNetwork: vi.fn().mockResolvedValue({

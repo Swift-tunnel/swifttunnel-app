@@ -62,6 +62,6 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
   }
 
   if (loadedSettings.update_settings.auto_check) {
-    void deps.checkForUpdates(false, true);
+    void deps.checkForUpdates(false, false);
   }
 }

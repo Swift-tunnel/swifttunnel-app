@@ -54,6 +54,23 @@ describe("stores/updaterStore", () => {
     updaterCheckChannel.mockReset();
     updaterInstallChannel.mockReset();
     notify.mockReset();
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        storage.set(key, value);
+      }),
+      removeItem: vi.fn((key: string) => {
+        storage.delete(key);
+      }),
+      clear: vi.fn(() => {
+        storage.clear();
+      }),
+      key: vi.fn((index: number) => Array.from(storage.keys())[index] ?? null),
+      get length() {
+        return storage.size;
+      },
+    });
 
     vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
   });
@@ -90,6 +107,7 @@ describe("stores/updaterStore", () => {
       current_version: "1.0.0",
       available_version: "1.5.1",
       release_tag: "v1.5.1",
+      release_notes: "- Faster startup",
       channel: "Stable",
     });
     updaterInstallChannel.mockResolvedValue({
@@ -102,12 +120,15 @@ describe("stores/updaterStore", () => {
 
     expect(useUpdaterStore.getState().status).toBe("update_available");
     expect(useUpdaterStore.getState().availableVersion).toBe("1.5.1");
+    expect(useUpdaterStore.getState().releaseNotes).toBe("- Faster startup");
+    expect(useUpdaterStore.getState().showWhatsNew).toBe(true);
 
     await useUpdaterStore.getState().installUpdate();
 
     expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
     expect(useUpdaterStore.getState().status).toBe("up_to_date");
     expect(useUpdaterStore.getState().availableVersion).toBeNull();
+    expect(useUpdaterStore.getState().showWhatsNew).toBe(false);
     expect(useUpdaterStore.getState().progressPercent).toBe(100);
     expect(notify).toHaveBeenCalledWith(
       "SwiftTunnel Update",
@@ -120,6 +141,7 @@ describe("stores/updaterStore", () => {
       current_version: "1.0.0",
       available_version: "1.5.1",
       release_tag: "v1.5.1",
+      release_notes: "- New popup",
       channel: "Stable",
     });
     updaterInstallChannel.mockResolvedValue({
@@ -133,10 +155,28 @@ describe("stores/updaterStore", () => {
     expect(updaterInstallChannel).not.toHaveBeenCalled();
     expect(useUpdaterStore.getState().status).toBe("update_available");
     expect(useUpdaterStore.getState().availableVersion).toBe("1.5.1");
-    expect(notify).toHaveBeenCalledWith(
-      "Update Available",
-      "Version 1.5.1 is ready to install.",
-    );
+    expect(useUpdaterStore.getState().showWhatsNew).toBe(true);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("does not show the whats-new popup again after dismissing the same release", async () => {
+    updaterCheckChannel.mockResolvedValue({
+      current_version: "1.0.0",
+      available_version: "1.5.1",
+      release_tag: "v1.5.1",
+      release_notes: "- New popup",
+      channel: "Stable",
+    });
+
+    const useUpdaterStore = await loadStore();
+    await useUpdaterStore.getState().checkForUpdates(false);
+
+    expect(useUpdaterStore.getState().showWhatsNew).toBe(true);
+    useUpdaterStore.getState().dismissWhatsNew();
+    expect(useUpdaterStore.getState().showWhatsNew).toBe(false);
+
+    await useUpdaterStore.getState().checkForUpdates(false);
+    expect(useUpdaterStore.getState().showWhatsNew).toBe(false);
   });
 
   it("auto-installs when autoInstall flag is true and update is available", async () => {

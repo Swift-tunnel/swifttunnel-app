@@ -402,6 +402,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       current_version: "1.0.45",
       available_version: null,
       release_tag: null,
+      release_notes: null,
       channel,
     };
   },
