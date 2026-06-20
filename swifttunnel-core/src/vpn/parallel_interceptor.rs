@@ -10550,7 +10550,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 100);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 50000;
-        let dst_port = 443;
+        let dst_port = 55000;
         let pid = 1234;
 
         let mut connections = HashMap::new();
@@ -10591,7 +10591,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 100);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 50000;
-        let dst_port = 443;
+        let dst_port = 55000;
         let pid = 1234;
 
         let mut connections = HashMap::new();
@@ -10629,7 +10629,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 101);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 50010;
-        let dst_port = 443;
+        let dst_port = 55000;
         let pid = 4321;
 
         let mut connections = HashMap::new();
@@ -10667,7 +10667,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 111);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 50110;
-        let dst_port = 443;
+        let dst_port = 55000;
         let pid = 9876;
 
         let mut connections = HashMap::new();
@@ -10705,7 +10705,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 112);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 50120;
-        let dst_port = 443;
+        let dst_port = 55000;
         let pid = 8765;
 
         let mut connections = HashMap::new();
@@ -10743,7 +10743,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 102);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 50020;
-        let dst_port = 443;
+        let dst_port = 55000;
         let pid = 6789;
 
         let mut connections = HashMap::new();
@@ -10781,7 +10781,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 120);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 52000;
-        let dst_port = 443;
+        let dst_port = 55000;
         let packet_id = 0x1234;
         let pid = 2468;
 
@@ -11075,7 +11075,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 140);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 53000;
-        let dst_port = 443;
+        let dst_port = 55000;
         let packet_id = 0x4242;
         let pid = 9001;
 
@@ -11317,7 +11317,7 @@ mod tests {
         let packet_ip = Ipv4Addr::new(10, 10, 10, 11);
         let dst_ip = Ipv4Addr::new(203, 0, 113, 10);
         let src_port = 53000;
-        let dst_port = 41000;
+        let dst_port = 55000;
         let pid = 5555;
 
         let mut connections = HashMap::new();
