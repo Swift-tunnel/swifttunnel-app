@@ -145,6 +145,22 @@ pub fn is_roblox_game_server(
     false
 }
 
+/// Check if UDP looks like Roblox gameplay/session traffic.
+///
+/// Normal SwiftTunnel mode should affect game ping, not Roblox web/asset
+/// delivery. That means Roblox-owned UDP/443 (HTTP/3/QUIC to CDN/API hosts)
+/// must stay direct unless Full Country Ban explicitly asks for broad relay.
+#[inline(always)]
+pub fn is_likely_gameplay_udp(dst_ip: Ipv4Addr, dst_port: u16, protocol: Protocol) -> bool {
+    if protocol != Protocol::Udp || dst_port == DNS_PORT {
+        return false;
+    }
+
+    (dst_port != 443 && is_roblox_game_server(dst_ip, dst_port, protocol, false))
+        || dst_port == 3478
+        || dst_port >= 49152
+}
+
 /// Check if traffic is likely game traffic (FULLY PERMISSIVE for trusted processes)
 ///
 /// This is used when we KNOW the packet is from a Roblox process.
@@ -168,7 +184,6 @@ pub fn is_likely_game_traffic(dst_port: u16, protocol: Protocol, api_tunneling: 
     match protocol {
         Protocol::Udp => true,
         Protocol::Tcp => api_tunneling,
-        _ => false,
     }
 }
 
@@ -375,11 +390,14 @@ impl ProcessSnapshot {
         // First check: Is this from a tunnel app?
         let is_tunnel_app = self.is_tunnel_connection(local_ip, local_port, protocol);
 
-        // If we KNOW it's a tunnel app, trust it and tunnel its UDP traffic
-        // even if the destination IP isn't in our known list.
-        // This handles new Roblox server deployments gracefully.
+        // If we KNOW it's a tunnel app, tunnel gameplay/session UDP only.
+        // Roblox can fetch assets over HTTP/3 (UDP/443); relaying that in
+        // normal mode causes slow textures, naked avatars, and missing menus.
         if is_tunnel_app {
-            return is_likely_game_traffic(dst_port, protocol, api_tunneling);
+            return match protocol {
+                Protocol::Udp => is_likely_gameplay_udp(dst_ip, dst_port, protocol),
+                Protocol::Tcp => is_likely_game_traffic(dst_port, protocol, api_tunneling),
+            };
         }
 
         // Process not detected - use strict IP range check for speculative tunneling.
@@ -1011,14 +1029,26 @@ mod tests {
             false,
         ));
 
-        // Permissive: SHOULD tunnel UDP to non-game IP from tunnel app
-        // We trust the process - ALL its UDP gets tunneled (STUN, voice chat, etc.)
-        assert!(snap.should_tunnel_v2(
+        // Normal tunnel: UDP/443 to non-game IPs is usually HTTP/3/QUIC for
+        // assets/API/CDN. Keep it direct so SwiftTunnel affects ping, not
+        // texture/avatar/menu loading.
+        assert!(!snap.should_tunnel_v2(
             Ipv4Addr::new(192, 168, 1, 100),
             50000,
             Protocol::Udp,
             Ipv4Addr::new(1, 1, 1, 1),
             443,
+            false,
+        ));
+
+        // Still keep a safety fallback for gameplay/session-shaped UDP from a
+        // known tunnel app when Roblox deploys a server range we do not know yet.
+        assert!(snap.should_tunnel_v2(
+            Ipv4Addr::new(192, 168, 1, 100),
+            50000,
+            Protocol::Udp,
+            Ipv4Addr::new(1, 1, 1, 1),
+            55000,
             false,
         ));
     }
@@ -1326,6 +1356,30 @@ mod tests {
         assert!(!is_likely_game_traffic(443, Protocol::Tcp, false));
         assert!(is_likely_game_traffic(443, Protocol::Udp, false));
         assert!(is_likely_game_traffic(443, Protocol::Udp, true));
+    }
+
+    #[test]
+    fn test_normal_gameplay_udp_classifier_keeps_quic_assets_direct() {
+        assert!(!is_likely_gameplay_udp(
+            Ipv4Addr::new(1, 1, 1, 1),
+            443,
+            Protocol::Udp
+        ));
+        assert!(is_likely_gameplay_udp(
+            Ipv4Addr::new(1, 1, 1, 1),
+            3478,
+            Protocol::Udp
+        ));
+        assert!(is_likely_gameplay_udp(
+            Ipv4Addr::new(1, 1, 1, 1),
+            55000,
+            Protocol::Udp
+        ));
+        assert!(!is_likely_gameplay_udp(
+            Ipv4Addr::new(128, 116, 50, 100),
+            443,
+            Protocol::Udp
+        ));
     }
 
     #[test]

@@ -125,8 +125,13 @@ const ASSET_DIRECT_ROBLOX_DOMAINS: &[&str] = &[
 // when it rides a shared relay NAT, showing as missing chat, empty menus, and
 // unloaded player icons. Full country-ban bypass ignores this split and relays
 // every pinned host.
-const ROUTE_ASSIST_RELAY_DOMAINS: &[&str] =
-    &["gamejoin.roblox.com", "games.roblox.com", "apis.roblox.com"];
+const ROUTE_ASSIST_RELAY_DOMAINS: &[&str] = &[
+    "gamejoin.roblox.com",
+    "games.roblox.com",
+    // Roblox latency measurement influences placement. Keep it on the relay so
+    // Route Assist measures the selected tunnel path instead of the user's ISP.
+    "lms.roblox.com",
+];
 
 /// Exact Roblox hostnames repaired when API tunneling is enabled.
 ///
@@ -147,11 +152,18 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     "accountinformation.roblox.com",
     "users.roblox.com",
     "avatar.roblox.com",
+    "badges.roblox.com",
     "catalog.roblox.com",
+    "contacts.roblox.com",
     "inventory.roblox.com",
     "economy.roblox.com",
+    "followings.roblox.com",
+    "gameinternationalization.roblox.com",
     "games.roblox.com",
     "gamejoin.roblox.com",
+    "groups.roblox.com",
+    "lms.roblox.com",
+    "notifications.roblox.com",
     "assetgame.roblox.com",
     "assetdelivery.roblox.com",
     "thumbnails.roblox.com",
@@ -191,8 +203,14 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     "t7.rbxcdn.com",
     "images.rbxcdn.com",
     "css.rbxcdn.com",
+    // Roblox account verification/FunCaptcha. Arkose can load the challenge
+    // script, iframe, verification API, and failover status endpoint from
+    // separate exact hosts; Full Country Ban must relay all of them.
     "cdn.arkoselabs.com",
+    "client-api.arkoselabs.com",
     "roblox-api.arkoselabs.com",
+    "roblox-verify.arkoselabs.com",
+    "status.arkoselabs.com",
 ];
 
 fn hosts_path() -> PathBuf {
@@ -1170,10 +1188,17 @@ mod tests {
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"apis.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"auth.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"avatar.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"badges.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"catalog.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"contacts.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"inventory.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"economy.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"followings.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"gameinternationalization.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"gamejoin.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"groups.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"lms.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"notifications.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"assetgame.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"chatsite.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"setup.rbxcdn.com"));
@@ -1194,12 +1219,15 @@ mod tests {
         }
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"captcha.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"cdn.arkoselabs.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"client-api.arkoselabs.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox-api.arkoselabs.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox-verify.arkoselabs.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"status.arkoselabs.com"));
     }
 
     #[test]
     fn domain_list_stays_allowlisted_and_exact() {
-        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 54);
+        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 64);
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"arkoselabs.com"));
@@ -1233,6 +1261,10 @@ mod tests {
                 domain: "gamejoin.roblox.com".to_string(),
             },
             HostOverride {
+                ip: Ipv4Addr::new(128, 116, 121, 5),
+                domain: "lms.roblox.com".to_string(),
+            },
+            HostOverride {
                 ip: Ipv4Addr::new(23, 61, 202, 142),
                 domain: "setup.rbxcdn.com".to_string(),
             },
@@ -1262,7 +1294,8 @@ mod tests {
             kept.iter()
                 .any(|entry| entry.domain == "gamejoin.roblox.com")
         );
-        assert!(kept.iter().any(|entry| entry.domain == "apis.roblox.com"));
+        assert!(kept.iter().any(|entry| entry.domain == "lms.roblox.com"));
+        assert!(!kept.iter().any(|entry| entry.domain == "apis.roblox.com"));
         // Launch-critical settings hosts ARE re-pinned direct (v2.5.11 fix).
         assert!(
             kept.iter()
@@ -1274,8 +1307,9 @@ mod tests {
                 .any(|entry| entry.domain == "clientsettings.roblox.com"
                     && entry.ip == Ipv4Addr::new(128, 116, 46, 3))
         );
-        // Broad UI + asset hosts stay unwritten (user DNS picks the local edge).
+        // Broad UI/auth/API + asset hosts stay unwritten (user DNS picks the local edge).
         assert!(!kept.iter().any(|entry| entry.domain == "www.roblox.com"));
+        assert!(!kept.iter().any(|entry| entry.domain == "apis.roblox.com"));
         assert!(!kept.iter().any(|entry| entry.domain == "setup.rbxcdn.com"));
         // Launch-critical settings hosts stay direct.
         assert!(direct_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
@@ -1283,11 +1317,14 @@ mod tests {
         assert!(!active_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
         // Region/join control-plane relays.
         assert!(active_ips.contains(&Ipv4Addr::new(128, 116, 121, 4)));
-        assert!(active_ips.contains(&Ipv4Addr::new(65, 9, 168, 81)));
-        // UI/social/avatar hosts stay direct so Roblox menus, chat, and player
-        // icons do not ride the shared relay NAT.
+        assert!(active_ips.contains(&Ipv4Addr::new(128, 116, 121, 5)));
+        assert!(!active_ips.contains(&Ipv4Addr::new(65, 9, 168, 81)));
+        // UI/social/auth/API/avatar hosts stay direct so Roblox menus, chat,
+        // security checks, and player icons do not ride the shared relay NAT.
         assert!(direct_ips.contains(&Ipv4Addr::new(128, 116, 121, 3)));
         assert!(!active_ips.contains(&Ipv4Addr::new(128, 116, 121, 3)));
+        assert!(direct_ips.contains(&Ipv4Addr::new(65, 9, 168, 81)));
+        assert!(!active_ips.contains(&Ipv4Addr::new(65, 9, 168, 81)));
         assert!(direct_ips.contains(&Ipv4Addr::new(65, 9, 168, 82)));
         assert!(!active_ips.contains(&Ipv4Addr::new(65, 9, 168, 82)));
         assert!(direct_ips.contains(&Ipv4Addr::new(65, 9, 168, 83)));
@@ -1399,21 +1436,21 @@ mod tests {
 
     #[test]
     fn route_assist_repins_settings_at_private_edge_when_shared_one_exists() {
-        // clientsettings shares edge `a` with relayed apis.roblox.com but also
+        // clientsettings shares edge `a` with relayed gamejoin.roblox.com but also
         // has a private edge `b`. The shared `a` is dropped from both;
-        // clientsettings is pinned direct at `b`, apis relays at its own
+        // clientsettings is pinned direct at `b`, gamejoin relays at its own
         // private edge `d`. Both behaviors hold.
         let a = Ipv4Addr::new(65, 9, 168, 80); // shared
         let b = Ipv4Addr::new(65, 9, 168, 90); // clientsettings private
-        let d = Ipv4Addr::new(65, 9, 168, 100); // apis private
+        let d = Ipv4Addr::new(65, 9, 168, 100); // gamejoin private
         let overrides = vec![
             HostOverride {
                 ip: a,
-                domain: "apis.roblox.com".to_string(),
+                domain: "gamejoin.roblox.com".to_string(),
             },
             HostOverride {
                 ip: d,
-                domain: "apis.roblox.com".to_string(),
+                domain: "gamejoin.roblox.com".to_string(),
             },
             HostOverride {
                 ip: a,
@@ -1436,10 +1473,10 @@ mod tests {
         );
         assert!(direct_ips.contains(&b));
         assert!(!active_ips.contains(&b));
-        // apis relays at its private edge `d`.
+        // gamejoin relays at its private edge `d`.
         assert!(
             kept.iter()
-                .any(|e| e.domain == "apis.roblox.com" && e.ip == d)
+                .any(|e| e.domain == "gamejoin.roblox.com" && e.ip == d)
         );
         assert!(active_ips.contains(&d));
     }
@@ -1472,7 +1509,7 @@ mod tests {
 
     #[test]
     fn route_assist_allocation_prefers_disjoint_pins_when_alternatives_exist() {
-        // apis.roblox.com (control-plane) and t3.rbxcdn.com (asset) share a
+        // gamejoin.roblox.com (control-plane) and t3.rbxcdn.com (asset) share a
         // CloudFront edge IP `a`, but each also has its own candidate. The
         // shared candidate is dropped from BOTH so each class gets a private
         // pin: control-plane relays AND assets stay direct.
@@ -1482,11 +1519,11 @@ mod tests {
         let overrides = vec![
             HostOverride {
                 ip: a,
-                domain: "apis.roblox.com".to_string(),
+                domain: "gamejoin.roblox.com".to_string(),
             },
             HostOverride {
                 ip: b,
-                domain: "apis.roblox.com".to_string(),
+                domain: "gamejoin.roblox.com".to_string(),
             },
             HostOverride {
                 ip: a,
@@ -1504,7 +1541,7 @@ mod tests {
         assert!(!kept.iter().any(|entry| entry.ip == a));
         assert!(
             kept.iter()
-                .any(|entry| entry.domain == "apis.roblox.com" && entry.ip == b)
+                .any(|entry| entry.domain == "gamejoin.roblox.com" && entry.ip == b)
         );
         assert!(
             !kept
@@ -1621,7 +1658,6 @@ mod tests {
         // Roblox hosts that are deliberately route-assisted must not be
         // learned as direct-only, and neither may arbitrary lookalikes.
         assert!(!learn_direct_only_bootstrap_ip("gamejoin.roblox.com", ip));
-        assert!(!learn_direct_only_bootstrap_ip("apis.roblox.com", ip));
         assert!(!learn_direct_only_bootstrap_ip(
             "clientsettingscdn.roblox.com.evil.test",
             ip

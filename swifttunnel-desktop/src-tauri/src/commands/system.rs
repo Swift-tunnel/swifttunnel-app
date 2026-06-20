@@ -669,7 +669,7 @@ fn build_elevated_msiexec_script(
     format!(
         "$ErrorActionPreference='Stop'; \
          $args=@('/i','{escaped_msi}','{ui_flag}','/norestart','/L*V','{escaped_log}'{reinstall_args}); \
-         $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -ArgumentList $args -Wait -PassThru; \
+         $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $args -Wait -PassThru; \
          exit $p.ExitCode"
     )
 }
@@ -707,7 +707,7 @@ fn build_restart_as_admin_script_with_env(
     format!(
         "$ErrorActionPreference='Stop'; \
          $inner='{escaped_inner}'; \
-         Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-Command',$inner) | Out-Null"
+         Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @('-NoProfile','-Command',$inner) | Out-Null"
     )
 }
 
@@ -2471,6 +2471,7 @@ mod tests {
         assert!(script.contains("log''s"));
         assert!(script.contains("Start-Process"));
         assert!(script.contains("msiexec.exe"));
+        assert!(script.contains("-WindowStyle Hidden"));
         assert!(script.contains("/passive"));
         assert!(script.contains("/L*V"));
         assert!(script.contains("REINSTALL=ALL"));
@@ -2486,6 +2487,7 @@ mod tests {
         assert!(script.contains("$inner='"));
         assert!(script.contains("Start-Process -FilePath 'powershell.exe'"));
         assert!(script.contains("-Verb RunAs"));
+        assert!(script.contains("-WindowStyle Hidden"));
         assert!(script.contains("-Command"));
     }
 

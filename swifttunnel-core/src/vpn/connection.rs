@@ -93,8 +93,9 @@ struct TunnelRoutingFlags {
 /// Resolve the per-protocol relay behavior from the three user-facing toggles.
 ///
 /// - Route Assist: relay Roblox's control-plane TCP so matchmaking lands the
-///   player in game servers near the tunneled region. Gameplay UDP rides the
-///   relay as usual.
+///   player in game servers near the tunneled region. It only adds the TCP
+///   control-plane path; normal SwiftTunnel gameplay UDP routing remains the
+///   owner of in-game traffic while connected.
 /// - Full country-ban bypass (whole platform blocked, e.g. Egypt): relay the
 ///   control plane AND gameplay UDP — the censor may block Roblox's IP ranges
 ///   wholesale, so nothing can be trusted to the direct path. GoodbyeDPI runs

@@ -42,7 +42,7 @@ const PONG_FRAME_LEN: usize = SESSION_ID_LEN + 1 + 4 + 8 + 8;
 // Slightly longer handshake budget improves reliability on congested/PPPoE paths
 // without affecting steady-state packet latency.
 const AUTH_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_millis(1500);
-const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(250);
+const AUTH_HANDSHAKE_RETRY_DELAY: Duration = Duration::from_millis(500);
 const AUTH_HANDSHAKE_ATTEMPTS: usize = 4;
 
 /// Outer path MTU for relay packets (client <-> relay).
@@ -1324,6 +1324,7 @@ impl UdpRelay {
     ) -> Result<Option<RelayAuthAckStatus>> {
         let deadline = Instant::now() + timeout;
         let mut recv_buf = [0u8; 1600];
+        let mut saw_replay = false;
 
         while Instant::now() < deadline {
             match self.socket.recv_from(&mut recv_buf) {
@@ -1345,12 +1346,20 @@ impl UdpRelay {
                     let status_byte = recv_buf[SESSION_ID_LEN + 1];
                     let status = RelayAuthAckStatus::from_u8(status_byte)
                         .unwrap_or(RelayAuthAckStatus::BadFormat);
+                    if status == RelayAuthAckStatus::Replay {
+                        saw_replay = true;
+                        continue;
+                    }
                     return Ok(Some(status));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
                 Err(e) => return Err(e.into()),
             }
+        }
+
+        if saw_replay {
+            return Ok(Some(RelayAuthAckStatus::Replay));
         }
 
         Ok(None)
@@ -1450,12 +1459,11 @@ impl UdpRelay {
         target: SocketAddr,
     ) -> Result<Option<RelayAuthAckStatus>> {
         let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
+        let mut saw_replay = false;
 
         for attempt in 0..AUTH_HANDSHAKE_ATTEMPTS {
-            if attempt > 0 {
-                tokio::time::sleep(AUTH_HANDSHAKE_RETRY_DELAY).await;
-            }
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 break;
             }
 
@@ -1463,7 +1471,13 @@ impl UdpRelay {
 
             // Poll the ack recorded by the inbound receiver thread.
             const POLL_INTERVAL: Duration = Duration::from_millis(25);
-            let attempt_deadline = (Instant::now() + AUTH_HANDSHAKE_RETRY_DELAY).min(deadline);
+            let is_last_attempt = attempt + 1 == AUTH_HANDSHAKE_ATTEMPTS;
+            let attempt_timeout = if is_last_attempt {
+                remaining
+            } else {
+                AUTH_HANDSHAKE_RETRY_DELAY.min(remaining)
+            };
+            let attempt_deadline = (Instant::now() + attempt_timeout).min(deadline);
             loop {
                 if let Some((from, status)) = *self.last_auth_ack.lock() {
                     if from == target {
@@ -1473,6 +1487,11 @@ impl UdpRelay {
                             target,
                             self.session_id_u64()
                         );
+                        if status == RelayAuthAckStatus::Replay {
+                            saw_replay = true;
+                            *self.last_auth_ack.lock() = None;
+                            continue;
+                        }
                         return Ok(Some(status));
                     }
                 }
@@ -1481,6 +1500,10 @@ impl UdpRelay {
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
+        }
+
+        if saw_replay {
+            return Ok(Some(RelayAuthAckStatus::Replay));
         }
 
         Ok(None)

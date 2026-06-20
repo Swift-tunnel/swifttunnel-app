@@ -61,7 +61,9 @@ use super::ipv6_recovery::{
     delete_ipv6_marker, has_ipv6_binding_native, remove_winpkfilter_ipv6_block_filters,
     restore_ipv6_from_marker, write_ipv6_marker_winpkfilter,
 };
-use super::process_cache::{DNS_PORT, LockFreeProcessCache, ProcessSnapshot};
+#[cfg(test)]
+use super::process_cache::DNS_PORT;
+use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
 use super::tso_recovery::{delete_tso_marker, restore_tso_from_marker, write_tso_marker};
 use super::{VpnError, VpnResult};
@@ -2053,6 +2055,21 @@ impl ParallelInterceptor {
             || friendly_lower.starts_with("wan ")
     }
 
+    fn is_point_to_point_candidate(candidate: &PhysicalCandidate) -> bool {
+        candidate.kind == "ppp"
+            || Self::has_wan_or_ppp_name_hint(&candidate.friendly_name, &candidate.description)
+            || Self::is_wan_like_friendly_name(&candidate.friendly_name)
+    }
+
+    fn is_ipv4_wan_candidate(candidate: &PhysicalCandidate) -> bool {
+        let label =
+            format!("{} {}", candidate.friendly_name, candidate.description).to_ascii_lowercase();
+        Self::is_point_to_point_candidate(candidate)
+            && label.contains("(ip)")
+            && !label.contains("(ipv6)")
+            && !label.contains("(bh)")
+    }
+
     fn adapter_kind_from_if_type(if_type: u32) -> &'static str {
         use windows::Win32::NetworkManagement::IpHelper::{
             IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK,
@@ -2183,6 +2200,24 @@ impl ParallelInterceptor {
         }
 
         None
+    }
+
+    fn should_try_bridge_sibling_after_binding_check(
+        route_owner_bridge_like: bool,
+        default_route_binding_error: Option<&VpnError>,
+    ) -> bool {
+        if !route_owner_bridge_like {
+            return false;
+        }
+
+        match default_route_binding_error {
+            None => true,
+            Some(err) => {
+                let details = err.to_string();
+                Self::is_winpkfilter_binding_missing_failure(&details)
+                    || Self::is_winpkfilter_binding_disabled_failure(&details)
+            }
+        }
     }
 
     fn normalize_binding_match_value(value: &str) -> Option<String> {
@@ -2366,6 +2401,30 @@ impl ParallelInterceptor {
         )
     }
 
+    fn select_point_to_point_wan_candidate<'a>(
+        candidates: &'a [PhysicalCandidate],
+    ) -> Option<&'a PhysicalCandidate> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let any_up = candidates.iter().any(|c| c.is_up == Some(true));
+        let is_allowed = |c: &&PhysicalCandidate| !any_up || c.is_up != Some(false);
+
+        candidates
+            .iter()
+            .filter(is_allowed)
+            .filter(|c| Self::is_ipv4_wan_candidate(c))
+            .max_by_key(|c| c.score)
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .filter(is_allowed)
+                    .filter(|c| Self::is_point_to_point_candidate(c))
+                    .max_by_key(|c| c.score)
+            })
+    }
+
     fn select_best_physical_candidate_with_preference<'a>(
         candidates: &'a [PhysicalCandidate],
         default_route_if_index: Option<u32>,
@@ -2418,16 +2477,6 @@ impl ParallelInterceptor {
             default_route_next_hop,
         ));
 
-        // Treat gateway-backed default routes as "strict". PPP/point-to-point default routes
-        // often have next-hop 0.0.0.0 and map to a WAN/PPP interface rather than the
-        // underlying physical NIC we need to intercept.
-        let strict_default_route =
-            default_route_next_hop.is_some() && default_route_next_hop != Some(0);
-        let default_route_guid_lc = if strict_default_route {
-            default_route_if_index.and_then(Self::get_interface_guid_ascii_lowercase_from_if_index)
-        } else {
-            None
-        };
         let default_route_owner = default_route_if_index
             .and_then(Self::get_adapter_details_for_if_index)
             .map(|(friendly_name, description, kind)| {
@@ -2435,6 +2484,36 @@ impl ParallelInterceptor {
                     Self::is_bridge_or_hypervisor_owner(&friendly_name, &description, &kind);
                 (friendly_name, description, kind, bridge_like)
             });
+        let point_to_point_default_route = default_route_if_index
+            .and_then(Self::point_to_point_interface_signals)
+            .map(
+                |(interface_is_point_to_point, interface_has_wan_ppp_hint)| {
+                    infer_point_to_point_default_route(
+                        default_route_next_hop == Some(0),
+                        interface_is_point_to_point,
+                        interface_has_wan_ppp_hint,
+                    )
+                },
+            )
+            .unwrap_or_else(|| {
+                default_route_owner
+                    .as_ref()
+                    .is_some_and(|(friendly_name, description, kind, _)| {
+                        *kind == "ppp" || Self::has_wan_or_ppp_name_hint(friendly_name, description)
+                    })
+                    && default_route_next_hop == Some(0)
+            });
+        // Treat gateway-backed default routes as "strict". PPP/point-to-point default routes
+        // often have next-hop 0.0.0.0 and map to a WAN/PPP interface rather than the
+        // ordinary Ethernet/Wi-Fi adapter, so Smart Auto can select the WAN/IP path.
+        let strict_default_route = default_route_next_hop.is_some()
+            && default_route_next_hop != Some(0)
+            && !point_to_point_default_route;
+        let default_route_guid_lc = if strict_default_route {
+            default_route_if_index.and_then(Self::get_interface_guid_ascii_lowercase_from_if_index)
+        } else {
+            None
+        };
         let route_owner_bridge_like = default_route_owner
             .as_ref()
             .is_some_and(|(_, _, _, bridge_like)| *bridge_like);
@@ -2444,9 +2523,13 @@ impl ParallelInterceptor {
                 "Will prioritize adapter with interface index {} (has default route)",
                 idx
             );
-            if !strict_default_route {
+            if point_to_point_default_route {
                 log::info!(
-                    "Default route appears to be PPP/point-to-point (next_hop=0.0.0.0); adapter binding will not be strict."
+                    "Default route appears to be PPP/point-to-point; enabling PPPoE/WAN Smart Auto adapter fallback."
+                );
+            } else if !strict_default_route {
+                log::info!(
+                    "Default route is not gateway-strict (next_hop=0.0.0.0); adapter binding will not be strict."
                 );
             }
             if let Some(target_ip) = self.default_route_target_ip {
@@ -2734,6 +2817,7 @@ impl ParallelInterceptor {
                 binding_preference.as_ref(),
             );
 
+        let mut manual_preference_missing_auto_fallback = false;
         if let Some(preference) = binding_preference.as_ref() {
             if used_preferred_physical_adapter {
                 if let Some(selected) = selected {
@@ -2747,12 +2831,11 @@ impl ParallelInterceptor {
             } else {
                 match preference.source {
                     BindingPreferenceSource::Manual => {
-                        self.binding_reason =
-                            "Selected manual adapter is not available on the current network."
-                                .to_string();
-                        self.binding_stage = BindingStage::Unrecoverable.as_str().to_string();
-                        self.last_validation_result = "manual_preference_missing".to_string();
-                        return Err(VpnError::SplitTunnel(self.binding_reason.clone()));
+                        log::warn!(
+                            "Manual adapter GUID {} was not found in NDIS candidates; falling back to Smart Auto selection.",
+                            preference.guid
+                        );
+                        manual_preference_missing_auto_fallback = true;
                     }
                     BindingPreferenceSource::RememberedAuto => {
                         log::warn!(
@@ -2764,11 +2847,33 @@ impl ParallelInterceptor {
             }
         }
 
+        let mut used_point_to_point_wan_fallback = false;
+        if selected.is_some()
+            && !used_preferred_physical_adapter
+            && point_to_point_default_route
+            && !selected.is_some_and(Self::is_point_to_point_candidate)
+        {
+            if let Some(wan_candidate) =
+                Self::select_point_to_point_wan_candidate(&physical_candidates)
+            {
+                log::info!(
+                    "PPPoE/WAN Smart Auto: replacing '{}' with '{}' for point-to-point default route",
+                    selected
+                        .map(|candidate| candidate.friendly_name.as_str())
+                        .unwrap_or("unknown"),
+                    wan_candidate.friendly_name
+                );
+                selected = Some(wan_candidate);
+                used_point_to_point_wan_fallback = true;
+            }
+        }
+
         let used_bridge_sibling = if selected.is_none()
             && strict_default_route
-            && route_owner_bridge_like
-            && default_route_binding_error.is_none()
-        {
+            && Self::should_try_bridge_sibling_after_binding_check(
+                route_owner_bridge_like,
+                default_route_binding_error.as_ref(),
+            ) {
             selected = Self::select_bridge_sibling_candidate(&physical_candidates);
             selected.is_some()
         } else {
@@ -2807,7 +2912,7 @@ impl ParallelInterceptor {
             BindingStage::RouteOwnerFallback
         } else if used_single_candidate_fallback {
             BindingStage::SingleCandidateFallback
-        } else if used_wan_only_fallback {
+        } else if used_wan_only_fallback || used_point_to_point_wan_fallback {
             BindingStage::WanFallback
         } else if selected.is_some() {
             BindingStage::ExactRouteMatch
@@ -3001,7 +3106,19 @@ impl ParallelInterceptor {
                 }
                 _ => "Connected using the active default-route adapter.".to_string(),
             };
+            if manual_preference_missing_auto_fallback {
+                self.binding_reason = format!(
+                    "Selected manual adapter was unavailable, so SwiftTunnel used Smart Auto: {}",
+                    self.binding_reason
+                );
+            }
             self.last_validation_result = format!("selected_{}", decision_stage.as_str());
+            if manual_preference_missing_auto_fallback {
+                self.last_validation_result = format!(
+                    "manual_preference_missing_auto_fallback_{}",
+                    decision_stage.as_str()
+                );
+            }
             self.recommended_adapter_guid = Some(selected.guid.clone());
             let selected_binding_reason = self.binding_reason.clone();
             self.binding_candidates = physical_candidates
@@ -7310,6 +7427,24 @@ fn should_route_to_vpn_with_inline_cache(
     should_route_to_vpn_with_routing_flags(data, snapshot, inline_cache, api_tunneling, true)
 }
 
+#[inline(always)]
+fn should_relay_udp_for_mode(
+    dst_ip: Ipv4Addr,
+    dst_port: u16,
+    protocol: Protocol,
+    full_country_ban_routing: bool,
+) -> bool {
+    if protocol != Protocol::Udp {
+        return false;
+    }
+
+    if full_country_ban_routing {
+        return super::process_cache::is_likely_game_traffic(dst_port, protocol, false);
+    }
+
+    super::process_cache::is_likely_gameplay_udp(dst_ip, dst_port, protocol)
+}
+
 fn should_route_to_vpn_with_routing_flags(
     data: &[u8],
     snapshot: &ProcessSnapshot,
@@ -7533,8 +7668,11 @@ where
     let snapshot_tunnel_hit = snapshot.should_tunnel(src_ip, src_port, protocol);
     if snapshot_tunnel_hit && !(protocol == Protocol::Tcp && api_tunneling) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
-        let result =
-            super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling);
+        let result = if protocol == Protocol::Udp {
+            should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
+        } else {
+            super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
+        };
         if protocol == Protocol::Udp && more_fragments {
             FRAGMENT_DECISIONS.with(|cache| {
                 let mut cache = cache.borrow_mut();
@@ -7588,6 +7726,8 @@ where
             let result = if protocol == Protocol::Tcp && api_tunneling {
                 !dst_is_direct_tcp
                     && (is_full_country_ban_routing || is_route_assist_control_tcp_dst)
+            } else if protocol == Protocol::Udp {
+                should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
             } else {
                 super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
                     && !dst_is_direct_tcp
@@ -7638,10 +7778,6 @@ where
     //
     // By only caching true results, we ensure that if a process wasn't found,
     // we keep trying on subsequent packets until it IS found.
-    if is_tunnel_app && !dst_is_direct_tcp && inline_cache.len() < 10000 {
-        inline_cache.insert(cache_key, InlineCacheEntry::Active);
-    }
-
     // Apply destination-based speculation if needed.
     let result = if !is_tunnel_app {
         // Phase 4: SPECULATIVE TUNNELING for first-packet guarantee
@@ -7663,6 +7799,13 @@ where
             && is_tcp_initial_syn
             && matches!(dst_port, 80 | 443)
             && is_route_assist_control_tcp_dst;
+        let is_full_country_ban_http_dst = can_speculate_tcp_api
+            && is_tcp_initial_syn
+            && matches!(dst_port, 80 | 443)
+            && is_full_country_ban_routing
+            && !dst_is_direct_tcp
+            && (is_route_assist_control_tcp_dst
+                || super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling));
         let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit {
             tcp_owner_lookup(src_ip, src_port)
         } else {
@@ -7678,14 +7821,22 @@ where
             };
         let tcp_api_bootstrap_owned_by_browser_route_assist =
             tcp_api_bootstrap_owned_by_browser && is_route_assist_http_dst;
+        let tcp_api_bootstrap_owned_by_browser_full_country_ban =
+            tcp_api_bootstrap_owned_by_browser && is_full_country_ban_http_dst;
         let tcp_api_bootstrap_known_unrelated = tcp_api_bootstrap_owner
             .map(|_| {
                 !tcp_api_bootstrap_owned_by_tunnel
                     && !tcp_api_bootstrap_owned_by_browser_route_assist
+                    && !tcp_api_bootstrap_owned_by_browser_full_country_ban
             })
             .unwrap_or(false);
         let tcp_api_bootstrap_owner_missing =
             is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && tcp_api_bootstrap_owner.is_none();
+        let tcp_api_bootstrap_destination_allowed = if tcp_api_bootstrap_owned_by_tunnel {
+            is_full_country_ban_routing || is_route_assist_http_dst
+        } else {
+            is_full_country_ban_http_dst || is_route_assist_http_dst
+        };
         // Partial/Route Assist must not relay every Roblox-owned HTTPS flow:
         // chat, avatar, menus, and settings can open new unpinned TCP flows later
         // and break when dragged through the shared relay. Relay only active
@@ -7695,12 +7846,16 @@ where
         let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
             && !dst_is_direct_tcp
             && !tcp_api_bootstrap_known_unrelated
-            && (is_full_country_ban_routing || is_route_assist_http_dst)
-            && (!tcp_api_bootstrap_owner_missing || is_route_assist_http_dst);
+            && tcp_api_bootstrap_destination_allowed
+            && (!tcp_api_bootstrap_owner_missing
+                || is_full_country_ban_http_dst
+                || is_route_assist_http_dst);
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
         } else {
-            is_route_assist_http_dst && is_tcp_initial_syn && !tcp_api_bootstrap_known_unrelated
+            (is_full_country_ban_http_dst || is_route_assist_http_dst)
+                && is_tcp_initial_syn
+                && !tcp_api_bootstrap_known_unrelated
         };
         if is_game_dst || tcp_api_bootstrap_allowed {
             // Log speculative tunneling for debugging (first 20 times only)
@@ -7777,11 +7932,17 @@ where
         // allowed to fall back to the relay.
         if protocol == Protocol::Tcp && api_tunneling {
             !dst_is_direct_tcp && (is_full_country_ban_routing || is_route_assist_control_tcp_dst)
+        } else if protocol == Protocol::Udp {
+            should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
         } else {
             super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
                 && !dst_is_direct_tcp
         }
     };
+
+    if is_tunnel_app && result && !dst_is_direct_tcp && inline_cache.len() < 10000 {
+        inline_cache.insert(cache_key, InlineCacheEntry::Active);
+    }
 
     if protocol == Protocol::Udp && more_fragments {
         FRAGMENT_DECISIONS.with(|cache| {
@@ -9568,6 +9729,94 @@ mod tests {
     }
 
     #[test]
+    fn test_point_to_point_wan_candidate_prefers_ipv4_wan_over_ethernet() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                guid: "eth-guid".to_string(),
+                friendly_name: "Ethernet".to_string(),
+                description: "Realtek PCIe GbE Family Controller".to_string(),
+                kind: "ethernet".to_string(),
+                internal_name: "eth".to_string(),
+                if_index: Some(20),
+                score: ParallelInterceptor::score_physical_candidate("Ethernet", 0, false)
+                    .expect("Ethernet should score"),
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                guid: "wan-bh".to_string(),
+                friendly_name: "WAN Network Interface (BH)".to_string(),
+                description: "NDISWAN adapter".to_string(),
+                kind: "ppp".to_string(),
+                internal_name: "wan-bh".to_string(),
+                if_index: Some(17),
+                score: ParallelInterceptor::score_physical_candidate(
+                    "WAN Network Interface (BH)",
+                    1,
+                    false,
+                )
+                .expect("BH should score"),
+                is_up: Some(true),
+            },
+            PhysicalCandidate {
+                idx: 2,
+                guid: "wan-ip".to_string(),
+                friendly_name: "WAN Network Interface (IP)".to_string(),
+                description: "NDISWAN adapter".to_string(),
+                kind: "ppp".to_string(),
+                internal_name: "wan-ip".to_string(),
+                if_index: Some(10),
+                score: ParallelInterceptor::score_physical_candidate(
+                    "WAN Network Interface (IP)",
+                    2,
+                    false,
+                )
+                .expect("IP should score"),
+                is_up: Some(true),
+            },
+        ];
+
+        let selected = ParallelInterceptor::select_point_to_point_wan_candidate(&candidates)
+            .expect("PPPoE fallback should select a WAN candidate");
+
+        assert_eq!(selected.friendly_name, "WAN Network Interface (IP)");
+    }
+
+    #[test]
+    fn test_point_to_point_wan_candidate_ignores_down_adapter_when_up_exists() {
+        let candidates = vec![
+            PhysicalCandidate {
+                idx: 0,
+                guid: "wan-ip-down".to_string(),
+                friendly_name: "WAN Network Interface (IP)".to_string(),
+                description: "NDISWAN adapter".to_string(),
+                kind: "ppp".to_string(),
+                internal_name: "wan-ip-down".to_string(),
+                if_index: Some(10),
+                score: 5000,
+                is_up: Some(false),
+            },
+            PhysicalCandidate {
+                idx: 1,
+                guid: "wan-ip-up".to_string(),
+                friendly_name: "WAN Network Interface (IP)".to_string(),
+                description: "NDISWAN adapter #2".to_string(),
+                kind: "ppp".to_string(),
+                internal_name: "wan-ip-up".to_string(),
+                if_index: Some(11),
+                score: 1,
+                is_up: Some(true),
+            },
+        ];
+
+        let selected = ParallelInterceptor::select_point_to_point_wan_candidate(&candidates)
+            .expect("PPPoE fallback should select the UP WAN candidate");
+
+        assert_eq!(selected.guid, "wan-ip-up");
+    }
+
+    #[test]
     fn test_should_rebind_on_route_change_rebinds_exact_match_mismatch() {
         assert!(ParallelInterceptor::should_rebind_on_route_change(
             false,
@@ -11338,6 +11587,9 @@ mod tests {
 
     #[test]
     fn test_tcp_inline_cache_hit_keeps_fin_seen_through_half_close_acks() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40000;
@@ -11349,6 +11601,7 @@ mod tests {
             build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         assert!(should_route_to_vpn_with_inline_cache(
             &fin_frame,
@@ -11390,10 +11643,15 @@ mod tests {
             true,
         ));
         assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
     fn test_tcp_inline_cache_hit_evicts_rst_after_routing() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let src_port = 40000;
@@ -11402,6 +11660,7 @@ mod tests {
         let rst_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x14);
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         assert!(should_route_to_vpn_with_inline_cache(
             &rst_frame,
@@ -11410,6 +11669,8 @@ mod tests {
             true,
         ));
         assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -11860,6 +12121,47 @@ mod tests {
     }
 
     #[test]
+    fn test_bridge_sibling_fallback_allows_binding_fault_on_bridge_owner() {
+        assert!(ParallelInterceptor::should_try_bridge_sibling_after_binding_check(true, None));
+
+        let missing = VpnError::SplitTunnel(
+            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Network Bridge'"
+                .to_string(),
+        );
+        assert!(
+            ParallelInterceptor::should_try_bridge_sibling_after_binding_check(
+                true,
+                Some(&missing)
+            )
+        );
+
+        let disabled = VpnError::SplitTunnel(
+            "winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter 'Network Bridge'"
+                .to_string(),
+        );
+        assert!(
+            ParallelInterceptor::should_try_bridge_sibling_after_binding_check(
+                true,
+                Some(&disabled)
+            )
+        );
+
+        let unrelated = VpnError::SplitTunnel("Failed to enumerate adapters".to_string());
+        assert!(
+            !ParallelInterceptor::should_try_bridge_sibling_after_binding_check(
+                true,
+                Some(&unrelated)
+            )
+        );
+        assert!(
+            !ParallelInterceptor::should_try_bridge_sibling_after_binding_check(
+                false,
+                Some(&missing)
+            )
+        );
+    }
+
+    #[test]
     fn test_winpkfilter_invalid_class_failure_is_nonfatal() {
         assert!(
             ParallelInterceptor::is_nonfatal_winpkfilter_validation_failure(
@@ -12073,6 +12375,54 @@ mod tests {
             true,
         ));
         assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_base_tunnel_keeps_roblox_asset_tcp_direct_even_with_stale_bootstrap_pin() {
+        // Base tunnel (no Route Assist / no Bypass) is UDP gameplay only. A
+        // stale bootstrap IP from a prior Route Assist/Bypass session must not
+        // make Roblox asset HTTPS ride the relay, or textures and clothing load
+        // slowly for users who only clicked Connect.
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(false);
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let asset_ip = Ipv4Addr::new(184, 87, 193, 160);
+        let src_port = 50011;
+        let dst_port = 443;
+        let pid = 1234;
+
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([asset_ip]);
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, asset_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &syn_frame,
+            &snapshot,
+            &mut inline_cache,
+            false,
+        ));
+        assert!(inline_cache.is_empty());
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -12383,6 +12733,164 @@ mod tests {
             },
         ));
         assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_full_country_ban_relays_browser_owned_roblox_http_without_bootstrap_pin() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(true);
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_web_ip = Ipv4Addr::new(128, 116, 50, 3);
+        let src_port = 40110;
+        let dst_port = 443;
+        let browser_pid = 9002;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["robloxplayerbeta.exe".to_string()].into_iter().collect(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_web_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(browser_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == browser_pid {
+                        Some("chrome.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            ),
+            "Full Country Ban must relay Roblox website traffic even before hosts pins are published"
+        );
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_full_country_ban_relays_owner_missing_roblox_http_without_bootstrap_pin() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(true);
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_web_ip = Ipv4Addr::new(128, 116, 50, 4);
+        let src_port = 40111;
+        let dst_port = 443;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["robloxplayerbeta.exe".to_string()].into_iter().collect(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_web_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |_ip, _port| None,
+                |_pid| None,
+            ),
+            "Full Country Ban must handle first browser SYNs before Windows publishes the owner"
+        );
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_route_assist_keeps_browser_owned_unpinned_roblox_http_direct() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(false);
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_web_ip = Ipv4Addr::new(128, 116, 50, 5);
+        let src_port = 40112;
+        let dst_port = 443;
+        let browser_pid = 9003;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["robloxplayerbeta.exe".to_string()].into_iter().collect(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_web_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(browser_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == browser_pid {
+                        Some("chrome.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            ),
+            "Route Assist should not restore broad browser Roblox-range tunneling"
+        );
+        assert!(inline_cache.is_empty());
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -13104,13 +13612,13 @@ mod tests {
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
 
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
-        let api_ip = Ipv4Addr::new(65, 9, 168, 101);
+        let control_ip = Ipv4Addr::new(65, 9, 168, 101);
         let src_port = 40023;
         let retry_src_port = 40024;
         let dst_port = 443;
         let tunnel_pid = 1234;
 
-        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([api_ip]);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([control_ip]);
 
         let snapshot = ProcessSnapshot {
             connections: HashMap::new(),
@@ -13141,7 +13649,8 @@ mod tests {
 
         let mut inline_cache: InlineCache = HashMap::new();
 
-        let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, api_ip, src_port, dst_port, 0x02);
+        let syn_frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, control_ip, src_port, dst_port, 0x02);
         assert!(
             should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &syn_frame,
@@ -13153,12 +13662,17 @@ mod tests {
             )
         );
 
-        // apis.roblox.com is route-assisted on purpose; its SNI must not
+        // games.roblox.com is route-assisted on purpose; its SNI must not
         // poison the destination IP into the direct-only set.
         let client_hello =
-            crate::roblox_proxy::tls_sni::build_client_hello_with_sni("apis.roblox.com");
-        let hello_frame =
-            build_ipv4_tcp_frame_with_payload(src_ip, api_ip, src_port, dst_port, &client_hello);
+            crate::roblox_proxy::tls_sni::build_client_hello_with_sni("games.roblox.com");
+        let hello_frame = build_ipv4_tcp_frame_with_payload(
+            src_ip,
+            control_ip,
+            src_port,
+            dst_port,
+            &client_hello,
+        );
         assert!(
             should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &hello_frame,
@@ -13171,10 +13685,10 @@ mod tests {
         );
 
         assert!(!crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(
-            api_ip
+            control_ip
         ));
         let next_syn =
-            build_ipv4_tcp_frame_with_flags(src_ip, api_ip, retry_src_port, dst_port, 0x02);
+            build_ipv4_tcp_frame_with_flags(src_ip, control_ip, retry_src_port, dst_port, 0x02);
         assert!(
             should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &next_syn,
@@ -13727,11 +14241,15 @@ mod tests {
 
     #[test]
     fn test_api_tunneling_collects_and_publishes_roblox_tcp_ports() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let roblox_pid = 1111;
         let chrome_pid = 2222;
         let roblox_port = 53001;
         let chrome_port = 53002;
         let roblox_udp_port = 53003;
+        let roblox_control_ip = Ipv4Addr::new(128, 116, 50, 100);
 
         let mut connections = HashMap::new();
         connections.insert(
@@ -13765,7 +14283,7 @@ mod tests {
         let frame = build_ipv4_frame(
             6,
             Ipv4Addr::new(10, 0, 0, 99),
-            Ipv4Addr::new(128, 116, 50, 100),
+            roblox_control_ip,
             roblox_port,
             443,
         );
@@ -13781,17 +14299,19 @@ mod tests {
 
         let syn_frame = build_ipv4_tcp_frame_with_flags(
             Ipv4Addr::new(10, 0, 0, 99),
-            Ipv4Addr::new(128, 116, 50, 100),
+            roblox_control_ip,
             roblox_port,
             443,
             0x02,
         );
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([roblox_control_ip]);
         assert!(should_route_to_vpn_with_inline_cache(
             &syn_frame,
             &snapshot,
             &mut inline_cache,
             true,
         ));
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
@@ -13838,7 +14358,7 @@ mod tests {
         let src_ip = Ipv4Addr::new(192, 168, 1, 100);
         let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
         let src_port = 50000;
-        let dst_port = 443;
+        let dst_port = 55000;
         let pid = 1234;
 
         let mut connections = HashMap::new();
@@ -13872,11 +14392,96 @@ mod tests {
             result_a, result_b,
             "UDP routing must be identical regardless of api_tunneling"
         );
-        assert!(result_a, "UDP from tunnel app should always be tunneled");
+        assert!(
+            result_a,
+            "gameplay-shaped UDP from tunnel app should tunnel"
+        );
+    }
+
+    #[test]
+    fn test_normal_tunnel_keeps_non_game_udp_443_direct() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(false);
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50000;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids,
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut cache: InlineCache = HashMap::new();
+
+        assert!(!should_route_to_vpn_with_inline_cache(
+            &frame, &snapshot, &mut cache, false,
+        ));
+        assert!(
+            cache.is_empty(),
+            "direct UDP/443 must not poison the inline cache"
+        );
+    }
+
+    #[test]
+    fn test_full_country_ban_relays_non_game_udp_443() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(true);
+
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50000;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids,
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+        let mut cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_inline_cache(
+            &frame, &snapshot, &mut cache, false,
+        ));
+
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(false);
     }
 
     #[test]
     fn test_country_bypass_can_tunnel_tcp_while_udp_stays_direct() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+
         let src_ip = Ipv4Addr::new(192, 168, 1, 100);
         let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
         let udp_src_port = 50000;
@@ -13914,6 +14519,7 @@ mod tests {
         let tcp_syn_frame =
             build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, tcp_src_port, 443, 0x02);
         let mut tcp_cache: InlineCache = HashMap::new();
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
         assert!(should_route_to_vpn_with_routing_flags(
             &tcp_syn_frame,
             &snapshot,
@@ -13921,6 +14527,7 @@ mod tests {
             true,
             false,
         ));
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     // ------------------------------------------------------------------

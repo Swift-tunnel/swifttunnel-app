@@ -18,6 +18,8 @@ import {
   systemCheckDriver,
   systemRepairDriver,
   systemResetDriver,
+  boostGetMetrics,
+  boostCloseRoblox,
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
@@ -389,7 +391,17 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
 
   connect: async (region, gamePresets) => {
     const attempt = nextConnectAttempt();
+    let closeRobloxAfterFullBypassConnect = false;
     try {
+      if (useSettingsStore.getState().settings.enable_country_ban) {
+        try {
+          closeRobloxAfterFullBypassConnect = (await boostGetMetrics()).roblox_running;
+        } catch (e) {
+          reportError("Failed to check Roblox before Full Country Ban connect", e, {
+            dedupeKey: "full-country-ban-roblox-running-check",
+          });
+        }
+      }
       set({
         state: "fetching_config",
         error: null,
@@ -509,7 +521,25 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       if (!isCurrentConnectAttempt(attempt)) return;
       if (get().state === "connected") {
         set({ connectedAt: Date.now() });
-        await notify("SwiftTunnel", `Connected to ${get().region ?? region}`);
+        if (closeRobloxAfterFullBypassConnect) {
+          try {
+            await boostCloseRoblox();
+            await notify(
+              "SwiftTunnel",
+              "Connected. Reopen Roblox so Full Country Ban uses the tunnel.",
+            );
+          } catch (e) {
+            reportError("Failed to close Roblox after Full Country Ban connect", e, {
+              dedupeKey: "full-country-ban-close-roblox",
+            });
+            await notify(
+              "SwiftTunnel",
+              "Connected. Close and reopen Roblox so Full Country Ban uses the tunnel.",
+            );
+          }
+        } else {
+          await notify("SwiftTunnel", `Connected to ${get().region ?? region}`);
+        }
       }
       // Successful connect clears the reset-attempted one-shot so a future
       // unrelated incident gets a fresh "Reset driver service" offer.

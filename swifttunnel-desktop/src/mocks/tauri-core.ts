@@ -348,6 +348,9 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   boost_restart_roblox: async () => {
     await new Promise((r) => setTimeout(r, 1200));
   },
+  boost_close_roblox: async () => {
+    await new Promise((r) => setTimeout(r, 400));
+  },
 
   boost_get_system_info: () => ({
     is_admin: true,

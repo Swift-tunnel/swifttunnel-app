@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useBoostStore } from "../stores/boostStore";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useVpnStore } from "../stores/vpnStore";
 import {
   OVERLAY_POSITION_EVENT,
   pushOverlayRender,
@@ -10,6 +11,15 @@ import {
 import type { Config, OverlayConfig, OverlayMetric } from "../lib/types";
 
 const pad = (n: number) => String(n).padStart(2, "0");
+
+function formatRate(bytesPerSecond: number | null): string {
+  if (bytesPerSecond === null) return "--";
+  if (bytesPerSecond < 1024) return `${Math.round(bytesPerSecond)} B/s`;
+  const kib = bytesPerSecond / 1024;
+  if (kib < 1024) return `${kib.toFixed(kib >= 10 ? 0 : 1)} KB/s`;
+  const mib = kib / 1024;
+  return `${mib.toFixed(mib >= 10 ? 0 : 1)} MB/s`;
+}
 
 function formatClock(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -24,9 +34,15 @@ interface BoostSnapshot {
   robloxRunning: boolean;
 }
 
+interface TunnelRateSnapshot {
+  uploadBps: number | null;
+  downloadBps: number | null;
+}
+
 function computeValues(
   b: BoostSnapshot,
   sessionMs: number,
+  tunnelRates: TunnelRateSnapshot,
 ): Partial<Record<OverlayMetric, string>> {
   const now = new Date();
   const ramPct =
@@ -37,8 +53,8 @@ function computeValues(
     playtime: b.robloxRunning ? formatClock(sessionMs) : "00:00:00",
     cpu: `${Math.round(b.cpuUsage)}%`,
     ram: ramPct === null ? "--" : `${ramPct}%`,
-    download: "--",
-    upload: "--",
+    download: formatRate(tunnelRates.downloadBps),
+    upload: formatRate(tunnelRates.uploadBps),
     battery: "--",
     cpu_temp: "--",
     gpu: "--",
@@ -57,7 +73,13 @@ function computeValues(
 export function useOverlayDriver() {
   const overlay = useSettingsStore((s) => s.settings.config.overlay);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
+  const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
   const ovRef = useRef<OverlayConfig>(overlay);
+  const trafficRef = useRef<{
+    bytesUp: number;
+    bytesDown: number;
+    at: number;
+  } | null>(null);
   ovRef.current = overlay;
 
   // Push render snapshots.
@@ -88,7 +110,42 @@ export function useOverlayDriver() {
       } catch {
         /* keep last values */
       }
+      const needsThroughput =
+        ovRef.current.metrics.includes("upload") ||
+        ovRef.current.metrics.includes("download");
+      const vpnBefore = useVpnStore.getState();
+      if (needsThroughput && vpnBefore.state === "connected") {
+        try {
+          await fetchThroughput();
+        } catch {
+          /* keep last throughput sample */
+        }
+      }
       const b = useBoostStore.getState();
+      const vpn = useVpnStore.getState();
+      const nowMs = Date.now();
+      let tunnelRates: TunnelRateSnapshot = {
+        uploadBps: null,
+        downloadBps: null,
+      };
+      if (vpn.state === "connected") {
+        const previous = trafficRef.current;
+        trafficRef.current = {
+          bytesUp: vpn.bytesUp,
+          bytesDown: vpn.bytesDown,
+          at: nowMs,
+        };
+        if (previous) {
+          const seconds = Math.max((nowMs - previous.at) / 1000, 0.001);
+          tunnelRates = {
+            uploadBps: Math.max(0, vpn.bytesUp - previous.bytesUp) / seconds,
+            downloadBps:
+              Math.max(0, vpn.bytesDown - previous.bytesDown) / seconds,
+          };
+        }
+      } else {
+        trafficRef.current = null;
+      }
       if (b.robloxRunning && !wasRunning) sessionStart = Date.now();
       wasRunning = b.robloxRunning;
       // Show only while Roblox is the FOREGROUND window (not just running) so
@@ -109,7 +166,11 @@ export function useOverlayDriver() {
         // across a foreground blip.
         values:
           gate || b.robloxRunning
-            ? computeValues(b, sessionStart ? Date.now() - sessionStart : 0)
+            ? computeValues(
+                b,
+                sessionStart ? Date.now() - sessionStart : 0,
+                tunnelRates,
+              )
             : {},
       }).catch(() => {});
     };
@@ -120,7 +181,7 @@ export function useOverlayDriver() {
       disposed = true;
       window.clearInterval(id);
     };
-  }, [overlay.enabled, fetchMetrics]);
+  }, [overlay.enabled, fetchMetrics, fetchThroughput]);
 
   // Persist the position when the user drags the bar on the overlay.
   const updateSettings = useSettingsStore((s) => s.update);

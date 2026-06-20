@@ -12,6 +12,8 @@ const {
   systemInstallDriver,
   systemRepairDriver,
   systemResetDriver,
+  boostGetMetrics,
+  boostCloseRoblox,
 } = vi.hoisted(() => ({
   vpnGetState: vi.fn(),
   vpnPreflightBinding: vi.fn(),
@@ -24,6 +26,8 @@ const {
   systemInstallDriver: vi.fn(),
   systemRepairDriver: vi.fn(),
   systemResetDriver: vi.fn(),
+  boostGetMetrics: vi.fn(),
+  boostCloseRoblox: vi.fn(),
 }));
 
 const { notify } = vi.hoisted(() => ({
@@ -42,6 +46,8 @@ vi.mock("../lib/commands", () => ({
   systemInstallDriver,
   systemRepairDriver,
   systemResetDriver,
+  boostGetMetrics,
+  boostCloseRoblox,
 }));
 
 vi.mock("../lib/notifications", () => ({
@@ -93,10 +99,23 @@ describe("stores/vpnStore", () => {
     systemInstallDriver.mockReset();
     systemRepairDriver.mockReset();
     systemResetDriver.mockReset();
+    boostGetMetrics.mockReset();
+    boostCloseRoblox.mockReset();
     notify.mockReset();
 
     vpnDisconnect.mockResolvedValue(undefined);
     vpnGetDiagnostics.mockResolvedValue(null);
+    boostGetMetrics.mockResolvedValue({
+      fps: 0,
+      cpu_usage: 0,
+      ram_usage: 0,
+      ram_total: 0,
+      ping: 0,
+      roblox_running: false,
+      roblox_foreground: false,
+      process_id: null,
+    });
+    boostCloseRoblox.mockResolvedValue(undefined);
     vpnPreflightBinding.mockResolvedValue({
       status: "ok",
       reason: "validated",
@@ -141,6 +160,35 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("connected");
     expect(useVpnStore.getState().driverSetupState).toBe("idle");
     expect(useVpnStore.getState().error).toBeNull();
+  });
+
+  it("closes already-running Roblox after Full Country Ban connects", async () => {
+    systemCheckDriver.mockResolvedValueOnce(driverStatus());
+    vpnConnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+    boostGetMetrics.mockResolvedValueOnce({
+      fps: 0,
+      cpu_usage: 0,
+      ram_usage: 0,
+      ram_total: 0,
+      ping: 0,
+      roblox_running: true,
+      roblox_foreground: false,
+      process_id: 1234,
+    });
+
+    const useVpnStore = await loadStore();
+    const { useSettingsStore } = await import("./settingsStore");
+    useSettingsStore.getState().update({ enable_country_ban: true });
+
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(vpnConnect).toHaveBeenCalledWith("singapore", ["roblox"]);
+    expect(boostCloseRoblox).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(
+      "SwiftTunnel",
+      "Connected. Reopen Roblox so Full Country Ban uses the tunnel.",
+    );
   });
 
   it("stops connect and surfaces actionable error when repair cannot make driver ready", async () => {

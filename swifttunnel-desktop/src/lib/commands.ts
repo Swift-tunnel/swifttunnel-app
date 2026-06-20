@@ -117,6 +117,9 @@ export const boostGetSystemInfo = () =>
 export const boostRestartRoblox = () =>
   invoke<void>("boost_restart_roblox");
 
+export const boostCloseRoblox = () =>
+  invoke<void>("boost_close_roblox");
+
 // ── Network Tests ──
 
 export const networkStartStabilityTest = (durationSecs: number) =>

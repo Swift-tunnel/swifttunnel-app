@@ -574,6 +574,7 @@ pub fn run() {
             commands::optimizer::boost_clean_ram,
             commands::optimizer::boost_get_system_info,
             commands::optimizer::boost_restart_roblox,
+            commands::optimizer::boost_close_roblox,
             // Network
             commands::network::network_start_stability_test,
             commands::network::network_start_speed_test,
